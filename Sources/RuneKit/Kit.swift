@@ -3,7 +3,7 @@ import Rune
 import RuneMotion
 
 /// Semantic status color bundle (`rune_kit::StateColors`).
-public struct StateColors: Sendable, Equatable {
+public struct StateColors: Sendable, Equatable, Hashable {
     public var bg: Color
     public var fg: Color
     public var border: Color
@@ -18,7 +18,7 @@ public struct StateColors: Sendable, Equatable {
 }
 
 /// Complete semantic color palette (`rune_kit::Palette`).
-public struct Palette: Sendable, Equatable {
+public struct Palette: Sendable, Equatable, Hashable {
     public var page: Color
     public var bgBase: Color
     public var bgDeep: Color
@@ -116,20 +116,134 @@ public enum PaletteFocus: Sendable, Equatable {
 }
 
 public struct KitElevation: Sendable, Equatable {
-    public var raised: [Shadow]
-    public var floating: [Shadow]
-    public var overlay: [Shadow]
-    public var buttonNeutral: [Shadow]
-    public var buttonContrast: [Shadow]
+    public var raised: [Shadow] = []
+    public var floating: [Shadow] = []
+    public var overlay: [Shadow] = []
+    public var buttonNeutral: [Shadow] = []
+    public var buttonContrast: [Shadow] = []
     public var elements: [Shadow] = []
     public var switchOff: [Shadow] = []
     public var switchOn: [Shadow] = []
     public var md: [Shadow] = []
-    public var knob: [Shadow]
+    public var knob: [Shadow] = []
     public var input: [Shadow] = []
+
+    public init(
+        raised: [Shadow] = [],
+        floating: [Shadow] = [],
+        overlay: [Shadow] = [],
+        buttonNeutral: [Shadow] = [],
+        buttonContrast: [Shadow] = [],
+        elements: [Shadow] = [],
+        switchOff: [Shadow] = [],
+        switchOn: [Shadow] = [],
+        md: [Shadow] = [],
+        knob: [Shadow] = [],
+        input: [Shadow] = []
+    ) {
+        self.raised = raised
+        self.floating = floating
+        self.overlay = overlay
+        self.buttonNeutral = buttonNeutral
+        self.buttonContrast = buttonContrast
+        self.elements = elements
+        self.switchOff = switchOff
+        self.switchOn = switchOn
+        self.md = md
+        self.knob = knob
+        self.input = input
+    }
+
+    /// Sets text fields' and field selects' own shadow (`--v2-elevation-input`).
+    public func withInput(_ layers: [Shadow]) -> KitElevation {
+        var copy = self
+        copy.input = layers
+        return copy
+    }
+
+    /// The shadow text fields and field selects draw (`input`, falling back to `buttonNeutral`).
+    public func effectiveInput() -> [Shadow] {
+        input.isEmpty ? buttonNeutral : input
+    }
 }
 
-public struct KitTypography: Sendable, Equatable {
+/// Small glyphs drawn inside components (`rune_kit::Glyphs`).
+public struct Glyphs: Sendable, Equatable, Hashable {
+    public var check: SVGIcon
+    public var checkSmall: SVGIcon
+    public var chevronDown: SVGIcon
+    public var chevronUp: SVGIcon
+    public var caretRight: SVGIcon
+    public var triangleDown: SVGIcon
+    public var triangleRight: SVGIcon
+    public var close: SVGIcon
+    public var clear: SVGIcon
+    public var copy: SVGIcon
+    public var search: SVGIcon
+    public var lock: SVGIcon
+    public var eye: SVGIcon
+    public var eyeOff: SVGIcon
+    public var circleX: SVGIcon
+    /// A short horizontal rule (card title placeholder).
+    public var dash: SVGIcon
+
+    public init(
+        check: SVGIcon,
+        checkSmall: SVGIcon,
+        chevronDown: SVGIcon,
+        chevronUp: SVGIcon,
+        caretRight: SVGIcon,
+        triangleDown: SVGIcon,
+        triangleRight: SVGIcon,
+        close: SVGIcon,
+        clear: SVGIcon,
+        copy: SVGIcon,
+        search: SVGIcon,
+        lock: SVGIcon,
+        eye: SVGIcon,
+        eyeOff: SVGIcon,
+        circleX: SVGIcon,
+        dash: SVGIcon
+    ) {
+        self.check = check
+        self.checkSmall = checkSmall
+        self.chevronDown = chevronDown
+        self.chevronUp = chevronUp
+        self.caretRight = caretRight
+        self.triangleDown = triangleDown
+        self.triangleRight = triangleRight
+        self.close = close
+        self.clear = clear
+        self.copy = copy
+        self.search = search
+        self.lock = lock
+        self.eye = eye
+        self.eyeOff = eyeOff
+        self.circleX = circleX
+        self.dash = dash
+    }
+
+    public static let `default` = Glyphs(
+        check: KitIcons.check,
+        checkSmall: KitIcons.checkSmall,
+        chevronDown: KitIcons.chevronDown,
+        chevronUp: KitIcons.chevronUp,
+        caretRight: KitIcons.caretRight,
+        triangleDown: KitIcons.triangleDown,
+        triangleRight: KitIcons.triangleRight,
+        close: KitIcons.close,
+        clear: KitIcons.close,
+        copy: KitIcons.copy,
+        search: KitIcons.search,
+        lock: KitIcons.lock,
+        eye: KitIcons.eye,
+        eyeOff: KitIcons.eyeOff,
+        circleX: KitIcons.circleX,
+        dash: KitIcons.dash
+    )
+}
+
+public struct KitTypography: Sendable, Equatable, Hashable {
     public var ui: TextStyle
     public var uiMedium: TextStyle
     public var uiCompact: TextStyle
@@ -149,7 +263,7 @@ public struct KitTypography: Sendable, Equatable {
     }
 }
 
-public struct KitRadius: Sendable, Equatable {
+public struct KitRadius: Sendable, Equatable, Hashable {
     public var xs: Float
     public var sm: Float
     public var md: Float
@@ -165,27 +279,27 @@ public struct KitMotion: Sendable, Equatable {
 
 /// Curated crisp vector SVG icon catalog (`rune_kit::glyphs`).
 public enum KitIcons {
-    public static let check = SVGIcon(viewBox: 16, paths: ["M3.5 8.5L6.5 11.5L12.5 4.5"], strokeWidth: 2.0)
-    public static let checkSmall = SVGIcon(viewBox: 16, paths: ["M3.54 8.18L6.39 11.75L12.46 4.25"], strokeWidth: 1.4)
+    public static let check = SVGIcon(viewBox: 12, paths: ["M3 7.17905L5.02703 8.85135L9 3.5"], strokeWidth: 1.5)
+    public static let checkSmall = SVGIcon(viewBox: 16, paths: ["M3.53564 8.17857L6.39279 11.75L12.4642 4.25"], strokeWidth: 1.0)
     public static let minus = SVGIcon(viewBox: 16, paths: ["M3.5 8H12.5"], strokeWidth: 2.0)
     public static let plus = SVGIcon(viewBox: 16, paths: ["M8 3.5V12.5", "M3.5 8H12.5"], strokeWidth: 1.8)
-    public static let close = SVGIcon(viewBox: 16, paths: ["M4 4L12 12", "M12 4L4 12"], strokeWidth: 1.8)
+    public static let close = SVGIcon(viewBox: 16, paths: ["M4.25 11.75L11.75 4.25", "M11.75 11.75L4.25 4.25"], strokeWidth: 1.0)
     public static let chevronRight = SVGIcon(viewBox: 16, paths: ["M6 3.5L10.5 8L6 12.5"], strokeWidth: 1.8)
-    public static let chevronDown = SVGIcon(viewBox: 16, paths: ["M3.5 6L8 10.5L12.5 6"], strokeWidth: 1.8)
-    public static let chevronUp = SVGIcon(viewBox: 16, paths: ["M12.5 10L8 5.5L3.5 10"], strokeWidth: 1.8)
-    public static let caretRight = SVGIcon(viewBox: 16, paths: ["M6 4L10 8L6 12Z"], strokeWidth: 1.5)
-    public static let triangleDown = SVGIcon(viewBox: 16, paths: ["M4 6H12L8 10.5Z"], strokeWidth: 1.5)
-    public static let triangleRight = SVGIcon(viewBox: 16, paths: ["M6 4L10.5 8L6 12Z"], strokeWidth: 1.5)
-    public static let copy = SVGIcon(viewBox: 16, paths: ["M4.5 4.5V2.5H13.5V11.5H11.5", "M2.5 4.5H11.5V13.5H2.5Z"], strokeWidth: 1.5)
-    public static let search = SVGIcon(viewBox: 16, paths: ["M7 3A4 4 0 1 1 6.99 3", "M10.2 10.2L13.2 13.2"], strokeWidth: 1.7)
-    public static let circleX = SVGIcon(viewBox: 16, paths: ["M6 6L10 10", "M10 6L6 10", "M8 1.5A6.5 6.5 0 1 1 7.99 1.5"], strokeWidth: 1.5)
-    public static let lock = SVGIcon(viewBox: 16, paths: ["M3.5 7H12.5V14H3.5Z", "M5.5 7V4.5A2.5 2.5 0 0 1 10.5 4.5V7"], strokeWidth: 1.5)
-    public static let eye = SVGIcon(viewBox: 16, paths: ["M1.5 8C3.5 4.5 12.5 4.5 14.5 8C12.5 11.5 3.5 11.5 1.5 8Z", "M8 6A2 2 0 1 1 7.99 6"], strokeWidth: 1.5)
-    public static let eyeOff = SVGIcon(viewBox: 16, paths: ["M2 2L14 14", "M3 5.5C5 3.5 11 3.5 13 5.5", "M3 10.5C5 12.5 11 12.5 13 10.5"], strokeWidth: 1.5)
-    public static let dash = SVGIcon(viewBox: 16, paths: ["M4 8H12"], strokeWidth: 1.5)
-    public static let arrowRight = SVGIcon(viewBox: 16, paths: ["M2.5 8H13.5", "M9 3.5L13.5 8L9 12.5"], strokeWidth: 1.6)
-    public static let folder = SVGIcon(viewBox: 16, paths: ["M2 4.5H6L7.5 6H14V12.5H2Z"], strokeWidth: 1.5)
-    public static let file = SVGIcon(viewBox: 16, paths: ["M4 2.5H10L12.5 5V13.5H4Z"], strokeWidth: 1.5)
+    public static let chevronDown = SVGIcon(viewBox: 16, paths: ["M5 6.5L8 9.5L11 6.5"], strokeWidth: 1.0)
+    public static let chevronUp = SVGIcon(viewBox: 16, paths: ["M11 9.5L8 6.5L5 9.5"], strokeWidth: 1.0)
+    public static let caretRight = SVGIcon(viewBox: 16, paths: ["M6 4L10 8L6 12V4Z"], strokeWidth: nil)
+    public static let triangleDown = SVGIcon(viewBox: 16, paths: ["M4 6H12L8 10.5L4 6Z"], strokeWidth: nil)
+    public static let triangleRight = SVGIcon(viewBox: 16, paths: ["M6.75194 10.62376C6.41861 10.81816 6 10.57776 6 10.19186V5.8079C6 5.422 6.41861 5.1816 6.75194 5.376L10.5096 7.56797C10.8404 7.76091 10.8404 8.23881 10.5096 8.43175L6.75194 10.62376Z"], strokeWidth: nil)
+    public static let copy = SVGIcon(viewBox: 16, paths: ["M4.5 4.5V2.5H13.5V11.5H11.5M2.5 4.5H11.5V13.5H2.5V4.5Z"], strokeWidth: 1.0)
+    public static let search = SVGIcon(viewBox: 16, paths: ["M14 14L10.3454 10.3454M6.88889 11.7778C9.58889 11.7778 11.7778 9.58889 11.7778 6.88889C11.7778 4.18889 9.58889 2 6.88889 2C4.18889 2 2 4.18889 2 6.88889C2 9.58889 4.18889 11.7778 6.88889 11.7778Z"], strokeWidth: 1.0)
+    public static let circleX = SVGIcon(viewBox: 16, paths: ["M6 6L10 10M10 6L6 10M14.5 8C14.5 11.5899 11.5899 14.5 8 14.5C4.41015 14.5 1.5 11.5899 1.5 8C1.5 4.41015 4.41015 1.5 8 1.5C11.5899 1.5 14.5 4.41015 14.5 8Z"], strokeWidth: 1.0)
+    public static let lock = SVGIcon(viewBox: 16, paths: ["M4.5 7H11.5A1 1 0 0 1 12.5 8V13A1 1 0 0 1 11.5 14H4.5A1 1 0 0 1 3.5 13V8A1 1 0 0 1 4.5 7Z", "M5.5 7V4.5a2.5 2.5 0 0 1 5 0V7M8 10v1.5"], strokeWidth: 1.0)
+    public static let eye = SVGIcon(viewBox: 16, paths: ["M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8Z", "M6 8A2 2 0 1 0 10 8A2 2 0 1 0 6 8Z"], strokeWidth: 1.0)
+    public static let eyeOff = SVGIcon(viewBox: 16, paths: ["m2 2 12 12M6.2 3.7A8 8 0 0 1 8 3.5C12.5 3.5 15 8 15 8a13 13 0 0 1 -2.4 2.8M10.3 12.1a8 8 0 0 1 -2.3 0.4C3.5 12.5 1 8 1 8a13 13 0 0 1 2.5 -2.9M6.6 6.6a2 2 0 0 0 2.8 2.8"], strokeWidth: 1.0)
+    public static let dash = SVGIcon(viewBox: 20, paths: ["M5 9.5H15V10.5H5Z"], strokeWidth: nil)
+    public static let arrowRight = SVGIcon(viewBox: 16, paths: ["M2.5 8H13.5M9 3.5L13.5 8L9 12.5"], strokeWidth: 1.0)
+    public static let folder = SVGIcon(viewBox: 16, paths: ["M1.5 3.5H6L7.5 5H14.5V13.5H1.5V3.5Z"], strokeWidth: 1.0)
+    public static let file = SVGIcon(viewBox: 16, paths: ["M3.5 1.5H9.5L12.5 4.5V14.5H3.5V1.5Z", "M9.5 1.5V4.5H12.5"], strokeWidth: 1.0)
     public static let info = SVGIcon(viewBox: 16, paths: ["M8 7.5V11.5", "M8 4.8V5.1"], strokeWidth: 2.0)
 }
 
@@ -194,6 +308,7 @@ public struct Kit: Sendable, Equatable {
     public var dark: Bool
     public var c: Palette
     public var elevation: KitElevation
+    public var glyph: Glyphs = .default
     public var ty: KitTypography
     public var radius: KitRadius
     public var motion: KitMotion
@@ -242,11 +357,11 @@ public struct Kit: Sendable, Equatable {
             bgAccent: accent,
             submitHighlight: Color.white.alpha(0.20),
             submitHover: Color.white.alpha(0.12),
-            submitFg: Color.white,
-            submitIcon: Color.white,
+            submitFg: t.card,
+            submitIcon: t.card,
             textBase: t.text,
             textMuted: t.textSecondary,
-            textFaint: t.textSecondary.alpha(0.78),
+            textFaint: t.textSecondary.alpha(0.80),
             textInverse: t.card,
             textContrast: t.card,
             textAccent: accent,
@@ -264,7 +379,7 @@ public struct Kit: Sendable, Equatable {
             pressed: t.press,
             contrastHover: Color.white.alpha(0.10),
             contrastPressed: Color.white.alpha(0.20),
-            scrim: Color.black.alpha(0.32),
+            scrim: Color.black.alpha(0.30),
             knob: t.knob,
             knobOn: t.knob,
             success: makeState(150),
@@ -275,9 +390,23 @@ public struct Kit: Sendable, Equatable {
             surfaceWeak: t.controlTrack,
             surfaceHover: t.hover,
             surfaceRaised: t.card,
+            surfaceRaisedBase: t.card,
+            surfaceRaisedHover: t.hover,
             surfaceFloat: t.text,
             surfaceDisabled: t.controlTrack,
-            stdBorder: t.cardBorder
+            borderWeak: t.separator,
+            borderHover: t.cardBorder,
+            borderActive: accent,
+            borderDisabled: t.separator,
+            textStrong: t.text,
+            textWeak: t.textSecondary,
+            textInvertStrong: t.card,
+            iconWeaker: t.textSecondary,
+            stdBorder: t.cardBorder,
+            stdIcon: t.textSecondary,
+            stdIconInvert: t.card,
+            stdIconStrong: t.text,
+            stdText: t.text
         )
 
         let ui = TextStyle(size: 13.0, weight: 400.0).lh(20.0)
@@ -290,14 +419,17 @@ public struct Kit: Sendable, Equatable {
                 overlay: [drop(8.0, 16.0, t.shadow), ring(t.cardBorder)],
                 buttonNeutral: [drop(1.0, 1.5, t.shadow), ring(t.cardBorder)],
                 buttonContrast: [drop(1.0, 1.5, t.shadow)],
+                elements: [drop(0.5, 0.5, t.edge)],
+                md: [drop(4.0, 8.0, t.shadowSoft)],
                 knob: [drop(1.0, 3.0, t.knobShadow)]
             ),
+            glyph: .default,
             ty: KitTypography(
                 ui: ui,
                 uiMedium: ui.medium(),
                 uiCompact: ui.lh(16.0),
-                small: TextStyle(size: 11.0, weight: 400.0).lh(14.0),
-                smallMedium: TextStyle(size: 11.0, weight: 500.0).lh(14.0),
+                small: TextStyle(size: 11.0, weight: 400.0).lh(12.0),
+                smallMedium: TextStyle(size: 11.0, weight: 500.0).lh(12.0),
                 body: TextStyle(size: 14.0, weight: 400.0).lh(21.0),
                 bodyMedium: TextStyle(size: 14.0, weight: 500.0).lh(21.0),
                 mono: TextStyle(size: 12.0, weight: 400.0).mono().lh(18.0)
@@ -555,5 +687,20 @@ public struct Kit: Sendable, Equatable {
     /// Black at opacity `a`.
     public func darkAlpha(_ a: Float) -> Color {
         alpha(c.black, a)
+    }
+
+    /// Gives `e` the kit's hover and press overlays (`c.hover` and `c.pressed`).
+    public func interactive<S>(_ e: El<S>) -> El<S> {
+        interactiveWith(e, hover: c.hover, pressed: c.pressed)
+    }
+
+    /// Gives `e` custom hover and press overlays; `pressed` replaces `hover` while held.
+    public func interactiveWith<S>(_ e: El<S>, hover: Color, pressed: Color) -> El<S> {
+        e.hover(hover).press(pressed)
+    }
+
+    /// Paints elevation layers on `e` as box shadows (respecting `usePaletteRing`).
+    public func elevate<S>(_ e: El<S>, _ layers: [Shadow]) -> El<S> {
+        e.shadows(shadowLayers(layers))
     }
 }

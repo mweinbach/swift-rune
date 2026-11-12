@@ -67,7 +67,12 @@ public enum Syntax: Int, CaseIterable, Sendable, Hashable {
 
     /// Returns the `RuneHighlights` language name for a file path (`syntax/paths.rs`).
     public static func langForPath(_ path: String) -> String? {
-        let name = path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""
+        let name: String
+        if let sep = path.lastIndex(where: { $0 == "/" || $0 == "\\" }) {
+            name = String(path[path.index(after: sep)...])
+        } else {
+            name = path
+        }
         if name.isEmpty { return nil }
 
         var found = pathTable[name]

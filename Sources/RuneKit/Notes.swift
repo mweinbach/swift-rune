@@ -83,12 +83,12 @@ public enum NoteParser {
         var i = 0
         while i < lines.count {
             let line = lines[i]
-            let trimmed = line.drop(while: { $0 == " " })
+            let trimmed = line.drop(while: \.isWhitespace)
             let indent = line.count - trimmed.count
 
             // Callout: `> [!note]` / `> [!warning]` / `> [!tip]`
             if indent < 4, trimmed.hasPrefix(">") {
-                let afterGT = trimmed.dropFirst().drop(while: { $0 == " " })
+                let afterGT = trimmed.dropFirst().drop(while: \.isWhitespace)
                 if afterGT.hasPrefix("[!"), let close = afterGT.firstIndex(of: "]") {
                     let rawLabel = String(afterGT[afterGT.index(afterGT.startIndex, offsetBy: 2)..<close])
                         .trimmingCharacters(in: .whitespaces)
@@ -98,7 +98,7 @@ public enum NoteParser {
                     if !tail.isEmpty { bodyLines.append(tail) }
                     i += 1
                     while i < lines.count {
-                        let next = lines[i].drop(while: { $0 == " " })
+                        let next = lines[i].drop(while: \.isWhitespace)
                         if next.hasPrefix(">") {
                             var content = String(next.dropFirst())
                             if content.hasPrefix(" ") { content.removeFirst() }
@@ -122,7 +122,7 @@ public enum NoteParser {
                 let tag = infoRaw.split(whereSeparator: \.isWhitespace).first.map { $0.lowercased() } ?? ""
                 let closingFence = String(repeating: ch, count: ticks)
                 if let end = ((i + 1)..<lines.count).first(where: { j in
-                    let u = lines[j].drop(while: { $0 == " " })
+                    let u = lines[j].drop(while: \.isWhitespace)
                     return u.hasPrefix(closingFence) && u.dropFirst(ticks).allSatisfy({ $0 == ch || $0.isWhitespace })
                 }) {
                     let body = Array(lines[(i + 1)..<end])
@@ -158,11 +158,18 @@ public enum NoteParser {
         return out
     }
 
+    private static func stripDashPrefixes(_ text: String) -> String {
+        var s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        while s.hasPrefix("- ") {
+            s = String(s.dropFirst(2))
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private static func parsePairs(_ lines: [String]) -> [(label: String, value: String)] {
         var out: [(label: String, value: String)] = []
         for raw in lines {
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            if line.hasPrefix("- ") { line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
+            let line = stripDashPrefixes(raw)
             guard !line.isEmpty else { continue }
             if let colon = line.firstIndex(of: ":") {
                 let k = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
@@ -178,8 +185,7 @@ public enum NoteParser {
     private static func parseSteps(_ lines: [String]) -> [NoteStepRow] {
         var out: [NoteStepRow] = []
         for raw in lines {
-            var s = raw.trimmingCharacters(in: .whitespaces)
-            if s.hasPrefix("- ") { s = String(s.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
+            var s = stripDashPrefixes(raw)
             guard !s.isEmpty else { continue }
             var status = "proposed"
             if s.hasPrefix("{"), let end = s.firstIndex(of: "}") {
