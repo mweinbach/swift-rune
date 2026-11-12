@@ -2,14 +2,27 @@ import Foundation
 
 /// Fixed-lane scalar conversion for values interpolated by `RuneMotion`.
 ///
-/// Maximum lane count in `RuneMotion` is 5 (`Transform`); types store and unpack their lanes
-/// from `[Float]` / `MotionLanes`.
+/// Maximum lane count in `RuneMotion` is 16 (`maxLanes`); common UI types use 1..5 lanes
+/// stored inline with zero heap allocation.
 public struct MotionLanes: Sendable, Equatable {
+    public static let maxLanes = 16
+
     public var l0: Float
     public var l1: Float
     public var l2: Float
     public var l3: Float
     public var l4: Float
+    public var l5: Float = 0
+    public var l6: Float = 0
+    public var l7: Float = 0
+    public var l8: Float = 0
+    public var l9: Float = 0
+    public var l10: Float = 0
+    public var l11: Float = 0
+    public var l12: Float = 0
+    public var l13: Float = 0
+    public var l14: Float = 0
+    public var l15: Float = 0
 
     @inlinable
     public init(_ l0: Float = 0, _ l1: Float = 0, _ l2: Float = 0, _ l3: Float = 0, _ l4: Float = 0) {
@@ -29,6 +42,17 @@ public struct MotionLanes: Sendable, Equatable {
             case 2: return l2
             case 3: return l3
             case 4: return l4
+            case 5: return l5
+            case 6: return l6
+            case 7: return l7
+            case 8: return l8
+            case 9: return l9
+            case 10: return l10
+            case 11: return l11
+            case 12: return l12
+            case 13: return l13
+            case 14: return l14
+            case 15: return l15
             default: return 0
             }
         }
@@ -39,6 +63,17 @@ public struct MotionLanes: Sendable, Equatable {
             case 2: l2 = newValue
             case 3: l3 = newValue
             case 4: l4 = newValue
+            case 5: l5 = newValue
+            case 6: l6 = newValue
+            case 7: l7 = newValue
+            case 8: l8 = newValue
+            case 9: l9 = newValue
+            case 10: l10 = newValue
+            case 11: l11 = newValue
+            case 12: l12 = newValue
+            case 13: l13 = newValue
+            case 14: l14 = newValue
+            case 15: l15 = newValue
             default: break
             }
         }

@@ -437,7 +437,10 @@ struct RuneMotionTests {
         #expect(clamped == Vec2(0, 100))
         store.sample(at: 5.0)
         let events = store.takeEvents()
-        #expect(events.contains(.settled(node: scroll, prop: Props.SCROLL.id)))
+        #expect(events.contains {
+            if case .settled(_, scroll, Props.SCROLL.id) = $0 { return true }
+            return false
+        })
 
         // Transition.kitRules clears blur on travelling transitions and caps blur <= 4
         let travelBlur = Transition.move(edge: .bottom).combined(with: Transition.blur(sigma: 8.0)).kitRules()

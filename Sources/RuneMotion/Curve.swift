@@ -89,16 +89,37 @@ public enum Curve: Sendable, Hashable {
         case .instant: return 0.0
         }
     }
+
+    /// How retargeting blends by default: springs and decays merge, tweens and Hermite splines add.
+    @inlinable
+    public var defaultBlend: Blend {
+        switch self {
+        case .spring, .decay, .instant: return .merge
+        case .tween, .hermite: return .additive
+        }
+    }
 }
 
 /// Retargeting strategy when a track receives a new target while already in flight.
 public enum Blend: Sendable, Hashable {
+    /// Merge for physics curves (`.spring`, `.decay`, `.instant`), additive for timed curves (`.tween`, `.hermite`).
+    case auto
     /// Collapse current position and velocity into a single analytic response toward the new target.
     case merge
     /// Superpose a new analytic offset layer on top of running layers (`target_new - target_old`).
     case additive
     /// Cut immediately to the target with zero velocity, dropping all active layers.
     case snap
+}
+
+/// Starting velocity rule for an animation segment.
+public enum VelocityRule: Sendable, Equatable {
+    /// Keep the track's instantaneous velocity (default interruptible motion).
+    case inherit
+    /// Start from zero velocity.
+    case zero
+    /// Start every lane at the same velocity (units per second).
+    case uniform(Float)
 }
 
 /// Typed velocity wrapper matching an `Animatable`'s lanes (units per second).
@@ -116,30 +137,73 @@ public struct Velocity<T: Animatable>: Sendable, Equatable {
     }
 }
 
-/// Full animation specification combining curve, retargeting blend, optional delay, and velocity seed.
+/// Full animation specification combining curve, retargeting blend, optional delay, velocity seed, and completion token.
 public struct Anim<T: Animatable>: Sendable, Equatable {
     public var curve: Curve
     public var blend: Blend
     public var delay: Float
     public var initialVelocity: Velocity<T>?
+    public var velocityRule: VelocityRule
+    /// Non-zero fires `MotionEvent.completed(token:node:prop:finished:)` when this animation settles or is replaced.
+    public var token: UInt64
 
     public init(
         curve: Curve,
-        blend: Blend = .merge,
+        blend: Blend = .auto,
         delay: Float = 0,
-        initialVelocity: Velocity<T>? = nil
+        initialVelocity: Velocity<T>? = nil,
+        velocityRule: VelocityRule = .inherit,
+        token: UInt64 = 0
     ) {
         self.curve = curve
         self.blend = blend
         self.delay = max(0, delay)
         self.initialVelocity = initialVelocity
+        self.velocityRule = velocityRule
+        self.token = token
     }
 
-    public static func spring(_ spring: Spring, blend: Blend = .merge) -> Anim<T> {
+    @inlinable
+    public var resolvedBlend: Blend {
+        switch blend {
+        case .auto: return curve.defaultBlend
+        default: return blend
+        }
+    }
+
+    public func delay(_ seconds: Float) -> Anim<T> {
+        var copy = self
+        copy.delay = max(0, seconds)
+        return copy
+    }
+
+    public func blend(_ blend: Blend) -> Anim<T> {
+        var copy = self
+        copy.blend = blend
+        return copy
+    }
+
+    public func additive() -> Anim<T> { blend(.additive) }
+    public func merge() -> Anim<T> { blend(.merge) }
+
+    public func velocity(_ rule: VelocityRule) -> Anim<T> {
+        var copy = self
+        copy.velocityRule = rule
+        if case .zero = rule { copy.initialVelocity = nil }
+        return copy
+    }
+
+    public func completion(_ token: UInt64) -> Anim<T> {
+        var copy = self
+        copy.token = token
+        return copy
+    }
+
+    public static func spring(_ spring: Spring, blend: Blend = .auto) -> Anim<T> {
         Anim(curve: .spring(spring), blend: blend)
     }
 
-    public static func tween(duration: Float, easing: Easing = .easeInOut, blend: Blend = .merge) -> Anim<T> {
+    public static func tween(duration: Float, easing: Easing = .easeInOut, blend: Blend = .auto) -> Anim<T> {
         Anim(curve: .tween(duration: duration, easing: easing), blend: blend)
     }
 
@@ -147,3 +211,6 @@ public struct Anim<T: Animatable>: Sendable, Equatable {
         Anim(curve: .instant, blend: .snap)
     }
 }
+
+/// Untyped animation descriptor used internally by `AnimationStore` and `Scene`.
+public typealias RawAnim = Anim<Float>
