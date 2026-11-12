@@ -65,7 +65,7 @@ private func tabItem(_ i: Int, state: FrostedBarState, dark: Bool) -> El<Frosted
         )
 }
 
-private func frostedBarView(_ s: FrostedBarState, _ cx: inout Cx<FrostedBarState>) -> El<FrostedBarState> {
+func frostedBarView(_ s: FrostedBarState, _ cx: inout Cx<FrostedBarState>) -> El<FrostedBarState> {
     let dark = cx.systemDark
     let t = Tok.theme(dark: dark)
 
@@ -114,13 +114,20 @@ private func frostedBarView(_ s: FrostedBarState, _ cx: inout Cx<FrostedBarState
         .child(bar)
 }
 
-let spec = AppSpec(
-    title: "Frosted bar",
-    size: Vec2(390, 640),
-    state: FrostedBarState(),
-    view: frostedBarView
-)
-.scene("strong") { $0.look = .strong }
-.scene("plain") { $0.look = .plain }
+@main
+enum RuneFrostedBarApp {
+    static func makeSpec() -> AppSpec<FrostedBarState> {
+        AppSpec(
+            title: "Frosted bar",
+            size: Vec2(390, 640),
+            state: FrostedBarState(),
+            view: frostedBarView
+        )
+        .scene("strong") { $0.look = .strong }
+        .scene("plain") { $0.look = .plain }
+    }
 
-try RuneApp.run(spec)
+    static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}

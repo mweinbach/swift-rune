@@ -1,7 +1,6 @@
 import Foundation
 import Rune
 
-/// Port of `examples/rich-clipboard`: copy and paste formatted text (plain, HTML, RTF).
 struct RichClipboardState {
     var field = TextEdit()
     var last: (String, ClipboardContent)? = nil
@@ -48,13 +47,11 @@ func richButton(
     return row()
         .key(key)
         .role(.button)
-        .p(8)
+        .p(Tok.Space.sm)
         .rounded(Tok.Radius.md)
         .bg(t.card)
         .border(1, t.cardBorder)
-        .hover(t.hover)
-        .press(t.press)
-        .child(text(label).size(12).medium().color(t.text))
+        .child(text(label).font(Tok.Typography.label).color(t.text))
         .onClick(action)
 }
 
@@ -65,52 +62,46 @@ func richClipboardView(_ s: RichClipboardState, _ cx: inout Cx<RichClipboardStat
     let field: El<RichClipboardState> = textInput(key: "field", \RichClipboardState.field)
         .wFull()
         .minH(80)
-        .p(8)
+        .p(Tok.Space.sm)
         .rounded(Tok.Radius.md)
         .bg(t.card)
         .border(1, t.cardBorder)
-        .size(14)
+        .font(Tok.Typography.body)
         .color(t.text)
 
     return col()
         .sizeFull()
-        .p(24)
-        .gap(12)
+        .p(Tok.Space.xl)
+        .gap(Tok.Space.md)
         .bg(t.bg)
         .child(field)
         .child(
             row()
-                .gap(8)
-                .child(richButton(key: "copy", label: "Copy formatted") { state, _ in
-                    let payload = sampleRichPayload()
-                    state.clipboard.writeRich(payload)
-                    recordSeen(&state, how: "Copied", content: payload.content)
+                .gap(Tok.Space.sm)
+                .child(richButton(key: "copy", label: "Copy formatted") { _, tx in
+                    tx.copyRich(sampleRichPayload())
                 })
                 .child(richButton(key: "read", label: "Read clipboard") { state, _ in
                     let payload = state.clipboard.readRich()
                     recordSeen(&state, how: "Read", content: payload.content)
                 })
         )
-        .child(text(head).key("summary").size(13).color(t.textSecondary))
-        .child(text(preview).key("preview").size(12).medium().color(t.textSecondary).wFull())
+        .child(text(head).key("summary").font(Tok.Typography.body).color(t.textSecondary))
+        .child(text(preview).key("preview").font(Tok.Typography.label).color(t.textSecondary).wFull())
 }
 
-let spec = AppSpec<RichClipboardState>(
-    title: "Rich Clipboard",
-    size: Vec2(560, 420),
-    dark: true,
-    state: RichClipboardState(),
-    view: richClipboardView
-)
-.scene("idle") { $0.last = nil }
-.scene("copied") {
-    let sample = sampleRichPayload().content
-    $0.last = ("Copied", sample)
-}
-.scene("pasted") {
-    let sample = sampleRichPayload().content
-    $0.field = TextEdit(sample.text)
-    $0.last = ("Pasted", sample)
-}
+@main
+enum RuneRichClipboardApp {
+    static func makeSpec() -> AppSpec<RichClipboardState> {
+        AppSpec<RichClipboardState>(
+            title: "Rich Clipboard",
+            size: Vec2(560, 420),
+            state: RichClipboardState(),
+            view: richClipboardView
+        )
+    }
 
-try RuneApp.run(spec as AppSpec<RichClipboardState>)
+    static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}

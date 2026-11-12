@@ -3,14 +3,14 @@ import Rune
 import RuneKit
 import RuneKnobs
 
-private let radiusKnob = Knob("Card radius", min: 0.0, max: 32.0, default: 14.0)
+let radiusKnob = Knob("Card radius", min: 0.0, max: 32.0, default: 14.0)
     .about("How round the card's corners are")
-private let padKnob = Knob("Card padding", min: 8.0, max: 48.0, default: 24.0)
+let padKnob = Knob("Card padding", min: 8.0, max: 48.0, default: 24.0)
     .step(1.0)
-private let tintKnob = Knob.choice("Card tint", labels: ["Plain", "Accent", "Raised"], default: 0)
-private let shadowKnob = Knob.choice("Card shadow", labels: ["Off", "On"], default: 0)
+let tintKnob = Knob.choice("Card tint", labels: ["Plain", "Accent", "Raised"], default: 0)
+let shadowKnob = Knob.choice("Card shadow", labels: ["Off", "On"], default: 0)
 
-private let knobGroups: [KnobGroup] = [
+let knobGroups: [KnobGroup] = [
     KnobGroup("Card", region: "card", knobs: [radiusKnob, padKnob, tintKnob, shadowKnob])
         .presets([KnobPreset("Round", values: ["Card radius": 28.0])])
 ]
@@ -58,7 +58,7 @@ private func pageView(_ s: KnobsDemoState, _ cx: inout Cx<KnobsDemoState>) -> El
         .child(card)
 }
 
-private func knobsDemoView(_ s: KnobsDemoState, _ cx: inout Cx<KnobsDemoState>) -> El<KnobsDemoState> {
+func knobsDemoView(_ s: KnobsDemoState, _ cx: inout Cx<KnobsDemoState>) -> El<KnobsDemoState> {
     let page = pageView(s, &cx)
     return RuneKnobs.side(
         page: page,
@@ -69,7 +69,7 @@ private func knobsDemoView(_ s: KnobsDemoState, _ cx: inout Cx<KnobsDemoState>) 
     )
 }
 
-private func onKnobsKey(_ s: inout KnobsDemoState, _ ev: KeyEvent, _ tx: inout Tx) -> Bool {
+func onKnobsKey(_ s: inout KnobsDemoState, _ ev: KeyEvent, _ tx: inout Tx) -> Bool {
     if RuneKnobs.key(&s.knobs, event: ev) {
         tx.settle()
         return true
@@ -81,17 +81,24 @@ private func onKnobsKey(_ s: inout KnobsDemoState, _ ev: KeyEvent, _ tx: inout T
     return false
 }
 
-let spec = AppSpec(
-    title: "Knobs",
-    size: Vec2(820, 520),
-    state: KnobsDemoState(),
-    onKey: onKnobsKey,
-    view: knobsDemoView
-)
-.scene("open") { $0.knobs.show() }
-.scene("filter") {
-    $0.knobs.show()
-    $0.knobs.filter("pad")
-}
+@main
+enum RuneKnobsDemoApp {
+    static func makeSpec() -> AppSpec<KnobsDemoState> {
+        AppSpec(
+            title: "Knobs",
+            size: Vec2(820, 520),
+            state: KnobsDemoState(),
+            onKey: onKnobsKey,
+            view: knobsDemoView
+        )
+        .scene("open") { $0.knobs.show() }
+        .scene("filter") {
+            $0.knobs.show()
+            $0.knobs.filter("pad")
+        }
+    }
 
-try RuneApp.run(spec)
+    static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}
