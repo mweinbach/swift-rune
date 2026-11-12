@@ -451,12 +451,8 @@ public struct Template: Sendable, Equatable {
                source[firstClose...].hasPrefix("}}") {
                 let name = source[inner..<firstClose].trimmingCharacters(in: .whitespaces)
                 let afterClose = source.index(firstClose, offsetBy: 2)
-                if name.isEmpty {
-                    appendLiteral(source[pos..<afterClose])
-                } else {
-                    appendLiteral(source[pos..<open])
-                    out.append(.variable(name))
-                }
+                appendLiteral(source[pos..<open])
+                out.append(.variable(name))
                 pos = afterClose
             } else {
                 let nextPos = source.index(after: open)

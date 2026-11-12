@@ -388,7 +388,9 @@ struct RuneI18nTests {
         // Template {{a}b}}, empty {{}}, {{ }}
         #expect(Template("{{a}b}}").parts == [.text("{{a}b}}")])
         #expect(Template("{{a}b}}").render(["a": "x"]) == "{{a}b}}")
-        #expect(Template("x {{}} y {{ }} z").parts == [.text("x {{}} y {{ }} z")])
+        #expect(Template("x {{}} y {{ }} z").parts == [.text("x {{}} y "), .arg(""), .text(" z")])
+        #expect(Template("x {{}} y {{ }} z").render([:]) == "x {{}} y  z")
+        #expect(Template("x {{}} y {{ }} z").render(["": "V"]) == "x {{}} y V z")
         #expect(Template("hi {{missing}}!").render([:]) == "hi !")
 
         // ICU-parity negotiation order and likely subtags
