@@ -43,6 +43,7 @@ public enum Key: Sendable, Hashable {
     case escape
     case backspace
     case delete
+    case insert
     case space
     case arrowLeft
     case arrowRight
@@ -53,33 +54,15 @@ public enum Key: Sendable, Hashable {
     case pageUp
     case pageDown
     case f(UInt8)
+    case contextMenu
+    case printScreen
+    case scrollLock
+    case pause
+    case modifier(ModifierKey, pressed: Bool)
 
     public static func named(_ raw: String) -> Key? {
-        switch raw.lowercased() {
-        case "enter", "return": return .enter
-        case "tab": return .tab
-        case "esc", "escape": return .escape
-        case "backspace": return .backspace
-        case "delete", "del": return .delete
-        case "space", " ": return .space
-        case "left", "arrowleft": return .arrowLeft
-        case "right", "arrowright": return .arrowRight
-        case "up", "arrowup": return .arrowUp
-        case "down", "arrowdown": return .arrowDown
-        case "home": return .home
-        case "end": return .end
-        case "pageup", "pgup": return .pageUp
-        case "pagedown", "pgdn": return .pageDown
-        case "plus": return .text("+")
-        default:
-            if raw.lowercased().hasPrefix("f"), let num = UInt8(raw.dropFirst()), (1...24).contains(num) {
-                return .f(num)
-            }
-            if raw.count == 1 {
-                return .text(raw)
-            }
-            return nil
-        }
+        guard let ck = ChordTable.chordKey(named: raw) else { return nil }
+        return ChordTable.key(from: ck, hasPrimary: false)
     }
 }
 
@@ -98,107 +81,202 @@ public struct KeyEvent: Sendable, Hashable {
 public struct Chord: Sendable, Hashable, CustomStringConvertible {
     public var mods: Mods
     public var key: Key
+    internal let chordModBits: UInt8
+    public let chordKey: ChordKey
+
+    public static func == (lhs: Chord, rhs: Chord) -> Bool {
+        lhs.chordModBits == rhs.chordModBits && lhs.chordKey == rhs.chordKey
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(chordModBits)
+        hasher.combine(chordKey)
+    }
 
     public init(mods: Mods = .none, key: Key) {
+        self.chordModBits = ChordBits.bitsFromMods(mods)
+        self.chordKey = ChordTable.chordKey(from: key) ?? .escape
         self.mods = mods
         self.key = key
     }
 
-    public init?(parsing spec: String) {
+    public init(chordMods: [ChordMod], key chordKey: ChordKey) {
+        let bits = chordMods.reduce(UInt8(0)) { $0 | $1.bit }
+        self.chordModBits = bits
+        self.chordKey = chordKey
+        let resolvedMods = ChordBits.modsFromBits(bits, platform: .current)
+        self.mods = resolvedMods
+        let hasPrimary = (ChordBits.fold(bits, platform: .current) & ChordBits.primary) != 0
+        self.key = ChordTable.key(from: chordKey, hasPrimary: hasPrimary)
+    }
+
+    /// Strictly parses a chord string (`"mod+shift+t"`, `"cmd+s"`, `"super+space"`), throwing `ChordError` on invalid input.
+    public static func parse(_ spec: String) throws -> Chord {
         let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let parts = trimmed.split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
-        guard let last = parts.last else { return nil }
+        guard !trimmed.isEmpty else { throw ChordError.empty }
+        if trimmed.hasSuffix("+") { throw ChordError.trailingPlus }
+        let parts = trimmed.split(separator: "+", omittingEmptySubsequences: false).map {
+            String($0).trimmingCharacters(in: .whitespaces)
+        }
+        guard let last = parts.last, !last.isEmpty else { throw ChordError.noKey }
 
-        var mods = Mods()
+        var bits: UInt8 = 0
         for p in parts.dropLast() {
-            switch p.lowercased() {
-            case "shift":
-                mods.shift = true
-            case "ctrl", "control":
-                mods.ctrl = true
-            case "alt", "opt", "option":
-                mods.alt = true
-            case "cmd", "command", "meta":
-                mods.cmd = true
-            case "super", "win", "logo":
-                mods.logo = true
-            case "mod":
-                #if os(macOS) || os(iOS)
-                mods.cmd = true
-                #else
-                mods.ctrl = true
-                #endif
-            default:
-                return nil
+            guard !p.isEmpty else { throw ChordError.unknownModifier("") }
+            guard let cm = ChordTable.modifierNamed(p) else {
+                throw ChordError.unknownModifier(p)
             }
+            bits |= cm.bit
         }
 
-        let parsedKey: Key
-        if mods.cmd, last.count == 1, let ch = last.lowercased().first {
-            parsedKey = .command(ch)
-        } else if let k = Key.named(last) {
-            if case .text(let s) = k, s.count == 1 {
-                parsedKey = .text(s.lowercased())
-            } else {
-                parsedKey = k
-            }
-        } else {
-            return nil
+        guard var parsedChordKey = ChordTable.chordKey(named: last) else {
+            throw ChordError.unknownKey(last)
+        }
+        if case .char(let ch) = parsedChordKey, (bits & ChordBits.shift) != 0,
+           let unshifted = ChordTable.usUnshifted(ch) {
+            parsedChordKey = .char(unshifted)
         }
 
-        self.mods = mods
-        self.key = parsedKey
+        var modsList: [ChordMod] = []
+        if (bits & ChordBits.primary) != 0 { modsList.append(.primary) }
+        if (bits & ChordBits.ctrl) != 0 { modsList.append(.ctrl) }
+        if (bits & ChordBits.alt) != 0 { modsList.append(.alt) }
+        if (bits & ChordBits.shift) != 0 { modsList.append(.shift) }
+        if (bits & ChordBits.super) != 0 { modsList.append(.super) }
+        return Chord(chordMods: modsList, key: parsedChordKey)
+    }
+
+    public init?(parsing spec: String) {
+        guard let parsed = try? Chord.parse(spec) else { return nil }
+        self = parsed
     }
 
     public func matches(_ ev: KeyEvent) -> Bool {
-        guard ev.mods.shift == mods.shift &&
-              ev.mods.ctrl == mods.ctrl &&
-              ev.mods.alt == mods.alt &&
-              ev.mods.cmd == mods.cmd &&
-              ev.mods.logo == mods.logo else {
-            return false
+        matches(ev, on: .current)
+    }
+
+    public func matches(_ ev: KeyEvent, on platform: KeyPlatform) -> Bool {
+        let want = ChordBits.fold(chordModBits, platform: platform)
+        let got = ChordBits.held(ev.mods, platform: platform)
+        guard want == got else { return false }
+        guard let gotKey = ChordTable.chordKey(from: ev.key) else { return false }
+        return gotKey == chordKey
+    }
+
+    public func sameKeys(_ other: Chord, on platform: KeyPlatform = .current) -> Bool {
+        ChordBits.fold(chordModBits, platform: platform) == ChordBits.fold(other.chordModBits, platform: platform)
+            && chordKey == other.chordKey
+    }
+
+    public func mods(on platform: KeyPlatform = .current) -> [ChordMod] {
+        let bits = ChordBits.fold(chordModBits, platform: platform)
+        let order: [ChordMod] = platform.isMac
+            ? [.ctrl, .alt, .shift, .primary, .super]
+            : [.primary, .ctrl, .alt, .shift, .super]
+        return order.filter { (bits & $0.bit) != 0 }
+    }
+
+    public func keycaps(on platform: KeyPlatform = .current) -> [String] {
+        var caps: [String] = mods(on: platform).map { mod in
+            switch (mod, platform) {
+            case (.primary, .mac): return "⌘"
+            case (.ctrl, .mac): return "⌃"
+            case (.alt, .mac): return "⌥"
+            case (.shift, .mac): return "⇧"
+            case (.super, .mac): return "⌘"
+            case (.primary, _), (.ctrl, _): return "Ctrl"
+            case (.alt, _): return "Alt"
+            case (.shift, _): return "Shift"
+            case (.super, .windows): return "Win"
+            case (.super, .linux): return "Super"
+            }
         }
-        switch (key, ev.key) {
-        case let (.command(a), .command(b)):
-            return a == Character(b.lowercased())
-        case let (.command(a), .text(b)):
-            return b.count == 1 && Character(b.lowercased()) == a
-        case let (.text(a), .command(b)):
-            return a.count == 1 && Character(a.lowercased()) == Character(b.lowercased())
-        case let (.text(a), .text(b)):
-            return a.lowercased() == b.lowercased()
-        default:
-            return key == ev.key
-        }
+        caps.append(Self.keycapString(chordKey, platform: platform))
+        return caps
+    }
+
+    public func label(on platform: KeyPlatform = .current) -> String {
+        keycaps(on: platform).joined(separator: platform.isMac ? "" : "+")
+    }
+
+    public var canonicalString: String {
+        var parts: [String] = []
+        if (chordModBits & ChordBits.primary) != 0 { parts.append("mod") }
+        if (chordModBits & ChordBits.ctrl) != 0 { parts.append("ctrl") }
+        if (chordModBits & ChordBits.alt) != 0 { parts.append("alt") }
+        if (chordModBits & ChordBits.shift) != 0 { parts.append("shift") }
+        if (chordModBits & ChordBits.super) != 0 { parts.append("super") }
+        parts.append(Self.canonicalKeyToken(chordKey))
+        return parts.joined(separator: "+")
     }
 
     public var description: String {
         var parts: [String] = []
-        if mods.ctrl { parts.append("Ctrl") }
-        if mods.alt { parts.append("Alt") }
-        if mods.shift { parts.append("Shift") }
-        if mods.cmd { parts.append("Cmd") }
-        switch key {
-        case .text(let s): parts.append(s.uppercased())
-        case .command(let c): parts.append(String(c).uppercased())
-        case .enter: parts.append("Enter")
-        case .tab: parts.append("Tab")
-        case .escape: parts.append("Esc")
-        case .backspace: parts.append("Backspace")
-        case .delete: parts.append("Delete")
-        case .space: parts.append("Space")
-        case .arrowLeft: parts.append("Left")
-        case .arrowRight: parts.append("Right")
-        case .arrowUp: parts.append("Up")
-        case .arrowDown: parts.append("Down")
-        case .home: parts.append("Home")
-        case .end: parts.append("End")
-        case .pageUp: parts.append("PageUp")
-        case .pageDown: parts.append("PageDown")
-        case .f(let n): parts.append("F\(n)")
+        let active = mods(on: .current)
+        if active.contains(.ctrl) { parts.append("Ctrl") }
+        if active.contains(.alt) { parts.append("Alt") }
+        if active.contains(.shift) { parts.append("Shift") }
+        if active.contains(.primary) || active.contains(.super) {
+            #if os(macOS) || os(iOS)
+            parts.append("Cmd")
+            #else
+            parts.append(active.contains(.super) ? "Super" : "Ctrl")
+            #endif
         }
+        parts.append(Self.keycapString(chordKey, platform: .linux))
         return parts.joined(separator: "+")
+    }
+
+    private static func canonicalKeyToken(_ ck: ChordKey) -> String {
+        switch ck {
+        case .char(let c): return ChordTable.charToken(c)
+        case .enter: return "enter"
+        case .tab: return "tab"
+        case .escape: return "escape"
+        case .backspace: return "backspace"
+        case .delete: return "delete"
+        case .insert: return "insert"
+        case .home: return "home"
+        case .end: return "end"
+        case .pageUp: return "pageup"
+        case .pageDown: return "pagedown"
+        case .arrowLeft: return "left"
+        case .arrowRight: return "right"
+        case .arrowUp: return "up"
+        case .arrowDown: return "down"
+        case .function(let n): return "f\(n)"
+        case .contextMenu: return "contextmenu"
+        case .printScreen: return "printscreen"
+        case .scrollLock: return "scrolllock"
+        case .pause: return "pause"
+        }
+    }
+
+    private static func keycapString(_ ck: ChordKey, platform: KeyPlatform) -> String {
+        let mac = platform.isMac
+        switch ck {
+        case .char(" "): return "Space"
+        case .char(let c): return String(c).uppercased()
+        case .enter: return mac ? "↩" : "Enter"
+        case .tab: return mac ? "⇥" : "Tab"
+        case .escape: return mac ? "⎋" : "Esc"
+        case .backspace: return mac ? "⌫" : "Backspace"
+        case .delete: return mac ? "⌦" : "Delete"
+        case .insert: return "Insert"
+        case .home: return mac ? "↖" : "Home"
+        case .end: return mac ? "↘" : "End"
+        case .pageUp: return mac ? "⇞" : (platform == .linux ? "PageUp" : "Page Up")
+        case .pageDown: return mac ? "⇟" : (platform == .linux ? "PageDown" : "Page Down")
+        case .arrowLeft: return mac ? "←" : "Left"
+        case .arrowRight: return mac ? "→" : "Right"
+        case .arrowUp: return mac ? "↑" : "Up"
+        case .arrowDown: return mac ? "↓" : "Down"
+        case .function(let n): return "F\(n)"
+        case .contextMenu: return "Menu"
+        case .printScreen: return "Print Screen"
+        case .scrollLock: return "Scroll Lock"
+        case .pause: return "Pause"
+        }
     }
 }
 
@@ -268,18 +346,31 @@ public struct TextEdit: Sendable, Equatable {
         var marks: [TextMark]
     }
 
+    public static let multilineSecureMask = "••••••••••••"
+
     public private(set) var text: String
     /// Active caret position in UTF-8 bytes (`0...text.utf8.count`).
     public private(set) var cursor: Int
     /// Selection anchor in UTF-8 bytes (`anchor == cursor` when collapsed).
     public private(set) var anchor: Int
     public var multiline: Bool
-    public var isSecure: Bool = false
+    public var isSecure: Bool = false {
+        didSet {
+            if isSecure && !oldValue {
+                undoStack.removeAll()
+                redoStack.removeAll()
+                marks.removeAll()
+                preedit = nil
+            }
+        }
+    }
     public var isRevealed: Bool = false
     public var spellcheckEnabled: Bool = false
     public var marks: [TextMark] = []
     /// Optional open IME composition `(preeditText, cursorRangeInBytes)`.
     public var preedit: (text: String, cursor: Range<Int>?)? = nil
+    /// Set when the last key press in `handleKey` requested blurring focus (e.g. non-composing Escape).
+    public private(set) var didRequestBlur: Bool = false
 
     private var undoStack: [Snapshot] = []
     private var redoStack: [Snapshot] = []
@@ -372,7 +463,7 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Inserts `inserted` at the current caret or replaces any active selection.
     public mutating func insert(_ inserted: String) {
-        let filtered = multiline ? inserted : inserted.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ")
+        let filtered = sanitizeInput(inserted)
         guard !filtered.isEmpty || hasSelection else { return }
         pushUndo()
         let range = selectedUTF8Range
@@ -386,7 +477,8 @@ public struct TextEdit: Sendable, Equatable {
         preedit = nil
     }
 
-    /// Deletes one extended grapheme cluster backward (or the active selection, or previous word when `word == true`).
+    /// Deletes backward (or the active selection, or previous word when `word == true`).
+    /// For un-selected clusters, deletes one scalar (so accents/Vowel signs peel cleanly) unless CR LF or emoji sequence.
     public mutating func backspace(word: Bool = false) {
         if hasSelection {
             insert("")
@@ -394,13 +486,13 @@ public struct TextEdit: Sendable, Equatable {
         }
         guard cursor > 0 else { return }
         pushUndo()
-        let target = word ? prevWordBoundary(from: cursor) : prevGraphemeBoundary(from: cursor)
-        let startIdx = stringIndex(forUTF8Offset: target)
-        let endIdx = stringIndex(forUTF8Offset: cursor)
+        let target = word ? prevWordBoundary(from: cursor) : prevBackspaceBoundary(from: cursor)
+        let startIdx = text.utf8.index(text.utf8.startIndex, offsetBy: target)
+        let endIdx = text.utf8.index(text.utf8.startIndex, offsetBy: cursor)
         text.removeSubrange(startIdx..<endIdx)
         adjustMarks(replacedRange: target..<cursor, newLength: 0)
-        cursor = target
-        anchor = target
+        cursor = snapToGraphemeBoundary(target)
+        anchor = cursor
     }
 
     /// Deletes one extended grapheme cluster forward (or the active selection, or next word when `word == true`).
@@ -486,12 +578,12 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     public func copy() -> String? {
-        guard (!isSecure || isRevealed) && hasSelection else { return nil }
+        guard !isSecure && hasSelection else { return nil }
         return selectedText
     }
 
     public mutating func cut() -> String? {
-        guard (!isSecure || isRevealed) && hasSelection else { return nil }
+        guard !isSecure && hasSelection else { return nil }
         let out = selectedText
         insert("")
         return out
@@ -501,9 +593,23 @@ public struct TextEdit: Sendable, Equatable {
         insert(pasted)
     }
 
+    /// Replaces any revealed secret with bullet masks and hides the field again (`TextEdit::conceal`).
+    public mutating func conceal() {
+        isRevealed = false
+        guard isSecure else { return }
+        text = displayString
+        let end = text.utf8.count
+        cursor = end
+        anchor = end
+        marks.removeAll()
+        preedit = nil
+        undoStack.removeAll()
+        redoStack.removeAll()
+    }
+
     @discardableResult
     public mutating func undo() -> Bool {
-        guard let prev = undoStack.popLast() else { return false }
+        guard !isSecure, let prev = undoStack.popLast() else { return false }
         redoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
         text = prev.text
         cursor = prev.cursor
@@ -515,7 +621,7 @@ public struct TextEdit: Sendable, Equatable {
 
     @discardableResult
     public mutating func redo() -> Bool {
-        guard let next = redoStack.popLast() else { return false }
+        guard !isSecure, let next = redoStack.popLast() else { return false }
         undoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
         text = next.text
         cursor = next.cursor
@@ -528,6 +634,10 @@ public struct TextEdit: Sendable, Equatable {
     // MARK: - IME Preedit
 
     public mutating func setPreedit(_ preeditText: String, cursor cursorRange: Range<Int>? = nil) {
+        guard !isSecure else {
+            preedit = nil
+            return
+        }
         if preeditText.isEmpty {
             preedit = nil
         } else {
@@ -537,6 +647,7 @@ public struct TextEdit: Sendable, Equatable {
 
     public mutating func commitPreedit(_ committed: String) {
         preedit = nil
+        guard !isSecure else { return }
         insert(committed)
     }
 
@@ -554,29 +665,75 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Processes a keyboard `KeyEvent`, returning how the editor responded.
     public mutating func handleKey(_ ev: KeyEvent) -> EditOutcome {
+        didRequestBlur = false
         let shift = ev.mods.shift
-        let primary = ev.mods.primaryCommand
         let alt = ev.mods.alt
 
-        if primary {
-            switch ev.key {
-            case .command("a"), .text("a"), .text("A"):
+        if let ctrlLetter = ev.controlBinding {
+            switch ctrlLetter {
+            case "a":
+                moveLeft(extend: shift, toLineBoundary: true)
+                return .navigation
+            case "e":
+                moveRight(extend: shift, toLineBoundary: true)
+                return .navigation
+            case "b":
+                moveLeft(extend: shift)
+                return .navigation
+            case "f":
+                moveRight(extend: shift)
+                return .navigation
+            case "p":
+                moveUp(extend: shift)
+                return .navigation
+            case "n":
+                moveDown(extend: shift)
+                return .navigation
+            case "d":
+                let before = text
+                deleteForward(word: false)
+                return text != before ? .modified : .navigation
+            case "h":
+                let before = text
+                backspace(word: false)
+                return text != before ? .modified : .navigation
+            case "k":
+                let end = lineEnd(for: cursor)
+                if cursor < end || hasSelection {
+                    if !hasSelection { anchor = end }
+                    insert("")
+                    return .modified
+                }
+                return .ignored
+            default:
+                break
+            }
+        }
+
+        if ev.mods.primaryCommand && ev.mods.primaryAlone {
+            if ev.isCommand("a") {
                 selectAll()
                 return .navigation
-            case .command("z"), .text("z"), .text("Z"):
+            }
+            if ev.isCommand("z") {
                 if shift {
                     return redo() ? .modified : .ignored
                 } else {
                     return undo() ? .modified : .ignored
                 }
-            case .command("y"), .text("y"), .text("Y"):
+            }
+            if ev.isCommand("y") {
                 return redo() ? .modified : .ignored
-            case .command("c"), .text("c"), .text("C"):
+            }
+            if ev.isCommand("c") {
                 if let copied = copy() { return .copy(copied) }
                 return .ignored
-            case .command("x"), .text("x"), .text("X"):
+            }
+            if ev.isCommand("x") {
                 if let cutStr = cut() { return .copy(cutStr) }
                 return .ignored
+            }
+            switch ev.key {
             case .arrowLeft:
                 moveLeft(extend: shift, toLineBoundary: true)
                 return .navigation
@@ -605,9 +762,19 @@ public struct TextEdit: Sendable, Equatable {
                     return .modified
                 }
                 return .ignored
+            case .enter:
+                if multiline && isSecure {
+                    return .submit
+                }
+                return .ignored
             default:
                 return .ignored
             }
+        }
+
+        // AltGr / extra modifiers alongside Cmd other than Shift leave primary commands untouched.
+        if ev.mods.primaryCommand {
+            return .ignored
         }
 
         switch ev.key {
@@ -646,7 +813,20 @@ public struct TextEdit: Sendable, Equatable {
             return .navigation
 
         case .enter:
-            if multiline && !ev.mods.ctrl {
+            if preedit != nil {
+                return .ignored
+            }
+            if !multiline {
+                return .submit
+            }
+            if isSecure {
+                if ev.mods.ctrl || ev.mods.cmd {
+                    return .submit
+                }
+                insert("\n")
+                return .modified
+            }
+            if shift || alt {
                 insert("\n")
                 return .modified
             }
@@ -657,6 +837,7 @@ public struct TextEdit: Sendable, Equatable {
                 cancelPreedit()
                 return .modified
             }
+            didRequestBlur = true
             return .ignored
 
         case .space:
@@ -678,12 +859,13 @@ public struct TextEdit: Sendable, Equatable {
         }
     }
 
-    /// Masked display string (`•` per grapheme cluster when `isSecure && !isRevealed` is true).
+    /// Masked display string (`"••••••••••••"` for hidden multi-line, `•` per scalar for hidden single-line).
     public var displayString: String {
-        if isSecure && !isRevealed {
-            return String(repeating: "•", count: text.count)
+        guard isSecure && !isRevealed else { return text }
+        if multiline {
+            return Self.multilineSecureMask
         }
-        return text
+        return String(repeating: "•", count: text.unicodeScalars.count)
     }
 
     // MARK: - Grapheme & Word Boundary Helpers
@@ -725,7 +907,46 @@ public struct TextEdit: Sendable, Equatable {
         c.isLetter || c.isNumber || c == "_"
     }
 
+    private func sanitizeInput(_ s: String) -> String {
+        if multiline {
+            return s.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+        }
+        return s.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\u{2028}", with: " ")
+    }
+
+    private func prevBackspaceBoundary(from offset: Int) -> Int {
+        let start = prevGraphemeBoundary(from: offset)
+        let lo = stringIndex(forUTF8Offset: start)
+        let hi = stringIndex(forUTF8Offset: offset)
+        let cluster = text[lo..<hi]
+        if cluster == "\r\n" {
+            return start
+        }
+        let isEmojiSeq = cluster.unicodeScalars.contains { scalar in
+            let v = scalar.value
+            return v == 0xFE0F
+                || v == 0x20E3
+                || (0x1F3FB...0x1F3FF).contains(v)
+                || (0x1F1E6...0x1F1FF).contains(v)
+                || (0xE0020...0xE007F).contains(v)
+        } || (cluster.unicodeScalars.contains { $0.value == 0x200D } && cluster.unicodeScalars.contains {
+            $0.properties.isEmojiPresentation || $0.properties.isEmoji
+        })
+        if isEmojiSeq {
+            return start
+        }
+        guard offset > 0 else { return 0 }
+        let scalarIdx = text.unicodeScalars.index(before: hi)
+        return text.utf8.distance(from: text.utf8.startIndex, to: scalarIdx)
+    }
+
     private func prevWordBoundary(from offset: Int) -> Int {
+        if isSecure && !isRevealed { return 0 }
         var idx = stringIndex(forUTF8Offset: offset)
         while idx > text.startIndex && !isWordChar(text[text.index(before: idx)]) {
             idx = text.index(before: idx)
@@ -737,6 +958,7 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     private func nextWordBoundary(from offset: Int) -> Int {
+        if isSecure && !isRevealed { return text.utf8.count }
         var idx = stringIndex(forUTF8Offset: offset)
         while idx < text.endIndex && !isWordChar(text[idx]) {
             idx = text.index(after: idx)
@@ -808,6 +1030,7 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     private mutating func pushUndo() {
+        guard !isSecure else { return }
         undoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
         if undoStack.count > 128 {
             undoStack.removeFirst()

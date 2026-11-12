@@ -49,7 +49,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
         italic: Bool = false,
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
-        wrap: TextWrap = .wrap
+        wrap: TextWrap = .noWrap
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -97,6 +97,12 @@ public struct TextStyle: Sendable, Hashable, Codable {
         return copy
     }
 
+    public func wrapped(_ on: Bool = true) -> TextStyle {
+        var copy = self
+        copy.wrap = on ? .wrap : .noWrap
+        return copy
+    }
+
     public func noWrap() -> TextStyle {
         var copy = self
         copy.wrap = .noWrap
@@ -122,7 +128,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
     }
 
     public var resolvedLineHeight: Float {
-        lineHeight ?? (size * 1.35).rounded(.toNearestOrEven)
+        if let lh = lineHeight, lh > 0 { return lh }
+        return size * 1.25
     }
 }
 
@@ -190,11 +197,10 @@ public struct ShapedText: @unchecked Sendable {
     public var underlines: [SIMD4<Float>]
     public var strikethroughs: [SIMD4<Float>] = []
     public var backgrounds: [(SIMD4<Float>, Color)]
-    #if canImport(CoreText)
-    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)]
-    #else
-    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])]
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
     #endif
+    fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
 }
 
 /// Shelf-packed R8 coverage atlas for CoreText glyphs and rasterized SVG icons.
@@ -497,7 +503,9 @@ public final class GlyphAtlas: @unchecked Sendable {
         var tokens: [String] = []
         var cur = ""
         for ch in d {
-            if ch.isLetter {
+            if (ch == "e" || ch == "E"), !cur.isEmpty, cur != "-", cur != "." {
+                cur.append(ch)
+            } else if ch.isLetter {
                 if !cur.isEmpty { tokens.append(cur); cur = "" }
                 tokens.append(String(ch))
             } else if ch == "," || ch.isWhitespace {
@@ -505,6 +513,9 @@ public final class GlyphAtlas: @unchecked Sendable {
             } else if ch == "-" && !cur.isEmpty && cur.last != "e" && cur.last != "E" {
                 tokens.append(cur)
                 cur = "-"
+            } else if ch == "." && cur.contains(".") && cur.last != "e" && cur.last != "E" {
+                tokens.append(cur)
+                cur = "."
             } else {
                 cur.append(ch)
             }
@@ -530,6 +541,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
 
         while idx < tokens.count {
+            let startIdx = idx
             let tok = tokens[idx]
             if tok.count == 1, let first = tok.first, first.isLetter {
                 cmd = first
@@ -541,53 +553,54 @@ public final class GlyphAtlas: @unchecked Sendable {
                     continue
                 }
             }
+            var parsed = true
             switch cmd {
             case "M":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 cx = x; cy = y; sx = x; sy = y
                 path.move(to: CGPoint(x: cx, y: cy))
                 prevCmd = "M"
                 cmd = "L"
             case "m":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 cx += dx; cy += dy; sx = cx; sy = cy
                 path.move(to: CGPoint(x: cx, y: cy))
                 prevCmd = "m"
                 cmd = "l"
             case "L":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 cx = x; cy = y
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "l":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 cx += dx; cy += dy
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "H":
-                guard let x = nextNum() else { break }
+                guard let x = nextNum() else { parsed = false; break }
                 cx = x
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "h":
-                guard let dx = nextNum() else { break }
+                guard let dx = nextNum() else { parsed = false; break }
                 cx += dx
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "V":
-                guard let y = nextNum() else { break }
+                guard let y = nextNum() else { parsed = false; break }
                 cy = y
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "v":
-                guard let dy = nextNum() else { break }
+                guard let dy = nextNum() else { parsed = false; break }
                 cy += dy
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "C":
                 guard let x1 = nextNum(), let y1 = nextNum(),
                       let x2 = nextNum(), let y2 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: x1, y: y1), control2: CGPoint(x: x2, y: y2))
                 lastC2X = x2; lastC2Y = y2
                 cx = x; cy = y
@@ -595,7 +608,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             case "c":
                 guard let dx1 = nextNum(), let dy1 = nextNum(),
                       let dx2 = nextNum(), let dy2 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let x2 = cx + dx2, y2 = cy + dy2
                 path.addCurve(
                     to: CGPoint(x: cx + dx, y: cy + dy),
@@ -607,7 +620,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "S":
                 guard let x2 = nextNum(), let y2 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 let isCubicPrev = (prevCmd == "C" || prevCmd == "c" || prevCmd == "S" || prevCmd == "s")
                 let x1 = isCubicPrev ? (2 * cx - lastC2X) : cx
                 let y1 = isCubicPrev ? (2 * cy - lastC2Y) : cy
@@ -617,7 +630,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "s":
                 guard let dx2 = nextNum(), let dy2 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let isCubicPrev = (prevCmd == "C" || prevCmd == "c" || prevCmd == "S" || prevCmd == "s")
                 let x1 = isCubicPrev ? (2 * cx - lastC2X) : cx
                 let y1 = isCubicPrev ? (2 * cy - lastC2Y) : cy
@@ -628,21 +641,21 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "Q":
                 guard let x1 = nextNum(), let y1 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 path.addQuadCurve(to: CGPoint(x: x, y: y), control: CGPoint(x: x1, y: y1))
                 lastQX = x1; lastQY = y1
                 cx = x; cy = y
                 prevCmd = cmd
             case "q":
                 guard let dx1 = nextNum(), let dy1 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let qx = cx + dx1, qy = cy + dy1
                 path.addQuadCurve(to: CGPoint(x: cx + dx, y: cy + dy), control: CGPoint(x: qx, y: qy))
                 lastQX = qx; lastQY = qy
                 cx += dx; cy += dy
                 prevCmd = cmd
             case "T":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 let isQuadPrev = (prevCmd == "Q" || prevCmd == "q" || prevCmd == "T" || prevCmd == "t")
                 let qx = isQuadPrev ? (2 * cx - lastQX) : cx
                 let qy = isQuadPrev ? (2 * cy - lastQY) : cy
@@ -651,7 +664,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 cx = x; cy = y
                 prevCmd = cmd
             case "t":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let isQuadPrev = (prevCmd == "Q" || prevCmd == "q" || prevCmd == "T" || prevCmd == "t")
                 let qx = isQuadPrev ? (2 * cx - lastQX) : cx
                 let qy = isQuadPrev ? (2 * cy - lastQY) : cy
@@ -663,7 +676,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 guard let rxRaw = nextNum(), let ryRaw = nextNum(),
                       let rotDeg = nextNum(),
                       let largeArc = nextNum(), let sweep = nextNum(),
-                      let xArg = nextNum(), let yArg = nextNum() else { break }
+                      let xArg = nextNum(), let yArg = nextNum() else { parsed = false; break }
                 let ex = (cmd == "a") ? cx + xArg : xArg
                 let ey = (cmd == "a") ? cy + yArg : yArg
                 Self.addSVGArc(
@@ -679,6 +692,9 @@ public final class GlyphAtlas: @unchecked Sendable {
                 cx = ex; cy = ey
                 prevCmd = cmd
             default:
+                idx += 1
+            }
+            if !parsed && idx == startIdx {
                 idx += 1
             }
         }
@@ -1250,6 +1266,39 @@ public final class TextSystem: @unchecked Sendable {
     }
     #else
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
+        measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale)
+    }
+
+    public func shape(
+        text: String,
+        spans: [TextSpan]? = nil,
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true
+    ) -> ShapedText {
+        shapePortable(text: text, spans: spans, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+    }
+
+    public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
+        caretRectPortable(in: shaped, utf8Offset: utf8Offset, pixelScale: pixelScale)
+    }
+
+    public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
+        hitTestUTF8OffsetPortable(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
+    }
+
+    public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+        selectionRectsPortable(in: shaped, utf8Range: utf8Range, pixelScale: pixelScale)
+    }
+    #endif
+
+    // MARK: - Portable (Headless / Linux / Windows / Android / Web) Text Shaping
+
+    internal func measurePortable(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
+        if text.isEmpty {
+            return Vec2(0, style.resolvedLineHeight)
+        }
         let key = MeasureKey(
             text: text,
             style: style,
@@ -1263,34 +1312,73 @@ public final class TextSystem: @unchecked Sendable {
         }
         lock.unlock()
 
-        let shaped = shape(text, style: style, spans: [], maxWidth: maxWidth, pixelScale: pixelScale)
+        let shaped = shapePortable(text: text, spans: nil, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        if measureCache.count > 4096 {
+            measureCache.removeAll(keepingCapacity: true)
+        }
         measureCache[key] = shaped.size
         lock.unlock()
         return shaped.size
     }
 
-    public func shape(
-        _ text: String,
+    internal func shapePortable(
+        text: String,
+        spans: [TextSpan]? = nil,
         style: TextStyle,
-        spans: [TextSpan] = [],
-        maxWidth: Float? = nil,
-        pixelScale: Float = 2.0
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true
     ) -> ShapedText {
         let scale = max(1.0, pixelScale)
         let invS = 1.0 / scale
         let lineH = style.resolvedLineHeight
-        let mono = (style.family == .mono)
-        let bold = style.weight >= 600.0
+        let fullText = spans.map { $0.map(\.text).joined() } ?? text
 
-        func scalarAdvance(_ scalar: UnicodeScalar) -> Float {
-            PortableGlyphFont.advanceRatio(for: scalar, mono: mono) * style.size + style.letterSpacing
+        if fullText.isEmpty {
+            return ShapedText(
+                size: Vec2(0, lineH),
+                lineCount: 1,
+                lineHeight: lineH,
+                glyphs: [],
+                underlines: [],
+                strikethroughs: [],
+                backgrounds: [],
+                portableLines: [(0, "", 0, 0, [0])]
+            )
         }
 
-        // Split into raw lines on '\n' and wrap if requested.
+        // Map contiguous span UTF-8 byte ranges for per-character attributes.
+        var spanEntries: [(utf8Range: Range<Int>, span: TextSpan)] = []
+        if let spans {
+            var utf8Cursor = 0
+            for span in spans {
+                let byteCount = span.text.utf8.count
+                if byteCount > 0 {
+                    spanEntries.append((utf8Cursor..<(utf8Cursor + byteCount), span))
+                    utf8Cursor += byteCount
+                }
+            }
+        }
+
+        func spanAt(utf8Offset: Int) -> TextSpan? {
+            spanEntries.last { $0.utf8Range.contains(utf8Offset) }?.span
+        }
+
+        func charAdvance(_ ch: Character, atUTF8 utf8Offset: Int) -> Float {
+            let match = spanAt(utf8Offset: utf8Offset)
+            let isMono = match?.monospace == true || style.family == .monospace
+            let count = ch.unicodeScalars.count
+            let scalarSum = ch.unicodeScalars.reduce(Float(0)) { acc, scalar in
+                acc + PortableGlyphFont.advanceRatio(for: scalar, mono: isMono) * style.size
+            }
+            return scalarSum + (count > 0 ? style.letterSpacing : 0)
+        }
+
+        // Split into raw lines on '\n' and wrap/ellipsis if requested.
         var lines: [(utf8Start: Int, text: String, width: Float)] = []
         var cursorUTF8 = 0
-        let rawParagraphs = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let rawParagraphs = fullText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         for (pIdx, para) in rawParagraphs.enumerated() {
             if para.isEmpty {
                 lines.append((cursorUTF8, "", 0))
@@ -1298,8 +1386,10 @@ public final class TextSystem: @unchecked Sendable {
                 var current = ""
                 var curW: Float = 0
                 var lineStart = cursorUTF8
+                var charUTF8 = cursorUTF8
                 for ch in para {
-                    let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                    let chBytes = String(ch).utf8.count
+                    let chW = charAdvance(ch, atUTF8: charUTF8)
                     if !current.isEmpty && curW + chW > maxW {
                         lines.append((lineStart, current, curW))
                         lineStart += current.utf8.count
@@ -1309,6 +1399,7 @@ public final class TextSystem: @unchecked Sendable {
                         current.append(ch)
                         curW += chW
                     }
+                    charUTF8 += chBytes
                 }
                 if !current.isEmpty {
                     lines.append((lineStart, current, curW))
@@ -1316,16 +1407,19 @@ public final class TextSystem: @unchecked Sendable {
             } else if style.wrap == .ellipsis, let maxW = maxWidth, maxW > 0 {
                 var current = ""
                 var curW: Float = 0
-                let ellW = scalarAdvance("…")
+                let ellW = charAdvance("…", atUTF8: cursorUTF8)
                 var truncated = false
+                var charUTF8 = cursorUTF8
                 for ch in para {
-                    let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                    let chBytes = String(ch).utf8.count
+                    let chW = charAdvance(ch, atUTF8: charUTF8)
                     if curW + chW + ellW > maxW {
                         truncated = true
                         break
                     }
                     current.append(ch)
                     curW += chW
+                    charUTF8 += chBytes
                 }
                 if truncated {
                     current.append("…")
@@ -1333,7 +1427,12 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 lines.append((cursorUTF8, current, curW))
             } else {
-                let w = para.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                var w: Float = 0
+                var charUTF8 = cursorUTF8
+                for ch in para {
+                    w += charAdvance(ch, atUTF8: charUTF8)
+                    charUTF8 += String(ch).utf8.count
+                }
                 lines.append((cursorUTF8, para, w))
             }
             cursorUTF8 += para.utf8.count
@@ -1346,7 +1445,7 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         let maxLineW = lines.map(\.width).max() ?? 0
-        let totalW = maxWidth.map { style.align == .left ? min($0, maxLineW) : $0 } ?? maxLineW
+        let totalW = maxWidth.map { style.align == .leading ? min($0, maxLineW) : $0 } ?? maxLineW
         let totalH = Float(lines.count) * lineH
 
         var glyphs: [PositionedGlyph] = []
@@ -1360,9 +1459,9 @@ public final class TextSystem: @unchecked Sendable {
             let originY = Float(idx) * lineH
             let originX: Float
             switch style.align {
-            case .left: originX = 0
+            case .leading: originX = 0
             case .center: originX = max(0, (totalW - item.width) * 0.5)
-            case .right: originX = max(0, totalW - item.width)
+            case .trailing: originX = max(0, totalW - item.width)
             }
 
             var charOffsets: [Float] = [0]
@@ -1372,11 +1471,11 @@ public final class TextSystem: @unchecked Sendable {
                 let chStart = bytePos
                 let chBytes = String(ch).utf8.count
                 bytePos += chBytes
-                let spanMatch = spans.last { $0.utf8Range.contains(chStart) }
-                let spanBold = spanMatch?.bold ?? bold
-                let spanItalic = spanMatch?.italic ?? style.italic
+                let spanMatch = spanAt(utf8Offset: chStart)
+                let spanBold = (spanMatch?.weight ?? style.weight) >= 600.0
+                let spanItalic = (spanMatch?.italic == true) || style.italic
                 let spanColor = spanMatch?.color
-                let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                let chW = charAdvance(ch, atUTF8: chStart)
 
                 if let bg = spanMatch?.background {
                     backgrounds.append((SIMD4<Float>(originX + penX, originY, chW, lineH), bg))
@@ -1388,22 +1487,24 @@ public final class TextSystem: @unchecked Sendable {
                     strikethroughs.append(SIMD4<Float>(originX + penX, originY + lineH * 0.52, chW, 1.0))
                 }
 
-                for scalar in ch.unicodeScalars where scalar.value > 0x20 {
-                    let entry = glyphAtlas.rasterizePortableGlyph(
-                        scalar: scalar,
-                        fontSizePx: style.size * scale,
-                        bold: spanBold,
-                        italic: spanItalic
-                    )
-                    let gx = originX + penX + entry.bearingPx.x * invS
-                    let gy = originY + baselineOffset + entry.bearingPx.y * invS
-                    let gw = Float(entry.pixelSize.x) * invS
-                    let gh = Float(entry.pixelSize.y) * invS
-                    glyphs.append(PositionedGlyph(
-                        rect: SIMD4<Float>(gx, gy, gw, gh),
-                        uv: entry.uv,
-                        color: spanColor
-                    ))
+                if emitGlyphs {
+                    for scalar in ch.unicodeScalars where scalar.value > 0x20 {
+                        let entry = glyphAtlas.rasterizePortableGlyph(
+                            scalar: scalar,
+                            fontSizePx: style.size * scale,
+                            bold: spanBold,
+                            italic: spanItalic
+                        )
+                        let gx = originX + penX + entry.bearingPx.x * invS
+                        let gy = originY + baselineOffset + entry.bearingPx.y * invS
+                        let gw = Float(entry.pixelSize.x) * invS
+                        let gh = Float(entry.pixelSize.y) * invS
+                        glyphs.append(PositionedGlyph(
+                            rect: SIMD4<Float>(gx, gy, gw, gh),
+                            uv: entry.uv,
+                            color: spanColor
+                        ))
+                    }
                 }
                 penX += chW
                 for _ in 0..<chBytes {
@@ -1421,29 +1522,29 @@ public final class TextSystem: @unchecked Sendable {
             underlines: underlines,
             strikethroughs: strikethroughs,
             backgrounds: backgrounds,
-            lineStrings: lineRecords
+            portableLines: lineRecords
         )
     }
 
-    public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
+    internal func caretRectPortable(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
         let clamped = max(0, utf8Offset)
-        for rec in shaped.lineStrings {
+        for rec in shaped.portableLines {
             let lineEnd = rec.utf8Start + rec.text.utf8.count
             if clamped <= lineEnd {
                 let local = max(0, min(rec.charOffsets.count - 1, clamped - rec.utf8Start))
                 return SIMD4<Float>(rec.originX + rec.charOffsets[local], rec.originY, 1.5, shaped.lineHeight)
             }
         }
-        if let last = shaped.lineStrings.last {
+        if let last = shaped.portableLines.last {
             return SIMD4<Float>(last.originX + (last.charOffsets.last ?? 0), last.originY, 1.5, shaped.lineHeight)
         }
         return SIMD4<Float>(0, 0, 1.5, shaped.lineHeight)
     }
 
-    public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
-        guard !shaped.lineStrings.isEmpty else { return 0 }
-        let lineIdx = max(0, min(shaped.lineStrings.count - 1, Int(floor(localY / max(1.0, shaped.lineHeight)))))
-        let rec = shaped.lineStrings[lineIdx]
+    internal func hitTestUTF8OffsetPortable(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
+        guard !shaped.portableLines.isEmpty else { return 0 }
+        let lineIdx = max(0, min(shaped.portableLines.count - 1, Int(floor(max(0, localY) / max(1.0, shaped.lineHeight)))))
+        let rec = shaped.portableLines[lineIdx]
         let relX = max(0, localX - rec.originX)
         var bestIdx = 0
         var bestDist = Float.greatestFiniteMagnitude
@@ -1457,9 +1558,9 @@ public final class TextSystem: @unchecked Sendable {
         return rec.utf8Start + bestIdx
     }
 
-    public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+    internal func selectionRectsPortable(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
         var rects: [SIMD4<Float>] = []
-        for rec in shaped.lineStrings {
+        for rec in shaped.portableLines {
             let lineStart = rec.utf8Start
             let lineEnd = lineStart + rec.text.utf8.count
             let lo = max(utf8Range.lowerBound, lineStart)
@@ -1478,5 +1579,4 @@ public final class TextSystem: @unchecked Sendable {
         }
         return rects
     }
-    #endif
 }
