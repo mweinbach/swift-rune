@@ -143,36 +143,20 @@ public enum LineSelectionState<P: LinePoint>: Sendable, Equatable {
         shift: Bool,
         rowOf: (P) -> UInt32?
     ) -> LineSelectionState<P> {
-        guard let current else {
-            return .selecting(selected: .line(at), before: nil)
+        if let current, shift && current.start.joins(with: at) {
+            guard let start = rowOf(current.start),
+                  let end = rowOf(current.end),
+                  let here = rowOf(at) else {
+                return .idle(selected: current)
+            }
+            let keepStart = (start <= end) ? (here >= start) : (here <= end)
+            let anchor = keepStart ? current.start : current.end
+            return .selecting(selected: LineRange(start: anchor, end: at), before: current)
         }
-        if current.start == at && current.end == at {
+        if let current, current.start == at && current.end == at {
             return .unselecting(line: current)
         }
-        if shift && current.start.joins(with: at) {
-            let start = keepEnd(current: current, at: at, rowOf: rowOf)
-            return .selecting(selected: LineRange(start: start, end: at), before: current)
-        }
         return .selecting(selected: .line(at), before: current)
-    }
-
-    private static func keepEnd(current: LineRange<P>, at: P, rowOf: (P) -> UInt32?) -> P {
-        guard let a = rowOf(current.start),
-              let b = rowOf(current.end),
-              let c = rowOf(at) else {
-            return current.start
-        }
-        let lo = min(a, b)
-        let hi = max(a, b)
-        if c < lo {
-            return a >= b ? current.start : current.end
-        }
-        if c > hi {
-            return a <= b ? current.start : current.end
-        }
-        return (c - lo <= hi - c)
-            ? (a >= b ? current.start : current.end)
-            : (a <= b ? current.start : current.end)
     }
 }
 

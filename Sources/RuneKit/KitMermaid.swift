@@ -20,9 +20,13 @@ public enum KitMermaid {
             .split(whereSeparator: \.isWhitespace)
             .map(String.init)
             .first(where: { !$0.hasPrefix("%%") }) ?? ""
-        let normalized = first
-            .replacingOccurrences(of: "-beta", with: "")
-            .replacingOccurrences(of: "-v2", with: "")
+        var normalized = first
+        if normalized.hasSuffix("-beta") {
+            normalized.removeLast("-beta".count)
+        }
+        if normalized.hasSuffix("-v2") {
+            normalized.removeLast("-v2".count)
+        }
         switch normalized {
         case "graph", "flowchart": return "Flowchart"
         case "sequenceDiagram": return "Sequence diagram"
@@ -47,22 +51,22 @@ public enum KitMermaid {
 }
 
 extension Kit {
-    /// Builds a `MermaidTheme` derived from this `Kit`'s surface, border, and ink tokens.
+    /// Builds a `MermaidTheme` derived from this `Kit`'s surface, border, and ink tokens (`markdown/style.rs`).
     public func mermaidTheme(
-        maxWidth: Float = 720,
-        minScale: Float = 0.55
+        maxWidth: Float = 680,
+        minScale: Float = 0.6
     ) -> MermaidTheme {
         var theme = MermaidTheme.neutral(dark: dark).minScale(minScale)
         theme.text = c.textBase
         theme.muted = c.textMuted
-        theme.surface = c.layer01
+        theme.surface = c.bgBase
         theme.surfaceBorder = c.borderMuted
-        theme.nodeFill = c.layer02
-        theme.nodeBorder = c.borderBase
-        theme.line = c.textMuted
-        theme.clusterFill = c.bgDeep
-        theme.noteFill = c.info.bg
-        theme.noteBorder = c.info.border
+        theme.nodeFill = c.layer01
+        theme.nodeBorder = alpha(c.textBase, 0.2)
+        theme.line = alpha(c.textBase, 0.42)
+        theme.clusterFill = alpha(c.textBase, dark ? 0.04 : 0.025)
+        theme.noteFill = c.warning.bg
+        theme.noteBorder = c.warning.border
         theme.maxWidth = maxWidth
         return theme
     }
@@ -70,12 +74,12 @@ extension Kit {
     /// Renders a Mermaid diagram card styled with `Kit` tokens, returning `nil` when unsupported/invalid.
     public func mermaid<State>(
         _ source: String,
-        maxWidth: Float = 720,
-        minScale: Float = 0.55,
-        hoverNeighbours: Bool = true
+        maxWidth: Float = 680,
+        minScale: Float = 0.6,
+        hoverNeighbours: Bool = false
     ) -> El<State>? {
         let theme = mermaidTheme(maxWidth: maxWidth, minScale: minScale)
-        let hover: (MermaidHover, Color) = (hoverNeighbours ? .neighbours : .edges, c.bgAccent)
+        let hover: (MermaidHover, Color) = (hoverNeighbours ? .neighbours : .edges, alpha(c.textBase, 0.9))
         guard let card: El<State> = renderMermaid(source, theme: theme, hover: hover) else {
             return nil
         }
@@ -87,11 +91,11 @@ extension Kit {
     public func mermaidDrawing<State>(
         _ source: String,
         maxWidth: Float = 1024,
-        minScale: Float = 0.55,
-        hoverNeighbours: Bool = true
+        minScale: Float = 0.6,
+        hoverNeighbours: Bool = false
     ) -> MermaidDrawing<State>? {
         let theme = mermaidTheme(maxWidth: maxWidth, minScale: minScale)
-        let hover: (MermaidHover, Color) = (hoverNeighbours ? .neighbours : .edges, c.bgAccent)
+        let hover: (MermaidHover, Color) = (hoverNeighbours ? .neighbours : .edges, alpha(c.textBase, 0.9))
         return renderMermaidDrawing(source, theme: theme, hover: hover)
     }
 
@@ -99,7 +103,7 @@ extension Kit {
     public func mermaidOrCode<State>(
         key: String = "mermaid",
         source: String,
-        maxWidth: Float = 720
+        maxWidth: Float = 680
     ) -> El<State> {
         if let diagram: El<State> = mermaid(source, maxWidth: maxWidth) {
             return diagram.key(key)
