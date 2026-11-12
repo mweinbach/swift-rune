@@ -400,7 +400,7 @@ let spec = AppSpec<PlaygroundState>(
     size: Vec2(780, 480),
     state: PlaygroundState(),
     onKey: { state, event, _ in
-        if event.key == .command("d") || event.key == .command("D") {
+        if event.mods.shift && (event.key == .command("d") || event.key == .command("D")) {
             state.playgroundOpen.toggle()
             return true
         }

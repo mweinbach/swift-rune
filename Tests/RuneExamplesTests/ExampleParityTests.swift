@@ -8,9 +8,11 @@ import Testing
 @testable import RuneLab
 @testable import RuneMatched
 @testable import RuneRef
+@testable import RuneSettings
 @testable import RuneTodo
 
-@Suite("Example Parity Tests (Phase 1)")
+@Suite("Example Parity Tests (Phase 1)", .serialized)
+@MainActor
 struct ExampleParityTests {
     private func center(of info: ElementInfo) -> Vec2 {
         Vec2(info.rect[0] + info.rect[2] * 0.5, info.rect[1] + info.rect[3] * 0.5)
@@ -162,5 +164,29 @@ struct ExampleParityTests {
         #expect(abs(mid.g - expected) < 1e-4)
         #expect(abs(mid.b - expected) < 1e-4)
         #expect(mid.r < 0.25) // sRGB 0x80 (~0.502) in linear is ~0.216, not ~0.502
+    }
+
+    // Upstream: examples/settings/src/main.rs:46 cancelling_the_speed_slider_restores_its_value_before_a_track_press
+    @Test("settings: cancelling the speed slider restores its value before a track press")
+    func settingsCancellingSpeedSliderRestoresValue() {
+        let rt = Runtime<SettingsState>(
+            state: SettingsState(),
+            viewport: Vec2(620, 520),
+            pixelScale: 1.0,
+            systemDark: true,
+            view: settingsView
+        )
+        rt.frame(at: 0.0)
+        let slider = center(of: rt.element(byKey: "slider")!)
+        rt.pointerDown(at: Vec2(slider.x + 60.0, slider.y), at: 0.0)
+        rt.pointerMove(to: Vec2(slider.x + 70.0, slider.y), at: 1.0 / 60.0)
+        rt.frame(at: 1.0 / 60.0)
+        #expect(rt.state.speed > 0.5)
+        rt.keyDown(KeyEvent(key: .escape), at: 1.0 / 60.0)
+        rt.frame(at: 2.0 / 60.0)
+        #expect(rt.state.speed == 0.5)
+        rt.pointerUp(at: Vec2(slider.x + 70.0, slider.y), at: 2.0 / 60.0)
+        rt.frame(at: 2.0 / 60.0)
+        #expect(rt.state.speed == 0.5)
     }
 }

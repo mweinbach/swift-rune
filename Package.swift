@@ -172,7 +172,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneSettings",
-            dependencies: ["Rune", "RuneKit"],
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
             path: "Sources/Examples/RuneSettings"
         ),
         .executableTarget(
@@ -297,7 +297,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneSiteScenes",
-            dependencies: ["Rune", "RuneMotion", "RuneKit", "OpenCodeTheme", "RuneFX", "RuneLight"],
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
             path: "Sources/Examples/RuneSiteScenes"
         ),
         .executableTarget(
@@ -425,6 +425,7 @@ let package = Package(
                 "RuneRef",
                 "RuneHello",
                 "RuneTodo",
+                "RuneSettings",
                 "RuneFrostedBar",
                 "RuneMatched",
                 "RuneKnobsDemo",
