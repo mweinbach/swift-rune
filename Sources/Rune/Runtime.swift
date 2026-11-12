@@ -192,6 +192,22 @@ public final class Runtime<State> {
     public private(set) var keyWarnings: [String] = []
     public var windowTitle: String? = nil
     public private(set) var quitRequested: Bool = false
+    public var fontSmoothing: FontSmoothing = .systemDefault
+    public var tabVisitsControls: Bool = false
+    public var poll: ((inout State, Double, inout Tx) -> Bool)? = nil
+    public var onFocus: ((inout State, Bool, inout Tx) -> Void)? = nil
+    public var onModifiers: ((inout State, Mods, inout Tx) -> Void)? = nil
+    public var onVisibility: ((inout State, Bool, inout Tx) -> Void)? = nil
+    public var onIme: ((inout State, Ime, inout Tx) -> Bool)? = nil
+    public var onClose: ((inout State, inout Tx) -> Bool)? = nil
+    public var onQuit: ((inout State, inout Tx) -> Void)? = nil
+    public var turnScope: ((inout State, (inout State) -> Void) -> Void)? = nil
+    public var onReopen: ((inout State, Bool, inout Tx) -> Bool)? = nil
+    public var onOpenUrl: ((inout State, String, inout Tx) -> Void)? = nil
+    public private(set) var closeWindowRequested: Bool = false
+    public private(set) var minimizeRequested: Bool = false
+    public private(set) var relaunchRequested: Bool = false
+    public private(set) var nextWakeDeadline: Double? = nil
     public var clipboard = ClipboardContent("")
     public var richClipboard = RichClipboardPayload()
     public let fileDropState = FileDropState()
@@ -305,6 +321,7 @@ public final class Runtime<State> {
         }
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
+        _ = runPoll(at: now)
 
         // Check if any `LiveText` changed; if a fixed-box LiveText changed we refresh its text without full commit if possible
         for (_, idx) in nodeByPath {
@@ -1967,7 +1984,7 @@ public final class Runtime<State> {
 
     // MARK: - Private Helpers
 
-    private func applyTx(_ tx: Tx, at now: Double) {
+    internal func applyTx(_ tx: Tx, at now: Double, markDirtyIfNotLiveOnly: Bool = true) {
         if let cb = tx.clipboardWrite {
             clipboard = cb
             richClipboard = RichClipboardPayload(content: cb)
@@ -1989,6 +2006,27 @@ public final class Runtime<State> {
         }
         if let title = tx.windowTitle {
             windowTitle = title
+        }
+        if let srgb = tx.srgbBlendRequest, srgb != srgbBlend {
+            srgbBlend = srgb
+            dirtyCommit(at: now)
+        }
+        if let smoothing = tx.fontSmoothingRequest, smoothing != fontSmoothing {
+            fontSmoothing = smoothing
+            dirtyCommit(at: now)
+        }
+        if tx.isCloseWindowRequested {
+            closeWindowRequested = true
+        }
+        if tx.isMinimizeRequested {
+            minimizeRequested = true
+        }
+        if tx.isRelaunchRequested {
+            relaunchRequested = true
+        }
+        if let wakeAfter = tx.wakeAfterSeconds {
+            let candidate = now + wakeAfter
+            nextWakeDeadline = min(nextWakeDeadline ?? candidate, candidate)
         }
         if tx.quitRequested {
             quitRequested = true
@@ -2018,9 +2056,148 @@ public final class Runtime<State> {
         if tx.settleRequested {
             forceInitialSettle = true
         }
-        if !tx.liveOnlyRequested {
+        if !tx.liveOnlyRequested && (markDirtyIfNotLiveOnly || tx.isForceCommitRequested) {
             dirtyCommit(at: now)
         }
+    }
+
+    // MARK: - App Shell Lifecycle & State Update Helpers
+
+    /// True when the view tree needs a rebuild before the next frame (`Runtime::stale`).
+    public var isStale: Bool { needsCommit }
+
+    /// Runs `poll(state, now, tx)` when attached. Only dirties the commit if `poll` returns `true`
+    /// or `tx.commit()` was explicitly called.
+    @discardableResult
+    public func runPoll(at now: Double) -> Bool {
+        guard let pollFn = poll else { return false }
+        var tx = Tx()
+        let changed: Bool
+        if let scope = turnScope {
+            var res = false
+            scope(&state) { s in
+                res = pollFn(&s, now, &tx)
+            }
+            changed = res
+        } else {
+            changed = pollFn(&state, now, &tx)
+        }
+        let shouldDirty = changed || tx.isForceCommitRequested
+        applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty)
+        return changed
+    }
+
+    /// Mutates state via `body`, always rebuilding unless `tx.liveOnlyRequested` is true.
+    public func update(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Void) {
+        let t = now ?? currentTime
+        var tx = Tx()
+        if let scope = turnScope {
+            scope(&state) { s in body(&s, &tx) }
+        } else {
+            body(&state, &tx)
+        }
+        applyTx(tx, at: t, markDirtyIfNotLiveOnly: true)
+    }
+
+    /// Conditionally mutates state via `body`. Only dirties commit when `body` returns `true`
+    /// or `tx.commit()` was explicitly called; side-effect requests (`wakeAfter`, `copy`, `quit`,
+    /// etc.) still apply without forcing a rebuild (`app.rs:1240-1251`).
+    @discardableResult
+    public func updateIf(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Bool) -> Bool {
+        let t = now ?? currentTime
+        var tx = Tx()
+        let changed: Bool
+        if let scope = turnScope {
+            var res = false
+            scope(&state) { s in res = body(&s, &tx) }
+            changed = res
+        } else {
+            changed = body(&state, &tx)
+        }
+        applyTx(tx, at: t, markDirtyIfNotLiveOnly: changed || tx.isForceCommitRequested)
+        return changed
+    }
+
+    /// Sets `srgbBlend` and dirties the tree if changed.
+    public func setSrgbBlend(_ enabled: Bool, at now: Double? = nil) {
+        guard srgbBlend != enabled else { return }
+        srgbBlend = enabled
+        dirtyCommit(at: now ?? currentTime)
+    }
+
+    /// Delivers a window focus transition to `onFocus`, deduplicating redundant transitions and
+    /// leaving the runtime un-staled when `onFocus` is unset (`app.rs:973-992`).
+    public func dispatchFocus(_ focused: Bool, at now: Double? = nil) {
+        guard windowFocused != focused else { return }
+        let t = now ?? currentTime
+        let prevStale = needsCommit
+        windowFocused = focused
+        if let hook = onFocus {
+            update(at: t) { s, tx in hook(&s, focused, &tx) }
+        } else {
+            needsCommit = prevStale
+        }
+    }
+
+    public func dispatchModifiers(_ mods: Mods, at now: Double? = nil) {
+        guard let hook = onModifiers else { return }
+        updateIf(at: now) { s, tx in
+            hook(&s, mods, &tx)
+            return false
+        }
+    }
+
+    public func dispatchVisibility(_ visible: Bool, at now: Double? = nil) {
+        guard let hook = onVisibility else { return }
+        update(at: now) { s, tx in hook(&s, visible, &tx) }
+    }
+
+    @discardableResult
+    public func dispatchIme(_ ime: Ime, at now: Double? = nil) -> Bool {
+        guard let hook = onIme else { return false }
+        return updateIf(at: now) { s, tx in hook(&s, ime, &tx) }
+    }
+
+    /// Runs `onClose`; returns `true` if closing is allowed (defaults to `true` when unset).
+    public func dispatchClose(at now: Double? = nil) -> Bool {
+        guard let hook = onClose else { return true }
+        var allow = true
+        updateIf(at: now) { s, tx in
+            allow = hook(&s, &tx)
+            return true
+        }
+        return allow
+    }
+
+    public func dispatchQuit(at now: Double? = nil) {
+        guard let hook = onQuit else { return }
+        updateIf(at: now) { s, tx in
+            hook(&s, &tx)
+            return false
+        }
+    }
+
+    @discardableResult
+    public func dispatchReopen(hasVisibleWindows: Bool, at now: Double? = nil) -> Bool {
+        guard let hook = onReopen else { return false }
+        var handled = false
+        updateIf(at: now) { s, tx in
+            handled = hook(&s, hasVisibleWindows, &tx)
+            return handled
+        }
+        return handled
+    }
+
+    public func dispatchOpenUrl(_ url: String, at now: Double? = nil) {
+        guard let hook = onOpenUrl else { return }
+        update(at: now) { s, tx in hook(&s, url, &tx) }
+    }
+
+    public func clearShellRequests() {
+        closeWindowRequested = false
+        minimizeRequested = false
+        relaunchRequested = false
+        nextWakeDeadline = nil
     }
 
     private func advanceTabFocus(backward: Bool) -> Bool {

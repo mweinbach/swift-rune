@@ -4,6 +4,12 @@ import RuneRef
 #if canImport(simd)
 import simd
 #endif
+#if canImport(CoreText)
+import CoreText
+#endif
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 /// Declarative application specification (`rune::App<State>`).
 public struct AppSpec<State> {
@@ -11,9 +17,14 @@ public struct AppSpec<State> {
     public var size: Vec2
     public var minSize: Vec2?
     public var dark: Bool?
+    public var srgbBlend: Bool
     public var makeState: () -> State
     /// Named scene presets invokable via `--scene <name>` for instant visual QA snapshots.
     public var scenes: [String: (inout State, inout Tx) -> Void]
+    public var fonts: [Data]
+    public var families: [String]
+    public var setup: ((Waker) -> Void)?
+    public var poll: ((inout State, Double, inout Tx) -> Bool)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var view: (State, inout Cx<State>) -> El<State>
 
@@ -22,8 +33,13 @@ public struct AppSpec<State> {
         size: Vec2 = Vec2(800, 600),
         minSize: Vec2? = nil,
         dark: Bool? = nil,
+        srgbBlend: Bool = true,
         state: @autoclosure @escaping () -> State,
         scenes: [String: (inout State, inout Tx) -> Void] = [:],
+        fonts: [Data] = [],
+        families: [String] = [],
+        setup: ((Waker) -> Void)? = nil,
+        poll: ((inout State, Double, inout Tx) -> Bool)? = nil,
         onKey: ((inout State, KeyEvent, inout Tx) -> Bool)? = nil,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
@@ -31,8 +47,13 @@ public struct AppSpec<State> {
         self.size = size
         self.minSize = minSize
         self.dark = dark
+        self.srgbBlend = srgbBlend
         self.makeState = state
         self.scenes = scenes
+        self.fonts = fonts
+        self.families = families
+        self.setup = setup
+        self.poll = poll
         self.onKey = onKey
         self.view = view
     }
@@ -40,6 +61,54 @@ public struct AppSpec<State> {
     public func scene(_ name: String, _ apply: @escaping (inout State) -> Void) -> Self {
         var copy = self
         copy.scenes[name] = { s, _ in apply(&s) }
+        return copy
+    }
+
+    public func scene(_ name: String, _ apply: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.scenes[name] = apply
+        return copy
+    }
+
+    public func srgbBlend(_ enabled: Bool) -> Self {
+        var copy = self
+        copy.srgbBlend = enabled
+        return copy
+    }
+
+    public func font(_ data: Data) -> Self {
+        var copy = self
+        copy.fonts.append(data)
+        return copy
+    }
+
+    public func fonts(_ data: [Data]) -> Self {
+        var copy = self
+        copy.fonts.append(contentsOf: data)
+        return copy
+    }
+
+    public func family(_ name: String) -> Self {
+        var copy = self
+        copy.families.append(name)
+        return copy
+    }
+
+    public func families(_ names: [String]) -> Self {
+        var copy = self
+        copy.families.append(contentsOf: names)
+        return copy
+    }
+
+    public func setup(_ hook: @escaping (Waker) -> Void) -> Self {
+        var copy = self
+        copy.setup = hook
+        return copy
+    }
+
+    public func poll(_ hook: @escaping (inout State, Double, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.poll = hook
         return copy
     }
 }
@@ -360,6 +429,61 @@ public enum HeadlessRunner {
     /// Runs `spec` deterministically under `args`, writing `--snap`, `--tree`, `--frames`, and `--strip` files if specified.
     @discardableResult
     public static func run<State>(_ spec: AppSpec<State>, args: ToolingArgs) throws -> Output {
+        try runWithHooks(spec: spec, args: args)
+    }
+
+    /// Runs `app` deterministically under `args` (including `compositor`, `setup`, `poll`, `AppHandle` updates, and frame reports).
+    @discardableResult
+    public static func run<State>(_ app: App<State>, args: ToolingArgs) throws -> Output {
+        var effectiveArgs = args
+        if app.gpuBackendPreference == .software {
+            effectiveArgs.forceCPU = true
+        }
+        let reports = FrameReports<State>(
+            onFrameEncoded: app.onFrameEncodedHook,
+            onFrameDrawn: app.onFrameDrawnHook,
+            drawnInterval: 0.0
+        )
+        return try runWithHooks(
+            spec: app.intoSpec(),
+            args: effectiveArgs,
+            compositor: app.compositorValue,
+            reports: reports,
+            appShared: app.sharedHandle.shared,
+            extraConfigure: { runtime, _ in
+                runtime.fontSmoothing = app.fontSmoothingMode
+                runtime.onFocus = app.onFocusHook
+                runtime.onModifiers = app.onModifiersHook
+                runtime.onVisibility = app.onVisibilityHook
+                runtime.onIme = app.onImeHook
+                runtime.onClose = app.onCloseHook
+                runtime.onQuit = app.onQuitHook
+                runtime.turnScope = app.turnScopeHook
+                runtime.onReopen = app.onReopenHook
+                runtime.onOpenUrl = app.onOpenUrlHook
+                runtime.tabVisitsControls = app.tabVisitsControlsEnabled
+            }
+        )
+    }
+
+    internal static func registerFonts(_ fonts: [Data]) {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        for data in fonts {
+            guard let provider = CGDataProvider(data: data as CFData),
+                  let cgFont = CGFont(provider) else { continue }
+            CTFontManagerRegisterGraphicsFont(cgFont, nil)
+        }
+        #endif
+    }
+
+    private static func runWithHooks<State>(
+        spec: AppSpec<State>,
+        args: ToolingArgs,
+        compositor: AnyCompositor<State>? = nil,
+        reports: FrameReports<State>? = nil,
+        appShared: AppShared<State>? = nil,
+        extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
+    ) throws -> Output {
         if args.listScenes {
             for name in spec.scenes.keys.sorted() {
                 print(name)
@@ -367,12 +491,15 @@ public enum HeadlessRunner {
             return Output(finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]), treeJSON: Data("{}".utf8))
         }
 
+        registerFonts(spec.fonts)
+
         var initialState = spec.makeState()
+        var initTx = Tx()
         if let sceneName = args.sceneName, let applyScene = spec.scenes[sceneName] {
-            var tx = Tx()
-            applyScene(&initialState, &tx)
+            applyScene(&initialState, &initTx)
         }
 
+        let waker = Waker()
         let vp = args.viewportOverride ?? spec.size
         let isDark = args.darkOverride ?? spec.dark ?? true
         let runtime = Runtime<State>(
@@ -381,10 +508,18 @@ public enum HeadlessRunner {
             pixelScale: args.pixelScale,
             systemDark: isDark,
             reducedMotion: args.reducedMotion,
+            waker: waker,
             onKey: spec.onKey,
             view: spec.view
         )
         runtime.windowTitle = spec.title
+        runtime.srgbBlend = spec.srgbBlend
+        runtime.poll = spec.poll
+        runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
+        extraConfigure?(runtime, waker)
+        appShared?.setWaker(waker)
+        spec.setup?(waker)
+        _ = appShared?.applyStateUpdates(to: runtime, at: 0.0)
 
         // Load script steps if `--script` was passed (supports file path OR inline JSON string)
         var steps: [ScriptStep] = []
@@ -399,6 +534,9 @@ public enum HeadlessRunner {
             steps = try parseScript(jsonData: data)
         }
 
+        let surfaceW = max(1, Int((vp.x * args.pixelScale).rounded()))
+        let surfaceH = max(1, Int((vp.y * args.pixelScale).rounded()))
+
         #if canImport(Metal)
         let metalRenderer: MetalRenderer? = args.forceCPU ? nil : (try? MetalRenderer())
         func renderScene(_ refScene: RefScene) throws -> Frame {
@@ -407,11 +545,61 @@ public enum HeadlessRunner {
             }
             return try RuneRef.render(refScene)
         }
+        let devKey = metalRenderer.map { DeviceKey(rawValue: $0.device.registryID) } ?? DeviceKey(rawValue: 0)
         #else
         func renderScene(_ refScene: RefScene) throws -> Frame {
             return try RuneRef.render(refScene)
         }
+        let devKey = DeviceKey(rawValue: 0)
         #endif
+
+        func renderAndReport(_ refScene: RefScene, at now: Double) throws -> Frame {
+            let commitsBefore = runtime.viewCommitCount
+            var rendered: Frame? = nil
+            var drawCount = 0
+            if let comp = compositor {
+                let compFrame = CompositorFrame<State>(
+                    deviceKey: devKey,
+                    pixelSize: (surfaceW, surfaceH),
+                    dt: 1.0 / 60.0,
+                    updateMilliseconds: 0.0,
+                    srgbBlend: runtime.srgbBlend,
+                    runtime: runtime,
+                    drawUI: {
+                        drawCount += 1
+                        rendered = try? renderScene(refScene)
+                    }
+                )
+                comp.render(frame: compFrame)
+                if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
+                    compFrame.drawUI()
+                }
+            }
+            let outFrame = try rendered ?? {
+                drawCount = 1
+                return try renderScene(refScene)
+            }()
+            if let reports {
+                let encoded = FrameEncoded(
+                    outcome: .drawn,
+                    frameMs: 0.0,
+                    updateMs: 0.0,
+                    encodeMs: 0.0,
+                    committed: runtime.viewCommitCount != commitsBefore,
+                    primitives: refScene.primitives.count,
+                    glyphs: refScene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) },
+                    animating: runtime.isAnimating,
+                    compositorAnimating: compositor?.isAnimating ?? false,
+                    drawCount: drawCount,
+                    compositorSummary: compositor?.summary()
+                )
+                reports.record(encoded)
+                runtime.updateIf(at: now) { s, tx in
+                    reports.flush(state: &s, tx: &tx, at: now, force: true)
+                }
+            }
+            return outFrame
+        }
 
         // Initial settled frame at t = 0 (or `--at` if specified)
         let initialT = (args.atTime ?? 0.0) * args.timeScale
@@ -503,7 +691,7 @@ public enum HeadlessRunner {
             }
         }
 
-        var finalFrame = try renderScene(lastRefScene)
+        var finalFrame = try renderAndReport(lastRefScene, at: runtime.currentTime)
         if let cropKey = args.cropKey, let elInfo = runtime.element(byKey: cropKey) {
             finalFrame = cropFrame(finalFrame, rectPt: elInfo.rect, scale: args.pixelScale)
         }

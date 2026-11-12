@@ -405,6 +405,10 @@ public final class MetalRenderer {
         return ping
     }
 
+    internal func renderScene(_ scene: RefScene, into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
+        encodeMainPass(scene: scene, into: target, commandBuffer: commandBuffer)
+    }
+
     private func encodeMainPass(scene: RefScene, into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
         uploadAtlases(glyphs: scene.glyphs, images: scene.images, srgbImages: !scene.srgbBlend)
 
