@@ -225,9 +225,17 @@ public enum ParityMapper {
         var unmappedFiles: [String] = []
 
         for crate in map.crates {
-            let swiftDir = swiftRoot.appendingPathComponent(crate.swiftPath)
-            if !fm.fileExists(atPath: swiftDir.path) {
-                missingSwiftPaths.append(crate.swiftPath)
+            if let swiftPath = crate.swiftPath {
+                let swiftDir = swiftRoot.appendingPathComponent(swiftPath)
+                if !fm.fileExists(atPath: swiftDir.path) {
+                    missingSwiftPaths.append(swiftPath)
+                }
+            }
+            for swiftFile in crate.swiftOnly ?? [] {
+                let full = swiftRoot.appendingPathComponent(swiftFile)
+                if !fm.fileExists(atPath: full.path) {
+                    missingSwiftPaths.append(swiftFile)
+                }
             }
             for mod in crate.moduleMappings ?? [] {
                 for swiftFile in mod.swift {
@@ -395,7 +403,7 @@ public enum ParityMapper {
             if let mod = crate.moduleMappings?.first(where: { $0.upstream == rel || $0.upstream == filePath }) {
                 return (crate.swiftTarget, mod.swift, testCmd, true)
             }
-            return (crate.swiftTarget, [crate.swiftPath], testCmd, true)
+            return (crate.swiftTarget, crate.swiftPath.map { [$0] } ?? [], testCmd, true)
         }
 
         if let theme = map.themes?.first(where: { filePath.hasPrefix($0.upstreamPath + "/") }) {

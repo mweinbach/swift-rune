@@ -66,6 +66,8 @@ def scan_unmapped(upstream: str, swift_root: str, umap: dict, crate_filter: str 
     unmapped_crates = []
     unmapped_files = []
     missing_swift_paths = set()
+    missing_mappings = []
+    status_counts = defaultdict(int)
 
     crates_dir = os.path.join(upstream, "crates")
     if os.path.isdir(crates_dir):
@@ -82,7 +84,7 @@ def scan_unmapped(upstream: str, swift_root: str, umap: dict, crate_filter: str 
             src_dir = os.path.join(full_crate, "src")
             if os.path.isdir(src_dir):
                 for p in sorted(glob.glob(src_dir + "/**/*", recursive=True)):
-                    if os.path.isfile(p) and p.endswith((".rs", ".wgsl")):
+                    if os.path.isfile(p) and p.endswith((".rs", ".wgsl", ".js", ".metallib")):
                         rel_file = os.path.relpath(p, upstream)
                         if rel_file not in file_to_entry:
                             unmapped_files.append(rel_file)
@@ -100,7 +102,7 @@ def scan_unmapped(upstream: str, swift_root: str, umap: dict, crate_filter: str 
             src_dir = os.path.join(full_theme, "src")
             if os.path.isdir(src_dir):
                 for p in sorted(glob.glob(src_dir + "/**/*", recursive=True)):
-                    if os.path.isfile(p) and p.endswith((".rs", ".wgsl")):
+                    if os.path.isfile(p) and p.endswith((".rs", ".wgsl", ".js", ".metallib")):
                         rel_file = os.path.relpath(p, upstream)
                         if rel_file not in file_to_entry:
                             unmapped_files.append(rel_file)
@@ -117,10 +119,19 @@ def scan_unmapped(upstream: str, swift_root: str, umap: dict, crate_filter: str 
         if crate_filter and crate_filter not in (
             entry["upstreamPath"],
             os.path.basename(entry["upstreamPath"]),
-            entry["swiftTarget"],
+            entry.get("swiftTarget") or "",
         ):
             continue
+        for sw in entry.get("swiftOnly", []):
+            if not os.path.exists(os.path.join(swift_root, sw)):
+                missing_swift_paths.add(sw)
+        up_prefix = entry["upstreamPath"].rstrip("/") + "/"
         for m in entry.get("moduleMappings", []):
+            m_status = m.get("status")
+            if m_status:
+                status_counts[m_status] += 1
+            if m_status == "missing":
+                missing_mappings.append(up_prefix + m["upstream"])
             for sw in m.get("swift", []):
                 if not os.path.exists(os.path.join(swift_root, sw)):
                     missing_swift_paths.add(sw)
@@ -130,6 +141,8 @@ def scan_unmapped(upstream: str, swift_root: str, umap: dict, crate_filter: str 
         "unmappedFiles": unmapped_files,
         "unmappedExamples": unmapped_examples,
         "missingSwiftPaths": sorted(missing_swift_paths),
+        "missingMappings": sorted(missing_mappings),
+        "statusBreakdown": dict(sorted(status_counts.items())),
     }
 
 
@@ -181,17 +194,17 @@ def map_changed_file(rel_path: str, file_to_entry, crate_entries, example_entrie
     if rel_path in file_to_entry:
         entry, swift_files = file_to_entry[rel_path]
         return {
-            "swiftTarget": entry["swiftTarget"],
-            "testTarget": entry.get("testTarget", ""),
+            "swiftTarget": entry.get("swiftTarget") or "(unassigned)",
+            "testTarget": entry.get("testTarget") or "",
             "swiftFiles": swift_files,
             "mapped": True,
         }
     for prefix, entry in crate_entries:
         if rel_path.startswith(prefix):
             return {
-                "swiftTarget": entry["swiftTarget"],
-                "testTarget": entry.get("testTarget", ""),
-                "swiftFiles": [entry["swiftPath"]],
+                "swiftTarget": entry.get("swiftTarget") or "(unassigned)",
+                "testTarget": entry.get("testTarget") or "",
+                "swiftFiles": [entry["swiftPath"]] if entry.get("swiftPath") else [],
                 "mapped": False,
             }
     for ex_prefix, ex in example_entries.items():
@@ -328,6 +341,15 @@ def main():
     print(f"Missing Swift paths    : {len(unmapped_report['missingSwiftPaths'])}")
     for mp in unmapped_report["missingSwiftPaths"]:
         print(f"  - {mp}")
+    if unmapped_report.get("statusBreakdown"):
+        summary = ", ".join(f"{k}={v}" for k, v in unmapped_report["statusBreakdown"].items())
+        print(f"Mapping statuses       : {summary}")
+    if unmapped_report.get("missingMappings"):
+        print(f"Missing mappings       : {len(unmapped_report['missingMappings'])}")
+        for mm in unmapped_report["missingMappings"][:30]:
+            print(f"  - {mm}")
+        if len(unmapped_report["missingMappings"]) > 30:
+            print(f"  ... ({len(unmapped_report['missingMappings']) - 30} more)")
 
     if commits:
         print("")
