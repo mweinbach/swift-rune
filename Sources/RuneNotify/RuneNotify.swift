@@ -19,10 +19,42 @@ public final class NotificationService: Sendable {
     }
 
     /// Registers an application identity (no-op on Apple platforms where identity comes from the bundle).
-    public func register(_ identity: NotificationIdentity) {}
+    public func register(_ identity: NotificationIdentity) {
+        _ = backend.register(identity)
+    }
+
+    /// Registers an application identity, returning `Result` parity with upstream `rune-notify::register`.
+    @discardableResult
+    public func registerWithResult(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        backend.register(identity)
+    }
 
     /// Adopts a pre-registered application identity (no-op on Apple platforms).
-    public func adopt(_ identity: NotificationIdentity) {}
+    public func adopt(_ identity: NotificationIdentity) {
+        _ = backend.adopt(identity)
+    }
+
+    /// Adopts a pre-registered application identity, returning `Result` parity with upstream `rune-notify::adopt`.
+    @discardableResult
+    public func adoptWithResult(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        backend.adopt(identity)
+    }
+
+    /// Parses an activation URL (`<scheme>://notification/<id>?...`) into a click when supported.
+    public func clickFromURL(_ url: String) -> NotificationClick? {
+        backend.clickFromURL(url)
+    }
+
+    /// Serves toast activations for `clsid` on Windows; no-op returning `.success(())` elsewhere.
+    @discardableResult
+    public func serveActivations(_ clsid: String) -> Result<Void, NotificationError> {
+        backend.serveActivations(clsid)
+    }
+
+    /// Waits up to `timeout` for a COM activation for `clsid` on Windows; returns `nil` elsewhere.
+    public func waitActivation(_ clsid: String, timeout: TimeInterval) -> NotificationClick? {
+        backend.waitActivation(clsid, timeout: timeout)
+    }
 
     /// Posts a notification, returning `false` if unavailable.
     @discardableResult
@@ -62,8 +94,31 @@ public enum RuneNotify {
         shared.register(identity)
     }
 
+    @discardableResult
+    public static func registerWithResult(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        shared.registerWithResult(identity)
+    }
+
     public static func adopt(_ identity: NotificationIdentity) {
         shared.adopt(identity)
+    }
+
+    @discardableResult
+    public static func adoptWithResult(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        shared.adoptWithResult(identity)
+    }
+
+    public static func clickFromURL(_ url: String) -> NotificationClick? {
+        shared.clickFromURL(url)
+    }
+
+    @discardableResult
+    public static func serveActivations(_ clsid: String) -> Result<Void, NotificationError> {
+        shared.serveActivations(clsid)
+    }
+
+    public static func waitActivation(_ clsid: String, timeout: TimeInterval) -> NotificationClick? {
+        shared.waitActivation(clsid, timeout: timeout)
     }
 
     @discardableResult

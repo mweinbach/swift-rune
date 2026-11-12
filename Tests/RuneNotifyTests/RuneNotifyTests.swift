@@ -1,6 +1,10 @@
 import Foundation
 import Testing
 @testable import RuneNotify
+#if canImport(UserNotifications)
+import ObjectiveC
+import UserNotifications
+#endif
 
 @Suite("RuneNotify Tests")
 struct RuneNotifyTests {
@@ -146,5 +150,85 @@ struct RuneNotifyTests {
         #expect(replyTap.action == "reply-btn")
         #expect(replyTap.input(for: "reply-btn") == "Ship it")
     }
+
+    @Test func aClickReachesTheHandlerAndCompletes() {
+        let fakeClass: AnyClass = {
+            if let existing = objc_getClass("RuneMacFakeNotificationResponse") as? AnyClass {
+                return existing
+            }
+            let cls: AnyClass = objc_allocateClassPair(NSObject.self, "RuneMacFakeNotificationResponse", 0)!
+            let selfImp: @convention(c) (AnyObject, Selector) -> AnyObject = { obj, _ in obj }
+            let idImp: @convention(c) (AnyObject, Selector) -> AnyObject = { _, _ in "n-7" as NSString }
+            let infoImp: @convention(c) (AnyObject, Selector) -> AnyObject = { _, _ in
+                ["session": "ses_7", "server": "http://127.0.0.1:4096"] as NSDictionary
+            }
+            let actionImp: @convention(c) (AnyObject, Selector) -> AnyObject = { _, _ in
+                "com.apple.UNNotificationDefaultActionIdentifier" as NSString
+            }
+            class_addMethod(cls, NSSelectorFromString("notification"), unsafeBitCast(selfImp, to: IMP.self), "@@:")
+            class_addMethod(cls, NSSelectorFromString("request"), unsafeBitCast(selfImp, to: IMP.self), "@@:")
+            class_addMethod(cls, NSSelectorFromString("content"), unsafeBitCast(selfImp, to: IMP.self), "@@:")
+            class_addMethod(cls, NSSelectorFromString("identifier"), unsafeBitCast(idImp, to: IMP.self), "@@:")
+            class_addMethod(cls, NSSelectorFromString("userInfo"), unsafeBitCast(infoImp, to: IMP.self), "@@:")
+            class_addMethod(cls, NSSelectorFromString("actionIdentifier"), unsafeBitCast(actionImp, to: IMP.self), "@@:")
+            objc_registerClassPair(cls)
+            return cls
+        }()
+
+        let got = NotifyLock(initialState: [NotificationClick]())
+        let completed = NotifyLock(initialState: false)
+        let backend = UserNotificationsBackend()
+        backend.setClickHandler { click in
+            got.withLock { $0.append(click) }
+        }
+        defer { backend.setClickHandler(nil) }
+
+        let responseObject: NSObject = (fakeClass as! NSObject.Type).init()
+        let centerObject = NSObject()
+        let fakeResponse = Unmanaged<UNNotificationResponse>.fromOpaque(
+            Unmanaged.passUnretained(responseObject).toOpaque()
+        ).takeUnretainedValue()
+        let fakeCenter = Unmanaged<UNUserNotificationCenter>.fromOpaque(
+            Unmanaged.passUnretained(centerObject).toOpaque()
+        ).takeUnretainedValue()
+        backend.userNotificationCenter(fakeCenter, didReceive: fakeResponse) {
+            completed.withLock { $0 = true }
+        }
+
+        let clicks = got.withLock { $0 }
+        #expect(clicks.count == 1)
+        #expect(clicks[0].id == "n-7")
+        #expect(clicks[0].get("session") == "ses_7")
+        #expect(clicks[0].info.count == 2)
+        #expect(completed.withLock { $0 })
+    }
     #endif
+
+    @Test func registrationActivationAndCriticalUrgencyParity() throws {
+        let mock = MockNotificationBackend()
+        let service = NotificationService(backend: mock)
+        let identity = NotificationIdentity(id: "dev.rune.test", name: "Rune Test")
+            .activation("rune-notify")
+
+        try service.registerWithResult(identity).get()
+        try service.adoptWithResult(identity).get()
+        #expect(mock.registeredIdentity == identity)
+        try service.serveActivations("{12345678-1234-1234-1234-1234567890ab}").get()
+        #expect(service.waitActivation("{12345678-1234-1234-1234-1234567890ab}", timeout: 0.01) == nil)
+
+        let click = service.clickFromURL("rune-notify://notification/n-99?session=ses_9&rune.action=open")
+        #expect(click?.id == "n-99")
+        #expect(click?.get("session") == "ses_9")
+        #expect(click?.action == "open")
+        #expect(service.clickFromURL("other-scheme://notification/n-99") == nil)
+
+        let critical = Notification(id: "crit-1", title: "Urgent").urgency(.critical)
+        #expect(service.post(critical))
+        #expect(mock.activeNotifications.first?.urgency == .critical)
+
+        // Default non-Windows platform parity: returns nil / success cleanly.
+        #expect(RuneNotify.clickFromURL("rune-notify://notification/n-1") == nil)
+        try RuneNotify.serveActivations("{00000000-0000-0000-0000-000000000000}").get()
+        #expect(RuneNotify.waitActivation("{00000000-0000-0000-0000-000000000000}", timeout: 0) == nil)
+    }
 }

@@ -220,3 +220,15 @@ public struct NotificationIdentity: Sendable, Equatable {
         return copy
     }
 }
+
+/// Error returned by notification registration or activation serving calls.
+public enum NotificationError: Error, Sendable, Equatable, CustomStringConvertible {
+    case message(String)
+
+    public var description: String {
+        switch self {
+        case .message(let text):
+            return text
+        }
+    }
+}

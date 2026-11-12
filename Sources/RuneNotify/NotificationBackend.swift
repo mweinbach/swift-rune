@@ -24,6 +24,33 @@ public protocol NotificationBackend: Sendable {
     func remove(ids: [String])
     func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?)
     func bringToFront()
+    func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError>
+    func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError>
+    func clickFromURL(_ url: String) -> NotificationClick?
+    func serveActivations(_ clsid: String) -> Result<Void, NotificationError>
+    func waitActivation(_ clsid: String, timeout: TimeInterval) -> NotificationClick?
+}
+
+public extension NotificationBackend {
+    func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        .success(())
+    }
+
+    func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        .success(())
+    }
+
+    func clickFromURL(_ url: String) -> NotificationClick? {
+        nil
+    }
+
+    func serveActivations(_ clsid: String) -> Result<Void, NotificationError> {
+        .success(())
+    }
+
+    func waitActivation(_ clsid: String, timeout: TimeInterval) -> NotificationClick? {
+        nil
+    }
 }
 
 /// Deterministic headless notification backend for unit tests and non-bundled environments.
@@ -31,6 +58,7 @@ public final class MockNotificationBackend: NotificationBackend, @unchecked Send
     private struct State: @unchecked Sendable {
         var available: Bool = true
         var appFocused: Bool = false
+        var registeredIdentity: NotificationIdentity?
         var activeNotifications: [Notification] = []
         var postedHistory: [Notification] = []
         var removedIds: [String] = []
@@ -147,6 +175,47 @@ public final class MockNotificationBackend: NotificationBackend, @unchecked Send
 
     public var bringToFrontCount: Int {
         lock.withLock { $0.bringToFrontCount }
+    }
+
+    public var registeredIdentity: NotificationIdentity? {
+        lock.withLock { $0.registeredIdentity }
+    }
+
+    public func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        lock.withLock { $0.registeredIdentity = identity }
+        return .success(())
+    }
+
+    public func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        lock.withLock { $0.registeredIdentity = identity }
+        return .success(())
+    }
+
+    public func clickFromURL(_ url: String) -> NotificationClick? {
+        let scheme = lock.withLock { $0.registeredIdentity?.activationScheme }
+        guard let scheme, !scheme.isEmpty else { return nil }
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let schemeSplit = trimmed.range(of: "://") else { return nil }
+        let head = String(trimmed[..<schemeSplit.lowerBound])
+        guard head.caseInsensitiveCompare(scheme) == .orderedSame else { return nil }
+        let rest = String(trimmed[schemeSplit.upperBound...])
+        guard rest.hasPrefix("notification/") else { return nil }
+        let afterHost = String(rest.dropFirst("notification/".count))
+        let parts = afterHost.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawId = String(parts[0]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let id = rawId.removingPercentEncoding ?? rawId
+        var info: [(String, String)] = []
+        if parts.count > 1, !parts[1].isEmpty {
+            for item in parts[1].split(separator: "&") {
+                let kv = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                let k = String(kv[0]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[0])
+                let v = kv.count > 1
+                    ? (String(kv[1]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[1]))
+                    : ""
+                info.append((k, v))
+            }
+        }
+        return NotificationClick(id: id, info: info)
     }
 }
 
