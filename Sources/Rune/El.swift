@@ -331,6 +331,7 @@ public struct El<State> {
     public var opacity: Float = 1.0
     public var scale: Vec2 = Vec2(1, 1)
     public var rotate: Float = 0
+    public var origin: Vec2 = Vec2(0.5, 0.5)
     public var offset: Vec2 = .zero
     public var blur: Float = 0
     public var backdropBlur: Float = 0
@@ -349,6 +350,9 @@ public struct El<State> {
     public var isModal: Bool = false
     public var isInert: Bool = false
     public var isHit: Bool = false
+    public var explicitHit: Bool { get { isHit } set { isHit = newValue } }
+    public var isSecure: Bool = false
+    public var isRevealed: Bool = false
 
     // Accessibility metadata
     public var a11yLabel: String? = nil
@@ -811,6 +815,12 @@ public struct El<State> {
         return copy
     }
 
+    public func origin(_ x: Float, _ y: Float) -> Self {
+        var copy = self
+        copy.origin = Vec2(x, y)
+        return copy
+    }
+
     public func offset(_ x: Float, _ y: Float) -> Self {
         var copy = self
         copy.offset = Vec2(x, y)
@@ -865,6 +875,8 @@ public struct El<State> {
     public func tracking(_ spacing: Float) -> Self { letterSpacing(spacing) }
     public func textAlign(_ align: TextAlign) -> Self { var c = self; c.textStyle.align = align; return c }
     public func noWrap() -> Self { var c = self; c.textStyle.wrap = .noWrap; return c }
+    public func wrapText() -> Self { var c = self; c.textStyle.wrap = .wrap; return c }
+    public func wrap(_ mode: TextWrap) -> Self { var c = self; c.textStyle.wrap = mode; return c }
     public func ellipsis() -> Self { var c = self; c.textStyle.wrap = .ellipsis; return c }
 
     public func color(_ c: Color) -> Self {
@@ -1009,9 +1021,21 @@ public struct El<State> {
     }
 
     /// Marks the drawn, ancestor-clipped rectangle as an explicit native overlay input hit region (`El::hit`).
-    public func hit() -> Self {
+    public func hit(_ enabled: Bool = true) -> Self {
         var copy = self
-        copy.isHit = true
+        copy.isHit = enabled
+        return copy
+    }
+
+    public func secure(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isSecure = enabled
+        return copy
+    }
+
+    public func revealed(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isRevealed = enabled
         return copy
     }
 
@@ -1391,6 +1415,7 @@ public func textInput<State>(
         .role(.textInput)
         .focusable(true)
         .clip(true)
+    node.textStyle.wrap = .wrap
     node.handlers.editLens = (
         get: { state in state[keyPath: keyPath] },
         set: { state, updated in state[keyPath: keyPath] = updated }

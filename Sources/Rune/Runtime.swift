@@ -40,6 +40,7 @@ public struct ElementInfo: Sendable, Equatable {
     public var press: Float
     public var scrolled: [Float]
     public var caret: [Float]?
+    public var secure: Bool = false
 }
 
 /// Retained stateful coordinator driving declarative `El<State>` views, layout, `Scene` motion,
@@ -254,6 +255,8 @@ public final class Runtime<State> {
     private var lastElements: [ElementInfo] = []
     private var presentedRectByPath: [String: MotionRect] = [:]
     private var presentedScaleByPath: [String: Vec2] = [:]
+    private var hitGeometryByPath: [String: HitGeometry] = [:]
+    private var paintOrderPaths: [String] = []
     private var imagePacker = ImageAtlasPacker()
     private var retainedLayout = RetainedLayoutCoordinator()
     private var needsCommit: Bool = true
@@ -294,7 +297,99 @@ public final class Runtime<State> {
     }
 
     public func element(byKey key: String) -> ElementInfo? {
-        lastElements.first { $0.key == key }
+        if let active = lastElements.first(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) }) {
+            return active
+        }
+        return lastElements.first { selectsElementSelector(key, path: $0.path, key: $0.key) }
+    }
+
+    /// Whether an element path contains secure text, hidden or revealed.
+    /// Unknown paths return `false`. Matches `crates/rune/src/runtime/elements.rs:189`.
+    public func elementIsSecure(_ path: String) -> Bool {
+        if let idx = nodeByPath[path] {
+            let el = flatNodes[idx].el
+            if el.isSecure { return true }
+            if let editLens = el.handlers.editLens {
+                return editLens.get(state).isSecure
+            }
+            return false
+        }
+        return lastElements.first(where: { $0.path == path })?.secure ?? false
+    }
+
+    /// Centre of the first non-exiting element matching `key` (or slash-path like `"slider/knob"`),
+    /// in logical window points. Matches `crates/rune/src/runtime/elements.rs:389`.
+    public func find(_ key: String) -> Vec2? {
+        guard let el = lastElements.first(where: { !$0.exiting && selectsElementSelector(key, path: $0.path, key: $0.key) }),
+              el.rect.count >= 4 else {
+            return nil
+        }
+        return Vec2(el.rect[0] + el.rect[2] * 0.5, el.rect[1] + el.rect[3] * 0.5)
+    }
+
+    /// Topmost element drawn at window point `(x, y)` (skipping exiting and opacity-0 elements).
+    public func elementAt(_ x: Float, _ y: Float) -> Picked? {
+        elementAtWith(x, y, pick: .default)
+    }
+
+    /// Topmost element drawn at window point `(x, y)` with `Pick` options.
+    public func elementAtWith(_ x: Float, _ y: Float, pick: Pick) -> Picked? {
+        elementAtWithin(nil, x: x, y: y, pick: pick)
+    }
+
+    /// Topmost element drawn at window point `(x, y)` restricted to `within` and its descendants.
+    public func elementAtIn(_ within: String, x: Float, y: Float) -> Picked? {
+        elementAtInWith(within, x: x, y: y, pick: .default)
+    }
+
+    /// Topmost element drawn at window point `(x, y)` restricted to `within` and its descendants, with `Pick` options.
+    public func elementAtInWith(_ within: String, x: Float, y: Float, pick: Pick) -> Picked? {
+        elementAtWithin(within, x: x, y: y, pick: pick)
+    }
+
+    private func elementAtWithin(_ within: String?, x: Float, y: Float, pick: Pick) -> Picked? {
+        let scopePath: String?
+        if let within {
+            guard let found = lastElements.first(where: { selectsElementSelector(within, path: $0.path, key: $0.key) }) else {
+                return nil
+            }
+            scopePath = found.path
+        } else {
+            scopePath = nil
+        }
+
+        let pt = Vec2(x, y)
+        for path in paintOrderPaths.reversed() {
+            if let scopePath, !(path == scopePath || path.hasPrefix(scopePath + "/")) {
+                continue
+            }
+            guard let geom = hitGeometryByPath[path],
+                  !geom.isExiting,
+                  (pick.includeTransparent || geom.opacity > 0.001),
+                  geom.contains(pt) else {
+                continue
+            }
+            let key = nodeByPath[path].flatMap { flatNodes[$0].key }
+                ?? lastElements.first(where: { $0.path == path })?.key
+            return Picked(path: path, key: key)
+        }
+        return nil
+    }
+
+    /// Whether window point `(x, y)` lies inside the drawn, clipped, and turned box of the element matching `key`.
+    public func contains(_ key: String, x: Float, y: Float) -> Bool {
+        containsWith(key, x: x, y: y, pick: .default)
+    }
+
+    /// `contains(_:x:y:)` with `Pick` options.
+    public func containsWith(_ key: String, x: Float, y: Float, pick: Pick) -> Bool {
+        guard let el = lastElements.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }),
+              let geom = hitGeometryByPath[el.path],
+              !geom.isExiting,
+              (pick.includeTransparent || geom.opacity > 0.001) else {
+            return false
+        }
+        return geom.contains(Vec2(x, y))
     }
 
     public func markNeedsCommit(settle: Bool = false) {
@@ -886,10 +981,21 @@ public final class Runtime<State> {
         primitives.reserveCapacity(frameOut.nodes.count * 2)
         var infos: [ElementInfo] = []
         infos.reserveCapacity(frameOut.nodes.count)
+        let windowRect = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
         var newRectByPath: [String: MotionRect] = [:]
         var newScaleByPath: [String: Vec2] = [:]
+        var newHitGeometries: [String: HitGeometry] = [:]
+        var newPaintOrder: [String] = []
+        newPaintOrder.reserveCapacity(frameOut.nodes.count)
 
-        func emitSubtree(_ p: Presented, ancestorOpacity: Float) {
+        func emitSubtree(
+            _ p: Presented,
+            ancestorOpacity: Float,
+            ancestorTurn: Turn?,
+            outerTurnClip: MotionRect?,
+            localTurnClip: MotionRect?,
+            parentPath: String?
+        ) {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return }
             let el = snap.el
             let rect = presentedRectById[p.id] ?? p.rect
@@ -897,8 +1003,37 @@ public final class Runtime<State> {
             let alpha = (ownOp * ancestorOpacity).clamped(to: 0...1)
             let scaleVec = presentedScaleById[p.id] ?? p.scale
 
+            let ownHasTurn = abs(p.rotate) > 1e-6
+            let nodeTurn: Turn?
+            if ownHasTurn {
+                let pivot = Vec2(rect.x + rect.width * el.origin.x, rect.y + rect.height * el.origin.y)
+                let localTurn = Turn.about(pivot, radians: p.rotate)
+                nodeTurn = ancestorTurn.map { $0.after(localTurn) } ?? localTurn
+            } else {
+                nodeTurn = ancestorTurn
+            }
+
+            let parentWindowClip = snap.parentIndex.map { flatNodes[$0].clipRect } ?? windowRect
+            let effectiveOuterClip: MotionRect
+            let effectiveHitClip: MotionRect
+            let childLocalTurnClip: MotionRect?
+            if let outerTurnClip {
+                effectiveOuterClip = outerTurnClip
+                effectiveHitClip = localTurnClip ?? windowRect
+                childLocalTurnClip = el.layout.clipOverflow ? intersectRects(effectiveHitClip, rect) : effectiveHitClip
+            } else if ownHasTurn {
+                effectiveOuterClip = parentWindowClip
+                effectiveHitClip = windowRect
+                childLocalTurnClip = el.layout.clipOverflow ? rect : windowRect
+            } else {
+                effectiveOuterClip = parentWindowClip
+                effectiveHitClip = parentWindowClip
+                childLocalTurnClip = nil
+            }
+
             newRectByPath[snap.path] = rect
             newScaleByPath[snap.path] = scaleVec
+            newPaintOrder.append(snap.path)
 
             var fillColor = p.fill.map(Color.init) ?? el.background
             var blurPt = p.blur
@@ -927,10 +1062,25 @@ public final class Runtime<State> {
             let scrolled = scrollOffsets[snap.path] ?? .zero
 
             var caretOut: [Float]? = nil
-            var elementTextValue: String? = el.liveText?.get() ?? el.plainText
-            if let editLens = el.handlers.editLens {
-                elementTextValue = editLens.get(state).text
+            let editValue: TextEdit? = el.handlers.editLens.map { lens in
+                var e = lens.get(state)
+                if el.isSecure {
+                    e.isSecure = true
+                    if el.isRevealed { e.isRevealed = true }
+                }
+                return e
             }
+            let nodeIsSecure = el.isSecure || (editValue?.isSecure ?? false)
+            let rawTextValue: String? = editValue?.text ?? el.liveText?.get() ?? el.plainText
+            // Never expose secure plaintext (hidden or revealed) in ElementInfo / --tree snapshots.
+            let elementTextValue: String? = nodeIsSecure ? nil : rawTextValue
+            let paintedLabelValue: String? = {
+                guard let raw = el.liveText?.get() ?? el.plainText else { return nil }
+                if nodeIsSecure && !el.isRevealed && !raw.isEmpty {
+                    return el.textStyle.wrap == .wrap ? "••••••••••••" : String(repeating: "•", count: raw.count)
+                }
+                return raw
+            }()
 
             let totalShapePieces = el.shapes.reduce(0) { $0 + $1.pieceCount }
             let useLayer = (blurPt >= 0.5) || el.isolatedLayer || (alpha > 0.001 && alpha < 1.0 && totalShapePieces > 1)
@@ -1156,18 +1306,19 @@ public final class Runtime<State> {
                 let textOriginY = rect.y + padT
                 let defaultTextColor = el.textColor ?? Tok.theme(dark: systemDark).text
 
-                if let editLens = el.handlers.editLens {
-                    let edit = editLens.get(state)
+                if let edit = editValue {
                     let displayStr = edit.displayString
                     let showingPlaceholder = displayStr.isEmpty && (edit.preedit?.text.isEmpty ?? true)
                     let renderedStr = showingPlaceholder ? (el.placeholder ?? "") : displayStr
                     let textCol = showingPlaceholder
                         ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
                         : defaultTextColor
+                    var inputStyle = el.textStyle
+                    if edit.multiline { inputStyle.wrap = .wrap }
 
                     let shaped = textSystem.shape(
                         text: renderedStr,
-                        style: el.textStyle,
+                        style: inputStyle,
                         maxWidth: edit.multiline ? innerW : nil,
                         pixelScale: pxScale,
                         emitGlyphs: !renderedStr.isEmpty
@@ -1266,9 +1417,9 @@ public final class Runtime<State> {
                             ))
                         }
                     }
-                } else if el.richSpans != nil || elementTextValue != nil {
+                } else if el.richSpans != nil || paintedLabelValue != nil {
                     let shaped = textSystem.shape(
-                        text: elementTextValue ?? "",
+                        text: paintedLabelValue ?? "",
                         spans: el.richSpans,
                         style: el.textStyle,
                         maxWidth: innerW + 0.5,
@@ -1320,6 +1471,27 @@ public final class Runtime<State> {
                 }
             }
 
+            let hasVisualBlocker = fillColor.a > 0.001 || el.gradient != nil ||
+                (el.borderWidth > 0 && borderColor.a > 0.001) || el.imagePayload != nil ||
+                el.backdropBlur >= 0.5 || !el.shapes.isEmpty
+            let hnd = el.handlers
+            let isInteractiveBlocker = hnd.onClick != nil || hnd.onClickPress != nil || hnd.onDoubleClick != nil ||
+                hnd.onPointerDown != nil || hnd.onDrag != nil || hnd.onHover != nil ||
+                hnd.editLens != nil || el.isModal || el.explicitHit
+
+            newHitGeometries[snap.path] = HitGeometry(
+                path: snap.path,
+                parentPath: parentPath,
+                rect: rect,
+                clipRect: effectiveHitClip,
+                outerClip: effectiveOuterClip,
+                turn: nodeTurn,
+                opacity: alpha,
+                isExiting: p.isExiting,
+                hasVisualBlocker: hasVisualBlocker,
+                isInteractiveBlocker: isInteractiveBlocker
+            )
+
             infos.append(ElementInfo(
                 path: snap.path,
                 key: snap.key,
@@ -1337,7 +1509,7 @@ public final class Runtime<State> {
                 text: elementTextValue,
                 label: el.a11yLabel,
                 help: el.a11yHelp,
-                selected: el.a11ySelected,
+                selected: nodeIsSecure ? nil : el.a11ySelected,
                 expanded: el.a11yExpanded,
                 level: el.a11yLevel,
                 itemSelected: el.itemSelected,
@@ -1350,13 +1522,22 @@ public final class Runtime<State> {
                 hover: isHovered ? 1.0 : 0.0,
                 press: isPressed ? 1.0 : 0.0,
                 scrolled: [scrolled.x, scrolled.y],
-                caret: caretOut
+                caret: caretOut,
+                secure: nodeIsSecure
             ))
 
             let childAncestorOp: Float = (shouldEmit && useLayer) ? 1.0 : alpha
+            let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
             if let children = childrenByParent[p.id] {
                 for child in sortByZOrder(children) {
-                    emitSubtree(child, ancestorOpacity: childAncestorOp)
+                    emitSubtree(
+                        child,
+                        ancestorOpacity: childAncestorOp,
+                        ancestorTurn: nodeTurn,
+                        outerTurnClip: nextOuterClip,
+                        localTurnClip: childLocalTurnClip,
+                        parentPath: snap.path
+                    )
                 }
             }
 
@@ -1366,12 +1547,21 @@ public final class Runtime<State> {
         }
 
         for root in sortByZOrder(rootNodes) {
-            emitSubtree(root, ancestorOpacity: 1.0)
+            emitSubtree(
+                root,
+                ancestorOpacity: 1.0,
+                ancestorTurn: nil,
+                outerTurnClip: nil,
+                localTurnClip: nil,
+                parentPath: nil
+            )
         }
 
         lastElements = infos
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
+        hitGeometryByPath = newHitGeometries
+        paintOrderPaths = newPaintOrder
         _ = now
 
         return RefScene(
@@ -1394,27 +1584,67 @@ public final class Runtime<State> {
     }
 
     private func hitTest(at point: Vec2, predicate: ((FlatNode) -> Bool)? = nil) -> (node: FlatNode, rect: MotionRect)? {
-        // Walk in reverse paint order (topmost zOrder & deepest child first)
-        let sortedIndices = flatNodes.indices.sorted { a, b in
-            let za = flatNodes[a].zOrder
-            let zb = flatNodes[b].zOrder
-            if za != zb { return za < zb }
-            return a < b
+        guard let detailed = hitTestDetailed(at: point, predicate: predicate) else { return nil }
+        return (detailed.node, detailed.rect)
+    }
+
+    private func hitTestDetailed(
+        at point: Vec2,
+        predicate: ((FlatNode) -> Bool)? = nil
+    ) -> (node: FlatNode, rect: MotionRect, localPoint: Vec2)? {
+        let orderedPaths: [String]
+        if !paintOrderPaths.isEmpty {
+            orderedPaths = paintOrderPaths
+        } else {
+            let sortedIndices = flatNodes.indices.sorted { a, b in
+                let za = flatNodes[a].zOrder
+                let zb = flatNodes[b].zOrder
+                if za != zb { return za < zb }
+                return a < b
+            }
+            orderedPaths = sortedIndices.map { flatNodes[$0].path }
         }
 
-        for idx in sortedIndices.reversed() {
+        // First non-transparent visual or interactive blocker stops hits on non-ancestor elements beneath it.
+        var firstBlockerPath: String? = nil
+
+        for path in orderedPaths.reversed() {
+            guard let idx = nodeByPath[path], idx < flatNodes.count else { continue }
             let node = flatNodes[idx]
             if node.effectiveInert { continue }
-            let infoRect = presentedRectByPath[node.path] ?? node.targetRect
-            let hitBox = intersectRects(node.clipRect, infoRect)
-            guard point.x >= hitBox.left && point.x <= hitBox.right &&
-                  point.y >= hitBox.top && point.y <= hitBox.bottom else {
-                continue
+
+            let geom = hitGeometryByPath[path]
+            if let geom {
+                if geom.isExiting || geom.opacity <= 0.001 { continue }
+                guard let localWindowPt = geom.unturnedLocalPoint(for: point) else { continue }
+
+                if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
+                    continue
+                }
+                if predicate == nil || predicate!(node) {
+                    return (node, geom.rect, Vec2(localWindowPt.x - geom.rect.x, localWindowPt.y - geom.rect.y))
+                }
+                if firstBlockerPath == nil && (geom.hasVisualBlocker || geom.isInteractiveBlocker) {
+                    firstBlockerPath = path
+                }
+            } else {
+                if node.el.opacity <= 0.001 { continue }
+                let infoRect = presentedRectByPath[path] ?? node.targetRect
+                let hitBox = intersectRects(node.clipRect, infoRect)
+                guard halfOpenContains(hitBox, point) else { continue }
+                if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
+                    continue
+                }
+                if predicate == nil || predicate!(node) {
+                    return (node, infoRect, Vec2(point.x - infoRect.x, point.y - infoRect.y))
+                }
+                let hasVis = node.el.background.a > 0.001 || node.el.gradient != nil ||
+                    (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001) ||
+                    node.el.imagePayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
+                if firstBlockerPath == nil && (hasVis || node.el.explicitHit || node.el.isModal) {
+                    firstBlockerPath = path
+                }
             }
-            if let predicate, !predicate(node) {
-                continue
-            }
-            return (node, infoRect)
         }
         return nil
     }
@@ -1525,10 +1755,10 @@ public final class Runtime<State> {
         }
 
         if button == .secondary {
-            if let (node, rect) = hitTest(at: pos, predicate: { $0.el.handlers.onSecondaryClick != nil }) {
+            if let (node, rect, local) = hitTestDetailed(at: pos, predicate: { $0.el.handlers.onSecondaryClick != nil }) {
                 let press = PointerPress(
                     window: pos,
-                    local: Vec2(pos.x - rect.x, pos.y - rect.y),
+                    local: local,
                     elementSize: Vec2(rect.width, rect.height),
                     button: .secondary,
                     mods: mods,
@@ -1541,14 +1771,15 @@ public final class Runtime<State> {
             return
         }
 
-        let interactiveHit = hitTest(at: pos) { node in
+        let interactiveHit = hitTestDetailed(at: pos) { node in
             let h = node.el.handlers
             return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
                    h.onPointerDown != nil || h.onDrag != nil || h.editLens != nil ||
-                   node.el.focusable || node.el.pressBg != nil || node.el.pressScaleFactor != nil
+                   node.el.focusable || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
+                   node.el.isModal || (node.el.role == .button && node.el.explicitHit)
         }
 
-        guard let (node, rect) = interactiveHit else {
+        guard let (node, rect, local) = interactiveHit else {
             if focusedPath != nil {
                 focusedPath = nil
                 focusedKey = nil
@@ -1565,7 +1796,6 @@ public final class Runtime<State> {
         }
         dirtyCommit(at: now)
 
-        let local = Vec2(pos.x - rect.x, pos.y - rect.y)
         let elemSize = Vec2(rect.width, rect.height)
         let press = PointerPress(
             window: pos,
@@ -1666,9 +1896,10 @@ public final class Runtime<State> {
         guard let rPath = releasedPath, let idx = nodeByPath[rPath] else { return }
         let node = flatNodes[idx]
         let rect = presentedRectByPath[rPath] ?? node.targetRect
+        let unturnedLocal = hitGeometryByPath[rPath]?.turn?.unturn(pos) ?? pos
         let press = PointerPress(
             window: pos,
-            local: Vec2(pos.x - rect.x, pos.y - rect.y),
+            local: Vec2(unturnedLocal.x - rect.x, unturnedLocal.y - rect.y),
             elementSize: Vec2(rect.width, rect.height),
             button: button,
             mods: mods,
@@ -1682,7 +1913,7 @@ public final class Runtime<State> {
         }
 
         // Fire click / double-click only if pointer released inside the pressed element and not dragged!
-        let inside = pos.x >= rect.left && pos.x <= rect.right && pos.y >= rect.top && pos.y <= rect.bottom
+        let inside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
         if inside && button == .primary && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
             if clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
                 var tx = Tx()
@@ -1762,7 +1993,8 @@ public final class Runtime<State> {
         let nid = NodeId.hash("scroll:" + path)
         let cur = scrollOffsets[path] ?? .zero
         scrollStore.snap(nid, Props.SCROLL, to: cur)
-        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(vx, vy)), decay: .IOS_NORMAL, at: now)
+        // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
+        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(-vx, -vy)), decay: .IOS_NORMAL, at: now)
     }
 
     /// Routes keyboard `KeyEvent` through active drag cancel (`Escape`), focused `TextEdit`,
@@ -1788,17 +2020,22 @@ public final class Runtime<State> {
         if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
             let fNode = flatNodes[fIdx]
 
-            // Element's own `onKey` runs first so custom handlers can intercept keys (e.g. Up/Down history)
-            var walkIdx: Int? = fIdx
-            while let curIdx = walkIdx {
-                if let onKey = flatNodes[curIdx].el.handlers.onKey {
-                    var tx = Tx()
-                    if onKey(&state, ev, &tx) {
-                        applyTx(tx, at: now)
-                        return true
+            // Upstream `keys.rs:238-246` & `on_key_tests.rs:81-90`: a focused text field keeps its keys;
+            // ancestor `onKey` handlers must not preempt typing, navigation, or editing inside it.
+            if fNode.el.handlers.editLens == nil {
+                var walkIdx: Int? = fIdx
+                while let curIdx = walkIdx {
+                    if flatNodes[curIdx].effectiveInert { break }
+                    if let onKey = flatNodes[curIdx].el.handlers.onKey {
+                        var tx = Tx()
+                        if onKey(&state, ev, &tx) {
+                            applyTx(tx, at: now)
+                            return true
+                        }
                     }
+                    if flatNodes[curIdx].el.isModal { break }
+                    walkIdx = flatNodes[curIdx].parentIndex
                 }
-                walkIdx = flatNodes[curIdx].parentIndex
             }
 
             // Focused TextInput editing
@@ -1808,6 +2045,16 @@ public final class Runtime<State> {
                     return true
                 }
                 var edit = editLens.get(state)
+                if fNode.el.isSecure {
+                    edit.isSecure = true
+                    if fNode.el.isRevealed { edit.isRevealed = true }
+                }
+                // Upstream `secure_text.rs:536,558`: copy/cut on secure text input stay blocked even when revealed.
+                if edit.isSecure && ev.mods.primaryCommand &&
+                    (ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C") ||
+                     ev.key == .command("x") || ev.key == .text("x") || ev.key == .text("X")) {
+                    return true
+                }
                 let outcome = edit.handleKey(ev)
                 switch outcome {
                 case .ignored:
@@ -1940,6 +2187,7 @@ public final class Runtime<State> {
             if let lv = e.level { obj["level"] = lv }
             if let ex = e.expanded { obj["expanded"] = ex }
             if e.itemSelected { obj["itemSelected"] = true }
+            if e.secure { obj["secure"] = true }
             if zip(e.rect, e.target).contains(where: { abs($0 - $1) > 0.01 }) {
                 obj["target"] = e.target.map(r2)
             }
