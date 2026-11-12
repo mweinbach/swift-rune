@@ -134,6 +134,16 @@ public struct Rgb: Sendable, Equatable, Hashable {
     public var v4: SIMD4<Float> {
         SIMD4<Float>(r, g, b, 1.0)
     }
+
+    /// Convert linear `Rgb` back to sRGB hex (`0xRRGGBB`), rounding.
+    public func hex() -> UInt32 {
+        func encode(_ c: Float) -> UInt32 {
+            let x = min(max(c, 0.0), 1.0)
+            let s: Float = x <= 0.0031308 ? x * 12.92 : 1.055 * powf(x, 1.0 / 2.4) - 0.055
+            return UInt32((min(max(s, 0.0), 1.0) * 255.0).rounded())
+        }
+        return (encode(r) << 16) | (encode(g) << 8) | encode(b)
+    }
 }
 
 /// Convert sRGB hex (`0xRRGGBB`) to linear-light `Rgb`.
@@ -369,6 +379,16 @@ public struct FxSlot: Sendable, Equatable {
         self.backdropSrgb = backdropSrgb
         self.blend = blend
     }
+
+    public func scale(_ s: Float) -> FxSlot { var copy = self; copy.scale = s; return copy }
+    public func clip(_ clip: SIMD4<Float>, fade: SIMD4<UInt32> = .zero) -> FxSlot {
+        var copy = self
+        copy.clip = clip
+        copy.fade = fade
+        return copy
+    }
+    public func backdropSrgb(_ on: Bool) -> FxSlot { var copy = self; copy.backdropSrgb = on; return copy }
+    public func blend(_ blend: FxBlend) -> FxSlot { var copy = self; copy.blend = blend; return copy }
 }
 
 public struct FxCost: Sendable, Equatable {

@@ -743,6 +743,100 @@ extension FillParams {
             return style.setParam(id, value)
         }
     }
+
+    /// Swift source that rebuilds these params as `Fx.fill(FillParams(...))`, written against the closest preset.
+    public func toSwift() -> String {
+        let info = self.info
+        var best: (count: Int, preset: FxPreset, diff: [String])?
+        for preset in info.presets {
+            let base = preset.style()
+            var diff: [String] = []
+            for param in info.params {
+                guard let val = style.getParam(param.id),
+                      base.getParam(param.id) != val else { continue }
+                let field = Self.swiftFieldName(param.id)
+                let lit = Self.swiftLiteral(val, param: param)
+                diff.append("p.\(field) = \(lit)")
+            }
+            if best == nil || diff.count < best!.count {
+                best = (diff.count, preset, diff)
+            }
+        }
+        guard let (_, preset, diff) = best else {
+            return "Fx.fill(FillParams(\(Self.swiftCaseName(style))(/* ... */)))"
+        }
+        let styleExpr: String
+        if diff.isEmpty {
+            styleExpr = preset.swiftCode
+        } else {
+            styleExpr = "{ var p = \(preset.swiftCode); \(diff.joined(separator: "; ")); return p }()"
+        }
+        var expr = "FillParams(\(Self.swiftCaseName(style))(\(styleExpr)))"
+        if border != 0.0 {
+            expr += ".border(\(Self.swiftFloat(border)))"
+        }
+        if intensity != 1.0 {
+            expr += ".intensity(\(Self.swiftFloat(intensity)))"
+        }
+        return "Fx.fill(\(expr))"
+    }
+
+    private static func swiftFloat(_ v: Float) -> String {
+        let x: Float = v.isFinite ? v : 0.0
+        let s = String(x)
+        return (s.contains(".") || s.contains("e") || s.contains("E")) ? s : "\(s).0"
+    }
+
+    private static func swiftFieldName(_ id: String) -> String {
+        switch id {
+        case "tint_amount": return "tintAmount"
+        case "edge_color": return "edgeColor"
+        case "ramp_angle": return "rampAngle"
+        default: return id
+        }
+    }
+
+    private static func swiftCaseName(_ style: FillStyle) -> String {
+        switch style {
+        case .liquidMetal: return ".liquidMetal"
+        case .meshGradient: return ".meshGradient"
+        case .dither: return ".dither"
+        case .grainGradient: return ".grainGradient"
+        case .flutedGlass: return ".flutedGlass"
+        case .metaballs: return ".metaballs"
+        case .swirl: return ".swirl"
+        case .voronoi: return ".voronoi"
+        case .waves: return ".waves"
+        case .halftone: return ".halftone"
+        case .plastic: return ".plastic"
+        }
+    }
+
+    private static func swiftLiteral(_ value: FxValue, param: FxParam) -> String {
+        switch value {
+        case .number(let x):
+            return swiftFloat(x)
+        case .count(let n):
+            return String(n)
+        case .toggle(let b):
+            return b ? "true" : "false"
+        case .choice(let idx):
+            if case .choice(let choices) = param.kind, idx >= 0, idx < choices.count {
+                return choices[idx].swiftLiteral
+            }
+            return "0"
+        case .color(let c):
+            return String(format: "rgb(0x%06x)", c.hex())
+        case .colors(let stops):
+            let hexes = stops.colors.map { String(format: "0x%06x", $0.hex()) }.joined(separator: ", ")
+            return "Stops.hex([\(hexes)])"
+        case .point(let p):
+            return "SIMD2<Float>(\(swiftFloat(p.x)), \(swiftFloat(p.y)))"
+        case .points(let pts):
+            let items = pts.map { "SIMD2<Float>(\(swiftFloat($0.x)), \(swiftFloat($0.y)))" }.joined(separator: ", ")
+            return "[\(items)]"
+        }
+    }
 }
 
 // MARK: - Catalog table
