@@ -415,6 +415,23 @@ let package = Package(
             dependencies: ["RuneParityCLI", "RuneRef", "Rune"],
             path: "Tests/RuneParityTests"
         ),
+        .testTarget(
+            name: "RuneExamplesTests",
+            dependencies: [
+                "Rune",
+                "RuneKit",
+                "RuneKnobs",
+                "RuneMotion",
+                "RuneRef",
+                "RuneHello",
+                "RuneTodo",
+                "RuneFrostedBar",
+                "RuneMatched",
+                "RuneKnobsDemo",
+                "RuneLab",
+            ],
+            path: "Tests/RuneExamplesTests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

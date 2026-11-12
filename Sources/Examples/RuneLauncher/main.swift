@@ -107,7 +107,7 @@ func launcherView(_ s: LauncherState, _ cx: inout Cx<LauncherState>) -> El<Launc
         .child(text(current.title).size(18).semibold().color(t.text))
         .child(text(current.body).size(13).color(t.textSecondary))
         .child(el().grow(1))
-        .child(text("Press ⌘Space or / to search notes").size(11).color(t.textSecondary.alpha(0.7)))
+        .child(text("⌘Space to search").size(11).color(t.textSecondary.alpha(0.7)))
 
     var root: El<LauncherState> = col()
         .key("root")
@@ -205,7 +205,7 @@ let spec = AppSpec<LauncherState>(
     dark: true,
     state: LauncherState(),
     onKey: { state, event, _ in
-        if event.key == .command(" ") || (!state.launcherOpen && event.key == .text("/")) {
+        if event.key == .command(" ") || (event.key == .space && event.mods.cmd) || (!state.launcherOpen && event.key == .text("/")) {
             state.launcherOpen.toggle()
             state.picked = 0
             return true

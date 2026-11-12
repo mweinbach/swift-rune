@@ -145,31 +145,38 @@ func matchedView(_ s: MatchedState, _ cx: inout Cx<MatchedState>) -> El<MatchedS
         .child(stage)
 }
 
-let spec = AppSpec<MatchedState>(
-    title: "Matched",
-    size: Vec2(720, 480),
-    state: MatchedState(),
-    onKey: { state, event, _ in
-        switch event.key {
-        case let .text(t) where !state.zoomed:
-            if let n = Int(t), (1...4).contains(n) {
-                state.picked = n - 1
-                return true
-            }
-            return false
-        case .enter:
-            state.zoomed = true
-            return true
-        case .escape:
-            state.zoomed = false
-            return true
-        default:
-            return false
-        }
-    },
-    view: matchedView
-)
-.scene("grid") { _ in }
-.scene("one") { $0.zoomed = true }
+@main
+enum RuneMatchedApp {
+    static func makeSpec() -> AppSpec<MatchedState> {
+        AppSpec<MatchedState>(
+            title: "Matched",
+            size: Vec2(720, 480),
+            state: MatchedState(),
+            onKey: { state, event, _ in
+                switch event.key {
+                case let .text(t) where !state.zoomed:
+                    if let n = Int(t), (1...4).contains(n) {
+                        state.picked = n - 1
+                        return true
+                    }
+                    return false
+                case .enter:
+                    state.zoomed = true
+                    return true
+                case .escape:
+                    state.zoomed = false
+                    return true
+                default:
+                    return false
+                }
+            },
+            view: matchedView
+        )
+        .scene("grid") { _ in }
+        .scene("one") { $0.zoomed = true }
+    }
 
-try RuneApp.run(spec)
+    static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}

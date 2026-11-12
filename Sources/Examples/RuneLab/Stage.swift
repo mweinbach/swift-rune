@@ -92,7 +92,7 @@ func onStageDrag(_ s: inout LabState, _ d: Drag, _ tx: inout Tx) {
     if d.delta == .zero && s.grab == nil {
         switch s.scene {
         case .lamp:
-            if near(s.lamp, p, radius: 36) {
+            if near(s.lamp, p, radius: 30) {
                 s.grab = .lamp(Vec2(p.x - s.lamp.x, p.y - s.lamp.y))
             }
         case .keys:
@@ -236,12 +236,11 @@ private func circleEl(_ cx: Float, _ cy: Float, _ r: Float) -> El<LabState> {
     bx(cx - r, cy - r, r * 2, r * 2).rounded(r)
 }
 
-private func hx(_ hex: UInt32) -> Color {
-    Color(
-        r: Float((hex >> 16) & 0xFF) / 255.0,
-        g: Float((hex >> 8) & 0xFF) / 255.0,
-        b: Float(hex & 0xFF) / 255.0,
-        a: 1.0
+func hx(_ hex: UInt32) -> Color {
+    Color.rgba8(
+        UInt8((hex >> 16) & 0xFF),
+        UInt8((hex >> 8) & 0xFF),
+        UInt8(hex & 0xFF)
     )
 }
 

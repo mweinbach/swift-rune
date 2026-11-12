@@ -146,7 +146,7 @@ private func sidebarView(_ s: LabState, p: LabPalette, hair: Float) -> El<LabSta
                         .key("brand")
                         .h(52)
                         .wFull()
-                        .pl(textX)
+                        .pl(86)
                         .itemsCenter()
                         .child(text("Rune Lab").key("title").font(TextStyle(size: 13.0, weight: 600.0)).color(p.text))
                 )
@@ -202,7 +202,7 @@ private func panelView(_ s: LabState, p: LabPalette, hair: Float) -> El<LabState
                 .hFull()
                 .bg(p.base)
                 .px(20)
-                .pt(32)
+                .pt(48)
                 .pb(20)
                 .child(text(sc.title).key("scene-title").font(titleFont).color(p.text))
                 .child(
@@ -392,11 +392,10 @@ private func swatchRow(
     ]
 
     for (j, hex) in palette.enumerated() {
-        let c = Color(
-            r: Float((hex >> 16) & 0xFF) / 255.0,
-            g: Float((hex >> 8) & 0xFF) / 255.0,
-            b: Float(hex & 0xFF) / 255.0,
-            a: 1.0
+        let c = Color.rgba8(
+            UInt8((hex >> 16) & 0xFF),
+            UInt8((hex >> 8) & 0xFF),
+            UInt8(hex & 0xFF)
         )
         children.append(
             el()

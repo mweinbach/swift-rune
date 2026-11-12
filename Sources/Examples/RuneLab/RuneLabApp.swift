@@ -83,45 +83,52 @@ private func onLabKey(_ s: inout LabState, _ e: KeyEvent, _ tx: inout Tx) -> Boo
     }
 }
 
-private var spec = AppSpec(
-    title: "Rune Lab",
-    size: Vec2(1320, 800),
-    minSize: Vec2(1080, 640),
-    state: LabState(),
-    onKey: onLabKey,
-    view: labView
-)
-.scene("lamp") { $0.scene = .lamp }
-.scene("flashlight") { $0.scene = .flashlight }
-.scene("gi") { $0.scene = .gi }
-.scene("keys") { $0.scene = .keys }
-.scene("godrays") { $0.scene = .godRays }
-.scene("glow") { $0.scene = .glow }
-.scene("pulses") { $0.scene = .pulses }
-.scene("electric") { $0.scene = .electric }
-.scene("fire") { $0.scene = .fire }
-.scene("motion") { $0.scene = .motion }
-.scene("lens") { $0.scene = .lens }
-.scene("lens-frost") {
-    $0.scene = .lens
-    if let i = knobSpecs(for: .lens).firstIndex(where: { $0.id == "frost" }) {
-        $0.vals[LabScene.lens.idx][i] = 1.0
+@main
+enum RuneLabApp {
+    static func makeSpec() -> AppSpec<LabState> {
+        AppSpec(
+            title: "Rune Lab",
+            size: Vec2(1320, 800),
+            minSize: Vec2(1080, 640),
+            state: LabState(),
+            onKey: onLabKey,
+            view: labView
+        )
+        .scene("lamp") { $0.scene = .lamp }
+        .scene("flashlight") { $0.scene = .flashlight }
+        .scene("gi") { $0.scene = .gi }
+        .scene("keys") { $0.scene = .keys }
+        .scene("godrays") { $0.scene = .godRays }
+        .scene("glow") { $0.scene = .glow }
+        .scene("pulses") { $0.scene = .pulses }
+        .scene("electric") { $0.scene = .electric }
+        .scene("fire") { $0.scene = .fire }
+        .scene("motion") { $0.scene = .motion }
+        .scene("lens") { $0.scene = .lens }
+        .scene("lens-frost") {
+            $0.scene = .lens
+            if let i = knobSpecs(for: .lens).firstIndex(where: { $0.id == "frost" }) {
+                $0.vals[LabScene.lens.idx][i] = 1.0
+            }
+        }
+        .scene("extras") { $0.scene = .extras }
+        .scene("motion-thrown") {
+            $0.scene = .motion
+            $0.card.set(Vec2(-60, 300))
+            $0.card.release(
+                velocity: Vec2(2400, -900),
+                target: Vec2(470, 160),
+                curve: .spring(Spring(duration: 0.6, bounce: 0)),
+                at: 0.0
+            )
+        }
+        .scene("fire-reduced") {
+            $0.scene = .fire
+            $0.reduced = true
+        }
+    }
+
+    static func main() throws {
+        try RuneApp.run(makeSpec())
     }
 }
-.scene("extras") { $0.scene = .extras }
-.scene("motion-thrown") {
-    $0.scene = .motion
-    $0.card.set(Vec2(-60, 300))
-    $0.card.release(
-        velocity: Vec2(2400, -900),
-        target: Vec2(470, 160),
-        curve: .spring(Spring(duration: 0.6, bounce: 0)),
-        at: 0.0
-    )
-}
-.scene("fire-reduced") {
-    $0.scene = .fire
-    $0.reduced = true
-}
-
-try RuneApp.run(spec)
