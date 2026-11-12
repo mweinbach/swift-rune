@@ -8,7 +8,8 @@ SYNC_FILE="$REPO_ROOT/.upstream-sync.json"
 UPSTREAM_DIR="${UPSTREAM_DIR:-/tmp/anomalyco-rune}"
 UPSTREAM_EXPLICIT=0
 DO_FETCH=1
-BRANCH="main"
+BRANCH=""
+BRANCH_EXPLICIT=0
 
 usage() {
   cat <<EOF
@@ -17,7 +18,7 @@ Usage: $(basename "$0") [options]
 Options:
   --upstream <dir>   Use an existing local clone (skips network clone/fetch by default)
   --fetch            Force 'git fetch origin' even when --upstream is provided
-  --branch <name>    Upstream branch to compare against (default: main)
+  --branch <name>    Upstream branch to compare against (default: remote HEAD / dev)
   -h, --help         Show this help
 EOF
 }
@@ -36,6 +37,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --branch)
       BRANCH="$2"
+      BRANCH_EXPLICIT=1
       shift 2
       ;;
     -h|--help)
@@ -64,6 +66,18 @@ print(d.get("upstreamRepo", "https://github.com/anomalyco/rune"), d.get("syncedC
 ' "$SYNC_FILE"
   )
   SYNCED_SUBJECT="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("syncedCommitSubject", ""))' "$SYNC_FILE")"
+fi
+
+if [[ "$BRANCH_EXPLICIT" -eq 0 ]]; then
+  if [[ -d "$UPSTREAM_DIR/.git" ]]; then
+    BRANCH="$(git -C "$UPSTREAM_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)"
+  fi
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="$(git ls-remote --symref "$UPSTREAM_REPO" HEAD 2>/dev/null | awk '/^ref:/ {sub("refs/heads/", "", $2); print $2; exit}' || true)"
+  fi
+  if [[ -z "$BRANCH" ]]; then
+    BRANCH="dev"
+  fi
 fi
 
 if [[ ! -d "$UPSTREAM_DIR/.git" ]]; then
