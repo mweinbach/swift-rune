@@ -75,8 +75,8 @@ struct RuneI18nTests {
         var i18n = I18n(locale: "en", fallback: "en", catalogs: [enCat])
 
         #expect(i18n.t("app.greeting", args: ["user": "Ada"]) == "Hello, Ada!")
-        // Missing template arg preserves placeholder safely without crashing
-        #expect(i18n.t("app.greeting") == "Hello, {{user}}!")
+        // Upstream template.rs:36-40 leaves missing args empty.
+        #expect(i18n.t("app.greeting") == "Hello, !")
         #expect(i18n.plural("app.tasks", count: 1) == "1 task remaining")
         #expect(i18n.plural("app.tasks", count: 5) == "5 tasks remaining")
 
@@ -266,5 +266,175 @@ struct RuneI18nTests {
                 strict: true
             )
         }
+    }
+
+    @Test("Parity #817: RTL plural isolation and category fallback order before other")
+    func rtlPluralIsolationAndFallbackOrder() throws {
+        // Dictionary-mode plural fallback order: ar has only .other, en has .one & .other
+        let enCat = Catalog(
+            locale: LocaleInfo("en"),
+            entries: [
+                "files": .plural([
+                    .one: Template("{{count}} file"),
+                    .other: Template("{{count}} files"),
+                ]),
+            ]
+        )
+        let arCat = Catalog(
+            locale: LocaleInfo("ar"),
+            entries: [
+                "files": .plural([
+                    .other: Template("{{count}} ملفات"),
+                ]),
+            ]
+        )
+        let i18n = I18n(locale: "ar", fallback: "en", catalogs: [enCat, arCat])
+        // For count == 1 (.one), ar lacks .one -> must check source[.one] BEFORE ar[.other]
+        #expect(i18n.plural("files", count: 1) == "1 file")
+        // For count == 2 (.two), neither has .two -> falls back to ar[.other]
+        #expect(i18n.plural("files", count: 2) == "2 ملفات")
+
+        // Codegen-mode RTL plural isolation (#817)
+        let manifest = I18nManifest(locales: [
+            I18nManifestLocale(id: "en", tag: "en", label: "English", rtl: false),
+            I18nManifestLocale(id: "ar", tag: "ar", label: "العربية", rtl: true),
+        ])
+        let compiled = try I18nCodegen.compile(
+            manifest: manifest,
+            messagesByLocale: [
+                "en": ["files.one": "{{count}} file", "files.other": "{{count}} files"],
+                "ar": ["files.other": "{{count}} ملفات"],
+            ]
+        )
+        #expect(compiled.swiftSource.contains("id: \"ar\", tag: \"ar\", label: \"العربية\", rtl: true"))
+        #expect(compiled.swiftSource.contains("\\u{2066}{{count}} file\\u{2069}"))
+    }
+
+    @Test("Parity #821: Runtime blob Catalog, Messages.later, and Catalog.loadJSON")
+    func runtimeBlobCatalogAndLoadJSON() throws {
+        let keys = ["files.one", "files.other", "greeting", "missing"]
+        let plurals = ["files"]
+        let pluralForms: [[UInt32]] = [[UInt32.max, 0, UInt32.max, UInt32.max, UInt32.max, 1]]
+        let (enText, enSpans) = Catalog.blob(keys: keys, message: { key in
+            switch key {
+            case "files.one": return "{{count}} file"
+            case "files.other": return "{{count}} files"
+            case "greeting": return "Hello, {{name}}!"
+            default: return nil
+            }
+        })
+        let locales = [
+            LocaleInfo(id: "en", tag: "en", label: "English", rtl: false),
+            LocaleInfo(id: "ar", tag: "ar", label: "العربية", rtl: true),
+        ]
+        let catalog = Catalog(
+            keys: keys,
+            plurals: plurals,
+            pluralForms: pluralForms,
+            locales: locales,
+            messages: [Messages(text: enText, spans: enSpans), .later()]
+        )
+        #expect(catalog.present(0))
+        #expect(!catalog.present(1))
+        #expect(!catalog.present(9))
+
+        var i18n = I18n(catalog: catalog)
+        let kGreeting = I18nKey.named(catalog.keys, "greeting")
+        let pFiles = I18nPluralKey.named(catalog.plurals, "files")
+        #expect(i18n.localeIndex == 0)
+        #expect(i18n.findLocale("ar") == 1)
+        #expect(i18n.info().label == "English")
+        #expect(i18n.text(kGreeting) == "Hello, {{name}}!")
+        let changedToAr = i18n.setLocale(1)
+        #expect(changedToAr)
+        let changedSame = i18n.setLocale(1)
+        #expect(!changedSame)
+        let changedOOB = i18n.setLocale(99)
+        #expect(!changedOOB)
+        // Unloaded locale 1 falls back to source locale 0
+        #expect(i18n.text(kGreeting) == "Hello, {{name}}!")
+
+        #expect(throws: I18nError.unknownLocale(5)) {
+            try catalog.loadJSON(locale: 5, json: "{}")
+        }
+        #expect(throws: I18nError.invalidJSON("not a JSON object")) {
+            try catalog.loadJSON(locale: 1, json: "[1, 2, 3]")
+        }
+
+        // Load ar with partial keys (greeting + files.other only, plus an unknown extra key)
+        try catalog.loadJSON(locale: 1, json: """
+        {
+          "greeting": "مرحبا {{name}}",
+          "files.other": "{{count}} ملفات",
+          "unknown.extra": "ignored"
+        }
+        """)
+        #expect(catalog.present(1))
+        #expect(i18n.format(kGreeting, args: ["name": "Ada"]) == "مرحبا Ada")
+        #expect(i18n.textIn(0, kGreeting) == "Hello, {{name}}!")
+        // #817 + #821: missing plural form files.one in RTL gets LRI..PDI isolated source string
+        #expect(i18n.pluralFormat(pFiles, count: 1) == "\u{2066}1 file\u{2069}")
+        #expect(i18n.pluralFormat(pFiles, count: 2) == "2 ملفات")
+        #expect(i18n.pluralRaw(pFiles, count: 5) == "{{count}} ملفات")
+        #expect(i18n.pluralForm(pFiles, category: .one) == "\u{2066}{{count}} file\u{2069}")
+
+        // Already-present locale is a no-op
+        try catalog.loadJSON(locale: 1, json: "{\"greeting\": \"changed\"}")
+        #expect(i18n.text(kGreeting) == "مرحبا {{name}}")
+    }
+
+    @Test("Parity P1: Template edge cases, likely-subtag negotiation, CLDR plurals, and Decimal rounding")
+    func templateNegotiationPluralsAndDecimal() {
+        // Template {{a}b}}, empty {{}}, {{ }}
+        #expect(Template("{{a}b}}").parts == [.text("{{a}b}}")])
+        #expect(Template("{{a}b}}").render(["a": "x"]) == "{{a}b}}")
+        #expect(Template("x {{}} y {{ }} z").parts == [.text("x {{}} y "), .arg(""), .text(" z")])
+        #expect(Template("x {{}} y {{ }} z").render([:]) == "x {{}} y  z")
+        #expect(Template("x {{}} y {{ }} z").render(["": "V"]) == "x {{}} y V z")
+        #expect(Template("hi {{missing}}!").render([:]) == "hi !")
+
+        // ICU-parity negotiation order and likely subtags
+        #expect(negotiate(["en-GB"], supported: ["en-US", "en-GB"]) == 0)
+        #expect(negotiate(["zh"], supported: ["en", "zh-Hans", "zh-Hant"]) == 1)
+        #expect(negotiate(["sr"], supported: ["en", "sr-Latn", "sr-Cyrl"]) == 2)
+        #expect(negotiate(["sr-ME"], supported: ["en", "sr-Latn", "sr-Cyrl"]) == 1)
+
+        // CLDR plural rules coverage
+        #expect(PluralCategory.select(count: 1, locale: LocaleInfo("tr")) == .one)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("tr")) == .other)
+        #expect(PluralCategory.select(count: 2, locale: LocaleInfo("tr")) == .other)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("pt-PT")) == .other)
+        #expect(PluralCategory.select(count: 1, locale: LocaleInfo("pt-PT")) == .one)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("pt")) == .one)
+        #expect(PluralCategory.select(count: 1, locale: LocaleInfo("lt")) == .one)
+        #expect(PluralCategory.select(count: 3, locale: LocaleInfo("lt")) == .few)
+        #expect(PluralCategory.select(count: 11, locale: LocaleInfo("lt")) == .other)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("lv")) == .zero)
+        #expect(PluralCategory.select(count: 21, locale: LocaleInfo("lv")) == .one)
+        #expect(PluralCategory.select(count: 1, locale: LocaleInfo("ro")) == .one)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("ro")) == .few)
+        #expect(PluralCategory.select(count: 20, locale: LocaleInfo("ro")) == .other)
+        #expect(PluralCategory.select(count: 101, locale: LocaleInfo("sl")) == .one)
+        #expect(PluralCategory.select(count: 102, locale: LocaleInfo("sl")) == .two)
+        #expect(PluralCategory.select(count: 104, locale: LocaleInfo("sl")) == .few)
+        #expect(PluralCategory.select(count: 105, locale: LocaleInfo("sl")) == .other)
+        #expect(PluralCategory.select(count: 2, locale: LocaleInfo("hr")) == .few)
+        #expect(PluralCategory.select(count: 5, locale: LocaleInfo("hr")) == .other)
+        #expect(PluralCategory.select(count: 2, locale: LocaleInfo("ga")) == .two)
+        #expect(PluralCategory.select(count: 7, locale: LocaleInfo("ga")) == .many)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("cy")) == .zero)
+        #expect(PluralCategory.select(count: 3, locale: LocaleInfo("cy")) == .few)
+        #expect(PluralCategory.select(count: 6, locale: LocaleInfo("cy")) == .many)
+        #expect(PluralCategory.select(count: 0, locale: LocaleInfo("mt")) == .few)
+        #expect(PluralCategory.select(count: 15, locale: LocaleInfo("mt")) == .many)
+        #expect(PluralCategory.select(count: 11, locale: LocaleInfo("is")) == .other)
+        #expect(PluralCategory.select(count: 21, locale: LocaleInfo("is")) == .one)
+        #expect(PluralCategory.select(count: 11, locale: LocaleInfo("mk")) == .other)
+        #expect(PluralCategory.select(count: 12, locale: LocaleInfo("gd")) == .two)
+
+        // Shortest round-trip float rounding (1.005 -> 1.01 half-expand)
+        let en = I18n(locale: "en-US", fallback: "en-US")
+        #expect(en.decimal(1.005, maxFraction: 2) == "1.01")
+        #expect(en.decimal(-1.005, maxFraction: 2) == "-1.01")
     }
 }

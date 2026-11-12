@@ -330,7 +330,7 @@ public enum I18nCodegen {
         for locale in locales {
             let map = messagesByLocale[locale.id] ?? [:]
             let isolateRTL = locale.rtl && !sourceLocale.rtl
-            lines.append("            Catalog(locale: LocaleInfo(\(swiftStringLiteral(locale.tag))), entries: [")
+            lines.append("            Catalog(locale: LocaleInfo(id: \(swiftStringLiteral(locale.id)), tag: \(swiftStringLiteral(locale.tag)), label: \(swiftStringLiteral(locale.label)), rtl: \(locale.rtl)), entries: [")
 
             // Emit single keys (excluding plural category keys belonging to `plurals`)
             for key in keys {
@@ -348,12 +348,15 @@ public enum I18nCodegen {
                 }
             }
 
-            // Emit plural entries
+            // Emit plural entries (including #817 LRI..PDI isolation for missing RTL category forms)
             for base in plurals {
                 var formPairs: [(PluralCategory, String)] = []
                 for cat in PluralCategory.allCases {
-                    if let msg = map["\(base).\(cat.rawValue)"] {
+                    let fullKey = "\(base).\(cat.rawValue)"
+                    if let msg = map[fullKey] {
                         formPairs.append((cat, msg))
+                    } else if isolateRTL, let srcMsg = sourceMap[fullKey] {
+                        formPairs.append((cat, "\u{2066}\(srcMsg)\u{2069}"))
                     }
                 }
                 if !formPairs.isEmpty {
