@@ -897,7 +897,8 @@ public final class Runtime<State> {
                 elementTextValue = editLens.get(state).text
             }
 
-            let useLayer = (blurPt >= 0.5) || el.isolatedLayer
+            let totalShapePieces = el.shapes.reduce(0) { $0 + $1.pieceCount }
+            let useLayer = (blurPt >= 0.5) || el.isolatedLayer || (alpha > 0.001 && alpha < 1.0 && totalShapePieces > 1)
             let devClip = SIMD4<Float>(
                 visClip.x * pxScale,
                 visClip.y * pxScale,
@@ -1065,30 +1066,49 @@ public final class Runtime<State> {
 
                 // 7. Vector Canvas Shapes (triangles & segments)
                 for shape in el.shapes {
-                    switch shape.style {
-                    case .fill(let col):
-                        let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        for tri in shape.path.triangulate() {
-                            let v0 = SIMD2<Float>((rect.x + tri.v0.x * scaleVec.x) * pxScale, (rect.y + tri.v0.y * scaleVec.y) * pxScale)
-                            let v1 = SIMD2<Float>((rect.x + tri.v1.x * scaleVec.x) * pxScale, (rect.y + tri.v1.y * scaleVec.y) * pxScale)
-                            let v2 = SIMD2<Float>((rect.x + tri.v2.x * scaleVec.x) * pxScale, (rect.y + tri.v2.y * scaleVec.y) * pxScale)
-                            primitives.append(.triangle(v0: v0, v1: v1, v2: v2, aaMask: tri.aaMask, color: c4, clip: devClip))
-                        }
-                    case let .stroke(col, width, roundCap):
-                        let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        let t0 = liveTrim?.x ?? shape.trimStart
-                        let t1 = liveTrim?.y ?? shape.trimEnd
-                        for (a, b) in shape.path.strokeSegments(trimStart: t0, trimEnd: t1) {
-                            let pa = SIMD2<Float>((rect.x + a.x * scaleVec.x) * pxScale, (rect.y + a.y * scaleVec.y) * pxScale)
-                            let pb = SIMD2<Float>((rect.x + b.x * scaleVec.x) * pxScale, (rect.y + b.y * scaleVec.y) * pxScale)
-                            primitives.append(.segment(
-                                from: pa,
-                                to: pb,
-                                width: width * scaleVec.x * pxScale,
-                                color: c4,
-                                roundCap: roundCap,
-                                clip: devClip
-                            ))
+                    let effectiveShape = liveTrim.map { shape.trimmed(start: $0.x, end: $0.y) } ?? shape
+                    let origin = SIMD2<Float>(rect.x * pxScale, rect.y * pxScale)
+                    let k: SIMD2<Float>
+                    if let vb = effectiveShape.viewBox, vb.x > 0, vb.y > 0 {
+                        k = SIMD2<Float>((rect.width * pxScale) / vb.x, (rect.height * pxScale) / vb.y)
+                    } else {
+                        k = SIMD2<Float>(scaleVec.x * pxScale, scaleVec.y * pxScale)
+                    }
+                    let kPx = scaleVec.x * pxScale
+                    let transformPoint = { (pt: Vec2) -> SIMD2<Float> in
+                        SIMD2<Float>(origin.x + pt.x * k.x, origin.y + pt.y * k.y)
+                    }
+
+                    for op in effectiveShape.ops {
+                        switch op {
+                        case let .fill(points, col):
+                            let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            if c4.w <= 0.0005 { continue }
+                            for (indices, aaMask) in Shape.triangulate(points) {
+                                let v0 = transformPoint(points[indices[0]])
+                                let v1 = transformPoint(points[indices[1]])
+                                let v2 = transformPoint(points[indices[2]])
+                                primitives.append(.triangle(v0: v0, v1: v1, v2: v2, aaMask: aaMask, color: c4, clip: devClip))
+                            }
+                        case let .stroke(points, closed, width, cap, col):
+                            let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            if c4.w <= 0.0005 { continue }
+                            let strokeW = width * kPx
+                            let roundCap = (cap == .round)
+                            let n = points.count
+                            let count = closed ? n : (n - 1)
+                            for i in 0..<count {
+                                let pa = transformPoint(points[i])
+                                let pb = transformPoint(points[(i + 1) % n])
+                                primitives.append(.segment(
+                                    from: pa,
+                                    to: pb,
+                                    width: strokeW,
+                                    color: c4,
+                                    roundCap: roundCap,
+                                    clip: devClip
+                                ))
+                            }
                         }
                     }
                 }
