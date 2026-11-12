@@ -1,39 +1,15 @@
 import Foundation
 import RuneMotion
 
-#if canImport(AVFoundation)
-import AVFoundation
-#endif
+// MARK: - 1. Audio Recorder Backwards-Compatible Wrapper
 
-// MARK: - 1. Audio Recorder & FakeMicrophone
-
-public enum RecordFormat: String, Sendable, Equatable, Codable {
-    case aac
-    case wav
-
+extension RecordFormat {
     public var fileExtension: String {
         switch self {
         case .aac: return "m4a"
         case .wav: return "wav"
         }
     }
-}
-
-public enum RecorderState: Sendable, Equatable {
-    case idle
-    case starting
-    case recording
-    case paused
-    case stopped
-    case interrupted(String)
-    case failed(String)
-}
-
-public enum MicPermission: String, Sendable, Equatable {
-    case granted
-    case denied
-    case undetermined
-    case restricted
 }
 
 public struct AudioLevel: Sendable, Equatable {
@@ -45,6 +21,14 @@ public struct AudioLevel: Sendable, Equatable {
         self.rms = rms
         self.peak = peak
         self.smoothed = smoothed
+    }
+
+    public init(level: Level) {
+        let rmsLin = level.rmsDB() > RecorderMeterConstants.floorDB ? powf(10.0, level.rmsDB() / 20.0) : 0.0
+        let peakLin = level.peakDB() > RecorderMeterConstants.floorDB ? powf(10.0, level.peakDB() / 20.0) : 0.0
+        self.rms = rmsLin
+        self.peak = peakLin
+        self.smoothed = level.meter()
     }
 }
 
@@ -62,140 +46,85 @@ public struct RecordingResult: Sendable, Equatable {
     }
 }
 
-/// Deterministic synthetic microphone input for headless testing (`rune::recorder::FakeMicrophone`).
-public struct FakeMicrophone: Sendable, Equatable {
-    public var sampleRate: Int
-    public var frequencyHz: Double
-    public var amplitude: Float
-
-    public init(sampleRate: Int = 44_100, frequencyHz: Double = 440.0, amplitude: Float = 0.25) {
-        self.sampleRate = max(8_000, sampleRate)
-        self.frequencyHz = frequencyHz
-        self.amplitude = amplitude.clamped(to: 0...1)
-    }
-
-    public func generatePCM16(durationSeconds: Double) -> [Int16] {
-        let count = max(0, Int(durationSeconds * Double(sampleRate)))
-        var samples = [Int16](repeating: 0, count: count)
-        for i in 0..<count {
-            let t = Double(i) / Double(sampleRate)
-            let v = sin(2.0 * .pi * frequencyHz * t) * Double(amplitude)
-            samples[i] = Int16(clamping: Int(v * 32767.0))
-        }
-        return samples
-    }
-
-    public func encodeWAV(durationSeconds: Double) -> Data {
-        let samples = generatePCM16(durationSeconds: durationSeconds)
-        let dataBytes = UInt32(samples.count * 2)
-        var wav = Data()
-        wav.append(contentsOf: "RIFF".utf8)
-        var chunkSize = UInt32(36 + dataBytes).littleEndian
-        wav.append(Data(bytes: &chunkSize, count: 4))
-        wav.append(contentsOf: "WAVEfmt ".utf8)
-        var subchunk1Size = UInt32(16).littleEndian
-        var audioFormat = UInt16(1).littleEndian
-        var numChannels = UInt16(1).littleEndian
-        var sr = UInt32(sampleRate).littleEndian
-        var byteRate = UInt32(sampleRate * 2).littleEndian
-        var blockAlign = UInt16(2).littleEndian
-        var bitsPerSample = UInt16(16).littleEndian
-        wav.append(Data(bytes: &subchunk1Size, count: 4))
-        wav.append(Data(bytes: &audioFormat, count: 2))
-        wav.append(Data(bytes: &numChannels, count: 2))
-        wav.append(Data(bytes: &sr, count: 4))
-        wav.append(Data(bytes: &byteRate, count: 4))
-        wav.append(Data(bytes: &blockAlign, count: 2))
-        wav.append(Data(bytes: &bitsPerSample, count: 2))
-        wav.append(contentsOf: "data".utf8)
-        var subchunk2Size = dataBytes.littleEndian
-        wav.append(Data(bytes: &subchunk2Size, count: 4))
-        for s in samples {
-            var le = s.littleEndian
-            wav.append(Data(bytes: &le, count: 2))
-        }
-        return wav
-    }
-}
-
+/// Convenience wrapper around `Recorder` preserving legacy `AudioRecorder` callers.
 public final class AudioRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var _state: RecorderState = .idle
-    private var _level = AudioLevel()
-    private var _elapsedSeconds: Double = 0
-    private var _outputURL: URL?
+    private var recorder: Recorder?
     private var _format: RecordFormat = .wav
+    private var _headlessClock: Double = 0.0
     private var fakeMic: FakeMicrophone?
 
-    public init(fakeMicrophone: FakeMicrophone? = FakeMicrophone()) {
+    public init(fakeMicrophone: FakeMicrophone? = nil) {
         self.fakeMic = fakeMicrophone
     }
 
-    public var state: RecorderState { lock.withLock { _state } }
-    public var level: AudioLevel { lock.withLock { _level } }
-    public var elapsedSeconds: Double { lock.withLock { _elapsedSeconds } }
+    public var state: RecorderState {
+        lock.withLock { recorder }?.state() ?? .idle
+    }
+
+    public var level: AudioLevel {
+        guard let rec = lock.withLock({ recorder }) else { return AudioLevel() }
+        return AudioLevel(level: rec.level())
+    }
+
+    public var elapsedSeconds: Double {
+        lock.withLock { recorder }?.elapsed() ?? 0.0
+    }
 
     public func start(outputURL: URL, format: RecordFormat = .wav) {
-        lock.withLock {
-            _outputURL = outputURL
-            _format = format
-            _elapsedSeconds = 0
-            _level = AudioLevel()
-            _state = .recording
+        try? FileManager.default.createDirectory(at: outputURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var rec = Recorder.toFile(outputURL).format(format)
+        if let mic = fakeMic {
+            rec = rec.fake(mic)
         }
+        lock.withLock {
+            _format = format
+            _headlessClock = 0.0
+            recorder = rec
+        }
+        if fakeMic != nil || !MediaPlaybackGate.isEnabled {
+            HeadlessClock.set(0.0)
+            Recorder.headlessReset()
+        }
+        rec.start()
     }
 
     public func advanceHeadless(deltaSeconds: Double) {
-        lock.withLock {
-            guard _state == .recording, deltaSeconds > 0 else { return }
-            _elapsedSeconds += deltaSeconds
-            let amp = fakeMic?.amplitude ?? 0.2
-            let rms = amp * 0.7071
-            let smoothed = _level.smoothed * 0.7 + rms * 0.3
-            _level = AudioLevel(rms: rms, peak: amp, smoothed: smoothed)
+        guard deltaSeconds > 0 else { return }
+        let rec = lock.withLock { () -> Recorder? in
+            _headlessClock += deltaSeconds
+            return recorder
         }
+        HeadlessClock.set(lock.withLock { _headlessClock })
+        Recorder.headlessFrame(clock: lock.withLock { _headlessClock })
+        _ = rec?.level()
     }
 
     public func pause() {
-        lock.withLock {
-            if _state == .recording { _state = .paused }
-        }
+        lock.withLock { recorder }?.pause()
     }
 
     public func resume() {
-        lock.withLock {
-            if _state == .paused { _state = .recording }
-        }
+        lock.withLock { recorder }?.resume()
     }
 
     public func stop() throws -> RecordingResult {
-        let (url, fmt, dur, mic) = lock.withLock { () -> (URL?, RecordFormat, Double, FakeMicrophone?) in
-            let u = _outputURL
-            let f = _format
-            let d = _elapsedSeconds
-            _state = .stopped
-            return (u, f, d, fakeMic)
+        guard let rec = lock.withLock({ recorder }) else {
+            throw NSError(domain: "RuneRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "not recording"])
         }
-        guard let url else {
-            throw NSError(domain: "RuneRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "No active recording URL"])
+        let fmt = lock.withLock { _format }
+        switch rec.stop() {
+        case .success(let recording):
+            let attrs = try? FileManager.default.attributesOfItem(atPath: recording.url.path)
+            let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+            return RecordingResult(url: recording.url, durationSeconds: recording.duration, format: fmt, sizeBytes: size)
+        case .failure(let msg):
+            throw NSError(domain: "RuneRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: msg.message])
         }
-        let data = (mic ?? FakeMicrophone()).encodeWAV(durationSeconds: max(0.05, dur))
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
-        return RecordingResult(url: url, durationSeconds: dur, format: fmt, sizeBytes: UInt64(data.count))
     }
 
     public func cancel() {
-        let url = lock.withLock { () -> URL? in
-            _state = .idle
-            _elapsedSeconds = 0
-            let u = _outputURL
-            _outputURL = nil
-            return u
-        }
-        if let url {
-            try? FileManager.default.removeItem(at: url)
-        }
+        lock.withLock { recorder }?.cancel()
     }
 }
 
