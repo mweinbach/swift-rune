@@ -266,6 +266,10 @@ public final class Runtime<State> {
         self.scene = Scene(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
+        if !MediaPlaybackGate.isEnabled {
+            Recorder.headlessReset()
+            HeadlessClock.set(0.0)
+        }
     }
 
     public func elements() -> [ElementInfo] {
@@ -295,6 +299,10 @@ public final class Runtime<State> {
     @discardableResult
     public func frame(at now: Double) -> RefScene {
         currentTime = now
+        if !MediaPlaybackGate.isEnabled {
+            HeadlessClock.set(now)
+            Recorder.headlessFrame(clock: now)
+        }
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
 
