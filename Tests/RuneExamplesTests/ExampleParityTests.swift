@@ -11,7 +11,8 @@ import Testing
 @testable import RuneSettings
 @testable import RuneTodo
 
-@Suite("Example Parity Tests (Phase 1)")
+@Suite("Example Parity Tests (Phase 1)", .serialized)
+@MainActor
 struct ExampleParityTests {
     private func center(of info: ElementInfo) -> Vec2 {
         Vec2(info.rect[0] + info.rect[2] * 0.5, info.rect[1] + info.rect[3] * 0.5)
