@@ -24,6 +24,55 @@ public struct StorageStats: Sendable, Equatable {
     public var liveNodes: Int
     public var slotCapacity: Int
     public var sparseCapacity: Int
+    public var bytesPerSlot: Int
+    public var inlineBufferBytes: Int
+    public var childHeapBytes: Int
+    public var coldStyleBytes: Int
+    public var coldCacheBytes: Int
+    public var coldAuxBytes: Int
+    public var totalRetainedBytes: Int
+
+    public init(
+        liveNodes: Int,
+        slotCapacity: Int,
+        sparseCapacity: Int,
+        bytesPerSlot: Int = 0,
+        inlineBufferBytes: Int = 0,
+        childHeapBytes: Int = 0,
+        coldStyleBytes: Int = 0,
+        coldCacheBytes: Int = 0,
+        coldAuxBytes: Int = 0,
+        totalRetainedBytes: Int = 0
+    ) {
+        self.liveNodes = liveNodes
+        self.slotCapacity = slotCapacity
+        self.sparseCapacity = sparseCapacity
+        self.bytesPerSlot = bytesPerSlot
+        self.inlineBufferBytes = inlineBufferBytes
+        self.childHeapBytes = childHeapBytes
+        self.coldStyleBytes = coldStyleBytes
+        self.coldCacheBytes = coldCacheBytes
+        self.coldAuxBytes = coldAuxBytes
+        self.totalRetainedBytes = totalRetainedBytes
+    }
+}
+
+/// Iterator over a slot's child `NodeId`s (matching `rune_taffy::SlotChildIter`).
+public struct SlotChildIter: Sequence, IteratorProtocol, Sendable {
+    private let slice: ArraySlice<UInt32>
+    private var idx: Int
+
+    internal init(_ slice: ArraySlice<UInt32>) {
+        self.slice = slice
+        self.idx = slice.startIndex
+    }
+
+    public mutating func next() -> NodeId? {
+        guard idx < slice.endIndex else { return nil }
+        let raw = slice[idx]
+        idx += 1
+        return NodeId(UInt64(raw))
+    }
 }
 
 private let unmountedIdx: UInt32 = UInt32.max
@@ -114,6 +163,27 @@ public struct LayoutStore: Sendable {
             currChildren.append(contentsOf: prevChildren[oldStart..<(oldStart + len)])
         }
         slots[idx].childStart = newStart
+    }
+
+    /// Rebases a sequence of `(oldKey, newKey, slot, nodeIndex)` entries when a memoized subtree
+    /// moves to a new parent path, preserving each slot's warm cache and children.
+    public mutating func rekeyAndReuseBatch<S: Sequence>(_ items: S) where S.Element == (UInt64, UInt64, SlotId, UInt32) {
+        let batch = Array(items)
+        for (oldKey, _, slot, _) in batch {
+            let removed = byKey.removeValue(forKey: oldKey)
+            assert(removed == slot.rawValue, "rekeyAndReuseBatch: oldKey \(oldKey) did not map to slot \(slot.rawValue)")
+        }
+        for (_, newKey, slot, nodeIndex) in batch {
+            if let stale = byKey.removeValue(forKey: newKey) {
+                slots[Int(stale)] = RetainedSlot()
+                free.append(stale)
+                if prevLive > 0 {
+                    prevLive -= 1
+                }
+            }
+            byKey[newKey] = slot.rawValue
+            reuseSlot(slot, nodeIndex: nodeIndex)
+        }
     }
 
     public mutating func syncNode(
@@ -219,18 +289,89 @@ public struct LayoutStore: Sendable {
         }
     }
 
-    public mutating func endCommit(root: inout SlotId, remap: (UInt32, SlotId) -> Void) {
-        if visitedExisting != prevLive {
-            finishFlatten()
-        }
+    /// Shrinks storage when live occupancy drops below 25% of capacity (D-T1).
+    public mutating func compactIfSparse(_ remap: (UInt32, SlotId) -> Void) {
+        var dummy = SlotId(unmountedIdx)
+        compactWithRoot(root: &dummy, remap: remap)
+    }
+
+    private mutating func compactWithRoot(root: inout SlotId, remap: (UInt32, SlotId) -> Void) {
         for idx in mutatedSlots {
             if Int(idx) < slots.count {
                 slots[Int(idx)].mutated = false
             }
         }
         mutatedSlots.removeAll(keepingCapacity: true)
-        _ = root
-        _ = remap
+
+        let live = byKey.count
+        if slots.capacity <= 64 || live * 4 > slots.capacity {
+            return
+        }
+
+        let cap = Swift.max(live * 2, 32)
+        var remapTable = Array(repeating: unmountedIdx, count: slots.count)
+        var newSlots: [RetainedSlot] = []
+        newSlots.reserveCapacity(cap)
+        var newNodeIdx: [UInt32] = []
+        newNodeIdx.reserveCapacity(cap)
+        var newByKey: [UInt64: UInt32] = [:]
+        newByKey.reserveCapacity(cap)
+
+        for (key, oldRaw) in byKey {
+            let oldS = Int(oldRaw)
+            let newS = UInt32(newSlots.count)
+            remapTable[oldS] = newS
+            var slot = slots[oldS]
+            slots[oldS] = RetainedSlot()
+            _ = slot.cache.clear()
+            let me = nodeIdx[oldS]
+            remap(me, SlotId(newS))
+            newByKey[key] = newS
+            newSlots.append(slot)
+            newNodeIdx.append(me)
+        }
+
+        let rootIdx = Int(root.rawValue)
+        if rootIdx < remapTable.count {
+            let mapped = remapTable[rootIdx]
+            if mapped != unmountedIdx {
+                root = SlotId(mapped)
+            }
+        }
+
+        for i in currChildren.indices {
+            currChildren[i] = remapTable[Int(currChildren[i])]
+        }
+
+        var shrunkCurr: [UInt32] = []
+        shrunkCurr.reserveCapacity(Swift.max(currChildren.count, cap))
+        shrunkCurr.append(contentsOf: currChildren)
+
+        var shrunkPrev: [UInt32] = []
+        shrunkPrev.reserveCapacity(cap)
+
+        slots = newSlots
+        nodeIdx = newNodeIdx
+        byKey = newByKey
+        free = []
+        currChildren = shrunkCurr
+        prevChildren = shrunkPrev
+        childScratch = []
+        childScratch.reserveCapacity(64)
+    }
+
+    public mutating func endCommit(root: inout SlotId, remap: (UInt32, SlotId) -> Void) {
+        if visitedExisting != prevLive {
+            finishFlatten()
+        }
+        compactWithRoot(root: &root, remap: remap)
+    }
+
+    public func childIds(_ parent: SlotId) -> SlotChildIter {
+        let s = slots[Int(parent.rawValue)]
+        let start = s.childStart
+        let end = start + s.childLen
+        return SlotChildIter(currChildren[start..<end])
     }
 
     public func style(_ id: SlotId) -> TaffyStyle {
@@ -249,6 +390,12 @@ public struct LayoutStore: Sendable {
         guard let s = byKey[key] else { return nil }
         let idx = nodeIdx[Int(s)]
         return idx == unmountedIdx ? nil : Int(idx)
+    }
+
+    public func measureHash(key: UInt64) -> UInt64?? {
+        guard let s = byKey[key] else { return nil }
+        let slot = slots[Int(s)]
+        return .some(slot.hasContext ? slot.measure : nil)
     }
 
     public mutating func setStyleAndMarkAncestors(
@@ -288,7 +435,7 @@ public struct LayoutStore: Sendable {
     public mutating func computeLayout(
         root: SlotId,
         availableSpace: Size<AvailableSpace>,
-        rounding: Bool = true,
+        rounding: Bool = false,
         measureLeaf: @escaping @Sendable (LayoutInput, Int?, TaffyStyle) -> LayoutOutput
     ) {
         let adapter = LayoutStoreAdapter(
@@ -316,10 +463,31 @@ public struct LayoutStore: Sendable {
     }
 
     public func storageStats() -> StorageStats {
-        StorageStats(
+        let slotCapacity = slots.capacity
+        let bytesPerSlot = MemoryLayout<RetainedSlot>.stride + MemoryLayout<UInt32>.stride
+        let inlineBufferBytes = slotCapacity * bytesPerSlot
+            + (prevChildren.capacity + currChildren.capacity + childScratch.capacity + free.capacity)
+                * MemoryLayout<UInt32>.stride
+        var coldStyleBytes = 0
+        var coldCacheBytes = 0
+        for s in byKey.values {
+            let slot = slots[Int(s)]
+            coldStyleBytes += slot.style.heapBytes()
+            coldCacheBytes += slot.cache.heapBytes()
+        }
+        let coldAuxBytes = 0
+        let total = inlineBufferBytes + coldStyleBytes + coldCacheBytes + coldAuxBytes
+        return StorageStats(
             liveNodes: byKey.count,
-            slotCapacity: slots.capacity,
-            sparseCapacity: byKey.capacity
+            slotCapacity: slotCapacity,
+            sparseCapacity: byKey.capacity,
+            bytesPerSlot: bytesPerSlot,
+            inlineBufferBytes: inlineBufferBytes,
+            childHeapBytes: 0,
+            coldStyleBytes: coldStyleBytes,
+            coldCacheBytes: coldCacheBytes,
+            coldAuxBytes: coldAuxBytes,
+            totalRetainedBytes: total
         )
     }
 }

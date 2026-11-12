@@ -101,6 +101,7 @@ internal func computeRootLayout(
         sizingMode: .inherentSize,
         axis: .both,
         knownDimensions: Size(width: knownW, height: knownH),
+        knownDimensionsAreDefinite: .true,
         parentSize: parentSize,
         availableSpace: availableSpace,
         verticalMarginsAreCollapsible: .false
@@ -257,6 +258,7 @@ internal func computeLeafLayout(
         sizingMode: input.sizingMode,
         axis: input.axis,
         knownDimensions: contentKnown,
+        knownDimensionsAreDefinite: input.knownDimensionsAreDefinite,
         parentSize: parentSize,
         availableSpace: avail,
         verticalMarginsAreCollapsible: input.verticalMarginsAreCollapsible

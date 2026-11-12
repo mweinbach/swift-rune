@@ -44,6 +44,28 @@ extension Size where T == Float? {
     public static let none = Size(width: nil, height: nil)
 }
 
+extension Size where T == Bool {
+    public static let `true` = Size(width: true, height: true)
+    public static let `false` = Size(width: false, height: false)
+}
+
+/// CSS `contain` flags (matching `taffy::Contain`).
+public struct Contain: OptionSet, Sendable, Equatable, Hashable {
+    public let rawValue: UInt8
+
+    @inlinable
+    public init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    public static let none: Contain = []
+    public static let size = Contain(rawValue: 1 << 0)
+    public static let inlineSize = Contain(rawValue: 1 << 1)
+    public static let layout = Contain(rawValue: 1 << 2)
+    public static let style = Contain(rawValue: 1 << 3)
+    public static let paint = Contain(rawValue: 1 << 4)
+}
+
 extension Size {
     @inlinable
     public func map<U>(_ transform: (T) -> U) -> Size<U> {
