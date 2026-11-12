@@ -430,6 +430,8 @@ let package = Package(
                 "RuneMatched",
                 "RuneKnobsDemo",
                 "RuneLab",
+                "RuneMotionBento",
+                "RuneSketch",
             ],
             path: "Tests/RuneExamplesTests"
         ),
