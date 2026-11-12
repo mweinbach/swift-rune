@@ -297,7 +297,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneSiteScenes",
-            dependencies: ["Rune", "RuneMotion", "RuneKit", "OpenCodeTheme", "RuneFX", "RuneLight"],
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
             path: "Sources/Examples/RuneSiteScenes"
         ),
         .executableTarget(
