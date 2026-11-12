@@ -30,6 +30,8 @@ public enum MacOSApp {
 
     @MainActor
     public static func run<State>(_ appBuilder: App<State>, parsed: ToolingArgs) throws {
+        ReadySignal.runStarts()
+        RelaunchController.waitForPrevious()
         HeadlessRunner.registerFonts(appBuilder.fontData)
 
         var initialState = appBuilder.makeState()
@@ -41,6 +43,10 @@ public enum MacOSApp {
         let vp = parsed.viewportOverride ?? appBuilder.size
         let app = NSApplication.shared
         app.setActivationPolicy(appBuilder.isAccessory ? .accessory : .regular)
+        if !appBuilder.isAccessory {
+            _ = RuneDefaultMacMenus.ensure(app)
+            RuneDefaultMacMenus.addStandardMenus(app)
+        }
 
         let respectSystemAppearance = (parsed.darkOverride == nil && appBuilder.dark == nil)
         let sysDark: Bool = {
@@ -61,6 +67,7 @@ public enum MacOSApp {
             view: appBuilder.view
         )
         runtime.windowTitle = appBuilder.title
+        runtime.urlOpener.headless = false
         runtime.srgbBlend = appBuilder.srgbBlendEnabled
         runtime.fontSmoothing = appBuilder.fontSmoothingMode
         runtime.poll = appBuilder.pollHook
@@ -170,6 +177,13 @@ public enum MacOSApp {
             keepRunning: appBuilder.keepsRunning,
             onFocusChange: { [weak hostView] focused in
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
+                if focused {
+                    RuneStandardMenuRouter.setActiveKeyDispatcher {
+                        { ev in
+                            hostView?.dispatchNativeKeyEvent(ev) ?? false
+                        }
+                    }
+                }
                 hostView?.requestRender()
             },
             onShouldClose: { [weak hostView] in
@@ -178,9 +192,19 @@ public enum MacOSApp {
             onClose: {
                 hostView.stopTimer()
                 appBuilder.sharedHandle.shared.setVisible(false)
+                if !appBuilder.keepsRunning && NSApplication.shared.windows.filter(\.isVisible).count <= 1 {
+                    let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
+                    _ = QuitLifecycle.send(.start(ending: false, after: after))
+                }
             },
             onTerminate: {
+                hostView.stopTimer()
                 runtime.dispatchQuit(at: hostView.currentElapsedTime())
+                QuitLifecycle.runQuitHooksIfOwed()
+                ReadySignal.clear()
+                if let fastHook = QuitLifecycle.activeFastExitHook() {
+                    QuitLifecycle.endFast(fastHook)
+                }
             },
             onReopen: { hasVisible in
                 runtime.dispatchReopen(hasVisibleWindows: hasVisible, at: hostView.currentElapsedTime())
@@ -190,6 +214,7 @@ public enum MacOSApp {
             }
         )
         app.delegate = delegate
+        MacOSQuitHook.install()
         window.delegate = delegate
         window.contentView = hostView
         window.center()
@@ -197,6 +222,12 @@ public enum MacOSApp {
         appBuilder.sharedHandle.shared.setWaker(waker)
         appBuilder.sharedHandle.shared.setVisible(true)
         appBuilder.onWindowHook?(windowHandle)
+
+        RuneStandardMenuRouter.setActiveKeyDispatcher { [weak hostView] in
+            { [weak hostView] ev in
+                hostView?.dispatchNativeKeyEvent(ev) ?? false
+            }
+        }
 
         waker.setCallback { [weak hostView] in
             DispatchQueue.main.async {
@@ -222,6 +253,7 @@ public enum MacOSApp {
         withExtendedLifetime(delegate) {
             app.run()
         }
+        QuitLifecycle.finishOrderlyExit()
     }
 }
 
@@ -275,6 +307,11 @@ private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
         onShouldClose()
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        _ = QuitLifecycle.send(.start(ending: false, after: .exit))
+        return .terminateNow
+    }
+
     func windowDidBecomeKey(_ notification: Notification) {
         onFocusChange(true)
     }
@@ -307,6 +344,7 @@ private final class RuneMetalHostView<State>: NSView {
     private var lastFrameTime: Double = 0.0
     private var animTimer: Timer?
     private var trackingAreaRef: NSTrackingArea?
+    private var didSignalReady = false
 
     init(
         frame: NSRect,
@@ -443,6 +481,8 @@ private final class RuneMetalHostView<State>: NSView {
             window?.miniaturize(nil)
         }
         if runtime.quitRequested {
+            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
+            _ = QuitLifecycle.send(.start(ending: false, after: after))
             NSApplication.shared.terminate(nil)
             return
         }
@@ -485,6 +525,7 @@ private final class RuneMetalHostView<State>: NSView {
             _ = surfaceMeter?.presented()
             if !didFireReady {
                 didFireReady = true
+                ReadySignal.ready()
                 if let wh = windowHandle {
                     onReady?(wh)
                 }
@@ -663,7 +704,7 @@ private final class RuneMetalHostView<State>: NSView {
         renderTick()
     }
 
-    override func keyDown(with event: NSEvent) {
+    private func makeKeyEvent(from event: NSEvent) -> KeyEvent? {
         let m = mods(for: event)
         let key: Key
         switch event.keyCode {
@@ -686,28 +727,62 @@ private final class RuneMetalHostView<State>: NSView {
             let ign = event.charactersIgnoringModifiers ?? chars
             if m.cmd, ign.count == 1, let ch = ign.lowercased().first {
                 key = .command(ch)
-                if ch == "v" {
-                    if let pasted = NSPasteboard.general.string(forType: .string) {
-                        runtime.paste(ClipboardContent(pasted), at: nowSeconds())
-                        renderTick()
-                        return
-                    }
-                }
             } else if !chars.isEmpty {
                 key = .text(chars)
             } else {
-                return
+                return nil
+            }
+        }
+        return KeyEvent(key: key, mods: m)
+    }
+
+    @discardableResult
+    func dispatchKeyEvent(_ ev: KeyEvent) -> Bool {
+        if ev.mods.cmd, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
+            if let pasted = NSPasteboard.general.string(forType: .string) {
+                runtime.clipboard = ClipboardContent(pasted)
             }
         }
         let prevClip = runtime.clipboard
         let prevRich = runtime.richClipboard
-        runtime.keyDown(KeyEvent(key: key, mods: m), at: nowSeconds())
+        let handled = runtime.keyDown(ev, at: nowSeconds())
         if runtime.richClipboard != prevRich {
             Clipboard.shared.writeRich(runtime.richClipboard)
         } else if runtime.clipboard != prevClip, !runtime.clipboard.text.isEmpty {
             Clipboard.shared.writeRich(RichClipboardPayload(content: runtime.clipboard))
         }
         renderTick()
+        return handled
+    }
+
+    @discardableResult
+    func dispatchNativeKeyEvent(_ event: NSEvent) -> Bool {
+        guard let kev = makeKeyEvent(from: event) else { return false }
+        return dispatchKeyEvent(kev)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        _ = dispatchNativeKeyEvent(event)
+    }
+
+    // MARK: - Standard Menu Bar Responder Selectors (native_menu/standard_macos.rs)
+
+    @objc func undo(_ sender: Any?) { routeStandardAction("undo:") }
+    @objc func redo(_ sender: Any?) { routeStandardAction("redo:") }
+    @objc func cut(_ sender: Any?) { routeStandardAction("cut:") }
+    @objc func copy(_ sender: Any?) { routeStandardAction("copy:") }
+    @objc func paste(_ sender: Any?) { routeStandardAction("paste:") }
+    override func selectAll(_ sender: Any?) { routeStandardAction("selectAll:") }
+    @objc func performMiniaturize(_ sender: Any?) { routeStandardAction("performMiniaturize:") }
+    @objc func performClose(_ sender: Any?) { routeStandardAction("performClose:") }
+
+    private func routeStandardAction(_ selector: String) {
+        RuneStandardMenuRouter.performStandardAction(
+            selector: selector,
+            window: window,
+            dispatchKeyEvent: { [weak self] ev in self?.dispatchKeyEvent(ev) ?? false },
+            dispatchNativeEvent: { [weak self] ev in self?.dispatchNativeKeyEvent(ev) ?? false }
+        )
     }
 
     // MARK: - NSDraggingDestination (File Drop)

@@ -2031,6 +2031,10 @@ public final class Runtime<State> {
         if tx.quitRequested {
             quitRequested = true
         }
+        if (tx.runtimeActions["relaunchRequested"] as? Bool) == true {
+            relaunchRequested = true
+            quitRequested = true
+        }
         if tx.blurFocusRequested {
             focusedPath = nil
             focusedKey = nil

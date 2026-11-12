@@ -430,12 +430,153 @@ public struct SystemContrast: Sendable, Equatable {
         self.buttonText = buttonText
         self.link = link
     }
+
+    /// `RUNE_CONTRAST=aquatic|desert|dusk|night-sky`: Windows 11 high-contrast preset colours (#816).
+    public static func preset(named name: String) -> SystemContrast? {
+        let hexes: [String]
+        switch name.lowercased() {
+        case "aquatic":
+            hexes = ["#202020", "#ffffff", "#8ee3f0", "#263b50", "#a6a6a6", "#75e9fc"]
+        case "desert":
+            hexes = ["#fffaef", "#3d3d3d", "#903909", "#fff5e3", "#6d6d6d", "#1c5e75"]
+        case "dusk":
+            hexes = ["#2d3236", "#ffffff", "#a1bfde", "#212d3b", "#a6a6a6", "#70ebde"]
+        case "night-sky", "nightsky":
+            hexes = ["#000000", "#ffffff", "#d6b4fd", "#2b2b2b", "#a6a6a6", "#8080ff"]
+        default:
+            return nil
+        }
+        let c = hexes.map { Color.hex($0) ?? .black }
+        return SystemContrast(
+            window: c[0],
+            text: c[1],
+            highlight: c[2],
+            highlightText: c[3],
+            disabled: c[4],
+            button: c[0],
+            buttonText: c[1],
+            link: c[5]
+        )
+    }
+
+    /// Reads `RUNE_CONTRAST` from the environment if set and valid.
+    public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> SystemContrast? {
+        guard let name = env["RUNE_CONTRAST"] else { return nil }
+        return preset(named: name)
+    }
 }
 
 /// Platform scroll bar visibility preference (`rune::platform::scroll_bars`).
 public enum ScrollBarStyle: String, Sendable, Equatable, Codable {
     case overlay
     case alwaysVisible
+}
+
+/// User's "Show scroll bars" preference (`rune::platform::scroll_bars::ScrollBars`).
+public enum ScrollBars: String, Sendable, Equatable, Hashable, Codable {
+    case automatic
+    case whenScrolling
+    case always
+
+    public func isOverlay(scrollerOverlay: Bool) -> Bool {
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        return true
+        #else
+        switch self {
+        case .automatic:
+            return scrollerOverlay
+        case .whenScrolling:
+            return true
+        case .always:
+            return false
+        }
+        #endif
+    }
+
+    public static func parseAppleShowScrollBars(_ raw: String?) -> ScrollBars {
+        switch raw {
+        case "Always": return .always
+        case "WhenScrolling": return .whenScrolling
+        default: return .automatic
+        }
+    }
+}
+
+/// Resolved scroll-bar settings (`rune::platform::scroll_bars::SystemScrollBars`).
+public struct SystemScrollBars: Sendable, Equatable, Hashable {
+    public var bars: ScrollBars
+    public var scrollerOverlay: Bool
+    public var jumpToClick: Bool
+
+    public static let `default` = SystemScrollBars(bars: .whenScrolling, scrollerOverlay: true, jumpToClick: false)
+
+    public init(bars: ScrollBars = .whenScrolling, scrollerOverlay: Bool = true, jumpToClick: Bool = false) {
+        self.bars = bars
+        self.scrollerOverlay = scrollerOverlay
+        self.jumpToClick = jumpToClick
+    }
+
+    public var isOverlay: Bool {
+        bars.isOverlay(scrollerOverlay: scrollerOverlay)
+    }
+
+    public func withOverride(_ bars: ScrollBars?) -> SystemScrollBars {
+        guard let bars else { return self }
+        var copy = self
+        copy.bars = bars
+        return copy
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cached: SystemScrollBars?
+
+    public static func current() -> SystemScrollBars {
+        #if os(macOS)
+        lock.lock()
+        defer { lock.unlock() }
+        if let existing = cached {
+            return existing
+        }
+        if Thread.isMainThread {
+            let read = MainActor.assumeIsolated { readMacOS() }
+            cached = read
+            return read
+        }
+        return .default
+        #else
+        return .default
+        #endif
+    }
+
+    public static func reread() -> SystemScrollBars {
+        #if os(macOS)
+        lock.lock()
+        defer { lock.unlock() }
+        if Thread.isMainThread {
+            let read = MainActor.assumeIsolated { readMacOS() }
+            cached = read
+            return read
+        }
+        return cached ?? .default
+        #else
+        return .default
+        #endif
+    }
+
+    #if os(macOS)
+    @MainActor
+    private static func readMacOS() -> SystemScrollBars {
+        let defaults = UserDefaults.standard
+        let pref = defaults.string(forKey: "AppleShowScrollBars")
+        let scrollerOverlay = (NSScroller.preferredScrollerStyle == .overlay)
+        let jumpToClick = defaults.bool(forKey: "AppleScrollerPagingBehavior")
+        return SystemScrollBars(
+            bars: ScrollBars.parseAppleShowScrollBars(pref),
+            scrollerOverlay: scrollerOverlay,
+            jumpToClick: jumpToClick
+        )
+    }
+    #endif
 }
 
 /// Aggregated OS accessibility & appearance preferences (`rune::platform::preferences`).
@@ -467,6 +608,7 @@ public struct SystemPreferences: Sendable, Equatable {
     }
 
     public static func current() -> SystemPreferences {
+        let envContrast = SystemContrast.fromEnvironment()
         #if os(macOS)
         let rm = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let fka: Bool
@@ -476,19 +618,13 @@ public struct SystemPreferences: Sendable, Equatable {
             fka = true
         }
         let dci = NSEvent.doubleClickInterval
-        let sbStyle: ScrollBarStyle
-        if Thread.isMainThread {
-            sbStyle = MainActor.assumeIsolated {
-                (NSScroller.preferredScrollerStyle == .legacy) ? .alwaysVisible : .overlay
-            }
-        } else {
-            sbStyle = .overlay
-        }
+        let sb = SystemScrollBars.current()
+        let sbStyle: ScrollBarStyle = sb.isOverlay ? .overlay : .alwaysVisible
         return SystemPreferences(
             darkMode: nil,
             reducedMotion: rm,
             fullKeyboardAccess: fka,
-            contrast: nil,
+            contrast: envContrast,
             accent: SystemAccent.systemAccent(),
             doubleClickInterval: dci,
             scrollBarStyle: sbStyle
@@ -504,13 +640,13 @@ public struct SystemPreferences: Sendable, Equatable {
             darkMode: nil,
             reducedMotion: rm,
             fullKeyboardAccess: true,
-            contrast: nil,
+            contrast: envContrast,
             accent: .default,
             doubleClickInterval: 0.4,
             scrollBarStyle: .overlay
         )
         #else
-        return SystemPreferences()
+        return SystemPreferences(contrast: envContrast)
         #endif
     }
 }
@@ -539,10 +675,29 @@ public enum ReadySignal {
             self.readyMs = readyMs
         }
 
+        private static func escapeJSONString(_ input: String) -> String {
+            var out = ""
+            out.reserveCapacity(input.count)
+            for scalar in input.unicodeScalars {
+                switch scalar.value {
+                case 0x22: out += "\\\""
+                case 0x5C: out += "\\\\"
+                case 0x08: out += "\\b"
+                case 0x0C: out += "\\f"
+                case 0x0A: out += "\\n"
+                case 0x0D: out += "\\r"
+                case 0x09: out += "\\t"
+                case 0x00..<0x20:
+                    out += String(format: "\\u%04x", scalar.value)
+                default:
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+            return out
+        }
+
         public func jsonLine() -> String {
-            let escaped = bundleId
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "\"", with: "\\\"")
+            let escaped = Self.escapeJSONString(bundleId)
             return "{\"pid\":\(pid),\"bundle_id\":\"\(escaped)\",\"ready_ms\":\(readyMs),\"rune\":\"\(runeVersion)\"}"
         }
 
@@ -575,6 +730,7 @@ public enum ReadySignal {
     private static let lock = NSLock()
     private nonisolated(unsafe) static var runStartTimestamp: TimeInterval?
     private nonisolated(unsafe) static var written: WrittenState = .notYet
+    private nonisolated(unsafe) static var atExitRegistered: Bool = false
 
     public static var currentPID: UInt32 {
         #if os(WASI)
@@ -588,9 +744,11 @@ public enum ReadySignal {
         if let id = Bundle.main.bundleIdentifier, !id.isEmpty {
             return id
         }
-        let exe = CommandLine.arguments.first ?? "rune"
-        let base = URL(fileURLWithPath: exe).lastPathComponent
-        return base.isEmpty ? "rune" : base
+        if let exe = CommandLine.arguments.first, !exe.isEmpty {
+            let base = URL(fileURLWithPath: exe).lastPathComponent
+            if !base.isEmpty { return base }
+        }
+        return "rune-app"
     }
 
     public static func runStarts() {
@@ -629,6 +787,14 @@ public enum ReadySignal {
         let payload = SignalPayload(pid: currentPID, bundleId: defaultBundleId(), readyMs: elapsedMs)
         if let path = payload.write(in: dir) {
             written = .at(path)
+            if !atExitRegistered {
+                atExitRegistered = true
+                #if canImport(Darwin) || canImport(Glibc) || canImport(Musl)
+                atexit {
+                    ReadySignal.clear()
+                }
+                #endif
+            }
         } else {
             written = .noFile
         }

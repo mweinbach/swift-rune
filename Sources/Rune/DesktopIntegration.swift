@@ -943,38 +943,165 @@ public final class UrlOpener: @unchecked Sendable {
     }
 
     public static func validate(_ raw: String) throws -> String {
+        try checkLink(raw, relative: false)
+    }
+
+    public static func checkSameTab(_ raw: String) throws -> String {
+        #if os(WASI)
+        return try checkLink(raw, relative: true)
+        #else
+        return try checkLink(raw, relative: false)
+        #endif
+    }
+
+    internal static func checkLink(_ raw: String, relative: Bool) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw OpenUrlError.empty }
-        guard trimmed.count <= maxLength else { throw OpenUrlError.invalid }
-        let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters).union(CharacterSet(charactersIn: "\\\"<>`^{|}"))
-        if trimmed.unicodeScalars.contains(where: { forbidden.contains($0) }) {
+        let utf8 = Array(trimmed.utf8)
+        let forbiddenChars = CharacterSet(charactersIn: "\\\"<>`^{|}")
+        let hasBadScalar = trimmed.unicodeScalars.contains { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || CharacterSet.controlCharacters.contains(scalar)
+                || forbiddenChars.contains(scalar)
+        }
+        if utf8.count > maxLength || hasBadScalar || badPercent(utf8) {
             throw OpenUrlError.invalid
+        }
+        if relative {
+            if let idx = trimmed.firstIndex(where: { $0 == ":" || $0 == "/" || $0 == "?" || $0 == "#" }) {
+                if trimmed[idx] != ":" {
+                    return trimmed
+                }
+            } else {
+                return trimmed
+            }
         }
         guard let colonIdx = trimmed.firstIndex(of: ":") else {
             throw OpenUrlError.invalid
         }
         let scheme = String(trimmed[..<colonIdx]).lowercased()
         let rest = String(trimmed[trimmed.index(after: colonIdx)...])
-        guard !scheme.isEmpty else { throw OpenUrlError.invalid }
+        guard
+            let first = scheme.first,
+            first.isASCII,
+            first.isLetter,
+            scheme.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == ".") })
+        else {
+            throw OpenUrlError.invalid
+        }
         switch scheme {
         case "http", "https":
             guard rest.hasPrefix("//") else { throw OpenUrlError.invalid }
-            let after = String(rest.dropFirst(2))
-            let hostPart = after.split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" }).first.map(String.init) ?? ""
-            guard !hostPart.isEmpty, !hostPart.contains("["), !hostPart.contains("]") else {
+            let after = rest.dropFirst(2)
+            let tailStart = after.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? after.endIndex
+            let authority = String(after[..<tailStart])
+            let tail = after[tailStart...]
+            if tail.contains("[") || tail.contains("]") || !validAuthority(authority) {
                 throw OpenUrlError.invalid
             }
         case "mailto":
-            guard !rest.isEmpty, !rest.hasPrefix("//") else { throw OpenUrlError.invalid }
+            if rest.isEmpty || rest.hasPrefix("//") || rest.contains("[") || rest.contains("]") {
+                throw OpenUrlError.invalid
+            }
         default:
             throw OpenUrlError.unsupportedScheme(scheme)
         }
         return "\(scheme):\(rest)"
     }
 
+    private static func badPercent(_ bytes: [UInt8]) -> Bool {
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x25 {
+                guard i + 2 < bytes.count else { return true }
+                let a = bytes[i + 1]
+                let b = bytes[i + 2]
+                if !isAsciiHexDigit(a) || !isAsciiHexDigit(b) || (a == 0x30 && b == 0x30) {
+                    return true
+                }
+                i += 3
+            } else {
+                i += 1
+            }
+        }
+        return false
+    }
+
+    private static func isAsciiHexDigit(_ b: UInt8) -> Bool {
+        (0x30...0x39).contains(b) || (0x41...0x46).contains(b) || (0x61...0x66).contains(b)
+    }
+
+    private static func validAuthority(_ authority: String) -> Bool {
+        let hostPort: String
+        if let atIdx = authority.lastIndex(of: "@") {
+            let userinfo = authority[..<atIdx]
+            if userinfo.isEmpty || userinfo.contains("[") || userinfo.contains("]") || userinfo.contains("@") {
+                return false
+            }
+            hostPort = String(authority[authority.index(after: atIdx)...])
+        } else {
+            hostPort = authority
+        }
+
+        let port: String?
+        if hostPort.hasPrefix("[") {
+            let rest = hostPort.dropFirst()
+            guard let closeIdx = rest.firstIndex(of: "]") else { return false }
+            let ipv6 = rest[..<closeIdx]
+            let portPart = rest[rest.index(after: closeIdx)...]
+            guard
+                ipv6.count >= 2,
+                ipv6.contains(":"),
+                !ipv6.hasPrefix("."),
+                !ipv6.contains(".."),
+                ipv6.allSatisfy({ $0.isASCII && ($0.isHexDigit || $0 == ":" || $0 == ".") })
+            else {
+                return false
+            }
+            if !portPart.isEmpty && !portPart.hasPrefix(":") {
+                return false
+            }
+            port = portPart.hasPrefix(":") ? String(portPart.dropFirst()) : nil
+        } else if hostPort.contains("[") || hostPort.contains("]") {
+            return false
+        } else {
+            let host: String
+            if let colonIdx = hostPort.firstIndex(of: ":") {
+                host = String(hostPort[..<colonIdx])
+                port = String(hostPort[hostPort.index(after: colonIdx)...])
+            } else {
+                host = hostPort
+                port = nil
+            }
+            if host.isEmpty || host.hasPrefix(".") || host.contains("..") || host.contains("%") || host.contains(":") {
+                return false
+            }
+        }
+
+        if let p = port {
+            return !p.isEmpty && p.allSatisfy { $0.isASCII && $0.isNumber } && UInt16(p) != nil
+        }
+        return true
+    }
+
+    internal static func percentEncodeNonAscii(_ url: String) -> String {
+        let utf8 = url.utf8
+        if utf8.allSatisfy({ $0 < 0x80 }) { return url }
+        var out = ""
+        out.reserveCapacity(utf8.count + 16)
+        for byte in utf8 {
+            if byte < 0x80 {
+                out.append(Character(UnicodeScalar(byte)))
+            } else {
+                out.append(String(format: "%%%02X", byte))
+            }
+        }
+        return out
+    }
+
     @discardableResult
     public func open(_ raw: String, sameTab: Bool = false) throws -> String {
-        let normalized = try Self.validate(raw)
+        let normalized = sameTab ? try Self.checkSameTab(raw) : try Self.validate(raw)
         let req = OpenUrlRequest(url: normalized, sameTab: sameTab)
         if headless {
             lock.lock()
@@ -983,8 +1110,12 @@ public final class UrlOpener: @unchecked Sendable {
             return normalized
         }
         #if os(macOS)
-        guard let nsUrl = URL(string: normalized), NSWorkspace.shared.open(nsUrl) else {
-            throw OpenUrlError.failed("NSWorkspace refused to open \(normalized)")
+        let ascii = Self.percentEncodeNonAscii(normalized)
+        guard let nsUrl = URL(string: ascii) else {
+            throw OpenUrlError.invalid
+        }
+        guard NSWorkspace.shared.open(nsUrl) else {
+            throw OpenUrlError.failed("no app opened it")
         }
         return normalized
         #elseif canImport(UIKit) && !os(watchOS)
@@ -1124,6 +1255,8 @@ public enum MenuError: Error, Sendable, Equatable {
     case unknownItem(String)
     case ambiguousTitle(String)
     case disabled(String)
+    case inUse
+    case backend(String)
 }
 
 public struct NativeMenuItem<State> {
@@ -1180,14 +1313,14 @@ public final class NativeMenuBar<State> {
         self.items = newItems
     }
 
-    public func dispatch(id: String, state: inout State, tx: inout Tx) throws {
-        guard let item = items.first(where: { !$0.isSeparator && $0.id == id }) else {
-            throw MenuError.unknownItem(id)
-        }
-        guard item.enabled else {
-            throw MenuError.disabled(id)
-        }
-        item.action(&state, &tx)
+    public func setValidatedItems(_ newItems: [NativeMenuItem<State>]) throws {
+        try NativeMenuValidator.validate(newItems)
+        self.items = newItems
+    }
+
+    public func dispatch(id selector: String, state: inout State, tx: inout Tx) throws {
+        let idx = try NativeMenuValidator.lookupIndex(selector: selector, in: items)
+        items[idx].action(&state, &tx)
     }
 
     #if os(macOS)
@@ -1893,7 +2026,10 @@ public enum QuitMachine {
             return (.quitting(hooks: .owed, after: after), effects)
         case (.quitting(let hooks, let currentAfter), .start(let ending, let nextAfter)):
             let mergedAfter: QuitAfter = (currentAfter == .relaunch || nextAfter == .relaunch) ? .relaunch : .exit
-            return (.quitting(hooks: hooks, after: mergedAfter), ending ? [.closeAndExit] : [])
+            var effects: [QuitEffect] = []
+            if hooks == .owed { effects.append(.runHooks) }
+            if ending { effects.append(.closeAndExit) }
+            return (.quitting(hooks: hooks, after: mergedAfter), effects)
         case (.quitting(_, let after), .hooksRan):
             return (.quitting(hooks: .ran, after: after), [])
         case (.quitting, .windowsClosed):
@@ -2025,10 +2161,21 @@ extension Tx {
 
     /// Requests opening an `http:`, `https:`, or `mailto:` URL.
     public mutating func openUrl(_ url: String, sameTab: Bool = false) throws {
-        let normalized = try UrlOpener.validate(url)
+        let normalized = sameTab ? try UrlOpener.checkSameTab(url) : try UrlOpener.validate(url)
         var list = (runtimeActions["openUrlRequests"] as? [OpenUrlRequest]) ?? []
         list.append(OpenUrlRequest(url: normalized, sameTab: sameTab))
         runtimeActions["openUrlRequests"] = list
+    }
+
+    /// Requests opening a URL in the same tab on web (allows relative paths on web; rejects on native).
+    public mutating func openUrlSameTab(_ url: String) throws {
+        try openUrl(url, sameTab: true)
+    }
+
+    /// Requests quitting the app and relaunching it once exited (`Tx::relaunch`).
+    public mutating func relaunch() {
+        quitRequested = true
+        runtimeActions["relaunchRequested"] = true
     }
 
     /// Initiates an outbound OS drag session with `item`.
