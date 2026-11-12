@@ -213,11 +213,15 @@ public final class PerfCounter: @unchecked Sendable {
 public final class PerfRecorder: @unchecked Sendable {
     public static let defaultCapacity = 600
     public static let defaultWindowMs: UInt64 = 60_000
+    public static let anomalyLogsPerSecondLimit: Int = 10
 
     private struct State {
         var recentFrames: [FrameSample] = []
         var totalFrames: UInt64 = 0
         var anomalyCount: UInt64 = 0
+        var logSuppressedCount: UInt64 = 0
+        var logSecond: UInt64 = 0
+        var loggedInSecond: Int = 0
         var lifetimeMaxWorkMs: Double?
         var lifetimeMaxAllocatedBytes: UInt64?
         var spans: [CompletedSpan] = []
@@ -245,6 +249,13 @@ public final class PerfRecorder: @unchecked Sendable {
 
     /// Records a frame sample into the bounded histogram window.
     public func recordFrame(_ frame: FrameSample) {
+        _ = accept(frame)
+    }
+
+    /// Accepts a frame sample and returns `true` if it should be logged (anomaly within 10/s rate limit).
+    /// Matches upstream `rune_perf::stats::Stats::accept`.
+    @discardableResult
+    public func accept(_ frame: FrameSample) -> Bool {
         lock.withLock { state in
             state.totalFrames += 1
             if let work = frame.workMs {
@@ -253,9 +264,6 @@ public final class PerfRecorder: @unchecked Sendable {
             if let alloc = frame.allocatedBytes {
                 state.lifetimeMaxAllocatedBytes = state.lifetimeMaxAllocatedBytes.map { max($0, alloc) } ?? alloc
             }
-            if frame.isAnomaly {
-                state.anomalyCount += 1
-            }
 
             if state.recentFrames.count >= capacity {
                 state.recentFrames.removeFirst(state.recentFrames.count - capacity + 1)
@@ -263,6 +271,28 @@ public final class PerfRecorder: @unchecked Sendable {
             state.recentFrames.append(frame)
 
             let cutoff = frame.timestampMs > windowMs ? frame.timestampMs - windowMs : 0
+            state.recentFrames.removeAll { $0.timestampMs < cutoff }
+
+            guard frame.isAnomaly else { return false }
+            state.anomalyCount += 1
+            let second = frame.timestampMs / 1_000
+            if state.logSecond != second {
+                state.logSecond = second
+                state.loggedInSecond = 0
+            }
+            if state.loggedInSecond >= Self.anomalyLogsPerSecondLimit {
+                state.logSuppressedCount += 1
+                return false
+            }
+            state.loggedInSecond += 1
+            return true
+        }
+    }
+
+    /// Prunes recent samples older than `windowMs` before `nowMs`.
+    public func prune(nowMs: UInt64) {
+        lock.withLock { state in
+            let cutoff = nowMs > windowMs ? nowMs - windowMs : 0
             state.recentFrames.removeAll { $0.timestampMs < cutoff }
         }
     }
@@ -343,8 +373,32 @@ public final class PerfRecorder: @unchecked Sendable {
         lock.withLock { $0.anomalyCount }
     }
 
+    public var logSuppressedCount: UInt64 {
+        lock.withLock { $0.logSuppressedCount }
+    }
+
+    public var lifetimeMaxWorkMs: Double? {
+        lock.withLock { $0.lifetimeMaxWorkMs }
+    }
+
+    public var lifetimeMaxAllocatedBytes: UInt64? {
+        lock.withLock { $0.lifetimeMaxAllocatedBytes }
+    }
+
     public var recentFrames: [FrameSample] {
         lock.withLock { $0.recentFrames }
+    }
+
+    public var recentAnomalies: [FrameSample] {
+        lock.withLock { state in
+            Array(state.recentFrames.reversed().filter(\.isAnomaly).prefix(20))
+        }
+    }
+
+    public var timedCount: Int {
+        lock.withLock { state in
+            state.recentFrames.filter { $0.workMs != nil }.count
+        }
     }
 
     public var completedSpans: [CompletedSpan] {
@@ -367,6 +421,23 @@ public final class PerfRecorder: @unchecked Sendable {
 
     public var updateMsStats: PercentileStats? {
         let values = lock.withLock { $0.recentFrames.compactMap(\.updateMs) }
+        return PercentileStats.compute(from: values)
+    }
+
+    public var inputToFrameMsStats: PercentileStats? {
+        let values = lock.withLock { $0.recentFrames.compactMap(\.inputToFrameMs) }
+        return PercentileStats.compute(from: values)
+    }
+
+    public var gpuMsStats: PercentileStats? {
+        let values = lock.withLock { $0.recentFrames.compactMap(\.gpuMs) }
+        return PercentileStats.compute(from: values)
+    }
+
+    public var allocatedBytesStats: PercentileStats? {
+        let values = lock.withLock { state in
+            state.recentFrames.compactMap { $0.allocatedBytes.map(Double.init) }
+        }
         return PercentileStats.compute(from: values)
     }
 

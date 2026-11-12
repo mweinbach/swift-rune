@@ -7,31 +7,38 @@ struct RunePerfParityTests {
     @Test func incidentDetectorDetectsAndRateLimits() {
         let detector = IncidentDetector()
         let stall = FrameSample(
-            window: 1,
+            window: 0,
             seq: 1,
             outcome: .drawn,
-            updateMs: 200.0,
-            renderMs: 60.0,
+            updateMs: 250.0,
+            renderMs: 0.0,
             allocatedBytes: 0,
-            timestampMs: 10_000
+            timestampMs: 0
         )
-        let first = detector.detectFrame(sample: stall, recent: [], windowId: 1)
+        let first = detector.detectFrame(sample: stall, recent: [], windowId: 0)
         #expect(first != nil)
         #expect(first?.kind == .stall)
-        #expect(detector.admit(nowMs: 10_000, incident: first!))
+        #expect(detector.admit(nowMs: 0, incident: first!))
 
-        // Within 2s global cooldown & 60s per-key cooldown, same severity is suppressed
-        #expect(!detector.admit(nowMs: 10_500, incident: first!))
+        // Global cooldown rejects within 2s.
+        #expect(!detector.admit(nowMs: 500, incident: first!))
 
-        // >1.25x severity escalation bypasses 60s same-key cooldown (after 2s global cooldown)
+        // Upstream incident.rs:86-91 & tests.rs:75-83: requires BOTH >=60s cooldown AND >=1.25x worsening.
+        // At 60_001 ms with same severity: rejected because severity did not worsen.
+        #expect(!detector.admit(nowMs: 60_001, incident: first!))
+
+        // Worsened >=1.25x (400 vs 250) within 60s cooldown: still rejected.
         let worse = Incident(
             kind: .stall,
-            window: 1,
-            severity: first!.severity * 1.5,
-            timestampMs: 12_500,
+            window: 0,
+            severity: 400.0,
+            timestampMs: 59_999,
             message: "severe stall"
         )
-        #expect(detector.admit(nowMs: 12_500, incident: worse))
+        #expect(!detector.admit(nowMs: 59_999, incident: worse))
+
+        // Both >=60s elapsed AND >=1.25x worsening: admitted.
+        #expect(detector.admit(nowMs: 60_001, incident: worse))
     }
 
     @Test func incidentStoreWritesReadsRotatesAndPrunes() throws {

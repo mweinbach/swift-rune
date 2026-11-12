@@ -58,12 +58,195 @@ public struct ProcessUsage: Sendable, Equatable, Codable {
     }
 }
 
+/// Counted heap statistics matching upstream `procwatch::alloc::Heap`.
+public struct ProcessHeapStats: Sendable, Equatable, Codable {
+    public var liveBytes: Int64
+    public var peakBytes: Int64
+    public var allocations: UInt64
+    public var largestBytes: Int
+    public var bigLiveBytes: Int64
+    public var bigBlocks: Int64
+    public var tags: [String: Int64]
+
+    public init(
+        liveBytes: Int64 = 0,
+        peakBytes: Int64 = 0,
+        allocations: UInt64 = 0,
+        largestBytes: Int = 0,
+        bigLiveBytes: Int64 = 0,
+        bigBlocks: Int64 = 0,
+        tags: [String: Int64] = [:]
+    ) {
+        self.liveBytes = liveBytes
+        self.peakBytes = peakBytes
+        self.allocations = allocations
+        self.largestBytes = largestBytes
+        self.bigLiveBytes = bigLiveBytes
+        self.bigBlocks = bigBlocks
+        self.tags = tags
+    }
+
+    /// Tags sorted descending by net bytes (`tags` in `procwatch::alloc::Heap`).
+    public var sortedTags: [(name: String, bytes: Int64)] {
+        tags.map { ($0.key, $0.value) }.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            return $0.0 < $1.0
+        }
+    }
+}
+
+/// Thread-safe allocation counter matching `procwatch::alloc` semantics
+/// (`BIG = 64 MiB`, `TAGS = 16`, per-thread allocation counts/bytes, and `Heap` stats).
+public final class ProcessCountingAllocator: @unchecked Sendable {
+    public static let shared = ProcessCountingAllocator()
+    public static let bigBlockThreshold: Int = 64 << 20
+    public static let maxTags: Int = 16
+
+    private struct State {
+        var installed: Bool = false
+        var liveBytes: Int64 = 0
+        var peakBytes: Int64 = 0
+        var allocations: UInt64 = 0
+        var largestBytes: Int = 0
+        var bigLiveBytes: Int64 = 0
+        var bigBlocks: Int64 = 0
+        var tagOrder: [String] = ["untagged"]
+        var tagNetBytes: [String: Int64] = ["untagged": 0]
+        var threadTag: [UInt64: String] = [:]
+        var threadAllocs: [UInt64: UInt64] = [:]
+        var threadAllocatedBytes: [UInt64: UInt64] = [:]
+    }
+
+    private let lock = PortableLock(initialState: State())
+
+    public init() {}
+
+    public func tagThread(_ name: String) {
+        let tid = Self.currentThreadID()
+        lock.withLock { state in
+            if state.tagOrder.contains(name) {
+                state.threadTag[tid] = name
+            } else if state.tagOrder.count < Self.maxTags {
+                state.tagOrder.append(name)
+                state.tagNetBytes[name] = 0
+                state.threadTag[tid] = name
+            } else {
+                state.threadTag[tid] = "untagged"
+            }
+        }
+    }
+
+    public func recordAlloc(size: Int) {
+        guard size >= 0 else { return }
+        let tid = Self.currentThreadID()
+        lock.withLock { state in
+            state.installed = true
+            state.allocations &+= 1
+            state.threadAllocs[tid, default: 0] &+= 1
+            state.threadAllocatedBytes[tid, default: 0] &+= UInt64(size)
+            Self.grow(&state, size: size, tid: tid)
+        }
+    }
+
+    public func recordDealloc(size: Int) {
+        guard size >= 0 else { return }
+        let tid = Self.currentThreadID()
+        lock.withLock { state in
+            Self.shrink(&state, size: size, tid: tid)
+        }
+    }
+
+    public func recordRealloc(oldSize: Int, newSize: Int) {
+        guard oldSize >= 0, newSize >= 0 else { return }
+        let tid = Self.currentThreadID()
+        lock.withLock { state in
+            state.installed = true
+            state.allocations &+= 1
+            state.threadAllocs[tid, default: 0] &+= 1
+            state.threadAllocatedBytes[tid, default: 0] &+= UInt64(newSize)
+            Self.shrink(&state, size: oldSize, tid: tid)
+            Self.grow(&state, size: newSize, tid: tid)
+        }
+    }
+
+    public func threadAllocations() -> UInt64 {
+        let tid = Self.currentThreadID()
+        return lock.withLock { $0.threadAllocs[tid] ?? 0 }
+    }
+
+    public func threadAllocatedBytes() -> UInt64? {
+        let tid = Self.currentThreadID()
+        return lock.withLock { state in
+            guard state.installed else { return nil }
+            return state.threadAllocatedBytes[tid] ?? 0
+        }
+    }
+
+    public func heap() -> ProcessHeapStats? {
+        lock.withLock { state in
+            guard state.installed else { return nil }
+            return ProcessHeapStats(
+                liveBytes: state.liveBytes,
+                peakBytes: state.peakBytes,
+                allocations: state.allocations,
+                largestBytes: state.largestBytes,
+                bigLiveBytes: state.bigLiveBytes,
+                bigBlocks: state.bigBlocks,
+                tags: state.tagNetBytes
+            )
+        }
+    }
+
+    public func reset() {
+        lock.withLock { $0 = State() }
+    }
+
+    private static func grow(_ state: inout State, size: Int, tid: UInt64) {
+        let s64 = Int64(size)
+        state.liveBytes += s64
+        if state.liveBytes > state.peakBytes {
+            state.peakBytes = state.liveBytes
+        }
+        if size > state.largestBytes {
+            state.largestBytes = size
+        }
+        if size >= bigBlockThreshold {
+            state.bigLiveBytes += s64
+            state.bigBlocks += 1
+        }
+        let tag = state.threadTag[tid] ?? "untagged"
+        state.tagNetBytes[tag, default: 0] += s64
+    }
+
+    private static func shrink(_ state: inout State, size: Int, tid: UInt64) {
+        let s64 = Int64(size)
+        state.liveBytes -= s64
+        if size >= bigBlockThreshold {
+            state.bigLiveBytes -= s64
+            state.bigBlocks -= 1
+        }
+        let tag = state.threadTag[tid] ?? "untagged"
+        state.tagNetBytes[tag, default: 0] -= s64
+    }
+
+    private static func currentThreadID() -> UInt64 {
+        #if canImport(Darwin)
+        var tid: UInt64 = 0
+        pthread_threadid_np(nil, &tid)
+        return tid
+        #else
+        return Thread.isMainThread ? 1 : UInt64(bitPattern: Int64(ObjectIdentifier(Thread.current).hashValue))
+        #endif
+    }
+}
+
 /// Full process telemetry snapshot including threads and custom memory gauges.
 public struct ProcessSnapshot: Sendable, Equatable, Codable {
     public var pid: Int32
     public var timestampMs: UInt64
     public var usage: ProcessUsage
     public var threads: [ProcessThreadInfo]
+    public var heap: ProcessHeapStats?
     public var gauges: [String: Int64]
 
     public init(
@@ -71,12 +254,14 @@ public struct ProcessSnapshot: Sendable, Equatable, Codable {
         timestampMs: UInt64,
         usage: ProcessUsage,
         threads: [ProcessThreadInfo] = [],
+        heap: ProcessHeapStats? = nil,
         gauges: [String: Int64] = [:]
     ) {
         self.pid = pid
         self.timestampMs = timestampMs
         self.usage = usage
         self.threads = threads
+        self.heap = heap
         self.gauges = gauges
     }
 
@@ -86,11 +271,82 @@ public struct ProcessSnapshot: Sendable, Equatable, Codable {
         return max(0.0, usage.totalCpuSeconds - liveSum)
     }
 
-    /// Footprint minus all tracked `MemoryGauge`s, or `nil` if footprint is unavailable.
+    /// Footprint minus counted heap and all tracked `MemoryGauge`s; `nil` without `heap` or footprint
+    /// (`procwatch::Snapshot::unaccounted`).
     public var unaccountedFootprintBytes: Int64? {
-        guard let footprint = usage.footprintBytes else { return nil }
+        guard let heap, let footprint = usage.footprintBytes else { return nil }
         let gaugeSum = gauges.values.reduce(0, +)
-        return Int64(clamping: footprint) - gaugeSum
+        return Int64(clamping: footprint) - max(0, heap.liveBytes) - gaugeSum
+    }
+
+    /// Upstream alias for `unaccountedFootprintBytes`.
+    public var unaccountedBytes: Int64? {
+        unaccountedFootprintBytes
+    }
+
+    /// Sorted gauges descending by byte count (`procwatch::gauges()`).
+    public var sortedGauges: [(name: String, bytes: Int64)] {
+        gauges.map { ($0.key, $0.value) }.sorted {
+            if $0.1 != $1.1 { return $0.1 > $1.1 }
+            return $0.0 < $1.0
+        }
+    }
+
+    /// Serializes the snapshot to upstream `procwatch::Snapshot::to_json` format.
+    public func toJSON() -> String {
+        func clean(_ name: String) -> String {
+            String(name.unicodeScalars.filter { scalar in
+                scalar.value >= 0x20 && scalar != "\"" && scalar != "\\" && scalar.value != 0x7F
+            })
+        }
+        func appendMap(_ out: inout String, _ entries: [(name: String, bytes: Int64)]) {
+            out.append("{")
+            for (i, entry) in entries.enumerated() {
+                if i > 0 { out.append(",") }
+                out.append("\"\(clean(entry.name))\":\(entry.bytes)")
+            }
+            out.append("}")
+        }
+
+        let footprint = usage.footprintBytes ?? 0
+        let footprintPeak = usage.footprintPeakBytes ?? 0
+        var s = String(
+            format: "{\"pid\":%d,\"footprint\":%llu,\"footprint_peak\":%llu,\"resident\":%llu,\"cpu_s\":%.3f,\"exited_cpu_s\":%.3f,\"fds\":%u,\"threads\":[",
+            pid,
+            footprint,
+            footprintPeak,
+            usage.residentBytes,
+            usage.totalCpuSeconds,
+            exitedThreadCpuSeconds,
+            usage.openFDs ?? 0
+        )
+        for (i, t) in threads.enumerated() {
+            if i > 0 { s.append(",") }
+            s.append(String(format: "{\"name\":\"%@\",\"cpu_s\":%.3f}", clean(t.name), t.cpuSeconds))
+        }
+        s.append("]")
+        if let h = heap {
+            s.append(
+                String(
+                    format: ",\"heap\":{\"live\":%lld,\"peak\":%lld,\"allocations\":%llu,\"largest\":%d,\"big_live\":%lld,\"big_blocks\":%lld,\"tags\":",
+                    h.liveBytes,
+                    h.peakBytes,
+                    h.allocations,
+                    h.largestBytes,
+                    h.bigLiveBytes,
+                    h.bigBlocks
+                )
+            )
+            appendMap(&s, h.sortedTags)
+            s.append("}")
+        }
+        s.append(",\"gauges\":")
+        appendMap(&s, sortedGauges)
+        if let bytes = unaccountedBytes {
+            s.append(",\"unaccounted\":\(bytes)")
+        }
+        s.append("}")
+        return s
     }
 }
 
@@ -202,7 +458,8 @@ public enum ProcessSampler {
     /// Captures a full snapshot of the current process (or another PID owned by this user).
     public static func snapshot(
         pid: Int32 = ProcessInfo.processInfo.processIdentifier,
-        gaugeRegistry: GaugeRegistry = .shared
+        gaugeRegistry: GaugeRegistry = .shared,
+        allocator: ProcessCountingAllocator = .shared
     ) -> ProcessSnapshot {
         let nowMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
         #if os(macOS)
@@ -237,22 +494,26 @@ public enum ProcessSampler {
         }
         let threads = sampleThreads(pid: pid)
         let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        let heap = isSelf ? allocator.heap() : nil
         return ProcessSnapshot(
             pid: pid,
             timestampMs: nowMs,
             usage: usage,
             threads: threads,
+            heap: heap,
             gauges: gauges
         )
         #elseif os(iOS) || os(tvOS) || os(visionOS)
         let isSelf = (pid == getpid())
         let usage = isSelf ? sampleUsage() : ProcessUsage()
         let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        let heap = isSelf ? allocator.heap() : nil
         return ProcessSnapshot(
             pid: pid,
             timestampMs: nowMs,
             usage: usage,
             threads: [],
+            heap: heap,
             gauges: gauges
         )
         #elseif os(Linux) || os(Android)
@@ -260,28 +521,41 @@ public enum ProcessSampler {
         let usage = isSelf ? sampleUsage() : ProcessUsage()
         let threads = isSelf ? sampleLinuxThreads() : []
         let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        let heap = isSelf ? allocator.heap() : nil
         return ProcessSnapshot(
             pid: pid,
             timestampMs: nowMs,
             usage: usage,
             threads: threads,
+            heap: heap,
             gauges: gauges
         )
         #elseif os(Windows)
         let isSelf = (pid == Int32(GetCurrentProcessId()))
         let usage = isSelf ? sampleUsage() : ProcessUsage()
         let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        let heap = isSelf ? allocator.heap() : nil
         return ProcessSnapshot(
             pid: pid,
             timestampMs: nowMs,
             usage: usage,
             threads: [],
+            heap: heap,
             gauges: gauges
         )
         #else
         return ProcessSnapshot(pid: pid, timestampMs: nowMs, usage: ProcessUsage())
         #endif
     }
+
+    #if canImport(Darwin)
+    /// Reads Darwin malloc zone live/peak/allocated stats via `malloc_zone_statistics`.
+    public static func sampleMallocZoneStats() -> (blocksInUse: UInt, sizeInUse: UInt, maxSizeInUse: UInt, sizeAllocated: UInt) {
+        var stats = malloc_statistics_t()
+        malloc_zone_statistics(nil, &stats)
+        return (UInt(stats.blocks_in_use), UInt(stats.size_in_use), UInt(stats.max_size_in_use), UInt(stats.size_allocated))
+    }
+    #endif
 
     #if os(macOS)
     private static func machTicksToSeconds() -> Double {
@@ -483,8 +757,9 @@ public final class MemoryLease: @unchecked Sendable {
     }
 }
 
-/// Registry of active `MemoryGauge` instances.
+/// Registry of active `MemoryGauge` instances (up to `maxGauges = 64`, matching `procwatch::gauge::GAUGES`).
 public final class GaugeRegistry: @unchecked Sendable {
+    public static let maxGauges = 64
     public static let shared = GaugeRegistry()
 
     private let lock = PortableLock(initialState: [String: MemoryGauge]())
@@ -492,7 +767,11 @@ public final class GaugeRegistry: @unchecked Sendable {
     public init() {}
 
     public func register(_ gauge: MemoryGauge) {
-        lock.withLock { $0[gauge.name] = gauge }
+        lock.withLock { gauges in
+            if gauges[gauge.name] != nil || gauges.count < Self.maxGauges {
+                gauges[gauge.name] = gauge
+            }
+        }
     }
 
     public func allValues() -> [String: Int64] {
