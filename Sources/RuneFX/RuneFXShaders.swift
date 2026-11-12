@@ -78,6 +78,9 @@ public enum RuneFXShaders: Sendable {
         return bd_lin(blurred.sample(samp, uv, level(0.0)), enc).rgb;
     }
 
+    constant float TAU = 6.2831853;
+    constant float PI = 3.14159265;
+
     inline uint pcg(uint v) {
         uint s = v * 747796405u + 2891336453u;
         uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -93,23 +96,40 @@ public enum RuneFXShaders: Sendable {
     }
 
     inline float hcell(int2 c, uint seed) {
-        return float(pcg(uint(c.x) ^ pcg(uint(c.y) ^ pcg(seed))) >> 8u) * (1.0 / 16777216.0);
+        return float(pcg(as_type<uint>(c.x) ^ pcg(as_type<uint>(c.y) ^ pcg(seed))) >> 8u) * (1.0 / 16777216.0);
     }
 
     inline float2 grad2(int2 c, uint seed) {
-        float a = hcell(c, seed) * 6.28318530718;
+        float a = hcell(c, seed) * TAU;
         return float2(cos(a), sin(a));
     }
 
     inline float gnoise(float2 p, uint seed) {
         int2 i = int2(floor(p));
-        float2 f = fract(p);
+        float2 f = p - floor(p);
         float a = dot(grad2(i + int2(0, 0), seed), f - float2(0.0, 0.0));
         float b = dot(grad2(i + int2(1, 0), seed), f - float2(1.0, 0.0));
         float c = dot(grad2(i + int2(0, 1), seed), f - float2(0.0, 1.0));
         float d = dot(grad2(i + int2(1, 1), seed), f - float2(1.0, 1.0));
         float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
         return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 1.41421;
+    }
+
+    inline float pgnoise(float2 p, int per, uint seed) {
+        int2 i = int2(floor(p));
+        float2 f = p - floor(p);
+        float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+        int x0 = ((i.x % per) + per) % per;
+        int x1 = (x0 + 1) % per;
+        float a = dot(grad2(int2(x0, i.y), seed), f);
+        float b = dot(grad2(int2(x1, i.y), seed), f - float2(1.0, 0.0));
+        float c = dot(grad2(int2(x0, i.y + 1), seed), f - float2(0.0, 1.0));
+        float d = dot(grad2(int2(x1, i.y + 1), seed), f - float2(1.0, 1.0));
+        return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 1.41421;
+    }
+
+    inline float2 rot_mul(float2 p) {
+        return float2(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y);
     }
 
     inline float fbm(float2 p, uint seed, int octaves) {
@@ -119,16 +139,155 @@ public enum RuneFXShaders: Sendable {
         for (int o = 0; o < octaves; o++) {
             s += a * gnoise(p, seed + uint(o) * 131u);
             norm += a;
-            p = float2(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y) * 2.02;
+            p = rot_mul(p) * 2.02;
             a *= 0.5;
         }
         return s / max(norm, 1e-4);
     }
 
-    inline float sd_rrect(float2 p, float2 half_size, float r) {
-        float rr = min(r, min(half_size.x, half_size.y));
-        float2 q = abs(p) - half_size + rr;
-        return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - rr;
+    inline float fbm3(float2 p0, uint seed) {
+        float2 p = p0;
+        float a = 0.5;
+        float s = 0.0;
+        for (uint o = 0u; o < 3u; o++) {
+            s += a * gnoise(p, seed + o * 131u);
+            p = rot_mul(p) * 2.02;
+            a *= 0.5;
+        }
+        return s / 0.875;
+    }
+
+    inline float fbm5(float2 p0, uint seed) {
+        float2 p = p0;
+        float a = 0.5;
+        float s = 0.0;
+        for (uint o = 0u; o < 5u; o++) {
+            s += a * gnoise(p, seed + o * 131u);
+            p = rot_mul(p) * 2.02;
+            a *= 0.5;
+        }
+        return s / 0.96875;
+    }
+
+    inline float ign(float2 px) {
+        return fract(52.9829189 * fract(dot(floor(px), float2(0.06711056, 0.00583715))));
+    }
+
+    inline float sd_rrect(float2 q, float2 half_size, float r) {
+        float rr = clamp(r, 0.0, min(half_size.x, half_size.y));
+        float2 k = abs(q) - half_size + rr;
+        return length(max(k, float2(0.0))) + min(max(k.x, k.y), 0.0) - rr;
+    }
+
+    inline float smin(float a, float b, float k) {
+        if (k <= 0.0) { return min(a, b); }
+        float h = max(k - abs(a - b), 0.0) / k;
+        return min(a, b) - h * h * k * 0.25;
+    }
+
+    inline float2 rrect_perim(float2 q, float2 half_size, float r0) {
+        float r = clamp(r0, 0.0, min(half_size.x, half_size.y));
+        float2 b = half_size - r;
+        float2 a = abs(q);
+        float lq = b.y + r * PI * 0.5 + b.x;
+        float s;
+        if (a.x > b.x && a.y > b.y) {
+            s = b.y + r * atan2(a.y - b.y, a.x - b.x);
+        } else if ((a.x - b.x) > (a.y - b.y)) {
+            s = min(a.y, b.y);
+        } else {
+            s = b.y + r * PI * 0.5 + (b.x - min(a.x, b.x));
+        }
+        float o;
+        if (q.x >= 0.0 && q.y >= 0.0) { o = s; }
+        else if (q.x < 0.0 && q.y >= 0.0) { o = 2.0 * lq - s; }
+        else if (q.x < 0.0) { o = 2.0 * lq + s; }
+        else { o = 4.0 * lq - s; }
+        return float2(o, 4.0 * lq);
+    }
+
+    struct Ctx {
+        float2 p;
+        float2 q;
+        float2 c;
+        float2 half_size;
+        float r;
+        float scale;
+        float aa;
+        float d;
+        float t;
+        uint seed;
+        int variant;
+        bool reduced;
+    };
+
+    inline Ctx make_ctx(Inst i, float2 px) {
+        Ctx c;
+        c.scale = i.shape.y;
+        c.p = px / c.scale;
+        c.half_size = i.rect.zw * 0.5;
+        c.c = i.rect.xy + c.half_size;
+        c.q = (px - c.c * c.scale) / c.scale;
+        c.r = i.shape.x;
+        c.aa = 1.0 / c.scale;
+        c.d = sd_rrect(c.q, c.half_size, c.r);
+        c.t = i.t.x;
+        c.seed = uint(i.t.y);
+        c.variant = int(i.t.z + 0.5);
+        c.reduced = (uint(i.t.w) & 1u) != 0u;
+        return c;
+    }
+
+    inline float2 sd_grad(Ctx c) {
+        float e = 0.35;
+        float dx = sd_rrect(c.q + float2(e, 0.0), c.half_size, c.r) - sd_rrect(c.q - float2(e, 0.0), c.half_size, c.r);
+        float dy = sd_rrect(c.q + float2(0.0, e), c.half_size, c.r) - sd_rrect(c.q - float2(0.0, e), c.half_size, c.r);
+        float2 gv = float2(dx, dy);
+        return gv / max(length(gv), 1e-5);
+    }
+
+    inline float erf_approx(float x) {
+        float x2 = x * x;
+        float a = 0.147;
+        float v = sqrt(1.0 - exp(-x2 * (1.2732395 + a * x2) / (1.0 + a * x2)));
+        return select(-v, v, x >= 0.0);
+    }
+
+    inline float cov(float d, float s) {
+        return 0.5 - 0.5 * erf_approx(d / (max(s, 1e-3) * 1.41421));
+    }
+
+    inline float gauss(float x, float w) {
+        return exp(-(x * x) / max(w * w, 1e-6));
+    }
+
+    inline float w_smoothstep(float a, float b, float x) {
+        return (a < b) ? smoothstep(a, b, x) : (a > b ? (1.0 - smoothstep(b, a, x)) : (x >= a ? 1.0 : 0.0));
+    }
+
+    inline float bloom(float d, float r, float reach) {
+        float o = max(d, 0.0);
+        float w = 1.0 - smoothstep(reach * 0.5, reach, o);
+        return (0.65 * gauss(o, r * 0.35) + 0.35 * gauss(o, r * 1.2)) * w;
+    }
+
+    inline float knee(float x) {
+        return 1.0 - exp(-max(x, 0.0));
+    }
+
+    inline float lum(float3 c) {
+        return dot(c, float3(0.2126, 0.7152, 0.0722));
+    }
+
+    inline float3 cooled(float3 c, float heat) {
+        float3 deep = c * c / max(max(c.r, max(c.g, c.b)), 0.02);
+        return mix(deep * 0.55, c, smoothstep(0.0, 0.75, heat));
+    }
+
+    inline float2 segdist(float2 p, float2 a, float2 b) {
+        float2 ab = b - a;
+        float h = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        return float2(length(p - a - ab * h), h);
     }
 
     inline float sd_shape(Inst i, float2 p) {
@@ -146,15 +305,88 @@ public enum RuneFXShaders: Sendable {
         return len > 1e-5 ? g / len : float2(0.0, -1.0);
     }
 
-    inline float clip_alpha(Inst i, float2 px) {
-        float2 d0 = px - i.clip.xy;
-        float2 d1 = i.clip.zw - px;
-        float m = min(min(d0.x, d0.y), min(d1.x, d1.y));
-        return smoothstep(-0.5, 0.5, m);
+    constant float CONTINUOUS_K = 1.52866483;
+
+    inline float sd_continuous(float2 p, float2 half_size, float r) {
+        float e = CONTINUOUS_K * r;
+        float2 q = half_size - abs(p);
+        float2 v = float2(e) - q;
+        if (v.x <= 0.0 || v.y <= 0.0) { return max(-q.x, -q.y); }
+        float u = atan2(v.y, v.x) * (4.0 / 3.14159265) - 1.0;
+        float u2 = u * u;
+        return length(v) - e * (1.14602295 + u2 * (-0.37573161 + u2 * (0.30796609 - 0.07724354 * u2)));
+    }
+
+    inline float sd_rounded(float2 p, float2 half_size, float4 radii) {
+        float r = radii.x;
+        if (p.x > 0.0) {
+            r = select(radii.y, radii.z, p.y > 0.0);
+        } else {
+            r = select(radii.x, radii.w, p.y > 0.0);
+        }
+        if (r < 0.0) { return sd_continuous(p, half_size, min(-r, min(half_size.x, half_size.y))); }
+        r = min(r, min(half_size.x, half_size.y));
+        float2 q = abs(p) - half_size + float2(r);
+        return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - r;
+    }
+
+    inline float ramp(float d, float fade) {
+        if (fade == 0.0) {
+            return clamp(d + 0.5, 0.0, 1.0);
+        }
+        float x = clamp(d / abs(fade), 0.0, 1.0);
+        if (fade < 0.0) {
+            return x;
+        }
+        return x * x * (3.0 - 2.0 * x);
+    }
+
+    inline float4 unpack_clip_radii(uint w) {
+        if (w == 0u) { return float4(0.0); }
+        if ((w & 0x60000000u) != 0x60000000u) {
+            return float4(as_type<float>(w));
+        }
+        float step = select(0.5, 2.0, (w & 0x10000000u) != 0u);
+        float sgn = select(1.0, -1.0, (w & 0x80000000u) != 0u);
+        return float4(
+            float(w & 0x7fu),
+            float((w >> 7u) & 0x7fu),
+            float((w >> 14u) & 0x7fu),
+            float((w >> 21u) & 0x7fu)
+        ) * (step * sgn);
+    }
+
+    inline float clip_alpha(float2 p, float4 c, uint4 packed) {
+        float4 f = float4(float2(as_type<half2>(packed.x)), float2(as_type<half2>(packed.y)));
+        float4 offset = unpack_unorm4x8_to_float(packed.z);
+        float4 hard = float4(p - c.xy, c.zw - p);
+        float alpha = 1.0;
+        for (uint edge = 0u; edge < 4u; edge++) {
+            float a = ramp(hard[edge], f[edge]);
+            if (offset[edge] >= 1.0) {
+                a = ramp(hard[edge], 0.0);
+            } else if (offset[edge] > 0.0) {
+                a = min(ramp(hard[edge], 0.0), ramp(hard[edge] + offset[edge] * abs(f[edge]), f[edge]));
+            }
+            alpha *= a;
+        }
+        if (packed.w != 0u) {
+            float2 half_size = (c.zw - c.xy) * 0.5;
+            alpha *= clamp(0.5 - sd_rounded(p - c.xy - half_size, half_size, unpack_clip_radii(packed.w)), 0.0, 1.0);
+        }
+        return alpha;
+    }
+
+    inline uint effective_blend_mode(Inst i, constant BackdropEncoding& enc) {
+        uint m = (uint(i.t.w) >> 1u) & 7u;
+        if ((m == 1u || m == 3u || m == 4u) && enc.present < 0.5) {
+            return 0u;
+        }
+        return m;
     }
 
     inline float blend_overlay_ch(float b, float s) {
-        return b <= 0.5 ? 2.0 * b * s : 1.0 - 2.0 * (1.0 - b) * (1.0 - s);
+        return select(1.0 - 2.0 * (1.0 - b) * (1.0 - s), 2.0 * b * s, b <= 0.5);
     }
 
     inline float3 blend_overlay(float3 b, float3 s) {
@@ -165,7 +397,7 @@ public enum RuneFXShaders: Sendable {
         if (s <= 0.5) {
             return b - (1.0 - 2.0 * s) * b * (1.0 - b);
         }
-        float d = b <= 0.25 ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(max(b, 0.0));
+        float d = select(sqrt(max(b, 0.0)), ((16.0 * b - 12.0) * b + 4.0) * b, b <= 0.25);
         return b + (2.0 * s - 1.0) * (d - b);
     }
 
@@ -173,19 +405,56 @@ public enum RuneFXShaders: Sendable {
         return float3(blend_soft_light_ch(b.r, s.r), blend_soft_light_ch(b.g, s.g), blend_soft_light_ch(b.b, s.b));
     }
 
-    inline float4 finish(float4 c, Inst i, float2 px, constant Globals& g) {
-        c *= i.shape.z * clip_alpha(i, px);
-        if (g.srgb > 0.5) {
-            float a = clamp(c.a, 0.0, 1.0);
-            float3 straight = a > 1e-6 ? c.rgb / a : float3(0.0);
-            c = float4(to_srgb(straight) * a, a);
-        }
+    inline float4 finish(float4 c0, float2 px, constant Globals& g) {
+        float4 c = max(c0, float4(0.0));
+        c.a = min(c.a, 1.0);
         if (g.dither > 0.5) {
             uint2 ip = uint2(px);
-            float n = u01(hu(ip.x, ip.y)) - u01(hu(ip.x + 17u, ip.y + 31u));
-            c.rgb += n / 255.0;
+            float n = (u01(ip.x + pcg(ip.y)) + u01(ip.x * 7919u + pcg(ip.y + 104729u))) - 1.0;
+            float3 s = to_srgb(c.rgb);
+            float gate = smoothstep(0.0, 3.0 / 255.0, max(s.r, max(s.g, s.b)));
+            c = float4(to_lin(max(s + float3(n / 255.0 * gate), float3(0.0))), c.a);
         }
         return c;
+    }
+
+    inline float4 fx_fs(
+        float4 shaded,
+        Inst i,
+        float2 px,
+        constant Globals& g,
+        texture2d<float> backdrop,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        float ca = clip_alpha(px, i.clip, i.fade);
+        if (ca <= 0.0) { return float4(0.0); }
+        float4 c = shaded * i.shape.z;
+        uint mode = effective_blend_mode(i, enc);
+        if (mode == 0u) {
+            if (g.srgb > 0.5) {
+                float3 cover = min(max(c.rgb, float3(0.0)), float3(c.a));
+                float3 straight = select(float3(0.0), cover / c.a, c.a > 1e-6);
+                return float4(to_srgb(straight) * c.a + to_srgb(max(c.rgb, float3(0.0)) - cover), c.a) * ca;
+            }
+            return c * ca;
+        }
+        float m = max(c.a, max(c.r, max(c.g, c.b)));
+        float as_ = clamp(m * ca, 0.0, 1.0);
+        if (as_ <= 0.0) { return float4(0.0); }
+        float3 cs_lin = select(float3(0.0), clamp(c.rgb / m, float3(0.0), float3(1.0)), m > 1e-6);
+        float3 cs = select(cs_lin, to_srgb(cs_lin), g.srgb > 0.5);
+        if (mode == 2u) {
+            return float4(cs * as_, as_);
+        }
+        float4 b_lin = bd(px, 1.0, g, backdrop, samp, enc);
+        float ab = clamp(b_lin.a, 0.0, 1.0);
+        float3 cb_lin = select(float3(0.0), clamp(b_lin.rgb / ab, float3(0.0), float3(1.0)), ab > 1e-6);
+        float3 cb = select(cb_lin, to_srgb(cb_lin), g.srgb > 0.5);
+        float3 blended = cb * cs;
+        if (mode == 3u) { blended = blend_overlay(cb, cs); }
+        if (mode == 4u) { blended = blend_soft_light(cb, cs); }
+        return float4(mix(cs, blended, ab) * as_, as_);
     }
 
     inline float2 recover_pixel(VOut in) {
@@ -210,66 +479,120 @@ public enum RuneFXShaders: Sendable {
     """
 
     public static let glowShader: String = commonPrelude + """
+    inline float3 aura_palette(float u, float3 a, float3 b, float3 c) {
+        float x = fract(u) * 3.0;
+        float w0 = w_smoothstep(1.0, 0.0, min(x, 3.0 - x));
+        float w1 = w_smoothstep(1.0, 0.0, abs(x - 1.0));
+        float w2 = w_smoothstep(1.0, 0.0, abs(x - 2.0));
+        return (a * w0 + b * w1 + c * w2) / max(w0 + w1 + w2, 1e-4);
+    }
+
+    inline float mask_tent(texture2d<float> source, sampler samp, float2 uv, float lod) {
+        float2 dims = float2(source.get_width(0), source.get_height(0));
+        float2 texel = exp2(lod) / max(dims, float2(1.0));
+        float2 o = texel * 0.5;
+        float s = source.sample(samp, uv + float2(o.x, o.y), level(lod)).a;
+        s += source.sample(samp, uv + float2(-o.x, o.y), level(lod)).a;
+        s += source.sample(samp, uv + float2(o.x, -o.y), level(lod)).a;
+        s += source.sample(samp, uv + float2(-o.x, -o.y), level(lod)).a;
+        return s * 0.25;
+    }
+
+    inline float4 shade_glow(
+        VOut in,
+        constant Globals& g,
+        const device Inst* insts,
+        texture2d<float> backdrop,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        Inst i = insts[in.id];
+        Ctx c = make_ctx(i, in.px);
+        float radius = i.p0.x;
+        float intensity = i.p0.y;
+        float inner = i.p0.z;
+        float occl = select(1.0, i.p0.w, effective_blend_mode(i, enc) == 0u);
+        float heat = i.p1.z;
+        float hot = i.p1.w;
+
+        float b = 0.0;
+        if (!c.reduced && i.p1.y > 0.0) {
+            b = 0.5 - 0.5 * cos(TAU * c.t / i.p1.y);
+            b = b * b * (3.0 - 2.0 * b);
+        }
+        float amp = i.p1.x;
+        intensity *= (1.0 - amp) + amp * b;
+        radius *= 1.0 + 0.22 * amp * b;
+        radius *= mix(0.72, 1.0, heat);
+        intensity *= pow(max(heat, 0.0), 1.6);
+        float3 tint = cooled(i.c0.rgb, heat);
+        float reach = radius * i.p2.z;
+
+        float3 light = float3(0.0);
+        float alpha = 0.0;
+        float edge = w_smoothstep(-c.aa, c.aa, c.d);
+
+        if (c.variant == 3) {
+            float2 uv = (c.p - i.aux2.xy) / i.aux2.zw;
+            float rpx = radius * c.scale;
+            float base = log2(max(rpx, 1.0)) - 0.6;
+            float m = 0.45 * mask_tent(source, samp, uv, max(base - 1.0, 0.0))
+                    + 0.35 * mask_tent(source, samp, uv, max(base, 0.0))
+                    + 0.2 * mask_tent(source, samp, uv, base + 1.3);
+            float core = source.sample(samp, uv, level(0.0)).a;
+            float gl = knee(m * 1.25 * intensity) * 1.1;
+            float hotc = core * hot * w_smoothstep(0.55, 1.0, heat);
+            light = tint * gl + i.c1.rgb * hotc * intensity * 0.6;
+            alpha = min(gl * occl, 1.0);
+            return finish(float4(light, alpha), in.px, g);
+        }
+
+        if (c.variant == 0) {
+            float out_g = bloom(c.d, radius, reach);
+            float in_g = inner * 0.7 * exp(min(c.d, 0.0) / max(0.4 * radius, 1e-4));
+            float gl = mix(in_g, out_g, edge);
+            float corew = gauss(max(c.d, 0.0), 0.3 * radius) * hot * w_smoothstep(0.6, 1.0, heat);
+            float3 col = mix(tint, i.c1.rgb, corew * 0.8);
+            float e = knee(gl * intensity * 1.1);
+            light = col * e;
+            alpha = e * occl;
+        } else if (c.variant == 1) {
+            float w = max(i.p2.y, c.aa * 0.75);
+            float core = gauss(c.d, w);
+            float out_g = bloom(c.d, radius, reach) * edge;
+            float in_g = inner * bloom(-c.d, radius * 0.6, reach) * (1.0 - edge);
+            float3 corec = mix(tint, i.c1.rgb, 0.7 * hot * w_smoothstep(0.5, 1.0, heat));
+            float e = knee((out_g + in_g) * intensity);
+            light = corec * core * 1.4 * intensity + tint * e * 0.9;
+            alpha = core * 0.6 * intensity + e * occl;
+        } else {
+            float2 pr = rrect_perim(c.q, c.half_size, c.r);
+            float u = pr.x / pr.y;
+            float flow = 0.0;
+            if (!c.reduced) { flow = c.t * i.p2.x; }
+            float3 col = aura_palette(u - flow, tint, i.c1.rgb, i.c2.rgb);
+            float wob = 0.85 + 0.15 * pgnoise(float2(u * 6.0, flow * 1.7 + 3.0), 6, c.seed);
+            float out_g = bloom(c.d, radius, reach) * edge;
+            float in_g = inner * exp(min(c.d, 0.0) / max(0.55 * radius, 1e-4)) * (1.0 - edge);
+            float hair = gauss(c.d + 0.6, max(i.p2.y, c.aa)) * 0.9;
+            float lit = knee((out_g + in_g) * wob * intensity * 1.1);
+            light = col * lit + mix(col, float3(1.0), 0.6) * hair * intensity * hot;
+            alpha = lit * occl;
+        }
+        return finish(float4(light, alpha), in.px, g);
+    }
+
     fragment float4 fx_glow_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
+        texture2d<float> backdrop [[texture(0)]],
         texture2d<float> source [[texture(1)]],
-        sampler samp [[sampler(0)]]
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
-        float d = sd_shape(i, p);
-        float radius = max(i.p0.x, 0.5);
-        float intensity = i.p0.y;
-        float inner = i.p0.z;
-        float occ = i.p0.w;
-        float breathe = i.p1.x;
-        float period = max(i.p1.y, 0.1);
-        float heat = i.p1.z;
-        float hot = i.p1.w;
-
-        float b = 1.0 + breathe * 0.22 * sin(6.28318530718 * i.t.x / period);
-        float r_eff = radius * b;
-        float inside_mask = mix(1.0, smoothstep(0.0, 1.5, d) + inner * (1.0 - smoothstep(0.0, 1.5, d)), occ);
-
-        float3 col = float3(0.0);
-        float alpha = 0.0;
-        int variant = int(round(i.t.z));
-
-        if (variant == 0) {
-            float falloff = exp(-max(d, 0.0) / r_eff) * (1.0 - smoothstep(r_eff * 3.0, r_eff * i.p2.z, max(d, 0.0)));
-            float in_fill = d < 0.0 ? inner * exp(d / r_eff) : 0.0;
-            float e = (falloff + in_fill) * intensity * heat * inside_mask;
-            col = mix(i.c0.rgb, i.c1.rgb, clamp(e * hot, 0.0, 1.0)) * e;
-            alpha = clamp(e * 0.65, 0.0, 1.0);
-        } else if (variant == 1) {
-            float rim_w = max(i.p2.y, 0.2);
-            float core_line = exp(-pow(abs(d) / rim_w, 2.0));
-            float halo = exp(-abs(d) / r_eff) * 0.7;
-            float e = (core_line * 1.4 + halo) * intensity * heat * inside_mask;
-            col = i.c0.rgb * (halo * intensity * heat) + i.c1.rgb * (core_line * intensity * heat * 1.5);
-            alpha = clamp(e * 0.75, 0.0, 1.0);
-        } else if (variant == 2) {
-            float2 c = i.rect.xy + i.rect.zw * 0.5;
-            float ang = atan2(p.y - c.y, p.x - c.x) + i.t.x * i.p2.x * 6.28318530718;
-            float u = fract(ang / 6.28318530718);
-            float3 pal = u < 0.3333 ? mix(i.c0.rgb, i.c1.rgb, u * 3.0)
-                : (u < 0.6667 ? mix(i.c1.rgb, i.c2.rgb, (u - 0.3333) * 3.0) : mix(i.c2.rgb, i.c0.rgb, (u - 0.6667) * 3.0));
-            float rim = exp(-pow(abs(d) / max(i.p2.y, 0.3), 2.0)) + exp(-max(d, 0.0) / r_eff) * 0.6;
-            float e = rim * intensity * heat * inside_mask;
-            col = pal * e;
-            alpha = clamp(e * 0.7, 0.0, 1.0);
-        } else {
-            float2 uv = (p - i.aux2.xy) / max(i.aux2.zw, float2(1.0));
-            float m = source.sample(samp, uv, level(2.0)).a;
-            float e = m * intensity * heat;
-            col = mix(i.c0.rgb, i.c1.rgb, clamp(m * hot, 0.0, 1.0)) * e;
-            alpha = clamp(e, 0.0, 1.0);
-        }
-
-        return finish(float4(col, alpha), i, px, g);
+        return fx_fs(shade_glow(in, g, insts, backdrop, source, samp, enc), insts[in.id], in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -277,7 +600,10 @@ public enum RuneFXShaders: Sendable {
     fragment float4 fx_pulse_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
-        const device Inst* insts [[buffer(1)]]
+        const device Inst* insts [[buffer(1)]],
+        texture2d<float> backdrop [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
@@ -353,7 +679,7 @@ public enum RuneFXShaders: Sendable {
             alpha = clamp(e, 0.0, 1.0);
         }
 
-        return finish(float4(col, clamp(alpha, 0.0, 1.0)), i, px, g);
+        return fx_fs(finish(float4(col, clamp(alpha, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -362,7 +688,10 @@ public enum RuneFXShaders: Sendable {
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
-        const device float4* data [[buffer(2)]]
+        const device float4* data [[buffer(2)]],
+        texture2d<float> backdrop [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
@@ -424,7 +753,7 @@ public enum RuneFXShaders: Sendable {
         float e = (core_e * 1.4 + halo_e) * intensity * strand_k * inside;
         float3 col = mix(i.c2.rgb, i.c0.rgb, clamp(halo_e * 1.5, 0.0, 1.0)) * halo_e * intensity * strand_k
                    + i.c1.rgb * core_e * intensity * strand_k * 1.4;
-        return finish(float4(col * inside, clamp(e * 0.8, 0.0, 1.0)), i, px, g);
+        return fx_fs(finish(float4(col * inside, clamp(e * 0.8, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -433,7 +762,10 @@ public enum RuneFXShaders: Sendable {
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
-        const device float4* data [[buffer(2)]]
+        const device float4* data [[buffer(2)]],
+        texture2d<float> backdrop [[texture(0)]],
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
@@ -494,7 +826,7 @@ public enum RuneFXShaders: Sendable {
             alpha = max(alpha, clamp(g_e, 0.0, 1.0));
         }
 
-        return finish(float4(col, alpha), i, px, g);
+        return fx_fs(finish(float4(col, alpha), in.px, g), i, in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -525,7 +857,7 @@ public enum RuneFXShaders: Sendable {
             float d = sd_shape(i, p);
             float mask = i.p1.x > 0.5 ? (1.0 - smoothstep(-1.0, 1.0, d)) : smoothstep(h, 0.0, max(i.rect.y - p.y, 0.0));
             float4 c = bd(p + off * mask, scale, g, backdrop, samp, enc);
-            return finish(float4(c.rgb * mask, mask), i, px, g);
+            return fx_fs(finish(float4(c.rgb * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else if (variant == 1) {
             float2 at = i.aux.xy;
             float reach = max(i.p0.x, 1.0);
@@ -543,7 +875,7 @@ public enum RuneFXShaders: Sendable {
             float cg = bd(p + off, scale, g, backdrop, samp, enc).g;
             float cb = bd(p + off * (1.0 - chroma), scale, g, backdrop, samp, enc).b;
             float a = clamp(ring * 1.2, 0.0, 1.0);
-            return finish(float4(float3(cr, cg, cb) * a, a), i, px, g);
+            return fx_fs(finish(float4(float3(cr, cg, cb) * a, a), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else if (variant == 2) {
             float d = sd_shape(i, p);
             float bevel = max(i.p0.x, 0.5);
@@ -568,7 +900,7 @@ public enum RuneFXShaders: Sendable {
             glass_rgb = mix(glass_rgb, i.c0.rgb, i.p2.y * presence);
             float rim = exp(-abs(d) / 1.5) * rim_s * presence * 0.25;
             float mask = 1.0 - smoothstep(-0.5, 0.5, d);
-            return finish(float4((glass_rgb + rim) * mask, mask), i, px, g);
+            return fx_fs(finish(float4((glass_rgb + rim) * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else if (variant == 3) {
             float2 center = i.rect.xy + i.rect.zw * 0.5;
             float2 uv = (p - center) / max(i.rect.zw * 0.5, float2(1.0));
@@ -581,14 +913,14 @@ public enum RuneFXShaders: Sendable {
             float scan = 1.0 - i.p0.z * (0.5 + 0.5 * sin(px.y * 3.14159 / max(i.p0.y, 0.5)));
             float vig = 1.0 - i.p1.x * 0.35 * r2;
             float mask = 1.0 - smoothstep(-i.p1.w, 0.5, sd_shape(i, p));
-            return finish(float4(float3(cr, cg, cb) * scan * vig * mask, mask), i, px, g);
+            return fx_fs(finish(float4(float3(cr, cg, cb) * scan * vig * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else {
             float2 off = i.p0.xy;
             float cr = bd(p + off, scale, g, backdrop, samp, enc).r;
             float cg = bd(p, scale, g, backdrop, samp, enc).g;
             float cb = bd(p - off, scale, g, backdrop, samp, enc).b;
             float mask = 1.0 - smoothstep(-i.p0.w, 0.5, sd_shape(i, p));
-            return finish(float4(float3(cr, cg, cb) * mask, mask), i, px, g);
+            return fx_fs(finish(float4(float3(cr, cg, cb) * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
         }
     }
     """
@@ -610,8 +942,10 @@ public enum RuneFXShaders: Sendable {
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
         const device float4* data [[buffer(2)]],
+        texture2d<float> backdrop [[texture(0)]],
         texture2d<float> source [[texture(1)]],
-        sampler samp [[sampler(0)]]
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
@@ -638,7 +972,7 @@ public enum RuneFXShaders: Sendable {
             acc /= max(wsum, 1e-4);
         }
 
-        return finish(acc, i, px, g);
+        return fx_fs(finish(acc, in.px, g), i, in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -648,8 +982,10 @@ public enum RuneFXShaders: Sendable {
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
         const device float4* data [[buffer(2)]],
+        texture2d<float> backdrop [[texture(0)]],
         texture2d<float> source [[texture(1)]],
-        sampler samp [[sampler(0)]]
+        sampler samp [[sampler(0)]],
+        constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
@@ -677,7 +1013,7 @@ public enum RuneFXShaders: Sendable {
             }
             float3 col = mix(i.c1.rgb * i.c1.a, i.c0.rgb, hl * intensity);
             float a = clamp((i.c1.a + hl * intensity) * mask, 0.0, 1.0);
-            return finish(float4(col * mask, a), i, px, g);
+            return fx_fs(finish(float4(col * mask, a), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else if (variant == 1) {
             uint base = uint(i.xf.x);
             uint count = uint(i.xf.y);
@@ -694,7 +1030,7 @@ public enum RuneFXShaders: Sendable {
                 col += i.c0.rgb * e;
                 a = max(a, clamp(e, 0.0, 1.0));
             }
-            return finish(float4(col, a), i, px, g);
+            return fx_fs(finish(float4(col, a), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else if (variant == 2) {
             uint base = uint(i.xf.x);
             float u = clamp((p.x - i.rect.x) / max(i.rect.z, 1.0), 0.0, 1.0);
@@ -709,14 +1045,14 @@ public enum RuneFXShaders: Sendable {
             }
             float mask = 1.0 - smoothstep(-max(i.p0.w, 1.0), 0.5, d);
             float e = i.p0.z * mask;
-            return finish(float4(col * e, clamp(length(col) * e, 0.0, 1.0)), i, px, g);
+            return fx_fs(finish(float4(col * e, clamp(length(col) * e, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
         } else {
             uint frame_t = i.p0.y > 0.0 ? uint(floor(i.t.x * i.p0.y)) : 0u;
             uint2 ip = uint2(px);
             float n = u01(hu(ip.x + frame_t * 131u, ip.y + frame_t * 977u)) - 0.5;
             float mask = 1.0 - smoothstep(-max(i.p0.z, 0.5), 0.5, d);
             float gval = n * i.p0.x * mask;
-            return finish(float4(float3(gval), abs(gval)), i, px, g);
+            return fx_fs(finish(float4(float3(gval), abs(gval)), in.px, g), i, in.px, g, backdrop, samp, enc);
         }
     }
     """
@@ -893,7 +1229,7 @@ public enum RuneFXShaders: Sendable {
             col = i.c0.rgb * (0.45 + 0.55 * diff) + spec * (1.0 - i.p0.x * 0.8);
         }
 
-        return finish(float4(col * mask * intensity, mask * intensity), i, px, g);
+        return fx_fs(finish(float4(col * mask * intensity, mask * intensity), in.px, g), i, in.px, g, backdrop, samp, enc);
     }
     """
 

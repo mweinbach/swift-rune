@@ -35,6 +35,30 @@ public struct FxStats: Sendable, Equatable {
     }
 }
 
+#if canImport(Metal)
+public struct FxFrame {
+    public var viewport: SIMD2<UInt32>
+    public var scale: Float
+    public var layers: [FxLayer]
+    public var backdrop: MTLTexture?
+    public var sources: [MTLTexture?]
+
+    public init(
+        viewport: SIMD2<UInt32>,
+        scale: Float = 1.0,
+        layers: [FxLayer],
+        backdrop: MTLTexture? = nil,
+        sources: [MTLTexture?] = []
+    ) {
+        self.viewport = viewport
+        self.scale = scale
+        self.layers = layers
+        self.backdrop = backdrop
+        self.sources = sources
+    }
+}
+#endif
+
 public struct FxPreparedLayer: Sendable, Equatable {
     public let layerIndex: Int
     public let kind: FxEffectKind
@@ -66,7 +90,8 @@ public struct FxRenderPassGraph: Sendable, Equatable {
         scale: Float,
         layers: [FxLayer],
         slots: [FxSlot]? = nil,
-        srgbBlend: Bool = false
+        srgbBlend: Bool = false,
+        hasBackdrop: Bool = false
     ) -> FxRenderPassGraph {
         let vpW = Float(viewport.x)
         let vpH = Float(viewport.y)
@@ -85,10 +110,10 @@ public struct FxRenderPassGraph: Sendable, Equatable {
             }
             var inst = packedInst
 
-            let bx0 = max(boundsPt.x * effScale, 0.0)
-            let by0 = max(boundsPt.y * effScale, 0.0)
-            let bx1 = min((boundsPt.x + boundsPt.w) * effScale, vpW)
-            let by1 = min((boundsPt.y + boundsPt.h) * effScale, vpH)
+            let bx0 = max(floorf(boundsPt.x * effScale), floorf(slot.clip.x), 0.0)
+            let by0 = max(floorf(boundsPt.y * effScale), floorf(slot.clip.y), 0.0)
+            let bx1 = min(ceilf((boundsPt.x + boundsPt.w) * effScale), ceilf(slot.clip.z), vpW)
+            let by1 = min(ceilf((boundsPt.y + boundsPt.h) * effScale), ceilf(slot.clip.w), vpH)
 
             if bx1 <= bx0 || by1 <= by0 {
                 stats.culledOffscreen += 1
@@ -108,9 +133,9 @@ public struct FxRenderPassGraph: Sendable, Equatable {
 
             var blurPx: Float = 0.0
             if case .distort(.lens(let l)) = layer.fx, l.frost > 0.0 {
-                blurPx = l.frost * FxPackConstants.lensFrostSigma * effScale
+                blurPx = max(min(max(l.frost, 0.0), 1.0) * FxPackConstants.lensFrostSigma * effScale, 0.0)
             } else if case .fill(let f) = layer.fx, case .flutedGlass(let fg) = f.style, fg.frost > 0.0 {
-                blurPx = fg.frost * FxPackConstants.lensFrostSigma * effScale
+                blurPx = max(min(max(fg.frost, 0.0), 1.0) * FxPackConstants.lensFrostSigma * effScale, 0.0)
             }
             maxBlurPx = max(maxBlurPx, blurPx)
 
@@ -125,6 +150,7 @@ public struct FxRenderPassGraph: Sendable, Equatable {
             stats.pixels += wPx * hPx
             stats.drawn += 1
 
+            let defaultBdSrgb = hasBackdrop ? false : srgbBlend
             prepared.append(FxPreparedLayer(
                 layerIndex: idx,
                 kind: kind,
@@ -133,7 +159,7 @@ public struct FxRenderPassGraph: Sendable, Equatable {
                 boundsPx: inst.bounds,
                 blurPx: blurPx,
                 needsBackdrop: needsBd,
-                backdropSrgb: slot.backdropSrgb ?? srgbBlend,
+                backdropSrgb: slot.backdropSrgb ?? defaultBdSrgb,
                 sourceSlot: layer.source?.slot,
                 instanceIndex: instIndex
             ))
@@ -231,12 +257,70 @@ public final class MaskPyramid: @unchecked Sendable {
     }
 }
 
+private final class BlurPyramid {
+    let size: SIMD2<UInt32>
+    let downTexture: MTLTexture
+    let upTexture: MTLTexture
+    let down: [MTLTexture]
+    let up: [MTLTexture]
+    var result: MTLTexture { up[0] }
+
+    static let maxMips = 6
+
+    init?(device: MTLDevice, viewport: SIMD2<UInt32>) {
+        let w = max((viewport.x + 1) / 2, 1)
+        let h = max((viewport.y + 1) / 2, 1)
+        let bitCount = 32 - max(w, h).leadingZeroBitCount
+        let mips = min(Self.maxMips, max(bitCount, 1))
+
+        func makeChain(_ label: String) -> (MTLTexture, [MTLTexture])? {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba16Float,
+                width: Int(w),
+                height: Int(h),
+                mipmapped: true
+            )
+            desc.mipmapLevelCount = mips
+            desc.usage = [.renderTarget, .shaderRead]
+            desc.storageMode = .private
+            guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+            tex.label = label
+            var views: [MTLTexture] = []
+            views.reserveCapacity(mips)
+            for m in 0..<mips {
+                guard let v = tex.makeTextureView(
+                    pixelFormat: .rgba16Float,
+                    textureType: .type2D,
+                    levels: m..<(m + 1),
+                    slices: 0..<1
+                ) else { return nil }
+                v.label = "\(label) mip \(m)"
+                views.append(v)
+            }
+            return (tex, views)
+        }
+
+        guard let (dTex, dViews) = makeChain("fx blur down"),
+              let (uTex, uViews) = makeChain("fx blur up") else {
+            return nil
+        }
+        self.size = viewport
+        self.downTexture = dTex
+        self.upTexture = uTex
+        self.down = dViews
+        self.up = uViews
+    }
+}
+
 public final class FxRenderer: @unchecked Sendable {
     public let device: MTLDevice
-    public let pixelFormat: MTLPixelFormat
+    public private(set) var pixelFormat: MTLPixelFormat
     public var options: FxOptions
+    private var explicitSrgb: Bool?
 
     private let samplerLinear: MTLSamplerState
+    private let dummyTexture: MTLTexture
+    private var formats: [MTLPixelFormat] = []
     private var libraries: [FxEffectKind: MTLLibrary] = [:]
     private var pipelines: [PipelineKey: MTLRenderPipelineState] = [:]
     private var blurLibrary: MTLLibrary?
@@ -245,6 +329,34 @@ public final class FxRenderer: @unchecked Sendable {
     private var mipLibrary: MTLLibrary?
     private var mipPipeline: MTLRenderPipelineState?
     private var fireSimPipeline: MTLComputePipelineState?
+
+    private var instBuffer: MTLBuffer
+    private var instCapacity: Int
+    private var tableBuffer: MTLBuffer
+    private var tableCapacity: Int
+    private var blurUniformsBuffer: MTLBuffer
+    private static let blurSlots = 64
+    private static let blurUniformStride = 256
+
+    private var blurPyramid: BlurPyramid?
+    private var blurSlot: Int = 0
+    private var lastViewport: SIMD2<UInt32> = .zero
+    private var lastGraph: FxRenderPassGraph?
+    private var preparedByLayer: [Int: FxPreparedLayer] = [:]
+    private var lastFrameBackdrop: MTLTexture?
+    private var lastFrameSources: [MTLTexture?] = []
+    private var layerBackdrops: [Int: MTLTexture] = [:]
+
+    private struct BindKey: Hashable {
+        let backdrop: ObjectIdentifier
+        let source: ObjectIdentifier
+        let blurred: ObjectIdentifier
+        let encFlags: UInt8
+    }
+    private var currentBindCache: [BindKey: UInt64] = [:]
+    private var previousBindCache: [BindKey: UInt64] = [:]
+    private var nextBindID: UInt64 = 1
+    private var layerBindIDs: [Int: UInt64] = [:]
 
     private struct PipelineKey: Hashable {
         let kind: FxEffectKind
@@ -259,6 +371,7 @@ public final class FxRenderer: @unchecked Sendable {
         self.device = dev
         self.pixelFormat = pixelFormat
         self.options = options
+        self.formats = [pixelFormat]
 
         let sd = MTLSamplerDescriptor()
         sd.minFilter = .linear
@@ -270,6 +383,68 @@ public final class FxRenderer: @unchecked Sendable {
             throw FxRendererError.metalUnavailable
         }
         self.samplerLinear = smp
+
+        let dummyDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
+        dummyDesc.usage = [.shaderRead]
+        dummyDesc.storageMode = .shared
+        guard let dummy = dev.makeTexture(descriptor: dummyDesc) else {
+            throw FxRendererError.textureCreationFailed
+        }
+        dummy.label = "fx dummy"
+        var zeroPixel: [UInt8] = [0, 0, 0, 0]
+        dummy.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zeroPixel, bytesPerRow: 4)
+        self.dummyTexture = dummy
+
+        self.instCapacity = 64
+        guard let ib = dev.makeBuffer(length: max(64 * MemoryLayout<FxInstRaw>.stride, 256), options: .storageModeShared) else {
+            throw FxRendererError.metalUnavailable
+        }
+        ib.label = "fx insts"
+        self.instBuffer = ib
+
+        self.tableCapacity = 4096
+        guard let tb = dev.makeBuffer(length: max(4096 * MemoryLayout<SIMD4<Float>>.stride, 256), options: .storageModeShared) else {
+            throw FxRendererError.metalUnavailable
+        }
+        tb.label = "fx tables"
+        self.tableBuffer = tb
+
+        guard let ub = dev.makeBuffer(length: Self.blurSlots * Self.blurUniformStride, options: .storageModeShared) else {
+            throw FxRendererError.metalUnavailable
+        }
+        ub.label = "fx blur params"
+        self.blurUniformsBuffer = ub
+    }
+
+    public func addFormat(_ format: MTLPixelFormat) {
+        if !formats.contains(format) {
+            formats.append(format)
+        }
+    }
+
+    public var builtPipelines: Int {
+        pipelines.count
+    }
+
+    public func setSrgbBlend(_ on: Bool) {
+        options.srgbBlend = on
+        explicitSrgb = on
+    }
+
+    private func resolveFormatForSrgb(_ srgb: Bool, format: MTLPixelFormat) -> MTLPixelFormat {
+        if srgb {
+            switch format {
+            case .rgba8Unorm_srgb: return .rgba8Unorm
+            case .bgra8Unorm_srgb: return .bgra8Unorm
+            default: return format
+            }
+        } else {
+            switch format {
+            case .rgba8Unorm: return .rgba8Unorm_srgb
+            case .bgra8Unorm: return .bgra8Unorm_srgb
+            default: return format
+            }
+        }
     }
 
     public func compileLibrary(for kind: FxEffectKind) throws -> MTLLibrary {
@@ -369,6 +544,16 @@ public final class FxRenderer: @unchecked Sendable {
         try compileUtilityPipelines()
     }
 
+    public func buildEveryPipeline() throws {
+        for fmt in formats {
+            for kind in FxEffectKind.allCases {
+                _ = try pipeline(for: kind, blend: .normal, format: fmt)
+                _ = try pipeline(for: kind, blend: .screen, format: fmt)
+            }
+        }
+        try compileUtilityPipelines()
+    }
+
     public func prepare(
         viewport: SIMD2<UInt32>,
         scale: Float,
@@ -384,6 +569,252 @@ public final class FxRenderer: @unchecked Sendable {
         )
     }
 
+    @discardableResult
+    public func prepare(frame: FxFrame, slots: [FxSlot] = []) -> FxRenderPassGraph {
+        if let srgb = explicitSrgb {
+            let resolved = resolveFormatForSrgb(srgb, format: pixelFormat)
+            addFormat(resolved)
+            pixelFormat = resolved
+        }
+
+        let graph = FxRenderPassGraph.build(
+            viewport: frame.viewport,
+            scale: frame.scale,
+            layers: frame.layers,
+            slots: slots.isEmpty ? nil : slots,
+            srgbBlend: options.srgbBlend,
+            hasBackdrop: frame.backdrop != nil
+        )
+
+        previousBindCache = currentBindCache
+        currentBindCache.removeAll(keepingCapacity: true)
+        layerBindIDs.removeAll(keepingCapacity: true)
+        layerBackdrops.removeAll(keepingCapacity: true)
+        preparedByLayer.removeAll(keepingCapacity: true)
+
+        lastViewport = frame.viewport
+        lastGraph = graph
+        lastFrameBackdrop = frame.backdrop
+        lastFrameSources = frame.sources
+        blurSlot = 0
+
+        let wantsBlur = graph.prepared.contains { $0.blurPx > 0.0 }
+        if wantsBlur {
+            try? compileUtilityPipelines()
+            if blurPyramid?.size != frame.viewport {
+                blurPyramid = BlurPyramid(device: device, viewport: frame.viewport)
+            }
+        }
+
+        uploadGraphBuffers(graph)
+
+        for item in graph.prepared {
+            preparedByLayer[item.layerIndex] = item
+            let readsBd = item.needsBackdrop && frame.backdrop != nil
+            let bdTex: MTLTexture = readsBd ? (frame.backdrop ?? dummyTexture) : dummyTexture
+            let srcTex: MTLTexture = item.sourceSlot.flatMap {
+                Int($0) < frame.sources.count ? frame.sources[Int($0)] : nil
+            } ?? dummyTexture
+            let blurredTex: MTLTexture = (item.blurPx > 0.0 && frame.backdrop != nil)
+                ? (blurPyramid?.result ?? dummyTexture)
+                : dummyTexture
+            let encFlags: UInt8 = (readsBd ? 2 : 0) | (item.backdropSrgb ? 1 : 0)
+            layerBindIDs[item.layerIndex] = resolveBindID(
+                backdrop: bdTex,
+                source: srcTex,
+                blurred: blurredTex,
+                encFlags: encFlags
+            )
+        }
+
+        return graph
+    }
+
+    /// Expose cached resource-group identity for a prepared layer (or `nil` when culled), for tests.
+    public func layerResourceHandle(_ layer: Int) -> UInt64? {
+        layerBindIDs[layer]
+    }
+
+    public func setLayerBackdrop(_ backdrop: MTLTexture, layer: Int) {
+        guard let item = preparedByLayer[layer], item.needsBackdrop else { return }
+        layerBackdrops[layer] = backdrop
+        let blurredTex: MTLTexture = item.blurPx > 0.0 ? (blurPyramid?.result ?? dummyTexture) : dummyTexture
+        let encFlags: UInt8 = 2 | (item.backdropSrgb ? 1 : 0)
+        layerBindIDs[layer] = resolveBindID(
+            backdrop: backdrop,
+            source: dummyTexture,
+            blurred: blurredTex,
+            encFlags: encFlags
+        )
+    }
+
+    @discardableResult
+    public func blurBackdrop(commandBuffer: MTLCommandBuffer, backdrop: MTLTexture, layer: Int) throws -> Bool {
+        setLayerBackdrop(backdrop, layer: layer)
+        guard let item = preparedByLayer[layer], item.blurPx > 0.0 else { return false }
+        if blurDownPipeline == nil || blurUpPipeline == nil {
+            try compileUtilityPipelines()
+        }
+        if blurPyramid?.size != lastViewport {
+            blurPyramid = BlurPyramid(device: device, viewport: lastViewport)
+        }
+        guard let pyr = blurPyramid,
+              let downPSO = blurDownPipeline,
+              let upPSO = blurUpPipeline else {
+            return false
+        }
+        let mips = pyr.down.count
+        guard mips >= 2, blurSlot + mips <= Self.blurSlots else { return false }
+
+        let level = min(max(log2f(max(item.blurPx / 2.0, 1.0)), 0.0), Float(mips - 1))
+        let n = min(max(Int(ceilf(level)), 1), mips - 1)
+        let frac = min(max(level - Float(n - 1), 0.0), 1.0)
+        let margin = item.blurPx * 3.0 + 8.0
+        let vw = lastViewport.x
+        let vh = lastViewport.y
+        let rx0 = max(item.boundsPx.x - margin, 0.0)
+        let ry0 = max(item.boundsPx.y - margin, 0.0)
+        let rx1 = min(item.boundsPx.z + margin, Float(vw))
+        let ry1 = min(item.boundsPx.w + margin, Float(vh))
+
+        let base = blurSlot
+        blurSlot += mips
+
+        let uBasePtr = blurUniformsBuffer.contents()
+        for k in 0..<mips {
+            var w = SIMD4<Float>(k + 1 == n ? frac : 1.0, 0.0, 0.0, 0.0)
+            memcpy(uBasePtr.advanced(by: (base + k) * Self.blurUniformStride), &w, MemoryLayout<SIMD4<Float>>.stride)
+        }
+
+        // Update xf.xy = (1.0, min(blurPx / 3.0, 1.0)) in instBuffer so shaders use the blurred pyramid.
+        if let xfOffset = MemoryLayout<FxInstRaw>.offset(of: \FxInstRaw.xf) {
+            var xf = SIMD4<Float>(1.0, min(item.blurPx / 3.0, 1.0), 0.0, 0.0)
+            let instOffset = Int(item.instanceIndex) * MemoryLayout<FxInstRaw>.stride + xfOffset
+            memcpy(instBuffer.contents().advanced(by: instOffset), &xf, MemoryLayout<SIMD4<Float>>.stride)
+        }
+
+        func scissorRect(mip m: Int) -> MTLScissorRect {
+            let k = Float(2 << m)
+            let w = max(((vw + 1) / 2) >> m, 1)
+            let h = max(((vh + 1) / 2) >> m, 1)
+            let x0 = min(UInt32(max(floorf(rx0 / k), 0.0)) &- min(UInt32(max(floorf(rx0 / k), 0.0)), 2), w - 1)
+            let y0 = min(UInt32(max(floorf(ry0 / k), 0.0)) &- min(UInt32(max(floorf(ry0 / k), 0.0)), 2), h - 1)
+            let x1 = min(UInt32(max(ceilf(rx1 / k), 0.0)) + 2, w)
+            let y1 = min(UInt32(max(ceilf(ry1 / k), 0.0)) + 2, h)
+            return MTLScissorRect(
+                x: Int(x0),
+                y: Int(y0),
+                width: Int(max(x1, x0 + 1) - x0),
+                height: Int(max(y1, y0 + 1) - y0)
+            )
+        }
+
+        func runPass(pso: MTLRenderPipelineState, src: MTLTexture, fine: MTLTexture, dst: MTLTexture, slot: Int, mip: Int) {
+            let rpd = MTLRenderPassDescriptor()
+            rpd.colorAttachments[0].texture = dst
+            rpd.colorAttachments[0].loadAction = .load
+            rpd.colorAttachments[0].storeAction = .store
+            guard let pass = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
+            pass.label = "fx blur"
+            pass.setScissorRect(scissorRect(mip: mip))
+            pass.setRenderPipelineState(pso)
+            pass.setFragmentTexture(src, index: 0)
+            pass.setFragmentTexture(fine, index: 1)
+            pass.setFragmentSamplerState(samplerLinear, index: 0)
+            pass.setFragmentBuffer(blurUniformsBuffer, offset: slot * Self.blurUniformStride, index: 0)
+            pass.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            pass.endEncoding()
+        }
+
+        for m in 0...n {
+            let src = (m == 0) ? backdrop : pyr.down[m - 1]
+            runPass(pso: downPSO, src: src, fine: dummyTexture, dst: pyr.down[m], slot: base + m, mip: m)
+        }
+        for m in (0..<n).reversed() {
+            let src = (m + 1 == n) ? pyr.down[m + 1] : pyr.up[m + 1]
+            runPass(pso: upPSO, src: src, fine: pyr.down[m], dst: pyr.up[m], slot: base + m, mip: m)
+        }
+        return true
+    }
+
+    public func drawLayer(encoder: MTLRenderCommandEncoder, layer: Int) throws {
+        try drawLayer(encoder: encoder, format: pixelFormat, origin: .zero, layer: layer)
+    }
+
+    public func drawLayer(
+        encoder: MTLRenderCommandEncoder,
+        format: MTLPixelFormat,
+        origin: SIMD2<Float>,
+        layer: Int
+    ) throws {
+        guard let item = preparedByLayer[layer],
+              let graph = lastGraph,
+              !graph.instances.isEmpty else { return }
+
+        let pso = try pipeline(for: item.kind, blend: item.blend, format: format)
+        let shifted = origin != .zero
+        if shifted {
+            encoder.setViewport(MTLViewport(
+                originX: Double(-origin.x),
+                originY: Double(-origin.y),
+                width: Double(lastViewport.x),
+                height: Double(lastViewport.y),
+                znear: 0.0,
+                zfar: 1.0
+            ))
+        }
+
+        var globals = FxGlobals(
+            viewport: SIMD2<Float>(Float(lastViewport.x), Float(lastViewport.y)),
+            dither: options.dither ? 1.0 : 0.0,
+            srgb: options.srgbBlend ? 1.0 : 0.0
+        )
+        encoder.setRenderPipelineState(pso)
+        encoder.setVertexBytes(&globals, length: MemoryLayout<FxGlobals>.stride, index: 0)
+        encoder.setFragmentBytes(&globals, length: MemoryLayout<FxGlobals>.stride, index: 0)
+        encoder.setVertexBuffer(instBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(instBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(tableBuffer, offset: 0, index: 2)
+        encoder.setFragmentSamplerState(samplerLinear, index: 0)
+
+        let overrideBd = layerBackdrops[layer]
+        let hasBd = (overrideBd != nil || lastFrameBackdrop != nil) && item.needsBackdrop
+        let bdTex = hasBd ? (overrideBd ?? lastFrameBackdrop ?? dummyTexture) : dummyTexture
+        let srcTex: MTLTexture = item.sourceSlot.flatMap {
+            Int($0) < lastFrameSources.count ? lastFrameSources[Int($0)] : nil
+        } ?? dummyTexture
+        let blurredTex: MTLTexture = (item.blurPx > 0.0 && (overrideBd != nil || lastFrameBackdrop != nil))
+            ? (blurPyramid?.result ?? dummyTexture)
+            : dummyTexture
+
+        encoder.setFragmentTexture(bdTex, index: 0)
+        encoder.setFragmentTexture(srcTex, index: 1)
+        encoder.setFragmentTexture(blurredTex, index: 2)
+
+        var enc = FxBackdropEncoding(encoded: item.backdropSrgb ? 1.0 : 0.0, present: hasBd ? 1.0 : 0.0)
+        encoder.setFragmentBytes(&enc, length: MemoryLayout<FxBackdropEncoding>.stride, index: 4)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: Int(item.instanceIndex))
+
+        if shifted {
+            encoder.setViewport(MTLViewport(
+                originX: 0.0,
+                originY: 0.0,
+                width: Double(lastViewport.x),
+                height: Double(lastViewport.y),
+                znear: 0.0,
+                zfar: 1.0
+            ))
+        }
+    }
+
+    public func drawAll(encoder: MTLRenderCommandEncoder, layers: [FxLayer], place: Place? = nil) throws {
+        for (i, l) in layers.enumerated() {
+            if place == nil || place == l.place {
+                try drawLayer(encoder: encoder, layer: i)
+            }
+        }
+    }
+
     public func encode(
         graph: FxRenderPassGraph,
         viewport: SIMD2<UInt32>,
@@ -396,6 +827,8 @@ public final class FxRenderer: @unchecked Sendable {
         let items = place == nil ? graph.prepared : graph.prepared.filter { $0.place == place }
         if items.isEmpty || graph.instances.isEmpty { return }
 
+        uploadGraphBuffers(graph)
+
         var globals = FxGlobals(
             viewport: SIMD2<Float>(Float(viewport.x), Float(viewport.y)),
             dither: options.dither ? 1.0 : 0.0,
@@ -403,33 +836,81 @@ public final class FxRenderer: @unchecked Sendable {
         )
         encoder.setVertexBytes(&globals, length: MemoryLayout<FxGlobals>.stride, index: 0)
         encoder.setFragmentBytes(&globals, length: MemoryLayout<FxGlobals>.stride, index: 0)
-
-        let instLen = graph.instances.count * MemoryLayout<FxInstRaw>.stride
-        guard let instBuf = device.makeBuffer(bytes: graph.instances, length: instLen, options: .storageModeShared) else {
-            return
-        }
-        encoder.setVertexBuffer(instBuf, offset: 0, index: 1)
-        encoder.setFragmentBuffer(instBuf, offset: 0, index: 1)
-
-        if !graph.tableData.isEmpty {
-            let dataLen = graph.tableData.count * MemoryLayout<SIMD4<Float>>.stride
-            if let dataBuf = device.makeBuffer(bytes: graph.tableData, length: dataLen, options: .storageModeShared) {
-                encoder.setFragmentBuffer(dataBuf, offset: 0, index: 2)
-            }
-        }
+        encoder.setVertexBuffer(instBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(instBuffer, offset: 0, index: 1)
+        encoder.setFragmentBuffer(tableBuffer, offset: 0, index: 2)
         encoder.setFragmentSamplerState(samplerLinear, index: 0)
-        if let backdrop { encoder.setFragmentTexture(backdrop, index: 0) }
-        if let blurred { encoder.setFragmentTexture(blurred, index: 2) }
+        encoder.setFragmentTexture(backdrop ?? dummyTexture, index: 0)
+        encoder.setFragmentTexture(blurred ?? dummyTexture, index: 2)
 
         for item in items {
             let pso = try pipeline(for: item.kind, blend: item.blend)
             encoder.setRenderPipelineState(pso)
             var enc = FxBackdropEncoding(encoded: item.backdropSrgb ? 1.0 : 0.0, present: backdrop != nil ? 1.0 : 0.0)
             encoder.setFragmentBytes(&enc, length: MemoryLayout<FxBackdropEncoding>.stride, index: 4)
-            if let slot = item.sourceSlot, Int(slot) < sources.count {
-                encoder.setFragmentTexture(sources[Int(slot)], index: 1)
-            }
+            let srcTex: MTLTexture = item.sourceSlot.flatMap {
+                Int($0) < sources.count ? sources[Int($0)] : nil
+            } ?? dummyTexture
+            encoder.setFragmentTexture(srcTex, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: Int(item.instanceIndex))
+        }
+    }
+
+    /// Expose buffer identities for steady-frame allocation tests.
+    internal var bufferIdentities: (insts: ObjectIdentifier, tables: ObjectIdentifier) {
+        (ObjectIdentifier(instBuffer), ObjectIdentifier(tableBuffer))
+    }
+
+    private func resolveBindID(backdrop: MTLTexture, source: MTLTexture, blurred: MTLTexture, encFlags: UInt8) -> UInt64 {
+        let key = BindKey(
+            backdrop: ObjectIdentifier(backdrop),
+            source: ObjectIdentifier(source),
+            blurred: ObjectIdentifier(blurred),
+            encFlags: encFlags
+        )
+        if let id = currentBindCache[key] { return id }
+        if let id = previousBindCache[key] {
+            currentBindCache[key] = id
+            return id
+        }
+        let id = nextBindID
+        nextBindID &+= 1
+        currentBindCache[key] = id
+        return id
+    }
+
+    private func uploadGraphBuffers(_ graph: FxRenderPassGraph) {
+        if !graph.instances.isEmpty {
+            if graph.instances.count > instCapacity {
+                var newCap = max(instCapacity, 64)
+                while newCap < graph.instances.count { newCap *= 2 }
+                if let nb = device.makeBuffer(length: max(newCap * MemoryLayout<FxInstRaw>.stride, 256), options: .storageModeShared) {
+                    nb.label = "fx insts"
+                    instBuffer = nb
+                    instCapacity = newCap
+                }
+            }
+            graph.instances.withUnsafeBytes { raw in
+                if let base = raw.baseAddress {
+                    memcpy(instBuffer.contents(), base, raw.count)
+                }
+            }
+        }
+        if !graph.tableData.isEmpty {
+            if graph.tableData.count > tableCapacity {
+                var newCap = max(tableCapacity, 4096)
+                while newCap < graph.tableData.count { newCap *= 2 }
+                if let nb = device.makeBuffer(length: max(newCap * MemoryLayout<SIMD4<Float>>.stride, 256), options: .storageModeShared) {
+                    nb.label = "fx tables"
+                    tableBuffer = nb
+                    tableCapacity = newCap
+                }
+            }
+            graph.tableData.withUnsafeBytes { raw in
+                if let base = raw.baseAddress {
+                    memcpy(tableBuffer.contents(), base, raw.count)
+                }
+            }
         }
     }
 
