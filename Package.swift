@@ -172,7 +172,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneSettings",
-            dependencies: ["Rune", "RuneKit"],
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
             path: "Sources/Examples/RuneSettings"
         ),
         .executableTarget(
@@ -425,6 +425,7 @@ let package = Package(
                 "RuneRef",
                 "RuneHello",
                 "RuneTodo",
+                "RuneSettings",
                 "RuneFrostedBar",
                 "RuneMatched",
                 "RuneKnobsDemo",
