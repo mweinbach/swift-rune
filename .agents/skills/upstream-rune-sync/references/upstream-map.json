@@ -1,0 +1,7554 @@
+{
+  "version": 1,
+  "upstreamRepo": "https://github.com/anomalyco/rune",
+  "crates": [
+    {
+      "upstreamPath": "crates/rune",
+      "swiftTarget": "Rune",
+      "swiftPath": "Sources/Rune",
+      "testTarget": "RuneTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/a11y/actions.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/dump.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/macos.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/mod.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/node.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/roles.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/text.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/tree.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/unix.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/a11y/windows.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/app.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/IOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/app/web.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/backdrop_blur.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/backdrop_composite.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/clip.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/content.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/hold_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/html.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/native.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/secret.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/secret_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/tx.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/clipboard/web.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/cold.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/color.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/compose.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/dirs.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/drag_out/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/drag_out/mod.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/drag_out/windows.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/drop_tests.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/caret_motion.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/direction_keys.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/display.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/history.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/history_tests.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/html.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/ime.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/input.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/keys.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/marks.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/model.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/rich_tests.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/secure.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/secure_tests.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/tests.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/typing.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/edit/typing_tests.rs",
+          "swift": [
+            "Sources/Rune/Edit.swift"
+          ]
+        },
+        {
+          "upstream": "src/el.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/a11y.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/anchor.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/backdrop.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/child_exit.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/direction.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/drop.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/effect.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/element_info.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/enter_delay.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/focus.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/grid.rs",
+          "swift": [
+            "Sources/Rune/GridLayout.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/growth.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/handler_set.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/handlers.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/help.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/input.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/isolates.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/layout.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/layout_watch.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/live_colors.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/motion.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/paragraphs.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/pills.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/pills/tests.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/pixel_snap.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/rare.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/ride_trailing.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/scroll.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/selection_style.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/sticky.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/text.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/text_spec.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/tx.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/tx/keys.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/tx/press.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/tx/scroll.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/tx/tests.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/virtual_list.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/virtual_rows.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/visual.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/el/visuals.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/file_dialog.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/file_dialog/portal.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/file_dialog/portal_format.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/flight.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/clock.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/clock_walk_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/encoded.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/encoded_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/host_clock.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/live_log.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/present_time.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/present_time_walk_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/present_worker.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/present_worker_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/profile.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/surface_stats.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/frame/surface_stats_walk_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/backend.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/health.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/health_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/bench.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/builtin.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/builtin_table.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/compute.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/compute_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/derive.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/derive_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/device.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/encode.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/layout.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/mod.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/pass.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/pipeline.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/query.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/resource.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/shader.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/shader_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/store.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/store_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/submit.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/surface.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/metal/tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/pick.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/pick_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/springs.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu/springs.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/growth.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/growth/walk.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/hot.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/image.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/animated.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/avif.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/from_url.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/from_url_tests.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/mip_tests.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/mips.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/image/pixels.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/input.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/canvas_input.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/chord.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/chord_label.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/cursor.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/cursor/image.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/cursor/image_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/cursor/os.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/cursor/web.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/drop_pointer.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/fn_key.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/key_diagnostics.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/keycaps.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/physical_input.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/pointer_observer.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/secure_input.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/time.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/input/time_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/jump_list.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/labels.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/latest.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/latest/pool.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/latest/tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/layer_blur.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/Rune/Exports.swift",
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/live.rs",
+          "swift": [
+            "Sources/Rune/Live.swift"
+          ]
+        },
+        {
+          "upstream": "src/live/wake_tests.rs",
+          "swift": [
+            "Sources/Rune/Live.swift"
+          ]
+        },
+        {
+          "upstream": "src/live_only_tests.rs",
+          "swift": [
+            "Sources/Rune/Live.swift"
+          ]
+        },
+        {
+          "upstream": "src/machine.rs",
+          "swift": [
+            "Sources/Rune/Machine.swift"
+          ]
+        },
+        {
+          "upstream": "src/machine/tests.rs",
+          "swift": [
+            "Sources/Rune/Machine.swift"
+          ]
+        },
+        {
+          "upstream": "src/marks.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/memo.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/memo/snapshot.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/memo/snapshot/tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/commits.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/evidence.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/kicks.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/loops.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/paint.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/painted.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/raster.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/regions.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check/series.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/check_tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/gate.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/loop_tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/mod.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/paint_tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/spring_none_tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/motion_gate/tests.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/default_macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/key_equivalent.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/key_equivalent_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/mod.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/standard.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_menu/standard_macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/mod.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/pipeline.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/place.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/place_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/video.wgsl",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/native_surface/windows.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/open_url.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/open_url/incoming.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/open_url/incoming_tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/open_url/instance.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/outline.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/any_host.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/draw.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/frame.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/input.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/lifetime.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/lost_release_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/more_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/options.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/placement.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/presence.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/presence_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/requests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/state_walk_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/surface.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay/xwayland.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/IOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/AndroidPlatform.swift",
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/accent.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/activation.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/app_icon.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/display_link.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/IOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/embed.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/ime.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/ime/windows.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/layer_shell.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/layer_shell_machine.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/layer_shell_machine_tests.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/appearance.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/cursor.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/drop.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/geometry.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/geometry_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/help.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/hold.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/hold_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/panel_bridge.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/pointer.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/pointer_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/presence.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/presence_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/presentation.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/surface.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/surface_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/traffic_lights.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/window_shape.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/macos/window_shape_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/main_queue.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/portal_appearance.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/portal_appearance_tests.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/preferences.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/ready_signal.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/ready_signal_tests.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/reopen.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/scroll_bars.rs",
+          "swift": [
+            "Sources/Rune/PlatformCommon.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/cpu_canvas.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/full_faces.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/health.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/input.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/page.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/page_fonts.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web/platform.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web_math.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/web_math_tests.rs",
+          "swift": [
+            "Sources/Rune/WebPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/cloak.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/dark_mode.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/dcomp_handover.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/dib.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/dpi_drag.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/drop_target.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/frame.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/jump_list.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/occlusion.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/placement.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/pointer.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/press_point.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/session_lock.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/win32/taskbar.rs",
+          "swift": [
+            "Sources/Rune/Win32Platform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/x11.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/x11/overlay.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/x11/pointer.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/x11/xwayland.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/platform/x11/xwayland_tests.rs",
+          "swift": [
+            "Sources/Rune/LinuxPlatform.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/chrome_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/folds.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/groups_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/keys_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/list.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/live.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/nav.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/open.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/press_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/real_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/region.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/region_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/scenes_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/stage.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/stage_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/story.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/testing.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/tree.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/variants.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/variants_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/view.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/widths.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground/widths_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/playground_tests.rs",
+          "swift": [
+            "Sources/Rune/PlaygroundHost.swift"
+          ]
+        },
+        {
+          "upstream": "src/popup_menu/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/popup_menu/mod.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/popup_menu/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/popup_menu/win32.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/prefs.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/quit.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/quit/mac.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/quit/relaunch.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/quit/win32.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/control.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/control_tests.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/fake.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/macos.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/meter.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/mod.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/tests.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/unsupported.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/render.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/backdrop_blur.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/backdrop_blur_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/backdrop_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/breaker.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/breaker_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/continuous_corner_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/backdrop.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/bin.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/blend.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/damage.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/drift.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/fill.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/painter.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/pool.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/raster.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/record.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/scroll.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/shade.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/cpu_boot/tool.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/dxbc.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/dxbc_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/fill.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/first_use.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/gpu_events.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/gpu_loss.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layer_blur.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layer_filter_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layer_rebind_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layer_show_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layers.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layers/plan.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layers/plan_frame_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/layers/plan_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/metallib.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/outlines.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/pass.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/pipelines.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/prewarm.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/surface_alpha.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/translucency.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/uber/dxbc_hash.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/uber/metallib_hash.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/uber/windfoil_hash.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/uber_wgsl.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/upload.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/upload/tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/variant.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/warm.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/warm_tests.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/warmup.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/render/windfoil_metallib.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/bundle.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/clip.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/mod.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/scrub.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/tape.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/tests.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/rewind/track.rs",
+          "swift": [
+            "Sources/Rune/RecorderAndRewind.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/anchor.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/anchor_fit_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/anchor_zoom_motion_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/anchor_zoom_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/anchored_grow_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/aspect_fit_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/bands_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/apply.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/apply_scratch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/flatten.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/layout_diagnostics.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/measure.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/memo_reuse.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/prune.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/relayout.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/remount.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/text_layout.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/watch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/commit/why.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/cx.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/drag_out_host.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/elements.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/event_log.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/font_families.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/frame.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/grid_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/hot_state.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/hover_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/action.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/app_ime.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/capture.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/drop.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/field_menu.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/file_dialog.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/focus.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/focus_machine.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/gesture.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/help.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/help_look.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/hit.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/hover.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/hover_delay.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/hover_delay_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/key_releases.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/key_releases_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/keys.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/modal_focus.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/modifier_keys.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/physical.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/pointer.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/popup.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/press_repeat.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/press_repeat_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/press_run.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/press_run_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/secondary.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/titlebar.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input/touch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/input_click_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/interaction.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/key_index.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/layer_cache_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/layer_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/layout_read.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/line_clamp_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/live_check_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/live_colors_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/memo_reuse_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/content_slide.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/content_slide_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/flights.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/flights_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/fold_hold.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/growth_rows.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/growth_runs.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/idle_meter.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/landing_hold.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/live_check.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/live_latch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/live_latch_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/loop_clock.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/motion_elements.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/props.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/reveal_phase.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/rewind.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/timer_wake.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/tracks.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/motion/unseen_presence.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/on_key_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/bands.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/blend.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/border.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/build.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/cache_layer.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/cache_layer_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/content.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/exit_mask.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/grid.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/helpers.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/pixel_snap.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/raster_check.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/shadow.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/shape.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/slots.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/soft_edges.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/text_flights.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint/tracks.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint_probe.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/paint_tracks_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/pixel_snap_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/playground.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/rounded_clip_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/row_reorder_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/anchor.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/bottom.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/drawn.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/edge.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/mode.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/nudge.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/nudge_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/offset.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/requests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/requests_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/reveal.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/sticky.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/touch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/watch.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/scroll/x.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/select_all_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/caret.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/click.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/copy_join.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/edge_scroll.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/edge_scroll_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/links.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/phase.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/rects.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/select_all.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/selectable.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/text_marks.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/text_selection.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection/toolbar.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/selection_api_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/size_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/system_settings.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/app_ime.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/context_menu_key.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/draw_on.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/event_markers.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/find_key.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/fold_glide.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/glyph_replay.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/group_opacity.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/id_pruning.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/input_clipboard.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/layout_hover.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/layout_reads.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/layout_rows.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/loop_sleep.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/matched_scroll.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/mod.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/no_motion.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/one_snap.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/picture_scale.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/pointer_drag.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/pointer_hit.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/press_moving.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/relayout.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/relayout/live.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/remount.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/reveal_chain.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/reveal_phase.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_carried.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_children.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_growth.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_hover.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_retarget.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/scroll_spring.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/secure_text.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/selection_edge_walk.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/selection_phase.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/selection_phase_virtual.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/shimmer.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/springs.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/stream_overflow.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/stream_pace.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/text_glide.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/text_keys.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/text_rebreak.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/titlebar_press.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/unseen_entrances.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/tests/window_wake.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/timer_wake_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/truncate_fade_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/truncate_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/turn.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/types.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/fill.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/fill_tests.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/pins.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/pins_tests.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/row_reorder.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/selection.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/selection_collect.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual/window.rs",
+          "swift": [
+            "Sources/Rune/VirtualList.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual_selection_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/virtual_store_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/visible.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/visible_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/a11y.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/a11y_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/export.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/export/css.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/export/page.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/export/tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/page.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/page_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/web/runtime.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/width_hold_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/window_requests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/window_requests_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/runtime/zoom.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/shader.wgsl",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/shape.rs",
+          "swift": [
+            "Sources/Rune/Shape.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/keys.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/layout_macos.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/macos.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/mod.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/parse.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/host_handler_tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/lifecycle_tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/machine.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/machine_tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/routing_tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/service/teardown_tests.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/wayland.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/windows.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/x11.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcuts/x11_repeat.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/spell.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/spell/macos.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/spell/pause.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/spell/windows.rs",
+          "swift": [
+            "Sources/Rune/AccessibilityAndInput.swift"
+          ]
+        },
+        {
+          "upstream": "src/states.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/system_material/macos.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/system_material/mod.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/system_material/tests.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/task.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/task/web.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/taskbar.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/text.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/atlas.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/atlas_fill.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/case.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/collate.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/color_icon.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/colr.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/core_text_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/coretext_match.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/coretext_match_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/cursor.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/decorations.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/default_fonts.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/default_fonts_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/fallback.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/families.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/fill_bench.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/full_faces.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/full_faces_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/glyph_cache.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/glyph_cache_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/glyph_emit.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/hairline.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/hash.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/hidden_axes.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/icon.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/icon_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/inline_fit.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/language.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/layout_cache.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/line_break.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/line_metrics.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/ltr_units.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/macos.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/macos/flatten.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/macos/hint.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/macos/smoothing.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/macos/smoothing_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/mask_cache.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/measure.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/measure/ink.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/measure/ink_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/build.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/cover.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/fill.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/lanes.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/path.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/outline/store.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/paragraphs.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/pill_chips.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/pixel_compare.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/pixel_compare_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/quality_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/rewrap_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/rich_layout.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/rich_layout_tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/run.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/span.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/support.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/svg_path.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/synthetic_bold.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/system_fonts.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/system_fonts/core_text.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/system_fonts/direct_write.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/system_fonts/fontconfig.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/system_weight.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/tests.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/trak.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/underline.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/windfoil.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/windows.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/windows/direct_write.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/windows/owner.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/text/windows/skia_gamma.rs",
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ]
+        },
+        {
+          "upstream": "src/theme.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/time.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/time/local.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/time/page_clock.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/time/page_clock_tests.rs",
+          "swift": [
+            "Sources/Rune/Runtime.swift"
+          ]
+        },
+        {
+          "upstream": "src/tok.rs",
+          "swift": [
+            "Sources/Rune/El.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/args.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/crop.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/eased_input.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/headless.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/headless_run.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/html.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/html_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/cause.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/export.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/frame.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/frame_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/gate.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/names.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/rollup.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/sampler_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/stack.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/watchdog.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/interaction/watchdog_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/key_names.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/parser_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/budget.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/commits.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/commits_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/idle.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/idle_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/launch.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/runq.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/perf_warn/tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/playground_cli_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/record.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/script.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/strip.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/test_alloc.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/trace.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/virtual_desktop.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/virtual_desktop/composite.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/virtual_desktop/displays.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/virtual_desktop/tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/virtual_desktop/window.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tooling/window_tests.rs",
+          "swift": [
+            "Sources/Rune/Tooling.swift"
+          ]
+        },
+        {
+          "upstream": "src/tracked.rs",
+          "swift": [
+            "Sources/Rune/FlightAndMemo.swift"
+          ]
+        },
+        {
+          "upstream": "src/tray.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/tray/sni.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/tray/win32.rs",
+          "swift": [
+            "Sources/Rune/DesktopIntegration.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/foreign.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/macos.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/mod.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/phases.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/phases_poster_tests.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/phases_tests.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/tests.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/turn.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/unsupported.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/waker.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/audio.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/decoder.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/gpu.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/layer.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/machine.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/mf.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/mod.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/still.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/video/windows/vsync.rs",
+          "swift": [
+            "Sources/Rune/MediaPipeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/window.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/any_host.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/app_events.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/backoff.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/backoff_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/chrome.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/configure.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/covered_draw.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/covered_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/cpu_frame.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/create.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/draw.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/event_loop.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/events.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/file_drop.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/first_frame.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/float_on_open.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/frame.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/frame_move_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/handle.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/handle_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/keys.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/keys_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/launch_drawables.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/life.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/life_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/lifecycle.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/mac.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/mac_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/minimize.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/native.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/native_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/occluded_surface_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/pacing.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/platform_sync.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/presented.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/redraw.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/reveal.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/reveal_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/shell_requests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/sight.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/spec.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/stepping.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/titlebar.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/titlebar/caption.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/video_layer.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/wake.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/wake_tests.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        },
+        {
+          "upstream": "src/window/win.rs",
+          "swift": [
+            "Sources/Rune/MacOSApp.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-kit",
+      "swiftTarget": "RuneKit",
+      "swiftPath": "Sources/RuneKit",
+      "testTarget": "RuneKitTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/accordion.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/actions.rs",
+          "swift": [
+            "Sources/RuneKit/Actions.swift"
+          ]
+        },
+        {
+          "upstream": "src/badge.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/budget.rs",
+          "swift": [
+            "Sources/RuneKit/Budget.swift"
+          ]
+        },
+        {
+          "upstream": "src/card.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/checkbox.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/collapsible.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/combobox.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/css.rs",
+          "swift": [
+            "Sources/RuneKit/Css.swift"
+          ]
+        },
+        {
+          "upstream": "src/dialog.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/copy.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/mod.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/model.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/myers.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/pairs.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/state.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/view.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/view/line_info.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/diff/words.rs",
+          "swift": [
+            "Sources/RuneKit/Diff.swift"
+          ]
+        },
+        {
+          "upstream": "src/feedback.rs",
+          "swift": [
+            "Sources/RuneKit/Feedback.swift"
+          ]
+        },
+        {
+          "upstream": "src/feedback/radar.rs",
+          "swift": [
+            "Sources/RuneKit/Feedback.swift"
+          ]
+        },
+        {
+          "upstream": "src/field.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/glyphs.rs",
+          "swift": [
+            "Sources/RuneKit/Glyphs.swift"
+          ]
+        },
+        {
+          "upstream": "src/grip.rs",
+          "swift": [
+            "Sources/RuneKit/Grip.swift"
+          ]
+        },
+        {
+          "upstream": "src/image_zoom/gesture.rs",
+          "swift": [
+            "Sources/RuneKit/ImageZoom.swift"
+          ]
+        },
+        {
+          "upstream": "src/image_zoom/glide.rs",
+          "swift": [
+            "Sources/RuneKit/ImageZoom.swift"
+          ]
+        },
+        {
+          "upstream": "src/image_zoom/math.rs",
+          "swift": [
+            "Sources/RuneKit/ImageZoom.swift"
+          ]
+        },
+        {
+          "upstream": "src/image_zoom/mod.rs",
+          "swift": [
+            "Sources/RuneKit/ImageZoom.swift"
+          ]
+        },
+        {
+          "upstream": "src/image_zoom/stage.rs",
+          "swift": [
+            "Sources/RuneKit/ImageZoom.swift"
+          ]
+        },
+        {
+          "upstream": "src/keybind.rs",
+          "swift": [
+            "Sources/RuneKit/Kit.swift"
+          ]
+        },
+        {
+          "upstream": "src/kit.rs",
+          "swift": [
+            "Sources/RuneKit/Kit.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneKit/Kit.swift"
+          ]
+        },
+        {
+          "upstream": "src/line_selection.rs",
+          "swift": [
+            "Sources/RuneKit/LineSelection.swift"
+          ]
+        },
+        {
+          "upstream": "src/list.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/autolink.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/bidi.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/cache.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/find.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/highlight.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/image.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/interrupt.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/interrupt_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/link_icon.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/links.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/parser.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/plain.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/render.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/stream.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/stream_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/style.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/table.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/markdown/tests.rs",
+          "swift": [
+            "Sources/RuneKit/Markdown.swift"
+          ]
+        },
+        {
+          "upstream": "src/menu.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/mermaid.rs",
+          "swift": [
+            "Sources/RuneKit/KitMermaid.swift"
+          ]
+        },
+        {
+          "upstream": "src/neutral.rs",
+          "swift": [
+            "Sources/RuneKit/Kit.swift"
+          ]
+        },
+        {
+          "upstream": "src/notes.rs",
+          "swift": [
+            "Sources/RuneKit/Notes.swift"
+          ]
+        },
+        {
+          "upstream": "src/notes_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Notes.swift"
+          ]
+        },
+        {
+          "upstream": "src/overlay.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/palette.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/popover.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/popover_tests.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/popup_list.rs",
+          "swift": [
+            "Sources/RuneKit/PopupList.swift"
+          ]
+        },
+        {
+          "upstream": "src/radio.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/rolling_text.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/scroll_bar.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/scroll_bar/press.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/scroll_bar/tests.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/scroll_bar/visibility.rs",
+          "swift": [
+            "Sources/RuneKit/Components.swift"
+          ]
+        },
+        {
+          "upstream": "src/search.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/segmented.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/select.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/mod.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/pane.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/reorder.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/sidebar.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/split.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/tab_strip.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/tab_strip/auto_scroll.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/tab_strip/drag.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/tab_strip/tab.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/tab_strip/tests.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/titlebar.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shell/toolbar.rs",
+          "swift": [
+            "Sources/RuneKit/Shell.swift"
+          ]
+        },
+        {
+          "upstream": "src/shortcut_recorder.rs",
+          "swift": [
+            "Sources/RuneKit/ShortcutRecorder.swift"
+          ]
+        },
+        {
+          "upstream": "src/switch.rs",
+          "swift": [
+            "Sources/RuneKit/Controls.swift"
+          ]
+        },
+        {
+          "upstream": "src/syntax.rs",
+          "swift": [
+            "Sources/RuneKit/Syntax.swift"
+          ]
+        },
+        {
+          "upstream": "src/syntax/paths.rs",
+          "swift": [
+            "Sources/RuneKit/Syntax.swift"
+          ]
+        },
+        {
+          "upstream": "src/table.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/text_input.rs",
+          "swift": [
+            "Sources/RuneKit/InputsAndContainers.swift"
+          ]
+        },
+        {
+          "upstream": "src/toast.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/toast_stack.rs",
+          "swift": [
+            "Sources/RuneKit/Overlays.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree.rs",
+          "swift": [
+            "Sources/RuneKit/FileTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree/file_tree.rs",
+          "swift": [
+            "Sources/RuneKit/FileTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree/tests.rs",
+          "swift": [
+            "Sources/RuneKit/FileTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree/view.rs",
+          "swift": [
+            "Sources/RuneKit/FileTree.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-motion",
+      "swiftTarget": "RuneMotion",
+      "swiftPath": "Sources/RuneMotion",
+      "testTarget": "RuneMotionTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/animated.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/carry.rs",
+          "swift": [
+            "Sources/RuneMotion/Snap.swift"
+          ]
+        },
+        {
+          "upstream": "src/choreo.rs",
+          "swift": [
+            "Sources/RuneMotion/Choreography.swift"
+          ]
+        },
+        {
+          "upstream": "src/clock.rs",
+          "swift": [
+            "Sources/RuneMotion/Clock.swift"
+          ]
+        },
+        {
+          "upstream": "src/curve.rs",
+          "swift": [
+            "Sources/RuneMotion/Curve.swift"
+          ]
+        },
+        {
+          "upstream": "src/cycle.rs",
+          "swift": [
+            "Sources/RuneMotion/Sequence.swift"
+          ]
+        },
+        {
+          "upstream": "src/easing.rs",
+          "swift": [
+            "Sources/RuneMotion/Easing.swift"
+          ]
+        },
+        {
+          "upstream": "src/gesture.rs",
+          "swift": [
+            "Sources/RuneMotion/Gesture.swift"
+          ]
+        },
+        {
+          "upstream": "src/keyframes.rs",
+          "swift": [
+            "Sources/RuneMotion/Keyframes.swift"
+          ]
+        },
+        {
+          "upstream": "src/layer.rs",
+          "swift": [
+            "Sources/RuneMotion/Layer.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/looping.rs",
+          "swift": [
+            "Sources/RuneMotion/Looping.swift"
+          ]
+        },
+        {
+          "upstream": "src/math.rs",
+          "swift": [
+            "Sources/RuneMotion/Snap.swift"
+          ]
+        },
+        {
+          "upstream": "src/props.rs",
+          "swift": [
+            "Sources/RuneMotion/Props.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene.rs",
+          "swift": [
+            "Sources/RuneMotion/Scene.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene/phase.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene/presence.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene/props.rs",
+          "swift": [
+            "Sources/RuneMotion/Props.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene/trailing.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/scene/travel.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/sequence.rs",
+          "swift": [
+            "Sources/RuneMotion/Sequence.swift"
+          ]
+        },
+        {
+          "upstream": "src/snap.rs",
+          "swift": [
+            "Sources/RuneMotion/Snap.swift"
+          ]
+        },
+        {
+          "upstream": "src/spring.rs",
+          "swift": [
+            "Sources/RuneMotion/Spring.swift"
+          ]
+        },
+        {
+          "upstream": "src/store.rs",
+          "swift": [
+            "Sources/RuneMotion/AnimationStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/store/started.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/store/tracks.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/store/typed.rs",
+          "swift": [
+            "Sources/RuneMotion/Animated.swift"
+          ]
+        },
+        {
+          "upstream": "src/tokens.rs",
+          "swift": [
+            "Sources/RuneMotion/Value.swift"
+          ]
+        },
+        {
+          "upstream": "src/trace.rs",
+          "swift": [
+            "Sources/RuneMotion/MotionTrace.swift"
+          ]
+        },
+        {
+          "upstream": "src/transition.rs",
+          "swift": [
+            "Sources/RuneMotion/Transition.swift"
+          ]
+        },
+        {
+          "upstream": "src/value.rs",
+          "swift": [
+            "Sources/RuneMotion/Value.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-fx",
+      "swiftTarget": "RuneFX",
+      "swiftPath": "Sources/RuneFX",
+      "testTarget": "RuneFXTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/binds.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/catalog.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXCatalog.swift"
+          ]
+        },
+        {
+          "upstream": "src/cpu.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXCPU.swift"
+          ]
+        },
+        {
+          "upstream": "src/fill.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXFills.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFX.swift"
+          ]
+        },
+        {
+          "upstream": "src/pack.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFX.swift"
+          ]
+        },
+        {
+          "upstream": "src/params.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXParams.swift"
+          ]
+        },
+        {
+          "upstream": "src/pipes.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/renderer.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/renderer_prepare.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/blur.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/common.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/distort.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/electric.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/extras.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/fill.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/fire.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/firesim.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/glow.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/mip.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/motion.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/pulse.wgsl",
+          "swift": [
+            "Sources/RuneFX/RuneFXShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/sim.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFXSim.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneFX/RuneFX.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-light",
+      "swiftTarget": "RuneLight",
+      "swiftPath": "Sources/RuneLight",
+      "testTarget": "RuneLightTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/cpu.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLightCPU.swift"
+          ]
+        },
+        {
+          "upstream": "src/glass.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLightGlass.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLightRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLight.swift"
+          ]
+        },
+        {
+          "upstream": "src/render.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLightRenderer.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/common.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/composite.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/field.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/gbuffer.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/gi.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/glass.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/shaders/shadow.wgsl",
+          "swift": [
+            "Sources/RuneLight/RuneLightShaders.swift"
+          ]
+        },
+        {
+          "upstream": "src/targets.rs",
+          "swift": [
+            "Sources/RuneLight/RuneLightRenderer.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-mermaid",
+      "swiftTarget": "RuneMermaid",
+      "swiftPath": "Sources/RuneMermaid",
+      "testTarget": "RuneMermaidTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/block.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidBlock.swift"
+          ]
+        },
+        {
+          "upstream": "src/block_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidBlock.swift"
+          ]
+        },
+        {
+          "upstream": "src/c4.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidC4.swift"
+          ]
+        },
+        {
+          "upstream": "src/c4_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidC4.swift"
+          ]
+        },
+        {
+          "upstream": "src/canvas.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidCanvas.swift"
+          ]
+        },
+        {
+          "upstream": "src/chart.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidChart.swift"
+          ]
+        },
+        {
+          "upstream": "src/chart_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidChart.swift"
+          ]
+        },
+        {
+          "upstream": "src/class.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidClass.swift"
+          ]
+        },
+        {
+          "upstream": "src/class_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidClass.swift"
+          ]
+        },
+        {
+          "upstream": "src/connector.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidConnector.swift"
+          ]
+        },
+        {
+          "upstream": "src/date.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidDate.swift"
+          ]
+        },
+        {
+          "upstream": "src/date_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidDate.swift"
+          ]
+        },
+        {
+          "upstream": "src/er.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidER.swift"
+          ]
+        },
+        {
+          "upstream": "src/er_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidER.swift"
+          ]
+        },
+        {
+          "upstream": "src/flowchart.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidFlowchart.swift"
+          ]
+        },
+        {
+          "upstream": "src/flowchart_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidFlowchart.swift"
+          ]
+        },
+        {
+          "upstream": "src/gantt.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidGantt.swift"
+          ]
+        },
+        {
+          "upstream": "src/gantt_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidGantt.swift"
+          ]
+        },
+        {
+          "upstream": "src/git.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidGit.swift"
+          ]
+        },
+        {
+          "upstream": "src/git_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidGit.swift"
+          ]
+        },
+        {
+          "upstream": "src/hover.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidHover.swift"
+          ]
+        },
+        {
+          "upstream": "src/hover_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidHover.swift"
+          ]
+        },
+        {
+          "upstream": "src/ink.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidInk.swift"
+          ]
+        },
+        {
+          "upstream": "src/ink_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidInk.swift"
+          ]
+        },
+        {
+          "upstream": "src/journey.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidJourney.swift"
+          ]
+        },
+        {
+          "upstream": "src/journey_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidJourney.swift"
+          ]
+        },
+        {
+          "upstream": "src/layered.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLayered.swift"
+          ]
+        },
+        {
+          "upstream": "src/layered_draw.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLayeredDraw.swift"
+          ]
+        },
+        {
+          "upstream": "src/layered_draw_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLayeredDraw.swift"
+          ]
+        },
+        {
+          "upstream": "src/layered_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLayered.swift"
+          ]
+        },
+        {
+          "upstream": "src/lenient.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLenient.swift"
+          ]
+        },
+        {
+          "upstream": "src/lenient_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidLenient.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneMermaid/Mermaid.swift"
+          ]
+        },
+        {
+          "upstream": "src/mindmap.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidMindmap.swift"
+          ]
+        },
+        {
+          "upstream": "src/mindmap_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidMindmap.swift"
+          ]
+        },
+        {
+          "upstream": "src/parts.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidParts.swift"
+          ]
+        },
+        {
+          "upstream": "src/parts_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidParts.swift"
+          ]
+        },
+        {
+          "upstream": "src/pie.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidPie.swift"
+          ]
+        },
+        {
+          "upstream": "src/pie_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidPie.swift"
+          ]
+        },
+        {
+          "upstream": "src/quadrant.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidQuadrant.swift"
+          ]
+        },
+        {
+          "upstream": "src/quadrant_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidQuadrant.swift"
+          ]
+        },
+        {
+          "upstream": "src/requirement.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidRequirement.swift"
+          ]
+        },
+        {
+          "upstream": "src/requirement_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidRequirement.swift"
+          ]
+        },
+        {
+          "upstream": "src/route.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidRoute.swift"
+          ]
+        },
+        {
+          "upstream": "src/route_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidRoute.swift"
+          ]
+        },
+        {
+          "upstream": "src/sankey.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSankey.swift"
+          ]
+        },
+        {
+          "upstream": "src/sankey_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSankey.swift"
+          ]
+        },
+        {
+          "upstream": "src/scenes.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidScenes.swift"
+          ]
+        },
+        {
+          "upstream": "src/sequence.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSequence.swift"
+          ]
+        },
+        {
+          "upstream": "src/sequence_draw.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSequenceDraw.swift"
+          ]
+        },
+        {
+          "upstream": "src/sequence_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSequence.swift"
+          ]
+        },
+        {
+          "upstream": "src/shape.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidShapes.swift"
+          ]
+        },
+        {
+          "upstream": "src/shape_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidShapes.swift"
+          ]
+        },
+        {
+          "upstream": "src/state.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidState.swift"
+          ]
+        },
+        {
+          "upstream": "src/state_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidState.swift"
+          ]
+        },
+        {
+          "upstream": "src/steady.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSteady.swift"
+          ]
+        },
+        {
+          "upstream": "src/steady_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidSteady.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/Mermaid.swift"
+          ]
+        },
+        {
+          "upstream": "src/timeline.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidTimeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/timeline_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidTimeline.swift"
+          ]
+        },
+        {
+          "upstream": "src/xychart.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidXYChart.swift"
+          ]
+        },
+        {
+          "upstream": "src/xychart_tests.rs",
+          "swift": [
+            "Sources/RuneMermaid/MermaidXYChart.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-knobs",
+      "swiftTarget": "RuneKnobs",
+      "swiftPath": "Sources/RuneKnobs",
+      "testTarget": "RuneKnobsTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/filter_tests.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/icons.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneKnobs/Knobs.swift",
+            "Sources/RuneKnobs/KnobDescriptor.swift"
+          ]
+        },
+        {
+          "upstream": "src/rows.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        },
+        {
+          "upstream": "src/side.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        },
+        {
+          "upstream": "src/side_list.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        },
+        {
+          "upstream": "src/side_tests.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        },
+        {
+          "upstream": "src/style.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneKnobs/Knobs.swift",
+            "Sources/RuneKnobs/KnobDescriptor.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree_tests.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobTree.swift"
+          ]
+        },
+        {
+          "upstream": "src/view.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        },
+        {
+          "upstream": "src/view_tests.rs",
+          "swift": [
+            "Sources/RuneKnobs/KnobPanel.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-ref",
+      "swiftTarget": "RuneRef",
+      "swiftPath": "Sources/RuneRef",
+      "testTarget": "RuneRefTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/blend.rs",
+          "swift": [
+            "Sources/RuneRef/RefBlend.swift"
+          ]
+        },
+        {
+          "upstream": "src/generate.rs",
+          "swift": [
+            "Sources/RuneRef/RefGenerator.swift"
+          ]
+        },
+        {
+          "upstream": "src/gpu.rs",
+          "swift": [
+            "Sources/RuneRef/Shader.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneRef/Frame.swift",
+            "Sources/RuneRef/Primitive.swift"
+          ]
+        },
+        {
+          "upstream": "src/main.rs",
+          "swift": [
+            "Sources/Examples/RuneRefCLI/main.swift"
+          ]
+        },
+        {
+          "upstream": "src/shader.rs",
+          "swift": [
+            "Sources/RuneRef/Shader.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-i18n",
+      "swiftTarget": "RuneI18n",
+      "swiftPath": "Sources/RuneI18n",
+      "testTarget": "RuneI18nTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/catalog.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/codegen.rs",
+          "swift": [
+            "Sources/RuneI18n/I18nCodegen.swift"
+          ]
+        },
+        {
+          "upstream": "src/format.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/i18n.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/locale.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/system.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        },
+        {
+          "upstream": "src/template.rs",
+          "swift": [
+            "Sources/RuneI18n/RuneI18n.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-notify",
+      "swiftTarget": "RuneNotify",
+      "swiftPath": "Sources/RuneNotify",
+      "testTarget": "RuneNotifyTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneNotify/RuneNotify.swift",
+            "Sources/RuneNotify/NotificationTypes.swift",
+            "Sources/RuneNotify/NotificationBackend.swift"
+          ]
+        },
+        {
+          "upstream": "src/mac.rs",
+          "swift": [
+            "Sources/RuneNotify/UserNotificationsBackend.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneNotify/RuneNotify.swift"
+          ]
+        },
+        {
+          "upstream": "src/windows.rs",
+          "swift": [
+            "Sources/RuneNotify/RuneNotify.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-mac",
+      "swiftTarget": "RuneMac",
+      "swiftPath": "Sources/RuneMac",
+      "testTarget": "RuneMacTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneMac/RuneMac.swift",
+            "Sources/RuneMac/WindowFramePersistence.swift"
+          ]
+        },
+        {
+          "upstream": "src/quiet.rs",
+          "swift": [
+            "Sources/RuneMac/AppLifecycleHelpers.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneMac/RuneMac.swift",
+            "Sources/RuneMac/WindowFramePersistence.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-perf",
+      "swiftTarget": "RunePerf",
+      "swiftPath": "Sources/RunePerf",
+      "testTarget": "RunePerfTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/incident.rs",
+          "swift": [
+            "Sources/RunePerf/PerfIncidentStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RunePerf/RunePerf.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder.rs",
+          "swift": [
+            "Sources/RunePerf/PerfRecorder.swift"
+          ]
+        },
+        {
+          "upstream": "src/recorder/tests.rs",
+          "swift": [
+            "Sources/RunePerf/PerfRecorder.swift"
+          ]
+        },
+        {
+          "upstream": "src/stats.rs",
+          "swift": [
+            "Sources/RunePerf/PerfBudget.swift"
+          ]
+        },
+        {
+          "upstream": "src/store.rs",
+          "swift": [
+            "Sources/RunePerf/PerfIncidentStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/store/tests.rs",
+          "swift": [
+            "Sources/RunePerf/PerfIncidentStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RunePerf/RunePerf.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/procwatch",
+      "swiftTarget": "RunePerf",
+      "swiftPath": "Sources/RunePerf",
+      "testTarget": "RunePerfTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/alloc.rs",
+          "swift": [
+            "Sources/RunePerf/AllocSiteTracker.swift"
+          ]
+        },
+        {
+          "upstream": "src/alloc/sites.rs",
+          "swift": [
+            "Sources/RunePerf/AllocSiteTracker.swift"
+          ]
+        },
+        {
+          "upstream": "src/gauge.rs",
+          "swift": [
+            "Sources/RunePerf/ProcessTelemetry.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RunePerf/ProcessTelemetry.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-highlights",
+      "swiftTarget": "RuneHighlights",
+      "swiftPath": "Sources/RuneHighlights",
+      "testTarget": "RuneHighlightsTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/env.rs",
+          "swift": [
+            "Sources/RuneHighlights/LexerScanner.swift"
+          ]
+        },
+        {
+          "upstream": "src/langs.rs",
+          "swift": [
+            "Sources/RuneHighlights/Language.swift",
+            "Sources/RuneHighlights/LanguageDetection.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneHighlights/RuneHighlights.swift",
+            "Sources/RuneHighlights/HighlightToken.swift"
+          ]
+        },
+        {
+          "upstream": "src/rt.rs",
+          "swift": [
+            "Sources/RuneHighlights/RuneHighlights.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-taffy",
+      "swiftTarget": "RuneTaffy",
+      "swiftPath": "Sources/RuneTaffy",
+      "testTarget": "RuneTaffyTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/baseline_store.rs",
+          "swift": [
+            "Sources/RuneTaffy/LayoutStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/cache.rs",
+          "swift": [
+            "Sources/RuneTaffy/LayoutCache.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneTaffy/RuneTaffy.swift"
+          ]
+        },
+        {
+          "upstream": "src/prelude.rs",
+          "swift": [
+            "Sources/RuneTaffy/RuneTaffy.swift"
+          ]
+        },
+        {
+          "upstream": "src/store.rs",
+          "swift": [
+            "Sources/RuneTaffy/LayoutStore.swift"
+          ]
+        },
+        {
+          "upstream": "src/style/convert.rs",
+          "swift": [
+            "Sources/RuneTaffy/TaffyStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/style/mod.rs",
+          "swift": [
+            "Sources/RuneTaffy/TaffyStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/style/setters.rs",
+          "swift": [
+            "Sources/RuneTaffy/TaffyStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/style/traits.rs",
+          "swift": [
+            "Sources/RuneTaffy/TaffyStyle.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneTaffy/RuneTaffy.swift"
+          ]
+        },
+        {
+          "upstream": "src/view.rs",
+          "swift": [
+            "Sources/RuneTaffy/TaffyTree.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-luau",
+      "swiftTarget": "RuneLuau",
+      "swiftPath": "Sources/RuneLuau",
+      "testTarget": "RuneLuauTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/card.rs",
+          "swift": [
+            "Sources/RuneLuau/Card.swift"
+          ]
+        },
+        {
+          "upstream": "src/data.rs",
+          "swift": [
+            "Sources/RuneLuau/Data.swift"
+          ]
+        },
+        {
+          "upstream": "src/error.rs",
+          "swift": [
+            "Sources/RuneLuau/LuauError.swift"
+          ]
+        },
+        {
+          "upstream": "src/functions.rs",
+          "swift": [
+            "Sources/RuneLuau/LuauStdlib.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneLuau/RuneLuau.swift"
+          ]
+        },
+        {
+          "upstream": "src/options.rs",
+          "swift": [
+            "Sources/RuneLuau/RuneLuau.swift"
+          ]
+        },
+        {
+          "upstream": "src/require.rs",
+          "swift": [
+            "Sources/RuneLuau/Require.swift"
+          ]
+        },
+        {
+          "upstream": "src/script.rs",
+          "swift": [
+            "Sources/RuneLuau/Script.swift"
+          ]
+        },
+        {
+          "upstream": "src/sources.rs",
+          "swift": [
+            "Sources/RuneLuau/Sources.swift"
+          ]
+        },
+        {
+          "upstream": "src/task.rs",
+          "swift": [
+            "Sources/RuneLuau/TaskScheduler.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/host.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/mod.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/nodes.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/props.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/rows.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/ui/view.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/vm.rs",
+          "swift": [
+            "Sources/RuneLuau/LuauVM.swift"
+          ]
+        },
+        {
+          "upstream": "src/watch.rs",
+          "swift": [
+            "Sources/RuneLuau/Watch.swift"
+          ]
+        },
+        {
+          "upstream": "src/watchdog.rs",
+          "swift": [
+            "Sources/RuneLuau/Watchdog.swift"
+          ]
+        },
+        {
+          "upstream": "src/web.rs",
+          "swift": [
+            "Sources/RuneLuau/UI.swift"
+          ]
+        },
+        {
+          "upstream": "src/workers.rs",
+          "swift": [
+            "Sources/RuneLuau/Workers.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-register",
+      "swiftTarget": "RuneRegister",
+      "swiftPath": "Sources/RuneRegister",
+      "testTarget": "RuneRegisterTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/RuneRegister/RuneRegister.swift"
+          ]
+        },
+        {
+          "upstream": "src/tests.rs",
+          "swift": [
+            "Sources/RuneRegister/RuneRegister.swift"
+          ]
+        }
+      ]
+    },
+    {
+      "upstreamPath": "crates/rune-staging",
+      "swiftTarget": "Rune",
+      "swiftPath": "Sources/Rune",
+      "testTarget": "RuneTests",
+      "status": "not_applicable",
+      "moduleMappings": [
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/Rune/MetalRenderer.swift"
+          ]
+        }
+      ]
+    }
+  ],
+  "themes": [
+    {
+      "upstreamPath": "themes/opencode",
+      "swiftTarget": "OpenCodeTheme",
+      "swiftPath": "Sources/OpenCodeTheme",
+      "testTarget": "OpenCodeThemeTests",
+      "status": "done",
+      "moduleMappings": [
+        {
+          "upstream": "src/app_icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeAppIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/file_icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeFileIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/file_icons/catalog.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeFileIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/lib.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeTheme.swift",
+            "Sources/OpenCodeTheme/OpenCodeThemeData.swift"
+          ]
+        },
+        {
+          "upstream": "src/new_icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeNewIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/provider_icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeProviderIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree_icons.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeTreeIcons.swift"
+          ]
+        },
+        {
+          "upstream": "src/tree_icons/catalog.rs",
+          "swift": [
+            "Sources/OpenCodeTheme/OpenCodeTreeIcons.swift"
+          ]
+        }
+      ]
+    }
+  ],
+  "examples": [
+    {
+      "upstreamName": "background",
+      "upstreamPath": "examples/background",
+      "cargoPackage": "background",
+      "swiftProduct": "rune-background",
+      "swiftTarget": "RuneBackground",
+      "swiftPath": "Sources/Examples/RuneBackground"
+    },
+    {
+      "upstreamName": "cursed-settings",
+      "upstreamPath": "examples/cursed-settings",
+      "cargoPackage": "cursed-settings",
+      "swiftProduct": "rune-cursed-settings",
+      "swiftTarget": "RuneCursedSettings",
+      "swiftPath": "Sources/Examples/RuneCursedSettings"
+    },
+    {
+      "upstreamName": "drag-out",
+      "upstreamPath": "examples/drag-out",
+      "cargoPackage": "drag-out",
+      "swiftProduct": "rune-drag-out",
+      "swiftTarget": "RuneDragOut",
+      "swiftPath": "Sources/Examples/RuneDragOut"
+    },
+    {
+      "upstreamName": "drop-files",
+      "upstreamPath": "examples/drop-files",
+      "cargoPackage": "drop-files",
+      "swiftProduct": "rune-drop-files",
+      "swiftTarget": "RuneDropFiles",
+      "swiftPath": "Sources/Examples/RuneDropFiles"
+    },
+    {
+      "upstreamName": "frosted-bar",
+      "upstreamPath": "examples/frosted-bar",
+      "cargoPackage": "frosted-bar",
+      "swiftProduct": "rune-frosted-bar",
+      "swiftTarget": "RuneFrostedBar",
+      "swiftPath": "Sources/Examples/RuneFrostedBar"
+    },
+    {
+      "upstreamName": "glass-card",
+      "upstreamPath": "examples/glass-card",
+      "cargoPackage": "glass-card",
+      "swiftProduct": "rune-glass-card",
+      "swiftTarget": "RuneGlassCard",
+      "swiftPath": "Sources/Examples/RuneGlassCard"
+    },
+    {
+      "upstreamName": "glass-panel",
+      "upstreamPath": "examples/glass-panel",
+      "cargoPackage": "glass-panel",
+      "swiftProduct": "rune-glass-panel",
+      "swiftTarget": "RuneGlassPanel",
+      "swiftPath": "Sources/Examples/RuneGlassPanel"
+    },
+    {
+      "upstreamName": "hello",
+      "upstreamPath": "examples/hello",
+      "cargoPackage": "hello",
+      "swiftProduct": "rune-hello",
+      "swiftTarget": "RuneHello",
+      "swiftPath": "Sources/Examples/RuneHello"
+    },
+    {
+      "upstreamName": "kit-gallery",
+      "upstreamPath": "examples/kit-gallery",
+      "cargoPackage": "kit-gallery",
+      "swiftProduct": "rune-kit-gallery",
+      "swiftTarget": "RuneKitGallery",
+      "swiftPath": "Sources/Examples/RuneKitGallery"
+    },
+    {
+      "upstreamName": "knobs",
+      "upstreamPath": "examples/knobs",
+      "cargoPackage": "knobs",
+      "swiftProduct": "rune-knobs",
+      "swiftTarget": "RuneKnobsDemo",
+      "swiftPath": "Sources/Examples/RuneKnobsDemo"
+    },
+    {
+      "upstreamName": "lab",
+      "upstreamPath": "examples/lab",
+      "cargoPackage": "lab",
+      "swiftProduct": "rune-lab",
+      "swiftTarget": "RuneLab",
+      "swiftPath": "Sources/Examples/RuneLab"
+    },
+    {
+      "upstreamName": "launcher",
+      "upstreamPath": "examples/launcher",
+      "cargoPackage": "launcher",
+      "swiftProduct": "rune-launcher",
+      "swiftTarget": "RuneLauncher",
+      "swiftPath": "Sources/Examples/RuneLauncher"
+    },
+    {
+      "upstreamName": "live-values",
+      "upstreamPath": "examples/live-values",
+      "cargoPackage": "live-values",
+      "swiftProduct": "rune-live-values",
+      "swiftTarget": "RuneLiveValues",
+      "swiftPath": "Sources/Examples/RuneLiveValues"
+    },
+    {
+      "upstreamName": "luau-panel",
+      "upstreamPath": "examples/luau-panel",
+      "cargoPackage": "luau-panel",
+      "swiftProduct": "rune-luau-panel",
+      "swiftTarget": "RuneLuauPanel",
+      "swiftPath": "Sources/Examples/RuneLuauPanel"
+    },
+    {
+      "upstreamName": "matched",
+      "upstreamPath": "examples/matched",
+      "cargoPackage": "matched",
+      "swiftProduct": "rune-matched",
+      "swiftTarget": "RuneMatched",
+      "swiftPath": "Sources/Examples/RuneMatched"
+    },
+    {
+      "upstreamName": "motion-bento",
+      "upstreamPath": "examples/motion-bento",
+      "cargoPackage": "motion-bento",
+      "swiftProduct": "rune-motion-bento",
+      "swiftTarget": "RuneMotionBento",
+      "swiftPath": "Sources/Examples/RuneMotionBento"
+    },
+    {
+      "upstreamName": "odometer",
+      "upstreamPath": "examples/odometer",
+      "cargoPackage": "odometer",
+      "swiftProduct": "rune-odometer",
+      "swiftTarget": "RuneOdometer",
+      "swiftPath": "Sources/Examples/RuneOdometer"
+    },
+    {
+      "upstreamName": "overlay",
+      "upstreamPath": "examples/overlay",
+      "cargoPackage": "overlay",
+      "swiftProduct": "rune-overlay",
+      "swiftTarget": "RuneOverlay",
+      "swiftPath": "Sources/Examples/RuneOverlay"
+    },
+    {
+      "upstreamName": "overlay-lab",
+      "upstreamPath": "examples/overlay-lab",
+      "cargoPackage": "overlay-lab",
+      "swiftProduct": "rune-overlay-lab",
+      "swiftTarget": "RuneOverlayLab",
+      "swiftPath": "Sources/Examples/RuneOverlayLab"
+    },
+    {
+      "upstreamName": "playground",
+      "upstreamPath": "examples/playground",
+      "cargoPackage": "playground",
+      "swiftProduct": "rune-playground",
+      "swiftTarget": "RunePlayground",
+      "swiftPath": "Sources/Examples/RunePlayground"
+    },
+    {
+      "upstreamName": "rich-clipboard",
+      "upstreamPath": "examples/rich-clipboard",
+      "cargoPackage": "rich-clipboard",
+      "swiftProduct": "rune-rich-clipboard",
+      "swiftTarget": "RuneRichClipboard",
+      "swiftPath": "Sources/Examples/RuneRichClipboard"
+    },
+    {
+      "upstreamName": "settings",
+      "upstreamPath": "examples/settings",
+      "cargoPackage": "settings",
+      "swiftProduct": "rune-settings",
+      "swiftTarget": "RuneSettings",
+      "swiftPath": "Sources/Examples/RuneSettings"
+    },
+    {
+      "upstreamName": "shapes",
+      "upstreamPath": "examples/shapes",
+      "cargoPackage": "shapes",
+      "swiftProduct": "rune-shapes",
+      "swiftTarget": "RuneShapes",
+      "swiftPath": "Sources/Examples/RuneShapes"
+    },
+    {
+      "upstreamName": "showreel",
+      "upstreamPath": "examples/showreel",
+      "cargoPackage": "showreel",
+      "swiftProduct": "rune-showreel",
+      "swiftTarget": "RuneShowreel",
+      "swiftPath": "Sources/Examples/RuneShowreel"
+    },
+    {
+      "upstreamName": "site-scenes",
+      "upstreamPath": "examples/site-scenes",
+      "cargoPackage": "site-scenes",
+      "swiftProduct": "rune-site-scenes",
+      "swiftTarget": "RuneSiteScenes",
+      "swiftPath": "Sources/Examples/RuneSiteScenes"
+    },
+    {
+      "upstreamName": "sketch",
+      "upstreamPath": "examples/sketch",
+      "cargoPackage": "sketch",
+      "swiftProduct": "rune-sketch",
+      "swiftTarget": "RuneSketch",
+      "swiftPath": "Sources/Examples/RuneSketch"
+    },
+    {
+      "upstreamName": "todo",
+      "upstreamPath": "examples/todo",
+      "cargoPackage": "todo",
+      "swiftProduct": "rune-todo",
+      "swiftTarget": "RuneTodo",
+      "swiftPath": "Sources/Examples/RuneTodo"
+    },
+    {
+      "upstreamName": "video-player",
+      "upstreamPath": "examples/video-player",
+      "cargoPackage": "video-player",
+      "swiftProduct": "rune-video-player",
+      "swiftTarget": "RuneVideoPlayer",
+      "swiftPath": "Sources/Examples/RuneVideoPlayer"
+    },
+    {
+      "upstreamName": "video-tiles",
+      "upstreamPath": "examples/video-tiles",
+      "cargoPackage": "video-tiles",
+      "swiftProduct": "rune-video-tiles",
+      "swiftTarget": "RuneVideoTiles",
+      "swiftPath": "Sources/Examples/RuneVideoTiles"
+    },
+    {
+      "upstreamName": "web-hello",
+      "upstreamPath": "examples/web-hello",
+      "cargoPackage": "web-hello",
+      "swiftProduct": "rune-web-hello",
+      "swiftTarget": "RuneWebHello",
+      "swiftPath": "Sources/Examples/RuneWebHello"
+    },
+    {
+      "upstreamName": "web-showcase",
+      "upstreamPath": "examples/web-showcase",
+      "cargoPackage": "web-showcase",
+      "swiftProduct": "rune-web-showcase",
+      "swiftTarget": "RuneWebShowcase",
+      "swiftPath": "Sources/Examples/RuneWebShowcase"
+    }
+  ]
+}

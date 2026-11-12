@@ -1,0 +1,9 @@
+{
+  "upstreamRepo": "https://github.com/anomalyco/rune",
+  "syncedCommit": "71fcd21d677c96bfbba52cb92b4ceb9de55a0b2f",
+  "syncedCommitDate": "2026-11-12T12:10:40-06:00",
+  "syncedCommitSubject": "Windows: Cx::system_contrast reports the contrast theme; it and reduced motion follow changes live (#814)",
+  "syncedAt": "2026-11-12T20:55:00Z",
+  "swiftTargets": 17,
+  "swiftExecutables": 33
+}

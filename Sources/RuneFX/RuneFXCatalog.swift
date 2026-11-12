@@ -1,0 +1,903 @@
+import Foundation
+
+/// How a numeric parameter reads in an inspector.
+public enum FxUnit: Sendable, Equatable {
+    case none
+    /// Points.
+    case pt
+    /// Radians (display as degrees).
+    case radians
+    /// 0..1 fraction (display as percentage).
+    case fraction
+    /// Per second (speeds, rates).
+    case perSecond
+}
+
+/// One option of a choice parameter.
+public struct FxChoice: Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let swiftLiteral: String
+
+    public init(id: String, name: String, swiftLiteral: String) {
+        self.id = id
+        self.name = name
+        self.swiftLiteral = swiftLiteral
+    }
+}
+
+/// The kind and valid range of a tunable fill parameter.
+public enum FxParamKind: Sendable, Equatable {
+    case number(min: Float, max: Float, step: Float, unit: FxUnit)
+    case count(min: UInt32, max: UInt32)
+    case toggle
+    case choice([FxChoice])
+    case color
+    case colors(min: Int, max: Int)
+    case point
+    case points(max: Int)
+}
+
+/// A tunable parameter in the fill catalog.
+public struct FxParam: Sendable, Equatable {
+    public let id: String
+    public let name: String
+    public let kind: FxParamKind
+
+    public init(id: String, name: String, kind: FxParamKind) {
+        self.id = id
+        self.name = name
+        self.kind = kind
+    }
+}
+
+/// A parameter's runtime value.
+public enum FxValue: Sendable, Equatable {
+    case number(Float)
+    case count(UInt32)
+    case toggle(Bool)
+    case choice(Int)
+    case color(Rgb)
+    case colors(Stops)
+    case point(SIMD2<Float>)
+    case points([SIMD2<Float>])
+}
+
+/// A named preset for a fill style.
+public struct FxPreset: Sendable {
+    public let id: String
+    public let name: String
+    public let swiftCode: String
+    private let makeStyle: @Sendable () -> FillStyle
+
+    public init(
+        id: String,
+        name: String,
+        swiftCode: String,
+        make: @escaping @Sendable () -> FillStyle
+    ) {
+        self.id = id
+        self.name = name
+        self.swiftCode = swiftCode
+        self.makeStyle = make
+    }
+
+    public func style() -> FillStyle {
+        makeStyle()
+    }
+
+    public func fill() -> FillParams {
+        FillParams(style())
+    }
+}
+
+/// A fill style's catalog metadata entry.
+public struct FxStyleInfo: Sendable {
+    public let id: String
+    public let name: String
+    public let summary: String
+    public let swiftType: String
+    public let params: [FxParam]
+    public let presets: [FxPreset]
+    public let readsBackdrop: Bool
+
+    public init(
+        id: String,
+        name: String,
+        summary: String,
+        swiftType: String,
+        params: [FxParam],
+        presets: [FxPreset],
+        readsBackdrop: Bool
+    ) {
+        self.id = id
+        self.name = name
+        self.summary = summary
+        self.swiftType = swiftType
+        self.params = params
+        self.presets = presets
+        self.readsBackdrop = readsBackdrop
+    }
+
+    public func preset(_ id: String) -> FxPreset? {
+        presets.first { $0.id == id }
+    }
+
+    public func defaultFill() -> FillParams {
+        presets[0].fill()
+    }
+}
+
+// Upstream-compatible typealiases
+public typealias Unit = FxUnit
+public typealias Choice = FxChoice
+public typealias ParamKind = FxParamKind
+public typealias Param = FxParam
+public typealias Value = FxValue
+public typealias Preset = FxPreset
+public typealias StyleInfo = FxStyleInfo
+
+private func num(_ min: Float, _ max: Float, _ step: Float, _ unit: FxUnit) -> FxParamKind {
+    .number(min: min, max: max, step: step, unit: unit)
+}
+
+// MARK: - Choice tables
+
+extension FillInput {
+    public static let choices: [FxChoice] = [
+        FxChoice(id: "linear", name: "Linear", swiftLiteral: ".linear"),
+        FxChoice(id: "radial", name: "Radial", swiftLiteral: ".radial"),
+        FxChoice(id: "noise", name: "Noise", swiftLiteral: ".noise"),
+        FxChoice(id: "backdrop", name: "Backdrop", swiftLiteral: ".backdrop"),
+        FxChoice(id: "image", name: "Image", swiftLiteral: ".image"),
+    ]
+
+    fileprivate static let allOptions: [FillInput] = [.linear, .radial, .noise, .backdrop, .image]
+}
+
+extension DitherPattern {
+    public static let choices: [FxChoice] = [
+        FxChoice(id: "bayer2", name: "Bayer 2×2", swiftLiteral: ".bayer2"),
+        FxChoice(id: "bayer4", name: "Bayer 4×4", swiftLiteral: ".bayer4"),
+        FxChoice(id: "bayer8", name: "Bayer 8×8", swiftLiteral: ".bayer8"),
+        FxChoice(id: "blue_noise", name: "Blue noise", swiftLiteral: ".blueNoise"),
+        FxChoice(id: "white", name: "White noise", swiftLiteral: ".white"),
+    ]
+
+    fileprivate static let allOptions: [DitherPattern] = [.bayer2, .bayer4, .bayer8, .blueNoise, .white]
+}
+
+extension GradientKind {
+    public static let choices: [FxChoice] = [
+        FxChoice(id: "linear", name: "Linear", swiftLiteral: ".linear"),
+        FxChoice(id: "radial", name: "Radial", swiftLiteral: ".radial"),
+        FxChoice(id: "conic", name: "Conic", swiftLiteral: ".conic"),
+    ]
+
+    fileprivate static let allOptions: [GradientKind] = [.linear, .radial, .conic]
+}
+
+extension FillAnchor {
+    public static let choices: [FxChoice] = [
+        FxChoice(id: "world", name: "World", swiftLiteral: ".world"),
+        FxChoice(id: "element", name: "Element", swiftLiteral: ".element"),
+    ]
+
+    fileprivate static let allOptions: [FillAnchor] = [.world, .element]
+}
+
+// MARK: - Param tables
+
+extension LiquidMetalParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "tint", name: "Tint", kind: .color),
+        FxParam(id: "light", name: "Light", kind: .color),
+        FxParam(id: "flow", name: "Flow", kind: num(0.0, 1.5, 0.01, .none)),
+        FxParam(id: "scale", name: "Scale", kind: num(16.0, 480.0, 1.0, .pt)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "bevel", name: "Bevel", kind: num(0.0, 48.0, 0.5, .pt)),
+        FxParam(id: "dome", name: "Dome", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "angle", name: "Angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "iridescence", name: "Iridescence", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "contrast", name: "Contrast", kind: num(0.5, 2.0, 0.01, .none)),
+        FxParam(id: "anchor", name: "Anchor", kind: .choice(FillAnchor.choices)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "tint": return .color(tint)
+        case "light": return .color(light)
+        case "flow": return .number(flow)
+        case "scale": return .number(scale)
+        case "speed": return .number(speed)
+        case "bevel": return .number(bevel)
+        case "dome": return .number(dome)
+        case "angle": return .number(angle)
+        case "iridescence": return .number(iridescence)
+        case "contrast": return .number(contrast)
+        case "anchor": return .choice(FillAnchor.allOptions.firstIndex(of: anchor) ?? 0)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("tint", .color(let c)): tint = c
+        case ("light", .color(let c)): light = c
+        case ("flow", .number(let x)) where x.isFinite: flow = x
+        case ("scale", .number(let x)) where x.isFinite: scale = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("bevel", .number(let x)) where x.isFinite: bevel = x
+        case ("dome", .number(let x)) where x.isFinite: dome = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("iridescence", .number(let x)) where x.isFinite: iridescence = x
+        case ("contrast", .number(let x)) where x.isFinite: contrast = x
+        case ("anchor", .choice(let i)) where i >= 0 && i < FillAnchor.allOptions.count:
+            anchor = FillAnchor.allOptions[i]
+        default: return false
+        }
+        return true
+    }
+}
+
+extension PlasticParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "color", name: "Colour", kind: .color),
+        FxParam(id: "roughness", name: "Roughness", kind: num(0.05, 1.0, 0.01, .fraction)),
+        FxParam(id: "dome", name: "Dome", kind: num(-1.0, 1.0, 0.01, .none)),
+        FxParam(id: "bevel", name: "Bevel", kind: num(0.0, 48.0, 0.5, .pt)),
+        FxParam(id: "angle", name: "Light angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "color": return .color(color)
+        case "roughness": return .number(roughness)
+        case "dome": return .number(dome)
+        case "bevel": return .number(bevel)
+        case "angle": return .number(angle)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("color", .color(let c)): color = c
+        case ("roughness", .number(let x)) where x.isFinite: roughness = x
+        case ("dome", .number(let x)) where x.isFinite: dome = x
+        case ("bevel", .number(let x)) where x.isFinite: bevel = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension MeshGradientParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 2, max: maxStops)),
+        FxParam(id: "points", name: "Points", kind: .points(max: maxStops)),
+        FxParam(id: "drift", name: "Drift", kind: num(0.0, 0.4, 0.01, .fraction)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "sharpness", name: "Sharpness", kind: num(0.5, 4.0, 0.01, .none)),
+        FxParam(id: "warp", name: "Warp", kind: num(0.0, 1.0, 0.01, .none)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "colors": return .colors(colors)
+        case "points": return .points(points)
+        case "drift": return .number(drift)
+        case "speed": return .number(speed)
+        case "sharpness": return .number(sharpness)
+        case "warp": return .number(warp)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("colors", .colors(let s)): colors = s
+        case ("points", .points(let pts)) where pts.allSatisfy({ $0.x.isFinite && $0.y.isFinite }):
+            var padded = Array(pts.prefix(maxStops))
+            while padded.count < maxStops { padded.append(.zero) }
+            points = padded
+        case ("drift", .number(let x)) where x.isFinite: drift = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("sharpness", .number(let x)) where x.isFinite: sharpness = x
+        case ("warp", .number(let x)) where x.isFinite: warp = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension DitherParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "pattern", name: "Pattern", kind: .choice(DitherPattern.choices)),
+        FxParam(id: "input", name: "Input", kind: .choice(FillInput.choices)),
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 2, max: maxStops)),
+        FxParam(id: "pixel", name: "Pixel", kind: num(0.5, 16.0, 0.5, .pt)),
+        FxParam(id: "angle", name: "Angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "scale", name: "Noise scale", kind: num(8.0, 400.0, 1.0, .pt)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "bias", name: "Bias", kind: num(-1.0, 1.0, 0.01, .none)),
+        FxParam(id: "contrast", name: "Contrast", kind: num(0.2, 4.0, 0.01, .none)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "pattern": return .choice(DitherPattern.allOptions.firstIndex(of: pattern) ?? 0)
+        case "input": return .choice(FillInput.allOptions.firstIndex(of: input) ?? 0)
+        case "colors": return .colors(colors)
+        case "pixel": return .number(pixel)
+        case "angle": return .number(angle)
+        case "scale": return .number(scale)
+        case "speed": return .number(speed)
+        case "bias": return .number(bias)
+        case "contrast": return .number(contrast)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("pattern", .choice(let i)) where i >= 0 && i < DitherPattern.allOptions.count:
+            pattern = DitherPattern.allOptions[i]
+        case ("input", .choice(let i)) where i >= 0 && i < FillInput.allOptions.count:
+            input = FillInput.allOptions[i]
+        case ("colors", .colors(let s)): colors = s
+        case ("pixel", .number(let x)) where x.isFinite: pixel = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("scale", .number(let x)) where x.isFinite: scale = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("bias", .number(let x)) where x.isFinite: bias = x
+        case ("contrast", .number(let x)) where x.isFinite: contrast = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension GrainGradientParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "kind", name: "Kind", kind: .choice(GradientKind.choices)),
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 2, max: maxStops)),
+        FxParam(id: "angle", name: "Angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "center", name: "Centre", kind: .point),
+        FxParam(id: "amount", name: "Grain", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "size", name: "Grain size", kind: num(0.5, 8.0, 0.25, .pt)),
+        FxParam(id: "mono", name: "Mono", kind: .toggle),
+        FxParam(id: "fps", name: "Grain rate", kind: num(0.0, 30.0, 1.0, .perSecond)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "kind": return .choice(GradientKind.allOptions.firstIndex(of: kind) ?? 0)
+        case "colors": return .colors(colors)
+        case "angle": return .number(angle)
+        case "center": return .point(center)
+        case "amount": return .number(amount)
+        case "size": return .number(size)
+        case "mono": return .toggle(mono)
+        case "fps": return .number(fps)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("kind", .choice(let i)) where i >= 0 && i < GradientKind.allOptions.count:
+            kind = GradientKind.allOptions[i]
+        case ("colors", .colors(let s)): colors = s
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("center", .point(let p)) where p.x.isFinite && p.y.isFinite: center = p
+        case ("amount", .number(let x)) where x.isFinite: amount = x
+        case ("size", .number(let x)) where x.isFinite: size = x
+        case ("mono", .toggle(let b)): mono = b
+        case ("fps", .number(let x)) where x.isFinite: fps = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension FlutedGlassParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "rib", name: "Rib width", kind: num(2.0, 64.0, 0.5, .pt)),
+        FxParam(id: "angle", name: "Angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "refraction", name: "Refraction", kind: num(0.0, 40.0, 0.5, .pt)),
+        FxParam(id: "frost", name: "Frost", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "dispersion", name: "Dispersion", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "highlight", name: "Highlight", kind: num(0.0, 1.0, 0.01, .fraction)),
+        FxParam(id: "tint", name: "Tint", kind: .color),
+        FxParam(id: "tint_amount", name: "Tint amount", kind: num(0.0, 1.0, 0.01, .fraction)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "rib": return .number(rib)
+        case "angle": return .number(angle)
+        case "refraction": return .number(refraction)
+        case "frost": return .number(frost)
+        case "dispersion": return .number(dispersion)
+        case "highlight": return .number(highlight)
+        case "tint": return .color(tint)
+        case "tint_amount", "tintAmount": return .number(tintAmount)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("rib", .number(let x)) where x.isFinite: rib = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("refraction", .number(let x)) where x.isFinite: refraction = x
+        case ("frost", .number(let x)) where x.isFinite: frost = x
+        case ("dispersion", .number(let x)) where x.isFinite: dispersion = x
+        case ("highlight", .number(let x)) where x.isFinite: highlight = x
+        case ("tint", .color(let c)): tint = c
+        case ("tint_amount", .number(let x)) where x.isFinite, ("tintAmount", .number(let x)) where x.isFinite:
+            tintAmount = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension MetaballParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 1, max: maxStops)),
+        FxParam(id: "base", name: "Base", kind: .color),
+        FxParam(id: "count", name: "Count", kind: .count(min: 1, max: 8)),
+        FxParam(id: "size", name: "Size", kind: num(0.05, 0.5, 0.01, .fraction)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "gloss", name: "Gloss", kind: num(0.0, 1.0, 0.01, .fraction)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "colors": return .colors(colors)
+        case "base": return .color(base)
+        case "count": return .count(count)
+        case "size": return .number(size)
+        case "speed": return .number(speed)
+        case "gloss": return .number(gloss)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("colors", .colors(let s)): colors = s
+        case ("base", .color(let c)): base = c
+        case ("count", .count(let n)): count = n
+        case ("count", .number(let x)) where x.isFinite: count = UInt32(max(0.0, x.rounded()))
+        case ("size", .number(let x)) where x.isFinite: size = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("gloss", .number(let x)) where x.isFinite: gloss = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension SwirlParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 2, max: maxStops)),
+        FxParam(id: "scale", name: "Scale", kind: num(16.0, 480.0, 1.0, .pt)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "twist", name: "Twist", kind: num(-2.0, 2.0, 0.01, .none)),
+        FxParam(id: "warp", name: "Warp", kind: num(0.0, 2.5, 0.01, .none)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "colors": return .colors(colors)
+        case "scale": return .number(scale)
+        case "speed": return .number(speed)
+        case "twist": return .number(twist)
+        case "warp": return .number(warp)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("colors", .colors(let s)): colors = s
+        case ("scale", .number(let x)) where x.isFinite: scale = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("twist", .number(let x)) where x.isFinite: twist = x
+        case ("warp", .number(let x)) where x.isFinite: warp = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension VoronoiParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 1, max: maxStops)),
+        FxParam(id: "edge_color", name: "Seam colour", kind: .color),
+        FxParam(id: "scale", name: "Cell size", kind: num(6.0, 200.0, 1.0, .pt)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "edge", name: "Seam", kind: num(0.0, 8.0, 0.25, .pt)),
+        FxParam(id: "depth", name: "Depth", kind: num(0.0, 1.0, 0.01, .fraction)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "colors": return .colors(colors)
+        case "edge_color", "edgeColor": return .color(edgeColor)
+        case "scale": return .number(scale)
+        case "speed": return .number(speed)
+        case "edge": return .number(edge)
+        case "depth": return .number(depth)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("colors", .colors(let s)): colors = s
+        case ("edge_color", .color(let c)), ("edgeColor", .color(let c)): edgeColor = c
+        case ("scale", .number(let x)) where x.isFinite: scale = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("edge", .number(let x)) where x.isFinite: edge = x
+        case ("depth", .number(let x)) where x.isFinite: depth = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension WaveParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "colors", name: "Colours", kind: .colors(min: 2, max: maxStops)),
+        FxParam(id: "amplitude", name: "Amplitude", kind: num(0.0, 0.25, 0.005, .fraction)),
+        FxParam(id: "frequency", name: "Frequency", kind: num(0.2, 6.0, 0.05, .none)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "angle", name: "Angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "softness", name: "Softness", kind: num(0.0, 0.1, 0.001, .fraction)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "colors": return .colors(colors)
+        case "amplitude": return .number(amplitude)
+        case "frequency": return .number(frequency)
+        case "speed": return .number(speed)
+        case "angle": return .number(angle)
+        case "softness": return .number(softness)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("colors", .colors(let s)): colors = s
+        case ("amplitude", .number(let x)) where x.isFinite: amplitude = x
+        case ("frequency", .number(let x)) where x.isFinite: frequency = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("softness", .number(let x)) where x.isFinite: softness = x
+        default: return false
+        }
+        return true
+    }
+}
+
+extension HalftoneParams {
+    public static let params: [FxParam] = [
+        FxParam(id: "input", name: "Input", kind: .choice(FillInput.choices)),
+        FxParam(id: "ink", name: "Ink", kind: .color),
+        FxParam(id: "base", name: "Base", kind: .color),
+        FxParam(id: "cell", name: "Dot pitch", kind: num(2.0, 32.0, 0.5, .pt)),
+        FxParam(id: "angle", name: "Screen angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "ramp_angle", name: "Ramp angle", kind: num(-3.14159, 3.14159, 0.01, .radians)),
+        FxParam(id: "scale", name: "Noise scale", kind: num(8.0, 400.0, 1.0, .pt)),
+        FxParam(id: "speed", name: "Speed", kind: num(0.0, 2.0, 0.01, .perSecond)),
+        FxParam(id: "bias", name: "Bias", kind: num(-1.0, 1.0, 0.01, .none)),
+        FxParam(id: "contrast", name: "Contrast", kind: num(0.2, 4.0, 0.01, .none)),
+    ]
+
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch id {
+        case "input": return .choice(FillInput.allOptions.firstIndex(of: input) ?? 0)
+        case "ink": return .color(ink)
+        case "base": return .color(base)
+        case "cell": return .number(cell)
+        case "angle": return .number(angle)
+        case "ramp_angle", "rampAngle": return .number(rampAngle)
+        case "scale": return .number(scale)
+        case "speed": return .number(speed)
+        case "bias": return .number(bias)
+        case "contrast": return .number(contrast)
+        default: return nil
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch (id, v) {
+        case ("input", .choice(let i)) where i >= 0 && i < FillInput.allOptions.count:
+            input = FillInput.allOptions[i]
+        case ("ink", .color(let c)): ink = c
+        case ("base", .color(let c)): base = c
+        case ("cell", .number(let x)) where x.isFinite: cell = x
+        case ("angle", .number(let x)) where x.isFinite: angle = x
+        case ("ramp_angle", .number(let x)) where x.isFinite, ("rampAngle", .number(let x)) where x.isFinite:
+            rampAngle = x
+        case ("scale", .number(let x)) where x.isFinite: scale = x
+        case ("speed", .number(let x)) where x.isFinite: speed = x
+        case ("bias", .number(let x)) where x.isFinite: bias = x
+        case ("contrast", .number(let x)) where x.isFinite: contrast = x
+        default: return false
+        }
+        return true
+    }
+}
+
+// MARK: - FillStyle & FillParams catalog accessors
+
+extension FillStyle {
+    fileprivate func getParam(_ id: String) -> FxValue? {
+        switch self {
+        case .liquidMetal(let p): return p.getParam(id)
+        case .meshGradient(let p): return p.getParam(id)
+        case .dither(let p): return p.getParam(id)
+        case .grainGradient(let p): return p.getParam(id)
+        case .flutedGlass(let p): return p.getParam(id)
+        case .metaballs(let p): return p.getParam(id)
+        case .swirl(let p): return p.getParam(id)
+        case .voronoi(let p): return p.getParam(id)
+        case .waves(let p): return p.getParam(id)
+        case .halftone(let p): return p.getParam(id)
+        case .plastic(let p): return p.getParam(id)
+        }
+    }
+
+    fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
+        switch self {
+        case .liquidMetal(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .liquidMetal(p) }
+            return ok
+        case .meshGradient(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .meshGradient(p) }
+            return ok
+        case .dither(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .dither(p) }
+            return ok
+        case .grainGradient(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .grainGradient(p) }
+            return ok
+        case .flutedGlass(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .flutedGlass(p) }
+            return ok
+        case .metaballs(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .metaballs(p) }
+            return ok
+        case .swirl(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .swirl(p) }
+            return ok
+        case .voronoi(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .voronoi(p) }
+            return ok
+        case .waves(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .waves(p) }
+            return ok
+        case .halftone(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .halftone(p) }
+            return ok
+        case .plastic(var p):
+            let ok = p.setParam(id, v)
+            if ok { self = .plastic(p) }
+            return ok
+        }
+    }
+}
+
+extension FillParams {
+    /// Params every fill style has.
+    public static let commonParams: [FxParam] = [
+        FxParam(id: "border", name: "Border", kind: num(0.0, 32.0, 0.5, .pt)),
+        FxParam(id: "intensity", name: "Intensity", kind: num(0.0, 1.0, 0.01, .fraction)),
+    ]
+
+    /// This style's catalog entry.
+    public var info: FxStyleInfo {
+        fillStyles()[style.index]
+    }
+
+    /// A param's value, common or the style's own, by id.
+    public func get(_ id: String) -> FxValue? {
+        switch id {
+        case "border": return .number(border)
+        case "intensity": return .number(intensity)
+        default: return style.getParam(id)
+        }
+    }
+
+    /// Set a param by id. Returns `false` when the id is unknown or the value has the wrong kind.
+    @discardableResult
+    public mutating func set(_ id: String, _ value: FxValue) -> Bool {
+        switch id {
+        case "border":
+            guard case .number(let x) = value, x.isFinite else { return false }
+            border = x
+            return true
+        case "intensity":
+            guard case .number(let x) = value, x.isFinite else { return false }
+            intensity = x
+            return true
+        default:
+            return style.setParam(id, value)
+        }
+    }
+}
+
+// MARK: - Catalog table
+
+private let allFillStyles: [FxStyleInfo] = [
+    FxStyleInfo(
+        id: "liquid_metal",
+        name: "Liquid metal",
+        summary: "Polished metal reflecting a studio, flowing like liquid. Works as a fill or a tube-like border.",
+        swiftType: "LiquidMetalParams",
+        params: LiquidMetalParams.params,
+        presets: [
+            FxPreset(id: "chrome", name: "Chrome", swiftCode: "LiquidMetalParams.chrome()") { .liquidMetal(.chrome()) },
+            FxPreset(id: "gold", name: "Gold", swiftCode: "LiquidMetalParams.gold()") { .liquidMetal(.gold()) },
+            FxPreset(id: "rose", name: "Rose gold", swiftCode: "LiquidMetalParams.rose()") { .liquidMetal(.rose()) },
+            FxPreset(id: "gunmetal", name: "Gunmetal", swiftCode: "LiquidMetalParams.gunmetal()") { .liquidMetal(.gunmetal()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "mesh_gradient",
+        name: "Mesh gradient",
+        summary: "Up to six colours pinned to slowly drifting points, blended in OKLab.",
+        swiftType: "MeshGradientParams",
+        params: MeshGradientParams.params,
+        presets: [
+            FxPreset(id: "dusk", name: "Dusk", swiftCode: "MeshGradientParams.dusk()") { .meshGradient(.dusk()) },
+            FxPreset(id: "lagoon", name: "Lagoon", swiftCode: "MeshGradientParams.lagoon()") { .meshGradient(.lagoon()) },
+            FxPreset(id: "orchid", name: "Orchid", swiftCode: "MeshGradientParams.orchid()") { .meshGradient(.orchid()) },
+            FxPreset(id: "graphite", name: "Graphite", swiftCode: "MeshGradientParams.graphite()") { .meshGradient(.graphite()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "dither",
+        name: "Dither",
+        summary: "Bayer or blue-noise dithering of a ramp, noise, the backdrop or an image into a palette.",
+        swiftType: "DitherParams",
+        params: DitherParams.params,
+        presets: [
+            FxPreset(id: "bayer", name: "Bayer", swiftCode: "DitherParams.bayer()") { .dither(.bayer()) },
+            FxPreset(id: "handheld", name: "Handheld", swiftCode: "DitherParams.handheld()") { .dither(.handheld()) },
+            FxPreset(id: "grain", name: "Blue noise", swiftCode: "DitherParams.grain()") { .dither(.grain()) },
+            FxPreset(id: "backdrop", name: "Backdrop", swiftCode: "DitherParams.backdrop()") { .dither(.backdrop()) },
+        ],
+        readsBackdrop: true
+    ),
+    FxStyleInfo(
+        id: "grain_gradient",
+        name: "Grain gradient",
+        summary: "A linear, radial or conic gradient scattered into film grain.",
+        swiftType: "GrainGradientParams",
+        params: GrainGradientParams.params,
+        presets: [
+            FxPreset(id: "ember", name: "Ember", swiftCode: "GrainGradientParams.ember()") { .grainGradient(.ember()) },
+            FxPreset(id: "halo", name: "Halo", swiftCode: "GrainGradientParams.halo()") { .grainGradient(.halo()) },
+            FxPreset(id: "sweep", name: "Sweep", swiftCode: "GrainGradientParams.sweep()") { .grainGradient(.sweep()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "fluted_glass",
+        name: "Fluted glass",
+        summary: "Reeded glass over the backdrop: each rib shows a squeezed, flipped strip of what is behind.",
+        swiftType: "FlutedGlassParams",
+        params: FlutedGlassParams.params,
+        presets: [
+            FxPreset(id: "reeded", name: "Reeded", swiftCode: "FlutedGlassParams.reeded()") { .flutedGlass(.reeded()) },
+            FxPreset(id: "fine", name: "Fine", swiftCode: "FlutedGlassParams.fine()") { .flutedGlass(.fine()) },
+            FxPreset(id: "frosted", name: "Frosted", swiftCode: "FlutedGlassParams.frosted()") { .flutedGlass(.frosted()) },
+            FxPreset(id: "wide", name: "Wide", swiftCode: "FlutedGlassParams.wide()") { .flutedGlass(.wide()) },
+        ],
+        readsBackdrop: true
+    ),
+    FxStyleInfo(
+        id: "metaballs",
+        name: "Metaballs",
+        summary: "Glossy blobs that drift and merge.",
+        swiftType: "MetaballParams",
+        params: MetaballParams.params,
+        presets: [
+            FxPreset(id: "lava", name: "Lava", swiftCode: "MetaballParams.lava()") { .metaballs(.lava()) },
+            FxPreset(id: "mint", name: "Mint", swiftCode: "MetaballParams.mint()") { .metaballs(.mint()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "swirl",
+        name: "Swirl",
+        summary: "Colours stirred into a slow swirl.",
+        swiftType: "SwirlParams",
+        params: SwirlParams.params,
+        presets: [
+            FxPreset(id: "ink", name: "Ink", swiftCode: "SwirlParams.ink()") { .swirl(.ink()) },
+            FxPreset(id: "marble", name: "Marble", swiftCode: "SwirlParams.marble()") { .swirl(.marble()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "voronoi",
+        name: "Voronoi",
+        summary: "Cells around drifting seed points, with seams.",
+        swiftType: "VoronoiParams",
+        params: VoronoiParams.params,
+        presets: [
+            FxPreset(id: "cells", name: "Cells", swiftCode: "VoronoiParams.cells()") { .voronoi(.cells()) },
+            FxPreset(id: "stained", name: "Stained glass", swiftCode: "VoronoiParams.stained()") { .voronoi(.stained()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "waves",
+        name: "Waves",
+        summary: "Layered bands of colour with rolling edges.",
+        swiftType: "WaveParams",
+        params: WaveParams.params,
+        presets: [
+            FxPreset(id: "sea", name: "Sea", swiftCode: "WaveParams.sea()") { .waves(.sea()) },
+            FxPreset(id: "dunes", name: "Dunes", swiftCode: "WaveParams.dunes()") { .waves(.dunes()) },
+        ],
+        readsBackdrop: false
+    ),
+    FxStyleInfo(
+        id: "halftone",
+        name: "Halftone",
+        summary: "Print dots on a rotated screen, sized by a ramp, noise, the backdrop or an image.",
+        swiftType: "HalftoneParams",
+        params: HalftoneParams.params,
+        presets: [
+            FxPreset(id: "print", name: "Print", swiftCode: "HalftoneParams.print()") { .halftone(.print()) },
+            FxPreset(id: "backdrop", name: "Backdrop", swiftCode: "HalftoneParams.backdrop()") { .halftone(.backdrop()) },
+        ],
+        readsBackdrop: true
+    ),
+    FxStyleInfo(
+        id: "plastic",
+        name: "Plastic",
+        summary: "Moulded plastic under a soft light: glossy to matte, domed or dished, with a rolled rim.",
+        swiftType: "PlasticParams",
+        params: PlasticParams.params,
+        presets: [
+            FxPreset(id: "glossy", name: "Glossy", swiftCode: "PlasticParams.glossy()") { .plastic(.glossy()) },
+            FxPreset(id: "matte", name: "Matte", swiftCode: "PlasticParams.matte()") { .plastic(.matte()) },
+            FxPreset(id: "dished", name: "Dished", swiftCode: "PlasticParams.dished()") { .plastic(.dished()) },
+        ],
+        readsBackdrop: false
+    ),
+]
+
+/// Every fill style, in catalog order.
+public func fillStyles() -> [FxStyleInfo] {
+    allFillStyles
+}
+
+/// Look up a fill style by its snake_case id.
+public func fillStyle(_ id: String) -> FxStyleInfo? {
+    allFillStyles.first { $0.id == id }
+}

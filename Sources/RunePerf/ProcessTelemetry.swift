@@ -1,0 +1,509 @@
+import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif canImport(Android)
+import Android
+#elseif canImport(WinSDK)
+import WinSDK
+#elseif canImport(WASILibc)
+import WASILibc
+#endif
+
+/// Per-thread CPU usage snapshot.
+public struct ProcessThreadInfo: Sendable, Equatable, Codable {
+    public var id: UInt64
+    public var name: String
+    public var cpuSeconds: Double
+
+    public init(id: UInt64, name: String, cpuSeconds: Double) {
+        self.id = id
+        self.name = name
+        self.cpuSeconds = cpuSeconds
+    }
+}
+
+/// Lightweight process memory, CPU, and file descriptor usage.
+public struct ProcessUsage: Sendable, Equatable, Codable {
+    public var residentBytes: UInt64
+    public var virtualBytes: UInt64
+    public var footprintBytes: UInt64?
+    public var footprintPeakBytes: UInt64?
+    public var cpuUserSeconds: Double
+    public var cpuSystemSeconds: Double
+    public var totalCpuSeconds: Double
+    public var openFDs: UInt32?
+
+    public init(
+        residentBytes: UInt64 = 0,
+        virtualBytes: UInt64 = 0,
+        footprintBytes: UInt64? = nil,
+        footprintPeakBytes: UInt64? = nil,
+        cpuUserSeconds: Double = 0,
+        cpuSystemSeconds: Double = 0,
+        totalCpuSeconds: Double = 0,
+        openFDs: UInt32? = nil
+    ) {
+        self.residentBytes = residentBytes
+        self.virtualBytes = virtualBytes
+        self.footprintBytes = footprintBytes
+        self.footprintPeakBytes = footprintPeakBytes
+        self.cpuUserSeconds = cpuUserSeconds
+        self.cpuSystemSeconds = cpuSystemSeconds
+        self.totalCpuSeconds = totalCpuSeconds
+        self.openFDs = openFDs
+    }
+}
+
+/// Full process telemetry snapshot including threads and custom memory gauges.
+public struct ProcessSnapshot: Sendable, Equatable, Codable {
+    public var pid: Int32
+    public var timestampMs: UInt64
+    public var usage: ProcessUsage
+    public var threads: [ProcessThreadInfo]
+    public var gauges: [String: Int64]
+
+    public init(
+        pid: Int32,
+        timestampMs: UInt64,
+        usage: ProcessUsage,
+        threads: [ProcessThreadInfo] = [],
+        gauges: [String: Int64] = [:]
+    ) {
+        self.pid = pid
+        self.timestampMs = timestampMs
+        self.usage = usage
+        self.threads = threads
+        self.gauges = gauges
+    }
+
+    /// CPU seconds spent by threads that have since exited.
+    public var exitedThreadCpuSeconds: Double {
+        let liveSum = threads.reduce(0.0) { $0 + $1.cpuSeconds }
+        return max(0.0, usage.totalCpuSeconds - liveSum)
+    }
+
+    /// Footprint minus all tracked `MemoryGauge`s, or `nil` if footprint is unavailable.
+    public var unaccountedFootprintBytes: Int64? {
+        guard let footprint = usage.footprintBytes else { return nil }
+        let gaugeSum = gauges.values.reduce(0, +)
+        return Int64(clamping: footprint) - gaugeSum
+    }
+}
+
+/// Samples process memory, CPU, threads, and file descriptors across Apple, Linux, Android, and Windows.
+public enum ProcessSampler {
+    /// Samples lightweight memory, CPU, and FD usage for the current process.
+    public static func sampleUsage() -> ProcessUsage {
+        #if os(macOS)
+        var residentBytes: UInt64 = 0
+        var virtualBytes: UInt64 = 0
+        var cpuUserSeconds: Double = 0
+        var cpuSystemSeconds: Double = 0
+
+        var machInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &machInfo) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            residentBytes = machInfo.resident_size
+            virtualBytes = machInfo.virtual_size
+            cpuUserSeconds = Double(machInfo.user_time.seconds)
+                + Double(machInfo.user_time.microseconds) / 1_000_000.0
+            cpuSystemSeconds = Double(machInfo.system_time.seconds)
+                + Double(machInfo.system_time.microseconds) / 1_000_000.0
+        }
+
+        let pid = getpid()
+        var footprintBytes: UInt64?
+        var footprintPeakBytes: UInt64?
+        var rusage = rusage_info_v4()
+        let rusageResult = withUnsafeMutablePointer(to: &rusage) { ptr in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
+                proc_pid_rusage(pid, RUSAGE_INFO_V4, rebound)
+            }
+        }
+        if rusageResult == 0 {
+            footprintBytes = rusage.ri_phys_footprint
+            footprintPeakBytes = rusage.ri_lifetime_max_phys_footprint
+            if residentBytes == 0 {
+                residentBytes = rusage.ri_resident_size
+            }
+            let tickScale = machTicksToSeconds()
+            let rusageUser = Double(rusage.ri_user_time) * tickScale
+            let rusageSystem = Double(rusage.ri_system_time) * tickScale
+            if rusageUser + rusageSystem > cpuUserSeconds + cpuSystemSeconds {
+                cpuUserSeconds = rusageUser
+                cpuSystemSeconds = rusageSystem
+            }
+        }
+
+        let openFDs = sampleOpenFDs(pid: pid)
+        return ProcessUsage(
+            residentBytes: residentBytes,
+            virtualBytes: virtualBytes,
+            footprintBytes: footprintBytes,
+            footprintPeakBytes: footprintPeakBytes,
+            cpuUserSeconds: cpuUserSeconds,
+            cpuSystemSeconds: cpuSystemSeconds,
+            totalCpuSeconds: cpuUserSeconds + cpuSystemSeconds,
+            openFDs: openFDs
+        )
+        #elseif os(iOS) || os(tvOS) || os(visionOS)
+        var residentBytes: UInt64 = 0
+        var virtualBytes: UInt64 = 0
+        var cpuUserSeconds: Double = 0
+        var cpuSystemSeconds: Double = 0
+
+        var machInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &machInfo) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            residentBytes = machInfo.resident_size
+            virtualBytes = machInfo.virtual_size
+            cpuUserSeconds = Double(machInfo.user_time.seconds)
+                + Double(machInfo.user_time.microseconds) / 1_000_000.0
+            cpuSystemSeconds = Double(machInfo.system_time.seconds)
+                + Double(machInfo.system_time.microseconds) / 1_000_000.0
+        }
+        return ProcessUsage(
+            residentBytes: residentBytes,
+            virtualBytes: virtualBytes,
+            footprintBytes: nil,
+            footprintPeakBytes: nil,
+            cpuUserSeconds: cpuUserSeconds,
+            cpuSystemSeconds: cpuSystemSeconds,
+            totalCpuSeconds: cpuUserSeconds + cpuSystemSeconds,
+            openFDs: nil
+        )
+        #elseif os(Linux) || os(Android)
+        return sampleLinuxProcUsage()
+        #elseif os(Windows)
+        return sampleWindowsUsage()
+        #else
+        return ProcessUsage()
+        #endif
+    }
+
+    /// Captures a full snapshot of the current process (or another PID owned by this user).
+    public static func snapshot(
+        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        gaugeRegistry: GaugeRegistry = .shared
+    ) -> ProcessSnapshot {
+        let nowMs = UInt64(Date().timeIntervalSince1970 * 1000.0)
+        #if os(macOS)
+        let isSelf = (pid == getpid())
+        let usage: ProcessUsage
+        if isSelf {
+            usage = sampleUsage()
+        } else {
+            var rusage = rusage_info_v4()
+            let rusageResult = withUnsafeMutablePointer(to: &rusage) { ptr in
+                ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
+                    proc_pid_rusage(pid, RUSAGE_INFO_V4, rebound)
+                }
+            }
+            if rusageResult == 0 {
+                let tickScale = machTicksToSeconds()
+                let user = Double(rusage.ri_user_time) * tickScale
+                let sys = Double(rusage.ri_system_time) * tickScale
+                usage = ProcessUsage(
+                    residentBytes: rusage.ri_resident_size,
+                    virtualBytes: 0,
+                    footprintBytes: rusage.ri_phys_footprint,
+                    footprintPeakBytes: rusage.ri_lifetime_max_phys_footprint,
+                    cpuUserSeconds: user,
+                    cpuSystemSeconds: sys,
+                    totalCpuSeconds: user + sys,
+                    openFDs: sampleOpenFDs(pid: pid)
+                )
+            } else {
+                usage = ProcessUsage()
+            }
+        }
+        let threads = sampleThreads(pid: pid)
+        let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        return ProcessSnapshot(
+            pid: pid,
+            timestampMs: nowMs,
+            usage: usage,
+            threads: threads,
+            gauges: gauges
+        )
+        #elseif os(iOS) || os(tvOS) || os(visionOS)
+        let isSelf = (pid == getpid())
+        let usage = isSelf ? sampleUsage() : ProcessUsage()
+        let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        return ProcessSnapshot(
+            pid: pid,
+            timestampMs: nowMs,
+            usage: usage,
+            threads: [],
+            gauges: gauges
+        )
+        #elseif os(Linux) || os(Android)
+        let isSelf = (pid == getpid())
+        let usage = isSelf ? sampleUsage() : ProcessUsage()
+        let threads = isSelf ? sampleLinuxThreads() : []
+        let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        return ProcessSnapshot(
+            pid: pid,
+            timestampMs: nowMs,
+            usage: usage,
+            threads: threads,
+            gauges: gauges
+        )
+        #elseif os(Windows)
+        let isSelf = (pid == Int32(GetCurrentProcessId()))
+        let usage = isSelf ? sampleUsage() : ProcessUsage()
+        let gauges = isSelf ? gaugeRegistry.allValues() : [:]
+        return ProcessSnapshot(
+            pid: pid,
+            timestampMs: nowMs,
+            usage: usage,
+            threads: [],
+            gauges: gauges
+        )
+        #else
+        return ProcessSnapshot(pid: pid, timestampMs: nowMs, usage: ProcessUsage())
+        #endif
+    }
+
+    #if os(macOS)
+    private static func machTicksToSeconds() -> Double {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        guard info.denom != 0 else { return 1e-9 }
+        return Double(info.numer) / Double(info.denom) / 1_000_000_000.0
+    }
+
+    private static func sampleOpenFDs(pid: Int32) -> UInt32? {
+        let fdInfoSize = MemoryLayout<proc_fdinfo>.stride
+        let needed = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard needed > 0 else { return nil }
+        let capacity = Int(needed) / fdInfoSize + 4
+        var buffer = [proc_fdinfo](repeating: proc_fdinfo(), count: capacity)
+        let actual = buffer.withUnsafeMutableBytes { raw -> Int32 in
+            proc_pidinfo(pid, PROC_PIDLISTFDS, 0, raw.baseAddress, Int32(raw.count))
+        }
+        guard actual > 0 else { return nil }
+        return UInt32(Int(actual) / fdInfoSize)
+    }
+
+    private static func sampleThreads(pid: Int32) -> [ProcessThreadInfo] {
+        var threadIDs = [UInt64](repeating: 0, count: 512)
+        let bytes = threadIDs.withUnsafeMutableBytes { raw -> Int32 in
+            proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, raw.baseAddress, Int32(raw.count))
+        }
+        guard bytes > 0 else { return [] }
+        let count = Int(bytes) / MemoryLayout<UInt64>.stride
+        var result: [ProcessThreadInfo] = []
+        result.reserveCapacity(count)
+
+        let infoSize = Int32(MemoryLayout<proc_threadinfo>.size)
+        for tid in threadIDs.prefix(count) {
+            var info = proc_threadinfo()
+            let read = withUnsafeMutablePointer(to: &info) { ptr in
+                proc_pidinfo(pid, PROC_PIDTHREADINFO, tid, ptr, infoSize)
+            }
+            guard read == infoSize else { continue }
+            let name = withUnsafePointer(to: info.pth_name) { ptr in
+                ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXTHREADNAMESIZE)) { cStr in
+                    String(cString: cStr)
+                }
+            }
+            let cpuSeconds = Double(info.pth_user_time + info.pth_system_time) / 1_000_000_000.0
+            result.append(ProcessThreadInfo(id: tid, name: name, cpuSeconds: cpuSeconds))
+        }
+        return result
+    }
+    #elseif os(Linux) || os(Android)
+    private static func sampleLinuxProcUsage() -> ProcessUsage {
+        var residentBytes: UInt64 = 0
+        var virtualBytes: UInt64 = 0
+        let pageSize = UInt64(max(1, sysconf(Int32(_SC_PAGESIZE))))
+        if let statm = try? String(contentsOfFile: "/proc/self/statm", encoding: .utf8) {
+            let parts = statm.split(whereSeparator: { $0.isWhitespace })
+            if parts.count >= 2, let vsizePages = UInt64(parts[0]), let rssPages = UInt64(parts[1]) {
+                virtualBytes = vsizePages * pageSize
+                residentBytes = rssPages * pageSize
+            }
+        }
+        if residentBytes == 0, let status = try? String(contentsOfFile: "/proc/self/status", encoding: .utf8) {
+            for line in status.split(separator: "\n") where line.hasPrefix("VmRSS:") {
+                let digits = line.dropFirst(6).split(whereSeparator: { $0.isWhitespace })
+                if let kb = digits.first.flatMap({ UInt64($0) }) {
+                    residentBytes = kb * 1024
+                }
+                break
+            }
+        }
+        var ru = rusage()
+        var userSec = 0.0
+        var sysSec = 0.0
+        if getrusage(RUSAGE_SELF, &ru) == 0 {
+            userSec = Double(ru.ru_utime.tv_sec) + Double(ru.ru_utime.tv_usec) / 1_000_000.0
+            sysSec = Double(ru.ru_stime.tv_sec) + Double(ru.ru_stime.tv_usec) / 1_000_000.0
+        }
+        let openFDs = (try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fd")).map { UInt32($0.count) }
+        return ProcessUsage(
+            residentBytes: residentBytes,
+            virtualBytes: virtualBytes,
+            footprintBytes: residentBytes > 0 ? residentBytes : nil,
+            footprintPeakBytes: nil,
+            cpuUserSeconds: userSec,
+            cpuSystemSeconds: sysSec,
+            totalCpuSeconds: userSec + sysSec,
+            openFDs: openFDs
+        )
+    }
+
+    private static func sampleLinuxThreads() -> [ProcessThreadInfo] {
+        guard let tids = try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/task") else {
+            return []
+        }
+        var result: [ProcessThreadInfo] = []
+        result.reserveCapacity(tids.count)
+        for tidStr in tids {
+            guard let tid = UInt64(tidStr) else { continue }
+            let comm = (try? String(contentsOfFile: "/proc/self/task/\(tidStr)/comm", encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            result.append(ProcessThreadInfo(id: tid, name: comm, cpuSeconds: 0))
+        }
+        return result
+    }
+    #elseif os(Windows)
+    private static func sampleWindowsUsage() -> ProcessUsage {
+        let process = GetCurrentProcess()
+        var pmc = PROCESS_MEMORY_COUNTERS()
+        pmc.cb = DWORD(MemoryLayout<PROCESS_MEMORY_COUNTERS>.size)
+        var residentBytes: UInt64 = 0
+        var virtualBytes: UInt64 = 0
+        if GetProcessMemoryInfo(process, &pmc, pmc.cb) {
+            residentBytes = UInt64(pmc.WorkingSetSize)
+            virtualBytes = UInt64(pmc.PagefileUsage)
+        }
+        var creation = FILETIME()
+        var exit = FILETIME()
+        var kernel = FILETIME()
+        var user = FILETIME()
+        var userSec = 0.0
+        var sysSec = 0.0
+        if GetProcessTimes(process, &creation, &exit, &kernel, &user) {
+            let k100ns = (UInt64(kernel.dwHighDateTime) << 32) | UInt64(kernel.dwLowDateTime)
+            let u100ns = (UInt64(user.dwHighDateTime) << 32) | UInt64(user.dwLowDateTime)
+            sysSec = Double(k100ns) / 10_000_000.0
+            userSec = Double(u100ns) / 10_000_000.0
+        }
+        return ProcessUsage(
+            residentBytes: residentBytes,
+            virtualBytes: virtualBytes,
+            footprintBytes: residentBytes > 0 ? residentBytes : nil,
+            footprintPeakBytes: nil,
+            cpuUserSeconds: userSec,
+            cpuSystemSeconds: sysSec,
+            totalCpuSeconds: userSec + sysSec,
+            openFDs: nil
+        )
+    }
+    #endif
+}
+
+/// Thread-safe byte gauge for memory not visible to the allocator (e.g., GPU textures, pixel buffers).
+public final class MemoryGauge: @unchecked Sendable {
+    public let name: String
+    private let lock = PortableLock(initialState: Int64(0))
+
+    public init(name: String, registry: GaugeRegistry? = .shared) {
+        self.name = name
+        registry?.register(self)
+    }
+
+    public var bytes: Int64 {
+        lock.withLock { $0 }
+    }
+
+    public func add(_ delta: Int64) {
+        lock.withLock { $0 += delta }
+    }
+
+    public func subtract(_ delta: Int64) {
+        lock.withLock { $0 -= delta }
+    }
+
+    public func set(_ value: Int64) {
+        lock.withLock { $0 = value }
+    }
+
+    /// Adds `bytes` now and subtracts them when the returned `MemoryLease` is released or invalidated.
+    public func track(_ bytes: Int64) -> MemoryLease {
+        add(bytes)
+        return MemoryLease(gauge: self, bytes: bytes)
+    }
+}
+
+/// RAII lease that subtracts tracked bytes from a `MemoryGauge` on `deinit` or `release()`.
+public final class MemoryLease: @unchecked Sendable {
+    private let gauge: MemoryGauge
+    public let bytes: Int64
+    private let released = PortableLock(initialState: false)
+
+    fileprivate init(gauge: MemoryGauge, bytes: Int64) {
+        self.gauge = gauge
+        self.bytes = bytes
+    }
+
+    public func release() {
+        let shouldSubtract = released.withLock { flag -> Bool in
+            if flag { return false }
+            flag = true
+            return true
+        }
+        if shouldSubtract {
+            gauge.subtract(bytes)
+        }
+    }
+
+    deinit {
+        release()
+    }
+}
+
+/// Registry of active `MemoryGauge` instances.
+public final class GaugeRegistry: @unchecked Sendable {
+    public static let shared = GaugeRegistry()
+
+    private let lock = PortableLock(initialState: [String: MemoryGauge]())
+
+    public init() {}
+
+    public func register(_ gauge: MemoryGauge) {
+        lock.withLock { $0[gauge.name] = gauge }
+    }
+
+    public func allValues() -> [String: Int64] {
+        lock.withLock { gauges in
+            gauges.mapValues { $0.bytes }
+        }
+    }
+
+    public func sortedValues() -> [(name: String, bytes: Int64)] {
+        allValues()
+            .map { (name: $0.key, bytes: $0.value) }
+            .sorted { $0.bytes > $1.bytes }
+    }
+}
