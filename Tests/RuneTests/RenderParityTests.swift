@@ -450,7 +450,7 @@ struct RenderGPUAndShaderParityTests {
                     .child(
                         el()
                             .size(40, 80)
-                            .linearGradient(angle: 0, stops: [
+                            .linearGradient(angle: .pi * 0.5, stops: [
                                 GradientStop(Color(r: 1, g: 0, b: 0, a: 1), at: 0),
                                 GradientStop(Color(r: 0, g: 1, b: 0, a: 1), at: 0.5),
                                 GradientStop(Color(r: 0, g: 0, b: 1, a: 1), at: 1),

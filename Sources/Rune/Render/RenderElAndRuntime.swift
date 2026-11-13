@@ -256,11 +256,18 @@ private func premulSIMD4(_ c: Color, opacity: Float = 1.0, srgb: Bool) -> SIMD4<
     return SIMD4<Float>(v.x * a, v.y * a, v.z * a, a)
 }
 
+internal let radialStopProps: [Prop<MotionColor>] = (0..<16).map {
+    Prop<MotionColor>.custom(UInt16(80 + $0), .color, name: "radialStop\($0)")
+}
+
 private func resolveRadialRadii(
     _ spec: RadialRadius,
     centerLocal: Vec2,
     size: Vec2
-) -> (rx: Float, ry: Float) {
+) -> (rx: Float, ry: Float)? {
+    guard centerLocal.x.isFinite && centerLocal.y.isFinite && size.x.isFinite && size.y.isFinite else {
+        return nil
+    }
     switch spec {
     case .farthestCorner:
         let dx = max(centerLocal.x, size.x - centerLocal.x)
@@ -274,10 +281,11 @@ private func resolveRadialRadii(
         let r = max(1e-3, max(max(centerLocal.x, size.x - centerLocal.x), max(centerLocal.y, size.y - centerLocal.y)))
         return (r, r)
     case .pixels(let p):
-        let r = max(1e-3, p)
-        return (r, r)
+        guard p.isFinite && p > 0 else { return nil }
+        return (p, p)
     case .xy(let rx, let ry):
-        return (max(1e-3, rx), max(1e-3, ry))
+        guard rx.isFinite && ry.isFinite && rx > 0 && ry > 0 else { return nil }
+        return (rx, ry)
     }
 }
 
@@ -289,6 +297,7 @@ private func emitStopSpans(
     clip: SIMD4<Float>,
     fade: SIMD4<UInt32>,
     soft: Float,
+    blurPx: Float = 0,
     opacity: Float,
     srgb: Bool,
     into instances: inout [RenderInstance],
@@ -311,20 +320,67 @@ private func emitStopSpans(
         return
     }
     let count = stops.count
+    let isRadial = uv.z > 0.0
+    let w = rect.z
+    let h = rect.w
+    let cx = uv.x
+    let cy = uv.y
+    let rx = uv.z
+    let ry = uv.w
+    let rmax = min(max(abs(radii.x), max(abs(radii.y), max(abs(radii.z), abs(radii.w)))), min(w * 0.5, h * 0.5))
+    let pad = 1.0 + max(0, blurPx) * 2.0
+
     for j in 0..<(count - 1) {
         let s0 = stops[j]
         let s1 = stops[j + 1]
+        let c0 = premulSIMD4(s0.color, opacity: opacity, srgb: srgb)
+        let c1 = premulSIMD4(s1.color, opacity: opacity, srgb: srgb)
+        if isRadial && c0.w <= 0.0005 && c1.w <= 0.0005 {
+            continue
+        }
         let lowerOpen = j > 0
         let upperOpen = j < count - 2
         let t0 = lowerOpen ? (s0.offset + 2.0) : s0.offset
         let t1 = upperOpen ? (s1.offset + 2.0) : s1.offset
+
+        var segRect = rect
+        var segRadii = radii
+        var segUV = uv
+        if isRadial && j < count - 2 {
+            var lx0 = max(0.0, floorf(cx - s1.offset * rx - pad))
+            var ly0 = max(0.0, floorf(cy - s1.offset * ry - pad))
+            var lx1 = min(w, ceilf(cx + s1.offset * rx + pad))
+            var ly1 = min(h, ceilf(cy + s1.offset * ry + pad))
+            if rmax > 0.0 {
+                if lx0 < rmax && (ly0 < rmax || ly1 > h - rmax) { lx0 = 0.0 }
+                if lx1 > w - rmax && (ly0 < rmax || ly1 > h - rmax) { lx1 = w }
+                if ly0 < rmax && (lx0 < rmax || lx1 > w - rmax) { ly0 = 0.0 }
+                if ly1 > h - rmax && (lx0 < rmax || lx1 > w - rmax) { ly1 = h }
+                if lx0 == 0.0 && (ly0 == 0.0 || ly1 == h) { lx1 = max(lx1, min(w, 2.0 * rmax)) }
+                if lx1 == w && (ly0 == 0.0 || ly1 == h) { lx0 = min(lx0, max(0.0, w - 2.0 * rmax)) }
+                if ly0 == 0.0 && (lx0 == 0.0 || lx1 == w) { ly1 = max(ly1, min(h, 2.0 * rmax)) }
+                if ly1 == h && (lx0 == 0.0 || lx1 == w) { ly0 = min(ly0, max(0.0, h - 2.0 * rmax)) }
+            }
+            if lx1 <= lx0 || ly1 <= ly0 {
+                continue
+            }
+            segRect = SIMD4<Float>(rect.x + lx0, rect.y + ly0, lx1 - lx0, ly1 - ly0)
+            segRadii = SIMD4<Float>(
+                (lx0 == 0.0 && ly0 == 0.0) ? radii.x : 0.0,
+                (lx1 == w && ly0 == 0.0) ? radii.y : 0.0,
+                (lx1 == w && ly1 == h) ? radii.z : 0.0,
+                (lx0 == 0.0 && ly1 == h) ? radii.w : 0.0
+            )
+            segUV = SIMD4<Float>(cx - lx0, cy - ly0, rx, ry)
+        }
+
         instances.append(RenderInstance(
-            rect: rect,
-            radii: radii,
-            fill: premulSIMD4(s0.color, opacity: opacity, srgb: srgb),
-            border: premulSIMD4(s1.color, opacity: opacity, srgb: srgb),
+            rect: segRect,
+            radii: segRadii,
+            fill: c0,
+            border: c1,
             params: SIMD4<Float>(t0, KIND_RADIAL, soft, t1),
-            uv: uv,
+            uv: segUV,
             clip: clip,
             fade: fade
         ))
@@ -761,7 +817,8 @@ extension Runtime {
                 anchorTo: anchorTo,
                 scale: sc
             )
-            let shifted = baseRect.offsetBy(Vec2(ownDx + el.offset.x, ownDy + el.offset.y))
+            let staticOffset = (rectMap[nid] == nil || liveRect != nil) ? el.offset : .zero
+            let shifted = baseRect.offsetBy(Vec2(ownDx + staticOffset.x, ownDy + staticOffset.y))
             let effRect: MotionRect
             if abs(sc.x - 1.0) > 1e-5 || abs(sc.y - 1.0) > 1e-5 || anchor != anchorTo {
                 effRect = MotionRect(
@@ -859,8 +916,7 @@ extension Runtime {
             let clipRadiiPt: SIMD4<Float>? = clipSpec?.radii
                 ?? el.clipCorners.map { SIMD4<Float>($0.topLeft, $0.topRight, $0.bottomRight, $0.bottomLeft) }
                 ?? el.clipRadius.map { SIMD4<Float>(repeating: $0) }
-            let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
-                ?? el.clipFade.map { SIMD4<Float>(abs($0.x), abs($0.y), abs($0.z), abs($0.w)) }
+            let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB ?? el.clipFade
             let hasRoundedClip = clipRadiiPt != nil || (el.layout.clipOverflow && el.corners.maxMagnitude != 0)
             let hasFeatherClip = clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
             let hasCutout = clipSpec?.cutoutCircle != nil
@@ -1121,33 +1177,36 @@ extension Runtime {
 
             if let rGrad = radialGradSpec, !rGrad.stops.isEmpty {
                 let centerLocal = Vec2(rGrad.center.x * effRect.width, rGrad.center.y * effRect.height)
-                let (rxPt, ryPt) = resolveRadialRadii(rGrad.radius, centerLocal: centerLocal, size: Vec2(effRect.width, effRect.height))
-                let uv = SIMD4<Float>(centerLocal.x * scale, centerLocal.y * scale, rxPt * scale, ryPt * scale)
-                emitStopSpans(
-                    stops: rGrad.stops,
-                    rect: rectPx,
-                    radii: radiiPx,
-                    uv: uv,
-                    clip: activeClip,
-                    fade: activeFade,
-                    soft: softEdge,
-                    opacity: localOpacity,
-                    srgb: srgbBlend,
-                    into: &instances,
-                    marks: &marks
-                )
+                if let (rxPt, ryPt) = resolveRadialRadii(rGrad.radius, centerLocal: centerLocal, size: Vec2(effRect.width, effRect.height)) {
+                    let animatedStops: [GradientStop] = rGrad.stops.prefix(16).enumerated().map { idx, stop in
+                        let c = scene.store.get(nid, radialStopProps[idx]).map(Color.init) ?? stop.color
+                        return GradientStop(c, at: stop.offset)
+                    }
+                    let uv = SIMD4<Float>(centerLocal.x * scale, centerLocal.y * scale, rxPt * scale, ryPt * scale)
+                    emitStopSpans(
+                        stops: animatedStops,
+                        rect: rectPx,
+                        radii: shapeRadiiPx,
+                        uv: uv,
+                        clip: activeClip,
+                        fade: activeFade,
+                        soft: softEdge,
+                        blurPx: (clipSpec?.soft ?? 0) * scale,
+                        opacity: localOpacity,
+                        srgb: srgbBlend,
+                        into: &instances,
+                        marks: &marks
+                    )
+                }
             } else if let lGrad = linearGradSpec, !lGrad.stops.isEmpty {
-                let cx = rectPx.z * 0.5
-                let cy = rectPx.w * 0.5
-                let ux = cosf(lGrad.angleRadians)
-                let uy = sinf(lGrad.angleRadians)
+                let ux = sinf(lGrad.angleRadians)
+                let uy = -cosf(lGrad.angleRadians)
                 let span = max(1e-3, abs(ux) * rectPx.z + abs(uy) * rectPx.w)
-                let _ = (cx, cy)
                 let uv = SIMD4<Float>(ux / span, uy / span, 0, 0)
                 emitStopSpans(
-                    stops: lGrad.stops,
+                    stops: Array(lGrad.stops.prefix(16)),
                     rect: rectPx,
-                    radii: radiiPx,
+                    radii: shapeRadiiPx,
                     uv: uv,
                     clip: activeClip,
                     fade: activeFade,
@@ -1225,19 +1284,29 @@ extension Runtime {
                 }
             }
 
-            let effBorderColor = borderMap[nid] ?? el.borderColor
+            let effBorderColor = borderMap[nid] ?? (borderGradSpec?.top ?? el.borderColor)
+            let springingBottom = scene.store.has(nid, Props.BORDER_BOTTOM)
+                && (scene.store.isAnimating(nid, Props.BORDER_BOTTOM) || scene.store.isAnimating(nid, Props.BORDER))
+            let topPremul = premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend)
+            let borderBottomColor: Color? = (bwPx > 0 && (borderGradSpec != nil || springingBottom))
+                ? (scene.store.get(nid, Props.BORDER_BOTTOM).map(Color.init) ?? borderGradSpec?.bottom ?? effBorderColor)
+                : nil
+            let borderBottomPremul: SIMD4<Float>? = borderBottomColor.flatMap { c in
+                let p = premulSIMD4(c, opacity: localOpacity, srgb: srgbBlend)
+                return (borderGradSpec != nil || p != topPremul) ? p : nil
+            }
 
             // Border & solid fill handling
             let fillPaintedByGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
-            if let bGrad = borderGradSpec, bwPx > 0 {
+            if let bottomPremul = borderBottomPremul, bwPx > 0 {
                 let bgPremul = fillPaintedByGrad ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: shapeRadiiPx,
                     fill: bgPremul,
-                    border: premulSIMD4(bGrad.top, opacity: localOpacity, srgb: srgbBlend),
+                    border: topPremul,
                     params: SIMD4<Float>(bwPx, KIND_GRADIENT, softEdge, 1.0),
-                    uv: premulSIMD4(bGrad.bottom, opacity: localOpacity, srgb: srgbBlend),
+                    uv: bottomPremul,
                     clip: activeClip,
                     fade: activeFade
                 ))
@@ -1284,20 +1353,20 @@ extension Runtime {
                     rect: rectPx,
                     radii: shapeRadiiPx,
                     fill: premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend),
-                    border: bwPx > 0 ? premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend) : .zero,
+                    border: bwPx > 0 ? topPremul : .zero,
                     params: SIMD4<Float>(bwPx, KIND_RECT, softEdge, 1.0),
                     uv: sidesVec,
                     clip: activeClip,
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if fillPaintedByGrad && bwPx > 0 && effBorderColor.a > 0.001 && borderGradSpec == nil {
+            } else if fillPaintedByGrad && bwPx > 0 && effBorderColor.a > 0.001 && borderBottomPremul == nil {
                 // Solid border atop multi-stop linear/radial gradient
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: radiiPx,
                     fill: .zero,
-                    border: premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend),
+                    border: topPremul,
                     params: SIMD4<Float>(bwPx, KIND_RECT, softEdge, 1.0),
                     uv: .zero,
                     clip: activeClip,
@@ -1331,12 +1400,13 @@ extension Runtime {
                     0,
                     0
                 )
+                let effScale = scale * sc.x
                 let slotInst = RenderInstance(
                     rect: rectPx,
                     radii: radiiPx,
                     fill: SIMD4<Float>(0, 0, 0, 1),
                     border: packedMark,
-                    params: SIMD4<Float>(eff.wantsBackdrop ? 1.0 : 0.0, KIND_EFFECT, eff.bleed * scale, scale),
+                    params: SIMD4<Float>(eff.wantsBackdrop ? 1.0 : 0.0, KIND_EFFECT, eff.bleed * effScale, effScale),
                     uv: eff.data,
                     clip: activeClip,
                     fade: activeFade
@@ -1417,12 +1487,13 @@ extension Runtime {
                         ? SIMD4<Float>(min(radiiPx.x, maxR), min(radiiPx.y, maxR), min(radiiPx.z, maxR), min(radiiPx.w, maxR))
                         : radiiPx
                     let idx = instances.count
+                    let premulFlag: Float = px.isPremultiplied ? 1.0 : 0.0
                     instances.append(RenderInstance(
                         rect: drawRect,
                         radii: drawRadii,
                         fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
                         border: .zero,
-                        params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
+                        params: SIMD4<Float>(0, KIND_IMAGE, premulFlag, 1.0),
                         uv: drawUV,
                         clip: activeClip,
                         fade: activeFade

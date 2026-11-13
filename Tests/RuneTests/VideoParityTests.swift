@@ -284,6 +284,7 @@ struct VideoParityTests {
     @Test("handle_edits_are_shared_and_validated")
     func handleEditsAreSharedAndValidated() {
         let v = Player.url("https://example.com/clip.mp4")
+        #expect(v.source == .url(URL(string: "https://example.com/clip.mp4")!))
         let other = v
         other.setRate(2.0)
         other.setRate(-1.0)

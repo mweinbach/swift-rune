@@ -246,9 +246,14 @@ public final class CVPixelBufferImporter: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Flushes any unused textures from the CoreVideo Metal texture cache (`macos.rs::flush`).
+    public func flush() {
+        CVMetalTextureCacheFlush(cache, 0)
+    }
+
     /// Zero-copy import of a BGRA or NV12 `CoreVideoPixelBuffer` into Metal textures + retention token.
     internal func `import`(_ buffer: CoreVideoPixelBuffer, format: SurfacePixelFormat, size: (UInt32, UInt32)) throws -> ([MTLTexture], RetainedPlaneToken) {
-        CVMetalTextureCacheFlush(cache, 0)
+        flush()
         switch format {
         case .bgra, .rgba:
             let tex = try createTexture(from: buffer.cvBuffer, pixelFormat: .bgra8Unorm, width: Int(size.0), height: Int(size.1), planeIndex: 0)

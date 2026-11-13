@@ -686,7 +686,7 @@ struct MotionGatePaintParityTests {
             var page: El<S> = col().wFull().hFull().bg(oklch(0.18, 0.01, 260.0)).child(swatch).child(first).child(second)
             let (ax, ay, aw, ah): (Float, Float, Float, Float) = (40, 200, 200, 80)
 
-            let plateBase: El<S> = el().key("plate").instantChanges().bg(card)
+            let plateBase: El<S> = el().key("plate").instantChanges().bg(card).transition(.opacity)
             let plate = s.carded ? plateBase.absolute(x: 0, y: 0).size(0, 0) : plateBase.absolute(x: ax, y: ay).size(aw, ah)
             if !s.cross {
                 page = page.child(plate)
@@ -730,7 +730,7 @@ struct MotionGatePaintParityTests {
     func aBorderThatThickensOnItsOwnSnapsUnlessAHandAsked() {
         let r = makeRun(input: false) { s, _ in s.thick = true }
         let f = r.playAndCheck(1.0)
-        #expect(f.map { ($0.kind, $0.element) }.elementsEqual([("snap", "swatch")], by: ==))
+        #expect(f.map { ($0.kind, $0.element) }.elementsEqual([("snap", "0/@swatch")], by: ==))
         #expect(f.first?.detail.hasPrefix("border-width 1.0 → 4.0") == true)
 
         let tapped = makeRun(input: true) { s, _ in s.thick = true }
@@ -756,11 +756,11 @@ struct MotionGatePaintParityTests {
         let f = r.playAndCheck(1.0)
         let flash = f.first { $0.kind == "flash" }
         #expect(flash != nil)
-        #expect(flash?.element == "plate (pixels)")
+        #expect(flash?.element == "0/@plate (pixels)")
         #expect(flash?.detail.contains("(204×96 pt at 36,192)") == true)
 
         let fixed = makeRun(input: false) { s, tx in s.carded = true; tx.instant() }
-        #expect(found(fixed).elementsEqual([("pop-in", "card")], by: ==))
+        #expect(found(fixed).elementsEqual([("pop-in", "0/@card")], by: ==))
     }
 
     @Test("a_deliberate_cross_fade_between_two_surfaces_is_no_flash")
@@ -781,7 +781,7 @@ struct MotionGatePaintParityTests {
         let r = makeRun(input: false) { _, _ in }
         blink(r)
         let f = r.playAndCheck(1.0)
-        #expect(f.contains { $0.kind == "flash" && $0.element == "blink (pixels)" })
+        #expect(f.contains { $0.kind == "flash" && $0.element == "0/@blink (pixels)" }, "Findings: \(f)")
 
         let marked = makeRun(input: false, intent: .pulse) { _, _ in }
         blink(marked)
@@ -935,7 +935,7 @@ struct MotionGateSpringNoneParityTests {
         r.step()
         r.play(1.0)
         let f = r.finish()
-        #expect(f.allSatisfy { $0.kind == "snap" && $0.element == "page/swatch" }, "Unexpected findings: \(f)")
+        #expect(f.allSatisfy { $0.kind == "snap" && $0.element == "@page/@swatch" }, "Unexpected findings: \(f)")
         return f.compactMap { $0.detail.split(separator: " ").first.map(String.init) }.sorted()
     }
 

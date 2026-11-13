@@ -233,6 +233,12 @@ public final class Pixels: @unchecked Sendable {
         return rgbaData
     }
 
+    public var isPremultiplied: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodedMips != nil
+    }
+
     fileprivate func snapshot() -> (width: UInt32, height: UInt32, rgba: [UInt8], mips: DecodedImage?, generation: UInt64) {
         lock.lock()
         defer { lock.unlock() }
@@ -324,7 +330,7 @@ public struct ImageAtlas: Sendable {
         let sourceBytes: [UInt8]
         let isPremultiplied: Bool
         if let decoded = snap.mips, !decoded.mips.isEmpty {
-            isPremultiplied = false
+            isPremultiplied = true
             while level + 1 < decoded.mips.count {
                 let next = decoded.mips[level + 1]
                 let minW = min(max(1.0, drawnSize.x), Float(snap.width))

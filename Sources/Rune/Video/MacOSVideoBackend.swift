@@ -122,6 +122,13 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
 
     public var videoKey: UInt64 { inner.key }
 
+    /// The media source configured for this player (`Player::source`).
+    public var source: MediaSource {
+        inner.lock.lock()
+        defer { inner.lock.unlock() }
+        return inner.request.source
+    }
+
     public var description: String {
         inner.lock.lock()
         let kind = inner.meta.kind

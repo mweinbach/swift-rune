@@ -1556,6 +1556,7 @@ public enum HeadlessRunner {
         var lastRenderedLoopFrame: Frame? = nil
 
         let needsLoop = !steps.isEmpty
+            || resolvedAtTime != nil
             || args.durationOverride != nil
             || args.durationAuto
             || args.frameCount != nil

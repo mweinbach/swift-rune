@@ -350,6 +350,8 @@ struct NativeSurfaceParityTests {
             clip: SIMD4<Float>(0, 0, 2, 2)
         )
         let (out, _) = try renderSingleSurface(draw, size: (2, 2), renderer: sr)
+        let importer = try CVPixelBufferImporter(device: dev)
+        importer.flush()
 
         // Mirrored horizontally: TL should be Green (TR original), TR should be Red (TL original)
         #expect(rgbaAt(out, width: 2, x: 0, y: 0)[1] > 200)

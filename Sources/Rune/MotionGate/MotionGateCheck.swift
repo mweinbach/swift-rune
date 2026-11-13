@@ -47,13 +47,10 @@ public func motionGateRule(_ kind: String) -> Float {
 
 public func motionGateShort(_ path: String) -> String {
     let segs = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-    let keyed = segs.indices.filter {
-        let seg = segs[$0]
-        return !seg.hasPrefix("#") && !seg.allSatisfy(\.isNumber)
-    }
+    let keyed = segs.indices.filter { !segs[$0].hasPrefix("#") }
     let from = max(0, keyed.count - 2)
     let start = from < keyed.count ? keyed[from] : 0
-    return segs[start...].map { $0.hasPrefix("@") ? String($0.dropFirst()) : $0 }.joined(separator: "/")
+    return segs[start...].joined(separator: "/")
 }
 
 public enum MotionGateSnapFlags {

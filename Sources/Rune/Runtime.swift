@@ -206,6 +206,7 @@ public final class Runtime<State> {
         var rowLayout: ParityRowLayout = .free
         var parentHasGrowth: Bool = false
         var parentNewlyMounted: Bool = false
+        var inheritedStyleSpring: Spring? = nil
     }
 
     private struct PaintInh {
@@ -244,6 +245,18 @@ public final class Runtime<State> {
             }
             return (k >= 1.0 / 16.0 && k <= 4.0) ? k : 1.0
         }
+    }
+
+    private struct LiftedFlightSubtree {
+        var node: Presented
+        var inh: PaintInh
+        var ancestorOpacity: Float
+        var ancestorTurn: Turn?
+        var outerTurnClip: MotionRect?
+        var localTurnClip: MotionRect?
+        var parentPath: String?
+        var nearestGroupHovered: Bool
+        var nearestGroupHoverFrac: Float
     }
 
     internal struct DragSession {
@@ -2147,6 +2160,7 @@ public final class Runtime<State> {
             let selfInstantLayoutOrStyle = childInstant || commitKind.snaps || commitCut || reducedMotion
 
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
+            let nodeStyleSpring = el.styleSpring ?? item.inheritedStyleSpring
             // Provide a subtle default interactive spring when pressScale / press is used
             var styleSp: Spring?
             if selfInstantLayoutOrStyle {
@@ -2154,11 +2168,14 @@ public final class Runtime<State> {
                     ? MotionTokens.INSTANT
                     : nil
             } else {
-                styleSp = el.styleSpring
+                styleSp = nodeStyleSpring
                     ?? commitColorSpring
                     ?? commitMotion?.spring
                     ?? ((el.pressScaleFactor != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
             }
+            var colorSp: Spring? = (childInstant || commitKind.snaps || commitCut)
+                ? nil
+                : (nodeStyleSpring ?? commitColorSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
             let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
                 guard self.scene.hasNode(nid),
@@ -2240,9 +2257,11 @@ public final class Runtime<State> {
                 specTransition = nil
                 layoutAnimSpec = nil
                 styleSp = nil
+                colorSp = nil
             } else if releasedEnterDelays.remove(nid) != nil {
                 let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
                 styleSp = enterSp
+                colorSp = enterSp
                 layoutAnimSpec = el.layoutAnim ?? LayoutAnim(spring: enterSp)
             }
             ancestorInstants.append(ancestorInstant)
@@ -2262,9 +2281,10 @@ public final class Runtime<State> {
                 corners: el.corners,
                 blur: specBlur,
                 fill: effectiveFill.motionColor,
-                border: el.borderColor.motionColor,
+                border: ((el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec)?.top ?? el.borderColor).motionColor,
                 layoutAnim: layoutAnimSpec,
                 styleSpring: styleSp,
+                colorSpring: colorSp,
                 animateOffset: (el.styleSpring != nil || commitMotion != nil || el.layoutAnim != nil),
                 transition: specTransition
             ))
@@ -2326,7 +2346,8 @@ public final class Runtime<State> {
                     staticInh: childStaticInh,
                     rowLayout: childInRow,
                     parentHasGrowth: el.growthSpec != nil,
-                    parentNewlyMounted: isFreshMount
+                    parentNewlyMounted: isFreshMount,
+                    inheritedStyleSpring: nodeStyleSpring
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -2811,9 +2832,11 @@ public final class Runtime<State> {
                 specs[i].transition = nil
                 specs[i].layoutAnim = nil
                 specs[i].styleSpring = nil
+                specs[i].colorSpring = nil
             } else if releasedEnterDelays.remove(nid) != nil {
                 let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
                 specs[i].styleSpring = enterSp
+                specs[i].colorSpring = enterSp
                 specs[i].layoutAnim = el.layoutAnim ?? LayoutAnim(spring: enterSp)
             }
         }
@@ -2830,12 +2853,12 @@ public final class Runtime<State> {
                 b.source.subscribe(waker)
             }
         }
-        refreshParityLiveSubscriptions()
 
         let prevFlatNodesSnapshot = flatNodes
         flatNodes = pass.nodes
         nodeByPath = pass.byPath
         nodeById = pass.byId
+        refreshParityLiveSubscriptions()
         lastCommittedSpecs = specs
         layoutCommitGen &+= 1
         layoutKeyIndex.invalidate()
@@ -3062,6 +3085,29 @@ public final class Runtime<State> {
         scene.keepFlights(keepsFlights)
         applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
         syncRideTrailingFlags(pass.nodes, on: &scene)
+        var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
+        pendingBorderBottoms.reserveCapacity(8)
+        var pendingRadialStops: [(id: NodeId, index: Int, target: MotionColor, spring: Spring?)] = []
+        for (i, node) in pass.nodes.enumerated() where i < specs.count {
+            let nid = node.nodeId
+            let wasPresent = scene.contains(nid)
+            let csp: Spring? = (!commitCut && !reducedMotion && wasPresent) ? specs[i].colorSpring : nil
+            if let rGrad = node.el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec {
+                for (si, stop) in rGrad.stops.prefix(16).enumerated() {
+                    pendingRadialStops.append((id: nid, index: si, target: stop.color.motionColor, spring: csp))
+                }
+            }
+            let bGrad = node.el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec
+            let bw = bGrad?.width ?? node.el.borderWidth
+            guard bw > 0 else { continue }
+            let hadBottom = scene.store.has(nid, Props.BORDER_BOTTOM)
+            guard bGrad != nil || hadBottom else { continue }
+            let seed: MotionColor? = (bGrad != nil && !hadBottom && wasPresent)
+                ? (scene.get(nid, Props.BORDER) ?? prevFlatNodesSnapshot.first(where: { $0.nodeId == nid })?.el.borderColor.motionColor ?? node.el.borderColor.motionColor)
+                : nil
+            let target = (bGrad?.bottom ?? node.el.borderColor).motionColor
+            pendingBorderBottoms.append((id: nid, seed: seed, target: target, spring: csp))
+        }
         measureFramePhase(.apply) {
             scene.commit(
                 specs,
@@ -3080,6 +3126,24 @@ public final class Runtime<State> {
                 resolvedNS[i] = ns
                 scene.traceName(n.nodeId, n.el.traceNameValue ?? n.key)
                 scene.traceNamespace(n.nodeId, ns)
+            }
+        }
+        for item in pendingBorderBottoms {
+            if let seed = item.seed {
+                scene.set(item.id, Props.BORDER_BOTTOM, seed)
+            }
+            if let csp = item.spring {
+                scene.animate(item.id, Props.BORDER_BOTTOM, to: item.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(item.id, Props.BORDER_BOTTOM, item.target)
+            }
+        }
+        for rs in pendingRadialStops {
+            let prop = radialStopProps[rs.index]
+            if let csp = rs.spring {
+                scene.animate(rs.id, prop, to: rs.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(rs.id, prop, rs.target)
             }
         }
         scene.keepFlights(false)
@@ -4313,7 +4377,7 @@ public final class Runtime<State> {
             }
             let borderColor: Color
             if let pb = p.border {
-                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER)
+                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER) && !scene.store.isMoving(p.id, Props.BORDER_BOTTOM)
                     && abs(pb.r - el.borderColor.r) < 1e-3
                     && abs(pb.g - el.borderColor.g) < 1e-3
                     && abs(pb.b - el.borderColor.b) < 1e-3
@@ -6296,7 +6360,10 @@ public final class Runtime<State> {
                         applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                     }
                     isDispatchingHover = false
-                    if !(ranAnyHover && hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)) || linkChanged || helpTargetChanges(at: pos) {
+                    let hoverSkippedCommit = ranAnyHover
+                        ? (hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
+                        : (moveDispatched && moveAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
+                    if !hoverSkippedCommit || linkChanged || helpTargetChanges(at: pos) {
                         suppressRevealFromHoverCommit = true
                         dirtyCommit(at: now)
                         changed = true

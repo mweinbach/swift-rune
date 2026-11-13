@@ -136,7 +136,7 @@ public enum TraceIntent {
             return reveal
         case Props.CORNERS.id, Props.SIDES.id:
             return shape
-        case Props.FILL.id, Props.BORDER.id, Props.TEXT_COLOR.id:
+        case Props.FILL.id, Props.BORDER.id, Props.BORDER_BOTTOM.id, Props.TEXT_COLOR.id:
             return contents
         case Props.PRESENCE.id:
             return transition | opacity

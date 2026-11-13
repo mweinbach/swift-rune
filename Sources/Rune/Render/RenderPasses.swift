@@ -1533,7 +1533,7 @@ public final class AtlasUploader {
         let needsCreate = imageTexture == nil || imageSize.x != atlas.width || imageSize.y != atlas.height
         if needsCreate {
             let desc = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm,
+                pixelFormat: .rgba8Unorm_srgb,
                 width: max(1, atlas.width),
                 height: max(1, atlas.height),
                 mipmapped: false

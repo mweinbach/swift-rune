@@ -661,6 +661,18 @@ internal final class RenderFrameEngine {
                     }
                 }
 
+                var layerOpacity: Float = 1.0
+                var layerTurn: Float = 0.0
+                if cur.isLayer {
+                    for scope in stack where scope.isLayer {
+                        if let si = scope.scopeInstance {
+                            layerOpacity *= si.fill.w
+                            if si.border.y != 0 {
+                                layerTurn = si.border.y
+                            }
+                        }
+                    }
+                }
                 let site = EffectSite(
                     index: effectCounter,
                     instance: inst,
@@ -671,6 +683,8 @@ internal final class RenderFrameEngine {
                     origin: cur.origin,
                     pixelSize: (cur.texture.width, cur.texture.height),
                     inLayer: cur.isLayer,
+                    opacity: layerOpacity,
+                    turn: layerTurn,
                     srgbBlend: frame.srgbBlend,
                     backdrop: backdropSnap
                 )
