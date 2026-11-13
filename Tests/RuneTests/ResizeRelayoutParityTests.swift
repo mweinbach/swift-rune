@@ -171,6 +171,25 @@ struct ResizeRelayoutParityTests {
         }
     }
 
+    @Test("a_resize_reuses_the_last_commits_node_buffer")
+    func resizeReusesLastCommitsNodeBuffer() {
+        let (rt, _) = makeParagraphRuntime(0)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        // The first commit let go of an empty buffer.
+        rt.invalidate(at: t)
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        for w in [Float(600.0), Float(420.0), Float(300.0)] {
+            let spare = rt.spareFlatNodes.withUnsafeBufferPointer { $0.baseAddress }
+            let last = rt.flatNodes.withUnsafeBufferPointer { $0.baseAddress }
+            #expect(rt.spareFlatNodes.capacity >= rt.flatNodes.count)
+            #expect(resize(rt, width: w, t: &t) == 0, "at \(w)")
+            #expect(rt.flatNodes.withUnsafeBufferPointer { $0.baseAddress } == spare, "at \(w)")
+            #expect(rt.spareFlatNodes.withUnsafeBufferPointer { $0.baseAddress } == last, "at \(w)")
+        }
+    }
+
     @Test("a_resize_keeps_the_memos_the_view_built")
     func resizeKeepsMemosTheViewBuilt() {
         let (rt, memoBuilds) = makeParagraphRuntime(0)

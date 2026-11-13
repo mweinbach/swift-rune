@@ -71,11 +71,36 @@ internal func computeOutOfFlowLayout(
         knownW = withRatio.width
         knownH = withRatio.height
 
+        let measuredW: Float
+        let measuredH: Float
+        if let kw = knownW, let kh = knownH {
+            measuredW = kw
+            measuredH = kh
+        } else {
+            let measureInput = LayoutInput(
+                runMode: .computeSize,
+                sizingMode: .contentSize,
+                axis: .both,
+                knownDimensions: Size(width: knownW, height: knownH),
+                parentSize: cbSize,
+                availableSpace: Size(
+                    width: .definite(knownW ?? cbWidth),
+                    height: .definite(knownH ?? cbHeight)
+                ),
+                verticalMarginsAreCollapsible: .false
+            )
+            let measured = computeNodeLayout(tree: tree, node: child, input: measureInput)
+            measuredW = knownW ?? measured.size.width
+            measuredH = knownH ?? measured.size.height
+        }
+        let finalW = maybeClamp(measuredW, min: minW, max: maxW)
+        let finalH = maybeClamp(measuredH, min: minH, max: maxH)
+
         let childInput = LayoutInput(
             runMode: .performLayout,
-            sizingMode: .inherentSize,
+            sizingMode: .contentSize,
             axis: .both,
-            knownDimensions: Size(width: knownW, height: knownH),
+            knownDimensions: Size(width: finalW, height: finalH),
             parentSize: cbSize,
             availableSpace: Size(
                 width: .definite(knownW ?? cbWidth),
@@ -83,10 +108,7 @@ internal func computeOutOfFlowLayout(
             ),
             verticalMarginsAreCollapsible: .false
         )
-
         let childOutput = computeNodeLayout(tree: tree, node: child, input: childInput)
-        let finalW = maybeClamp(knownW ?? childOutput.size.width, min: minW, max: maxW)
-        let finalH = maybeClamp(knownH ?? childOutput.size.height, min: minH, max: maxH)
 
         // Horizontal position & auto margin resolution
         let (x, resolvedML, resolvedMR) = resolveAbsoluteAxis(

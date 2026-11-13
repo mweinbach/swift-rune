@@ -138,7 +138,7 @@ extension Runtime {
             && cached.fitHeight == fitHeight
             && playgroundHost == nil
         guard unchanged else { return .rebuild }
-        if pendingResizeRelayout {
+        if pendingResizeRelayout || pendingGrowthRelayout {
             if cached.viewportRead && cached.viewport != viewport {
                 return .rebuild
             }
@@ -151,6 +151,7 @@ extension Runtime {
     public func invalidate(at now: Double? = nil) {
         stateUnchangedSinceBuild = false
         pendingResizeRelayout = false
+        pendingGrowthRelayout = false
         dirtyCommit(at: now ?? currentTime, external: true)
     }
 
@@ -379,6 +380,7 @@ extension Runtime {
         let savedScrollContentSizes = scrollContentSizes
         let savedWasPinned = wasPinnedToBottom
         let savedGrowthRows = growthRows
+        let savedGrowthStacks = growthStacks
 
         var expandedRoot = cached.expandedRootEl
         if cached.virtualExpansion.anyVirtualList {
@@ -397,7 +399,8 @@ extension Runtime {
             commitMotion: commitMotion,
             commitColorSpring: commitColorSpring,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds
+            prevMountedIds: prevMountedIds,
+            isResizeRelayout: pendingResizeRelayout
         )
         pass.reads = cached.reads
 
@@ -412,6 +415,7 @@ extension Runtime {
             scrollContentSizes = savedScrollContentSizes
             wasPinnedToBottom = savedWasPinned
             growthRows = savedGrowthRows
+            growthStacks = savedGrowthStacks
             return nil
         }
 
@@ -437,6 +441,7 @@ extension Runtime {
                 scrollContentSizes = savedScrollContentSizes
                 wasPinnedToBottom = savedWasPinned
                 growthRows = savedGrowthRows
+                growthStacks = savedGrowthStacks
                 pass = buildMeasureResult(
                     rootEl: expandedRoot,
                     expandedContextOverride: cached.virtualExpansion,

@@ -391,11 +391,14 @@ extension Runtime {
         cut: Bool,
         snaps: Bool,
         lands: Bool,
+        isRelayoutPass: Bool = false,
+        reducedMotionOverride: Bool? = nil,
         at now: Double
     ) -> GrowthCaptureResult {
         var result = GrowthCaptureResult()
         var seenGrowthKeys: Set<String> = []
-        let settleAll = cut || lands || reducedMotion
+        var seenStackPaths: Set<String> = []
+        let settleAll = cut || lands || (reducedMotionOverride ?? reducedMotion)
 
         func foldLimit(path: String, enclosingScrollPath: String?) -> Float {
             guard let vpPath = enclosingScrollPath,
@@ -413,10 +416,28 @@ extension Runtime {
             siblingIndex: Int,
             siblingKeysSeen: inout [String: Int],
             inGrowthSpec: GrowthSpec?,
+            parentStackPath: String?,
             enclosingScrollPath: String?
         ) {
             let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
+
+            var ownStackPath = parentStackPath
+            if el.growthSpec != nil {
+                seenStackPaths.insert(path)
+                ownStackPath = path
+                let stackWidth = res.layout.localRect.width
+                let existed = growthStacks[path] != nil
+                var stack = growthStacks[path] ?? RuntimeGrowthStackState(width: stackWidth, widthHold: .off)
+                if !existed || settleAll {
+                    stack.widthHold = .off
+                    stack.pendingHeights.removeAll(keepingCapacity: true)
+                } else if abs(stackWidth - stack.width) > 0.25 {
+                    stack.widthHold = .rewrap(at: now)
+                }
+                stack.width = stackWidth
+                growthStacks[path] = stack
+            }
 
             let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer")
             if !isVirtualSpacer && (inGrowthSpec != nil || el.foldGlideSpec != nil) {
@@ -442,20 +463,38 @@ extension Runtime {
                     if settleAll || (snaps && el.foldGlideSpec == nil && !streaming && !whole) {
                         existing.track = existing.track.restarted(at: naturalH)
                         existing.contentSlide = nil
-                    } else if abs(existing.track.target - naturalH) > 0.1 {
-                        existing.track.retarget(naturalH)
-                        if let prevTop, let curTop = firstChildTop {
-                            let topDelta = curTop - prevTop
-                            let was = naturalH - prevH
-                            if topDelta * (naturalH - prevTarget) > 0.01 && abs(was) > 0.01 {
-                                let curSlide: Float
-                                if let oldSlide = existing.contentSlide, abs(oldSlide.was) > 0.01 {
-                                    let oldLeft = prevTarget - prevH
-                                    curSlide = oldSlide.dy * min(1, max(0, oldLeft / oldSlide.was))
-                                } else {
-                                    curSlide = 0
+                        if let sp = parentStackPath {
+                            growthStacks[sp]?.pendingHeights.removeValue(forKey: gKey)
+                        }
+                    } else {
+                        let holdState = parentStackPath.flatMap { growthStacks[$0]?.widthHold } ?? .off
+                        let effectiveH = (streaming && !isRelayoutPass && holdState.mayShrink(at: now))
+                            ? max(naturalH, min(existing.track.h, existing.track.target))
+                            : naturalH
+                        if let sp = parentStackPath, holdState.defers(at: now) {
+                            if abs(effectiveH - existing.track.target) > 0.1 || growthStacks[sp]?.pendingHeights[gKey] != nil {
+                                growthStacks[sp]?.pendingHeights[gKey] = effectiveH
+                            }
+                        } else {
+                            if let sp = parentStackPath {
+                                growthStacks[sp]?.pendingHeights.removeValue(forKey: gKey)
+                            }
+                            if abs(existing.track.target - effectiveH) > 0.1 {
+                                existing.track.retarget(effectiveH)
+                                if let prevTop, let curTop = firstChildTop {
+                                    let topDelta = curTop - prevTop
+                                    let was = effectiveH - prevH
+                                    if topDelta * (effectiveH - prevTarget) > 0.01 && abs(was) > 0.01 {
+                                        let curSlide: Float
+                                        if let oldSlide = existing.contentSlide, abs(oldSlide.was) > 0.01 {
+                                            let oldLeft = prevTarget - prevH
+                                            curSlide = oldSlide.dy * min(1, max(0, oldLeft / oldSlide.was))
+                                        } else {
+                                            curSlide = 0
+                                        }
+                                        existing.contentSlide = (was: was, dy: curSlide - topDelta)
+                                    }
                                 }
-                                existing.contentSlide = (was: was, dy: curSlide - topDelta)
                             }
                         }
                     }
@@ -508,6 +547,7 @@ extension Runtime {
                         siblingIndex: i,
                         siblingKeysSeen: &childSeen,
                         inGrowthSpec: nextGrowth,
+                        parentStackPath: ownStackPath,
                         enclosingScrollPath: nextScrollPath
                     )
                 }
@@ -522,9 +562,16 @@ extension Runtime {
             siblingIndex: 0,
             siblingKeysSeen: &rootSeen,
             inGrowthSpec: nil,
+            parentStackPath: nil,
             enclosingScrollPath: nil
         )
         growthRows = growthRows.filter { seenGrowthKeys.contains($0.key) }
+        growthStacks = growthStacks.compactMap { (k, v) -> (String, RuntimeGrowthStackState)? in
+            guard seenStackPaths.contains(k) else { return nil }
+            var copy = v
+            copy.pendingHeights = copy.pendingHeights.filter { seenGrowthKeys.contains($0.key) }
+            return (k, copy)
+        }.reduce(into: [:]) { $0[$1.0] = $1.1 }
         if lastGrowthStepTime == nil {
             lastGrowthStepTime = now
         }
@@ -577,48 +624,89 @@ extension Runtime {
     }
 
     internal func advanceGrowthRows(at now: Double) -> Bool {
-        guard !growthRows.isEmpty else {
-            lastGrowthStepTime = now
+        var flushedHold = false
+        let prevNow = lastGrowthStepTime
+        let hasDeferredAtEnd = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
+        let dt = prevNow.map { max(0, min(0.1, now - $0)) } ?? (1.0 / 60.0)
+        lastGrowthStepTime = now
+
+        func flushReleasedHolds(at checkTime: Double) {
+            for (sp, var stack) in growthStacks where !stack.pendingHeights.isEmpty && !stack.widthHold.defers(at: checkTime) {
+                for (gKey, pendingH) in stack.pendingHeights {
+                    if var entry = growthRows[gKey], abs(entry.track.target - pendingH) > 0.1 {
+                        entry.track.retarget(pendingH)
+                        growthRows[gKey] = entry
+                        flushedHold = true
+                    }
+                }
+                stack.pendingHeights.removeAll(keepingCapacity: true)
+                growthStacks[sp] = stack
+            }
+        }
+
+        if growthRows.isEmpty && !hasDeferredAtEnd {
             growthSubstepAccumulator = 0
             return false
         }
-        let dt = lastGrowthStepTime.map { max(0, min(0.1, now - $0)) } ?? (1.0 / 60.0)
-        lastGrowthStepTime = now
-        guard dt > 0 else {
-            return growthRows.values.contains { $0.track.moving }
+
+        if dt <= 0 {
+            flushReleasedHolds(at: now)
+            if flushedHold {
+                needsCommit = true
+                pendingGrowthRelayout = true
+            }
+            let hasPending = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
+            return hasPending || growthRows.values.contains { $0.track.moving }
         }
+
+        let stepSize = 1.0 / 240.0
         growthSubstepAccumulator += dt
-        let stepSize = Double(Growth.substep)
-        var substeps = Int(floor(growthSubstepAccumulator / stepSize))
-        growthSubstepAccumulator -= Double(substeps) * stepSize
+        var substeps = Int(floor((growthSubstepAccumulator + 1e-9) / stepSize))
+        growthSubstepAccumulator = max(0, growthSubstepAccumulator - Double(substeps) * stepSize)
         substeps = min(substeps, 240)
-        if substeps <= 0 {
-            return growthRows.values.contains { $0.track.moving }
-        }
+
+        let stepOrigin = (prevNow ?? (now - dt))
         var anyChanged = false
         var anyMoving = false
-        for (k, var entry) in growthRows {
-            if !entry.track.moving { continue }
-            let prevH = entry.track.h
-            let prevM = entry.track.mask
-            for _ in 0..<substeps {
-                entry.track.step(spring: entry.spring, edge: entry.edge, carryingTail: false)
+        if substeps > 0 {
+            var working = growthRows
+            for s in 0..<substeps {
+                let subNow = stepOrigin + Double(s + 1) * stepSize
+                for (sp, var stack) in growthStacks where !stack.pendingHeights.isEmpty && !stack.widthHold.defers(at: subNow) {
+                    for (gKey, pendingH) in stack.pendingHeights {
+                        if var entry = working[gKey], abs(entry.track.target - pendingH) > 0.1 {
+                            entry.track.retarget(pendingH)
+                            working[gKey] = entry
+                            flushedHold = true
+                        }
+                    }
+                    stack.pendingHeights.removeAll(keepingCapacity: true)
+                    growthStacks[sp] = stack
+                }
+                for (k, var entry) in working {
+                    if !entry.track.moving { continue }
+                    let prevH = entry.track.h
+                    let prevM = entry.track.mask
+                    entry.track.step(spring: entry.spring, edge: entry.edge, carryingTail: false)
+                    if !entry.track.moving {
+                        entry.contentSlide = nil
+                    }
+                    working[k] = entry
+                    if abs(entry.track.h - prevH) > 0.05 || abs(entry.track.mask - prevM) > 0.05 || !entry.track.moving {
+                        anyChanged = true
+                    }
+                }
             }
-            if !entry.track.moving {
-                entry.contentSlide = nil
-            }
-            growthRows[k] = entry
-            if abs(entry.track.h - prevH) > 0.05 || abs(entry.track.mask - prevM) > 0.05 || !entry.track.moving {
-                anyChanged = true
-            }
-            if entry.track.moving {
-                anyMoving = true
-            }
+            growthRows = working
+            anyMoving = growthRows.values.contains { $0.track.moving }
         }
-        if anyChanged {
+        flushReleasedHolds(at: now)
+        let hasPendingHold = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
+        if anyChanged || flushedHold {
             needsCommit = true
+            pendingGrowthRelayout = true
         }
-        return anyMoving
+        return anyMoving || hasPendingHold
     }
 
     // MARK: - Post-Commit Virtual Measurements & onVisibleRows
@@ -1439,7 +1527,21 @@ extension Runtime {
         parentStickyShift: Vec2,
         presentedRectByNodeId: [NodeId: MotionRect]
     ) -> (shift: Vec2, parentShiftMag: Float) {
-        let node = flatNodes[idx]
+        computeStickyShift(
+            nodeIndex: idx,
+            parentStickyShift: parentStickyShift,
+            nodes: flatNodes,
+            rectOf: { node in presentedRectByNodeId[node.nodeId] ?? node.targetRect }
+        )
+    }
+
+    internal func computeStickyShift(
+        nodeIndex idx: Int,
+        parentStickyShift: Vec2,
+        nodes: [FlatNode],
+        rectOf: (FlatNode) -> MotionRect
+    ) -> (shift: Vec2, parentShiftMag: Float) {
+        let node = nodes[idx]
         let held = scrollRequestsState.keeps.compactMap(\.hold).first(where: { $0.path == node.path })
         let effEdge: StickyEdge
         let effInset: Float
@@ -1467,8 +1569,8 @@ extension Runtime {
             return (parentStickyShift, max(abs(parentStickyShift.x), abs(parentStickyShift.y)))
         }
 
-        let scrollNode = flatNodes[sIdx]
-        let scrollRect = presentedRectByNodeId[scrollNode.nodeId] ?? scrollNode.targetRect
+        let scrollNode = nodes[sIdx]
+        let scrollRect = rectOf(scrollNode)
         let scrollClip = intersectRects(scrollRect, scrollNode.clipRect)
 
         // Intersect scroll band across any outer scroll viewports on the same axis.
@@ -1478,10 +1580,10 @@ extension Runtime {
         var bandRight = scrollClip.right
         var anc = scrollNode.parentIndex
         while let aIdx = anc {
-            let aNode = flatNodes[aIdx]
+            let aNode = nodes[aIdx]
             if (needsVertical && aNode.el.layout.scrollAxes.contains(.vertical))
                 || (!needsVertical && aNode.el.layout.scrollAxes.contains(.horizontal)) {
-                let aRect = presentedRectByNodeId[aNode.nodeId] ?? aNode.targetRect
+                let aRect = rectOf(aNode)
                 bandTop = max(bandTop, aRect.top)
                 bandBottom = min(bandBottom, aRect.bottom)
                 bandLeft = max(bandLeft, aRect.left)
@@ -1496,8 +1598,8 @@ extension Runtime {
         let boxLeft: Float
         let boxRight: Float
         if let pIdx = node.parentIndex {
-            let pNode = flatNodes[pIdx]
-            let pRect = presentedRectByNodeId[pNode.nodeId] ?? pNode.targetRect
+            let pNode = nodes[pIdx]
+            let pRect = rectOf(pNode)
             let pad = pNode.el.layout.padding
             let bdr = pNode.el.borderSides ?? Sides(
                 top: pNode.el.borderWidth,
@@ -1531,7 +1633,7 @@ extension Runtime {
             boxBottom = .infinity
         }
 
-        let rawRect = presentedRectByNodeId[node.nodeId] ?? node.targetRect
+        let rawRect = rectOf(node)
         let shiftedElem = MotionRect.fromXYWH(
             rawRect.x + parentStickyShift.x,
             rawRect.y + parentStickyShift.y,

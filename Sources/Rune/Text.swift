@@ -483,6 +483,8 @@ public struct ShapedText: @unchecked Sendable {
     internal var forcedDirection: TextFlow? = nil
     internal var primaryIsRTL: Bool = false
     public var wasTruncated: Bool = false
+    internal var lastLineAdvancePx: Float = 0
+    internal var hangingAdvancePx: Float = 0
 }
 
 internal struct PillMetrics: Sendable, Hashable {
@@ -2147,6 +2149,7 @@ public final class TextSystem: @unchecked Sendable {
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
     private var measureCache: [MeasureKey: Vec2] = [:]
+    internal private(set) var measureMissCount: Int = 0
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
         self.glyphAtlas = glyphAtlas
@@ -2503,6 +2506,7 @@ public final class TextSystem: @unchecked Sendable {
         lock.unlock()
         let shaped = shape(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        measureMissCount += 1
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
         }
@@ -3314,7 +3318,9 @@ public final class TextSystem: @unchecked Sendable {
             markerMap: markerMap,
             forcedDirection: style.direction,
             primaryIsRTL: (style.direction == .rtl) || (style.direction == nil && (visualLines.first?.isRTL ?? false)),
-            wasTruncated: anyTruncated
+            wasTruncated: anyTruncated,
+            lastLineAdvancePx: visualLines.last?.widthPx ?? 0,
+            hangingAdvancePx: visualLines.last?.trailingWsPx ?? 0
         )
     }
 
@@ -3693,6 +3699,7 @@ public final class TextSystem: @unchecked Sendable {
 
         let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        measureMissCount += 1
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
         }
