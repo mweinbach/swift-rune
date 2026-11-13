@@ -85,6 +85,12 @@ public extension RuneKnobs {
             .p(10)
             .gap(8)
             .shadows([Shadow(x: 0, y: 12, blur: 32, spread: 0, color: style.shadow)])
+            .focusable(true)
+            .noFocusRing()
+            .onClick { state, tx in
+                tx.instant()
+                state[keyPath: keyPath].kbd = true
+            }
             .onKey { state, ev, tx in
                 if RuneKnobs.key(&state[keyPath: keyPath], event: ev) {
                     tx.instant()

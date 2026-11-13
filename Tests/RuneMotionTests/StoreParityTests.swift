@@ -906,6 +906,30 @@ struct StoreParityTests {
 
     @Test("looping_delayed_cooling_linear_slide_and_clock_reference")
     func loopingDelayedCoolingLinearSlideAndClockReference() {
+        // sequence_delays_interpolates_holds_and_finishes_without_restarting (looping.rs:195-218)
+        let seq4Beats = [
+            Beat(at: 0.0, opacity: 0.0, scale: 0.8),
+            Beat(at: 0.3, easing: .linear),
+            Beat(at: 0.6, opacity: 0.5, scale: 1.1, easing: .linear),
+            Beat(at: 0.9, easing: .linear),
+        ]
+        let seq4Spec = LoopSpec.sequence(MotionSequence(frames: seq4Beats, delay: 0.2))
+        var seq4 = LoopTrack(spec: seq4Spec, now: 4.0)
+        #expect(seq4.pendingStart(at: 4.0) == 4.2)
+        #expect(!seq4.isActive(at: 4.1))
+        let pose = seq4.pose(at: 4.35, reduced: false)!
+        #expect(abs(pose.opacity - 0.5) < 1e-5 && abs(pose.scale - 0.9) < 1e-5)
+        seq4.retime(spec: seq4Spec, at: 4.35)
+        #expect(seq4.pose(at: 4.35, reduced: false) == pose)
+        #expect(seq4.isActive(at: 4.35))
+        #expect(!seq4.isActive(at: 5.2))
+        #expect(seq4.pose(at: 5.2, reduced: false)?.opacity == 1.0)
+        #expect(seq4.pose(at: 4.35, reduced: true)?.scale == 1.0)
+        seq4.finish()
+        #expect(!seq4.isActive(at: 4.35))
+        #expect(seq4.pendingStart(at: 4.0) == nil)
+        #expect(seq4.pose(at: 4.35, reduced: false)?.scale == 1.0)
+
         let beats = [Beat(at: 0.0, opacity: 0.0), Beat(at: 0.5, opacity: 1.0)]
         let seqSpec = LoopSpec.sequence(MotionSequence(frames: beats, delay: 0.2))
         var seqTrack = LoopTrack(spec: seqSpec, now: 0.0)
@@ -921,6 +945,15 @@ struct StoreParityTests {
         #expect(seqTrack.pendingStart(at: 2.0) == 2.2)
         #expect(!seqTrack.isActive(at: 2.1))
         #expect(seqTrack.pose(at: 2.1, reduced: false)?.opacity == 0.0)
+
+        // delay_has_one_wake_and_no_active_frames (looping.rs:260-268)
+        let wakeTrack = LoopTrack(spec: LoopSpec.opacity(period: 1.0, delay: 2.0, low: 0.0, high: 1.0), now: 3.0)
+        #expect(wakeTrack.pendingStart(at: 3.0) == 5.0)
+        #expect(!wakeTrack.isActive(at: 4.999))
+        #expect(wakeTrack.sample(at: 4.999, reduced: false) == 0.0)
+        #expect(wakeTrack.pendingStart(at: 5.0) == nil)
+        #expect(wakeTrack.isActive(at: 5.0))
+        #expect(wakeTrack.phase(at: 5.0) == 0.0)
 
         var delayed = LoopTrack(spec: LoopSpec.opacity(period: 1.0, delay: 2.0, low: 0.0, high: 1.0), now: 3.0)
         #expect(delayed.pendingStart(at: 3.0) == 5.0)

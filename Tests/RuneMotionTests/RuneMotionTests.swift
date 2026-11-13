@@ -124,8 +124,11 @@ struct RuneMotionTests {
     func cubicBezierAndEasings() {
         #expect(Easing.easeInOut.sample(0) == 0)
         #expect(Easing.easeInOut.sample(1) == 1)
-        #expect(abs(Easing.easeInOut.sample(0.5) - 0.5) < 1e-3)
-        #expect(Easing.overshoot.sample(0.6) > 1.0)
+        #expect(abs(Easing.ease.sample(0.5) - 0.8024) < 1e-3)
+        #expect(abs(Easing.easeInOut.sample(0.5) - 0.5) < 1e-5)
+        #expect(Easing.easeOut.sample(0.0) == 0.0)
+        #expect(Easing.easeOut.sample(1.0) == 1.0)
+        #expect((0..<100).contains { Easing.overshoot.sample(Float($0) / 100.0) > 1.05 })
         #expect(Easing.steps(4, .jumpEnd).sample(0.5) == 0.5)
         #expect(Easing.steps(4, .jumpStart).sample(0.01) == 0.25)
     }
@@ -386,8 +389,12 @@ struct RuneMotionTests {
     @Test("CSS steps() at u=0 for jumpStart/jumpBoth and tween velocity carry")
     func stepsZeroAndTweenCarry() {
         #expect(Easing.steps(4, .jumpEnd).sample(0.0) == 0.0)
+        #expect(Easing.steps(4, .jumpEnd).sample(0.3) == 0.25)
         #expect(Easing.steps(4, .jumpStart).sample(0.0) == 0.25)
+        #expect(Easing.steps(4, .jumpStart).sample(0.3) == 0.5)
         #expect(abs(Easing.steps(2, .jumpBoth).sample(0.0) - (1.0 / 3.0)) < 1e-6)
+        #expect(abs(Easing.steps(2, .jumpBoth).sample(0.4) - (1.0 / 3.0)) < 1e-6)
+        #expect(Easing.steps(3, .jumpBoth).sample(1.0) == 1.0)
         #expect(Easing.steps(2, .jumpNone).sample(0.5) == 1.0)
 
         // Tween retarget carries initial velocity smoothly without discontinuity
@@ -422,7 +429,9 @@ struct RuneMotionTests {
         #expect(abs(Gesture.project(x: 0.0, velocity: 1000.0, rate: DecelerationRate.normal) - 499.0) < 0.01)
         let d: Float = 800.0
         #expect(Gesture.rubberBand(overshoot: 100.0, dimension: d) < 55.0 + 1e-3)
+        #expect(Gesture.rubberBand(overshoot: 100.0, dimension: d) > 0.0)
         #expect(Gesture.rubberBand(overshoot: -100.0, dimension: d) == -Gesture.rubberBand(overshoot: 100.0, dimension: d))
+        #expect(abs(Gesture.rubberBand(overshoot: 1.0, dimension: d) - 0.55) < 1e-3)
         #expect(Gesture.rubberBandClamp(50.0, min: 0.0, max: 100.0, dimension: d) == 50.0)
 
         var tracker = VelocityTracker<Float>()
@@ -585,6 +594,17 @@ struct RuneMotionTests {
         #expect(abs(rot.phase(at: 0.25) - 0.25) < 1e-6)
         #expect(abs(rot.phase(at: 1.25) - 0.75) < 1e-6)
 
+        // phase_continuity_and_clock_sampling (looping.rs:270-280)
+        var rotSweep = LoopTrack(spec: .rotation(period: 0.9), now: 4.0)
+        for i in 0..<200 {
+            let now = 4.0 + Double(i) * 0.037
+            let before = rotSweep.phase(at: now)
+            rotSweep.retime(spec: .rotation(period: 0.2 + Double(i % 9) * 0.1), at: now)
+            #expect(abs(before - rotSweep.phase(at: now)) < 1e-12)
+            #expect(rotSweep.sample(at: now, reduced: false) == rotSweep.sample(at: now, reduced: false))
+        }
+        #expect(rotSweep.sample(at: 100.0, reduced: true) == 0.0)
+
         // cycle_preserves_wall_phase_stops_still_and_cadence (looping.rs:249-258)
         let cyc = Cycle(
             period: 1.7,
@@ -667,6 +687,10 @@ struct RuneMotionTests {
         #expect(carry.items == [1, 2, 3])
         carry.begin()
         #expect(carry.items == [3])
+        carry.end()
+        carry.begin()
+        carry.end()
+        #expect(carry.items.isEmpty)
     }
 
     @Test("MotionTrace JSONL emission, channels, and MotionTraceCapture assertions")

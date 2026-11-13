@@ -460,13 +460,31 @@ struct RuneKnobsTests {
             _ = rt.frame(at: Double(i) / 60.0)
         }
 
-        if let panel = rt.element(byKey: "knobs-floating-panel") {
-            let center = Vec2(panel.rect[0] + panel.rect[2] * 0.5, panel.rect[1] + panel.rect[3] * 0.5)
-            rt.pointerMove(to: center, at: 0.1)
-            rt.pointerDown(at: center, at: 0.1)
-            rt.pointerUp(at: center, at: 0.11)
+        let cardTarget = rt.element(byKey: "knobs-floating-panel") ?? rt.element(byKey: "knobs-card")
+        #expect(cardTarget != nil)
+        if let cardTarget {
+            let pt = Vec2(cardTarget.rect[0] + 6, cardTarget.rect[1] + 4)
+            rt.pointerMove(to: pt, at: 0.1)
+            rt.pointerDown(at: pt, at: 0.1)
+            rt.pointerUp(at: pt, at: 0.11)
             _ = rt.frame(at: 0.12)
         }
+        // keyboard_steps_knobs_and_switches_groups (view_tests.rs:107-124)
+        _ = rt.keyDown(KeyEvent(key: .arrowRight), at: 0.14)
+        _ = rt.frame(at: 0.15)
+        #expect(abs(rt.state.knobs.get(l) - 5.1) < 1e-3)
+        _ = rt.keyDown(KeyEvent(key: .arrowLeft, mods: Mods(shift: true)), at: 0.16)
+        _ = rt.frame(at: 0.17)
+        #expect(abs(rt.state.knobs.get(l) - 4.1) < 1e-3)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.18)
+        _ = rt.frame(at: 0.19)
+        #expect(rt.state.knobs.group == "Inner")
+        _ = rt.keyDown(KeyEvent(key: .text("[")), at: 0.20)
+        _ = rt.frame(at: 0.21)
+        #expect(rt.state.knobs.group == "Left")
+        _ = rt.keyDown(KeyEvent(key: .escape), at: 0.22)
+        _ = rt.frame(at: 0.23)
+        #expect(!rt.state.knobs.open)
 
         // Inline layout stays within a narrow column and wide tracks grow.
         struct InlineState {
@@ -564,6 +582,16 @@ struct RuneKnobsTests {
         #expect(k3.folded.contains("Item page"))
         #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowDown)))
         #expect(k3.treeAt == .page("Sidebar"))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(k3.unfolded.contains("Sidebar"))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(k3.treeAt == .group(2))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(k3.treeAt == .knob(groupIndex: 2, knobIndex: 0))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(abs(k3.get(c) - 2.08) < 1e-4)
+        #expect(k3.group == "Rows")
     }
 
     @Test @MainActor func sidePanelRuntimePagePushFilterTypingAndFloatingTabClick() {
@@ -687,11 +715,23 @@ struct RuneKnobsTests {
         if let floating {
             #expect(abs(floating.rect[2] - 300) < 1.0)
         }
+        // opens_on_a_group_and_outlines_only_on_tab_hover (view_tests.rs:89-104)
+        let firstKnob = layerRt.element(byKey: "knob-Left size")
+        #expect(firstKnob != nil)
+        #expect(layerRt.element(byKey: "knobs-outline") == nil)
+        if let firstKnob {
+            let kpt = Vec2(firstKnob.rect[0] + firstKnob.rect[2] * 0.5, firstKnob.rect[1] + firstKnob.rect[3] * 0.5)
+            layerRt.pointerMove(to: kpt, at: 0.15)
+            _ = layerRt.frame(at: 0.17)
+            #expect(layerRt.element(byKey: "knobs-outline") == nil)
+        }
         let tab1 = layerRt.element(byKey: "knobs-group-tab-1")
         #expect(tab1 != nil)
         if let tab1 {
             let pt = Vec2(tab1.rect[0] + tab1.rect[2] * 0.5, tab1.rect[1] + tab1.rect[3] * 0.5)
             layerRt.pointerMove(to: pt, at: 0.2)
+            _ = layerRt.frame(at: 0.205)
+            #expect(layerRt.element(byKey: "knobs-outline") != nil)
             layerRt.pointerDown(at: pt, at: 0.21)
             layerRt.pointerUp(at: pt, at: 0.22)
             _ = layerRt.frame(at: 0.25)
@@ -923,6 +963,88 @@ struct RuneKnobsTests {
         #expect(midH > 1.0 && midH < openH - 1.0)
         settle()
         #expect(rect("knobs-sec-0-body")[3] < 0.5)
+
+        // the_panel_reopens_folded_but_for_the_group_last_opened (`side_tests.rs:77-90`)
+        var reopenState = TestAppState()
+        reopenState.knobs.show()
+        var reopenT = 0.0
+        let reopenRt = Runtime<TestAppState>(
+            state: reopenState,
+            viewport: Vec2(1000, 700),
+            pixelScale: 1.0
+        ) { s, _ in
+            let page: El<TestAppState> = row().key("cols").wFull().hFull()
+                .child(col().key("left").w(300).hFull())
+                .child(col().key("right").grow(1).hFull())
+            return RuneKnobs.side(page: page, knobs: s.knobs, groups: groups, style: .dark(), keyPath: \TestAppState.knobs)
+        }
+        let settleReopen = {
+            for _ in 0..<45 { reopenT += 1.0 / 60.0; _ = reopenRt.frame(at: reopenT) }
+        }
+        let clickSide = { (key: String) in
+            let el = reopenRt.element(byKey: key)!
+            let pt = Vec2(el.rect[0] + el.rect[2] * 0.5, el.rect[1] + el.rect[3] * 0.5)
+            reopenRt.pointerMove(to: pt, at: reopenT + 0.01)
+            reopenT += 1.0 / 60.0
+            _ = reopenRt.frame(at: reopenT)
+            reopenRt.pointerDown(at: pt, at: reopenT + 0.01)
+            reopenRt.pointerUp(at: pt, at: reopenT + 0.02)
+            settleReopen()
+        }
+        settleReopen()
+        clickSide("knobs-sub-head-0")
+        clickSide("knobs-sub-head-1")
+        reopenRt.state.knobs.close()
+        reopenRt.state.knobs.show()
+        reopenRt.markNeedsCommit()
+        settleReopen()
+        #expect((reopenRt.element(byKey: "knobs-sec-0-body")?.rect[3] ?? -1) < 0.5)
+        #expect((reopenRt.element(byKey: "knobs-sec-1-body")?.rect[3] ?? 0) > 20.0)
+
+        // using_a_knob_makes_its_group_the_panels (`side_tests.rs:93-104`)
+        var activeGroupState = TestAppState()
+        activeGroupState.knobs.show()
+        var activeT = 0.0
+        let activeRt = Runtime<TestAppState>(
+            state: activeGroupState,
+            viewport: Vec2(1000, 700),
+            pixelScale: 1.0
+        ) { s, _ in
+            let page: El<TestAppState> = row().key("cols").wFull().hFull()
+                .child(col().key("left").w(300).hFull())
+                .child(col().key("right").grow(1).hFull())
+            return RuneKnobs.side(page: page, knobs: s.knobs, groups: groups, style: .dark(), keyPath: \TestAppState.knobs)
+        }
+        let settleActive = {
+            for _ in 0..<45 { activeT += 1.0 / 60.0; _ = activeRt.frame(at: activeT) }
+        }
+        settleActive()
+        let rightHead = activeRt.element(byKey: "knobs-sub-head-1")!
+        let rhPt = Vec2(rightHead.rect[0] + rightHead.rect[2] * 0.5, rightHead.rect[1] + rightHead.rect[3] * 0.5)
+        activeRt.pointerMove(to: rhPt, at: activeT + 0.01)
+        activeRt.pointerDown(at: rhPt, at: activeT + 0.02)
+        activeRt.pointerUp(at: rhPt, at: activeT + 0.03)
+        settleActive()
+        let padKnob = activeRt.element(byKey: "knob-Right pad")!
+        let pkStart = Vec2(padKnob.rect[0] + padKnob.rect[2] * 0.6, padKnob.rect[1] + padKnob.rect[3] * 0.5)
+        activeRt.pointerMove(to: pkStart, at: activeT + 0.01)
+        activeRt.pointerDown(at: pkStart, at: activeT + 0.02)
+        activeRt.pointerMove(to: Vec2(pkStart.x + 6, pkStart.y), at: activeT + 0.03)
+        activeRt.pointerUp(at: Vec2(pkStart.x + 6, pkStart.y), at: activeT + 0.04)
+        settleActive()
+        #expect(activeRt.state.knobs.group == "Right")
+        activeRt.pointerMove(to: rhPt, at: activeT + 0.05)
+        settleActive()
+        if let randBtn = activeRt.element(byKey: "knobs-sec-1-random") ?? activeRt.element(byKey: "knobs-btn-random") {
+            let rpt = Vec2(randBtn.rect[0] + randBtn.rect[2] * 0.5, randBtn.rect[1] + randBtn.rect[3] * 0.5)
+            activeRt.pointerDown(at: rpt, at: activeT + 0.06)
+            activeRt.pointerUp(at: rpt, at: activeT + 0.07)
+            settleActive()
+        } else {
+            activeRt.state.knobs.random(groups[1])
+        }
+        #expect(activeRt.state.knobs.values["Right pad"] != nil)
+        #expect(activeRt.state.knobs.values["Left size"] == nil)
     }
 
     @Test @MainActor func sidePanelFilterEditingFullKeyboardCaretPasteAndBlurCases() {
@@ -998,6 +1120,8 @@ struct RuneKnobsTests {
 
         // down_while_typing_moves_the_row + escape_and_return + with_the_field_idle + clicking_away + query_set_by_app (`filter_tests.rs:125..191`)
         let (rt3, tick3) = makeRt()
+        rt3.state.knobs.setFolded("Right", false)
+        rt3.markNeedsCommit(); tick3()
         _ = rt3.keyDown(KeyEvent(key: .text("right")), at: 1.0); tick3()
         #expect(rt3.state.knobs.treeAt == .knob(groupIndex: 1, knobIndex: 0))
         _ = rt3.keyDown(KeyEvent(key: .arrowDown), at: 1.1); tick3()
@@ -1014,10 +1138,19 @@ struct RuneKnobsTests {
         #expect(rt3.state.knobs.get(r) == 21)
         _ = rt3.keyDown(KeyEvent(key: .arrowLeft), at: 1.5); tick3()
         #expect(rt3.state.knobs.get(r) == 20)
+        // Clearing query + ArrowLeft folds "Right" header, then "/" re-enters filtering (filter_tests.rs:162-170)
+        rt3.state.knobs.setQuery("")
+        rt3.markNeedsCommit(); tick3()
+        rt3.state.knobs.setAt(.group(1), groups: groups)
+        _ = rt3.keyDown(KeyEvent(key: .arrowLeft), at: 1.55); tick3()
+        #expect(rt3.state.knobs.folded.contains("Right"))
         _ = rt3.keyDown(KeyEvent(key: .text("/")), at: 1.6); tick3()
         #expect(rt3.state.knobs.filtering)
         _ = rt3.keyDown(KeyEvent(key: .escape), at: 1.7); tick3()
-        #expect(!rt3.state.knobs.filtering && rt3.state.knobs.query == "right")
+        #expect(!rt3.state.knobs.filtering)
+        rt3.state.knobs.setQuery("right")
+        rt3.markNeedsCommit(); tick3()
+        #expect(rt3.state.knobs.query == "right")
         _ = rt3.keyDown(KeyEvent(key: .escape), at: 1.8); tick3()
         #expect(rt3.state.knobs.query.isEmpty && rt3.state.knobs.open)
         _ = rt3.keyDown(KeyEvent(key: .escape), at: 1.9); tick3()
