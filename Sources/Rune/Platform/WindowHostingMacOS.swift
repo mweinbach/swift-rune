@@ -933,7 +933,7 @@ private final class RuneHostedMetalView: NSView {
                 return
             }
         }
-        _ = entry.keyDown(runtimeObj: runtime, event: KeyEvent(key: key, mods: m), at: nowSeconds())
+        _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: KeyEvent(key: key, mods: m), at: nowSeconds())
         requestRender()
     }
 

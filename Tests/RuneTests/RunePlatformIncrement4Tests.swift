@@ -555,5 +555,73 @@ struct RunePlatformIncrement4Tests {
         #expect(!fileDialogPresenter.isPresenting)
         _ = dragOutCoordinator
     }
+
+    @Test("MacOSDragOutLogic outcome handles Copy/Move/Delete/Generic/Link precedence and withinApp mask")
+    func macOSDragOutOutcomePrecedenceAndWithinAppMask() {
+        #expect(MacOSDragOutLogic.outcome(from: 0, ended: true) == .cancelled)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsCopyMask, ended: false) == .cancelled)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsCopyMask, ended: true) == .copied)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsMoveMask, ended: true) == .moved)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsDeleteMask, ended: true) == .moved)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsGenericMask, ended: true) == .moved)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsLinkMask, ended: true) == .linked)
+
+        // Precedence: Copy beats Move|Delete|Generic|Link; Move|Delete|Generic beats Link.
+        let allOps = MacOSDragOutLogic.nsCopyMask
+            | MacOSDragOutLogic.nsMoveMask
+            | MacOSDragOutLogic.nsDeleteMask
+            | MacOSDragOutLogic.nsGenericMask
+            | MacOSDragOutLogic.nsLinkMask
+        #expect(MacOSDragOutLogic.outcome(from: allOps, ended: true) == .copied)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsGenericMask | MacOSDragOutLogic.nsLinkMask, ended: true) == .moved)
+        #expect(MacOSDragOutLogic.outcome(from: MacOSDragOutLogic.nsDeleteMask | MacOSDragOutLogic.nsLinkMask, ended: true) == .moved)
+
+        // dropsWithinApp == false returns 0 inside app and preserves mask outside app.
+        let mask = MacOSDragOutLogic.nsCopyMask | MacOSDragOutLogic.nsMoveMask
+        #expect(MacOSDragOutLogic.operationMask(for: mask, withinApplication: true, dropsWithinApp: false) == 0)
+        #expect(MacOSDragOutLogic.operationMask(for: mask, withinApplication: false, dropsWithinApp: false) == mask)
+        #expect(MacOSDragOutLogic.operationMask(for: mask, withinApplication: true, dropsWithinApp: true) == mask)
+    }
     #endif
+
+    @Test("Drop pass-through skips inner target that accepts zero URLs without reject handlers")
+    func dropPassThroughToOuterTarget() {
+        let rt = Runtime<DropState>(
+            state: DropState(),
+            viewport: Vec2(300, 200),
+            view: { _, _ in
+                el()
+                    .key("outer")
+                    .w(200)
+                    .h(120)
+                    .acceptsExtensions(["txt"])
+                    .onDropFiles { s, urls, _ in s.outerDropped.append(contentsOf: urls) }
+                    .child(
+                        el()
+                            .key("inner")
+                            .w(120)
+                            .h(80)
+                            .acceptsExtensions(["png"])
+                            .onDropFiles { s, urls, _ in s.dropped.append(contentsOf: urls) }
+                    )
+            }
+        )
+        _ = rt.frame(at: 0.0)
+
+        let txt = URL(fileURLWithPath: "/tmp/readme.txt")
+        let png = URL(fileURLWithPath: "/tmp/icon.png")
+
+        // Inner accepts .png only and claims NO reject handlers, so .txt passes through to outer.
+        #expect(rt.acceptsDrop([txt], at: Vec2(20, 20)) == true)
+        rt.dragFiles([txt], at: Vec2(20, 20), at: 0.1)
+        #expect(rt.dropHovered == "outer")
+        #expect(rt.dropHoveredAccepted == true)
+        rt.dropFiles([txt], at: Vec2(20, 20), at: 0.2)
+        #expect(rt.state.outerDropped == [txt])
+        #expect(rt.state.dropped.isEmpty)
+
+        // .png matches inner directly.
+        rt.dropFiles([png], at: Vec2(20, 20), at: 0.3)
+        #expect(rt.state.dropped == [png])
+    }
 }

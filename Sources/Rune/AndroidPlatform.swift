@@ -130,24 +130,33 @@ public struct AndroidConfigurationState: Sendable, Equatable {
 public enum AndroidApp {
     @MainActor
     public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs) throws {
+        HeadlessRunner.registerFonts(spec.fonts)
         var state = spec.makeState()
+        var initTx = Tx()
         if let sceneName = parsed.sceneName, let apply = spec.scenes[sceneName] {
-            var tx = Tx()
-            apply(&state, &tx)
+            apply(&state, &initTx)
         }
         let vp = parsed.viewportOverride ?? spec.size
         let isDark = parsed.darkOverride ?? spec.dark ?? true
+        let waker = Waker()
+        spec.setup?(waker)
         let runtime = Runtime<State>(
             state: state,
             viewport: vp,
             pixelScale: 2.0,
             systemDark: isDark,
             reducedMotion: parsed.reducedMotion,
-            waker: Waker(),
+            waker: waker,
             onKey: spec.onKey,
             view: spec.view
         )
         runtime.windowTitle = spec.title
+        runtime.srgbBlend = spec.srgbBlend
+        runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
+        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         _ = runtime.frame(at: 0.0)
         ReadySignal.ready()
     }

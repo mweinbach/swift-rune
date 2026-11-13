@@ -314,6 +314,14 @@ public final class Runtime<State> {
     internal var activeDragOut: (path: String, key: String?, onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?)? = nil
     internal var pendingDragOutStart: DragOutStart? = nil
 
+    public private(set) var systemContrast: SystemContrast? = nil
+
+    public func setSystemContrast(_ contrast: SystemContrast?) {
+        guard contrast != systemContrast else { return }
+        systemContrast = contrast
+        needsCommit = true
+    }
+
     public var hasPendingInput: Bool {
         !pendingFileDialogAnswers.isEmpty || pendingDropMovePoint != nil || !popupQueue.isEmpty
     }
@@ -776,6 +784,7 @@ public final class Runtime<State> {
             hoveredKey: hoveredKey,
             pressedKey: pressedKey,
             waker: waker,
+            systemContrast: systemContrast,
             scrollLookup: { [weak self] key in
                 guard let self else { return .zero }
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
@@ -2755,8 +2764,12 @@ public final class Runtime<State> {
 
     // MARK: - Internal Platform Input Bridges
 
-    internal func dropTargetHitTest(at point: Vec2) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
-        guard let hit = hitTest(at: point, predicate: { $0.el.handlers.drop != nil }),
+    internal func dropTargetHitTest(at point: Vec2, for urls: [URL]) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
+        guard let hit = hitTest(at: point, predicate: { node in
+            guard let spec = node.el.handlers.drop else { return false }
+            let (accepted, rejected) = spec.split(urls)
+            return !accepted.isEmpty || (!rejected.isEmpty && spec.claimsRejects)
+        }),
               let spec = hit.node.el.handlers.drop else {
             return nil
         }
@@ -3497,6 +3510,7 @@ public final class Runtime<State> {
 
     public func paste(_ content: ClipboardContent, at now: Double) {
         clipboard = content
+        richClipboard = RichClipboardPayload(content: content)
         guard let fPath = focusedPath,
               let fIdx = nodeByPath[fPath],
               let editLens = flatNodes[fIdx].el.handlers.editLens else {

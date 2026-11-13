@@ -29,6 +29,10 @@ public struct DropSpec<State> {
         self.onDropRejectedHover = onDropRejectedHover
     }
 
+    public var claimsRejects: Bool {
+        onDropRejected != nil || onDropRejectedHover != nil
+    }
+
     public func matches(_ url: URL) -> Bool {
         accepts?(url) ?? true
     }

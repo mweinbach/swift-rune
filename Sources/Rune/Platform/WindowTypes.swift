@@ -333,6 +333,7 @@ public protocol HostedWindowEntry: AnyObject {
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double)
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
+    @MainActor func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double)
     func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool
     func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>?
@@ -392,6 +393,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         )
         rt.windowTitle = spec.appSpec.title
         rt.urlOpener.headless = false
+        rt.srgbBlend = spec.appSpec.srgbBlend
+        rt.poll = spec.appSpec.poll
+        rt.onAppFileDrop = spec.appSpec.onFileDrop
+        rt.onFileDrop = spec.appSpec.onFileDropPhase
+        rt.setSystemContrast(SystemPreferences.current().contrast)
         if let onQuit = spec.onQuit {
             nonisolated(unsafe) weak let weakRt = rt
             nonisolated(unsafe) let quitFn = onQuit
@@ -421,7 +427,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func setFocused(runtimeObj: AnyObject, focused: Bool) {
-        rt(runtimeObj).windowFocused = focused
+        let r = rt(runtimeObj)
+        r.windowFocused = focused
+        if focused {
+            r.setSystemContrast(SystemPreferences.current().contrast)
+        }
     }
 
     func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
@@ -466,6 +476,15 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
         rt(runtimeObj).keyDown(event, at: at)
+    }
+
+    @MainActor
+    func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
+        #if os(macOS)
+        return MacOSClipboardSync.dispatchKeyWithSync(event, runtime: rt(runtimeObj), at: at)
+        #else
+        return rt(runtimeObj).keyDown(event, at: at)
+        #endif
     }
 
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double) {

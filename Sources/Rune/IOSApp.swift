@@ -28,10 +28,11 @@ public enum IOSApp {
         _ spec: AppSpec<State>,
         parsed: ToolingArgs = ToolingArgs.parse([])
     ) throws -> RuneIOSViewController<State> {
+        HeadlessRunner.registerFonts(spec.fonts)
         var state = spec.makeState()
+        var initTx = Tx()
         if let sceneName = parsed.sceneName, let apply = spec.scenes[sceneName] {
-            var tx = Tx()
-            apply(&state, &tx)
+            apply(&state, &initTx)
         }
         let screenScale = Float(UIScreen.main.scale)
         let bounds = UIScreen.main.bounds.size
@@ -39,6 +40,7 @@ public enum IOSApp {
         let isDark = parsed.darkOverride ?? spec.dark ?? (UITraitCollection.current.userInterfaceStyle == .dark)
 
         let waker = Waker()
+        spec.setup?(waker)
         let runtime = Runtime<State>(
             state: state,
             viewport: vp,
@@ -50,6 +52,12 @@ public enum IOSApp {
             view: spec.view
         )
         runtime.windowTitle = spec.title
+        runtime.srgbBlend = spec.srgbBlend
+        runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
+        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         return try RuneIOSViewController(
             runtime: runtime,

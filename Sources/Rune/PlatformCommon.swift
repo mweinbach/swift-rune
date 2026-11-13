@@ -61,7 +61,7 @@ public enum RuneApp {
     @MainActor
     public static func run<State>(_ app: App<State>, arguments: [String]? = nil) throws {
         let parsed = (arguments ?? app.runOptions.arguments).map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
-        if parsed.isHeadlessRequested || app.isWindowless {
+        if parsed.isHeadlessRequested {
             _ = try HeadlessRunner.run(app, args: parsed)
             return
         }

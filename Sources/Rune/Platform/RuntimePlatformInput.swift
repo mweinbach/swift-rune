@@ -119,7 +119,7 @@ extension Runtime {
         draggedFiles = urls
         draggedFilesPoint = point
         guard !filesHeld else { return }
-        guard let pt = point, let hit = dropTargetHitTest(at: pt) else {
+        guard let pt = point, let hit = dropTargetHitTest(at: pt, for: urls) else {
             endDropHover(at: now)
             return
         }
@@ -210,7 +210,7 @@ extension Runtime {
         endDropHover(at: now)
 
         var handledByElement = false
-        if let pt = targetPt, let hit = dropTargetHitTest(at: pt) {
+        if let pt = targetPt, let hit = dropTargetHitTest(at: pt, for: urls) {
             let (accepted, rejected) = hit.spec.split(urls)
             if !accepted.isEmpty, let onFiles = hit.spec.onDropFiles {
                 var tx = Tx()
@@ -244,7 +244,7 @@ extension Runtime {
 
     /// Returns whether `point` accepts any dragged `urls` (for `NSDraggingDestination` cursor feedback).
     public func acceptsDrop(_ urls: [URL], at point: Vec2) -> Bool {
-        if let hit = dropTargetHitTest(at: point) {
+        if let hit = dropTargetHitTest(at: point, for: urls) {
             return !hit.spec.split(urls).accepted.isEmpty
         }
         return onAppFileDrop != nil || onFileDrop != nil
@@ -566,5 +566,311 @@ extension PopupShow {
             let y = (posId != nil) ? r.top : r.bottom
             return (Vec2(x, y), posId, r.width)
         }
+    }
+}
+
+// MARK: - Rich HTML Selection Copy (`runtime/selection/copy_html.rs`, #832)
+
+/// Rich text selection slice passed to `ClipboardHTMLBuilder.render`.
+public struct SelectionHTMLSlice: Sendable, Equatable {
+    public var role: ElementRole
+    public var blockTag: String?
+    public var headingLevel: Int?
+    public var isHidden: Bool
+    public var isOrderedListItem: Bool
+    public var groupId: String
+    public var rowId: String
+    public var isHeaderCell: Bool
+    public var isMonospaceBlock: Bool
+    public var text: String
+    public var baseWeight: Float
+    public var baseItalic: Bool
+    public var spans: [TextSpan]
+    public var links: [(utf8Range: Range<Int>, url: String)]
+    public var strikes: [Range<Int>]
+    public var utf8Range: Range<Int>
+    public var besidePrevious: Bool
+
+    public init(
+        role: ElementRole = .text,
+        blockTag: String? = nil,
+        headingLevel: Int? = nil,
+        isHidden: Bool = false,
+        isOrderedListItem: Bool = false,
+        groupId: String = "",
+        rowId: String = "",
+        isHeaderCell: Bool = false,
+        isMonospaceBlock: Bool = false,
+        text: String,
+        baseWeight: Float = 400,
+        baseItalic: Bool = false,
+        spans: [TextSpan] = [],
+        links: [(utf8Range: Range<Int>, url: String)] = [],
+        strikes: [Range<Int>] = [],
+        utf8Range: Range<Int>? = nil,
+        besidePrevious: Bool = false
+    ) {
+        self.role = role
+        self.blockTag = blockTag
+        self.headingLevel = headingLevel
+        self.isHidden = isHidden
+        self.isOrderedListItem = isOrderedListItem
+        self.groupId = groupId
+        self.rowId = rowId
+        self.isHeaderCell = isHeaderCell
+        self.isMonospaceBlock = isMonospaceBlock
+        self.text = text
+        self.baseWeight = baseWeight
+        self.baseItalic = baseItalic
+        self.spans = spans
+        self.links = links
+        self.strikes = strikes
+        self.utf8Range = utf8Range ?? (0..<text.utf8.count)
+        self.besidePrevious = besidePrevious
+    }
+
+    public static func == (lhs: SelectionHTMLSlice, rhs: SelectionHTMLSlice) -> Bool {
+        lhs.role == rhs.role &&
+            lhs.blockTag == rhs.blockTag &&
+            lhs.headingLevel == rhs.headingLevel &&
+            lhs.isHidden == rhs.isHidden &&
+            lhs.isOrderedListItem == rhs.isOrderedListItem &&
+            lhs.groupId == rhs.groupId &&
+            lhs.rowId == rhs.rowId &&
+            lhs.isHeaderCell == rhs.isHeaderCell &&
+            lhs.isMonospaceBlock == rhs.isMonospaceBlock &&
+            lhs.text == rhs.text &&
+            lhs.baseWeight == rhs.baseWeight &&
+            lhs.baseItalic == rhs.baseItalic &&
+            lhs.spans == rhs.spans &&
+            lhs.strikes == rhs.strikes &&
+            lhs.utf8Range == rhs.utf8Range &&
+            lhs.besidePrevious == rhs.besidePrevious &&
+            lhs.links.count == rhs.links.count &&
+            zip(lhs.links, rhs.links).allSatisfy { $0.utf8Range == $1.utf8Range && $0.url == $1.url }
+    }
+}
+
+/// Converts selected styled text blocks into HTML (`<h1>..<h6>`, `<ul>`/`<ol>`, `<table>`, `<pre><code>`, `<p>`, inline formatting & links) matching upstream `copy_html.rs` (#832).
+public enum ClipboardHTMLBuilder {
+    private enum Block: Equatable {
+        case heading(id: String, level: Int)
+        case item(listId: String, itemId: String, ordered: Bool)
+        case cell(tableId: String, rowId: String, cellId: String, head: Bool)
+        case code(id: String)
+        case paragraph(id: String)
+    }
+
+    public static func render(_ slices: [SelectionHTMLSlice]) -> String? {
+        guard !slices.isEmpty else { return nil }
+        var out = ""
+        var prev: Block? = nil
+        var openLists: [(listId: String, itemId: String, ordered: Bool)] = []
+
+        func closeLists(keep: Int) {
+            while openLists.count > keep {
+                let top = openLists.removeLast()
+                out += top.ordered ? "</li></ol>" : "</li></ul>"
+            }
+        }
+
+        for (index, slice) in slices.enumerated() {
+            let block = classify(slice, index: index)
+            if slice.isHidden, case .item = block {
+                continue
+            }
+            let inline = renderInline(slice)
+            if inline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
+
+            if let prevBlock = prev, prevBlock == block {
+                if slice.besidePrevious && !out.hasSuffix(" ") && !inline.hasPrefix(" ") {
+                    out += " "
+                } else if !slice.besidePrevious {
+                    out += "<br>"
+                }
+            } else {
+                if let prevBlock = prev {
+                    if case .item = prevBlock {} else {
+                        close(prevBlock, next: block, into: &out)
+                    }
+                }
+                switch block {
+                case let .item(listId, itemId, ordered):
+                    let keep = openLists.lastIndex(where: { $0.listId == listId }).map { $0 + 1 } ?? 0
+                    closeLists(keep: keep)
+                    if let last = openLists.last, last.listId == listId {
+                        out += "</li><li>"
+                        openLists[openLists.count - 1].itemId = itemId
+                    } else {
+                        out += ordered ? "<ol><li>" : "<ul><li>"
+                        openLists.append((listId: listId, itemId: itemId, ordered: ordered))
+                    }
+                default:
+                    closeLists(keep: 0)
+                    open(block, prev: prev, into: &out)
+                }
+            }
+
+            out += inline
+            prev = block
+        }
+
+        guard let finalPrev = prev else { return nil }
+        if case .item = finalPrev {} else {
+            close(finalPrev, next: nil, into: &out)
+        }
+        closeLists(keep: 0)
+        return out
+    }
+
+    private static func classify(_ s: SelectionHTMLSlice, index: Int) -> Block {
+        let tag = s.blockTag?.lowercased()
+        if s.role == .heading || tag == "heading" || s.headingLevel != nil {
+            let level = min(6, max(1, s.headingLevel ?? 2))
+            return .heading(id: s.groupId.isEmpty ? "h-\(index)" : s.groupId, level: level)
+        }
+        if s.role == .listItem || tag == "listitem" {
+            let listId = s.groupId.isEmpty ? "list-0" : s.groupId
+            let itemId = s.rowId.isEmpty ? "item-\(index)" : s.rowId
+            return .item(listId: listId, itemId: itemId, ordered: s.isOrderedListItem)
+        }
+        if tag == "cell" || tag == "columnheader" || tag == "rowheader" || tag == "td" || tag == "th" || s.isHeaderCell {
+            let tableId = s.groupId.isEmpty ? "table-0" : s.groupId
+            let rowId = s.rowId.isEmpty ? "row-0" : s.rowId
+            return .cell(tableId: tableId, rowId: rowId, cellId: "cell-\(index)", head: s.isHeaderCell || (tag != "cell" && tag != "td"))
+        }
+        if s.isMonospaceBlock || tag == "code" {
+            return .code(id: s.groupId.isEmpty ? "code-0" : s.groupId)
+        }
+        return .paragraph(id: s.groupId.isEmpty ? "p-\(index)" : s.groupId)
+    }
+
+    private static func open(_ block: Block, prev: Block?, into out: inout String) {
+        switch block {
+        case let .heading(_, level):
+            out += "<h\(level)>"
+        case .item:
+            break
+        case let .cell(tableId, rowId, _, head):
+            let sameTable: Bool
+            let sameRow: Bool
+            if case let .cell(pt, pr, _, _) = prev {
+                sameTable = (pt == tableId)
+                sameRow = (pt == tableId && pr == rowId)
+            } else {
+                sameTable = false
+                sameRow = false
+            }
+            if !sameTable { out += "<table>" }
+            if !sameRow { out += "<tr>" }
+            out += head ? "<th>" : "<td>"
+        case .code:
+            out += "<pre><code>"
+        case .paragraph:
+            out += "<p>"
+        }
+    }
+
+    private static func close(_ block: Block, next: Block?, into out: inout String) {
+        switch block {
+        case let .heading(_, level):
+            out += "</h\(level)>"
+        case .item:
+            break
+        case let .cell(tableId, rowId, _, head):
+            out += head ? "</th>" : "</td>"
+            let sameTable: Bool
+            let sameRow: Bool
+            if case let .cell(nt, nr, _, _) = next {
+                sameTable = (nt == tableId)
+                sameRow = (nt == tableId && nr == rowId)
+            } else {
+                sameTable = false
+                sameRow = false
+            }
+            if !sameRow { out += "</tr>" }
+            if !sameTable { out += "</table>" }
+        case .code:
+            out += "</code></pre>"
+        case .paragraph:
+            out += "</p>"
+        }
+    }
+
+    private static func renderInline(_ slice: SelectionHTMLSlice) -> String {
+        let utf8 = Array(slice.text.utf8)
+        let len = utf8.count
+        let start = min(max(0, slice.utf8Range.lowerBound), len)
+        let end = min(max(start, slice.utf8Range.upperBound), len)
+        guard start < end else { return "" }
+
+        var spanRanges: [(range: Range<Int>, span: TextSpan)] = []
+        if !slice.spans.isEmpty {
+            var cursor = 0
+            for sp in slice.spans {
+                let spLen = sp.text.utf8.count
+                let spRange = cursor..<(cursor + spLen)
+                spanRanges.append((spRange, sp))
+                cursor += spLen
+            }
+        }
+
+        var cuts: Set<Int> = [start, end]
+        for (r, _) in spanRanges {
+            if r.lowerBound >= start && r.lowerBound <= end { cuts.insert(r.lowerBound) }
+            if r.upperBound >= start && r.upperBound <= end { cuts.insert(r.upperBound) }
+        }
+        for (r, _) in slice.links {
+            if r.lowerBound >= start && r.lowerBound <= end { cuts.insert(r.lowerBound) }
+            if r.upperBound >= start && r.upperBound <= end { cuts.insert(r.upperBound) }
+        }
+        for r in slice.strikes {
+            if r.lowerBound >= start && r.lowerBound <= end { cuts.insert(r.lowerBound) }
+            if r.upperBound >= start && r.upperBound <= end { cuts.insert(r.upperBound) }
+        }
+        let sortedCuts = cuts.sorted()
+        var out = ""
+        var activeHref: String? = nil
+
+        for idx in 0..<(sortedCuts.count - 1) {
+            let s = sortedCuts[idx]
+            let e = sortedCuts[idx + 1]
+            guard s < e else { continue }
+            guard let textPiece = String(bytes: utf8[s..<e], encoding: .utf8), !textPiece.isEmpty else { continue }
+
+            let spanMatches = spanRanges.filter { $0.range.lowerBound <= s && e <= $0.range.upperBound }.map(\.span)
+            let isBold = (spanMatches.contains { ($0.weight ?? 0) >= 600 } || slice.baseWeight >= 600)
+            let isItalic = (spanMatches.contains { $0.italic }) && !slice.baseItalic
+            let isCode = spanMatches.contains { $0.monospace }
+            let isStruck = spanMatches.contains { $0.strikethrough } || slice.strikes.contains { $0.lowerBound <= s && e <= $0.upperBound }
+            let href = slice.links.first {
+                $0.utf8Range.lowerBound <= s && e <= $0.utf8Range.upperBound &&
+                    ($0.url.contains("://") || $0.url.hasPrefix("mailto:"))
+            }?.url
+
+            if activeHref != href {
+                if activeHref != nil { out += "</a>" }
+                if let h = href { out += "<a href=\"\(escapeHTML(h))\">" }
+                activeHref = href
+            }
+
+            var piece = escapeHTML(textPiece).replacingOccurrences(of: "\n", with: "<br>")
+            if isCode { piece = "<code>\(piece)</code>" }
+            if isStruck { piece = "<s>\(piece)</s>" }
+            if isItalic { piece = "<em>\(piece)</em>" }
+            if isBold && slice.baseWeight < 600 { piece = "<strong>\(piece)</strong>" }
+            out += piece
+        }
+        if activeHref != nil { out += "</a>" }
+        return out
+    }
+
+    public static func escapeHTML(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
     }
 }

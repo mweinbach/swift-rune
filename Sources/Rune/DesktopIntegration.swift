@@ -2507,6 +2507,11 @@ extension Tx {
         runtimeActions["richClipboardWrite"] = payload
     }
 
+    /// Copies plain text along with HTML markup (`text/html`) to the clipboard (#832).
+    public mutating func copyHTML(_ text: String, html: String) {
+        copyRich(RichClipboardPayload(text: text, html: html))
+    }
+
     /// Requests opening an `http:`, `https:`, or `mailto:` URL.
     public mutating func openUrl(_ url: String, sameTab: Bool = false) throws {
         let normalized = sameTab ? try UrlOpener.checkSameTab(url) : try UrlOpener.validate(url)
@@ -2969,6 +2974,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         rt.nativeOverlay = true
         rt.srgbBlend = opts.srgbBlend
         rt.clearColor = Color.transparent
+        rt.setSystemContrast(prefs.contrast)
         self.runtime = rt
 
         if let setupHandler {

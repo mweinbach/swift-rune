@@ -70,7 +70,9 @@ public enum DropTempNaming {
 public enum MacOSDragOutLogic {
     public static let nsCopyMask: UInt = 1
     public static let nsLinkMask: UInt = 2
+    public static let nsGenericMask: UInt = 4
     public static let nsMoveMask: UInt = 16
+    public static let nsDeleteMask: UInt = 32
 
     public static func dragOperationMask(for item: DragItem) -> UInt {
         var mask: UInt = 0
@@ -78,6 +80,13 @@ public enum MacOSDragOutLogic {
         if item.offers(.link) { mask |= nsLinkMask }
         if item.offers(.move) { mask |= nsMoveMask }
         return mask == 0 ? nsCopyMask : mask
+    }
+
+    public static func operationMask(for mask: UInt, withinApplication: Bool, dropsWithinApp: Bool) -> UInt {
+        if withinApplication && !dropsWithinApp {
+            return 0
+        }
+        return mask
     }
 
     /// Prevents modifier keys from altering/cancelling single-operation drags (`drag_out/macos.rs`).
@@ -94,14 +103,14 @@ public enum MacOSDragOutLogic {
         if operationRawValue == 0 {
             return .cancelled
         }
-        if (operationRawValue & nsMoveMask) != 0 {
+        if (operationRawValue & nsCopyMask) != 0 {
+            return .copied
+        }
+        if (operationRawValue & (nsMoveMask | nsDeleteMask | nsGenericMask)) != 0 {
             return .moved
         }
         if (operationRawValue & nsLinkMask) != 0 {
             return .linked
-        }
-        if (operationRawValue & nsCopyMask) != 0 {
-            return .copied
         }
         return .cancelled
     }
@@ -525,6 +534,13 @@ public final class MacOSDragOutCoordinator {
         in view: NSView,
         onComplete: @escaping @MainActor (DragOutcome) -> Void
     ) {
+        // Finalize any prior unended session synchronously first so its muted types are restored
+        // before muting for the replacement session (`drag_out/macos.rs`).
+        if let previous = activeSession {
+            activeSession = nil
+            previous.cancelAndUnmute()
+        }
+
         let draggingItems = buildDraggingItems(start: start, in: view)
         guard !draggingItems.isEmpty else {
             onComplete(.cancelled)
@@ -536,9 +552,25 @@ public final class MacOSDragOutCoordinator {
             return
         }
 
+        var mutedWindows: [(NSWindow, [NSPasteboard.PasteboardType])] = []
         var mutedViews: [(NSView, [NSPasteboard.PasteboardType])] = []
         if !start.item.dropsWithinApp {
+            let regSelector = NSSelectorFromString("registeredDraggedTypes")
+            let dragEnterSelector = NSSelectorFromString("draggingEntered:")
             for win in NSApp.windows {
+                let winTypes: [NSPasteboard.PasteboardType]
+                if win.responds(to: regSelector),
+                   let rawTypes = win.perform(regSelector)?.takeUnretainedValue() as? [NSPasteboard.PasteboardType] {
+                    winTypes = rawTypes
+                } else if let del = win.delegate, del.responds(to: dragEnterSelector) {
+                    winTypes = MacOSDropReader.draggedTypes
+                } else {
+                    winTypes = []
+                }
+                if !winTypes.isEmpty {
+                    mutedWindows.append((win, winTypes))
+                    win.unregisterDraggedTypes()
+                }
                 if let contentView = win.contentView {
                     collectAndMuteRegisteredTypes(in: contentView, excluding: nil, out: &mutedViews)
                 }
@@ -547,18 +579,22 @@ public final class MacOSDragOutCoordinator {
 
         let session = Session(
             operationMask: NSDragOperation(rawValue: MacOSDragOutLogic.dragOperationMask(for: start.item)),
-            ignoreModifiers: MacOSDragOutLogic.ignoreModifierKeys(for: start.item)
+            dropsWithinApp: start.item.dropsWithinApp,
+            ignoreModifiers: MacOSDragOutLogic.ignoreModifierKeys(for: start.item),
+            mutedWindows: mutedWindows,
+            mutedViews: mutedViews
         ) { [weak self] outcome in
-            Task { @MainActor in
-                for (v, types) in mutedViews {
-                    v.registerForDraggedTypes(types)
-                }
-                self?.activeSession = nil
-                onComplete(outcome)
-            }
+            self?.activeSession = nil
+            onComplete(outcome)
         }
         self.activeSession = session
         _ = view.beginDraggingSession(with: draggingItems, event: dragEvent, source: session)
+    }
+
+    public func cancelActive() {
+        guard let session = activeSession else { return }
+        activeSession = nil
+        session.cancelAndUnmute()
     }
 
     private func collectAndMuteRegisteredTypes(
@@ -706,24 +742,73 @@ public final class MacOSDragOutCoordinator {
 
     private final class Session: NSObject, NSDraggingSource {
         private let operationMask: NSDragOperation
+        private let dropsWithinApp: Bool
         private let ignoreModifiers: Bool
-        private var completion: ((DragOutcome) -> Void)?
+        private var mutedWindows: [(NSWindow, [NSPasteboard.PasteboardType])]
+        private var mutedViews: [(NSView, [NSPasteboard.PasteboardType])]
+        private var completion: (@MainActor (DragOutcome) -> Void)?
 
-        init(operationMask: NSDragOperation, ignoreModifiers: Bool, completion: @escaping (DragOutcome) -> Void) {
+        init(
+            operationMask: NSDragOperation,
+            dropsWithinApp: Bool,
+            ignoreModifiers: Bool,
+            mutedWindows: [(NSWindow, [NSPasteboard.PasteboardType])],
+            mutedViews: [(NSView, [NSPasteboard.PasteboardType])],
+            completion: @escaping @MainActor (DragOutcome) -> Void
+        ) {
             self.operationMask = operationMask
+            self.dropsWithinApp = dropsWithinApp
             self.ignoreModifiers = ignoreModifiers
+            self.mutedWindows = mutedWindows
+            self.mutedViews = mutedViews
             self.completion = completion
             super.init()
         }
 
         deinit {
+            let windows = mutedWindows
+            let views = mutedViews
+            let cb = completion
+            mutedWindows = []
+            mutedViews = []
+            completion = nil
+            if !windows.isEmpty || !views.isEmpty || cb != nil {
+                MainActor.assumeIsolated {
+                    for (w, types) in windows { w.registerForDraggedTypes(types) }
+                    for (v, types) in views { v.registerForDraggedTypes(types) }
+                    cb?(.cancelled)
+                }
+            }
+        }
+
+        @MainActor
+        func cancelAndUnmute() {
+            finish(with: .cancelled)
+        }
+
+        @MainActor
+        private func unmuteAll() {
+            for (w, types) in mutedWindows { w.registerForDraggedTypes(types) }
+            for (v, types) in mutedViews { v.registerForDraggedTypes(types) }
+            mutedWindows.removeAll()
+            mutedViews.removeAll()
+        }
+
+        @MainActor
+        private func finish(with outcome: DragOutcome) {
+            unmuteAll()
             let cb = completion
             completion = nil
-            cb?(.cancelled)
+            cb?(outcome)
         }
 
         func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-            operationMask
+            let masked = MacOSDragOutLogic.operationMask(
+                for: operationMask.rawValue,
+                withinApplication: context == .withinApplication,
+                dropsWithinApp: dropsWithinApp
+            )
+            return NSDragOperation(rawValue: masked)
         }
 
         func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
@@ -731,10 +816,40 @@ public final class MacOSDragOutCoordinator {
         }
 
         func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-            let cb = completion
-            completion = nil
-            cb?(MacOSDragOutLogic.outcome(from: operation.rawValue, ended: true))
+            let resolved = MacOSDragOutLogic.outcome(from: operation.rawValue, ended: true)
+            MainActor.assumeIsolated {
+                finish(with: resolved)
+            }
         }
+    }
+}
+
+/// Shared macOS NSPasteboard <-> Runtime clipboard sync helper supporting `public.html`, RTF, PNG, and plain text (#832).
+@MainActor
+public enum MacOSClipboardSync {
+    @discardableResult
+    public static func dispatchKeyWithSync<State>(
+        _ event: KeyEvent,
+        runtime: Runtime<State>,
+        at now: Double
+    ) -> Bool {
+        if event.mods.cmd, (event.key == .command("v") || event.key == .text("v") || event.key == .text("V")) {
+            let rich = Clipboard.shared.readRich()
+            if !rich.content.text.isEmpty || rich.content.html != nil || rich.content.rtf != nil || rich.image != nil {
+                runtime.richClipboard = rich
+                runtime.clipboard = rich.content
+            }
+        }
+        let prevClip = runtime.clipboard
+        let prevRich = runtime.richClipboard
+        let handled = runtime.keyDown(event, at: now)
+        if runtime.richClipboard != prevRich {
+            Clipboard.shared.writeRich(runtime.richClipboard)
+        } else if runtime.clipboard != prevClip,
+                  !runtime.clipboard.text.isEmpty || runtime.clipboard.html != nil || runtime.clipboard.rtf != nil {
+            Clipboard.shared.writeRich(RichClipboardPayload(content: runtime.clipboard))
+        }
+        return handled
     }
 }
 #endif

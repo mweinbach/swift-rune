@@ -189,6 +189,7 @@ public struct Cx<State> {
     public let pressedKey: String?
     public let waker: Waker
     public var helpLook: HelpLook?
+    public let systemContrast: SystemContrast?
     internal let scrollLookup: (String) -> Vec2
     internal let scrollMaxLookup: (String) -> Vec2
     internal let viewportSizeLookup: (String) -> Vec2
@@ -207,6 +208,7 @@ public struct Cx<State> {
         pressedKey: String? = nil,
         waker: Waker = Waker(),
         helpLook: HelpLook? = nil,
+        systemContrast: SystemContrast? = nil,
         scrollLookup: @escaping (String) -> Vec2 = { _ in .zero },
         scrollMaxLookup: @escaping (String) -> Vec2 = { _ in .zero },
         viewportSizeLookup: @escaping (String) -> Vec2 = { _ in .zero },
@@ -223,6 +225,7 @@ public struct Cx<State> {
         self.pressedKey = pressedKey
         self.waker = waker
         self.helpLook = helpLook
+        self.systemContrast = systemContrast
         self.scrollLookup = scrollLookup
         self.scrollMaxLookup = scrollMaxLookup
         self.viewportSizeLookup = viewportSizeLookup
