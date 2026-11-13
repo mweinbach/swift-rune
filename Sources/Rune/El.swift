@@ -448,6 +448,7 @@ public struct Cx<State> {
     internal let contentSizeLookup: (String) -> Vec2
     internal let layoutRectLookup: (String) -> MotionRect?
     internal var envState = CxEnvironmentState()
+    internal let layoutCollector: LayoutReadCollector
 
     public init(
         viewport: Vec2,
@@ -481,6 +482,43 @@ public struct Cx<State> {
         self.viewportSizeLookup = viewportSizeLookup
         self.contentSizeLookup = contentSizeLookup
         self.layoutRectLookup = layoutRectLookup
+        self.layoutCollector = LayoutReadCollector()
+    }
+
+    internal init(
+        viewport: Vec2,
+        pixelScale: Float,
+        systemDark: Bool,
+        reducedMotion: Bool,
+        windowFocused: Bool,
+        focusedKey: String?,
+        hoveredKey: String?,
+        pressedKey: String?,
+        waker: Waker,
+        helpLook: HelpLook? = nil,
+        scrollLookup: @escaping (String) -> Vec2,
+        scrollMaxLookup: @escaping (String) -> Vec2 = { _ in .zero },
+        viewportSizeLookup: @escaping (String) -> Vec2 = { _ in .zero },
+        contentSizeLookup: @escaping (String) -> Vec2 = { _ in .zero },
+        layoutRectLookup: @escaping (String) -> MotionRect? = { _ in nil },
+        layoutCollector: LayoutReadCollector
+    ) {
+        self.viewport = viewport
+        self.pixelScale = pixelScale
+        self.systemDark = systemDark
+        self.reducedMotion = reducedMotion
+        self.windowFocused = windowFocused
+        self.focusedKey = focusedKey
+        self.hoveredKey = hoveredKey
+        self.pressedKey = pressedKey
+        self.waker = waker
+        self.helpLook = helpLook
+        self.scrollLookup = scrollLookup
+        self.scrollMaxLookup = scrollMaxLookup
+        self.viewportSizeLookup = viewportSizeLookup
+        self.contentSizeLookup = contentSizeLookup
+        self.layoutRectLookup = layoutRectLookup
+        self.layoutCollector = layoutCollector
     }
 
     public func isFocused(_ key: String) -> Bool {
@@ -631,6 +669,9 @@ public struct ElementHandlers<State> {
     public var onPaste: ((inout State, String, inout Tx) -> Void)?
     public var onPasteContent: ((inout State, ClipboardContent, inout Tx) -> Void)?
     public var onInputPaste: ((inout State, ClipboardContent, inout Tx) -> Bool)?
+    public var onLayout: ((inout State, [Float], inout Tx) -> Void)?
+    public var onScreenLayout: ((inout State, [Float], inout Tx) -> Void)?
+    public var drawnRectUpdate: ((MotionRect) -> Bool)?
 
     public init() {}
 }
@@ -2435,32 +2476,6 @@ public struct El<State> {
     public func onStepLimit(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onStepLimit = handler
-        return copy
-    }
-
-    /// Called when this element's drawn `[x, y, width, height]` moves (`El::on_drawn_layout`).
-    public func onDrawnLayout(_ handler: @escaping (inout State, [Float]) -> Void) -> Self {
-        onDrawnLayoutTx { s, rect, _ in handler(&s, rect) }
-    }
-
-    /// Called with a `Tx` when this element's drawn `[x, y, width, height]` moves (`El::on_drawn_layout_tx`).
-    public func onDrawnLayoutTx(_ handler: @escaping (inout State, [Float], inout Tx) -> Void) -> Self {
-        var copy = self
-        copy.handlers.onDrawnLayout = handler
-        return copy
-    }
-
-    /// Writes this element's drawn frame into `rect` on every frame without rebuilding the view (`El::drawn_rect_into`).
-    public func drawnRectInto(_ rect: Live<MotionRect>) -> Self {
-        var copy = self
-        copy.drawnRectLive = rect
-        return copy
-    }
-
-    /// Called when this element enters (`true`) or leaves (`false`) the visible viewport (`El::on_visible`).
-    public func onVisible(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
-        var copy = self
-        copy.handlers.onVisible = handler
         return copy
     }
 

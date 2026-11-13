@@ -253,6 +253,7 @@ public enum MemoScope {
 
     static var activeCache: MemoCache? { current?.cache }
     static var activeEnvHash: UInt64 { current?.envHash ?? currentEnvironmentHash() }
+    static var isInsideMemo: Bool { !(current?.readFrames.isEmpty ?? true) }
 
     public static func environmentHash(
         systemDark: Bool,
@@ -428,43 +429,6 @@ public func caretRect(_ key: String) -> [Float]? {
 }
 
 extension Cx {
-    /// Last committed `[x, y, width, height]` of `.key(key)` in window space, recording a layout read.
-    public func layout(_ key: String) -> [Float]? {
-        let rect = MemoScope.readLayout(key)
-        envState.reads.layoutReads.append(.layout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
-        return rect
-    }
-
-    /// Reads `key`'s layout rect through `transform`, invalidating memos only when the projected value changes (`Cx::layout_with`).
-    public func layoutWith<T: Equatable & Sendable>(
-        _ key: String,
-        _ transform: @escaping @Sendable ([Float]) -> T
-    ) -> T? {
-        MemoScope.readLayoutWith(key, transform, into: &envState.reads.layoutReads)
-    }
-
-    /// Last committed `[width, height]` of `.key(key)`, invalidating memos only on size changes.
-    public func layoutSize(_ key: String) -> [Float]? {
-        let size = MemoScope.readLayoutSize(key)
-        envState.reads.layoutReads.append(.layoutSize(key: key, size: size.map { Vec2($0[0], $0[1]) }))
-        return size
-    }
-
-    /// Last committed `[x, y, width, height]` of `.key(key)` in window coordinates (0.5 pt hysteresis).
-    public func windowLayout(_ key: String) -> [Float]? {
-        let rect = MemoScope.readWindowLayout(key)
-        envState.reads.layoutReads.append(.windowLayout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
-        return rect
-    }
-
-    /// Reads `key`'s window layout rect through `transform`, invalidating memos only when the projected value changes (`Cx::window_layout_with`).
-    public func windowLayoutWith<T: Equatable & Sendable>(
-        _ key: String,
-        _ transform: @escaping @Sendable ([Float]) -> T
-    ) -> T? {
-        MemoScope.readWindowLayoutWith(key, transform, into: &envState.reads.layoutReads)
-    }
-
     /// Last rendered `[x, y, width, height]` caret rect of text field `.key(key)`.
     public func caret(_ key: String) -> [Float]? {
         envState.reads.caretRead = true

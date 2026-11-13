@@ -80,26 +80,8 @@ extension El {
     /// Override parent cross-axis alignment for this child (`align-self: stretch`).
     public func selfStretch() -> Self { alignSelf(.stretch) }
 
-    /// Paint-time whole-pixel snapping (`El::pixel_snap`). On by default.
-    public func pixelSnap(_ on: Bool = true) -> Self {
-        var copy = self
-        copy.runtimeExtras["pixelSnap"] = on
-        return copy
-    }
-
-    /// Hold trailing position against a widening parent (`El::ride_trailing`).
-    public func rideTrailing() -> Self {
-        var copy = self
-        copy.runtimeExtras["rideTrailing"] = true
-        return copy
-    }
-
     var isPixelSnapEnabled: Bool {
-        (runtimeExtras["pixelSnap"] as? Bool) ?? true
-    }
-
-    var isRideTrailing: Bool {
-        (runtimeExtras["rideTrailing"] as? Bool) ?? false
+        pixelSnapEnabled
     }
 
     var scaleOrigin: Vec2 {
