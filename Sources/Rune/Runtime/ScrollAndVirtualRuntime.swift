@@ -252,6 +252,11 @@ extension Runtime {
         let isFirstMount = (scrollOffsets[vpPath] == nil && !wasPinnedToBottom.contains(vpPath))
         let stickyPin = nextStickBottom && (isFirstMount || wasPinnedToBottom.contains(vpPath))
 
+        let vpScrollKey = vpPath.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
+        let hasPendingRevealForViewport = pendingScrollReveals.contains { req in
+            req.scope == nil || req.scope == vpPath || req.scope == path
+                || req.scope.map { selectsElementSelector($0, path: vpPath, key: vpScrollKey) } == true
+        }
         var curOffsetY = scrollOffsets[vpPath]?.y ?? 0
         if stickyPin {
             curOffsetY = max(0, total - vpH)
@@ -261,6 +266,7 @@ extension Runtime {
                   let anchorKey = vState.lastAnchorKey,
                   !scrollRequestsState.owns(vpPath),
                   !directScrolledPaths.contains(vpPath),
+                  !hasPendingRevealForViewport,
                   let anchorIdx = keys.firstIndex(of: anchorKey) {
             let expectedY = prefix[anchorIdx] + vState.lastAnchorLocalY
             if abs(expectedY - curOffsetY) > 0.25 {
@@ -644,7 +650,14 @@ extension Runtime {
                         result.needsClampedRelayout = true
                     }
                 } else {
+                    let revealedInCommit = enclosingScrollPath.map { sp in
+                        let sKey = sp.split(separator: "/").last.flatMap { $0.hasPrefix("@") ? String($0.dropFirst()) : nil }
+                        return pendingScrollReveals.contains { req in
+                            req.scope == nil || req.scope == sp || req.scope.map { selectsElementSelector($0, path: sp, key: sKey) } == true
+                        }
+                    } ?? false
                     let startsFromZero = !settleAll
+                        && !revealedInCommit
                         && viewCommitCount > 1
                         && (whole || streaming)
                     var track: GrowTrack
@@ -976,7 +989,12 @@ extension Runtime {
                 !pass.nodes[$0].el.layout.scrollAxes.isEmpty ? $0 : pass.nodes[$0].enclosingVScrollIndex
             }
             let scrollPath = scrollIdx.map { pass.nodes[$0].path } ?? listPath
-            if scrollRequestsState.owns(scrollPath) || directScrolledPaths.contains(scrollPath) {
+            let scrollKey = scrollIdx.flatMap { pass.nodes[$0].key }
+            let hasPendingReveal = pendingScrollReveals.contains { req in
+                req.scope == nil || req.scope == scrollPath || req.scope == listPath
+                    || req.scope.map { selectsElementSelector($0, path: scrollPath, key: scrollKey) } == true
+            }
+            if scrollRequestsState.owns(scrollPath) || directScrolledPaths.contains(scrollPath) || hasPendingReveal {
                 continue
             }
             let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
@@ -1545,7 +1563,7 @@ extension Runtime {
                     top: itemTop,
                     height: itemH,
                     viewport: vpH,
-                    margin: 8.0
+                    margin: Double(flatNodes[vIdx].el.scrollMarginPts)
                 )
             }
 

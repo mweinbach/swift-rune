@@ -136,11 +136,12 @@ struct ElInc2ParityTests {
         let instantBox = rt.element(byKey: "instant-box")!
         #expect(abs(instantBox.rect[2] - 120) < 0.5)
         #expect(rt.element(byKey: "delayed")!.opacity < 0.01)
-        #expect(rt.isAnimating == true)
+        #expect(rt.isAnimating == false)
         #expect(rt.nextWakeDeadline(after: 0.05) != nil)
 
-        // Advance past 0.25s delay + settle time -> delayed fades in to 1.0!
+        // Advance past 0.25s delay -> delayed starts animating, then settles to 1.0!
         _ = rt.frame(at: 0.26)
+        #expect(rt.isAnimating == true)
         let settled = rt.frame(at: 1.5)
         _ = settled
         #expect(rt.element(byKey: "delayed")!.opacity > 0.99)

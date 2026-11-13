@@ -97,7 +97,7 @@ public struct ScrollRevealRequest: Sendable, Equatable {
     }
 
     public static func intoView(scope: String? = nil, key: String) -> ScrollRevealRequest {
-        ScrollRevealRequest(scope: scope, key: key, center: false, animated: true)
+        ScrollRevealRequest(scope: scope, key: key, center: false, animated: false)
     }
 
     public static func center(scope: String? = nil, key: String, animated: Bool = true) -> ScrollRevealRequest {

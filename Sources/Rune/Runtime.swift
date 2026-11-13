@@ -852,8 +852,6 @@ public final class Runtime<State> {
     public internal(set) var noWindowDragRects: [MotionRect] = []
     internal var activeByKeys: Bool = false
     internal var pendingSentKeys: [KeyEvent] = []
-    private var enterDelays: [NodeId: Double] = [:]
-    private var releasedEnterDelays: Set<NodeId> = []
     private struct MatchedSeenSnapshot {
         var id: NodeId
         var path: String
@@ -1255,8 +1253,15 @@ public final class Runtime<State> {
     /// Earliest future wall-clock timestamp when an active `enterDelay`, tooltip wait, or `looping`/`cycle` animation needs a frame.
     public func nextWakeDeadline(after now: Double) -> Double? {
         var best: Double? = nil
-        for readyAt in enterDelays.values where readyAt > now {
-            best = best.map { min($0, readyAt) } ?? readyAt
+        if let storeWake = scene.store.waitingUntil() {
+            let scale = Double(cxSettings.viewTimeScale)
+            if scale > 0 {
+                let scaledNow = cxSettings.scaledTime(at: now)
+                let wallWake = now + max(0.0, storeWake - scaledNow) / scale
+                if wallWake > now {
+                    best = best.map { min($0, wallWake) } ?? wallWake
+                }
+            }
         }
         if case .waiting(_, let since) = helpState.tipState {
             let due = since + currentHelpDelays().open
@@ -1625,17 +1630,6 @@ public final class Runtime<State> {
         insideFramePollOrInput = false
         promotePendingWakes(at: now)
 
-        // Release any `enterDelay` elements whose wait window has elapsed
-        var releasedAny = false
-        for (nid, readyAt) in enterDelays where now >= readyAt {
-            enterDelays.removeValue(forKey: nid)
-            releasedEnterDelays.insert(nid)
-            releasedAny = true
-        }
-        if releasedAny && !needsCommit {
-            commitTree(at: now, cut: false)
-        }
-
         if liveVisible {
             _ = liveWake.takeVisible()
         }
@@ -1671,7 +1665,7 @@ public final class Runtime<State> {
         if isInitiallyScrolling {
             layoutFeedback.step(.reopened)
         }
-        var didCommitThisFrame = releasedAny
+        var didCommitThisFrame = false
         if needsCommit {
             let other = hasExternalDirtyCommit || ranExternalLayoutAction
             let feedback = ranLayoutFeedback
@@ -1881,7 +1875,10 @@ public final class Runtime<State> {
                 shadowTrackCounts.removeValue(forKey: nid)
             }
         }
-        let rawAnimating = frameOut.isAnimating
+        // Tracks only holding for delayed starts (`enterDelay`) draw nothing new until wake:
+        // keep `isAnimating == false` and clear `AnimSource.tracks` so the host sleeps until `nextWakeDeadline`.
+        let tracksAnimating = frameOut.isAnimating && scene.store.waitingUntil() == nil
+        let rawAnimating = tracksAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
             || liveActive
@@ -1889,7 +1886,6 @@ public final class Runtime<State> {
             || growthRows.values.contains { $0.track.moving }
             || growthStacks.values.contains { !$0.pendingHeights.isEmpty }
             || virtualFill.isFilling
-            || !enterDelays.isEmpty
             || tooltipFading(at: now)
             || hasActiveMotionLoops(at: now)
             || hasActiveSelectableEdgeScroll
@@ -1897,10 +1893,10 @@ public final class Runtime<State> {
             || hasMovingScaleSettle
             || activeWordReveals
         var sources: UInt32 = 0
-        if frameOut.isAnimating { sources |= AnimSource.tracks }
+        if tracksAnimating { sources |= AnimSource.tracks }
         if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
-        if !enterDelays.isEmpty || activeWordReveals { sources |= AnimSource.reveal }
+        if activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
         if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }
@@ -1929,7 +1925,6 @@ public final class Runtime<State> {
         unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter {
             activeIds.contains($0) && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
         }
-        enterDelays = enterDelays.filter { activeIds.contains($0.key) }
 
         return (frameOut, animNow)
     }
@@ -1992,14 +1987,10 @@ public final class Runtime<State> {
                 lastWasSettled = true
             }
 
-            if commitCut || commitKind.lands {
-                enterDelays.removeAll()
-                releasedEnterDelays.removeAll()
-                if commitCut {
-                    activeFlightIds.removeAll()
-                    launchedFlightIds.removeAll()
-                    unclippedMatchedFlightIds.removeAll()
-                }
+            if commitCut {
+                activeFlightIds.removeAll()
+                launchedFlightIds.removeAll()
+                unclippedMatchedFlightIds.removeAll()
             }
             let sincePass = memo.nextPass()
             let liveCheck = pendingLiveOnlyCheck
@@ -2309,7 +2300,6 @@ public final class Runtime<State> {
         let savedWasPinned = hadVirtuals ? wasPinnedToBottom : []
         let savedGrowthRows = growthRows
         let savedGrowthStacks = growthStacks
-        let savedReleasedEnterDelays = releasedEnterDelays
         var result = buildMeasureResult(
             rootEl: viewPass.rootEl,
             passHelpLook: viewPass.helpLook,
@@ -2334,7 +2324,6 @@ public final class Runtime<State> {
             savedGrowthRows: savedGrowthRows
         ) {
             growthStacks = savedGrowthStacks
-            releasedEnterDelays = savedReleasedEnterDelays
             result = buildMeasureResult(
                 rootEl: viewPass.rootEl,
                 passHelpLook: viewPass.helpLook,
@@ -2355,7 +2344,6 @@ public final class Runtime<State> {
         result.measuredGrowthStacks = growthStacks
         growthRows = savedGrowthRows
         growthStacks = savedGrowthStacks
-        releasedEnterDelays = savedReleasedEnterDelays
         return result
     }
 
@@ -2745,10 +2733,10 @@ public final class Runtime<State> {
                     ?? commitMotion?.spring
                     ?? (el.pressBg != nil ? MotionTokens.INSTANT : nil)
             }
-            var paintSp: Spring? = (selfInstantStyle || reducedMotion)
+            let paintSp: Spring? = (selfInstantStyle || reducedMotion)
                 ? nil
                 : (nodeStyleSpring ?? commitColorSpring ?? commitMotion?.spring)
-            var colorSp: Spring? = selfInstantStyle
+            let colorSp: Spring? = selfInstantStyle
                 ? nil
                 : (paintSp ?? commitColorSpring ?? nodeStyleSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
             let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
@@ -2827,39 +2815,14 @@ public final class Runtime<State> {
                 specTransition = Transition.opacity
             } else if el.flightId != nil {
                 specTransition = Transition(insertion: .identity, removal: TransitionEffect(zeroOpacity: 0))
+            } else if el.enterDelay > 0 {
+                specTransition = Transition.opacity
             } else {
                 specTransition = nil
             }
-            var specSnapMount: Bool = commitCut || commitKind.snaps || (ancestorInstant && childInstant) || (reducedMotion && el.transition == nil && !item.parentHasGrowth)
-            var specRect = targetRect
-            var specOpacity = el.opacity
-            var specScale = effectiveScale
-            var specBlur = el.blur
-
+            let specSnapMount: Bool = commitCut || commitKind.snaps || (ancestorInstant && childInstant) || (reducedMotion && el.transition == nil && !item.parentHasGrowth && el.enterDelay <= 0)
             let isFreshMount = !prevMountedIds.contains(nid)
-            if el.enterDelay > 0 && viewCommitCount > 1 && !cut && !commitKind.snaps && !commitKind.lands && !ancestorInstant && isFreshMount && !releasedEnterDelays.contains(nid) && enterDelays[nid] == nil {
-                enterDelays[nid] = now + Double(el.enterDelay)
-            }
-            if let readyAt = enterDelays[nid], now < readyAt {
-                let eff = el.transition?.insertion ?? Transition.opacity.insertion
-                specOpacity = eff.zeroOpacity ?? 0
-                specScale = Vec2(specScale.x * eff.zeroScale.x, specScale.y * eff.zeroScale.y)
-                let dx = eff.pointOffset.x + eff.relativeOffset.x * targetRect.width
-                let dy = eff.pointOffset.y + eff.relativeOffset.y * targetRect.height
-                specRect = targetRect.offsetBy(Vec2(dx, dy))
-                specBlur = max(specBlur, eff.zeroBlur)
-                specSnapMount = true
-                layoutAnimSpec = nil
-                styleSp = nil
-                paintSp = nil
-                colorSp = nil
-            } else if releasedEnterDelays.remove(nid) != nil {
-                let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
-                styleSp = enterSp
-                paintSp = enterSp
-                colorSp = enterSp
-                layoutAnimSpec = el.layoutAnim ?? LayoutAnim(spring: enterSp)
-            }
+            let specEnterDelay: Float = (el.enterDelay > 0 && viewCommitCount > 1 && !cut && !commitKind.snaps && !commitKind.lands && !ancestorInstant && isFreshMount) ? el.enterDelay : 0
             ancestorInstants.append(ancestorInstant)
 
             if let ls = el.loopingSpec {
@@ -2869,13 +2832,13 @@ public final class Runtime<State> {
             specs.append(NodeSpec(
                 id: nid,
                 parent: parentNid,
-                rect: specRect,
-                opacity: specOpacity,
-                scale: specScale,
+                rect: targetRect,
+                opacity: el.opacity,
+                scale: effectiveScale,
                 rotate: el.rotate,
                 offset: el.offset,
                 corners: el.corners,
-                blur: specBlur,
+                blur: el.blur,
                 fill: effectiveFill.motionColor,
                 border: ((el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec)?.top ?? el.borderColor).motionColor,
                 layoutAnim: layoutAnimSpec,
@@ -2889,7 +2852,8 @@ public final class Runtime<State> {
                 rotateAnim: selfInstantLayoutOrStyle ? nil : el.rotateMotionAnim,
                 iconTurn: el.iconRotation,
                 transition: specTransition,
-                snapMount: specSnapMount
+                snapMount: specSnapMount,
+                enterDelay: specEnterDelay
             ))
 
             let growthSlideY: Float = {
@@ -3463,34 +3427,6 @@ public final class Runtime<State> {
         activeModalPath = newActiveModalPath
 
         var specs = pass.specs
-        for i in pass.nodes.indices {
-            let node = pass.nodes[i]
-            let el = node.el
-            let nid = node.nodeId
-            let ancestorInstant = i < pass.ancestorInstants.count ? pass.ancestorInstants[i] : false
-            let isFreshMount = !prevMountedIds.contains(nid)
-            if el.enterDelay > 0 && viewCommitCount > 1 && !cut && !ancestorInstant && isFreshMount && !releasedEnterDelays.contains(nid) && enterDelays[nid] == nil {
-                enterDelays[nid] = now + Double(el.enterDelay)
-            }
-            if let readyAt = enterDelays[nid], now < readyAt {
-                let eff = el.transition?.insertion ?? Transition.opacity.insertion
-                specs[i].opacity = eff.zeroOpacity ?? 0
-                specs[i].scale = Vec2(specs[i].scale.x * eff.zeroScale.x, specs[i].scale.y * eff.zeroScale.y)
-                let dx = eff.pointOffset.x + eff.relativeOffset.x * node.targetRect.width
-                let dy = eff.pointOffset.y + eff.relativeOffset.y * node.targetRect.height
-                specs[i].rect = node.targetRect.offsetBy(Vec2(dx, dy))
-                specs[i].blur = max(specs[i].blur, eff.zeroBlur)
-                specs[i].transition = nil
-                specs[i].layoutAnim = nil
-                specs[i].styleSpring = nil
-                specs[i].colorSpring = nil
-            } else if releasedEnterDelays.remove(nid) != nil {
-                let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
-                specs[i].styleSpring = enterSp
-                specs[i].colorSpring = enterSp
-                specs[i].layoutAnim = el.layoutAnim ?? LayoutAnim(spring: enterSp)
-            }
-        }
 
         let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
 
@@ -4950,6 +4886,7 @@ public final class Runtime<State> {
         // Precompute `hoverAlone` & `hoverGroupShared` active state from pointer / keyboard focus
         let isGroupHovered = makeGroupHoverPredicate(presentedRectById: presentedRectById)
 
+        let hasStickyNodes = flatNodes.contains(where: \.isSticky)
         func sortByZOrder(_ nodes: [Presented]) -> [Presented] {
             nodes.enumerated().sorted { a, b in
                 let na = nodeById[a.element.id] ?? exitingSnapshots[a.element.id]
@@ -4957,9 +4894,17 @@ public final class Runtime<State> {
                 let za = na?.zOrder ?? 0
                 let zb = nb?.zOrder ?? 0
                 if za != zb { return za < zb }
-                let sa = (na?.isSticky == true) ? 1 : 0
-                let sb = (nb?.isSticky == true) ? 1 : 0
-                if sa != sb { return sa < sb }
+                if hasStickyNodes {
+                    func stickyRank(_ n: FlatNode?) -> Int {
+                        guard let n else { return 0 }
+                        if n.el.anchor != nil || n.el.isModal { return 2 }
+                        if n.isSticky { return 1 }
+                        return 0
+                    }
+                    let ra = stickyRank(na)
+                    let rb = stickyRank(nb)
+                    if ra != rb { return ra < rb }
+                }
                 return a.offset < b.offset
             }.map(\.element)
         }
@@ -5430,10 +5375,10 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
             ))
             let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
-            let ownScaleSpringMoving = scene.store.isAnimating(p.id, Props.SCALE)
-                || scene.store.isAnimating(p.id, Props.UNIFORM_SCALE)
-                || scene.store.isAnimating(p.id, Props.PRESENCE)
-                || scene.store.isAnimating(p.id, Props.PRESS_SCALE)
+            let ownScaleSpringMoving = scene.store.isUnheldAnimating(p.id, Props.SCALE)
+                || scene.store.isUnheldAnimating(p.id, Props.UNIFORM_SCALE)
+                || scene.store.isUnheldAnimating(p.id, Props.PRESENCE)
+                || scene.store.isUnheldAnimating(p.id, Props.PRESS_SCALE)
             let ownLiveScaleMoving = el.liveBindings.contains(where: { b in
                 b.target == .scale
                     && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))

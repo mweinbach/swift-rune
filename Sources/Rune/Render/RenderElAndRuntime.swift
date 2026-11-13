@@ -875,10 +875,10 @@ extension Runtime {
             } else {
                 effRect = shifted
             }
-            let ownScaleSpringMoving = scene.store.isAnimating(nid, Props.SCALE)
-                || scene.store.isAnimating(nid, Props.UNIFORM_SCALE)
-                || scene.store.isAnimating(nid, Props.PRESENCE)
-                || scene.store.isAnimating(nid, Props.PRESS_SCALE)
+            let ownScaleSpringMoving = scene.store.isUnheldAnimating(nid, Props.SCALE)
+                || scene.store.isUnheldAnimating(nid, Props.UNIFORM_SCALE)
+                || scene.store.isUnheldAnimating(nid, Props.PRESENCE)
+                || scene.store.isUnheldAnimating(nid, Props.PRESS_SCALE)
             let ownLiveScaleMoving = el.liveBindings.contains { b in
                 b.target == .scale
                     && (liveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
