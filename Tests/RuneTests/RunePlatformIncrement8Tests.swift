@@ -734,4 +734,30 @@ struct RunePlatformIncrement8Tests {
         let json1 = try JSONSerialization.jsonObject(with: out1.treeJSON) as? [String: Any]
         #expect((json1?["viewport"] as? [Double]) == [320.0, 220.0])
     }
+
+    @Test("tooling/tests.rs: a_scripted_resize_steps_the_viewport_with_the_hand")
+    func scriptedResizeStepsViewportWithHand() throws {
+        let script = #"[{"t": 0.1, "type": "resize", "dw": -100, "dh": -40, "dur": 0.5}]"#
+        func viewport(at atTime: String) throws -> (Double, Double) {
+            let app = App(title: "resize", size: Vec2(300, 400), state: 0) { _, _ in
+                el().key("root").wFull().hFull()
+            }
+            let out = try HeadlessRunner.run(
+                app,
+                args: ToolingArgs.parse(["--script", script, "--scale", "1", "--fps", "60", "--at", atTime])
+            )
+            let tree = try JSONSerialization.jsonObject(with: out.treeJSON) as? [String: Any]
+            let vp = tree?["viewport"] as? [Double] ?? []
+            return (vp[0], vp[1])
+        }
+
+        let before = try viewport(at: "0.05")
+        #expect(before == (300.0, 400.0))
+
+        let mid = try viewport(at: "0.35")
+        #expect(mid.0 < 300.0 && mid.0 > 200.0 && mid.1 < 400.0 && mid.1 > 360.0)
+
+        let after = try viewport(at: "1")
+        #expect(after == (200.0, 360.0))
+    }
 }
