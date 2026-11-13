@@ -219,6 +219,78 @@ struct RollingTextRuntimeParityTests {
         #expect(o > 0.0 && o < 1.0)
     }
 
+    // 5. crates/rune-kit/tests/rolling_text.rs:255
+    @Test("Inside a growth row, width springs under animateLayout (tests/rolling_text.rs:255)")
+    func insideGrowthRowWidthSpringsUnderAnimateLayout() throws {
+        struct GrowthRowState: Sendable {
+            var label: String
+            var animate: Bool
+            var showFresh: Bool
+        }
+        let kit = Kit.neutral(dark: true)
+        let chevronX: (Runtime<GrowthRowState>) throws -> Float = { rt in
+            try #require(rt.element(byKey: "count-chevron")).rect[0]
+        }
+        for animate in [false, true] {
+            let store = RollingTextStore()
+            let rt = Runtime(
+                state: GrowthRowState(label: "Used 1 tool", animate: animate, showFresh: false),
+                viewport: Vec2(400, 100),
+                pixelScale: 2.0,
+                systemDark: true
+            ) { s, _ in
+                func buildRow(_ key: String, _ label: String) -> El<GrowthRowState> {
+                    let base: El<GrowthRowState> = row()
+                        .key("trigger")
+                        .h(28.0)
+                        .child(RollingText<GrowthRowState>(key: key, value: label, font: kit.ty.body, kit: kit, store: store).build())
+                        .child(el().key("\(key)-chevron").size(14.0, 14.0))
+                    return s.animate ? base.animateLayout() : base
+                }
+                var stack: El<GrowthRowState> = col()
+                    .wFull()
+                    .growth(GrowthSpec())
+                    .child(col().key("r0").wFull().child(buildRow("count", s.label)))
+                if s.showFresh {
+                    stack = stack.child(col().key("r1").wFull().child(buildRow("fresh", "Used 1 tool")))
+                }
+                return stack
+            }
+            var now = 0.0
+            _ = rt.frame(at: now)
+            let from = try chevronX(rt)
+            rt.update { s, _ in
+                s.label = "Used 12 tools"
+                s.showFresh = true
+            }
+            var xs: [Float] = []
+            for f in 0..<120 {
+                now += 1.0 / 120.0
+                _ = rt.frame(at: now)
+                if f == 0 {
+                    let freshGlyphs = rt.elements().filter { $0.key?.hasPrefix("fresh#") == true }
+                    #expect(!freshGlyphs.isEmpty)
+                    #expect(
+                        freshGlyphs.allSatisfy { $0.opacity == 1.0 },
+                        "a newly mounted growth row's initial glyphs ride the row instead of rolling in"
+                    )
+                }
+                xs.append(try chevronX(rt))
+            }
+            let to = try #require(xs.last)
+            #expect(to > from + 10.0, "the label widens: \(from) -> \(to)")
+            var step = abs(xs[0] - from)
+            for i in 1..<xs.count {
+                step = max(step, abs(xs[i] - xs[i - 1]))
+            }
+            if animate {
+                #expect(step < (to - from) / 4.0, "the width springs: a \(step)pt step of \(to - from)")
+            } else {
+                #expect(step > (to - from) * 0.9, "a growth row's contents snap by default: \(step)pt")
+            }
+        }
+    }
+
     // 6. crates/rune-kit/tests/rolling_text.rs:304
     @Test("Digit changing soon after label fades in rolls in (tests/rolling_text.rs:304)")
     func digitChangingSoonAfterLabelFadesInRollsIn() throws {
@@ -531,8 +603,6 @@ struct RollingTextRuntimeParityTests {
                             Rune.text("Refactor the session list so pinned rows keep their place")
                                 .font(TextStyle(size: 13.0, weight: 530.0))
                                 .ellipsis()
-                                .shrink(1.0)
-                                .minW(0)
                         )
                     )
                     .child(spacer())

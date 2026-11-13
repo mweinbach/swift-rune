@@ -1091,11 +1091,13 @@ extension Runtime {
                 let tRect = flatNodes[tIdx].targetRect
                 let at = req.y ?? 0
                 let targetY = cur.y + (tRect.top - vpRect.top) - at
+                markScrollMovedByHand(path: vPath)
                 applyScrollOffset(path: vPath, next: Vec2(cur.x, targetY), glide: req.glide)
             } else if let vIdx = findScrollNode(bySelector: req.key) {
                 let path = flatNodes[vIdx].path
                 let cur = scrollOffsets[path] ?? .zero
                 let next = Vec2(req.x ?? cur.x, req.y ?? cur.y)
+                markScrollMovedByHand(path: path)
                 applyScrollOffset(path: path, next: next, glide: req.glide)
             }
         }
@@ -1157,7 +1159,7 @@ extension Runtime {
                 )
                 if lastScrollOffsetReports[path] != pos {
                     lastScrollOffsetReports[path] = pos
-                    onScrollOffset(pos)
+                    dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
                 }
             }
         }

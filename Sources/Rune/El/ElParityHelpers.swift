@@ -24,6 +24,14 @@ internal extension El {
     var isClipToContent: Bool {
         (runtimeExtras[Self.clipToContentExtraKey] as? Bool) ?? false
     }
+
+    mutating func applyParityClip(_ apply: (inout El<State>) -> Void) {
+        if isClipToContent && !children.isEmpty {
+            apply(&children[0])
+        } else {
+            apply(&self)
+        }
+    }
 }
 
 internal extension Runtime {
@@ -40,11 +48,11 @@ internal extension Runtime {
         return false
     }
 
-    /// Whether `node` lies inside a `TextInput` / `editLens` subtree (`in_textbox`).
+    /// Whether `node` lies inside a `TextInput` / `editLens` / `.textInput` subtree (`in_textbox`).
     func isInsideEditLensSubtree(_ node: FlatNode?) -> Bool {
         var cur = node?.parentIndex.map { flatNodes[$0] }
         while let n = cur {
-            if n.el.handlers.editLens != nil {
+            if n.el.handlers.editLens != nil || n.el.role == .textInput {
                 return true
             }
             cur = n.parentIndex.map { flatNodes[$0] }
@@ -80,6 +88,7 @@ public extension LayoutStyle {
         outer.alignSelf = alignSelf
         outer.aspectRatio = aspectRatio
         outer.gridItem = gridItem
+        outer.clipOverflow = clipOverflow || !scrollAxes.isEmpty
 
         if displayNone {
             displayNone = false
@@ -204,11 +213,12 @@ public enum ParityLayoutAnimation {
             return .instant
         }
         let base = explicitLayoutAnim ?? LayoutAnim(spring: nodeSpring)
-        if inRow == .snaps || parentHasGrowth {
-            return .instant
-        }
-        if inRow == .horizontal {
+        let stackRow = parentHasGrowth || (inRow == .horizontal)
+        if stackRow {
             return LayoutAnim(x: base.x, y: .instant)
+        }
+        if inRow == .snaps {
+            return .instant
         }
         return base
     }

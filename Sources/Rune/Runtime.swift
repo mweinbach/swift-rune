@@ -171,6 +171,9 @@ public final class Runtime<State> {
         var enclosingVScrollIndex: Int?
         var enclosingHScrollIndex: Int?
         var staticInh: StaticInh
+        var rowLayout: ParityRowLayout = .free
+        var parentHasGrowth: Bool = false
+        var parentNewlyMounted: Bool = false
     }
 
     private struct PaintInh {
@@ -948,6 +951,7 @@ public final class Runtime<State> {
         _ = runPoll(at: now)
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
+        _ = takeParityLivePending()
         applyPlaygroundIfNeeded(at: now)
         flushPendingPasteRequests(at: now)
         let (drainedFeedback, drainedExternal) = drainLayoutActions(at: now)
@@ -1057,6 +1061,9 @@ public final class Runtime<State> {
                     )
                     if scrollOffsets[path] != clamped {
                         scrollOffsets[path] = clamped
+                        if !scrollGlidingPaths.contains(path) {
+                            markScrollMovedByHand(path: path)
+                        }
                         anyScrollMoved = true
                     }
                     // Stop fling immediately if clamped against boundary
@@ -1765,12 +1772,32 @@ public final class Runtime<State> {
                     && abs(curTarget.height - localTarget.height) < 0.1
             }
             var layoutAnimSpec: LayoutAnim?
+            let isStackContainer = (el.growthSpec != nil) || (el.virtualEstimate != nil)
+            let (selfInRow, childInRow) = ParityLayoutAnimation.resolveRowLayout(
+                parentInRow: item.rowLayout,
+                hasAbove: el.anchor != nil,
+                hasAnimateLayout: el.layoutAnim != nil,
+                isStackContainer: isStackContainer
+            )
             if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
             } else if commitKind.lands, el.layoutAnim != nil, isRunningSameSceneFrame() {
                 layoutAnimSpec = .instant
+            } else if selfInRow == .horizontal || item.parentHasGrowth {
+                let resolved = ParityLayoutAnimation.resolveNodeLayoutAnim(
+                    inRow: selfInRow,
+                    explicitLayoutAnim: el.layoutAnim,
+                    nodeSpring: el.styleSpring ?? MotionTokens.SETTLE,
+                    parentHasGrowth: item.parentHasGrowth,
+                    isInstant: false,
+                    isSameSceneFrame: false,
+                    commitLands: false
+                )
+                layoutAnimSpec = (el.layoutAnim != nil || selfInRow == .horizontal) ? resolved : nil
+            } else if selfInRow == .snaps {
+                layoutAnimSpec = el.layoutAnim != nil ? .instant : nil
             } else {
                 layoutAnimSpec = el.layoutAnim
             }
@@ -1870,7 +1897,10 @@ public final class Runtime<State> {
                     enclosingScrollIndex: !el.layout.scrollAxes.isEmpty ? myIndex : item.enclosingScrollIndex,
                     enclosingVScrollIndex: el.layout.scrollAxes.contains(.vertical) ? myIndex : item.enclosingVScrollIndex,
                     enclosingHScrollIndex: el.layout.scrollAxes.contains(.horizontal) ? myIndex : item.enclosingHScrollIndex,
-                    staticInh: childStaticInh
+                    staticInh: childStaticInh,
+                    rowLayout: childInRow,
+                    parentHasGrowth: el.growthSpec != nil,
+                    parentNewlyMounted: isFreshMount
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -2262,6 +2292,7 @@ public final class Runtime<State> {
                 b.source.subscribe(waker)
             }
         }
+        refreshParityLiveSubscriptions()
 
         flatNodes = pass.nodes
         nodeByPath = pass.byPath
@@ -5544,18 +5575,29 @@ public final class Runtime<State> {
         }
 
         let preservesSel = preservesTextSelectionInChain(node)
+        let preservesFocus = preservesFocusOnPressInChain(node)
+        let inEditSubtree = isInsideEditLensSubtree(node)
+        let onLink = hasActiveTextLinks(node.el)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         pressedPath = node.path
         pressedKey = node.key
-        if cxSettings.viewDefaults.webFocus && !preservesSel {
+        if cxSettings.viewDefaults.webFocus && !preservesSel && !preservesFocus {
             webFocusTabStartPath = node.path
         }
-        if !preservesSel && !hasActiveTextLinks(node.el) && nodeTakesFocus(node.el) {
+        let isTextBox = node.el.handlers.editLens != nil
+        let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
+        if !preservesSel && !onLink && shouldFocusNode {
             if focusedPath != node.path {
                 imeReset = true
             }
             focusedPath = node.path
             focusedKey = node.key
+        } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
+            if focusedPath != nil {
+                focusedPath = nil
+                focusedKey = nil
+                imeReset = true
+            }
         }
         dirtyCommit(at: now)
 
@@ -5765,6 +5807,7 @@ public final class Runtime<State> {
                     scrollStore.snap(nid, Props.SCROLL, to: cur)
                     scrollGlidingPaths.remove(path)
                     directScrolledPaths.insert(path)
+                    markScrollMovedByHand(path: path)
                     scrollRequestsState.stepCancel()
                     scrollMovedSinceLastFrame = true
                     if scrollRequiresCommit {
@@ -5793,6 +5836,7 @@ public final class Runtime<State> {
         let cur = scrollOffsets[path] ?? .zero
         scrollGlidingPaths.remove(path)
         directScrolledPaths.insert(path)
+        markScrollMovedByHand(path: path)
         scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
@@ -6613,6 +6657,7 @@ public final class Runtime<State> {
                     scrollGlidingPaths.remove(path)
                     anySnapped = true
                 }
+                markScrollMovedByHand(path: path)
                 scrollMovedSinceLastFrame = true
             }
             if anySnapped {

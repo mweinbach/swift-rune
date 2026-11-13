@@ -33,6 +33,7 @@ struct ElAndLiveHooksParityTests {
         #expect(outer.layout.height == .points(120))
         #expect(outer.layout.minWidth == .points(50))
         #expect(outer.layout.aspectFit == 1.5)
+        #expect(outer.layout.clipOverflow)
         #expect(outer.anchor?.key == "anchor-target")
         #expect(outer.transition != nil)
 
@@ -155,6 +156,30 @@ struct ElAndLiveHooksParityTests {
         )
         #expect(anim.x != .instant)
         #expect(anim.y == .instant)
+
+        let growthChildAnim = ParityLayoutAnimation.resolveNodeLayoutAnim(
+            inRow: .snaps,
+            explicitLayoutAnim: LayoutAnim(spring: MotionTokens.SETTLE),
+            nodeSpring: MotionTokens.SETTLE,
+            parentHasGrowth: true,
+            isInstant: false,
+            isSameSceneFrame: false,
+            commitLands: false
+        )
+        #expect(growthChildAnim.x != .instant)
+        #expect(growthChildAnim.y == .instant)
+
+        let snapAnim = ParityLayoutAnimation.resolveNodeLayoutAnim(
+            inRow: .snaps,
+            explicitLayoutAnim: LayoutAnim(spring: MotionTokens.SETTLE),
+            nodeSpring: MotionTokens.SETTLE,
+            parentHasGrowth: false,
+            isInstant: false,
+            isSameSceneFrame: false,
+            commitLands: false
+        )
+        #expect(snapAnim.x == .instant)
+        #expect(snapAnim.y == .instant)
 
         #expect(ParityLayoutAnimation.shouldMountAtInitialOpacity(
             inRow: .horizontal,

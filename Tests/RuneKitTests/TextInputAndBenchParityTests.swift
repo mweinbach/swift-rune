@@ -30,6 +30,49 @@ struct TextInputAndBenchParityTests {
         #expect(rt.state.edit.cursor == 0 && rt.state.edit.anchor == 0)
     }
 
+    // MARK: - 2. crates/rune-kit/tests/text_input_press.rs:287
+
+    @Test("Any unfocusable element can keep outside field focused and still press (tests/text_input_press.rs:287)")
+    func anyUnfocusableElementCanKeepOutsideFieldFocusedAndStillPress() throws {
+        struct P {
+            var field = TextEdit("x")
+            var pressed: Int = 0
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: P(), viewport: Vec2(200, 200), pixelScale: 1.0, systemDark: true) { _, cx in
+            col().gap(8.0)
+                .child(TextInput<P>(key: "field", \.field).build(kit, cx: cx))
+                .child(row().key("plain").size(100.0, 30.0).onClick { s, _ in s.pressed += 1 }.focusable(false))
+                .child(row().key("keeper").size(100.0, 30.0).preserveFocusOnPress(true).onClick { s, _ in s.pressed += 10 }.focusable(false))
+        }
+        rt.frame(at: 0.0)
+        let fieldFocusedNow: () -> Bool = {
+            rt.elements().contains { !$0.exiting && $0.key == "field-input" && $0.focused }
+        }
+        let fieldRect = try #require(rt.element(byKey: "field")).rect
+        let fPt = Vec2(fieldRect[0] + fieldRect[2] * 0.5, fieldRect[1] + fieldRect[3] * 0.5)
+        rt.pointerDown(at: fPt, at: 0.005)
+        rt.pointerUp(at: fPt, at: 0.01)
+        rt.frame(at: 0.015)
+        #expect(fieldFocusedNow())
+
+        let keeperRect = try #require(rt.element(byKey: "keeper")).rect
+        let kPt = Vec2(keeperRect[0] + keeperRect[2] * 0.5, keeperRect[1] + keeperRect[3] * 0.5)
+        rt.pointerDown(at: kPt, at: 0.02)
+        rt.pointerUp(at: kPt, at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.state.pressed == 10, "the press still reaches onClick")
+        #expect(fieldFocusedNow(), "the field keeps focus")
+
+        let plainRect = try #require(rt.element(byKey: "plain")).rect
+        let pPt = Vec2(plainRect[0] + plainRect[2] * 0.5, plainRect[1] + plainRect[3] * 0.5)
+        rt.pointerDown(at: pPt, at: 0.05)
+        rt.pointerUp(at: pPt, at: 0.06)
+        rt.frame(at: 0.07)
+        #expect(rt.state.pressed == 11)
+        #expect(!fieldFocusedNow(), "without the flag a press blurs, as before")
+    }
+
     // MARK: - 3. crates/rune-kit/tests/popup_list.rs:288
 
     @Test("Ordinary listbox selection does not reveal and press still blurs (tests/popup_list.rs:288)")

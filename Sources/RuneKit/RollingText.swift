@@ -310,13 +310,18 @@ public final class RollingTextStore: @unchecked Sendable {
         let prevNumeric = snap.numericValue
         nextSeq = snap.nextSeq
 
-        let slots = RollingTextDiff.transition(
+        var slots = RollingTextDiff.transition(
             labelKey: key,
             previous: previous,
             to: value,
             trailing: trailing,
             nextSeq: &nextSeq
         )
+        if previous.isEmpty {
+            slots = slots.map {
+                RollingSlot(key: $0.key, glyph: $0.glyph, retained: true, enterDelay: 0)
+            }
+        }
 
         let falling: Bool
         if let old = prevNumeric, let cur = numericValue, cur.isFinite, cur < old {
