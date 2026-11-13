@@ -3231,8 +3231,7 @@ public final class Runtime<State> {
             }
         }
 
-        let preCommitNodes = flatNodes
-        let childExitOverrides = collectChildExitOverrides(prevNodes: preCommitNodes, newById: pass.byId, cut: cut)
+        let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
 
         for s in liveSubscriptions {
             s.isActive = false
