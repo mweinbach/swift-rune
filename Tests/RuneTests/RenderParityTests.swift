@@ -647,6 +647,26 @@ struct RenderGPUAndShaderParityTests {
         let poolStats = pool.stats()
         #expect(poolStats.cachedLayers <= 2)
         #expect(poolStats.evictions >= 2)
+
+        // Live Gaussian layerBlurMSL verification: `.blur(6)` runs LayerBlurPipeline H/V passes
+        let rtBlur = Runtime<S>(
+            state: S(),
+            viewport: Vec2(60, 60),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(60, 60)
+                    .bg(.black)
+                    .child(el().size(20, 20).absolute(x: 20, y: 20).bg(.white).blur(6))
+            }
+        )
+        let layerBlurred = try renderer.renderOffscreen(rtBlur.renderFrame(at: 0))
+        let blurCenter = sampleRGBA(layerBlurred, x: 30, y: 30)
+        let blurLeftHalo = sampleRGBA(layerBlurred, x: 16, y: 30)
+        let blurRightHalo = sampleRGBA(layerBlurred, x: 43, y: 30)
+        #expect(blurCenter.r > 150)
+        #expect(blurLeftHalo.r > 15 && blurLeftHalo.r < 240)
+        #expect(blurRightHalo.r > 15 && blurRightHalo.r < 240)
     }
 
     @Test("GPUSpringBindings + vs_springs animates vertex offset and arbitrary retarget settle bounds hold for the tail")
@@ -1419,6 +1439,91 @@ struct RenderGPUAndShaderParityTests {
         #expect(sampleRGBA(outBlue, x: 10, y: 10).b > 200 && sampleRGBA(outBlue, x: 10, y: 10).r < 20)
     }
 
+    @Test("Effect slot in cached subtree draws live and never caches (effect_slot.rs:483)")
+    func effectSlotInCachedSubtreeDrawsLiveAndNeverCaches() throws {
+        let renderer = try MetalRenderer()
+        let shaderSrc = """
+        #include <metal_stdlib>
+        using namespace metal;
+        vertex float4 cache_slot_vs(uint vid [[vertex_id]]) {
+            float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+            return float4(pos[vid], 0.0, 1.0);
+        }
+        fragment float4 cache_slot_fs() { return float4(1.0, 0.0, 0.0, 1.0); }
+        """
+        let lib = try renderer.device.makeLibrary(source: shaderSrc, options: nil)
+        let vsFn = try #require(lib.makeFunction(name: "cache_slot_vs"))
+        let fsFn = try #require(lib.makeFunction(name: "cache_slot_fs"))
+        var pipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
+
+        struct S {}
+        let cardBg = try #require(Color.hex("#282828"))
+        let rt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(96, 96),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(96, 96)
+                    .bg(.black)
+                    .child(
+                        col()
+                            .key("cached-card")
+                            .cache(true)
+                            .absolute(x: 16, y: 16)
+                            .size(64, 64)
+                            .bg(cardBg)
+                            .child(el().effect(1).effectBackdrop(true).absolute(x: 8, y: 8).size(48, 48))
+                    )
+            }
+        )
+
+        struct ProbeEntry: Equatable {
+            let frame: Int
+            let targets: Int
+            let wantsBackdrop: Bool
+            let inLayer: Bool
+        }
+        var log: [ProbeEntry] = []
+        var frameOutputs: [Frame] = []
+        for frameNo in 1...2 {
+            let rf = rt.renderFrame(at: Double(frameNo - 1) * (1.0 / 60.0))
+            let img = try renderer.renderOffscreen(rf, hook: { encoder, site in
+                log.append(ProbeEntry(
+                    frame: frameNo,
+                    targets: renderer.layerStats().targets,
+                    wantsBackdrop: site.backdrop != nil,
+                    inLayer: site.inLayer
+                ))
+                if frameNo >= 2 {
+                    let pso: MTLRenderPipelineState
+                    if let cached = pipelines[site.pixelFormat] {
+                        pso = cached
+                    } else {
+                        let pDesc = MTLRenderPipelineDescriptor()
+                        pDesc.vertexFunction = vsFn
+                        pDesc.fragmentFunction = fsFn
+                        pDesc.colorAttachments[0].pixelFormat = site.pixelFormat
+                        pso = try! renderer.device.makeRenderPipelineState(descriptor: pDesc)
+                        pipelines[site.pixelFormat] = pso
+                    }
+                    encoder.setRenderPipelineState(pso)
+                    encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                }
+            })
+            frameOutputs.append(img)
+        }
+
+        #expect(log == [
+            ProbeEntry(frame: 1, targets: 0, wantsBackdrop: true, inLayer: false),
+            ProbeEntry(frame: 2, targets: 0, wantsBackdrop: true, inLayer: false),
+        ])
+        let center1 = sampleRGBA(frameOutputs[0], x: 40, y: 40)
+        #expect(center1.r < 60 && center1.g < 60 && center1.b < 60)
+        let center2 = sampleRGBA(frameOutputs[1], x: 40, y: 40)
+        #expect(center2.r > 240 && center2.g < 15 && center2.b < 15)
+    }
+
     @Test("All MSL render shader libraries compile via ShaderLibraryCache and analytic/crisp shadows match WGSL")
     func analyticShadowAndShaderLibraryParity() throws {
         // 1. shader_tests.rs equivalent: compile and verify required entrypoints for all core MSL shaders
@@ -1426,6 +1531,22 @@ struct RenderGPUAndShaderParityTests {
         let shaderLib = try ShaderLibraryCache.load(named: "shader", source: RenderShaders.shaderMSL, requiredFunction: "vs_springs", on: device)
         #expect(shaderLib.makeFunction(name: "vs") != nil)
         #expect(shaderLib.makeFunction(name: "fs") != nil)
+
+        let outlineSmokeSource = RenderShaders.outlineMSL + """
+
+        fragment float4 windfoil_outline_smoke(
+            float4 pos [[position]],
+            texture2d<uint> outlines [[texture(0)]],
+            texture2d<float> atlas [[texture(1)]]
+        ) {
+            float4 lcd = float4(0.0);
+            float a = outline_glyph(float4(0.0, 0.0, 1.0, 1.0), float4(0.0), pos.xy, outlines, lcd);
+            float b = lcd_mask(float4(0.0, 0.0, 8.0, 8.0), float4(0.0), pos.xy, atlas, lcd);
+            return float4(a, b, lcd.xy);
+        }
+        """
+        let outlineLib = try ShaderLibraryCache.load(named: "outline_smoke", source: outlineSmokeSource, requiredFunction: "windfoil_outline_smoke", on: device)
+        #expect(outlineLib.makeFunction(name: "windfoil_outline_smoke") != nil)
 
         let layerBlurLib = try ShaderLibraryCache.load(named: "layer_blur", source: RenderShaders.layerBlurMSL, requiredFunction: "layer_blur_vs", on: device)
         #expect(layerBlurLib.makeFunction(name: "layer_blur_fs") != nil)
