@@ -2124,7 +2124,7 @@ extension Runtime {
                     glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
                 }
             }
-            let focusOverlay = resolvedFocusRingOverlay(
+            let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
                 el: el,
                 snapIndex: node.index,
                 snapPath: node.path,
@@ -2136,7 +2136,7 @@ extension Runtime {
                 devRect: rectPx,
                 devRadii: radiiPx,
                 pxScale: scale
-            )
+            ) : nil
             if focusOverlay == nil, let ol = el.elOutline, localOpacity > 0.0005 {
                 let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
                 if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
@@ -2192,7 +2192,8 @@ extension Runtime {
             let localOpacity = ((needsLayer ? 1.0 : effOpacity) * el.elPaintAlpha).clamped(to: 0...1)
 
             // 13. Focus ring
-            if let overlay = resolvedFocusRingOverlay(
+            if !hasActiveTextLinks(el),
+               let overlay = resolvedFocusRingOverlay(
                 el: el,
                 snapIndex: node.index,
                 snapPath: node.path,

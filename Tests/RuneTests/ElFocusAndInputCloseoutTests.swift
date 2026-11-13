@@ -154,9 +154,13 @@ struct ElFocusAndInputCloseoutTests {
         rt.setFullKeyboardAccess(true)
         _ = rt.frame(at: 0)
 
-        // Focus initial row via Tab -> enters focus-selected row-0.
+        // Focus initial row via Tab -> enters focus-selected row-0, suppressing default focus ring inside listbox.
         #expect(rt.keyDown(KeyEvent(key: .tab), at: 0.01))
         #expect(rt.focusedKey == "row-0")
+        let sListInit = rt.frame(at: 0.01)
+        let rfListInit = rt.renderFrame(at: 0.01)
+        #expect(sListInit.primitives.filter { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.params.x > 0.5 && $0.border.w > 0.1 }.isEmpty)
+        #expect(rfListInit.instances.filter { $0.params.y == KIND_RECT && $0.params.x > 0.5 && $0.border.w > 0.1 }.isEmpty)
 
         // ArrowDown moves focus and fires row-1's onClick.
         #expect(rt.keyDown(KeyEvent(key: .arrowDown), at: 0.02))
@@ -239,6 +243,13 @@ struct ElFocusAndInputCloseoutTests {
                         .focusable(true)
                         .noFocusRing()
                 )
+                .child(
+                    text("Docs")
+                        .key("link-el")
+                        .size(120, 24)
+                        .link(TextLink(0..<4, id: "docs-link"))
+                        .onLink { _, _ in }
+                )
         }
         rt.setFullKeyboardAccess(true)
         _ = rt.frame(at: 0)
@@ -248,20 +259,21 @@ struct ElFocusAndInputCloseoutTests {
         let hl4 = highlight.simd4(srgb: rt.srgbBlend)
         let ring4 = ringColor.simd4(srgb: rt.srgbBlend)
 
+        let expectedRoundedRectKind = Float(PrimitiveKind.roundedRect.rawValue)
         func hasHighlightFill(in scene: RefScene) -> Bool {
-            scene.primitives.contains { p in
-                p.params.y == Float(PrimitiveKind.roundedRect.rawValue)
-                    && abs(p.fill.x - hl4.x) < 0.02
-                    && abs(p.fill.y - hl4.y) < 0.02
-                    && abs(p.fill.z - hl4.z) < 0.02
+            scene.primitives.contains { (p: Primitive) -> Bool in
+                guard p.params.y == expectedRoundedRectKind else { return false }
+                return abs(p.fill.x - hl4.x) < Float(0.02)
+                    && abs(p.fill.y - hl4.y) < Float(0.02)
+                    && abs(p.fill.z - hl4.z) < Float(0.02)
             }
         }
         func hasHighlightInstance(in rf: RenderFrame) -> Bool {
-            rf.instances.contains { inst in
-                inst.params.y == KIND_RECT
-                    && abs(inst.fill.x - hl4.x) < 0.02
-                    && abs(inst.fill.y - hl4.y) < 0.02
-                    && abs(inst.fill.z - hl4.z) < 0.02
+            rf.instances.contains { (inst: RenderInstance) -> Bool in
+                guard inst.params.y == KIND_RECT else { return false }
+                return abs(inst.fill.x - hl4.x) < Float(0.02)
+                    && abs(inst.fill.y - hl4.y) < Float(0.02)
+                    && abs(inst.fill.z - hl4.z) < Float(0.02)
             }
         }
         func strokeRings(in scene: RefScene) -> [Primitive] {
@@ -316,15 +328,15 @@ struct ElFocusAndInputCloseoutTests {
         let rfCustom = rt.renderFrame(at: 0.06)
         let customPrims = strokeRings(in: sCustom)
         let customInsts = strokeInstances(in: rfCustom)
-        #expect(customPrims.contains { p in
-            abs(p.params.x - 3.0) < 0.1
-                && abs(p.border.y - ring4.y) < 0.02
-                && p.rect.w > ringRect[3] + 6.0
+        #expect(customPrims.contains { (p: Primitive) -> Bool in
+            abs(p.params.x - Float(3.0)) < Float(0.1)
+                && abs(p.border.y - ring4.y) < Float(0.02)
+                && p.rect.w > ringRect[3] + Float(6.0)
         })
-        #expect(customInsts.contains { inst in
-            abs(inst.params.x - 3.0) < 0.1
-                && abs(inst.border.y - ring4.y) < 0.02
-                && inst.rect.w > ringRect[3] + 6.0
+        #expect(customInsts.contains { (inst: RenderInstance) -> Bool in
+            abs(inst.params.x - Float(3.0)) < Float(0.1)
+                && abs(inst.border.y - ring4.y) < Float(0.02)
+                && inst.rect.w > ringRect[3] + Float(6.0)
         })
 
         // Tab to "no-ring" -> noFocusRing suppresses even default keyboard focus ring.
@@ -334,11 +346,19 @@ struct ElFocusAndInputCloseoutTests {
         let rfNoRing = rt.renderFrame(at: 0.07)
         #expect(strokeRings(in: sNoRing).isEmpty)
         #expect(strokeInstances(in: rfNoRing).isEmpty)
+
+        // Tab to active text link -> suppresses default keyboard focus ring in both RefScene and Metal RenderFrame.
+        #expect(rt.keyDown(KeyEvent(key: .tab), at: 0.08))
+        #expect(rt.focusedKey == "docs-link")
+        let sLink = rt.frame(at: 0.08)
+        let rfLink = rt.renderFrame(at: 0.08)
+        #expect(strokeRings(in: sLink).isEmpty)
+        #expect(strokeInstances(in: rfLink).isEmpty)
     }
 
     // MARK: - el/focus: focusWithinRing & focusWithinFlat
 
-    @Test("focusWithinRing shows on pointer+keyboard focus inside; focusWithinFlat drops shadows, hover fill, and ring")
+    @Test("focusWithinRing shows on pointer+keyboard focus inside; focusWithinFlat drops shadows and hover fill while keeping focusWithinRing")
     func focusWithinRingAndFocusWithinFlatParity() {
         struct S { var unused = 0 }
         let withinRingColor = Color.srgb(0.2, 0.7, 0.95, 1.0)
@@ -442,16 +462,16 @@ struct ElFocusAndInputCloseoutTests {
             p.params.y == Float(PrimitiveKind.roundedRect.rawValue) && p.fill.x > 0.5
         })
 
-        // Click inside flat-card then hover flat-card padding -> focusWithinFlat suppresses outer shadow,
-        // inset shadow, hover background fill, AND focusWithinRing in both RefScene and Metal RenderFrame!
+        // Click inside flat-card then hover flat-card padding -> focusWithinFlat drops outer shadow,
+        // inset shadow, and hover background fill while keeping focusWithinRing standing in for its raised edge!
         rt.pointerDown(at: pFlat, at: 0.04)
         rt.pointerUp(at: pFlat, at: 0.05)
         rt.pointerMove(to: flatPadPos, at: 0.055)
         let sFlatFocused = rt.frame(at: 0.06)
         let rfFlatFocused = rt.renderFrame(at: 0.06)
         #expect(rt.focusedKey == "inside-flat")
-        #expect(countWithinRings(in: sFlatFocused) == 0)
-        #expect(countWithinRingInstances(in: rfFlatFocused) == 0)
+        #expect(countWithinRings(in: sFlatFocused) == 1)
+        #expect(countWithinRingInstances(in: rfFlatFocused) == 1)
         #expect(!sFlatFocused.primitives.contains { $0.params.y == Float(PrimitiveKind.dropShadow.rawValue) })
         #expect(!sFlatFocused.primitives.contains { $0.params.y == Float(PrimitiveKind.insetShadow.rawValue) })
         #expect(!rfFlatFocused.instances.contains { $0.params.y == KIND_SHADOW || $0.params.y == KIND_INSET })
@@ -544,6 +564,9 @@ struct ElFocusAndInputCloseoutTests {
         e0.setCursor(utf8Offset: 2, extendSelection: false)
         var e1 = TextEdit("zqxjk")
         e1.setCursor(utf8Offset: 2, extendSelection: false)
+        var e2 = TextEdit("zqxjk")
+        e2.spellcheckEnabled = true
+        e2.setCursor(utf8Offset: 2, extendSelection: false)
 
         struct S {
             var slots: [TextEdit]
@@ -566,7 +589,7 @@ struct ElFocusAndInputCloseoutTests {
         )
 
         let rt = Runtime<S>(
-            state: S(slots: [e0, e1]),
+            state: S(slots: [e0, e1, e2]),
             viewport: Vec2(420, 300),
             pixelScale: 1.0,
             systemDark: true
@@ -604,20 +627,36 @@ struct ElFocusAndInputCloseoutTests {
                         )
                         .size(280, 32)
                 )
+                .child(
+                    el()
+                        .key("field-2")
+                        .role(.textInput)
+                        .focusable(true)
+                        .singleLine(true)
+                        .spellcheck(false)
+                        .onEdit(
+                            get: { (s: S) in s.slots[2] },
+                            set: { (s: inout S, e: TextEdit) in s.slots[2] = e }
+                        )
+                        .size(280, 32)
+                )
         }
         _ = rt.frame(at: 0)
 
         let f0Rect = rt.elements().first(where: { $0.key == "field-0" })!.rect
         let f1Rect = rt.elements().first(where: { $0.key == "field-1" })!.rect
+        let f2Rect = rt.elements().first(where: { $0.key == "field-2" })!.rect
         let f0Center = Vec2(f0Rect[0] + 8, f0Rect[1] + f0Rect[3] * 0.5)
         let f1Center = Vec2(f1Rect[0] + 8, f1Rect[1] + f1Rect[3] * 0.5)
+        let f2Center = Vec2(f2Rect[0] + 8, f2Rect[1] + f2Rect[3] * 0.5)
 
-        // Secondary click on editable field-0 skips ancestor onSecondaryClick and opens FieldMenu with suggestions.
+        // Secondary click outside selection over misspelled word selects the misspelled word & opens suggestions.
         rt.pointerDown(at: f0Center, button: .secondary, at: 0.01)
         rt.pointerUp(at: f0Center, button: .secondary, at: 0.02)
         _ = rt.frame(at: 0.025)
         #expect(rt.state.secondaryFired == 0)
         #expect(rt.focusedKey == "field-0")
+        #expect(rt.state.slots[0].selectedUTF8Range == 0..<4)
         let show0 = rt.openPopupHeadless()
         #expect(show0 != nil)
 
@@ -721,5 +760,21 @@ struct ElFocusAndInputCloseoutTests {
         try rt.resolvePopup("paste")
         _ = rt.frame(at: 0.19)
         #expect(rt.state.slots[0].text == "abcde")
+
+        // Field with .spellcheck(false) suppresses spelling suggestions & learn-spelling even if TextEdit.spellcheckEnabled == true.
+        rt.pointerDown(at: f2Center, button: .secondary, at: 0.20)
+        rt.pointerUp(at: f2Center, button: .secondary, at: 0.21)
+        _ = rt.frame(at: 0.215)
+        let show2 = rt.openPopupHeadless()
+        #expect(show2 != nil)
+        let ids2 = show2!.menu.entries.compactMap { entry -> String? in
+            if case .item(let item) = entry { return item.id }
+            return nil
+        }
+        #expect(!ids2.contains("no-guesses"))
+        #expect(!ids2.contains("learn-spelling"))
+        #expect(!rt.state.slots[2].hasSelection)
+        #expect(rt.state.slots[2].selectedUTF8Range.isEmpty)
+        try rt.resolvePopup(nil)
     }
 }

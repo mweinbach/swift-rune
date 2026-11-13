@@ -44,11 +44,24 @@ extension Runtime {
             if node.el.isRevealed { edit.isRevealed = true }
         }
 
+        let spellEnabled = (node.el.spellcheck || node.el.isSpellcheck) && !isSecure
+
         if fromPointer {
             let offset = textHitOffset(node: node, windowPos: windowPos, edit: edit)
             let sel = edit.selectedUTF8Range
-            if !edit.hasSelection || offset < sel.lowerBound || offset >= sel.upperBound {
-                edit.setCursor(utf8Offset: offset, extendSelection: false)
+            if !edit.hasSelection || offset < sel.lowerBound || offset > sel.upperBound {
+                var hitWordRange: Range<Int>? = nil
+                if spellEnabled {
+                    var spellProbe = edit
+                    spellProbe.spellcheckEnabled = true
+                    hitWordRange = spellProbe.spellingSuggestions(atUTF8Offset: offset)?.range
+                }
+                if let range = hitWordRange {
+                    edit.setCursor(utf8Offset: range.lowerBound, extendSelection: false)
+                    edit.setCursor(utf8Offset: range.upperBound, extendSelection: true)
+                } else {
+                    edit.setCursor(utf8Offset: offset, extendSelection: false)
+                }
                 editLens.set(&state, edit)
             }
             if focusedPath != node.path {
@@ -67,11 +80,13 @@ extension Runtime {
         let languagesHook = resolveNearestOnSpellcheckLanguages(from: node.index)
 
         var checkEdit = edit
-        if node.el.spellcheck || node.el.isSpellcheck {
-            checkEdit.spellcheckEnabled = true
-        }
-        let spellingHit: (range: Range<Int>, word: String, suggestions: [String])? = !isSecure
-            ? checkEdit.spellingSuggestions(atUTF8Offset: edit.cursor)
+        checkEdit.spellcheckEnabled = spellEnabled
+        let spellingHit: (range: Range<Int>, word: String, suggestions: [String])? = spellEnabled
+            ? {
+                guard let hit = checkEdit.spellingSuggestions(atUTF8Offset: edit.cursor) else { return nil }
+                if edit.hasSelection && edit.selectedUTF8Range != hit.range { return nil }
+                return hit
+            }()
             : nil
 
         var menu = PopupMenu()

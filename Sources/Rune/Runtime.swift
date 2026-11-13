@@ -4709,8 +4709,17 @@ public final class Runtime<State> {
         devRadii: SIMD4<Float>,
         pxScale: Float
     ) -> (rect: SIMD4<Float>, radii: SIMD4<Float>, color: Color, widthPx: Float)? {
+        let suppressedByListOrMenuGroup: Bool = {
+            guard el.focusRingColor == nil,
+                  flatNodes.indices.contains(snapIndex),
+                  flatNodes[snapIndex].path == snapPath,
+                  let gIdx = findFocusGroupAncestor(of: snapIndex),
+                  flatNodes.indices.contains(gIdx) else { return false }
+            let role = flatNodes[gIdx].el.role
+            return role == .listbox || role == .list || role == .tree || role == .grid || role == .menu
+        }()
         let suppressesDefaultRing = el.focusHighlightColor != nil ||
-            (el.focusRingColor == nil && (el.handlers.editLens != nil || el.role == .textInput))
+            (el.focusRingColor == nil && (el.handlers.editLens != nil || el.role == .textInput || hasActiveTextLinks(el) || suppressedByListOrMenuGroup))
         let ownerIsFocused: Bool = {
             if isFocused { return true }
             guard !isExiting, !effectiveInert, el.focusRingColor != nil, !el.noFocusRing,
@@ -4743,7 +4752,7 @@ public final class Runtime<State> {
             )
             return (ringRect, ringRadii, ringCol, ringW)
         }
-        guard !isExiting, !effectiveInert, !el.noFocusRing, !el.focusWithinFlat,
+        guard !isExiting, !effectiveInert, !el.noFocusRing,
               let within = el.focusWithinRing,
               let fp = focusedPath,
               (fp == snapPath || fp.hasPrefix(snapPath + "/")) else {
