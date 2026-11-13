@@ -52,7 +52,8 @@ func settingsView(_ s: SettingsState, _ cx: inout Cx<SettingsState>) -> El<Setti
     case .light: false
     case .dark: true
     }
-    // Phase 2 (@shell): wire `cx.reducedMotion(s.reduceMotion)` and `cx.timeScale(speedOf(s.speed))` once Cx exposes them.
+    cx.reducedMotion(s.reduceMotion)
+    cx.timeScale(speedOf(s.speed))
     let p = SettingsPaint(
         t: Tok.theme(dark: dark),
         accent: Tok.accent(s.accent, dark: dark),
@@ -60,7 +61,6 @@ func settingsView(_ s: SettingsState, _ cx: inout Cx<SettingsState>) -> El<Setti
     )
     let t = p.t
 
-    // Phase 2 (@el): add `.clipFade(0, Tok.Space.xs, 0, Tok.Space.xl)` when `El.clipFade` lands.
     return col()
         .key("window")
         .bg(t.bg)
@@ -82,6 +82,7 @@ func settingsView(_ s: SettingsState, _ cx: inout Cx<SettingsState>) -> El<Setti
                 .pt(Tok.Space.xs)
                 .pb(Tok.Space.xl)
                 .gap(Tok.Space.xl)
+                .clipFade(left: 0, top: Tok.Space.xs, right: 0, bottom: Tok.Space.xl)
                 .child(
                     section(
                         p,

@@ -58,6 +58,7 @@ private let titleFont = TextStyle(size: 17.0, weight: 600.0)
 private let valueFont = TextStyle(size: 11.5, weight: 500.0).mono()
 
 func labView(_ s: LabState, _ cx: inout Cx<LabState>) -> El<LabState> {
+    cx.reducedMotion(s.reduced)
     let p = LabPalette.dark
     let hair: Float = 1.0 / max(1.0, cx.pixelScale)
 
