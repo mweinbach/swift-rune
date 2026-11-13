@@ -7682,10 +7682,27 @@ public final class Runtime<State> {
                pointerPosition.y >= 0,
                pointerPosition.x < viewport.x,
                pointerPosition.y < viewport.y {
-                if refreshHover(at: currentTime, isPointerEvent: false) {
-                    isAnimating = true
+                let prevHoverPath = hoveredPath
+                let prevHoverLink = hoveredLink
+                refreshHoverAndSyncTracks(at: cxSettings.scaledTime(at: currentTime), wallNow: currentTime, cut: false)
+                if hoverHoldState != .held && pressedPath == nil {
+                    let newPath = hoveredPath
+                    let linkChanged = (hoveredLink != prevHoverLink)
+                    if newPath != prevHoverPath {
+                        let menuHoverChanged = updateMenuHoverHighlight(hoveredPath: newPath)
+                        if linkChanged || menuHoverChanged || hasHoverVisualInChain(prevHoverPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pointerPosition) {
+                            suppressRevealFromHoverCommit = true
+                            dirtyCommit(at: currentTime)
+                            isAnimating = true
+                        }
+                    } else if linkChanged || helpTargetChanges(at: pointerPosition) {
+                        dirtyCommit(at: currentTime)
+                        isAnimating = true
+                    }
+                } else if helpTargetChanges(at: pointerPosition) {
+                    dirtyCommit(at: currentTime)
                 }
-                refreshHoverAndSyncTracks(at: now, wallNow: currentTime, cut: false)
+                settleKitHoverDelays(at: pointerPosition, now: currentTime)
             }
         }
         kitHooks.unseenPresence.recordPostBuildFilterSeen(nodes: flatNodes)
