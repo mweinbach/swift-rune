@@ -6240,40 +6240,36 @@ public final class Runtime<State> {
                 let oldPath = hoveredPath
                 hoveredPath = newPath
                 hoveredKey = newKey
-                isDispatchingHover = true
-                var ranAnyHover = false
-                var hoverAllLiveOnly = true
-                if let old = oldPath, let oldIdx = nodeByPath[old],
-                   !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
-                    var tx = makeTx(at: now)
-                    cb(&state, false, &tx)
-                    if !tx.liveOnlyRequested {
-                        perfWatch.meter.handler(name: "on_hover", path: old)
-                    }
-                    ranAnyHover = true
-                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                }
-                if let np = newPath, let newIdx = nodeByPath[np],
-                   !flatNodes[newIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[newIdx].el.handlers.onHover {
-                    var tx = makeTx(at: now)
-                    cb(&state, true, &tx)
-                    if !tx.liveOnlyRequested {
-                        perfWatch.meter.handler(name: "on_hover", path: np)
-                    }
-                    ranAnyHover = true
-                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                }
-                isDispatchingHover = false
                 if isPointerEvent {
-                    if !(ranAnyHover && hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)) {
-                        suppressRevealFromHoverCommit = true
-                        dirtyCommit(at: now)
-                        changed = true
-                    } else if linkChanged || helpTargetChanges(at: pos) {
+                    isDispatchingHover = true
+                    var ranAnyHover = false
+                    var hoverAllLiveOnly = true
+                    if let old = oldPath, let oldIdx = nodeByPath[old],
+                       !flatNodes[oldIdx].el.hasKitHoverDelays,
+                       let cb = flatNodes[oldIdx].el.handlers.onHover {
+                        var tx = makeTx(at: now)
+                        cb(&state, false, &tx)
+                        if !tx.liveOnlyRequested {
+                            perfWatch.meter.handler(name: "on_hover", path: old)
+                        }
+                        ranAnyHover = true
+                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
+                    }
+                    if let np = newPath, let newIdx = nodeByPath[np],
+                       !flatNodes[newIdx].el.hasKitHoverDelays,
+                       let cb = flatNodes[newIdx].el.handlers.onHover {
+                        var tx = makeTx(at: now)
+                        cb(&state, true, &tx)
+                        if !tx.liveOnlyRequested {
+                            perfWatch.meter.handler(name: "on_hover", path: np)
+                        }
+                        ranAnyHover = true
+                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
+                    }
+                    isDispatchingHover = false
+                    if !(ranAnyHover && hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)) || linkChanged || helpTargetChanges(at: pos) {
                         suppressRevealFromHoverCommit = true
                         dirtyCommit(at: now)
                         changed = true
