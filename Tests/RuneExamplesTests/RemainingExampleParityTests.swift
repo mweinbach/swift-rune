@@ -1,9 +1,14 @@
 import Foundation
 import Testing
 @testable import Rune
+@testable import RuneBackground
+@testable import RuneCursedSettings
 @testable import RuneDragOut
 @testable import RuneDropFiles
+@testable import RuneLab
 @testable import RuneRichClipboard
+@testable import RuneShowreel
+import RuneMotionBento
 
 @Suite("Remaining Example Parity Tests (Phase 1)", .serialized)
 @MainActor
@@ -122,11 +127,59 @@ struct RemainingExampleParityTests {
     func dropFilesSystemDispatch() {}
 
     // Upstream: examples/motion-bento/src/tests.rs:11
-    @Test(
-        "motion-bento: script_taps_reach_the_same_state_as_the_schedule",
-        .disabled("Blocked on Phase 2: motion-bento dock/schedule view + Shell AppSpec.poll(t)")
-    )
-    func motionBentoScriptTapsReachSchedule() {}
+    @Test("motion-bento: script_taps_reach_the_same_state_as_the_schedule")
+    func motionBentoScriptTapsReachSchedule() throws {
+        func findElement(_ keyPath: String, in elements: [ElementInfo]) -> ElementInfo? {
+            let parts = keyPath.split(separator: "/").map(String.init)
+            guard let leaf = parts.last else { return nil }
+            return elements.first { el in
+                guard !el.exiting, el.key == leaf else { return false }
+                let chain = el.path
+                    .split(separator: "/")
+                    .filter { $0.hasPrefix("@") }
+                    .map { String($0.dropFirst()) }
+                return chain.suffix(parts.count) == parts[...]
+            }
+        }
+
+        for seed: UInt64 in [1, 2, 3] {
+            let cfg = ChaosConfig(seed: seed, duration: 12.0)
+            let rt = Runtime<MotionBentoState>(
+                state: MotionBentoState(config: cfg, scripted: true),
+                viewport: Vec2(ChaosGrid.width, ChaosGrid.height),
+                pixelScale: 1.0,
+                systemDark: true,
+                view: bentoView
+            )
+            var want = ChaosModel(seed: seed)
+            let dt = 1.0 / 60.0
+            var t = 0.0
+            rt.frame(at: 0.0)
+            for (n, e) in ChaosSchedule.schedule(cfg).enumerated() {
+                while t + dt <= e.t - ChaosSchedule.tapLead {
+                    t += dt
+                    rt.frame(at: t)
+                }
+                let key = e.action.key
+                let info = try #require(
+                    findElement(key, in: rt.elements()),
+                    "seed \(seed): event \(n) at \(e.t): no element \(key)"
+                )
+                let center = Vec2(info.rect[0] + info.rect[2] * 0.5, info.rect[1] + info.rect[3] * 0.5)
+                rt.pointerMove(to: center, at: t)
+                rt.pointerDown(at: center, at: t)
+                t += dt
+                rt.frame(at: t)
+                rt.pointerUp(at: center, at: t)
+                rt.frame(at: t)
+                want.apply(e.action)
+                #expect(
+                    rt.state.m == want,
+                    "seed \(seed): event \(n) at \(e.t): tapping \(key) (\(center.x), \(center.y)) for \(e.action)"
+                )
+            }
+        }
+    }
 
     // Upstream: examples/kit-gallery/src/layer_timing.rs:40, 84 (manual #[ignore] GPU baseline benchmarks)
     @Test(
@@ -134,4 +187,52 @@ struct RemainingExampleParityTests {
         .disabled("Manual upstream #[ignore] GPU baseline benchmark requiring RUNE_KIT_PIXEL_BASELINE & Metal timestamp queries")
     )
     func kitGalleryLayerTimingManualBenchmarks() {}
+
+    @Test("phase2 batch A: background, showreel, cursed-settings, and lab App/.poll/.scene wiring")
+    func phase2BatchAAppPollAndSceneWiring() throws {
+        let bg = try HeadlessRunner.run(
+            RuneBackgroundApp.makeApp(arguments: ["--headless"]),
+            args: ToolingArgs.parse(["--scene", "ticked"])
+        )
+        let bgTree = String(decoding: bg.treeJSON, as: UTF8.self)
+        #expect(bgTree.contains("\"window\""))
+        #expect(bgTree.contains("42 ticks from a background thread"))
+
+        let sr0 = try HeadlessRunner.run(
+            RuneShowreelApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "deploy", "--at", "0.0"])
+        )
+        let sr = try HeadlessRunner.run(
+            RuneShowreelApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "fire", "--at", "1.6"])
+        )
+        let srTree = String(decoding: sr.treeJSON, as: UTF8.self)
+        #expect(srTree.contains("fire-flames"))
+        #expect(srTree.contains("\"anim_t\" : 1.6"))
+        let srDeploy = try HeadlessRunner.run(
+            RuneShowreelApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "deploy", "--at", "3.6"])
+        )
+        #expect(sr0.treeJSON != srDeploy.treeJSON)
+
+        let cs = try HeadlessRunner.run(
+            RuneCursedSettingsApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "fire", "--at", "0.8"])
+        )
+        let csTree = String(decoding: cs.treeJSON, as: UTF8.self)
+        #expect(csTree.contains("firewall-flames"))
+        #expect(csTree.contains("\"anim_t\" : 0.8"))
+
+        let lab0 = try HeadlessRunner.run(
+            RuneLabApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "motion-thrown", "--at", "0.0"])
+        )
+        let labMid = try HeadlessRunner.run(
+            RuneLabApp.makeApp(),
+            args: ToolingArgs.parse(["--scene", "motion-thrown", "--at", "0.15"])
+        )
+        #expect(lab0.treeJSON != labMid.treeJSON)
+        let labMidTree = String(decoding: labMid.treeJSON, as: UTF8.self)
+        #expect(labMidTree.contains("\"card\""))
+    }
 }

@@ -3,418 +3,357 @@ import Rune
 import RuneKit
 import RuneMotion
 
-public func thousands(_ n: UInt32) -> String {
-    let s = String(n)
-    var out = ""
-    out.reserveCapacity(s.count + s.count / 3)
-    for (i, ch) in s.reversed().enumerated() {
-        if i > 0 && i % 3 == 0 {
-            out.append(",")
-        }
-        out.append(ch)
-    }
-    return String(out.reversed())
-}
-
-/// Port of `examples/motion-bento`: a smart-studio control center where tiles animate
-/// simultaneously via `RuneMotion` springs (`Spring`), `rollingText`, `progressCircle`,
-/// `progress`, and interactive scene/chaos stepping.
-public enum StudioScene: Int, CaseIterable, CustomStringConvertible, Sendable {
-    case relax = 0
-    case focus = 1
-    case cinema = 2
-    case night = 3
-
-    public var description: String {
-        switch self {
-        case .relax: return "Relax"
-        case .focus: return "Focus"
-        case .cinema: return "Cinema"
-        case .night: return "Night"
-        }
-    }
-
-    public var accent: Color {
-        switch self {
-        case .relax: return Color.hex("#4ea8de")!
-        case .focus: return Color.hex("#52b788")!
-        case .cinema: return Color.hex("#e76f51")!
-        case .night: return Color.hex("#9b72cf")!
-        }
-    }
-}
-
 public struct MotionBentoState: Sendable {
-    public var scene: StudioScene = .relax
-    public var step: Int = 0
-    public var events: Int = 12
-    public var targetTemp: Float = 21.5
-    public var lightsOn: [Bool] = [true, true, false, true]
-    public var playing: Bool = true
-    public var volume: Float = 0.68
-    public var locked: Bool = true
-    public var powerWatts: Int = 420
-    public var netDownMbps: Int = 640
-    public var blindsOpen: Float = 0.72
-    public var airQuality: Int = 94
+    public var config: ChaosConfig
+    public var m: ChaosModel
+    public var springs: ChaosSprings
+    public var ring: Live<Vec2>
+    public var kit: Kit
+    public var player: ChaosPlayer?
+    public var hud: Bool
+    public var hudLines: [String]
+    public var hudAt: Double
+    public var begun: Bool = false
+    public var ended: Bool = false
+    public var written: Bool = false
+    public var wall: ChaosWall?
+    public var t: Double = 0.0
+    public var replay: ChaosReplay?
+    public var readout: ChaosReadout?
+    public var meter: ChaosMeter?
+    public let memoCache: MemoCache
 
-    public init() {}
+    public init(config: ChaosConfig = ChaosConfig(), scripted: Bool = false, meter: ChaosMeter? = nil) {
+        let model = ChaosModel(seed: config.seed)
+        var kit = Kit.neutral(dark: true)
+        kit.c.bgAccent = bentoColor(ChaosColor.accent)
+        self.config = config
+        self.m = model
+        self.springs = ChaosSprings.variant(config.variant)
+        self.ring = Live(Vec2(0.0, model.tempFraction()))
+        self.kit = kit
+        self.player = (!scripted && config.load == nil) ? ChaosPlayer(config: config) : nil
+        self.hud = config.hud
+        self.hudLines = Array(repeating: "", count: 4)
+        self.hudAt = -.infinity
+        self.wall = config.load != nil ? ChaosWall(seed: config.seed) : nil
+        self.replay = config.hudFrom.flatMap { path in try? ChaosReplay.load(path: path) }
+        self.meter = meter
+        self.memoCache = MemoCache()
+    }
 
-    public mutating func stepChaos() {
-        step += 1
-        events += 3
-        let nextIdx = (scene.rawValue + 1) % StudioScene.allCases.count
-        scene = StudioScene.allCases[nextIdx]
-        switch scene {
-        case .relax:
-            targetTemp = 21.5
-            lightsOn = [true, true, false, true]
-            playing = true
-            volume = 0.68
-            locked = true
-            powerWatts = 420
-            netDownMbps = 640
-            blindsOpen = 0.72
-            airQuality = 94
-        case .focus:
-            targetTemp = 20.0
-            lightsOn = [true, true, true, false]
-            playing = false
-            volume = 0.35
-            locked = true
-            powerWatts = 580
-            netDownMbps = 890
-            blindsOpen = 0.90
-            airQuality = 97
-        case .cinema:
-            targetTemp = 22.0
-            lightsOn = [false, false, false, true]
-            playing = true
-            volume = 0.85
-            locked = true
-            powerWatts = 710
-            netDownMbps = 940
-            blindsOpen = 0.08
-            airQuality = 91
-        case .night:
-            targetTemp = 18.5
-            lightsOn = [false, false, false, false]
-            playing = false
-            volume = 0.15
-            locked = true
-            powerWatts = 145
-            netDownMbps = 120
-            blindsOpen = 0.0
-            airQuality = 98
+    public mutating func act(_ action: ChaosAction) {
+        m.apply(action)
+        ring.set(Vec2(0.0, m.tempFraction()))
+    }
+
+    public mutating func writeMetrics() {
+        guard !written else { return }
+        written = true
+        guard var meter else { return }
+        meter.end()
+        if let path = config.frames {
+            try? meter.framesCSV().write(toFile: path, atomically: true, encoding: .utf8)
         }
+        if let path = config.metrics {
+            try? meter.json().write(toFile: path, atomically: true, encoding: .utf8)
+        }
+        self.meter = meter
     }
 }
 
-private let snappySpring = Spring(duration: 0.42, bounce: 0.18)
-private let smoothSpring = Spring(duration: 0.55, bounce: 0.08)
+public func bentoPoll(_ s: inout MotionBentoState, _ t: Double, _ tx: inout Tx) -> Bool {
+    var changed = false
+    if var p = s.player {
+        let due = p.due(at: t)
+        if let next = p.nextAt {
+            tx.wakeAfter(max(0.0, next - t))
+        }
+        s.player = p
+        for event in due {
+            s.act(event.action)
+            changed = true
+        }
+    }
+    if var wall = s.wall, let load = s.config.load {
+        let n = load.at(t)
+        wall.update(t: t, n: n)
+        s.wall = wall
+        s.t = t
+        s.meter?.tag(show: t, load: n)
+        if s.hud {
+            if let replay = s.replay {
+                s.readout = ChaosReadout.replay(replay, at: t)
+            } else if let m = s.meter {
+                s.readout = ChaosReadout.live(m)
+            }
+        }
+        tx.wakeAfter(0.0)
+        changed = true
+    }
+    if !s.begun && t >= ChaosSchedule.start {
+        s.begun = true
+        s.meter?.begin()
+    }
+    if !s.ended && t >= s.config.duration {
+        s.ended = true
+        s.meter?.end()
+    }
+    let headless = CommandLine.arguments.dropFirst().contains {
+        $0 == "--snap" || $0 == "--tree" || $0 == "--script" || $0 == "--list-scenes" || $0 == "--headless"
+    }
+    if !headless && !s.config.stay {
+        if t >= s.config.duration + 1.0 {
+            s.writeMetrics()
+            tx.requestQuit()
+        } else if s.ended || t >= s.config.duration {
+            tx.wakeAfter(max(0.0, s.config.duration + 1.0 - t))
+        }
+    }
+    if headless && t >= s.config.duration + 1.0 {
+        s.writeMetrics()
+    }
+    if s.hud && s.wall == nil && !headless && t - s.hudAt >= 0.25 {
+        s.hudAt = t
+        if let m = s.meter {
+            let summary = m.recent()
+            let lines = [
+                String(format: "Rune · %.1f fps · %.1f ms p50", summary.fps, summary.workMs[0]),
+                String(format: "build %.1f ms p95 · late %d · drop %d", summary.buildMs?[1] ?? summary.workMs[1], summary.late, summary.dropped),
+                String(format: "cpu %.1f%% · mem %.1f MB", summary.cpuPercent, summary.footprintMb),
+                "seed \(s.config.seed) · \(s.config.variant)",
+            ]
+            if lines != s.hudLines {
+                s.hudLines = lines
+                changed = true
+            }
+        }
+        tx.wakeAfter(0.25)
+    }
+    return changed
+}
 
-private func tileCard(
-    key: String,
-    title: String,
-    subtitle: String,
-    kit: Kit,
-    content: El<MotionBentoState>
-) -> El<MotionBentoState> {
-    let headerRow: El<MotionBentoState> = row()
+private func bentoHeader(_ s: MotionBentoState) -> El<MotionBentoState> {
+    let k = s.kit
+    let mood = ChaosColor.scene[s.m.scene]
+    let scene: El<MotionBentoState> = row()
+        .h(34.0)
+        .px(14.0)
+        .gap(8.0)
+        .rounded(17.0)
+        .centerY()
+        .bg(bentoColor(ChaosColor.tile))
+        .border(1.0, bentoColor(ChaosColor.edge))
+        .animateLayout(bentoSpring(s.springs.layout))
+        .child(
+            el()
+                .size(10.0, 10.0)
+                .rounded(5.0)
+                .bg(bentoColor(mood))
+                .animate(bentoSpring(s.springs.morph))
+        )
+        .child(
+            k.rollingText(
+                key: "head-scene",
+                ChaosConstants.scenes[s.m.scene],
+                font: bentoFont(13.0, 560.0),
+                color: bentoColor(ChaosColor.text)
+            )
+        )
+
+    let events = row()
+        .gap(6.0)
+        .centerY()
+        .child(
+            k.rollingText(
+                key: "events",
+                "\(s.m.events)",
+                font: bentoNums(13.0, 600.0),
+                color: bentoColor(ChaosColor.text)
+            )
+        )
+        .child(bentoCaption("events"))
+
+    return row()
         .wFull()
-        .itemsCenter()
-        .justifyBetween()
-        .child(text(title).font(kit.ty.uiMedium).color(kit.c.textBase))
-        .child(text(subtitle).font(kit.ty.small).color(kit.c.textMuted))
+        .h(ChaosGrid.header)
+        .centerY()
+        .gap(16.0)
+        .child(
+            col()
+                .gap(2.0)
+                .child(text("Studio").font(bentoFont(24.0, 680.0)).color(bentoColor(ChaosColor.text)))
+                .child(bentoCaption("Control center · Friday evening"))
+        )
+        .child(spacer())
+        .child(events)
+        .child(scene)
+}
 
-    return col()
-        .key(key)
-        .grow(1)
-        .hFull()
-        .p(14)
-        .gap(10)
-        .rounded(14)
-        .bg(kit.c.layer01)
-        .border(1, kit.c.borderBase)
-        .animate(smoothSpring)
-        .child(headerRow)
-        .child(content)
+private func bentoHud(_ s: MotionBentoState) -> El<MotionBentoState> {
+    var lines: El<MotionBentoState> = col()
+        .key("hud")
+        .absolute(x: ChaosGrid.width - ChaosGrid.pad - 300.0, y: 12.0)
+        .w(300.0)
+        .p(12.0)
+        .gap(3.0)
+        .rounded(12.0)
+        .bg(bentoColor(ChaosColor.bg.alpha(0.92)))
+        .border(1.0, bentoColor(ChaosColor.accent.alpha(0.4)))
+        .z(1)
+    for line in s.hudLines {
+        let label: El<MotionBentoState> = text(line).font(bentoNums(11.0, 500.0).mono()).color(bentoColor(ChaosColor.text2))
+        lines = lines.child(label)
+    }
+    return lines
 }
 
 public func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<MotionBentoState> {
-    let bg = Color.hex("#0c0e13")!
-    let fg = Color.hex("#eef1f6")!
-    let kit = Kit.fromPalette(PaletteSeed(bg: bg, fg: fg, accent: s.scene.accent), focus: .accent)
-
-    let eventsCounter: El<MotionBentoState> = row()
-        .gap(6)
-        .itemsCenter()
-        .child(kit.rollingText(key: "events-roll", "\(s.events)", font: kit.ty.uiMedium, color: kit.c.textBase))
-        .child(text("events").font(kit.ty.small).color(kit.c.textMuted))
-
-    let dot: El<MotionBentoState> = el()
-        .square(10)
-        .rounded(5)
-        .bg(s.scene.accent)
-        .animate(snappySpring)
-
-    let scenePill: El<MotionBentoState> = row()
-        .key("scene-pill")
-        .h(32)
-        .px(14)
-        .gap(8)
-        .itemsCenter()
-        .rounded(16)
-        .bg(kit.c.layer01)
-        .border(1, kit.c.borderBase)
-        .onClick { state in state.stepChaos() }
-        .child(dot)
-        .child(text(s.scene.description).font(kit.ty.uiMedium).color(kit.c.textBase))
-
-    let stepBtn: El<MotionBentoState> = kit.button(key: "step-btn", "Step Chaos", variant: .accent, size: .sm) { state, _ in
-        state.stepChaos()
+    if let wall = s.wall {
+        return bentoStressView(s, wall)
+    }
+    let k = s.kit
+    let m = s.m
+    let headerEl = memo("header", deps: [UInt32(m.scene), m.events], cache: s.memoCache) {
+        bentoHeader(s)
+    }
+    let sceneEl = memo(
+        "scene",
+        deps: [UInt32(m.scene), m.temp.bitPattern] + m.lights.map { $0 ? 1 : 0 } + m.chips.map { $0 ? 1 : 0 },
+        cache: s.memoCache
+    ) {
+        bentoScenes(s, k)
+    }
+    let thermoEl = memo("thermo", deps: m.temp.bitPattern, cache: s.memoCache) {
+        bentoThermostat(s, k)
+    }
+    let lightsEl = memo("lights", deps: m.lights, cache: s.memoCache) {
+        bentoLights(s, k)
+    }
+    let mixerEl = memo("mixer", deps: m.faders.map(\.bitPattern), cache: s.memoCache) {
+        bentoMixer(s, k)
+    }
+    let xyEl = memo("xy", deps: m.puck.map(\.bitPattern), cache: s.memoCache) {
+        bentoXY(s, k)
+    }
+    let queueEl = memo("queue", deps: m.queue, cache: s.memoCache) {
+        bentoQueue(s, k)
+    }
+    let feedEl = memo("feed", deps: m.feed, cache: s.memoCache) {
+        bentoFeed(s, k)
     }
 
-    let header: El<MotionBentoState> = row()
-        .key("header")
-        .wFull()
-        .h(52)
-        .itemsCenter()
-        .justifyBetween()
+    var root = col()
+        .w(ChaosGrid.width)
+        .h(ChaosGrid.height)
+        .px(ChaosGrid.pad)
+        .pb(ChaosGrid.pad)
+        .pt(ChaosGrid.pad - 8.0)
+        .gap(ChaosGrid.gap)
+        .bg(bentoColor(ChaosColor.bg))
+        .animateLayout(bentoSpring(s.springs.layout))
+        .child(headerEl)
         .child(
-            col().gap(2)
-                .child(text("Studio").size(22).bold().color(kit.c.textBase))
-                .child(text("Control center · Friday evening").font(kit.ty.small).color(kit.c.textMuted))
+            row()
+                .h(ChaosGrid.row1)
+                .gap(ChaosGrid.gap)
+                .child(sceneEl)
+                .child(thermoEl)
+                .child(lightsEl)
         )
         .child(
-            row().gap(12).itemsCenter()
-                .child(eventsCounter)
-                .child(scenePill)
-                .child(stepBtn)
+            row()
+                .h(ChaosGrid.row2)
+                .gap(ChaosGrid.gap)
+                .child(mixerEl)
+                .child(xyEl)
+                .child(queueEl)
+                .child(feedEl)
         )
+        .child(bentoDock(s, k))
 
-    let tempFrac = ((s.targetTemp - 16.0) / 12.0).clamped(to: 0...1)
-    let climateTile = tileCard(
-        key: "tile-climate",
-        title: "Thermostat",
-        subtitle: "Zone 1",
-        kit: kit,
-        content: row().wFull().grow(1).itemsCenter().gap(14)
-            .child(kit.progressCircle(key: "thermo-ring", fraction: tempFrac, diameter: 54, strokeWidth: 5))
-            .child(
-                col().gap(4)
-                    .child(text(String(format: "%.1f°C", s.targetTemp)).size(20).semibold().color(kit.c.textBase))
-                    .child(
-                        row().gap(6)
-                            .child(kit.button(key: "temp-dn", "−", variant: .ghost, size: .sm) { state, _ in
-                                state.targetTemp = max(16, state.targetTemp - 0.5)
-                            })
-                            .child(kit.button(key: "temp-up", "+", variant: .ghost, size: .sm) { state, _ in
-                                state.targetTemp = min(28, state.targetTemp + 0.5)
-                            })
-                    )
-            )
-    )
-
-    let roomNames = ["Desk", "Ceiling", "Wash", "Strip"]
-    var lightGrid: El<MotionBentoState> = col().wFull().grow(1).gap(6)
-    for idx in 0..<4 {
-        let on = s.lightsOn[idx]
-        let lightRow: El<MotionBentoState> = row()
-            .key("light-\(idx)")
-            .wFull()
-            .h(26)
-            .px(10)
-            .itemsCenter()
-            .justifyBetween()
-            .rounded(7)
-            .bg(on ? s.scene.accent.alpha(0.22) : kit.c.layer02)
-            .border(1, on ? s.scene.accent.alpha(0.55) : kit.c.borderBase)
-            .animate(snappySpring)
-            .onClick { state in
-                state.lightsOn[idx].toggle()
-                state.events += 1
-            }
-            .child(text(roomNames[idx]).font(kit.ty.small).color(on ? kit.c.textBase : kit.c.textMuted))
-            .child(el().square(8).rounded(4).bg(on ? s.scene.accent : kit.c.textMuted.alpha(0.35)))
-        lightGrid = lightGrid.child(lightRow)
+    if s.hud {
+        root = root.child(bentoHud(s))
     }
-    let lightsTile = tileCard(
-        key: "tile-lights",
-        title: "Lighting",
-        subtitle: "\(s.lightsOn.filter { $0 }.count)/4 active",
-        kit: kit,
-        content: lightGrid
-    )
+    return root
+}
 
-    let audioTile = tileCard(
-        key: "tile-audio",
-        title: "Now Playing",
-        subtitle: s.playing ? "Playing" : "Paused",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(
-                col().gap(2)
-                    .child(text("Midnight Signals").font(kit.ty.uiMedium).color(kit.c.textBase))
-                    .child(text("Ambient Works · 24-bit").font(kit.ty.small).color(kit.c.textMuted))
-            )
-            .child(
-                row().wFull().itemsCenter().gap(8)
-                    .child(kit.button(key: "play-btn", s.playing ? "Pause" : "Play", variant: .neutral, size: .sm) { state, _ in
-                        state.playing.toggle()
-                    })
-                    .child(el().grow(1).child(kit.progress(key: "vol-bar", fraction: s.volume)))
-            )
-    )
-
-    let securityTile = tileCard(
-        key: "tile-security",
-        title: "Perimeter",
-        subtitle: s.locked ? "Armed" : "Disarmed",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(
-                row().gap(8).itemsCenter()
-                    .child(kit.badge(s.locked ? "All Doors Locked" : "Entry Unlocked", tone: s.locked ? .success : .warning))
-            )
-            .child(
-                kit.button(key: "lock-btn", s.locked ? "Unlock" : "Lock All", variant: .neutral, size: .sm) { state, _ in
-                    state.locked.toggle()
-                    state.events += 1
-                }
-            )
-    )
-
-    let powerFrac = Float(s.powerWatts) / 1000.0
-    let energyTile = tileCard(
-        key: "tile-energy",
-        title: "Power Draw",
-        subtitle: "\(s.powerWatts) W",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(text("\(s.powerWatts) W").size(22).bold().color(kit.c.textBase))
-            .child(kit.progress(key: "power-bar", fraction: powerFrac.clamped(to: 0...1)))
-            .child(text("Solar offset 62%").font(kit.ty.small).color(kit.c.textMuted))
-    )
-
-    let netTile = tileCard(
-        key: "tile-net",
-        title: "Network",
-        subtitle: "Fiber 1G",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(text("\(s.netDownMbps) Mbps").size(20).semibold().color(kit.c.textBase))
-            .child(kit.progress(key: "net-bar", fraction: (Float(s.netDownMbps) / 1000.0).clamped(to: 0...1)))
-            .child(text("Latency 4 ms · 0% loss").font(kit.ty.small).color(kit.c.textMuted))
-    )
-
-    let blindsTile = tileCard(
-        key: "tile-blinds",
-        title: "Shades",
-        subtitle: "\(Int((s.blindsOpen * 100).rounded()))%",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(kit.progress(key: "blinds-bar", fraction: s.blindsOpen))
-            .child(
-                row().gap(6)
-                    .child(kit.button(key: "blinds-0", "Close", variant: .ghost, size: .sm) { state, _ in state.blindsOpen = 0 })
-                    .child(kit.button(key: "blinds-50", "Half", variant: .ghost, size: .sm) { state, _ in state.blindsOpen = 0.5 })
-                    .child(kit.button(key: "blinds-100", "Open", variant: .ghost, size: .sm) { state, _ in state.blindsOpen = 1.0 })
-            )
-    )
-
-    let airTile = tileCard(
-        key: "tile-air",
-        title: "Air Quality",
-        subtitle: "AQI \(s.airQuality)",
-        kit: kit,
-        content: col().wFull().grow(1).justifyBetween()
-            .child(text("\(s.airQuality)%").size(22).bold().color(kit.c.textBase))
-            .child(kit.badge("Clean Air", tone: .success))
-            .child(text("CO₂ 412 ppm · 46% RH").font(kit.ty.small).color(kit.c.textMuted))
-    )
-
-    var dock: El<MotionBentoState> = row()
-        .key("dock")
-        .wFull()
-        .h(54)
-        .px(16)
-        .gap(10)
-        .itemsCenter()
-        .justifyCenter()
-        .rounded(16)
-        .bg(kit.c.layer01)
-        .border(1, kit.c.borderBase)
-
-    for sc in StudioScene.allCases {
-        let active = (sc == s.scene)
-        let item: El<MotionBentoState> = row()
-            .key("dock-\(sc.description)")
-            .h(34)
-            .px(16)
-            .gap(8)
-            .itemsCenter()
-            .rounded(10)
-            .bg(active ? sc.accent.alpha(0.22) : .transparent)
-            .border(1, active ? sc.accent : .transparent)
-            .animate(snappySpring)
-            .onClick { state in
-                state.scene = sc
-                state.step += 1
-                state.events += 1
-            }
-            .child(el().square(8).rounded(4).bg(sc.accent))
-            .child(text(sc.description).font(kit.ty.uiMedium).color(active ? kit.c.textBase : kit.c.textMuted))
-        dock = dock.child(item)
-    }
-
-    return col()
-        .key("root")
-        .sizeFull()
-        .p(20)
-        .gap(14)
-        .bg(bg)
-        .child(header)
-        .child(
-            row().wFull().grow(1).gap(14)
-                .child(climateTile)
-                .child(lightsTile)
-                .child(audioTile)
-                .child(securityTile)
-        )
-        .child(
-            row().wFull().grow(1).gap(14)
-                .child(energyTile)
-                .child(netTile)
-                .child(blindsTile)
-                .child(airTile)
-        )
-        .child(dock)
+private final class SharedMeterBox: @unchecked Sendable {
+    let lock = NSLock()
+    var meter: ChaosMeter
+    init(_ meter: ChaosMeter) { self.meter = meter }
 }
 
 @main
 public enum RuneMotionBentoApp {
-    public static func makeSpec() -> AppSpec<MotionBentoState> {
-        AppSpec<MotionBentoState>(
-            title: "Motion Bento",
-            size: Vec2(1060, 660),
+    public static func makeApp(
+        config: ChaosConfig = ChaosConfig(),
+        arguments: [String] = []
+    ) -> App<MotionBentoState> {
+        let scripted = arguments.contains("--script")
+        var meter = ChaosMeter(framework: "rune", refreshHz: 120.0)
+        meter.note("work", "update_ms + encode_ms: events, poll, view, layout, paint, upload and encode, to submit")
+        meter.note("build", "update_ms: events, poll, view, layout and paint")
+        meter.note("variant", config.variant)
+        meter.note("seed", "\(config.seed)")
+        meter.note("mode", config.naive ? "naive" : "idiomatic")
+        let sharedMeter = SharedMeterBox(meter)
+
+        return App<MotionBentoState>(
+            title: "Motion bento",
+            size: Vec2(ChaosGrid.width, ChaosGrid.height),
+            minSize: Vec2(ChaosGrid.width, ChaosGrid.height),
             dark: true,
-            state: MotionBentoState(),
-            onKey: { state, event, _ in
-                if event.key == .space {
-                    state.stepChaos()
-                    return true
-                }
-                return false
-            },
+            state: MotionBentoState(config: config, scripted: scripted, meter: meter),
             view: bentoView
         )
-        .scene("relax") { $0.scene = .relax }
-        .scene("cinema") { $0.stepChaos(); $0.stepChaos(); $0.scene = .cinema }
-        .scene("night") { $0.stepChaos(); $0.stepChaos(); $0.stepChaos(); $0.scene = .night }
+        .args(RunOptions(arguments: arguments))
+        .poll { state, t, tx in
+            sharedMeter.lock.lock()
+            state.meter = sharedMeter.meter
+            sharedMeter.lock.unlock()
+            let changed = bentoPoll(&state, t, &tx)
+            if let updated = state.meter {
+                sharedMeter.lock.lock()
+                sharedMeter.meter = updated
+                sharedMeter.lock.unlock()
+            }
+            return changed
+        }
+        .onKey { state, event, _ in
+            if case .text(let t) = event.key, t.lowercased() == "h" {
+                state.hud.toggle()
+                state.readout = nil
+                state.hudAt = -.infinity
+                return true
+            }
+            return false
+        }
+        .onClose { state, _ in
+            state.writeMetrics()
+            return true
+        }
+        .onFrameEncoded { frame in
+            guard frame.outcome == .drawn else { return }
+            let build = frame.updateMs
+            let work = build + frame.encodeMs
+            sharedMeter.lock.lock()
+            sharedMeter.meter.frameWithBuild(at: ContinuousClock.now, workMs: work, buildMs: build)
+            sharedMeter.lock.unlock()
+        }
     }
 
     public static func main() throws {
-        try RuneApp.run(makeSpec())
+        do {
+            let (cfg, rest) = try ChaosConfig.parse(Array(CommandLine.arguments.dropFirst()))
+            if let path = cfg.emitScript {
+                try ChaosSchedule.scriptJSON(cfg).write(toFile: path, atomically: true, encoding: .utf8)
+                return
+            }
+            try makeApp(config: cfg, arguments: rest).run()
+        } catch {
+            fputs("motion-bento: \(error)\n", stderr)
+            exit(2)
+        }
     }
 }

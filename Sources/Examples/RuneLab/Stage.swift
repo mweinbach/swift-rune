@@ -519,7 +519,7 @@ private func keysCanvas(_ s: LabState, _ p: StagePalette) -> [El<LabState>] {
     for i in 0..<keyCount {
         let rc = keyRect(i)
         let accent = accentKey(i)
-        let press = s.keys[i].target
+        let press = s.keys[i].sample(at: s.now)
         let fill = accent ? oklch(0.62 - 0.08 * press, 0.17, 35) : oklch(0.29 - 0.05 * press, 0.004, 265)
         v.append(
             rcEl(FxRect(x: rc.x, y: rc.y + press * 3, w: rc.w, h: rc.h))
@@ -706,7 +706,7 @@ private func motionCanvas(_ s: LabState, _ p: StagePalette) -> [El<LabState>] {
             v.append(bx(30 + Float(gx) * 55, 26 + Float(gy) * 55, 2, 2).rounded(1).bg(oklcha(1, 0, 0, 0.07)))
         }
     }
-    let c = s.card.target
+    let c = s.card.sample(at: s.now)
     let w = cardSize.x
     let h = cardSize.y
     v.append(
