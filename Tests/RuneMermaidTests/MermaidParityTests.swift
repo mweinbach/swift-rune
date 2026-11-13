@@ -234,6 +234,15 @@ struct MermaidParityTests {
             let f = flow(src)
             let got = f.edges.map { (f.nodes[$0.from].id, f.nodes[$0.to].id) }
             #expect(got.count == want.count && zip(got, want).allSatisfy(==), "Mismatch for \(src)")
+            let ids = f.nodes.map(\.id)
+            var used: [String] = []
+            for (a, b) in want {
+                if used.last != a { used.append(a) }
+                if used.last != b { used.append(b) }
+            }
+            if !want.isEmpty {
+                #expect(ids == used, "Failed statement added stray nodes for \(src): \(ids) vs \(used)")
+            }
         }
     }
 
@@ -423,9 +432,16 @@ struct MermaidParityTests {
                 return nil
             }
             #expect(!dashes.isEmpty)
+            var minDist = Float.greatestFiniteMagnitude
             for d in dashes {
                 #expect(!d.contains { $0.x > b.0 + 0.5 && $0.x < b.2 - 0.5 && $0.y > b.1 + 0.5 && $0.y < b.3 - 0.5 })
+                for p in d {
+                    let dx = max(b.0 - p.x, p.x - b.2, 0.0)
+                    let dy = max(b.1 - p.y, p.y - b.3, 0.0)
+                    minDist = min(minDist, max(dx, dy))
+                }
             }
+            #expect(minDist < 1.5, "Dashed link did not reach cluster border: minDist=\(minDist)")
         } else {
             Issue.record("Expected first fill op to be cluster box")
         }
@@ -578,7 +594,12 @@ struct MermaidParityTests {
         #expect(color(c.ops[1]) == InkFlattener.over(ink, InkFlattener.over(tint, surface)))
         #expect(color(c.ops[2]) == InkFlattener.over(ink, surface))
 
-        guard case let .flowchart(f)? = MermaidParser.parse("flowchart LR\nR1[Retry] -->|fails| R2[Wait]\nR2 -->|ok| On[Done]") else {
+        guard case let .flowchart(f)? = MermaidParser.parse("""
+        flowchart LR
+          A[Start] --> B[Parse]
+          B -->|"ok"| C[Run]
+          B -->|"bad"| D[Skip]
+        """) else {
             fatalError()
         }
         var fc = FlowchartParser.drawCanvas(f, paint: dark, hover: (.edges, dark.text.alpha(0.9)))!
@@ -587,7 +608,7 @@ struct MermaidParityTests {
             if case let .stroke(_, _, _, _, col) = $0 { return col.a }
             return nil
         }
-        #expect(alphas.count >= 2 && alphas.allSatisfy { $0 == 1.0 })
+        #expect(alphas.count >= 3 && alphas.allSatisfy { $0 == 1.0 })
 
         // a_line_is_no_brighter_at_its_joints_under_its_head_or_round_a_corner (ink_tests.rs:53)
         func insideCount(_ pts: [Vec2], _ p: Vec2) -> Int {
@@ -701,16 +722,32 @@ struct MermaidParityTests {
                 prevSize = s.size
             }
         }
-        let full = retries.joined(separator: "\n")
-        let before = scene(full, paint: dark)!
-        let streamedFinal = MermaidScenes.growing(full, theme: dark, hover: nil)
-        let after = scene(full, paint: dark)!
+        let full = """
+        flowchart LR
+          Drop[Socket drops] --> R1[Retry at once]
+          R1 -->|ok| On[Online]
+          R1 -->|fails| R2[Back off 1 s]
+          R2 -->|ok| On
+          R2 -->|fails| Off[Offline]
+          Off -->|retry| R2
+        """
+        MermaidScenes.clearCache()
+        let before = MermaidScenes.built(full, theme: dark, hover: nil, prev: nil).scene!
+        let lines = full.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var streamed: [MermaidScene] = []
+        for k in 2...lines.count {
+            let prefix = lines[..<k].joined(separator: "\n") + "\n"
+            if let s = MermaidScenes.growing(prefix, theme: dark, hover: nil) {
+                streamed.append(s)
+            }
+        }
+        let after = MermaidScenes.built(full, theme: dark, hover: nil, prev: nil).scene!
         func centres(_ s: MermaidScene) -> [String: Vec2] {
             Dictionary(uniqueKeysWithValues: s.pieces.filter { $0.key.hasPrefix("n:") && !$0.key.contains(".") }.map {
                 ($0.key, Vec2($0.at.x + $0.size.x / 2.0, $0.at.y + $0.size.y / 2.0))
             })
         }
-        #expect(streamedFinal != nil)
+        #expect(!streamed.isEmpty)
         #expect(centres(before) == centres(after))
         #expect(before.size == after.size)
 

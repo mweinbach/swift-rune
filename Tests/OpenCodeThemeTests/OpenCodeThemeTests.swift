@@ -135,6 +135,14 @@ struct OpenCodeThemeTests {
     }
 
     @Test func ambientThemeAndKitFollowThemeWithBlend() {
+        for dark in [false, true] {
+            let defaultKit = OpenCodeTheme.kit(dark: dark)
+            let srgbExplicit = OpenCodeTheme.kit(dark: dark, srgbBlend: true)
+            #expect(defaultKit == srgbExplicit)
+            if Theme.blendsSrgb(), let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"] {
+                #expect(defaultKit.c.hover == authored)
+            }
+        }
         Theme.withBlend(true) {
             for dark in [false, true] {
                 let k = OpenCodeTheme.kit(dark: dark)

@@ -436,5 +436,17 @@ struct RuneI18nTests {
         let en = I18n(locale: "en-US", fallback: "en-US")
         #expect(en.decimal(1.005, maxFraction: 2) == "1.01")
         #expect(en.decimal(-1.005, maxFraction: 2) == "-1.01")
+
+        // Direct I18n.negotiate and I18n.negotiateIndex coverage (3a.#36)
+        let cat = Catalog(
+            keys: ["hi"],
+            plurals: [],
+            pluralForms: [],
+            locales: [LocaleInfo("en"), LocaleInfo("fr-FR")],
+            messages: [.later(), .later()]
+        )
+        let multi = I18n(catalog: cat)
+        #expect(multi.negotiate(["es-MX", "fr"]) == "fr-FR")
+        #expect(multi.negotiateIndex(["fr", "en"]) == 1)
     }
 }
