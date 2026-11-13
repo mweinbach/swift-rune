@@ -74,6 +74,7 @@ struct RuneKitTests {
     }
 
     @Test("FileDiff LCS computation, unified git patch parser, and unified/split diffView")
+    @MainActor
     func diffComputationAndRendering() {
         let oldSrc = "line 1\nline 2\nline 3"
         let newSrc = "line 1\nline two\nline 3\nline 4"
