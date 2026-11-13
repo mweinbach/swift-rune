@@ -7745,56 +7745,62 @@
       "swiftTarget": "RuneRef",
       "swiftPath": "Sources/RuneRef",
       "testTarget": "RuneRefTests",
-      "status": "partial",
+      "status": "mostly",
       "moduleMappings": [
         {
           "upstream": "src/blend.rs",
           "swift": [
             "Sources/RuneRef/RefBlend.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/generate.rs",
           "swift": [
+            "Sources/RuneRef/OracleGenerator.swift",
             "Sources/RuneRef/RefGenerator.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/gpu.rs",
           "swift": [
-            "Sources/RuneRef/Shader.swift"
+            "Sources/RuneRef/Shader.swift",
+            "Sources/Examples/RuneRefCLI/main.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Swift uses MetalRenderer rather than wgpu; addTextRun parity in RuneRefCLI"
         },
         {
           "upstream": "src/lib.rs",
           "swift": [
+            "Sources/RuneRef/Oracle.swift",
+            "Sources/RuneRef/Blake3.swift",
             "Sources/RuneRef/Frame.swift",
             "Sources/RuneRef/Primitive.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/main.rs",
           "swift": [
             "Sources/Examples/RuneRefCLI/main.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shader.rs",
           "swift": [
+            "Sources/RuneRef/OracleShader.swift",
             "Sources/RuneRef/Shader.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         }
       ],
-      "note": "Oracle encoding mismatch (blake3/kind12-13/fade/clip/blend/JSON scene replay missing); CLI in RuneRefCLI",
+      "note": "Oracle encoding matches upstream bit-for-bit across all 16 goldens.json seeds (BLAKE3, kind 12 no-op, JSON replay, blame/diff); CLI in RuneRefCLI",
       "parity": {
         "files": "6/6",
-        "pubSymbols": "25/48 (52%)",
+        "pubSymbols": "45/48 (94%)",
         "report": "runtime.md"
       },
       "swiftOnly": [
@@ -7909,7 +7915,7 @@
           "note": "Windows toast backend excluded"
         }
       ],
-      "note": "Linux switch non-exhaustive; missing activation URL/serve/wait and Result error parity",
+      "note": "Exhaustive Linux switch, activation URL/serve/wait, and Result error parity ported; macOS UserNotificationsBackend + Linux backend",
       "parity": {
         "files": "4/4",
         "pubSymbols": "11/24 (46%)",
@@ -7958,28 +7964,30 @@
       "swiftTarget": "RunePerf",
       "swiftPath": "Sources/RunePerf",
       "testTarget": "RunePerfTests",
-      "status": "partial",
+      "status": "mostly",
       "moduleMappings": [
         {
           "upstream": "src/incident.rs",
           "swift": [
             "Sources/RunePerf/PerfIncidentStore.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/lib.rs",
           "swift": [
-            "Sources/RunePerf/RunePerf.swift"
+            "Sources/RunePerf/RunePerf.swift",
+            "Sources/RunePerf/PerfFileRecorder.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/recorder.rs",
           "swift": [
-            "Sources/RunePerf/PerfRecorder.swift"
+            "Sources/RunePerf/PerfRecorder.swift",
+            "Sources/RunePerf/PerfFileRecorder.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/recorder/tests.rs",
@@ -7987,7 +7995,7 @@
             "Tests/RunePerfTests/RunePerfTests.swift",
             "Tests/RunePerfTests/RunePerfParityTests.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/stats.rs",
@@ -7999,9 +8007,10 @@
         {
           "upstream": "src/store.rs",
           "swift": [
-            "Sources/RunePerf/PerfIncidentStore.swift"
+            "Sources/RunePerf/PerfIncidentStore.swift",
+            "Sources/RunePerf/PerfFileRecorder.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/store/tests.rs",
@@ -8009,7 +8018,7 @@
             "Tests/RunePerfTests/RunePerfTests.swift",
             "Tests/RunePerfTests/RunePerfParityTests.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/tests.rs",
@@ -8017,10 +8026,10 @@
             "Tests/RunePerfTests/RunePerfTests.swift",
             "Tests/RunePerfTests/RunePerfParityTests.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         }
       ],
-      "note": "Inverted incident dedup, missing Config/Recorder/file outputs (.perf.lock, perf.log, perf-incident-NN.json, perf.json)",
+      "note": "Incident dedup fixed; Config, Recorder, and file outputs (.perf.lock, perf.log, perf-incident-NN.json, perf.json) ported",
       "parity": {
         "files": "8/8",
         "pubSymbols": "38/51 (75%)",
@@ -8035,38 +8044,40 @@
       "swiftTarget": "RunePerf",
       "swiftPath": "Sources/RunePerf",
       "testTarget": "RunePerfTests",
-      "status": "partial",
+      "status": "mostly",
       "moduleMappings": [
         {
           "upstream": "src/alloc.rs",
           "swift": [
             "Sources/RunePerf/AllocSiteTracker.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/alloc/sites.rs",
           "swift": [
             "Sources/RunePerf/AllocSiteTracker.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/gauge.rs",
           "swift": [
-            "Sources/RunePerf/ProcessTelemetry.swift"
+            "Sources/RunePerf/ProcessTelemetry.swift",
+            "Sources/RunePerf/ProcessWatcher.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/lib.rs",
           "swift": [
-            "Sources/RunePerf/ProcessTelemetry.swift"
+            "Sources/RunePerf/ProcessTelemetry.swift",
+            "Sources/RunePerf/ProcessWatcher.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         }
       ],
-      "note": "Missing Config/Watcher/watch/serve/latest/mb/to_json/GAUGES=64 cap and alloc zone tracking",
+      "note": "Config, ProcessWatcher, serve, latest/mb/toJSON, GAUGES=64 cap, and alloc zone tracking ported",
       "parity": {
         "files": "4/4",
         "pubSymbols": "34/52 (65%)",
@@ -8255,9 +8266,11 @@
         },
         {
           "upstream": "src/functions.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Script functions.rs API (renderFn/spawnFn/evalFn/version/vmId) not yet ported"
+          "swift": [
+            "Sources/RuneLuau/Script.swift"
+          ],
+          "status": "ported",
+          "note": "Script renderFn/spawnFn/evalFn/version/vmId/module/prewarm/reloadCompiled/memory ported"
         },
         {
           "upstream": "src/lib.rs",
@@ -8378,7 +8391,7 @@
           "status": "ported"
         }
       ],
-      "note": "Pure-Swift Luau VM; P0 virtualList/children/unknown-color/functions.rs gaps remain",
+      "note": "Pure-Swift Luau VM + sandbox + memoryLimit + virtualList + children + unknown-colour + functions.rs ported; fadeOut/hoverGroup/dir/tabular/hoverTransition/hoverGroupColor/revealOnHover/helpSide wait on Swift El APIs",
       "parity": {
         "files": "20/21 + 1 n/a",
         "pubSymbols": "72/151 (48%)",
@@ -8425,22 +8438,24 @@
     },
     {
       "upstreamPath": "crates/rune-staging",
-      "swiftTarget": null,
-      "swiftPath": null,
-      "testTarget": null,
-      "status": "missing",
+      "swiftTarget": "RuneStaging",
+      "swiftPath": "Sources/RuneStaging",
+      "testTarget": "RuneStagingTests",
+      "status": "mostly",
       "moduleMappings": [
         {
           "upstream": "src/lib.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "crates/rune-staging not ported"
+          "swift": [
+            "Sources/RuneStaging/Staging.swift",
+            "Sources/RuneStaging/MetalStaging.swift"
+          ],
+          "status": "ported"
         }
       ],
-      "note": "crates/rune-staging (GPU staging ring buffer) not yet ported",
+      "note": "Chunked GPU upload staging pool ported with MetalStagingBackend and cross-platform InMemoryStagingBackend",
       "parity": {
-        "files": "0/1",
-        "pubSymbols": "0/6 (0%)",
+        "files": "1/1",
+        "pubSymbols": "6/6 (100%)",
         "report": "runtime.md"
       }
     }
@@ -9176,9 +9191,9 @@
   "extraBins": [
     {
       "upstreamPath": "crates/rune-ref/src/main.rs",
-      "status": "partial",
+      "status": "ported",
       "swiftTarget": "RuneRefCLI",
-      "note": "CLI parity incomplete pending oracle encoding port"
+      "note": "CLI parity with --scene JSON replay, --save, --blame, --diff, and blake3=<hash> output"
     },
     {
       "upstreamPath": "tools/rune-dev-guard",

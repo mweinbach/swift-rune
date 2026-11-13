@@ -28,6 +28,7 @@ let package = Package(
         .library(name: "RuneTaffy", targets: ["RuneTaffy"]),
         .library(name: "RuneLuau", targets: ["RuneLuau"]),
         .library(name: "RuneRegister", targets: ["RuneRegister"]),
+        .library(name: "RuneStaging", targets: ["RuneStaging"]),
         .executable(name: "rune-hello", targets: ["RuneHello"]),
         .executable(name: "rune-todo", targets: ["RuneTodo"]),
         .executable(name: "rune-settings", targets: ["RuneSettings"]),
@@ -160,6 +161,10 @@ let package = Package(
         .target(
             name: "RuneRegister",
             path: "Sources/RuneRegister"
+        ),
+        .target(
+            name: "RuneStaging",
+            path: "Sources/RuneStaging"
         ),
         .executableTarget(
             name: "RuneHello",
@@ -410,6 +415,11 @@ let package = Package(
             name: "RuneRegisterTests",
             dependencies: ["RuneRegister"],
             path: "Tests/RuneRegisterTests"
+        ),
+        .testTarget(
+            name: "RuneStagingTests",
+            dependencies: ["RuneStaging"],
+            path: "Tests/RuneStagingTests"
         ),
         .testTarget(
             name: "RuneParityTests",

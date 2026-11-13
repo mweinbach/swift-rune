@@ -15,6 +15,7 @@ public enum PrimitiveKind: Int, Sendable, Codable {
     case dashedRing = 10
     case multiGradient = 11
     case backdropBlur = 12
+    case effectSlot = 13
 }
 
 /// Device-pixel primitive instance matching the 32-float GPU instance layout.
@@ -314,6 +315,18 @@ public struct Primitive: Sendable, Equatable {
         Primitive(
             rect: .zero,
             params: SIMD4<Float>(0, Float(PrimitiveKind.layerEnd.rawValue), 0, 0),
+            clip: clip
+        )
+    }
+
+    /// Effect slot placeholder (no-op in scalar reference).
+    public static func effectSlot(
+        rect: SIMD4<Float> = .zero,
+        clip: SIMD4<Float> = SIMD4<Float>(-1e6, -1e6, 2e6, 2e6)
+    ) -> Primitive {
+        Primitive(
+            rect: rect,
+            params: SIMD4<Float>(0, Float(PrimitiveKind.effectSlot.rawValue), 0, 0),
             clip: clip
         )
     }

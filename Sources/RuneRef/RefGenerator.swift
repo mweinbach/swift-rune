@@ -171,6 +171,11 @@ public enum RefGenerator {
         return s
     }
 
+    /// Generates a seeded scene where every primitive uses radial / multi-stop gradient shading.
+    public static func radial(seed: UInt64, count: Int = 8) -> RefScene {
+        OracleGenerator.radial(seed: seed, count: count).toRefScene()
+    }
+
     /// Translates all primitives and non-sentinel clip rects in `scene` by `(dx, dy)`.
     public static func translate(_ scene: inout RefScene, dx: Float, dy: Float) {
         for i in scene.primitives.indices {
