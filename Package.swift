@@ -432,6 +432,8 @@ let package = Package(
                 "RuneLab",
                 "RuneMotionBento",
                 "RuneSketch",
+                "RuneKitGallery",
+                "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
         ),
