@@ -78,21 +78,29 @@ public enum TextCase: String, Sendable, Hashable, Codable {
     case lowercase
 }
 
-/// Transforms `source` according to `TextCase` while tracking UTF-8 source byte -> displayed byte mappings.
+/// Transforms `source` according to `TextCase` while tracking bidirectional UTF-8 byte offsets
+/// matching `crates/rune/src/text/case.rs`.
 public struct TextCaseMapping: Sendable, Equatable {
+    private struct Bound: Sendable, Equatable {
+        var sourceByte: Int
+        var displayedByte: Int
+    }
+
     public let displayed: String
-    /// Indexed by source UTF-8 byte boundary `[0...sourceUTF8Count]`.
-    private let sourceToDisplayedOffsets: [Int]
+    private let sourceUTF8Count: Int
+    private let bounds: [Bound]
 
     public init(source: String, textCase: TextCase) {
         let scalars = Array(source.unicodeScalars)
         var shown = ""
         shown.reserveCapacity(source.utf8.count)
-        var map = [Int](repeating: 0, count: source.utf8.count + 1)
+        var pairs: [Bound] = []
+        pairs.reserveCapacity(scalars.count + 1)
         var srcByte = 0
         var dstByte = 0
 
         for i in scalars.indices {
+            pairs.append(Bound(sourceByte: srcByte, displayedByte: dstByte))
             let scalar = scalars[i]
             let transformed: String
             if textCase == .uppercase {
@@ -126,26 +134,46 @@ public struct TextCaseMapping: Sendable, Equatable {
             }
 
             shown.append(transformed)
-            let nextSrc = srcByte + scalar.utf8.count
-            let nextDst = dstByte + transformed.utf8.count
-            for b in (srcByte + 1)...nextSrc {
-                map[b] = (b == nextSrc) ? nextDst : dstByte
-            }
-            srcByte = nextSrc
-            dstByte = nextDst
+            srcByte += scalar.utf8.count
+            dstByte += transformed.utf8.count
         }
+        pairs.append(Bound(sourceByte: srcByte, displayedByte: dstByte))
         self.displayed = shown
-        self.sourceToDisplayedOffsets = map
+        self.sourceUTF8Count = srcByte
+        self.bounds = pairs
     }
 
-    public func displayedOffset(forSourceUTF8Offset offset: Int) -> Int {
-        let clamped = min(max(0, offset), sourceToDisplayedOffsets.count - 1)
-        return sourceToDisplayedOffsets[clamped]
+    /// Displayed UTF-8 byte offset where source byte `offset` starts (`up == false`),
+    /// or its end when inside an expanding scalar (`up == true`, matching `Source::shown`).
+    public func displayedOffset(forSourceUTF8Offset offset: Int, up: Bool = false) -> Int {
+        guard !bounds.isEmpty else { return 0 }
+        if up {
+            let idx = bounds.firstIndex { $0.sourceByte >= offset }
+            return idx.map { bounds[$0].displayedByte } ?? (bounds.last?.displayedByte ?? 0)
+        } else {
+            let idx = bounds.lastIndex { $0.sourceByte <= offset }
+            return idx.map { bounds[$0].displayedByte } ?? 0
+        }
+    }
+
+    /// Source UTF-8 byte offset of the scalar drawn at displayed byte `offset` (`up == false`),
+    /// or the next scalar's start when inside an expanded scalar (`up == true`, matching `Source::source`).
+    public func sourceOffset(forDisplayedUTF8Offset offset: Int, up: Bool = false) -> Int {
+        guard !bounds.isEmpty else { return sourceUTF8Count }
+        if up {
+            let idx = bounds.firstIndex { $0.displayedByte >= offset }
+            return idx.map { bounds[$0].sourceByte } ?? sourceUTF8Count
+        } else {
+            let idx = bounds.lastIndex { $0.displayedByte <= offset }
+            return idx.map { bounds[$0].sourceByte } ?? 0
+        }
     }
 
     public func displayedRange(forSourceUTF8Range range: Range<Int>) -> Range<Int> {
-        let lo = displayedOffset(forSourceUTF8Offset: range.lowerBound)
-        let hi = displayedOffset(forSourceUTF8Offset: range.upperBound)
+        let lo = displayedOffset(forSourceUTF8Offset: range.lowerBound, up: false)
+        let hi = range.isEmpty
+            ? lo
+            : displayedOffset(forSourceUTF8Offset: range.upperBound, up: true)
         return min(lo, hi)..<max(lo, hi)
     }
 }

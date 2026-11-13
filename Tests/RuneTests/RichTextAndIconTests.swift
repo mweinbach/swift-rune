@@ -36,16 +36,29 @@ struct RichTextAndIconTests {
     @Test("TextCaseMapping preserves UTF-8 byte offsets across Unicode case expansions")
     func textCaseByteMapping() {
         // 'ß' (2 UTF-8 bytes at 1..<3) expands to "SS" (2 bytes), 'i' -> 'I'
+        // Ported from crates/rune/src/text/case.rs:63-82
         let src = "aß b"
         let mapped = TextCaseMapping(source: src, textCase: .uppercase)
         #expect(mapped.displayed == "ASS B")
+        #expect(mapped.displayedOffset(forSourceUTF8Offset: 1, up: false) == 1)
+        #expect(mapped.displayedOffset(forSourceUTF8Offset: 3, up: false) == 3)
+        #expect(mapped.displayedOffset(forSourceUTF8Offset: 2, up: false) == 1)
+        #expect(mapped.displayedOffset(forSourceUTF8Offset: 2, up: true) == 3)
+        #expect(mapped.displayedOffset(forSourceUTF8Offset: 5, up: false) == 5)
+        #expect(mapped.displayedRange(forSourceUTF8Range: 1..<2) == 1..<3)
         #expect(mapped.displayedRange(forSourceUTF8Range: 1..<3) == 1..<3)
         #expect(mapped.displayedRange(forSourceUTF8Range: 4..<5) == 4..<5)
+
+        #expect(mapped.sourceOffset(forDisplayedUTF8Offset: 2, up: false) == 1)
+        #expect(mapped.sourceOffset(forDisplayedUTF8Offset: 2, up: true) == 3)
+        #expect(mapped.sourceOffset(forDisplayedUTF8Offset: 4, up: false) == 4)
+        #expect(mapped.sourceOffset(forDisplayedUTF8Offset: 5, up: false) == 5)
 
         // Greek uppercase -> lowercase
         let greek = "ΟΔΟΣ Ω"
         let lower = TextCaseMapping(source: greek, textCase: .lowercase)
         #expect(lower.displayed == "οδος ω")
+        #expect(lower.displayedOffset(forSourceUTF8Offset: 8, up: false) == 8)
     }
 
     @Test("RichSpanFlattener splits and merges overlapping spans into contiguous TextSpans")

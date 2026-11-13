@@ -862,6 +862,8 @@ public final class TextSystem: @unchecked Sendable {
     /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
     public var currentFontEpoch: UInt64 {
         syncGlobalFamiliesIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
         return lastObservedFontEpoch
     }
 
@@ -889,8 +891,12 @@ public final class TextSystem: @unchecked Sendable {
         #endif
         measureCache.removeAll(keepingCapacity: true)
         lock.unlock()
+
         FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
-        lastObservedFontEpoch = fontEpoch()
+        let newEpoch = fontEpoch()
+        lock.lock()
+        lastObservedFontEpoch = newEpoch
+        lock.unlock()
         return true
     }
 
@@ -1415,6 +1421,74 @@ public final class TextSystem: @unchecked Sendable {
         selectionRectsPortable(in: shaped, utf8Range: utf8Range, pixelScale: pixelScale)
     }
     #endif
+
+    /// Visual wrapped line ranges `(utf8Start, utf8End, originY, originX)` for soft-wrap caret motion.
+    public func visualLines(in shaped: ShapedText) -> [(utf8Start: Int, utf8End: Int, originY: Float, originX: Float)] {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if !shaped.lineStrings.isEmpty {
+            return shaped.lineStrings.map { ($0.utf8Start, $0.utf8Start + $0.text.utf8.count, $0.originY, $0.originX) }
+        }
+        #endif
+        return shaped.portableLines.map { ($0.utf8Start, $0.utf8Start + $0.text.utf8.count, $0.originY, $0.originX) }
+    }
+
+    /// Computes which visual line index owns `(utf8Offset, upstream)` in a soft-wrapped `ShapedText`.
+    public func visualLineIndex(in shaped: ShapedText, utf8Offset: Int, upstream: Bool) -> Int {
+        let lines = visualLines(in: shaped)
+        guard !lines.isEmpty else { return 0 }
+        for i in lines.indices {
+            let l = lines[i]
+            if upstream {
+                if utf8Offset <= l.utf8End { return i }
+            } else {
+                // Downstream prefers the next wrapped line when sitting on a soft-wrap boundary,
+                // unless this line ends in an explicit `\n` or is the last line.
+                let isLast = (i == lines.count - 1)
+                if isLast { return i }
+                if utf8Offset < l.utf8End { return i }
+                if utf8Offset == l.utf8End {
+                    let nextStart = lines[i + 1].utf8Start
+                    if nextStart > l.utf8End {
+                        // Hard break (`\n`) separates line `i` and line `i + 1`, so `utf8End` belongs to line `i`.
+                        return i
+                    }
+                    // Soft-wrap boundary: upstream keeps end of `i`, downstream belongs to `i + 1`.
+                }
+            }
+        }
+        return lines.count - 1
+    }
+
+    /// Caret rect honoring soft-wrap upstream/downstream affinity at line boundaries.
+    public func caretRect(in shaped: ShapedText, utf8Offset: Int, upstream: Bool, pixelScale: Float) -> SIMD4<Float> {
+        let lines = visualLines(in: shaped)
+        guard !lines.isEmpty else {
+            return SIMD4<Float>(0, 0, 1.5, shaped.lineHeight)
+        }
+        let lineIdx = visualLineIndex(in: shaped, utf8Offset: utf8Offset, upstream: upstream)
+        let rec = lines[lineIdx]
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if lineIdx < shaped.lineStrings.count {
+            let ctRec = shaped.lineStrings[lineIdx]
+            let scale = max(pixelScale, 1.0)
+            let localUTF8 = (utf8Offset - ctRec.utf8Start).clamped(to: 0...ctRec.text.utf8.count)
+            let localUTF16 = String(decoding: ctRec.text.utf8.prefix(localUTF8), as: UTF8.self).utf16.count
+            var xPt = ctRec.originX
+            if let ctLine = ctRec.ctLine {
+                xPt += Float(CTLineGetOffsetForStringIndex(ctLine, localUTF16, nil)) / scale
+            }
+            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineHeight)
+        }
+        #endif
+        if lineIdx < shaped.portableLines.count {
+            let pRec = shaped.portableLines[lineIdx]
+            let localUTF8 = (utf8Offset - pRec.utf8Start).clamped(to: 0...pRec.text.utf8.count)
+            let charIdx = String(decoding: pRec.text.utf8.prefix(localUTF8), as: UTF8.self).count
+            let xPt = pRec.originX + pRec.charOffsets[min(charIdx, pRec.charOffsets.count - 1)]
+            return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineHeight)
+        }
+        return caretRect(in: shaped, utf8Offset: utf8Offset, pixelScale: pixelScale)
+    }
 
     // MARK: - Portable (Headless / Linux / Windows / Android / Web) Text Shaping
 
