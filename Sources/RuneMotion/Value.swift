@@ -2,14 +2,27 @@ import Foundation
 
 /// Fixed-lane scalar conversion for values interpolated by `RuneMotion`.
 ///
-/// Maximum lane count in `RuneMotion` is 5 (`Transform`); types store and unpack their lanes
-/// from `[Float]` / `MotionLanes`.
-public struct MotionLanes: Sendable, Equatable {
+/// Maximum lane count in `RuneMotion` is 16 (`maxLanes`); common UI types use 1..5 lanes
+/// stored inline with zero heap allocation.
+public struct MotionLanes: Sendable, Hashable {
+    public static let maxLanes = 16
+
     public var l0: Float
     public var l1: Float
     public var l2: Float
     public var l3: Float
     public var l4: Float
+    public var l5: Float = 0
+    public var l6: Float = 0
+    public var l7: Float = 0
+    public var l8: Float = 0
+    public var l9: Float = 0
+    public var l10: Float = 0
+    public var l11: Float = 0
+    public var l12: Float = 0
+    public var l13: Float = 0
+    public var l14: Float = 0
+    public var l15: Float = 0
 
     @inlinable
     public init(_ l0: Float = 0, _ l1: Float = 0, _ l2: Float = 0, _ l3: Float = 0, _ l4: Float = 0) {
@@ -29,6 +42,17 @@ public struct MotionLanes: Sendable, Equatable {
             case 2: return l2
             case 3: return l3
             case 4: return l4
+            case 5: return l5
+            case 6: return l6
+            case 7: return l7
+            case 8: return l8
+            case 9: return l9
+            case 10: return l10
+            case 11: return l11
+            case 12: return l12
+            case 13: return l13
+            case 14: return l14
+            case 15: return l15
             default: return 0
             }
         }
@@ -39,6 +63,17 @@ public struct MotionLanes: Sendable, Equatable {
             case 2: l2 = newValue
             case 3: l3 = newValue
             case 4: l4 = newValue
+            case 5: l5 = newValue
+            case 6: l6 = newValue
+            case 7: l7 = newValue
+            case 8: l8 = newValue
+            case 9: l9 = newValue
+            case 10: l10 = newValue
+            case 11: l11 = newValue
+            case 12: l12 = newValue
+            case 13: l13 = newValue
+            case 14: l14 = newValue
+            case 15: l15 = newValue
             default: break
             }
         }
@@ -190,6 +225,19 @@ public struct MotionRect: Animatable, Hashable {
 
     @inlinable
     public var xywh: [Float] { [left, top, max(0, right - left), max(0, bottom - top)] }
+
+    @inlinable
+    public var edges: (Float, Float, Float, Float) { (left, top, right, bottom) }
+
+    @inlinable
+    public static func fromEdges(_ left: Float, _ top: Float, _ right: Float, _ bottom: Float) -> MotionRect {
+        MotionRect(left: left, top: top, right: right, bottom: bottom)
+    }
+
+    @inlinable
+    public func translated(_ d: Vec2) -> MotionRect {
+        MotionRect(left: left + d.x, top: top + d.y, right: right + d.x, bottom: bottom + d.y)
+    }
 
     @inlinable
     public func offsetBy(_ d: Vec2) -> MotionRect {
@@ -365,8 +413,7 @@ public struct Transform2D: Animatable, Hashable {
     /// 2x3 column-major affine matrix `[a, b, c, d, tx, ty]` applying this transform about `anchor`.
     @inlinable
     public func toAffine(anchor: Vec2) -> [Float] {
-        let s = sinf(rot)
-        let c = cosf(rot)
+        let (s, c) = MotionMath.sinCos(rot)
         let a = c * sx
         let b = s * sx
         let cc = -s * sy
@@ -398,6 +445,9 @@ public struct MotionColor: Animatable, Hashable {
 
     public static let laneCount = 4
     public static let zeroValue = MotionColor(r: 0, g: 0, b: 0, a: 0)
+    public static let transparent = MotionColor(r: 0, g: 0, b: 0, a: 0)
+    public static let black = MotionColor(r: 0, g: 0, b: 0, a: 1)
+    public static let white = MotionColor(r: 1, g: 1, b: 1, a: 1)
 
     @inlinable
     public init(r: Float, g: Float, b: Float, a: Float = 1.0) {
@@ -405,6 +455,65 @@ public struct MotionColor: Animatable, Hashable {
         self.g = g
         self.b = b
         self.a = a
+    }
+
+    /// `0xRRGGBB` with alpha 1.
+    @inlinable
+    public static func hex(_ rgb: UInt32) -> MotionColor {
+        MotionColor(
+            r: Float((rgb >> 16) & 0xff) / 255.0,
+            g: Float((rgb >> 8) & 0xff) / 255.0,
+            b: Float(rgb & 0xff) / 255.0,
+            a: 1.0
+        )
+    }
+
+    @inlinable
+    public func withAlpha(_ alpha: Float) -> MotionColor {
+        MotionColor(r: r, g: g, b: b, a: alpha)
+    }
+
+    @inlinable
+    public static func srgbDecode(_ c: Float) -> Float {
+        c <= 0.040_45 ? (c / 12.92) : powf((c + 0.055) / 1.055, 2.4)
+    }
+
+    @inlinable
+    public static func srgbEncode(_ c: Float) -> Float {
+        c <= 0.003_130_8 ? (c * 12.92) : (1.055 * powf(c, 1.0 / 2.4) - 0.055)
+    }
+
+    @inlinable
+    public static func linearToOKLab(r: Float, g: Float, b: Float) -> (L: Float, a: Float, b: Float) {
+        let rr = max(0, r)
+        let gg = max(0, g)
+        let bb = max(0, b)
+        let l = 0.4122214708 * rr + 0.5363325363 * gg + 0.0514459929 * bb
+        let m = 0.2119034982 * rr + 0.6806995451 * gg + 0.1073969566 * bb
+        let s = 0.0883024619 * rr + 0.2817188376 * gg + 0.6299787005 * bb
+        let l_ = cbrtf(l)
+        let m_ = cbrtf(m)
+        let s_ = cbrtf(s)
+        return (
+            L: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            b: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+        )
+    }
+
+    @inlinable
+    public static func oklabToLinear(L: Float, a: Float, b: Float) -> (r: Float, g: Float, b: Float) {
+        let l_ = L + 0.3963377774 * a + 0.2158037573 * b
+        let m_ = L - 0.1055613458 * a - 0.0638541728 * b
+        let s_ = L - 0.0894841775 * a - 1.2914855480 * b
+        let l = l_ * l_ * l_
+        let m = m_ * m_ * m_
+        let s = s_ * s_ * s_
+        return (
+            r: +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            g: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            b: -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        )
     }
 
     @inlinable

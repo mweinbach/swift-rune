@@ -63,7 +63,7 @@ public struct CubicBezier: Sendable, Hashable, Codable {
         var t = u
         for _ in 0..<8 {
             let x = sampleCurveX(t) - u
-            if abs(x) < 1e-6 {
+            if abs(x) < 1e-7 {
                 return t
             }
             let d = sampleCurveDerivativeX(t)
@@ -107,16 +107,19 @@ public struct CubicBezier: Sendable, Hashable, Codable {
 
     /// Evaluates `dy/du` at normalized time `u in [0, 1]`.
     public func derivative(_ u: Float) -> Float {
-        let clamped = u.clamped(to: 0...1)
         if x1 == y1 && x2 == y2 { return 1 }
-        let t = solveCurveX(clamped)
+        let t: Float
+        if u <= 0 {
+            t = 0
+        } else if u >= 1 {
+            t = 1
+        } else {
+            t = solveCurveX(u)
+        }
         let dx = sampleCurveDerivativeX(t)
         let dy = sampleCurveDerivativeY(t)
-        if abs(dx) < 1e-5 {
-            let eps: Float = 1e-3
-            let u0 = max(0, clamped - eps)
-            let u1 = min(1, clamped + eps)
-            return (sample(u1) - sample(u0)) / max(1e-5, u1 - u0)
+        if abs(dx) < 1e-6 {
+            return dy == 0 ? 0 : (dy > 0 ? 1e3 : -1e3)
         }
         return dy / dx
     }

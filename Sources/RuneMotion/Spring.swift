@@ -131,17 +131,16 @@ public struct Spring: Sendable, Hashable, Codable {
         let a = x0 - target
         if abs(zeta - 1.0) < 1e-4 {
             let b = v0 + omega * a
-            let e = expf(-omega * t)
+            let e = MotionMath.exp(-omega * t)
             let lin = a + b * t
             return (target + lin * e, (b - omega * lin) * e)
         } else if zeta < 1.0 {
             let sigma = zeta * omega
             let omegaD = omega * sqrtf(max(1e-8, 1.0 - zeta * zeta))
             let b = (v0 + sigma * a) / omegaD
-            let e = expf(-sigma * t)
+            let e = MotionMath.exp(-sigma * t)
             let angle = omegaD * t
-            let cs = cosf(angle)
-            let sn = sinf(angle)
+            let (sn, cs) = MotionMath.sinCos(angle)
             let off = e * (a * cs + b * sn)
             let vel = e * ((b * omegaD - sigma * a) * cs - (a * omegaD + sigma * b) * sn)
             return (target + off, vel)
@@ -151,8 +150,8 @@ public struct Spring: Sendable, Hashable, Codable {
             let r2 = -omega * (zeta + s)
             let c1 = (v0 - r2 * a) / (r1 - r2)
             let c2 = a - c1
-            let e1 = expf(r1 * t)
-            let e2 = expf(r2 * t)
+            let e1 = MotionMath.exp(r1 * t)
+            let e2 = MotionMath.exp(r2 * t)
             return (target + c1 * e1 + c2 * e2, c1 * r1 * e1 + c2 * r2 * e2)
         }
     }
@@ -165,6 +164,7 @@ public struct Spring: Sendable, Hashable, Codable {
 
     /// Seconds until an arbitrary retarget stays within `epsilon` of `target`.
     public func settlingDuration(from x0: Float, velocity v0: Float, target: Float, epsilon: Float = 1e-3) -> Float {
+        if self == .none { return 0.0 }
         let eps = max(epsilon, 1e-6)
         guard let layer = Layer.make(
             curve: .spring(self),
@@ -217,6 +217,7 @@ public enum MotionTokens {
     /// Immediate response (press feedback, hover snaps): `0.10s`, bounce `0`.
     public static let INSTANT = Spring(duration: 0.10, bounce: 0.0)
     public static let INSTANT_EXIT = Spring(duration: 0.10, bounce: 0.0)
+    public static let INSTANT_PAIR = SpringPair(enter: INSTANT, exit: INSTANT_EXIT)
     /// Snappy UI controls (switches, checkboxes, buttons): `0.25s`, bounce `0`.
     public static let SNAP = Spring(duration: 0.25, bounce: 0.0)
     public static let SNAP_EXIT = Spring(duration: 0.20, bounce: 0.0)

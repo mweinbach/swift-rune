@@ -122,43 +122,35 @@ public struct Ops: Sendable {
         to store: inout AnimationStore,
         delay: Float,
         snapOnly: Bool,
-        at now: Double,
-        out: inout [(NodeId, PropId, UInt64)]
+        out: inout [(TrackId, UInt32)]
     ) {
         for op in ops {
-            store.ensureRaw(
-                node: op.node,
-                prop: op.prop,
-                propClass: op.propClass,
-                laneCount: op.laneCount,
-                target: op.target
+            let t = store.ensure(
+                op.node,
+                op.prop,
+                op.propClass,
+                initLanes: op.target,
+                count: op.laneCount
             )
             if snapOnly {
-                store.snapRaw(
-                    node: op.node,
-                    prop: op.prop,
-                    propClass: op.propClass,
-                    laneCount: op.laneCount,
-                    target: op.target
-                )
+                store.setRaw(t, lanes: op.target, count: op.laneCount)
             } else {
                 let k = store.nodeTimeScale(op.node)
                 let scaledDelay = k > 0 ? delay * k : delay
-                store.animateRaw(
-                    node: op.node,
-                    prop: op.prop,
-                    propClass: op.propClass,
-                    laneCount: op.laneCount,
-                    target: op.target,
+                _ = store.animateRaw(
+                    Int(t),
+                    targets: op.target,
+                    count: op.laneCount,
                     curve: op.curve,
                     blend: op.blend,
                     delay: op.delay + scaledDelay,
-                    initialVelocity: op.initialVelocity,
-                    at: now
+                    velocityRule: .inherit,
+                    token: 0,
+                    laneVelocities: op.initialVelocity
                 )
             }
-            let ep = store.epoch(op.node, op.prop) ?? 0
-            out.append((op.node, op.prop, ep))
+            let id = store.idOf(Int(t))
+            out.append((id, store.epoch(id) ?? 0))
         }
     }
 }
@@ -177,7 +169,7 @@ public struct Choreography: Sendable {
     }
 
     private var steps: [Step] = []
-    private var tracks: [(NodeId, PropId, UInt64)] = []
+    private var tracks: [(TrackId, UInt32)] = []
     private var t0: Double?
 
     public init() {}
@@ -227,7 +219,10 @@ public struct Choreography: Sendable {
 
     /// Starts every step whose cue is due or now known. Call at `now` before `store.sample(at: now)`.
     public mutating func tick(store: inout AnimationStore, at now: Double? = nil) {
-        let currentNow = now ?? store.now
+        if let n = now, n != store.now {
+            store.setTime(n)
+        }
+        let currentNow = store.now
         let origin = t0 ?? currentNow
         if t0 == nil { t0 = origin }
 
@@ -246,7 +241,7 @@ public struct Choreography: Sendable {
                 let at = max(resolvedBase + Double(cue.delay), origin + Double(cue.notBeforeTime))
                 let delay = Float(max(0.0, at - currentNow))
                 let first = tracks.count
-                steps[k].ops.apply(to: &store, delay: delay, snapOnly: false, at: currentNow, out: &tracks)
+                steps[k].ops.apply(to: &store, delay: delay, snapOnly: false, out: &tracks)
                 let count = tracks.count - first
                 steps[k].state = .running(start: currentNow + Double(delay), first: first, count: count)
                 progressed = true
@@ -290,7 +285,7 @@ public struct ChoreographyPhaseAnimator: Sendable {
     private var advanceWhen: When = .arrived
     private var repeatLoop: Bool = true
     private var holdSeconds: Float = 0
-    private var tracks: [(NodeId, PropId, UInt64)] = []
+    private var tracks: [(TrackId, UInt32)] = []
     private var next: Next = .unstarted
 
     public init() {}
@@ -323,11 +318,14 @@ public struct ChoreographyPhaseAnimator: Sendable {
 
     public mutating func tick(store: inout AnimationStore, at now: Double? = nil) {
         guard !phases.isEmpty else { return }
-        let currentNow = now ?? store.now
+        if let n = now, n != store.now {
+            store.setTime(n)
+        }
+        let currentNow = store.now
         let hold = Double(holdSeconds)
         if next == .unstarted {
             tracks.removeAll(keepingCapacity: true)
-            phases[0].apply(to: &store, delay: 0, snapOnly: true, at: currentNow, out: &tracks)
+            phases[0].apply(to: &store, delay: 0, snapOnly: true, out: &tracks)
             next = .at(currentNow)
         }
         if store.reducedMotion { return }
@@ -361,7 +359,7 @@ public struct ChoreographyPhaseAnimator: Sendable {
         }
         currentIndex = nextIndex % phases.count
         tracks.removeAll(keepingCapacity: true)
-        phases[currentIndex].apply(to: &store, delay: 0, snapOnly: false, at: currentNow, out: &tracks)
+        phases[currentIndex].apply(to: &store, delay: 0, snapOnly: false, out: &tracks)
         switch advanceWhen {
         case .arrived, .started:
             let end = arrival(store: store, tracks: tracks[...], from: currentNow) + hold
@@ -372,14 +370,14 @@ public struct ChoreographyPhaseAnimator: Sendable {
     }
 }
 
-private func allSettled(store: AnimationStore, tracks: ArraySlice<(NodeId, PropId, UInt64)>) -> Bool {
-    tracks.allSatisfy { (node, prop, epoch) in
-        store.isSettled(node, prop) || store.epoch(node, prop) != epoch
+private func allSettled(store: AnimationStore, tracks: ArraySlice<(TrackId, UInt32)>) -> Bool {
+    tracks.allSatisfy { (id, epoch) in
+        store.isSettled(id) || store.epoch(id) != epoch
     }
 }
 
-private func arrival(store: AnimationStore, tracks: ArraySlice<(NodeId, PropId, UInt64)>, from: Double) -> Double {
+private func arrival(store: AnimationStore, tracks: ArraySlice<(TrackId, UInt32)>, from: Double) -> Double {
     tracks.reduce(from) { best, item in
-        max(best, store.logicalEnd(item.0, item.1) ?? from)
+        max(best, store.logicalEnd(item.0) ?? from)
     }
 }

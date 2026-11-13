@@ -64,12 +64,16 @@ public struct Stagger: Sendable, Hashable {
     public var maxDelay: Float
     public var fromEnd: Bool
     public var from: StaggerFrom
+    public var start: Float
+    public var ease: Easing?
 
     public init(step: Float = 0.03, maxDelay: Float = 0.24, fromEnd: Bool = false) {
         self.step = max(0, step)
         self.maxDelay = max(0, maxDelay)
         self.fromEnd = fromEnd
         self.from = fromEnd ? .end : .start
+        self.start = 0.0
+        self.ease = nil
     }
 
     public init(step: Float = 0.03, maxDelay: Float = 0.24, from: StaggerFrom) {
@@ -77,11 +81,41 @@ public struct Stagger: Sendable, Hashable {
         self.maxDelay = max(0, maxDelay)
         self.fromEnd = (from == .end)
         self.from = from
+        self.start = 0.0
+        self.ease = nil
+    }
+
+    public init(gap: Float) {
+        self.step = max(0, gap)
+        self.maxDelay = 0.0
+        self.fromEnd = false
+        self.from = .start
+        self.start = 0.0
+        self.ease = nil
+    }
+
+    public func from(_ from: StaggerFrom) -> Stagger {
+        var copy = self
+        copy.from = from
+        copy.fromEnd = (from == .end)
+        return copy
+    }
+
+    public func start(_ seconds: Float) -> Stagger {
+        var copy = self
+        copy.start = seconds
+        return copy
+    }
+
+    public func ease(_ easing: Easing) -> Stagger {
+        var copy = self
+        copy.ease = easing
+        return copy
     }
 
     /// Delay in seconds for item `index` out of `count`.
     public func delay(index: Int, count: Int) -> Float {
-        guard count > 1 else { return 0 }
+        guard count > 1 else { return start }
         let i = max(0, min(index, count - 1))
         let maxDist: Float
         let dist: Float
@@ -105,10 +139,11 @@ public struct Stagger: Sendable, Hashable {
             dist = Float(abs(i - clamped))
             maxDist = Float(max(clamped, count - 1 - clamped))
         }
-        guard maxDist > 0 else { return 0 }
+        guard maxDist > 0 else { return start }
+        let shaped = ease.map { $0.sample(dist / maxDist) * maxDist } ?? dist
         let rawTotal = step * maxDist
         let effectiveStep = (maxDelay > 0 && rawTotal > maxDelay) ? (maxDelay / maxDist) : step
-        return dist * effectiveStep
+        return start + shaped * effectiveStep
     }
 }
 
@@ -144,5 +179,192 @@ public struct PhaseAnimator<Phase: Sendable & Equatable>: Sendable {
             nextAdvanceAt = now + max(1e-4, duration(cur))
             return (cur, true)
         }
+    }
+}
+
+/// One scheduled keyframe step matching upstream `rune_motion::Keyframe<T>`.
+public enum KeyframeStep<T: Animatable>: Sendable, Equatable {
+    /// Linear/eased interpolation to `value` over `duration` seconds.
+    case linear(value: T, duration: Float, easing: Easing)
+    /// Spring toward `value` for `duration` seconds, then hand exact `(x, v)` to the next step.
+    case spring(value: T, duration: Float, spring: Spring)
+    /// Catmull-Rom C¹ cubic spline through consecutive cubic steps.
+    case cubic(value: T, duration: Float)
+    /// Instant jump to `value`.
+    case move(value: T)
+
+    public var value: T {
+        switch self {
+        case .linear(let value, _, _),
+             .spring(let value, _, _),
+             .cubic(let value, _),
+             .move(let value):
+            return value
+        }
+    }
+
+    public var duration: Float {
+        switch self {
+        case .linear(_, let duration, _),
+             .spring(_, let duration, _),
+             .cubic(_, let duration):
+            return max(0, duration)
+        case .move:
+            return 0
+        }
+    }
+}
+
+/// SwiftUI `KeyframeAnimator`-style ordered keyframe sequence for one property.
+public struct Keyframes<T: Animatable>: Sendable, Equatable {
+    public private(set) var frames: [KeyframeStep<T>]
+    public private(set) var delaySeconds: Float
+    public private(set) var repeatCount: UInt32
+
+    public init() {
+        self.frames = []
+        self.delaySeconds = 0
+        self.repeatCount = 1
+    }
+
+    public func linear(_ value: T, duration: Float) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.linear(value: value, duration: duration, easing: .linear))
+        return copy
+    }
+
+    public func eased(_ value: T, duration: Float, easing: Easing) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.linear(value: value, duration: duration, easing: easing))
+        return copy
+    }
+
+    public func spring(_ value: T, _ spring: Spring) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.spring(value: value, duration: spring.duration, spring: spring))
+        return copy
+    }
+
+    public func springFor(_ value: T, duration: Float, spring: Spring) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.spring(value: value, duration: duration, spring: spring))
+        return copy
+    }
+
+    public func cubic(_ value: T, duration: Float) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.cubic(value: value, duration: duration))
+        return copy
+    }
+
+    public func moveTo(_ value: T) -> Keyframes<T> {
+        var copy = self
+        copy.frames.append(.move(value: value))
+        return copy
+    }
+
+    public func delay(_ seconds: Float) -> Keyframes<T> {
+        var copy = self
+        copy.delaySeconds = seconds
+        return copy
+    }
+
+    public func `repeat`(_ times: UInt32) -> Keyframes<T> {
+        var copy = self
+        copy.repeatCount = max(1, times)
+        return copy
+    }
+
+    /// Total duration of one pass in seconds.
+    public var duration: Float {
+        frames.reduce(0) { $0 + $1.duration }
+    }
+
+    internal var lastValue: T? { frames.last?.value }
+}
+
+extension AnimationStore {
+    /// Plays `keyframes` on a property from its current value (canceling any scheduled segments).
+    /// Under Reduce Motion, spatial tracks cut cleanly and opacity/color/presence take the short fade.
+    @discardableResult
+    public mutating func playKeyframes<T: Animatable>(
+        _ node: NodeId,
+        _ prop: Prop<T>,
+        _ kf: Keyframes<T>
+    ) -> TrackId {
+        guard let last = kf.lastValue else {
+            return trackId(node, prop) ?? {
+                preconditionFailure("empty keyframes on a new property")
+            }()
+        }
+        let first = kf.frames[0].value
+        let start = sample(node, prop) ?? first
+        let initLanes = start.toLanes()
+        let t = Int(ensure(node, prop.id, prop.propClass, initLanes: initLanes, count: T.laneCount))
+        let n = T.laneCount
+        if reducedMotion && prop.propClass.forReducedMotion(.spring(MotionTokens.SMOOTH)) != .spring(MotionTokens.SMOOTH) {
+            let targetLanes = last.toLanes()
+            _ = animateRaw(
+                t,
+                targets: targetLanes,
+                count: n,
+                curve: .spring(MotionTokens.SMOOTH),
+                blend: .auto,
+                delay: kf.delaySeconds,
+                velocityRule: .inherit,
+                token: 0,
+                laneVelocities: nil
+            )
+            return idOf(t)
+        }
+        cancelTrackPending(t)
+        var at = timeOf(t) + Double(max(0, kf.delaySeconds))
+        var prev = initLanes
+        let frames = kf.frames
+        for _ in 0..<kf.repeatCount {
+            for k in 0..<frames.count {
+                let frame = frames[k]
+                let v = frame.value.toLanes()
+                let dur = frame.duration
+                for i in 0..<n {
+                    let curve: Curve
+                    let vel: Float?
+                    switch frame {
+                    case let .linear(_, duration, easing):
+                        curve = .tween(duration: duration, easing: easing)
+                        vel = 0.0
+                    case let .spring(_, _, spring):
+                        curve = Curve.from(spring)
+                        vel = nil
+                    case .move:
+                        curve = .instant
+                        vel = nil
+                    case let .cubic(_, duration):
+                        let next: KeyframeStep<T>?
+                        if k + 1 < frames.count {
+                            next = frames[k + 1]
+                        } else if kf.repeatCount > 1 {
+                            next = frames.first
+                        } else {
+                            next = nil
+                        }
+                        let m: Float
+                        if case let .cubic(nextVal, d2)? = next {
+                            let nv = nextVal.toLanes()
+                            m = (nv[i] - prev[i]) / max(duration + d2, 1e-6)
+                        } else {
+                            m = 0.0
+                        }
+                        curve = .hermite(duration: duration, endVelocity: m)
+                        vel = nil
+                    }
+                    schedule(t, lane: i, at: at, target: v[i], curve: curve, blend: .merge, velocity: vel)
+                }
+                at += Double(dur)
+                prev = v
+            }
+        }
+        commitScheduled(t, logicalAt: at, token: 0)
+        return idOf(t)
     }
 }

@@ -128,11 +128,11 @@ public enum TraceIntent {
             return position
         case Props.OPACITY.id:
             return opacity
-        case Props.SCALE.id:
+        case Props.SCALE.id, Props.UNIFORM_SCALE.id:
             return size | transition
-        case Props.BLUR.id:
+        case Props.BLUR.id, Props.BLUR_SCALAR.id:
             return transition
-        case Props.CORNERS.id, Props.SIDES.id:
+        case Props.CORNERS.id, Props.MASK.id, Props.SIDES.id:
             return shape
         case Props.FILL.id, Props.BORDER.id, Props.TEXT_COLOR.id:
             return contents
@@ -301,7 +301,7 @@ public final class MotionTrace: @unchecked Sendable {
                 var evList: [String] = []
                 for e in events {
                     switch e {
-                    case let .settled(node, prop):
+                    case let .settled(_, node, prop):
                         evList.append(jsonEscape("settled \(node.rawValue):\(prop.rawValue)"))
                     case let .completed(token, _, _, finished):
                         evList.append(jsonEscape("completed #\(token)\(finished ? "" : " (replaced)")"))
@@ -337,7 +337,7 @@ public final class MotionTrace: @unchecked Sendable {
                 }
 
                 let r = p.rect
-                let flags = flagsByNode[p.id] ?? (p.isMoving ? TraceFlags.animated : 0)
+                let flags = flagsByNode[p.id] ?? (p.flags != 0 ? p.flags : (p.isMoving ? TraceFlags.animated : 0))
                 var s: [Float] = [
                     r.x, r.y, r.width, r.height, p.opacity, p.corners.topLeft, Float(flags),
                     .nan, 0, 0, 0

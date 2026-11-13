@@ -196,6 +196,15 @@ public struct Carry<T: Sendable>: Sendable {
         storage.append(item)
     }
 
+    public mutating func reserveCapacity(_ minimumCapacity: Int) {
+        storage.reserveCapacity(minimumCapacity)
+    }
+
+    public mutating func removeAll(keepingCapacity: Bool = true) {
+        storage.removeAll(keepingCapacity: keepingCapacity)
+        reported = 0
+    }
+
     /// What the last frame reported, and anything pushed since.
     public var items: [T] {
         storage
