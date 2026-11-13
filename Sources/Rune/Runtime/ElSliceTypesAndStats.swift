@@ -70,8 +70,22 @@ extension Runtime {
         )
     }
 
-    /// Most recent clipboard copy text requested via `Tx.copy(...)`, if non-empty (`Runtime::copy_request`).
-    public var copyRequest: String? {
-        clipboard.text.isEmpty ? nil : clipboard.text
+    /// Takes and consumes the pending clipboard copy request once (`Runtime::copy_request.take()`).
+    @discardableResult
+    public func takeCopyRequest() -> String? {
+        let out = copyRequest
+        copyRequest = nil
+        return out
+    }
+
+    internal func recordCopy(_ content: ClipboardContent, rich: RichClipboardPayload? = nil) {
+        clipboard = content
+        richClipboard = rich ?? RichClipboardPayload(content: content)
+        if boundClipboard != nil {
+            writeCopyToBoundClipboard(text: content.text, rich: rich)
+            copyRequest = nil
+        } else {
+            copyRequest = content.text
+        }
     }
 }
