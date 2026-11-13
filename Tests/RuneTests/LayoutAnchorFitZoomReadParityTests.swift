@@ -204,4 +204,42 @@ struct LayoutAnchorFitZoomReadParityTests {
             #expect(counter.views - viewsBefore == 1, "a move to \(top) re-ran the size read")
         }
     }
+
+    // MARK: - crates/rune/src/el/anchor.rs (`Anchor`, `above`, `anchored_unscaled`, `anchored_round`)
+
+    @Test("Anchor struct, El.above, anchoredUnscaled, and anchoredRound parity")
+    func anchorModifiersParity() {
+        let manual = Anchor(key: "trg", side: .top, align: .center, gap: 4, fit: false, unscaled: false, round: true)
+        let pos = anchorPosition(manual, trigger: [20.3, 100.4, 51.0, 120.4], size: (40.0, 20.0), viewport: (300.0, 200.0))
+        // center x = (20.3 + 51.0 - 40.0) * 0.5 = 15.65 -> rounded 16; top y = 100.4 - 20.0 - 4.0 = 76.4 -> rounded 76
+        #expect(pos.0 == 16.0 && pos.1 == 76.0)
+
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(300, 200), pixelScale: 1.0) { _, _ in
+            col().size(300, 200).children([
+                col().scale(2.0).size(60, 20).ml(50).mt(50).children([
+                    el().key("scaled-trg").size(40, 20),
+                ]),
+                el().key("fractional-trg").absolute(x: 20.4, y: 100.3).size(31, 20),
+                el().key("above-tip").w(40).h(18).above("fractional-trg", gutter: 6),
+                el().key("round-tip").w(40).h(18).anchored("fractional-trg", side: .bottom, align: .center, gap: 4).anchoredRound(),
+                el().key("unscaled-tip").w(50).h(20).anchored("scaled-trg", side: .bottom, align: .start, gap: 4).anchoredUnscaled(),
+            ])
+        }
+        _ = rt.frame(at: 0.0)
+        if let trg = rt.element(byKey: "fractional-trg"),
+           let above = rt.element(byKey: "above-tip"),
+           let rounded = rt.element(byKey: "round-tip") {
+            #expect(abs((above.rect[1] + above.rect[3]) - (trg.rect[1] - 6.0)) < 0.01)
+            #expect(rounded.rect[0] == rounded.rect[0].rounded() && rounded.rect[1] == rounded.rect[1].rounded())
+        } else {
+            Issue.record("missing fractional-trg / above-tip / round-tip elements")
+        }
+        if let unscaled = rt.element(byKey: "unscaled-tip") {
+            // Unscaled overlay keeps its own 50x20 size instead of inheriting the trigger's 2x scale
+            #expect(abs(unscaled.rect[2] - 50.0) < 0.01 && abs(unscaled.rect[3] - 20.0) < 0.01)
+        } else {
+            Issue.record("missing unscaled-tip element")
+        }
+    }
 }
