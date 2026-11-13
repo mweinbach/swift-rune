@@ -696,6 +696,77 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
         liveOpacity.set(visibility.opacity)
         liveFill.set(visibility.overBar ? style.thumbHoverColor : style.thumbColor)
     }
+
+    public func updateFromScrollPos(
+        _ pos: ScrollPos,
+        style: KitScrollBarStyle,
+        now: Double = ProcessInfo.processInfo.systemUptime
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        let axisOffset = style.horizontal ? pos.offset.x : pos.offset.y
+        let axisViewport = style.horizontal ? pos.viewport.x : pos.viewport.y
+        let axisMax = style.horizontal ? pos.max.x : pos.max.y
+        let metrics = ScrollAxisMetrics(
+            offset: axisOffset,
+            content: axisViewport + axisMax,
+            viewport: axisViewport
+        )
+        let scrolledChanged = abs(metrics.offset - lastMetrics.offset) > 1e-4
+        lastMetrics = metrics
+
+        let (trackLen, shows) = ScrollBarMath.trackLength(
+            for: metrics,
+            startInset: style.trackStartInset,
+            endInset: style.trackEndInset,
+            minThumb: style.minThumb
+        )
+        visibility.setShows(shows, now: now)
+        if scrolledChanged {
+            visibility.scrolled(now: now)
+        }
+        liveOpacity.set(visibility.opacity)
+
+        let effectiveLen = max(trackLen, max(0, metrics.viewport - style.trackStartInset - style.trackEndInset))
+        let (rawStart, rawLen) = ScrollBarMath.thumbAlong(
+            metrics,
+            trackLength: effectiveLen,
+            minThumb: style.minThumb,
+            devicePixels: style.devicePixels,
+            scale: style.scale
+        )
+        let (pillStart, pillLen) = style.pillExtent(start: rawStart, length: rawLen)
+        let activeW = (visibility.isWide || pressTracker.isHeld) ? style.hoverWidth : style.width
+        if style.horizontal {
+            let y0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveTrack.snap(MotionRect(
+                left: style.trackStartInset,
+                top: 0,
+                right: style.trackStartInset + effectiveLen,
+                bottom: style.resolvedStripWidth
+            ))
+            liveThumb.snap(MotionRect(
+                left: style.trackStartInset + pillStart,
+                top: y0,
+                right: style.trackStartInset + pillStart + pillLen,
+                bottom: y0 + activeW
+            ))
+        } else {
+            let x0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveTrack.snap(MotionRect(
+                left: 0,
+                top: style.trackStartInset,
+                right: style.resolvedStripWidth,
+                bottom: style.trackStartInset + effectiveLen
+            ))
+            liveThumb.snap(MotionRect(
+                left: x0,
+                top: style.trackStartInset + pillStart,
+                right: x0 + activeW,
+                bottom: style.trackStartInset + pillStart + pillLen
+            ))
+        }
+    }
 }
 
 /// Bounded kept scrollbar live-binding store (`KEPT = 256`).
@@ -895,7 +966,9 @@ extension El {
 
         return el()
             .key("\(style.key)-wrap-\(viewportKey)")
-            .child(self)
+            .child(self.chainScrollOffset { pos in
+                slot.updateFromScrollPos(pos, style: style)
+            })
             .child(track)
     }
 

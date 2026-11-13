@@ -167,6 +167,13 @@ enum TableKeyOutcome {
 }
 
 /// Persistent interaction state for `TableView` (`rune_kit::table::TableState`).
+final class TableScrollSync: @unchecked Sendable {
+    var cxScrollY: Float = 0.0
+    var pendingTarget: Bool = false
+    var viewportH: Float = 0.0
+    var rowHeight: Float = 28.0
+}
+
 public struct TableState: Sendable {
     public var key: String = "table"
     public var multi: Bool = false
@@ -183,6 +190,7 @@ public struct TableState: Sendable {
     public var viewport: Float = 0.0
     public var rowHeight: Float = 28.0
     public var trackedScrollY: Float = 0.0
+    fileprivate let scrollSync = TableScrollSync()
 
     public init(key: String = "table", multi: Bool = false) {
         self.key = key
@@ -329,14 +337,21 @@ public struct TableState: Sendable {
     }
 
     private mutating func scrollToRow(_ row: Int, tx: inout Tx) {
-        let rh = max(1.0, rowHeight)
-        let vp = viewport > 0 ? viewport : 270.0
+        let rh = rowHeight > 0 ? rowHeight : max(1.0, scrollSync.rowHeight)
+        let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 270.0)
+        if !scrollSync.pendingTarget {
+            trackedScrollY = scrollSync.cxScrollY
+        }
+        let prevY = trackedScrollY
         let rowTop = Float(row) * rh
         let rowBot = rowTop + rh
         if rowTop < trackedScrollY {
             trackedScrollY = rowTop
         } else if rowBot > trackedScrollY + vp {
             trackedScrollY = max(0.0, rowBot - vp)
+        }
+        if abs(trackedScrollY - prevY) > 1e-4 {
+            scrollSync.pendingTarget = true
         }
         tx.scrollTo("\(key)-viewport", offset: Vec2(0, trackedScrollY), animated: false)
     }
@@ -601,14 +616,21 @@ public struct TableView<State> {
             style: style
         )
 
-        let scrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-
+        let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
+        if !st.scrollSync.pendingTarget {
+            st.scrollSync.cxScrollY = cxScrollY
+        }
         let rh = max(1.0, style.rowHeight)
+        st.scrollSync.viewportH = viewportH
+        st.scrollSync.rowHeight = rh
+        let scrollY = st.scrollSync.pendingTarget ? st.trackedScrollY : cxScrollY
+
         let overscan: Float = 200.0
         let start = count > 0 ? max(0, Int(floor((scrollY - overscan) / rh))) : 0
         let end = count > 0 ? min(count, Int(ceil((scrollY + viewportH + overscan) / rh))) : 0
+        let safeStart = min(start, end)
 
-        let beforeH = Float(start) * rh
+        let beforeH = Float(safeStart) * rh
         let afterH = Float(max(0, count - end)) * rh
 
         var rowsCol: El<State> = col()
@@ -620,7 +642,7 @@ public struct TableView<State> {
             rowsCol = rowsCol.child(el().key("\(tableKey)-before").wFull().h(beforeH).shrink(0.0))
         }
 
-        for i in start..<end {
+        for i in safeStart..<end {
             let id = rowID(s, i)
             let selected = st.isSelected(id)
             var r: El<State> = row()
@@ -698,12 +720,17 @@ public struct TableView<State> {
             rowsCol = rowsCol.child(el().key("\(tableKey)-after").wFull().h(afterH).shrink(0.0))
         }
 
+        let scrollSync = st.scrollSync
         let viewport: El<State> = col()
             .key(viewportKey)
             .wFull()
             .grow(1.0)
             .minH(0.0)
             .scrollY()
+            .chainScrollOffset { pos in
+                scrollSync.cxScrollY = pos.offset.y
+                scrollSync.pendingTarget = false
+            }
             .child(rowsCol)
 
         let upd = update

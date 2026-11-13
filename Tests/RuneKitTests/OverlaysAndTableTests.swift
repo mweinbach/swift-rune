@@ -483,13 +483,9 @@ struct OverlaysAndTableTests {
         return rt
     }
 
-    @Test(
-        "Combobox opening takes focus, clears prior preedit, and reveals offscreen selection",
-        .disabled("Blocked on @el: El.onInputKey & El.revealSelected in gap/el d94ec08 (pending merge to main)")
-    )
+    @Test("Combobox opening takes focus and reveals offscreen selection")
     func comboboxOpeningTakesFocusAndRevealsOffscreenSelection() throws {
         var s = ComboApp()
-        s.other.setPreedit("pending")
         s.chosen = "item-199"
         let rt = makeComboRuntime(s, open: false)
 
@@ -504,10 +500,10 @@ struct OverlaysAndTableTests {
         rt.pointerDown(at: Vec2(cx, cy), at: 0.1)
         rt.pointerUp(at: Vec2(cx, cy), at: 0.11)
         rt.frame(at: 0.12)
+        rt.frame(at: 0.13)
 
         #expect(rt.state.combo.isOpen)
         #expect(rt.elements().first(where: \.focused)?.key == "models-search")
-        #expect(rt.state.other.preedit == nil)
 
         let last = rt.elements().first { $0.key == "models-option-item-199" }
         #expect((last?.visible[3] ?? 0) > 0)
@@ -518,9 +514,12 @@ struct OverlaysAndTableTests {
     }
 
     @Test(
-        "Combobox loops skipping disabled, virtualizes rows, and handles IME/Escape/Scrim focus",
-        .disabled("Blocked on @el: El.onInputKey & El.revealSelected in gap/el d94ec08 (pending merge to main)")
+        "Combobox opening commits and clears prior TextEdit preedit on intra-window focus transfer",
+        .disabled("Blocked on @el: Runtime intra-window focus transfer / tx.focus does not invoke finishComposition() to commit previous TextEdit preedit")
     )
+    func comboboxOpeningClearsPriorPreeditBlockedOnEl() {}
+
+    @Test("Combobox loops skipping disabled, virtualizes rows, and handles IME/Escape/Scrim focus")
     func comboboxLoopsSkipsDisabledAndReturnsFocus() throws {
         let rt = makeComboRuntime()
         let optionCount = rt.elements().filter { $0.key?.hasPrefix("models-option-") == true }.count
@@ -541,6 +540,7 @@ struct OverlaysAndTableTests {
         #expect(rt.state.combo.active == "item-2")
         send(.arrowUp)
         send(.arrowUp)
+        rt.frame(at: 0.22)
         #expect(rt.state.combo.active == "item-199")
         let last = rt.elements().first { $0.key == "models-option-item-199" }
         #expect((last?.visible[3] ?? 0) > 0)
@@ -649,16 +649,58 @@ struct OverlaysAndTableTests {
         #expect(rt.elements().first(where: { $0.focused })?.key == "composer")
     }
 
-    @Test(
-        "PopupList composer intercepts ArrowUp/ArrowDown via El.onInputKey without losing focus",
-        .disabled("Blocked on @el: El.onInputKey needed so focused textInput composer can intercept ArrowUp/ArrowDown (Runtime.swift:2996)")
-    )
-    func popupListComposerInterceptsArrowKeys() {}
+    @Test("PopupList composer intercepts ArrowUp/ArrowDown via El.onInputKey without losing focus")
+    func popupListComposerInterceptsArrowKeys() {
+        struct PState {
+            var active: Int? = 0
+            var composer = TextEdit()
+            var chosen: String? = nil
+        }
+        let k = Kit.neutral(dark: true)
+        let rt = Runtime(state: PState(), viewport: Vec2(480, 480), systemDark: true) { s, cx in
+            var layer: [El<PState>] = []
+            let input: El<PState> = Rune.textInput(key: "composer", \PState.composer)
+                .size(240, 32)
+                .onInputKey { st, ev, tx in
+                    if ev.key == .arrowDown {
+                        st.active = min(3, (st.active ?? 0) + 1)
+                        return true
+                    }
+                    if ev.key == .arrowUp {
+                        st.active = max(0, (st.active ?? 0) - 1)
+                        return true
+                    }
+                    if ev.key == .enter {
+                        st.chosen = "cmd-\(st.active ?? 0)"
+                        tx.instant()
+                        return true
+                    }
+                    return false
+                }
+            PopupList<PState>("commands", anchor: "composer")
+                .open(true)
+                .items((0..<4).map { PopupItem<PState>("cmd-\($0)", "Command \($0)") })
+                .active(s.active)
+                .build(kit: k, layer: &layer, cx: cx)
+            return RuneKit.root(col().pt(300).px(24).child(input), layer)
+        }
+        rt.frame(at: 0.0)
+        _ = rt.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.elements().first(where: \.focused)?.key == "composer")
 
-    @Test(
-        "PopupList reveals offscreen active option inside scrollable viewport",
-        .disabled("Blocked on @el: El.revealSelected / El.focusSelected in Runtime")
-    )
+        _ = rt.keyDown(KeyEvent(key: .arrowDown, mods: .none), at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.state.active == 1)
+        #expect(rt.elements().first(where: \.focused)?.key == "composer")
+
+        _ = rt.keyDown(KeyEvent(key: .enter, mods: .none), at: 0.08)
+        rt.frame(at: 0.09)
+        #expect(rt.state.chosen == "cmd-1")
+        #expect(rt.elements().first(where: \.focused)?.key == "composer")
+    }
+
+    @Test("PopupList reveals offscreen active option inside scrollable viewport")
     func popupListRevealsOffscreenActive() {
         struct PState {
             var active: Int? = 0
@@ -669,7 +711,7 @@ struct OverlaysAndTableTests {
             var layer: [El<PState>] = []
             let input: El<PState> = Rune.textInput(key: "composer", \PState.composer)
                 .size(240, 32)
-                .onKey { st, ev, _ in
+                .onInputKey { st, ev, _ in
                     if ev.key == .arrowUp { st.active = 39; return true }
                     return false
                 }
@@ -684,7 +726,9 @@ struct OverlaysAndTableTests {
         _ = rt.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.01)
         rt.frame(at: 0.02)
         _ = rt.keyDown(KeyEvent(key: .arrowUp, mods: .none), at: 0.05)
-        rt.frame(at: 0.06)
+        for i in 0..<30 {
+            rt.frame(at: 0.06 + Double(i) * (1.0 / 60.0))
+        }
         let last = rt.elements().first { $0.key == "commands-option-cmd-39" }
         #expect((last?.visible[3] ?? 0) > 0)
     }

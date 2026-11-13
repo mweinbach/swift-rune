@@ -378,17 +378,17 @@ public struct PopupList<State> {
         let scrollY = max(trackedScrollYValue, cxScrollY)
         let overscan: Float = 265.0
         let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
-        let beforeH = Float(start) * rh
         let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(viewportH, rh) + overscan) / rh)))
+        let safeStart = min(start, end)
+        let beforeH = Float(safeStart) * rh
         let afterH = Float(max(0, itemList.count - end)) * rh
 
         var rows: El<State> = col().key("\(key)-rows").wFull().shrink(0.0)
-        if beforeH > 0 {
-            rows = rows.child(el().key("\(key)-before").wFull().h(beforeH).shrink(0.0))
-        }
+        let extraActiveBefore = validActive.flatMap { $0 < safeStart ? $0 : nil }
+        let extraActiveAfter = validActive.flatMap { $0 >= end ? $0 : nil }
 
         let weakColor = k.c.textWeak.a > 0 ? k.c.textWeak : k.c.textMuted
-        for i in start..<end {
+        func makeItemRow(_ i: Int) -> El<State> {
             let option = itemList[i]
             let optID = option.id
             let isActive = validActive == i
@@ -397,6 +397,7 @@ public struct PopupList<State> {
                 .role(.option)
                 .label(option.label)
                 .itemSelected(isActive)
+                .revealSelected(isActive)
                 .positionInSet(i + 1, size: itemList.count)
                 .disabled(option.isDisabled)
                 .wFull()
@@ -442,10 +443,38 @@ public struct PopupList<State> {
                     .focusable(false)
                 }
             }
-            rows = rows.child(itemRow)
+            return itemRow
         }
 
-        if afterH > 0 {
+        if let activeIdx = extraActiveBefore {
+            let headH = Float(activeIdx) * rh
+            if headH > 0 {
+                rows = rows.child(el().key("\(key)-before-head").wFull().h(headH).shrink(0.0))
+            }
+            rows = rows.child(makeItemRow(activeIdx))
+            let midH = Float(max(0, safeStart - activeIdx - 1)) * rh
+            if midH > 0 {
+                rows = rows.child(el().key("\(key)-before-tail").wFull().h(midH).shrink(0.0))
+            }
+        } else if beforeH > 0 {
+            rows = rows.child(el().key("\(key)-before").wFull().h(beforeH).shrink(0.0))
+        }
+
+        for i in safeStart..<end {
+            rows = rows.child(makeItemRow(i))
+        }
+
+        if let activeIdx = extraActiveAfter {
+            let midH = Float(max(0, activeIdx - end)) * rh
+            if midH > 0 {
+                rows = rows.child(el().key("\(key)-after-head").wFull().h(midH).shrink(0.0))
+            }
+            rows = rows.child(makeItemRow(activeIdx))
+            let tailH = Float(max(0, itemList.count - activeIdx - 1)) * rh
+            if tailH > 0 {
+                rows = rows.child(el().key("\(key)-after-tail").wFull().h(tailH).shrink(0.0))
+            }
+        } else if afterH > 0 {
             rows = rows.child(el().key("\(key)-after").wFull().h(afterH).shrink(0.0))
         }
 

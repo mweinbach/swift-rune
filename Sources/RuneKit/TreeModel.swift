@@ -137,11 +137,19 @@ public struct TreeModel<T: Sendable>: Sendable {
     private var activeFilter: Filter?
     private var cache = CacheBox()
     private var typeAhead: TypeAhead = .idle
+    internal final class ScrollSync: @unchecked Sendable {
+        var cxScrollY: Float = 0.0
+        var pendingTarget: Bool = false
+        var viewportH: Float = 0.0
+        var rowHeight: Float = 24.0
+    }
+
     public var key: String = "tree"
     public var viewport: Float = 0.0
     public var rowHeight: Float = 24.0
     public var rtl: Bool = false
-    private var trackedScrollY: Float = 0.0
+    internal private(set) var trackedScrollY: Float = 0.0
+    internal let scrollSync = ScrollSync()
 
     public init(key: String = "tree", multiSelect: Bool = false) {
         self.key = key
@@ -477,11 +485,15 @@ public struct TreeModel<T: Sendable>: Sendable {
         expandTo(id)
         select(id)
         if let row = visibleRow(of: id) {
-            let rh = max(1.0, rowHeight)
-            let vp = viewport > 0 ? viewport : 240.0
+            let rh = max(1.0, rowHeight > 0 ? rowHeight : scrollSync.rowHeight)
+            let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 240.0)
+            let prevY = scrollSync.pendingTarget ? trackedScrollY : scrollSync.cxScrollY
             let rowTop = Float(row) * rh
             let centeredY = max(0.0, rowTop - max(0.0, vp - rh) * 0.5)
             trackedScrollY = centeredY
+            if abs(centeredY - prevY) > 1e-4 {
+                scrollSync.pendingTarget = true
+            }
             tx.scrollTo("\(key)-viewport", offset: Vec2(0, centeredY), animated: false)
         }
         return true
@@ -722,14 +734,21 @@ public struct TreeModel<T: Sendable>: Sendable {
         let vis = visibleRows()
         let i = vis.rows[row]
         moveTo(i, extend: extend)
-        let rh = max(1.0, rowHeight)
-        let vp = viewport > 0 ? viewport : 240.0
+        let rh = max(1.0, rowHeight > 0 ? rowHeight : scrollSync.rowHeight)
+        let vp = viewport > 0 ? viewport : (scrollSync.viewportH > 0 ? scrollSync.viewportH : 240.0)
+        if !scrollSync.pendingTarget {
+            trackedScrollY = scrollSync.cxScrollY
+        }
+        let prevY = trackedScrollY
         let rowTop = Float(row) * rh
         let rowBottom = rowTop + rh
         if rowTop < trackedScrollY {
             trackedScrollY = rowTop
         } else if rowBottom > trackedScrollY + vp {
             trackedScrollY = max(0.0, rowBottom - vp)
+        }
+        if abs(trackedScrollY - prevY) > 1e-4 {
+            scrollSync.pendingTarget = true
         }
         tx.scrollTo("\(key)-viewport", offset: Vec2(0, trackedScrollY), animated: false)
         return .handled

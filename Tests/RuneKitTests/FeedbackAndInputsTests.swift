@@ -772,7 +772,7 @@ struct FeedbackAndInputsTests {
 
     @Test(
         "ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)",
-        .disabled("Blocked on @el: El.onScrollOffset (live ScrollAxisMetrics from Runtime layout/wheel) and El.wrapScrollArea / clipToContent (forwarding wrapper clipFadeLinear to viewport child only)")
+        .disabled("Blocked on @el: El.wrapScrollArea / clipToContent (forwarding wrapper clipFadeLinear to viewport child only; El.onScrollOffset is now wired)")
     )
     func scrollBarFadeOverViewportDrawsWholeThumb() throws {
         let width: Float = 200
@@ -822,6 +822,46 @@ struct FeedbackAndInputsTests {
                 #expect(p.x == 255 && p.w == 255)
             }
         }
+    }
+
+    @Test("El.scrollBarStyled tracks live ScrollPos metrics and thumb rect via chainScrollOffset on wheel")
+    func scrollBarLiveScrollTrackingViaOnScrollOffset() throws {
+        var style = KitScrollBarStyle.neutral(dark: true)
+            .key("live-sb-\(UUID().uuidString)")
+            .thumbKey("live-thumb")
+        style.overlay = true
+        let viewportKey = "live-vp-\(UUID().uuidString)"
+        final class Counter: @unchecked Sendable { var count = 0 }
+        let builds = Counter()
+
+        let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            builds.count += 1
+            let rows: [El<Int>] = (0..<40).map { i in
+                el().key("live-row-\(i)").wFull().h(20.0).shrink(0.0)
+            }
+            let viewport: El<Int> = col()
+                .key(viewportKey)
+                .wFull()
+                .h(100.0)
+                .scrollY()
+                .child(col().wFull().shrink(0.0).children(rows))
+                .scrollBarStyled(style, viewportKey: viewportKey)
+            return col().size(200.0, 100.0).child(viewport)
+        }
+
+        _ = rt.frame(at: 0.0)
+        let slot = ScrollBarLiveStore.shared.slot(for: "\(style.key)::\(viewportKey)", style: style)
+        #expect(builds.count == 1)
+        #expect(abs(slot.lastMetrics.viewport - 100.0) < 0.5)
+        #expect(abs(slot.lastMetrics.content - 800.0) < 0.5)
+        #expect(abs(slot.lastMetrics.offset) < 0.5)
+        let topBefore = slot.liveThumb.get().top
+
+        rt.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(100, 50), now: 0.02)
+        _ = rt.frame(at: 0.03)
+        #expect(slot.lastMetrics.offset > 50.0)
+        #expect(slot.liveThumb.get().top > topBefore)
+        #expect(slot.liveOpacity.get() == 1.0)
     }
 
     @Test("Extra KitIcons glyphs rasterize with ink (tests/glyphs.rs)")

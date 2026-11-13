@@ -396,7 +396,7 @@ public struct Combobox<State> {
                     }
                 }
             }
-            .onKey { s, ev, tx in
+            .onInputKey { s, ev, tx in
                 var currentCombo = ComboboxState()
                 upd(&s) { currentCombo = $0 }
                 if currentCombo.search.preedit != nil {

@@ -447,7 +447,10 @@ public struct Tree<State, T: Sendable> {
         let treeKey = model.key
         let viewportKey = "\(treeKey)-viewport"
 
-        let scrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
+        let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
+        if !model.scrollSync.pendingTarget {
+            model.scrollSync.cxScrollY = cxScrollY
+        }
         let viewportH: Float = if model.viewport > 0 {
             model.viewport
         } else if let vp = cx?.viewport.y, vp > 0 {
@@ -456,11 +459,15 @@ public struct Tree<State, T: Sendable> {
             240.0
         }
         let rh = max(1.0, style.rowHeight)
+        model.scrollSync.viewportH = viewportH
+        model.scrollSync.rowHeight = rh
+        let scrollY = model.scrollSync.pendingTarget ? model.trackedScrollY : cxScrollY
         let overscan: Float = 200.0
         let start = count > 0 ? max(0, Int(floor((scrollY - overscan) / rh))) : 0
         let end = count > 0 ? min(count, Int(ceil((scrollY + viewportH + overscan) / rh))) : 0
+        let safeStart = min(start, end)
 
-        let beforeHeight = Float(start) * rh
+        let beforeHeight = Float(safeStart) * rh
         let afterHeight = Float(max(0, count - end)) * rh
 
         var rowsCol: El<State> = col()
@@ -474,7 +481,7 @@ public struct Tree<State, T: Sendable> {
             )
         }
 
-        for idx in start..<end {
+        for idx in safeStart..<end {
             guard let (data, r) = model.row(at: idx) else { continue }
             let item = rowBuilder?(data, r) ?? TreeRowItem(label(data))
             let id = r.id
@@ -511,12 +518,17 @@ public struct Tree<State, T: Sendable> {
             )
         }
 
+        let scrollSync = model.scrollSync
         let viewport = col()
             .key(viewportKey)
             .wFull()
             .grow(1.0)
             .minH(0.0)
             .scrollY()
+            .chainScrollOffset { pos in
+                scrollSync.cxScrollY = pos.offset.y
+                scrollSync.pendingTarget = false
+            }
             .child(rowsCol)
 
         let upd = update
