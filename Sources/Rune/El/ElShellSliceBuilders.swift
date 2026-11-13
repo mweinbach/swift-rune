@@ -8,7 +8,6 @@ internal struct ElStrikeSpec: Sendable, Hashable {
 }
 
 private enum ShellElExtrasKey {
-    static let inputDecorations = "inputDecorations"
     static let spanRadius = "shell.spanRadius"
     static let strikes = "shell.strikes"
     static let wrapAnywhere = "shell.wrapAnywhere"
@@ -40,16 +39,6 @@ extension El {
     }
 
     // MARK: - el/text.rs
-
-    /// Ephemeral syntax or highlight `RichSpan`s painted over static text or a `textInput` (`El::decorations`).
-    public func decorations(_ spans: [RichSpan]) -> Self {
-        if handlers.editLens != nil {
-            var copy = self
-            copy.runtimeExtras[ShellElExtrasKey.inputDecorations] = spans
-            return copy
-        }
-        return self.spans(spans)
-    }
 
     /// Corner radius in points of rounded `RichSpan` background chips (`El::span_radius`, default `4.0`).
     public func spanRadius(_ radius: Float) -> Self {

@@ -1814,7 +1814,9 @@ public struct El<State> {
         var copy = self
         copy.borderWidth = max(0, width)
         copy.borderColor = color
-        copy.runtimeExtras.removeValue(forKey: RenderExtrasKey.borderGradient)
+        if copy._cold?.data.runtimeExtras[RenderExtrasKey.borderGradient] != nil {
+            copy.runtimeExtras.removeValue(forKey: RenderExtrasKey.borderGradient)
+        }
         return copy
     }
 

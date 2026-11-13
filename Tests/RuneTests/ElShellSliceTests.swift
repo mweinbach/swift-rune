@@ -152,6 +152,42 @@ struct ElShellSliceTests {
         #expect(rfBg.contains { abs($0.radii.x - 14.0) < 0.25 })
     }
 
+    @Test("spanRings batch-applies inset border rings onto background-bearing spans")
+    func spanRingsAppliesBatchRingsToBackgroundSpans() {
+        let bgChip = Color(r: 0.2, g: 0.2, b: 0.2, a: 1)
+        let rt = Runtime(state: (), viewport: Vec2(320, 80), pixelScale: 1.0) { _, _ in
+            rich("alpha beta gamma", [
+                RichSpan(0..<5).bg(bgChip),
+                RichSpan(6..<10).bg(bgChip),
+            ])
+            .spanRings([
+                (0..<5, cGreen, 2.0),
+                (6..<10, cRed, 1.5),
+                (11..<16, cBlue, 2.0), // ignored: no bg on 11..<16
+            ])
+        }
+        let scene = rt.frame(at: 0.0)
+        let rectKind = Float(PrimitiveKind.roundedRect.rawValue)
+        let ringPrims = scene.primitives.filter { prim in
+            prim.params.y == rectKind && prim.params.x > 0 && prim.border.w > 0.5
+        }
+        #expect(ringPrims.count == 2)
+        let hasGreenRing = ringPrims.contains { prim in
+            prim.border.y > 0.8 && prim.border.x < 0.1 && abs(prim.params.x - 2.0) < 0.05
+        }
+        let hasRedRing = ringPrims.contains { prim in
+            prim.border.x > 0.8 && prim.border.y < 0.1 && abs(prim.params.x - 1.5) < 0.05
+        }
+        #expect(hasGreenRing)
+        #expect(hasRedRing)
+
+        let rf = rt.renderFrame(at: 0.0)
+        let rfRings = rf.instances.filter { inst in
+            inst.params.y == KIND_RECT && inst.params.x > 0 && inst.border.w > 0.5
+        }
+        #expect(rfRings.count == 2)
+    }
+
     @Test("strike and strikes emit strikethrough quads with explicit, inherited span, or text colors")
     func strikeAndStrikesEmitCorrectQuads() {
         let rt = Runtime(state: (), viewport: Vec2(320, 80), pixelScale: 1.0) { _, _ in
@@ -431,10 +467,27 @@ struct ElShellSliceTests {
         }
         #expect(rfOutline != nil)
 
+        let boxPrim = scene.primitives.first {
+            $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && abs($0.rect.z - 120) < 0.5 && abs($0.rect.w - 80) < 0.5 && $0.fill.x > 0.8
+        }
+        #expect(boxPrim?.radii == SIMD4<Float>(4, 8, 12, 16))
+        #expect((boxPrim?.border.x ?? 0) > 0.99 && (boxPrim?.border.w ?? 0) > 0.99)
+        #expect(boxPrim?.params.x == -1.0)
+        #expect(boxPrim?.uv == SIMD4<Float>(2, 4, 6, 8))
+
         let clipNode = try #require(rt.renderNode(forKey: "softClip"))
         #expect(clipNode.hoverWithinCurves() != nil)
+        #expect(clipNode.clipFade == SIMD4<Float>(4, 4, 4, 4))
+        #expect(clipNode.clipCorners == Corners(2, 4, 6, 8))
         let outlinedNode = try #require(rt.renderNode(forKey: "outlined"))
         #expect(outlinedNode.elOutline == Outline(width: 2, offset: 3, color: outlineColor))
+        #expect(outlinedNode.corners == Corners(2, 4, 6, 8))
+        #expect(outlinedNode.borderSides == Sides(top: 1, right: 2, bottom: 3, left: 4))
+        #expect(outlinedNode.pressScaleFactor == 0.95)
+        #expect(outlinedNode.hoverMotionSpec != nil)
+        let blurNoneNode: El<Void> = col().blurMotion(.none)
+        #expect(blurNoneNode.runtimeExtras.values.contains { ($0 as? Bool) == true })
+        #expect(outlinedNode.runtimeExtras.values.contains { ($0 as? Bool) == false })
     }
 
     @Test("dim multiplies own/child paint alphas without opening an offscreen layer; layerOpacity opens one layer for subtrees")

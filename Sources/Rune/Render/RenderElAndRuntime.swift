@@ -1938,6 +1938,60 @@ extension Runtime {
                     ))
                     marks.append(0)
                 }
+                var combinedHighlights = el.textHighlights ?? []
+                let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
+                if !ringHls.isEmpty {
+                    combinedHighlights.append(contentsOf: ringHls)
+                }
+                if !combinedHighlights.isEmpty && !resolvedText.displayedText.isEmpty {
+                    let quads = TextHighlightPainter.quads(
+                        highlights: combinedHighlights,
+                        in: resolvedText.displayedText,
+                        shaped: shaped,
+                        textSystem: textSystem,
+                        pixelScale: scale,
+                        origin: .zero
+                    )
+                    for q in quads {
+                        let hlRect = SIMD4<Float>(
+                            textLeft * scale + q.rect.x,
+                            textTop * scale + q.rect.y,
+                            q.rect.z,
+                            q.rect.w
+                        )
+                        let hlRadii = SIMD4<Float>(repeating: q.cornerRadius)
+                        let bgColor = premulSIMD4(q.bg, opacity: localOpacity, srgb: srgbBlend)
+                        if bgColor.w > 0.0005 {
+                            instances.append(RenderInstance(
+                                rect: hlRect,
+                                radii: hlRadii,
+                                fill: bgColor,
+                                border: .zero,
+                                params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+                                uv: .zero,
+                                clip: activeClip,
+                                fade: activeFade
+                            ))
+                            marks.append(0)
+                        }
+                        if let ring = q.ring, ring.width > 0 {
+                            let ringColor = premulSIMD4(ring.color, opacity: localOpacity, srgb: srgbBlend)
+                            if ringColor.w > 0.0005 {
+                                instances.append(RenderInstance(
+                                    rect: hlRect,
+                                    radii: hlRadii,
+                                    fill: .zero,
+                                    border: ringColor,
+                                    params: SIMD4<Float>(ring.width * scale, KIND_RECT, 0, 1.0),
+                                    uv: .zero,
+                                    clip: activeClip,
+                                    fade: activeFade
+                                ))
+                                marks.append(0)
+                            }
+                        }
+                    }
+                }
                 if !el.elStrikes.isEmpty {
                     let strikeQuads = ShellSliceRenderHelpers.strikeQuads(
                         strikes: el.elStrikes,
