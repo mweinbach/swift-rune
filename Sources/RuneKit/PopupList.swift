@@ -375,24 +375,10 @@ public struct PopupList<State> {
         let viewportKey = "\(key)-viewport"
         let viewportH = min(Float(itemList.count) * rh, maxHeightValue)
         let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-        var scrollY = max(trackedScrollYValue, cxScrollY)
-        if let act = validActive, cxScrollY == 0.0, trackedScrollYValue == 0.0 {
-            let activeBot = Float(act + 1) * rh
-            if activeBot > viewportH {
-                scrollY = max(0.0, activeBot - viewportH)
-            }
-        }
+        let scrollY = max(trackedScrollYValue, cxScrollY)
         let overscan: Float = 160.0
-        let start: Int
-        let beforeH: Float
-        if let act = validActive, cxScrollY == 0.0, trackedScrollYValue == 0.0, scrollY > 0.0 {
-            let rowsPerPage = max(1, Int(floor(viewportH / rh)))
-            start = itemList.isEmpty ? 0 : max(0, act - rowsPerPage + 1)
-            beforeH = 0.0
-        } else {
-            start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
-            beforeH = Float(start) * rh
-        }
+        let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
+        let beforeH = Float(start) * rh
         let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(viewportH, rh) + overscan) / rh)))
         let afterH = Float(max(0, itemList.count - end)) * rh
 

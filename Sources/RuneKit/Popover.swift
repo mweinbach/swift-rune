@@ -199,9 +199,9 @@ public enum PopoverAnchor {
             .z(z)
             .modal(true)
         if let scrim {
-            wrapper = wrapper.child(scrim.z(0))
+            wrapper = wrapper.child(scrim.z(z))
         }
-        wrapper = wrapper.child(content.z(1))
+        wrapper = wrapper.child(content.z(z + 1))
         return wrapper
     }
 
@@ -240,7 +240,13 @@ public enum PopoverAnchor {
 /// Mounts the primary body and any floating overlay `layer` items at the root (`rune_kit::root`).
 public func root<State>(_ body: El<State>, _ layer: [El<State>]) -> El<State> {
     var container: El<State> = col().wFull().hFull().child(body)
-    for item in layer {
+    let ordered = layer.enumerated().sorted { a, b in
+        if a.element.zIndex != b.element.zIndex {
+            return a.element.zIndex < b.element.zIndex
+        }
+        return a.offset < b.offset
+    }.map(\.element)
+    for item in ordered {
         container = container.child(item)
     }
     return container

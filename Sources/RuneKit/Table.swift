@@ -183,7 +183,6 @@ public struct TableState: Sendable {
     public var viewport: Float = 0.0
     public var rowHeight: Float = 28.0
     public var trackedScrollY: Float = 0.0
-    public var pendingRevealId: String?
 
     public init(key: String = "table", multi: Bool = false) {
         self.key = key
@@ -251,19 +250,22 @@ public struct TableState: Sendable {
         selected.removeAll()
     }
 
-    public mutating func reveal(_ id: String, tx: inout Tx) {
-        select(id)
-        pendingRevealId = id
-        let _ = tx
-    }
-
-    public mutating func reveal(_ id: String, rowIndex: Int?, tx: inout Tx) {
+    /// Selects `id` and scrolls `rowIndex` (when known) into view in the table viewport.
+    /// Full id-only `tx.scrollIntoViewIn(key, id)` awaits `@el` core runtime support.
+    public mutating func reveal(_ id: String, rowIndex: Int? = nil, tx: inout Tx) {
         select(id)
         if let rowIndex {
             scrollToRow(rowIndex, tx: &tx)
-            pendingRevealId = nil
-        } else {
-            pendingRevealId = id
+        }
+    }
+
+    /// Selects `id` and resolves its row index via `idAt` to scroll the viewport via `tx`.
+    public mutating func reveal(_ id: String, len: Int, idAt: (Int) -> String, tx: inout Tx) {
+        select(id)
+        if let idx = (0..<len).first(where: { idAt($0) == id }) {
+            cursorHint = idx
+            anchorHint = idx
+            scrollToRow(idx, tx: &tx)
         }
     }
 
@@ -599,15 +601,7 @@ public struct TableView<State> {
             style: style
         )
 
-        var scrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-        if let pending = st.pendingRevealId,
-           let targetIdx = (0..<count).first(where: { rowID(s, $0) == pending }) {
-            let rh = max(1.0, style.rowHeight)
-            let rowTop = Float(targetIdx) * rh
-            if rowTop < scrollY || rowTop + rh > scrollY + viewportH {
-                scrollY = max(0.0, rowTop - max(0.0, viewportH - rh) * 0.5)
-            }
-        }
+        let scrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
 
         let rh = max(1.0, style.rowHeight)
         let overscan: Float = 200.0

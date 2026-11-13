@@ -256,16 +256,9 @@ public struct Combobox<State> {
         return copy
     }
 
-    public func build(kit k: Kit, layer: inout [El<State>], cx: Cx<State>? = nil) -> El<State> {
-        let state = get(cx_placeholder: nil)
-        return buildInternal(stateValue: state, kit: k, layer: &layer, cx: cx)
-    }
-
     public func build(_ s: State, kit k: Kit, layer: inout [El<State>], cx: Cx<State>? = nil) -> El<State> {
         buildInternal(stateValue: get(s), kit: k, layer: &layer, cx: cx)
     }
-
-    private func get(cx_placeholder _: Void?) -> ComboboxState { ComboboxState() }
 
     private func buildInternal(
         stateValue comboState: ComboboxState,

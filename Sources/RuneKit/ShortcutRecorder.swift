@@ -12,11 +12,22 @@ public struct ShortcutModifiers: OptionSet, Sendable, Hashable {
     public static let shift   = ShortcutModifiers(rawValue: 1 << 3)
 
     public var keycaps: [String] {
+        keycaps(macOS: true)
+    }
+
+    public func keycaps(macOS: Bool) -> [String] {
         var caps: [String] = []
-        if contains(.control) { caps.append("⌃") }
-        if contains(.option)  { caps.append("⌥") }
-        if contains(.shift)   { caps.append("⇧") }
-        if contains(.command) { caps.append("⌘") }
+        if macOS {
+            if contains(.control) { caps.append("⌃") }
+            if contains(.option)  { caps.append("⌥") }
+            if contains(.shift)   { caps.append("⇧") }
+            if contains(.command) { caps.append("⌘") }
+        } else {
+            if contains(.control) { caps.append("Ctrl") }
+            if contains(.option)  { caps.append("Alt") }
+            if contains(.shift)   { caps.append("Shift") }
+            if contains(.command) { caps.append("Super") }
+        }
         return caps
     }
 }
@@ -32,11 +43,20 @@ public struct ShortcutChord: Sendable, Equatable, Hashable {
     }
 
     public var keycaps: [String] {
-        modifiers.keycaps + [key.uppercased()]
+        keycaps(macOS: true)
+    }
+
+    public func keycaps(macOS: Bool) -> [String] {
+        modifiers.keycaps(macOS: macOS) + [key.uppercased()]
     }
 
     public var displayString: String {
-        keycaps.joined()
+        displayString(macOS: true)
+    }
+
+    public func displayString(macOS: Bool) -> String {
+        let caps = keycaps(macOS: macOS)
+        return macOS ? caps.joined() : caps.joined(separator: "+")
     }
 
     public var hasPrimaryModifier: Bool {
@@ -63,12 +83,17 @@ public enum ShortcutValidationError: Error, Sendable, Equatable {
     case custom(String)
 
     public func defaultMessage(for chord: ShortcutChord?) -> String {
+        defaultMessage(for: chord, macOS: true)
+    }
+
+    public func defaultMessage(for chord: ShortcutChord?, macOS: Bool) -> String {
         guard let chord else {
             return self == .invalidKey ? "That key can't be part of a shortcut." : "The shortcut couldn't be cleared."
         }
-        let label = chord.displayString
+        let label = chord.displayString(macOS: macOS)
         switch self {
-        case .missingModifier: return "Add ⌘, ⌃ or ⌥."
+        case .missingModifier:
+            return macOS ? "Add ⌘, ⌃ or ⌥." : "Add Ctrl, Alt or Super."
         case .invalidKey: return "That key can't be part of a shortcut."
         case .conflict: return "\(label) is already in use."
         case .unsupported: return "This desktop doesn't support global shortcuts."
@@ -83,7 +108,7 @@ public enum ShortcutInputEvent: Sendable, Equatable {
     case focusLost
     case modifiersChanged(ShortcutModifiers)
     case keyDown(key: String, modifiers: ShortcutModifiers, isRepeat: Bool)
-    case keyUp(key: String)
+    case keyUp(String)
 }
 
 /// State machine for `ShortcutRecorder` (`rune_kit::shortcut_recorder::ShortcutRecorderState`).
@@ -91,6 +116,7 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     public enum Phase: Sendable, Equatable {
         case idle
         case capturing(error: ShortcutValidationError?, refused: ShortcutChord?)
+        case swallowing(key: String)
     }
 
     public var shortcut: ShortcutChord?
@@ -110,6 +136,11 @@ public struct ShortcutRecorderState: Sendable, Equatable {
         return false
     }
 
+    public var isSwallowing: Bool {
+        if case .swallowing = phase { return true }
+        return false
+    }
+
     public var error: ShortcutValidationError? {
         if case .capturing(let err, _) = phase { return err }
         return nil
@@ -121,13 +152,17 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     }
 
     public var keycaps: [String] {
+        keycaps(macOS: true)
+    }
+
+    public func keycaps(macOS: Bool) -> [String] {
         if let refused = refusedChord {
-            return refused.keycaps
+            return refused.keycaps(macOS: macOS)
         }
         if isRecording {
-            return heldModifiers.keycaps
+            return heldModifiers.keycaps(macOS: macOS)
         }
-        return shortcut?.keycaps ?? []
+        return shortcut?.keycaps(macOS: macOS) ?? []
     }
 
     public mutating func markUnregistered() {
@@ -143,6 +178,25 @@ public struct ShortcutRecorderState: Sendable, Equatable {
         heldModifiers = []
     }
 
+    /// Clears the stored shortcut directly when triggered via reset/clear button.
+    @discardableResult
+    public mutating func clear(onChange: ((ShortcutChord?) -> ShortcutValidationError?)? = nil) -> Bool {
+        clearWithValidator { chord in onChange?(chord) }
+    }
+
+    /// Non-escaping validator variant for synchronous `inout State` closures.
+    @discardableResult
+    public mutating func clearWithValidator(_ validate: (ShortcutChord?) -> ShortcutValidationError?) -> Bool {
+        if let err = validate(nil) {
+            refuse(err, chord: nil)
+            return false
+        }
+        shortcut = nil
+        unregistered = false
+        cancel()
+        return true
+    }
+
     public mutating func refuse(_ error: ShortcutValidationError, chord: ShortcutChord? = nil) {
         phase = .capturing(error: error, refused: chord)
     }
@@ -155,9 +209,21 @@ public struct ShortcutRecorderState: Sendable, Equatable {
         allowUnmodified: Bool = false,
         onChange: ((ShortcutChord?) -> ShortcutValidationError?)? = nil
     ) -> Bool {
+        handleWithValidator(event, allowUnmodified: allowUnmodified) { chord in
+            onChange?(chord)
+        }
+    }
+
+    /// Non-escaping validator variant of `handle(_:...)` so callers can pass `inout State` closures safely.
+    @discardableResult
+    public mutating func handleWithValidator(
+        _ event: ShortcutInputEvent,
+        allowUnmodified: Bool = false,
+        validate: (ShortcutChord?) -> ShortcutValidationError?
+    ) -> Bool {
         switch event {
         case .focusLost:
-            let wasActive = isRecording
+            let wasActive = isRecording || isSwallowing
             cancel()
             return wasActive
 
@@ -170,22 +236,32 @@ public struct ShortcutRecorderState: Sendable, Equatable {
             return isRecording
 
         case let .keyDown(key, mods, isRepeat):
+            let lower = key.lowercased()
+            if case .swallowing(let expected) = phase {
+                if isRepeat && lower == expected {
+                    return true
+                }
+                phase = .idle
+                return false
+            }
+
             heldModifiers = mods
             guard isRecording else { return false }
             if isRepeat { return true }
 
-            let lower = key.lowercased()
             if lower == "escape" || lower == "esc" {
-                cancel()
+                phase = .swallowing(key: lower)
+                heldModifiers = []
                 return true
             }
             if lower == "backspace" || lower == "delete" {
-                if let err = onChange?(nil) {
+                if let err = validate(nil) {
                     refuse(err, chord: nil)
                 } else {
                     shortcut = nil
                     unregistered = false
-                    cancel()
+                    phase = .swallowing(key: lower)
+                    heldModifiers = []
                 }
                 return true
             }
@@ -196,25 +272,186 @@ public struct ShortcutRecorderState: Sendable, Equatable {
                 return true
             }
             if shortcut == chord && !unregistered {
-                cancel()
+                phase = .swallowing(key: lower)
+                heldModifiers = []
                 return true
             }
-            if let err = onChange?(chord) {
+            if let err = validate(chord) {
                 refuse(err, chord: chord)
             } else {
                 shortcut = chord
                 unregistered = false
-                cancel()
+                phase = .swallowing(key: lower)
+                heldModifiers = []
             }
             return true
 
-        case .keyUp:
+        case .keyUp(let key):
+            if case .swallowing(let expected) = phase {
+                if key.lowercased() == expected {
+                    phase = .idle
+                    return true
+                }
+                return false
+            }
             return isRecording
         }
     }
 }
 
+/// Fluent builder for an interactive shortcut recorder (`rune_kit::shortcut_recorder::ShortcutRecorder`).
+public struct ShortcutRecorder<State> {
+    public var key: String
+    public var stateKeyPath: WritableKeyPath<State, ShortcutRecorderState>
+    public var label: String?
+    public var width: Float
+    public var disabled: Bool
+    public var allowUnmodified: Bool
+    public var errorFormatter: ((ShortcutValidationError, ShortcutChord?) -> String)?
+    public var onChange: ((inout State, ShortcutChord?) -> ShortcutValidationError?)?
+
+    public init(
+        key: String = "shortcut-recorder",
+        _ stateKeyPath: WritableKeyPath<State, ShortcutRecorderState>,
+        label: String? = nil,
+        width: Float = 240
+    ) {
+        self.key = key
+        self.stateKeyPath = stateKeyPath
+        self.label = label
+        self.width = width
+        self.disabled = false
+        self.allowUnmodified = false
+    }
+
+    public func label(_ value: String?) -> Self {
+        var copy = self; copy.label = value; return copy
+    }
+
+    public func width(_ value: Float) -> Self {
+        var copy = self; copy.width = value; return copy
+    }
+
+    public func disabled(_ value: Bool = true) -> Self {
+        var copy = self; copy.disabled = value; return copy
+    }
+
+    public func allowUnmodified(_ value: Bool = true) -> Self {
+        var copy = self; copy.allowUnmodified = value; return copy
+    }
+
+    public func errorMessage(_ formatter: @escaping (ShortcutValidationError, ShortcutChord?) -> String) -> Self {
+        var copy = self; copy.errorFormatter = formatter; return copy
+    }
+
+    public func onChange(_ handler: @escaping (inout State, ShortcutChord?) -> ShortcutValidationError?) -> Self {
+        var copy = self; copy.onChange = handler; return copy
+    }
+
+    public func build(using kit: Kit, in state: State) -> El<State> {
+        let rec = state[keyPath: stateKeyPath]
+        let errorText: String? = rec.error.map { err in
+            errorFormatter?(err, rec.refusedChord) ?? err.defaultMessage(for: rec.refusedChord)
+        }
+        var elTree: El<State> = kit.shortcutRecorder(
+            key: key,
+            state: rec,
+            label: label,
+            width: width,
+            disabled: disabled,
+            errorText: errorText,
+            onBegin: { (s: inout State) in
+                s[keyPath: stateKeyPath].begin()
+            },
+            onClear: { (s: inout State) in
+                var recCopy = s[keyPath: stateKeyPath]
+                _ = recCopy.clearWithValidator { chord in
+                    onChange?(&s, chord)
+                }
+                s[keyPath: stateKeyPath] = recCopy
+            }
+        )
+        if !disabled {
+            elTree = elTree
+                .focusable(true)
+                .onKey { s, ev, tx in
+                    guard let event = Self.mapKeyEvent(ev) else { return false }
+                    var recCopy = s[keyPath: stateKeyPath]
+                    let handled = recCopy.handleWithValidator(
+                        event,
+                        allowUnmodified: allowUnmodified
+                    ) { chord in
+                        onChange?(&s, chord)
+                    }
+                    s[keyPath: stateKeyPath] = recCopy
+                    if handled && !recCopy.isRecording && !recCopy.isSwallowing {
+                        tx.blur()
+                    }
+                    return handled
+                }
+        }
+        return elTree
+    }
+
+    static func mapKeyEvent(_ ev: KeyEvent) -> ShortcutInputEvent? {
+        var mods: ShortcutModifiers = []
+        if ev.mods.cmd { mods.insert(.command) }
+        if ev.mods.ctrl { mods.insert(.control) }
+        if ev.mods.alt { mods.insert(.option) }
+        if ev.mods.shift { mods.insert(.shift) }
+
+        let keyName: String
+        switch ev.key {
+        case .escape: keyName = "escape"
+        case .backspace: keyName = "backspace"
+        case .delete: keyName = "delete"
+        case .enter: keyName = "return"
+        case .tab: keyName = "tab"
+        case .space: keyName = "space"
+        case .arrowLeft: keyName = "left"
+        case .arrowRight: keyName = "right"
+        case .arrowUp: keyName = "up"
+        case .arrowDown: keyName = "down"
+        case .home: keyName = "home"
+        case .end: keyName = "end"
+        case .pageUp: keyName = "pageUp"
+        case .pageDown: keyName = "pageDown"
+        case .f(let n): keyName = "F\(n)"
+        case .text(let s):
+            if s.isEmpty { return nil }
+            keyName = s
+        case .command(let ch):
+            keyName = String(ch)
+        }
+        return .keyDown(key: keyName, modifiers: mods, isRepeat: false)
+    }
+}
+
 extension Kit {
+    /// Interactive shortcut recorder using a `ShortcutRecorder<State>` binding builder.
+    public func shortcutRecorder<State>(
+        key: String = "shortcut-recorder",
+        _ stateKeyPath: WritableKeyPath<State, ShortcutRecorderState>,
+        in state: State,
+        label: String? = nil,
+        width: Float = 240,
+        disabled: Bool = false,
+        allowUnmodified: Bool = false,
+        errorMessage: ((ShortcutValidationError, ShortcutChord?) -> String)? = nil,
+        onChange: ((inout State, ShortcutChord?) -> ShortcutValidationError?)? = nil
+    ) -> El<State> {
+        var builder = ShortcutRecorder<State>(key: key, stateKeyPath, label: label, width: width)
+            .disabled(disabled)
+            .allowUnmodified(allowUnmodified)
+        if let errorMessage {
+            builder = builder.errorMessage(errorMessage)
+        }
+        if let onChange {
+            builder = builder.onChange(onChange)
+        }
+        return builder.build(using: self, in: state)
+    }
+
     /// Interactive shortcut recorder capturing key chords with conflict/error badge and clear/escape handling.
     public func shortcutRecorder<State>(
         key: String = "shortcut-recorder",
@@ -222,6 +459,7 @@ extension Kit {
         label: String? = nil,
         width: Float = 240,
         disabled: Bool = false,
+        errorText: String? = nil,
         onBegin: @escaping (inout State) -> Void,
         onClear: ((inout State) -> Void)? = nil
     ) -> El<State> {
@@ -274,8 +512,9 @@ extension Kit {
 
         var root: El<State> = col().key("\(key)-field").gap(4).child(control)
         if let err = state.error {
+            let resolvedMessage = errorText ?? err.defaultMessage(for: state.refusedChord)
             root = root.child(
-                text(err.defaultMessage(for: state.refusedChord))
+                text(resolvedMessage)
                     .key("\(key)-error")
                     .font(ty.smallMedium)
                     .color(c.danger.fg)

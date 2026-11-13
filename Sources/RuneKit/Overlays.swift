@@ -37,23 +37,7 @@ public struct ComboboxOption<ID: Hashable & Sendable & CustomStringConvertible>:
     }
 }
 
-public struct ToastEntry: Sendable, Equatable {
-    public var id: String
-    public var message: String
-    public var tone: BadgeTone
-
-    public init(id: String, message: String, tone: BadgeTone = .neutral) {
-        self.id = id
-        self.message = message
-        self.tone = tone
-    }
-}
-
-public enum ToastPlacement: Sendable, Hashable {
-    case topTrailing
-    case bottomTrailing
-    case bottomCenter
-}
+// `ToastEntry`, `ToastPlacement`, and `Kit.toastStack` live in `ToastStack.swift`.
 
 extension Kit {
     // MARK: - Scrim (`rune_kit::overlay::scrim`)
@@ -293,35 +277,6 @@ extension Kit {
             root = root.child(popup)
         }
         return root
-    }
-
-    // MARK: - ToastStack (`rune_kit::toast_stack`)
-
-    /// Positioned stack of active toast notifications (`Kit::toast_stack`).
-    public func toastStack<State>(
-        key: String = "toast-stack",
-        toasts: [ToastEntry],
-        placement: ToastPlacement = .bottomTrailing,
-        onDismiss: @escaping (inout State, String) -> Void
-    ) -> El<State> {
-        var stack: El<State> = col().key(key).gap(8).z(95)
-        switch placement {
-        case .topTrailing:
-            stack = stack.pin(top: 16, right: 16)
-        case .bottomTrailing:
-            stack = stack.pin(right: 16, bottom: 16)
-        case .bottomCenter:
-            stack = stack.pin(right: 16, bottom: 16, left: 16).itemsCenter()
-        }
-        for entry in toasts {
-            let entryId = entry.id
-            stack = stack.child(
-                toast(key: "\(key)-\(entryId)", message: entry.message, tone: entry.tone) { s in
-                    onDismiss(&s, entryId)
-                }
-            )
-        }
-        return stack
     }
 
     // MARK: - Shell: WindowTitlebar & Sidebar (`rune_kit::shell`)

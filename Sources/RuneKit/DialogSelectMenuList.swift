@@ -287,7 +287,11 @@ public struct Select<State> {
                     }
                     return false
                 }
-            let surface = PopoverAnchor.raised(k, content, radius: 6.0)
+            let surface: El<State> = content
+                .rounded(6.0)
+                .bg(k.c.layer01)
+                .shadows(k.shadowLayers(k.elevation.floating))
+                .onPointerDown { _, _, _ in }
             let anchoredSurface = PopoverAnchor.anchored(
                 k,
                 surface,
@@ -308,7 +312,11 @@ public struct Select<State> {
                 .focusable(false)
             layer.append(PopoverAnchor.modalOverlay(key: key, z: 60, scrim: scrimEl, content: anchoredSurface))
         } else {
-            let surface = PopoverAnchor.raised(k, content, radius: 6.0)
+            let surface: El<State> = content
+                .rounded(6.0)
+                .bg(k.c.layer01)
+                .shadows(k.shadowLayers(k.elevation.floating))
+                .onPointerDown { _, _, _ in }
             layer.append(
                 PopoverAnchor.anchored(k, surface, anchor: anchorKey, placement: placementValue, gap: 2.0, window: cx?.viewport)
             )
@@ -548,7 +556,7 @@ public struct Dialog<State> {
             .wFull()
             .maxW(widthValue)
             .rounded(6.0)
-            .bg(k.c.surfaceRaised)
+            .bg(k.c.layer01)
             .shadows(k.shadowLayers(k.elevation.overlay))
             .animate(k.motion.overlay)
             .child(
@@ -812,7 +820,7 @@ public struct MenuItem<State> {
                     .px(4.0)
                     .center()
                     .rounded(2.0)
-                    .bg(c.surfaceWeak)
+                    .bg(c.layer02)
                     .border(0.5, c.borderBase)
                     .child(text(b).font(k.ty.smallMedium.lh(11.0)).color(c.textMuted))
             )
@@ -982,7 +990,7 @@ public struct Menu<State> {
         } else {
             frame = frame
                 .rounded(6.0)
-                .bg(c.surfaceRaised)
+                .bg(c.layer01)
                 .shadows(k.shadowLayers(k.elevation.floating))
         }
 

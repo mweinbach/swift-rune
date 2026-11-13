@@ -1823,43 +1823,30 @@ extension Kit {
         tone: BadgeTone = .neutral,
         onDismiss: ((inout State) -> Void)? = nil
     ) -> El<State> {
-        let (bgCol, fgCol, borderCol, leadingSvg): (Color, Color, Color, SVGIcon?) = {
-            switch tone {
-            case .neutral: return (c.surfaceRaised, c.textBase, c.borderBase, nil)
-            case .accent: return (c.surfaceRaised, c.textBase, c.bgAccent.alpha(0.45), KitIcons.info)
-            case .success: return (c.success.bg, c.success.fg, c.success.border, KitIcons.check)
-            case .warning: return (c.warning.bg, c.warning.fg, c.warning.border, KitIcons.info)
-            case .danger: return (c.danger.bg, c.danger.fg, c.danger.border, KitIcons.circleX)
-            case .info: return (c.info.bg, c.info.fg, c.info.border, KitIcons.info)
-            }
-        }()
+        Toast<State>(
+            key: key,
+            message: message,
+            variant: tone,
+            onDismiss: onDismiss.map { handler in { s, _ in handler(&s) } }
+        ).build(using: self)
+    }
 
-        var bar: El<State> = row()
-            .key(key)
-            .px(14)
-            .py(10)
-            .gap(10)
-            .itemsCenter()
-            .rounded(radius.lg)
-            .bg(bgCol)
-            .border(1.0, borderCol)
-            .shadows(shadowLayers(elevation.floating))
-            .transition(Transition.push(from: .bottom).spring(motion.overlay))
-
-        if let leadingSvg {
-            let iconColor = (tone == .accent) ? c.textAccent : fgCol
-            bar = bar.child(icon(leadingSvg, size: 15).color(iconColor))
-        }
-        bar = bar.child(text(message).font(ty.uiMedium).color(fgCol))
-
-        if let onDismiss {
-            bar = bar.child(
-                iconButton(key: "\(key)-dismiss", svg: KitIcons.close, label: "Dismiss", size: .sm) { s, _ in
-                    onDismiss(&s)
-                }
-            )
-        }
-        return bar
+    public func toast<State>(
+        key: String,
+        message: String,
+        tone: BadgeTone = .neutral,
+        actionLabel: String,
+        onAction: @escaping (inout State, inout Tx) -> Void,
+        onDismiss: ((inout State) -> Void)? = nil
+    ) -> El<State> {
+        Toast<State>(
+            key: key,
+            message: message,
+            variant: tone,
+            actionLabel: actionLabel,
+            onAction: onAction,
+            onDismiss: onDismiss.map { handler in { s, _ in handler(&s) } }
+        ).build(using: self)
     }
 
     // MARK: - App Shell (`sidebar`, `toolbar`, `splitView`), `tree` & `table`
