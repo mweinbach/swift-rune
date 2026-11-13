@@ -69,16 +69,18 @@ public struct FrameEncoded: Sendable, Equatable, Codable {
     }
 }
 
-/// Manages `onFrameEncoded` and coalesced `onFrameDrawn` reporting across frames (`frame::FrameReports`).
+/// Manages `onFrameEncoded` and `onFrameDrawn` reporting across frames (`frame::FrameReports`).
 public final class FrameReports<State> {
     public var onFrameEncoded: ((FrameEncoded) -> Void)?
     public var onFrameDrawn: ((inout State, FrameEncoded, inout Tx) -> Void)?
+    public var onInspectDrawn: ((Runtime<State>) -> Void)?
     /// Minimum interval between `onFrameDrawn` state updates (upstream throttles state callbacks so
     /// high-refresh loops aren't self-invalidated at 120Hz). Set to `0` for immediate delivery.
     public var drawnInterval: Double
     public var windowKey: String?
     public private(set) var droppedCount: Int = 0
     public private(set) var reportCount: UInt64 = 0
+    public private(set) var refreshHz: Double?
 
     private var pendingDrawn: FrameEncoded?
     private var lastDrawnAt: Double = -.infinity
@@ -86,13 +88,90 @@ public final class FrameReports<State> {
     public init(
         onFrameEncoded: ((FrameEncoded) -> Void)? = nil,
         onFrameDrawn: ((inout State, FrameEncoded, inout Tx) -> Void)? = nil,
+        onInspectDrawn: ((Runtime<State>) -> Void)? = nil,
         drawnInterval: Double = 0.1,
         windowKey: String? = nil
     ) {
         self.onFrameEncoded = onFrameEncoded
         self.onFrameDrawn = onFrameDrawn
+        self.onInspectDrawn = onInspectDrawn
         self.drawnInterval = max(0.0, drawnInterval)
         self.windowKey = windowKey
+    }
+
+    /// Attaches an unthrottled runtime inspection hook (`FrameReports::inspecting`).
+    public func inspecting(_ drawn: ((Runtime<State>) -> Void)?) -> FrameReports<State> {
+        self.onInspectDrawn = drawn
+        return self
+    }
+
+    /// Whether anyone reads the reports, so a host asks only for what they need (`FrameReports::wanted`).
+    public var wanted: Bool { onFrameEncoded != nil }
+
+    /// Captures a timestamp only when an `onFrameEncoded` hook is present (`FrameReports::stamp`).
+    public func stamp() -> Double? {
+        onFrameEncoded != nil ? ProcessInfo.processInfo.systemUptime : nil
+    }
+
+    /// Sets the display refresh carried on subsequent reports until changed (`FrameReports::set_refresh`).
+    public func setRefresh(_ hz: Double?) {
+        guard onFrameEncoded != nil else { return }
+        refreshHz = hz.flatMap { ($0.isFinite && $0 > 0.0) ? $0 : nil }
+    }
+
+    /// Records a `.drawn` frame encoded at `at` (from `stamp()`), starting at `started` (`FrameReports::drawn`).
+    public func drawn(at: Double?, presentsAt: Double? = nil, started: Double, updateMs: Double) {
+        guard let at, onFrameEncoded != nil else { return }
+        let clampedUpdate = max(0.0, updateMs)
+        let encodeMs = max(0.0, max(0.0, at - started) * 1000.0 - clampedUpdate)
+        record(
+            FrameEncoded(
+                outcome: .drawn,
+                frameMs: clampedUpdate + encodeMs,
+                updateMs: clampedUpdate,
+                encodeMs: encodeMs,
+                at: at,
+                window: windowKey,
+                seq: reportCount,
+                presentsAt: presentsAt,
+                started: started,
+                refreshHz: refreshHz
+            )
+        )
+    }
+
+    /// Records an `.unchanged` frame (`FrameReports::unchanged`).
+    public func unchanged(presentsAt: Double? = nil) {
+        guard onFrameEncoded != nil else { return }
+        record(
+            FrameEncoded(
+                outcome: .unchanged,
+                at: ProcessInfo.processInfo.systemUptime,
+                window: windowKey,
+                seq: reportCount,
+                presentsAt: presentsAt,
+                refreshHz: refreshHz
+            )
+        )
+    }
+
+    /// Records a `.skipped` frame (`FrameReports::skipped`).
+    public func skipped() {
+        guard onFrameEncoded != nil else { return }
+        record(
+            FrameEncoded(
+                outcome: .skipped,
+                at: ProcessInfo.processInfo.systemUptime,
+                window: windowKey,
+                seq: reportCount,
+                refreshHz: refreshHz
+            )
+        )
+    }
+
+    /// Invokes `App::on_frame_drawn` unthrottled runtime inspector after a `Drawn` frame (`FrameReports::inspect`).
+    public func inspect(_ runtime: Runtime<State>) {
+        onInspectDrawn?(runtime)
     }
 
     /// Emits `onFrameEncoded` immediately (when set) and queues a drawn report if `outcome == .drawn`.
@@ -103,6 +182,9 @@ public final class FrameReports<State> {
         }
         if entry.window == nil {
             entry.window = windowKey
+        }
+        if entry.refreshHz == nil {
+            entry.refreshHz = refreshHz
         }
         reportCount &+= 1
         onFrameEncoded?(entry)

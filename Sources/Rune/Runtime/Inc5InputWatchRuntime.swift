@@ -43,11 +43,10 @@ extension Runtime {
         richClipboard = RichClipboardPayload(content: content)
 
         if let fPath = focusedPath,
-           let fIdx = nodeByPath[fPath] {
-            let fNode = flatNodes[fIdx]
-            if let editLens = fNode.el.handlers.editLens {
+           let fEl = focusedInputElement(at: fPath) {
+            if let editLens = fEl.handlers.editLens {
                 var consumed = false
-                if let onInputPaste = fNode.el.handlers.onInputPaste {
+                if let onInputPaste = fEl.handlers.onInputPaste {
                     var tx = makeTx(at: now)
                     consumed = onInputPaste(&state, content, &tx)
                     applyTx(tx, at: now)
@@ -55,7 +54,7 @@ extension Runtime {
                 let hasHTML = content.html.map { !$0.isEmpty } ?? false
                 if !consumed && (!content.text.isEmpty || hasHTML) {
                     var edit = editLens.get(state)
-                    if fNode.el.isSecure {
+                    if fEl.isSecure {
                         edit.isSecure = true
                     }
                     if edit.isRichEnabled && !edit.isSecure, let html = content.html, !html.isEmpty {
@@ -65,10 +64,10 @@ extension Runtime {
                     }
                     editLens.set(&state, edit)
                     var tx = makeTx(at: now)
-                    if fNode.el.layoutAnim == nil {
+                    if fEl.layoutAnim == nil {
                         tx.instant()
                     }
-                    if let onChange = fNode.el.handlers.onTextChange {
+                    if let onChange = fEl.handlers.onTextChange {
                         onChange(&state, edit.text, &tx)
                     }
                     applyTx(tx, at: now)

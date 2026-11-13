@@ -181,6 +181,13 @@ public struct Effects<E>: Sequence {
         }
     }
 
+    /// Removes and returns all collected effects in insertion order (`Effects::drain`).
+    public mutating func drain() -> [E] {
+        let items = array
+        storage = .zero
+        return items
+    }
+
     public func makeIterator() -> IndexingIterator<[E]> {
         array.makeIterator()
     }

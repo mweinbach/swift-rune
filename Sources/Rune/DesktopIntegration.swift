@@ -2,6 +2,12 @@ import Foundation
 import RuneMotion
 import RuneRef
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 #if os(macOS)
 import AppKit
 import CoreGraphics
@@ -2032,7 +2038,7 @@ public struct AppDirs: Sendable, Equatable {
     public static let prefsDirEnv = "RUNE_PREFS_DIR"
 
     public let id: String
-    public let home: URL
+    public let home: URL?
     public let config: URL
     public let data: URL
     public let cache: URL
@@ -2043,7 +2049,7 @@ public struct AppDirs: Sendable, Equatable {
 
     public init(
         id: String,
-        home: URL,
+        home: URL?,
         config: URL,
         data: URL,
         cache: URL,
@@ -2125,7 +2131,7 @@ public struct AppDirs: Sendable, Equatable {
         }
         let homeURL = nonEmpty("HOME").map { URL(fileURLWithPath: $0, isDirectory: true) }
         if let root = nonEmpty(rootEnv) {
-            return rooted(at: URL(fileURLWithPath: root, isDirectory: true), appId: appId, home: homeURL ?? defaultHomeURL)
+            return rooted(at: URL(fileURLWithPath: root, isDirectory: true), appId: appId, home: homeURL)
         }
         guard let homeURL else { return nil }
         return resolveWithHome(appId: appId, homeURL: homeURL, lookup: nonEmpty, isRooted: false)
@@ -2190,7 +2196,7 @@ public struct AppDirs: Sendable, Equatable {
         #endif
     }
 
-    public static func rooted(at root: URL, appId: String, home: URL = AppDirs.defaultHomeURL) -> AppDirs {
+    public static func rooted(at root: URL, appId: String, home: URL? = nil) -> AppDirs {
         let cleanId = sanitize(appId)
         return AppDirs(
             id: cleanId,
@@ -2242,13 +2248,41 @@ public final class Prefs: @unchecked Sendable {
 
     public var isPersistent: Bool { path != nil }
 
-    public static func open(appId: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> Prefs {
-        if let custom = environment[AppDirs.prefsDirEnv], !custom.isEmpty {
-            let dir = URL(fileURLWithPath: custom, isDirectory: true)
-            return at(dir.appendingPathComponent("\(AppDirs.sanitize(appId))/prefs.json"))
+    /// Resolves the root preferences directory via `lookup` (`prefs::config_dir`), returning `nil` if unconfigured.
+    public static func configDir(lookup: (String) -> String?) -> URL? {
+        func nonEmpty(_ key: String) -> String? {
+            guard let v = lookup(key), !v.isEmpty else { return nil }
+            return v
         }
-        let dirs = AppDirs.resolve(appId: appId, environment: environment)
-        return at(dirs.config.appendingPathComponent("prefs.json"))
+        if let custom = nonEmpty(AppDirs.prefsDirEnv) {
+            return URL(fileURLWithPath: custom, isDirectory: true)
+        }
+        #if os(macOS) || os(iOS)
+        guard let home = nonEmpty("HOME") else { return nil }
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        #elseif os(Windows)
+        if let appData = nonEmpty("APPDATA") {
+            return URL(fileURLWithPath: appData, isDirectory: true)
+        }
+        guard let home = nonEmpty("HOME") else { return nil }
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent("AppData/Roaming", isDirectory: true)
+        #else
+        if let xdg = nonEmpty("XDG_CONFIG_HOME"), xdg.hasPrefix("/") {
+            return URL(fileURLWithPath: xdg, isDirectory: true)
+        }
+        guard let home = nonEmpty("HOME") else { return nil }
+        return URL(fileURLWithPath: home, isDirectory: true)
+            .appendingPathComponent(".config", isDirectory: true)
+        #endif
+    }
+
+    public static func open(appId: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> Prefs {
+        guard let dir = configDir(lookup: { environment[$0] }) else {
+            return memory()
+        }
+        return at(dir.appendingPathComponent("\(AppDirs.sanitize(appId))/prefs.json"))
     }
 
     public static func at(_ url: URL) -> Prefs {
@@ -2335,10 +2369,10 @@ public final class Prefs: @unchecked Sendable {
             let out = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
             let tmp = dir.appendingPathComponent(".prefs.\(UUID().uuidString).tmp")
             try out.write(to: tmp, options: .atomic)
-            if FileManager.default.fileExists(atPath: path.path) {
-                _ = try FileManager.default.replaceItemAt(path, withItemAt: tmp)
-            } else {
-                try FileManager.default.moveItem(at: tmp, to: path)
+            if rename(tmp.path, path.path) != 0 {
+                let err = errno
+                try? FileManager.default.removeItem(at: tmp)
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(err))
             }
         } catch {
             throw PrefsError.io(error.localizedDescription)

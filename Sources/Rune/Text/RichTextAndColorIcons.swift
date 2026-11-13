@@ -16,7 +16,7 @@ public func withFontFamilies(sans: String, mono: String, _ body: () throws -> Vo
     try FontFamiliesRegistry.withFamilies(sans: sans, mono: mono, body)
 }
 
-/// Process-wide font epoch & slot registry (`rune::text::families`).
+/// Process-wide font epoch & thread-scoped slot registry (`rune::text::families`).
 public enum FontFamiliesRegistry {
     private final class Storage: @unchecked Sendable {
         let lock = NSLock()
@@ -25,9 +25,37 @@ public enum FontFamiliesRegistry {
         var mono: String = ""
     }
 
+    private struct ThreadFrame {
+        var sans: String
+        var mono: String
+        var epoch: UInt64
+    }
+
     private static let storage = Storage()
+    private static let threadStackKey = "rune.fontFamilies.threadStack"
+
+    private static func currentThreadStack() -> [ThreadFrame]? {
+        Thread.current.threadDictionary[threadStackKey] as? [ThreadFrame]
+    }
+
+    private static func setThreadStack(_ stack: [ThreadFrame]) {
+        if stack.isEmpty {
+            Thread.current.threadDictionary.removeObject(forKey: threadStackKey)
+        } else {
+            Thread.current.threadDictionary[threadStackKey] = stack
+        }
+    }
+
+    /// Returns active thread-local override families if running inside `withFontFamilies`, else `nil`.
+    internal static func threadOverrideFamilies() -> (sans: String, mono: String)? {
+        guard let top = currentThreadStack()?.last else { return nil }
+        return (top.sans, top.mono)
+    }
 
     public static func currentEpoch() -> UInt64 {
+        if let top = currentThreadStack()?.last {
+            return top.epoch
+        }
         storage.lock.lock()
         defer { storage.lock.unlock() }
         return storage.epoch
@@ -39,10 +67,17 @@ public enum FontFamiliesRegistry {
         storage.epoch &+= 1
         let val = storage.epoch
         storage.lock.unlock()
+        if var stack = currentThreadStack(), !stack.isEmpty {
+            stack[stack.count - 1].epoch = val
+            setThreadStack(stack)
+        }
         return val
     }
 
     public static func currentFamilies() -> (sans: String, mono: String) {
+        if let top = currentThreadStack()?.last {
+            return (top.sans, top.mono)
+        }
         storage.lock.lock()
         defer { storage.lock.unlock() }
         return (storage.sans, storage.mono)
@@ -50,6 +85,18 @@ public enum FontFamiliesRegistry {
 
     @discardableResult
     public static func setFamilies(sans: String, mono: String) -> Bool {
+        if var stack = currentThreadStack(), let top = stack.last {
+            if top.sans == sans && top.mono == mono {
+                return false
+            }
+            storage.lock.lock()
+            storage.epoch &+= 1
+            let newEpoch = storage.epoch
+            storage.lock.unlock()
+            stack[stack.count - 1] = ThreadFrame(sans: sans, mono: mono, epoch: newEpoch)
+            setThreadStack(stack)
+            return true
+        }
         storage.lock.lock()
         if storage.sans == sans && storage.mono == mono {
             storage.lock.unlock()
@@ -63,9 +110,24 @@ public enum FontFamiliesRegistry {
     }
 
     public static func withFamilies(sans: String, mono: String, _ body: () throws -> Void) rethrows {
-        let prev = currentFamilies()
-        _ = setFamilies(sans: sans, mono: mono)
-        defer { _ = setFamilies(sans: prev.sans, mono: prev.mono) }
+        storage.lock.lock()
+        storage.epoch &+= 1
+        let entryEpoch = storage.epoch
+        storage.lock.unlock()
+
+        var stack = currentThreadStack() ?? []
+        stack.append(ThreadFrame(sans: sans, mono: mono, epoch: entryEpoch))
+        setThreadStack(stack)
+        defer {
+            var updated = currentThreadStack() ?? []
+            if !updated.isEmpty {
+                updated.removeLast()
+            }
+            setThreadStack(updated)
+            storage.lock.lock()
+            storage.epoch &+= 1
+            storage.lock.unlock()
+        }
         try body()
     }
 }

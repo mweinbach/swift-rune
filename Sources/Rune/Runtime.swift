@@ -11,17 +11,6 @@ private struct FlightCoverTransform {
     var scale: Float
 }
 
-private struct LiftedFlightSubtree {
-    var node: Presented
-    var ancestorOpacity: Float
-    var ancestorTurn: Turn?
-    var outerTurnClip: MotionRect?
-    var localTurnClip: MotionRect?
-    var parentPath: String?
-    var nearestGroupHovered: Bool
-    var nearestGroupHoverFrac: Float
-}
-
 internal struct PresentedTransform {
     var dx: Float = 0
     var dy: Float = 0
@@ -187,6 +176,18 @@ public final class Runtime<State> {
         var parentMoving: Bool = false
         var rectSpringing: Bool = false
         var clip: MotionRect? = nil
+    }
+
+    private struct LiftedFlightSubtree {
+        var node: Presented
+        var inh: PaintInh
+        var ancestorOpacity: Float
+        var ancestorTurn: Turn?
+        var outerTurnClip: MotionRect?
+        var localTurnClip: MotionRect?
+        var parentPath: String?
+        var nearestGroupHovered: Bool
+        var nearestGroupHoverFrac: Float
     }
 
     private struct DragSession {
@@ -488,6 +489,8 @@ public final class Runtime<State> {
         var edge: StreamEdge
         var spring: Spring
         var foldLimit: Float
+        var lastFirstChildTop: Float? = nil
+        var contentSlide: (was: Float, dy: Float)? = nil
     }
     internal var growthRows: [String: RuntimeGrowthEntry] = [:]
     internal var growthSubstepAccumulator: Double = 0
@@ -590,6 +593,31 @@ public final class Runtime<State> {
     private var liveTweenStart: [ObjectIdentifier: Double] = [:]
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
+    private var customLiveWaker: Waker? = nil
+    private var liveWake: LiveWake
+    private var liveSubscriptions: [LiveSubscription] = []
+    private var isLiveVisible: Bool = true
+    private var livePendingDirty: Bool = false
+    public private(set) var liveOnlyEvents: UInt64 = 0
+    private var liveOnlyCheckEnabled: Bool = {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }()
+    private var lastCommitClock: Double = 0.0
+    private var liveOnlyCheckBefore: LiveOnlyViewPrint? = nil
+    private var liveOnlyCheckLabel: String? = nil
+    public private(set) var liveOnlyWarnings: [String] = []
+
+    internal struct VirtualInputEntry {
+        var path: String
+        var key: String?
+        var rowKey: String
+        var el: El<State>
+    }
+    internal var virtualInputs: [String: VirtualInputEntry] = [:]
 
     internal var flatNodes: [FlatNode] = []
     internal var nodeByPath: [String: Int] = [:]
@@ -662,6 +690,8 @@ public final class Runtime<State> {
         self.reducedMotion = reducedMotion
         self.textSystem = textSystem
         self.waker = waker
+        let defaultWaker = waker
+        self.liveWake = LiveWake { [weak defaultWaker] in defaultWaker?.wake() }
         self.scene = Scene(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
@@ -670,6 +700,12 @@ public final class Runtime<State> {
             Recorder.headlessReset()
             VideoHeadless.reset()
             HeadlessClock.set(0.0)
+        }
+    }
+
+    deinit {
+        for sub in liveSubscriptions {
+            sub.isActive = false
         }
     }
 
@@ -1099,7 +1135,14 @@ public final class Runtime<State> {
         // Sample Scene & Live property bindings using scaled animation clock
         refreshHoverAndSyncTracks(at: animNow, cut: false)
         let frameOut = scene.frame(at: animNow)
-        let liveActive = updateLiveBindings(at: animNow)
+        let liveActive: Bool
+        if isLiveVisible {
+            _ = liveWake.takeVisible()
+            liveActive = updateLiveBindings(at: animNow)
+            livePendingDirty = liveActive
+        } else {
+            liveActive = false
+        }
         liveStore.sample(at: animNow)
 
         if !activeTextFlights.isEmpty {
@@ -1363,7 +1406,8 @@ public final class Runtime<State> {
             srgbBlend: srgbBlend,
             accent: cx.accent(),
             focusColor: cx.focusColor(),
-            chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)]
+            chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)],
+            scrollerOverlay: cxSettings.scrollBarsState.isOverlay
         )
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
             MemoScope.enter(
@@ -1773,7 +1817,10 @@ public final class Runtime<State> {
             if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
             }
-            if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && activeFlightIds.contains(nid) {
+            let rowGrowthKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
+            let hasGrowthSlide = growthRows[rowGrowthKey]?.contentSlide != nil
+            let isRunningFlight = !hasGrowthSlide && (activeFlightIds.contains(nid) || launchedFlightIds.contains(nid))
+            if layoutAnimSpec == nil && !commitCut && !reducedMotion && !commitKind.lands && isRunningFlight {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
             var specTransition = (ancestorInstant || reducedMotion) ? nil : el.transition
@@ -1825,6 +1872,19 @@ public final class Runtime<State> {
                 transition: specTransition
             ))
 
+            let growthSlideY: Float = {
+                let gKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
+                guard let gEntry = growthRows[gKey],
+                      gEntry.track.moving,
+                      let slide = gEntry.contentSlide,
+                      abs(slide.was) > 0.01 else {
+                    return 0
+                }
+                let left = gEntry.track.target - gEntry.track.h
+                guard left * slide.was > 0 else { return 0 }
+                return slide.dy * min(1, max(0, left / slide.was))
+            }()
+
             var childKeysSeen: [String: Int] = [:]
             var childItems: [WalkItem] = []
             childItems.reserveCapacity(min(el.children.count, solved.children.count))
@@ -1853,8 +1913,8 @@ public final class Runtime<State> {
                     resolvedKey: childResolvedKey,
                     path: "\(path)/\(childSegment)",
                     parentIdx: myIndex,
-                    parentOrigin: Vec2(worldX, worldY),
-                    parentUnscrolledOrigin: Vec2(unscrolledX, unscrolledY),
+                    parentOrigin: Vec2(worldX, worldY + growthSlideY),
+                    parentUnscrolledOrigin: Vec2(unscrolledX, unscrolledY + growthSlideY),
                     parentScroll: ownScroll,
                     parentScale: nodeInheritedScale,
                     scaleChain: childScaleChain,
@@ -2248,15 +2308,26 @@ public final class Runtime<State> {
         let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut)
 
+        for s in liveSubscriptions {
+            s.isActive = false
+        }
+        liveSubscriptions.removeAll(keepingCapacity: true)
         for node in pass.nodes {
             exitingSnapshots[node.nodeId] = node
             if let lt = node.el.liveText {
-                lt.subscribe(waker)
+                liveSubscriptions.append(lt.subscribe(liveWake))
                 liveTextSeenSeq[node.path] = lt.sequence
             }
             for b in node.el.liveBindings {
-                b.source.subscribe(waker)
+                liveSubscriptions.append(b.source.subscribe(liveWake))
             }
+            if let px = node.el.pixelsPayload {
+                liveSubscriptions.append(px.subscribe(liveWake))
+            }
+        }
+        if liveSubscriptions.isEmpty {
+            _ = liveWake.takeVisible()
+            livePendingDirty = false
         }
 
         flatNodes = pass.nodes
@@ -2283,6 +2354,8 @@ public final class Runtime<State> {
             return
         }
 
+        virtualInputs = pass.virtualExpansion.virtualInputs
+
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
         reconcileFocusAfterCommit(
             prevFocusedPath: prevFocusedPath,
@@ -2290,6 +2363,14 @@ public final class Runtime<State> {
             prevFocusVisible: prevFocusVisible
         )
         reconcilePlaygroundAfterCommit(at: now)
+        lastCommitClock = now
+        #if DEBUG
+        if let before = liveOnlyCheckBefore, let label = liveOnlyCheckLabel {
+            liveOnlyCheckBefore = nil
+            liveOnlyCheckLabel = nil
+            recordLiveOnlyDiffIfNeeded(handler: label, before: before)
+        }
+        #endif
 
         lastPixelsSizeByPath.removeAll(keepingCapacity: true)
         for node in pass.nodes {
@@ -3030,6 +3111,26 @@ public final class Runtime<State> {
             }
         }
 
+        if !txBlur && nextIdx == nil {
+            let allowsVirtual: (String) -> Bool = { path in
+                guard let modal = self.activeModalPath else { return true }
+                return path == modal || path.hasPrefix(modal + "/")
+            }
+            if let fk = txFocusKey ?? focusedKey,
+               let v = virtualInputs.values.first(where: { $0.key == fk && allowsVirtual($0.path) }) {
+                focusedPath = v.path
+                focusedKey = v.key
+                if prevFocusedPath != focusedPath { imeReset = true }
+                return
+            }
+            if let fp = focusedPath, let v = virtualInputs[fp], allowsVirtual(v.path) {
+                focusedPath = v.path
+                focusedKey = v.key
+                if prevFocusedPath != focusedPath { imeReset = true }
+                return
+            }
+        }
+
         if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty || cxSettings.viewDefaults.webFocus) {
             nextIdx = tabOrderIndices().first
         }
@@ -3433,6 +3534,7 @@ public final class Runtime<State> {
             if !emitLiftedNow && flyingRootIds.contains(p.id) {
                 liftedFlights.append(LiftedFlightSubtree(
                     node: p,
+                    inh: inh,
                     ancestorOpacity: ancestorOpacity,
                     ancestorTurn: ancestorTurn,
                     outerTurnClip: outerTurnClip,
@@ -4855,9 +4957,13 @@ public final class Runtime<State> {
         for lifted in liftedFlights {
             let isUnclippedFlight = launchedFlightIds.contains(lifted.node.id)
                 || unclippedMatchedFlightIds.contains(lifted.node.id)
+            var liftedInh = lifted.inh
+            if isUnclippedFlight {
+                liftedInh.clip = nil
+            }
             emitSubtree(
                 lifted.node,
-                inh: PaintInh(opacity: lifted.ancestorOpacity),
+                inh: liftedInh,
                 ancestorOpacity: lifted.ancestorOpacity,
                 ancestorTurn: lifted.ancestorTurn,
                 outerTurnClip: lifted.outerTurnClip,
@@ -5275,6 +5381,8 @@ public final class Runtime<State> {
         pointerPosition = pos
 
         let moveHits = hitTestAll(at: pos, predicate: { $0.el.handlers.onPointerMove != nil })
+        var moveDispatched = false
+        var moveAllLiveOnly = true
         for moveHit in moveHits {
             if let onMove = moveHit.node.el.handlers.onPointerMove {
                 let press = PointerPress(
@@ -5287,7 +5395,11 @@ public final class Runtime<State> {
                 )
                 var tx = makeTx(at: now)
                 onMove(&state, press, &tx)
-                applyTx(tx, at: now)
+                moveDispatched = true
+                if !tx.liveOnlyRequested {
+                    moveAllLiveOnly = false
+                }
+                applyTx(tx, at: now, liveOnlyLabel: "onPointerMove")
             }
         }
 
@@ -5341,19 +5453,24 @@ public final class Runtime<State> {
                 hoveredPath = newPath
                 hoveredKey = newKey
                 isDispatchingHover = true
+                var hoverRequestedCommit = false
                 if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, false, &tx)
-                    applyTx(tx, at: now)
+                    if !tx.liveOnlyRequested { hoverRequestedCommit = true }
+                    applyTx(tx, at: now, liveOnlyLabel: "onHover")
                 }
                 if let np = newPath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, true, &tx)
-                    applyTx(tx, at: now)
+                    if !tx.liveOnlyRequested { hoverRequestedCommit = true }
+                    applyTx(tx, at: now, liveOnlyLabel: "onHover")
                 }
                 isDispatchingHover = false
-                suppressRevealFromHoverCommit = true
-                dirtyCommit(at: now)
+                if !(moveDispatched && moveAllLiveOnly && !hoverRequestedCommit) || helpTargetChanges(at: pos) {
+                    suppressRevealFromHoverCommit = true
+                    dirtyCommit(at: now)
+                }
             } else if helpTargetChanges(at: pos) {
                 dirtyCommit(at: now)
             }
@@ -5456,6 +5573,9 @@ public final class Runtime<State> {
 
         let preservesSel = preservesTextSelectionInChain(node)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
+        let prevPressedPath = pressedPath
+        let prevFocusedPath = focusedPath
+        let prevImeReset = imeReset
         pressedPath = node.path
         pressedKey = node.key
         if cxSettings.viewDefaults.webFocus && !preservesSel {
@@ -5468,7 +5588,11 @@ public final class Runtime<State> {
             focusedPath = node.path
             focusedKey = node.key
         }
-        dirtyCommit(at: now)
+        let pressVisualChanged = pressedPath != prevPressedPath && (node.el.pressBg != nil || node.el.pressScaleFactor != nil)
+        let focusChanged = focusedPath != prevFocusedPath || imeReset != prevImeReset
+        if pressVisualChanged || focusChanged {
+            dirtyCommit(at: now)
+        }
 
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
         let safeSc = Vec2(abs(sc.x) > 1e-6 ? sc.x : 1.0, abs(sc.y) > 1e-6 ? sc.y : 1.0)
@@ -5568,7 +5692,12 @@ public final class Runtime<State> {
         pressedPath = nil
         pressedKey = nil
         let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
-        dirtyCommit(at: now)
+        if let rPath = releasedPath, let rIdx = nodeByPath[rPath] {
+            let rEl = flatNodes[rIdx].el
+            if rEl.pressBg != nil || rEl.pressScaleFactor != nil {
+                dirtyCommit(at: now)
+            }
+        }
 
         var draggedPastThreshold = suppressedClickFromSelDrag
         if let drag = activeDrag {
@@ -5775,8 +5904,8 @@ public final class Runtime<State> {
                 dirChord = nextChord
                 if let flow,
                    let fPath = focusedPath,
-                   let fIdx = nodeByPath[fPath],
-                   let editLens = flatNodes[fIdx].el.handlers.editLens {
+                   let fEl = focusedInputElement(at: fPath),
+                   let editLens = fEl.handlers.editLens {
                     var edit = editLens.get(state)
                     edit.forceDir(flow)
                     editLens.set(&state, edit)
@@ -5825,6 +5954,12 @@ public final class Runtime<State> {
         }
 
         // 2. Focused element & ancestor chain
+        if let fPath = focusedPath,
+           nodeByPath[fPath] == nil,
+           let vInput = virtualInputs[fPath],
+           applyFocusedTextEditKey(ev, el: vInput.el, layout: nil, at: now) {
+            return true
+        }
         if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
             let fNode = flatNodes[fIdx]
 
@@ -6353,7 +6488,13 @@ public final class Runtime<State> {
 
     // MARK: - Private Helpers
 
-    internal func applyTx(_ tx: Tx, at now: Double, markDirtyIfNotLiveOnly: Bool = true, external: Bool = true) {
+    internal func applyTx(
+        _ tx: Tx,
+        at now: Double,
+        markDirtyIfNotLiveOnly: Bool = true,
+        external: Bool = true,
+        liveOnlyLabel: String = "handler"
+    ) {
         if let cb = tx.clipboardWrite {
             clipboard = cb
             richClipboard = RichClipboardPayload(content: cb)
@@ -6561,7 +6702,22 @@ public final class Runtime<State> {
             pendingPasteRequests += 1
         }
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty)
-        if !tx.liveOnlyRequested && (markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests) {
+        if tx.liveOnlyRequested {
+            livePendingDirty = true
+            #if DEBUG
+            if liveOnlyCheckEnabled && (now - lastCommitClock) >= 0.25 {
+                if liveOnlyCheckBefore == nil {
+                    liveOnlyCheckBefore = captureLiveOnlySnapshot()
+                    liveOnlyCheckLabel = liveOnlyLabel
+                }
+                dirtyCommit(at: now, external: external)
+                return
+            }
+            #endif
+            liveOnlyEvents &+= 1
+            return
+        }
+        if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
             dirtyCommit(at: now, external: external)
         }
     }
@@ -6732,6 +6888,240 @@ public final class Runtime<State> {
         dirtyCommit(at: now ?? currentTime)
     }
 
+    /// Connects or replaces the waker notified when bound `Live`, `LiveText`, or `Pixels` sources publish (`Runtime::set_live_waker`).
+    public func setLiveWaker(_ waker: Waker) {
+        let prevVisible = isLiveVisible
+        let hadPending = livePendingDirty || liveWake.isVisiblePending
+        for sub in liveSubscriptions {
+            sub.isActive = false
+        }
+        liveSubscriptions.removeAll(keepingCapacity: true)
+        customLiveWaker = waker
+        let nextWake = LiveWake { [weak waker] in waker?.wake() }
+        nextWake.visible(prevVisible)
+        if hadPending {
+            nextWake.notify()
+        }
+        liveWake = nextWake
+        for node in flatNodes {
+            if let lt = node.el.liveText {
+                liveSubscriptions.append(lt.subscribe(liveWake))
+            }
+            for b in node.el.liveBindings {
+                liveSubscriptions.append(b.source.subscribe(liveWake))
+            }
+            if let px = node.el.pixelsPayload {
+                liveSubscriptions.append(px.subscribe(liveWake))
+            }
+        }
+        if liveSubscriptions.isEmpty {
+            _ = liveWake.takeVisible()
+            livePendingDirty = false
+        }
+    }
+
+    /// Updates whether this window is visible to `Live` publishers (`Runtime::set_live_visible`).
+    public func setLiveVisible(_ visible: Bool) {
+        let wasVisible = isLiveVisible
+        isLiveVisible = visible
+        let wokeFromLiveWake = liveWake.visibleReturningWoke(visible)
+        if !wokeFromLiveWake && visible && !wasVisible && livePendingDirty {
+            (customLiveWaker ?? waker).wake()
+        }
+    }
+
+    /// True when the window is visible and a subscribed `Live` / `LiveText` / `Pixels` source
+    /// has pending work for the next frame (`Runtime::live_pending`).
+    public var livePending: Bool {
+        guard isLiveVisible else { return false }
+        return livePendingDirty || liveWake.isVisiblePending
+    }
+
+    /// Enables or disables debug stale-view spot checks for `Tx.liveOnly()` (`Runtime::check_live_only`).
+    public func checkLiveOnly(_ on: Bool) {
+        #if DEBUG
+        liveOnlyCheckEnabled = on
+        #else
+        _ = on
+        #endif
+    }
+
+    /// Runs `poll` while the window is hidden (`Runtime::poll_hidden`), returning `true` if
+    /// the view or pending scroll/flight state became out of date.
+    @discardableResult
+    public func pollHidden(at now: Double) -> Bool {
+        currentTime = now
+        let changed = runPoll(at: now)
+        return changed
+            || needsCommit
+            || !pendingScrollBottoms.isEmpty
+            || !pendingScrollReveals.isEmpty
+            || !pendingTextFlights.isEmpty
+            || !pendingLaunches.isEmpty
+    }
+
+    internal func focusedInputElement(at path: String) -> El<State>? {
+        if let idx = nodeByPath[path], idx < flatNodes.count {
+            return flatNodes[idx].el
+        }
+        return virtualInputs[path]?.el
+    }
+
+    private func applyFocusedTextEditKey(_ ev: KeyEvent, el: El<State>, layout: ShapedText?, at now: Double) -> Bool {
+        guard let editLens = el.handlers.editLens else { return false }
+        var edit = editLens.get(state)
+        if el.isSecure {
+            edit.isSecure = true
+            if el.isRevealed { edit.isRevealed = true }
+        }
+        let isCopyOrCut = ev.mods.primaryCommand &&
+            (ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C") ||
+             ev.key == .command("x") || ev.key == .text("x") || ev.key == .text("X"))
+        let preCopyHTML: String? = (isCopyOrCut && edit.isRichEnabled && !edit.isSecure && edit.hasSelection)
+            ? {
+                let html = edit.toHTML(range: edit.selectedUTF8Range)
+                return html.isEmpty ? nil : html
+            }()
+            : nil
+        let outcome = edit.handleKey(ev, layout: layout)
+        switch outcome {
+        case .ignored:
+            return false
+        case .navigation:
+            editLens.set(&state, edit)
+            dirtyCommit(at: now)
+            return true
+        case .modified:
+            editLens.set(&state, edit)
+            var tx = makeTx(at: now)
+            if el.layoutAnim == nil {
+                tx.instant()
+            }
+            if let onChange = el.handlers.onTextChange {
+                onChange(&state, edit.text, &tx)
+            }
+            applyTx(tx, at: now)
+            dirtyCommit(at: now)
+            return true
+        case .submit:
+            editLens.set(&state, edit)
+            if let onSubmit = el.handlers.onTextSubmit {
+                var tx = makeTx(at: now)
+                tx.animated()
+                onSubmit(&state, edit.text, &tx)
+                applyTx(tx, at: now)
+                dirtyCommit(at: now)
+                return true
+            }
+            return false
+        case .copy(let copied):
+            editLens.set(&state, edit)
+            clipboard = ClipboardContent(copied, html: preCopyHTML)
+            richClipboard = RichClipboardPayload(content: clipboard)
+            if let onChange = el.handlers.onTextChange {
+                var tx = makeTx(at: now)
+                onChange(&state, edit.text, &tx)
+                applyTx(tx, at: now)
+            }
+            dirtyCommit(at: now)
+            return true
+        }
+    }
+
+    private struct LiveOnlyNodePrint {
+        var path: String
+        var target: [Float]
+        var bg: Color?
+        var borderColor: Color?
+        var borderWidth: Float
+        var opacity: Float?
+        var text: String?
+        var textColor: Color?
+
+        func difference(to now: LiveOnlyNodePrint) -> (path: String, what: String, values: (String, String)?)? {
+            let tol: Float = 0.01
+            if zip(target, now.target).contains(where: { abs($0 - $1) > tol }) {
+                return (path, "layout rect", ("\(target)", "\(now.target)"))
+            }
+            if bg != now.bg {
+                return (path, "fill", ("\(String(describing: bg))", "\(String(describing: now.bg))"))
+            }
+            if borderColor != now.borderColor || abs(borderWidth - now.borderWidth) > tol {
+                return (path, "border", nil)
+            }
+            if let o1 = opacity, let o2 = now.opacity, abs(o1 - o2) > 0.001 {
+                return (path, "opacity", ("\(o1)", "\(o2)"))
+            }
+            if text != now.text {
+                return (path, "text", (text ?? "nil", now.text ?? "nil"))
+            }
+            if textColor != now.textColor {
+                return (path, "text colour", nil)
+            }
+            return nil
+        }
+    }
+
+    private struct LiveOnlyViewPrint {
+        var nodes: [LiveOnlyNodePrint]
+
+        func firstDifference(after: LiveOnlyViewPrint) -> (path: String, what: String, values: (String, String)?)? {
+            let a = nodes
+            let b = after.nodes
+            func has(_ list: [LiveOnlyNodePrint], path: String) -> Bool {
+                list.contains { $0.path == path }
+            }
+            var i = 0
+            var j = 0
+            while i < a.count && j < b.count {
+                let x = a[i]
+                let y = b[j]
+                if x.path == y.path {
+                    if let d = x.difference(to: y) { return d }
+                    i += 1
+                    j += 1
+                } else if !has(b, path: x.path) {
+                    return (x.path, "removed element", nil)
+                } else if !has(a, path: y.path) {
+                    return (y.path, "added element", nil)
+                } else {
+                    return (x.path, "order", nil)
+                }
+            }
+            if i < a.count { return (a[i].path, "removed element", nil) }
+            if j < b.count { return (b[j].path, "added element", nil) }
+            return nil
+        }
+    }
+
+    private func captureLiveOnlySnapshot() -> LiveOnlyViewPrint {
+        LiveOnlyViewPrint(nodes: flatNodes.map { node in
+            let el = node.el
+            let hasLiveBg = el.liveBindings.contains { $0.target == .fill }
+            let hasLiveOpacity = el.liveBindings.contains { $0.target == .opacity }
+            let textVal: String? = el.liveText != nil ? nil : (el.isSecure ? "[redacted]" : el.plainText)
+            return LiveOnlyNodePrint(
+                path: node.path,
+                target: [node.targetRect.left, node.targetRect.top, node.targetRect.width, node.targetRect.height],
+                bg: hasLiveBg ? nil : el.background,
+                borderColor: el.borderColor,
+                borderWidth: el.borderWidth,
+                opacity: hasLiveOpacity ? nil : el.opacity,
+                text: textVal,
+                textColor: el.textColor
+            )
+        })
+    }
+
+    private func recordLiveOnlyDiffIfNeeded(handler: String, before: LiveOnlyViewPrint) {
+        let after = captureLiveOnlySnapshot()
+        guard let d = before.firstDifference(after: after) else { return }
+        let head = "rune: \(handler) called Tx.liveOnly, but the view built something else after it: \(d.what) of \"\(d.path)\""
+        if liveOnlyWarnings.contains(where: { $0.hasPrefix(head) }) { return }
+        let values = d.values.map { " went from \($0.0) to \($0.1)" } ?? ""
+        liveOnlyWarnings.append("\(head)\(values). Set only Live values in a live-only handler, or disable with checkLiveOnly(false).")
+    }
+
     /// Delivers a window focus transition to `onFocus`, deduplicating redundant transitions and
     /// leaving the runtime un-staled when `onFocus` is unset (`app.rs:973-992`).
     public func dispatchFocus(_ focused: Bool, at now: Double? = nil) {
@@ -6778,14 +7168,14 @@ public final class Runtime<State> {
 
     /// Returns a reconversion/surrounding text snapshot for the focused non-secure `TextEdit` (`Runtime::ime_text`).
     public func focusedImeSnapshot(maxContextBytes: Int = 1024) -> ImeText? {
-        guard let fp = focusedPath,
-              let idx = nodeByPath[fp],
-              !flatNodes[idx].effectiveInert,
-              let editLens = flatNodes[idx].el.handlers.editLens else {
+        guard let fp = focusedPath else { return nil }
+        if let idx = nodeByPath[fp], flatNodes[idx].effectiveInert { return nil }
+        guard let el = focusedInputElement(at: fp),
+              let editLens = el.handlers.editLens else {
             return nil
         }
         var edit = editLens.get(state)
-        if flatNodes[idx].el.isSecure {
+        if el.isSecure {
             edit.isSecure = true
         }
         return edit.imeTextSnapshot(maxContextBytes: maxContextBytes)
@@ -6805,15 +7195,15 @@ public final class Runtime<State> {
         let t = now ?? currentTime
         imeReset = true
         guard let fp = focusedPath,
-              let idx = nodeByPath[fp],
-              let editLens = flatNodes[idx].el.handlers.editLens else {
+              let el = focusedInputElement(at: fp),
+              let editLens = el.handlers.editLens else {
             _ = dispatchIme(.cancel, at: t)
             return
         }
         var edit = editLens.get(state)
         if let activePreedit = edit.preedit?.text, edit.finishPreedit() {
             editLens.set(&state, edit)
-            if let onChange = flatNodes[idx].el.handlers.onTextChange {
+            if let onChange = el.handlers.onTextChange {
                 var tx = Tx()
                 onChange(&state, edit.text, &tx)
                 applyTx(tx, at: t)
@@ -6829,13 +7219,13 @@ public final class Runtime<State> {
         let t = now ?? currentTime
         var handledByEdit = false
         if let fp = focusedPath,
-           let idx = nodeByPath[fp],
-           !flatNodes[idx].effectiveInert,
-           let editLens = flatNodes[idx].el.handlers.editLens {
+           nodeByPath[fp].map({ !flatNodes[$0].effectiveInert }) ?? true,
+           let el = focusedInputElement(at: fp),
+           let editLens = el.handlers.editLens {
             var edit = editLens.get(state)
-            if flatNodes[idx].el.isSecure {
+            if el.isSecure {
                 edit.isSecure = true
-                if flatNodes[idx].el.isRevealed { edit.isRevealed = true }
+                if el.isRevealed { edit.isRevealed = true }
             }
             let outcome = edit.applyIme(event)
             switch outcome {
@@ -6847,7 +7237,7 @@ public final class Runtime<State> {
                 handledByEdit = true
             case .modified:
                 editLens.set(&state, edit)
-                if let onChange = flatNodes[idx].el.handlers.onTextChange {
+                if let onChange = el.handlers.onTextChange {
                     var tx = Tx()
                     onChange(&state, edit.text, &tx)
                     applyTx(tx, at: t)

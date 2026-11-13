@@ -850,6 +850,7 @@ public enum HeadlessRunner {
         let reports = FrameReports<State>(
             onFrameEncoded: app.onFrameEncodedHook,
             onFrameDrawn: app.onFrameDrawnHook,
+            onInspectDrawn: app.onFrameInspectHook,
             drawnInterval: 0.0
         )
         return try runWithHooks(
@@ -1113,6 +1114,7 @@ public enum HeadlessRunner {
                 runtime.updateIf(at: now) { s, tx in
                     reports.flush(state: &s, tx: &tx, at: now, force: true)
                 }
+                reports.inspect(runtime)
             }
             return outFrame
         }
@@ -1238,6 +1240,7 @@ public enum HeadlessRunner {
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
         var didFireReady = false
+        var lastRenderedLoopFrame: Frame? = nil
 
         let needsLoop = !steps.isEmpty
             || args.durationOverride != nil
@@ -1405,9 +1408,14 @@ public enum HeadlessRunner {
                     let needDump = dumpDir != nil
                     let needVideo = videoEncoder != nil
                     let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
-                    let needRender = needDump || needVideo || needStrip
+                    let hasFrameObservers = compositor != nil
+                        || (reports?.wanted ?? false)
+                        || (reports?.onFrameDrawn != nil)
+                        || (reports?.onInspectDrawn != nil)
+                    let needRender = needDump || needVideo || needStrip || (args.frameCount != nil && hasFrameObservers)
                     if needRender {
-                        let baseFrame = applyChromeOverlay(try renderCaptured(lastCaptured))
+                        let baseFrame = applyChromeOverlay(try renderAndReport(lastCaptured, at: simTime))
+                        lastRenderedLoopFrame = baseFrame
                         if needVideo {
                             try videoEncoder?.writeFrame(baseFrame)
                         }
@@ -1450,7 +1458,11 @@ public enum HeadlessRunner {
             onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = applyChromeOverlay(try renderAndReport(lastCaptured, at: runtime.currentTime))
+        var finalFrame = if let lastRenderedLoopFrame {
+            lastRenderedLoopFrame
+        } else {
+            applyChromeOverlay(try renderAndReport(lastCaptured, at: runtime.currentTime))
+        }
         if !args.cropRects.isEmpty {
             finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
         } else if let cropKey = args.cropKey {
