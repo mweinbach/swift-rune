@@ -253,28 +253,36 @@ struct RenderClipBackdropDashTests {
         // (40, 30) is clear of both fades -> bright white
         #expect(sampleRGBA(imgNested, x: 40, y: 30).r > 245)
 
-        // Part B: Streaming/growth feather row inside an outer clipFade preserves both streaming mask & outer fade
+        // Part B: Streaming/growth feather row inside an outer clipFade preserves both streaming mask & outer fade across 1x & 2x
         struct StreamS { var h: Float = 20 }
-        let rtStream = Runtime<StreamS>(state: StreamS(), viewport: Vec2(120, 80), pixelScale: 1.0) { s, _ in
-            col().size(120, 80).bg(.black)
-                .child(
-                    col().size(120, 80).clip().clipFade(left: 20)
+        for scale: Float in [1.0, 2.0] {
+            let renderStreaming: (Bool) throws -> (Frame, RenderFrame) = { faded in
+                let rtStream = Runtime<StreamS>(state: StreamS(), viewport: Vec2(80, 200), pixelScale: scale) { s, _ in
+                    col().size(80, 200).clipFade(bottom: faded ? 24 : 0)
                         .child(
-                            col().size(120, 80).growth(GrowthSpec(spring: MotionTokens.SNAP, edge: .feather))
-                                .child(el().key("row").size(120, s.h).streaming().bg(.white))
+                            col().wFull().growth(GrowthSpec(edge: .fastFeather))
+                                .child(
+                                    col().key("row").wFull().streaming(true)
+                                        .child(el().size(80, s.h).bg(.white))
+                                )
                         )
-                )
+                }
+                rtStream.clearColor = .black
+                _ = rtStream.renderFrame(at: 0.0)
+                rtStream.update(at: 0.0) { s, _ in s.h = 80 }
+                _ = rtStream.renderFrame(at: 1.0 / 60.0)
+                let rf = rtStream.renderFrame(at: 2.0 / 60.0)
+                let img = try renderer.renderOffscreen(rf)
+                return (img, rf)
+            }
+            let (imgPlain, _) = try renderStreaming(false)
+            let (imgFaded, rfFaded) = try renderStreaming(true)
+            let rowInst = try #require(rfFaded.instances.first(where: { $0.fill.w > 0.99 }))
+            let (rowWidth, rowOffset) = unpackFade(rowInst.fade)
+            #expect(rowWidth.w > 0 && rowWidth.w < 24.0 * scale)
+            #expect(rowOffset.w == 0.0)
+            #expect(imgPlain.rgba == imgFaded.rgba)
         }
-        _ = rtStream.frame(at: 0.0)
-        rtStream.update(at: 0.01) { s, _ in s.h = 60 }
-        let streamScene = rtStream.frame(at: 0.03)
-        let streamRF = rtStream.renderFrame(at: 0.03)
-        // Outer fade (left: 20 -> invSpan 0.05 in RefScene, width 20 in RenderFrame) + growth animation active
-        let hasOuterLeftFade = streamScene.primitives.contains { abs($0.fade.z - 0.05) < 0.005 && $0.fade.x == 1.0 }
-            && streamRF.instances.contains { abs(unpackFade($0.fade).width.x - 20.0) < 0.5 }
-        let hasGrowthFade = streamScene.primitives.contains { $0.fade.z > 0.01 && $0.fade.y < -0.5 }
-        #expect(hasOuterLeftFade)
-        #expect(hasGrowthFade || rtStream.isAnimating)
     }
 
     /// Upstream: `crates/rune/tests/clip.rs:204` `a_linear_fade_falls_in_proportion_to_distance_from_the_edge`
@@ -296,44 +304,19 @@ struct RenderClipBackdropDashTests {
         // RefScene encodes directional linear fade [dirX=1, dirY=0, invSpan=1/20, minAlpha=0]
         #expect(scene.primitives.contains { abs($0.fade.z - 0.05) < 0.002 && $0.fade.x == 1.0 })
         let cpuImg = try RuneRef.render(scene)
-        // Pixel centers at x = 3 (3.5/20), 9 (9.5/20), 15 (15.5/20) must be linear (NOT smoothstep)
         let c3 = cpuImg.pixel(x: 3, y: 10).x
         let c9 = cpuImg.pixel(x: 9, y: 10).x
         let c15 = cpuImg.pixel(x: 15, y: 10).x
         let c30 = cpuImg.pixel(x: 30, y: 10).x
-        #expect(c3 > 30 && c3 < 70) // ~45 in linear (~0.175 * 255) vs smoothstep (~21)
+        #expect(c3 > 30 && c3 < 70)
         #expect(abs(Int(c9) - 121) < 12)
-        #expect(c15 > 180 && c15 < 220) // ~198 in linear vs smoothstep (~223)
+        #expect(c15 > 180 && c15 < 220)
         #expect(c30 > 250)
 
-        // 2. Metal GPU clip_ramp linear path via packFade(width: -20)
-        let rect = SIMD4<Float>(0, 0, 60, 20)
-        let packedLinear = packFade(
-            width: SIMD4<Float>(-20, 0, 0, 0),
-            origin: SIMD4<Float>(0, 0, 60, 20),
-            clip: SIMD4<Float>(0, 0, 60, 20)
-        )
-        #expect(abs(unpackFade(packedLinear).width.x - (-20.0)) < 0.05)
-
-        let rf = RenderFrame(
-            width: 60,
-            height: 20,
-            srgbBlend: true,
-            clearColor: SIMD4<Float>(0, 0, 0, 1),
-            glyphs: GlyphAtlas().compositedAtlas(),
-            glyphGeneration: 0,
-            images: RGBA8Atlas(),
-            imageRevision: 0,
-            instances: [
-                RenderInstance(
-                    rect: rect,
-                    fill: SIMD4<Float>(1, 1, 1, 1),
-                    params: SIMD4<Float>(0, KIND_RECT, 0, 1),
-                    clip: rect,
-                    fade: packedLinear
-                )
-            ]
-        )
+        // 2. Runtime.renderFrame(at:) packs negative -20 width and Metal renders the linear ramp directly
+        let rf = rt.renderFrame(at: 0.0)
+        let fadedInst = try #require(rf.instances.first(where: { unpackFade($0.fade).width.x < 0 }))
+        #expect(abs(unpackFade(fadedInst.fade).width.x - (-20.0)) < 0.05)
         let gpuImg = try renderer.renderOffscreen(rf)
         let g3 = sampleRGBA(gpuImg, x: 3, y: 10).r
         let g9 = sampleRGBA(gpuImg, x: 9, y: 10).r
@@ -439,9 +422,8 @@ struct RenderClipBackdropDashTests {
         let rf = rt.renderFrame(at: 0.0)
         let blurIdx = try #require(rf.instances.firstIndex(where: { $0.params.y == KIND_BACKDROP_BLUR }))
         #expect(abs(rf.instances[blurIdx].fill.w - 0.5) < 0.01)
-        if let layerIdx = rf.instances.firstIndex(where: { $0.params.y == KIND_LAYER }) {
-            #expect(blurIdx < layerIdx)
-        }
+        let layerIdx = try #require(rf.instances.firstIndex(where: { $0.params.y == KIND_LAYER }))
+        #expect(blurIdx < layerIdx)
 
         let img = try renderer.renderOffscreen(rf)
         let s = redSpread(img, y: 60, x0: 60, x1: 140)
@@ -501,96 +483,70 @@ struct RenderClipBackdropDashTests {
         let renderer = try MetalRenderer()
         let emptyAtlas = GlyphAtlas().compositedAtlas()
 
-        // 1. Ordinary frame without backdrop slots allocates 0 pool targets
-        let plainFrame = RenderFrame(
-            width: 32,
-            height: 32,
-            srgbBlend: true,
-            clearColor: SIMD4<Float>(0, 0, 0, 1),
-            glyphs: emptyAtlas,
-            glyphGeneration: 0,
-            images: RGBA8Atlas(),
-            imageRevision: 0,
-            instances: [
-                RenderInstance(rect: SIMD4<Float>(0, 0, 16, 16), fill: SIMD4<Float>(1, 0, 0, 1), params: SIMD4<Float>(0, KIND_RECT, 0, 1))
-            ]
-        )
-        _ = try renderer.renderOffscreen(plainFrame)
-        #expect(renderer.layerStats().allocations == 0)
-
-        // 2. Effect slot requesting backdrop allocates lazily (params.x == 1.0) and delivers site.backdrop
-        let effectFrame = RenderFrame(
-            width: 32,
-            height: 32,
-            srgbBlend: true,
-            clearColor: SIMD4<Float>(0.2, 0.4, 0.6, 1),
-            glyphs: emptyAtlas,
-            glyphGeneration: 0,
-            images: RGBA8Atlas(),
-            imageRevision: 0,
-            instances: [
-                RenderInstance(rect: SIMD4<Float>(0, 0, 32, 32), fill: SIMD4<Float>(1, 0, 0, 1), params: SIMD4<Float>(0, KIND_RECT, 0, 1)),
-                RenderInstance(rect: SIMD4<Float>(4, 4, 24, 24), params: SIMD4<Float>(1, KIND_EFFECT, 0, 1), clip: SIMD4<Float>(0, 0, 32, 32))
-            ]
-        )
-        var seenSizes: [(Int, Int, MTLPixelFormat)] = []
-        _ = try renderer.renderOffscreen(effectFrame, backdropHook: { phase, site in
-            if case .backdrop = phase, let b = site.backdrop {
-                seenSizes.append((b.width, b.height, b.pixelFormat))
-            }
-        })
-        let allocAfterFirst = renderer.layerStats().allocations
-        #expect(allocAfterFirst == 1)
-        #expect(seenSizes.count == 1)
-        #expect(seenSizes[0] == (32, 32, .bgra8Unorm))
-
-        // 3. Re-drawing with the same size & format reuses the pooled slot with zero new allocations
-        _ = try renderer.renderOffscreen(effectFrame, backdropHook: { phase, site in
-            if case .backdrop = phase, let b = site.backdrop {
-                seenSizes.append((b.width, b.height, b.pixelFormat))
-            }
-        })
-        #expect(renderer.layerStats().allocations == allocAfterFirst)
-
-        // 4. Resize & switch live target formats (.bgra8Unorm -> .bgra8Unorm_srgb -> .rgba16Float): follows each format/size and reuses same-format size!
-        let specs: [(Int, Int, MTLPixelFormat)] = [
-            (48, 40, .bgra8Unorm_srgb),
-            (64, 48, .rgba16Float),
-            (48, 40, .bgra8Unorm_srgb),
-        ]
-        var allocBeforeSameFormatRepeat: UInt64 = 0
-        for (idx, (w, h, fmt)) in specs.enumerated() {
-            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: w, height: h, mipmapped: false)
-            desc.usage = [.renderTarget, .shaderRead]
-            let target = try #require(renderer.device.makeTexture(descriptor: desc))
-            let cb = try #require(renderer.commandQueue.makeCommandBuffer())
-            let f = RenderFrame(
-                width: w,
-                height: h,
-                srgbBlend: (fmt == .bgra8Unorm),
+        func makeEffectFrame(width: Int, height: Int, srgbBlend: Bool, instances: [RenderInstance]) -> RenderFrame {
+            RenderFrame(
+                width: width,
+                height: height,
+                srgbBlend: srgbBlend,
                 clearColor: SIMD4<Float>(0, 0, 0, 1),
                 glyphs: emptyAtlas,
                 glyphGeneration: 0,
                 images: RGBA8Atlas(),
                 imageRevision: 0,
-                instances: effectFrame.instances
+                instances: instances
             )
-            if idx == 2 {
-                allocBeforeSameFormatRepeat = renderer.layerStats().allocations
-            }
-            renderer.drawWithBackdrop(frame: f, into: target, commandBuffer: cb) { phase, site in
+        }
+
+        // 1. Empty & ordinary effect slots (params.x == 0) allocate 0 backdrop textures
+        var slot = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 16, 16),
+            fill: SIMD4<Float>(0, 0, 0, 1),
+            params: SIMD4<Float>(0, KIND_EFFECT, 0, 1),
+            clip: NO_CLIP
+        )
+        for instances in [[], [slot]] {
+            renderer.prepare(frame: makeEffectFrame(width: 32, height: 32, srgbBlend: false, instances: instances), viewport: (32, 32))
+            #expect(renderer.backdropTextures.isEmpty)
+        }
+
+        // 2. Slot requesting backdrop allocates 1 texture and reuses the exact texture object on repeat prepare
+        slot.params.x = 1.0
+        renderer.setFormat(.bgra8Unorm_srgb)
+        let oneSlot = makeEffectFrame(width: 32, height: 32, srgbBlend: false, instances: [slot])
+        renderer.prepare(frame: oneSlot, viewport: (32, 32))
+        #expect(renderer.backdropTextures.count == 1)
+        let original = renderer.backdropTextures[0]
+        renderer.prepare(frame: oneSlot, viewport: (32, 32))
+        #expect(renderer.backdropTextures[0] === original)
+
+        // 3. Switching format after prepare allocates/ensures the new format's pool immediately
+        renderer.setFormat(.bgra8Unorm)
+        #expect(renderer.backdropTextures.contains(where: { $0.pixelFormat == .bgra8Unorm }))
+
+        // 4. Two slots [slot, slot] across format/size transitions share one texture per draw & keep 2 format pools
+        let twoSlots = makeEffectFrame(width: 32, height: 32, srgbBlend: false, instances: [slot, slot])
+        for (fmt, size) in [(MTLPixelFormat.bgra8Unorm, (48, 24)), (.bgra8Unorm_srgb, (24, 48)), (.bgra8Unorm, (32, 32))] {
+            renderer.setFormat(fmt)
+            let frameForSize = makeEffectFrame(width: size.0, height: size.1, srgbBlend: fmt == .bgra8Unorm, instances: twoSlots.instances)
+            renderer.prepare(frame: frameForSize, viewport: size)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: size.0, height: size.1, mipmapped: false)
+            desc.usage = [.renderTarget, .shaderRead]
+            let target = try #require(renderer.device.makeTexture(descriptor: desc))
+            let cb = try #require(renderer.commandQueue.makeCommandBuffer())
+            var backdrops: [MTLTexture] = []
+            renderer.drawWithBackdrop(frame: frameForSize, into: target, commandBuffer: cb) { phase, site in
                 if case .backdrop = phase, let b = site.backdrop {
-                    seenSizes.append((b.width, b.height, b.pixelFormat))
+                    #expect((b.width, b.height) == size)
+                    #expect(b.pixelFormat == fmt)
+                    backdrops.append(b)
                 }
             }
             cb.commit()
             cb.waitUntilCompleted()
+            #expect(backdrops.count == 2)
+            #expect(backdrops[0] === backdrops[1])
+            #expect(renderer.backdropTextures.count == 2)
         }
-        #expect(seenSizes.count == 5)
-        #expect(seenSizes[2] == (48, 40, .bgra8Unorm_srgb))
-        #expect(seenSizes[3] == (64, 48, .rgba16Float))
-        #expect(seenSizes[4] == (48, 40, .bgra8Unorm_srgb))
-        #expect(renderer.layerStats().allocations == allocBeforeSameFormatRepeat)
     }
 
     /// Upstream: `crates/rune/src/render/surface_alpha.rs:14` `gpu_straight_alpha_matches_cpu_reference`
@@ -669,6 +625,8 @@ struct RenderClipBackdropDashTests {
 
     private func makeCapsuleFrame(mode: CapsuleMode, pixelScale: Float = 2.0) -> RenderFrame {
         struct S {}
+        let top = Color.rgba8(255, 0, 0, 255)
+        let bottom = Color.rgba8(0, 0, 255, 255)
         let rim = Color.rgba8(255, 255, 255, 255)
         let dark = Color.rgba8(18, 22, 28, 255)
         let rt = Runtime<S>(state: S(), viewport: Vec2(68, 22), pixelScale: pixelScale) { _, _ in
@@ -681,7 +639,7 @@ struct RenderClipBackdropDashTests {
             case .filledDashed:
                 card = card.bg(dark).dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0)
             case .gradientDashed:
-                card = card.bg(dark).dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0).borderGradient(width: 1.0, top: rim, bottom: dark)
+                card = card.borderGradient(width: 1.0, top: top, bottom: bottom).dashedBorder(1.0, rim, dash: 8, gap: 4)
             }
             return col().size(68, 22).child(card)
         }
@@ -705,7 +663,11 @@ struct RenderClipBackdropDashTests {
         #expect(filled.instances[1].uv == SIMD4<Float>(16, 8, 4, 0)) // (8, 4, 2) * scale 2
 
         let grad = makeCapsuleFrame(mode: .gradientDashed)
-        #expect(grad.instances.contains(where: { $0.params.y == KIND_GRADIENT && $0.params.x == 2.0 }))
+        #expect(grad.instances.count == 1)
+        #expect(grad.instances[0].params.y == KIND_DASHED)
+        #expect(grad.instances[0].params.x == 2.0)
+        #expect(abs(grad.instances[0].fill.x - 1.0) < 1e-4 && abs(grad.instances[0].fill.y) < 1e-4 && abs(grad.instances[0].fill.z) < 1e-4 && grad.instances[0].fill.w == 1.0)
+        #expect(abs(grad.instances[0].border.x) < 1e-4 && abs(grad.instances[0].border.y) < 1e-4 && abs(grad.instances[0].border.z - 1.0) < 1e-4 && grad.instances[0].border.w == 1.0)
     }
 
     /// Upstream: `crates/rune/tests/border_dash.rs:62` `dashes_antialias_like_the_solid_border_and_show_the_fill_between`
