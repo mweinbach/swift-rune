@@ -510,13 +510,27 @@ public final class Script: @unchecked Sendable {
     }
 
     /// Evaluates a Luau function synchronously and returns its raw `LuauValue` results.
+    /// Does not bump the script's version.
     @discardableResult
     public func evalFn(_ fn: LuauValue, args: [LuauValue] = []) throws -> [LuauValue] {
         guard let vm else {
             throw failedError ?? ScriptError(kind: .missing, message: "not running")
         }
-        return try enterThrowing {
-            try vm.call(value: fn, args: args)
+        do {
+            let out = try runTimed(on: vm) {
+                try vm.call(value: fn, args: args)
+            }
+            noteSchedule()
+            return out
+        } catch let err as LuauRuntimeError {
+            let se = err.toScriptError()
+            appendLog(.error, se.message)
+            noteSchedule()
+            throw se
+        } catch let err as ScriptError {
+            appendLog(.error, err.message)
+            noteSchedule()
+            throw err
         }
     }
 

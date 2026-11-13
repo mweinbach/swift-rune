@@ -312,8 +312,6 @@ internal final class UIRenderEnv: @unchecked Sendable {
         }
         warnOnce("unknown colour \(token)")
         colorCache[token] = .transparent
-        warnOnce("unknown colour \(token)")
-        colorCache[token] = .transparent
         return .transparent
     }
 
@@ -476,6 +474,15 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         let rowKeyFn = props.rawGet("rowKey")
         let rowErrorFn = props.rawGet("rowError")
         let onVisibleRowsFn = props.rawGet("onVisibleRows")
+        switch onVisibleRowsFn {
+        case .nil, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList onVisibleRows can't be a \(onVisibleRowsFn.typeName)"))
+        }
+        if !props.rawGet("onPress").isNil {
+            env.warnOnce("ui.virtualList takes no onPress")
+        }
         let gap = Float(props.rawGet("gap").coercedNumber ?? 0.0)
         let keyStr = props.rawGet("key").isNil ? "list" : props.rawGet("key").displayString
         let containerKey = "\(env.prefix)\(keyStr)"
@@ -551,16 +558,22 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         container = try LuauUIBridge.applyProps([props], to: container, isText: false, env: env, skipKeys: skipKeys)
         container = container.key(containerKey)
 
-        if !onVisibleRowsFn.isNil, onVisibleRowsFn.asBool == nil {
+        if !onVisibleRowsFn.isNil {
             let visFirst = window.visibleRange.isEmpty ? 0 : window.visibleRange.lowerBound + 1
             let visLast = window.visibleRange.isEmpty ? 0 : window.visibleRange.upperBound
             if let script = env.script, script.recordVisibleRowsChange(for: containerKey, first: visFirst, last: visLast) {
+                let event = LuauTable()
+                event.rawSet("kind", value: .string("visible-rows"))
+                event.rawSet("first", value: .number(Double(visFirst)))
+                event.rawSet("last", value: .number(Double(visLast)))
+                let vmID = env.vmID
                 var dummyState: Any = ()
-                script.aroundWriteOptional(state: &dummyState, tx: nil) { _ in
-                    _ = try? vm.call(value: onVisibleRowsFn, args: [
-                        .number(Double(visFirst)),
-                        .number(Double(visLast)),
-                    ])
+                script.aroundWriteOptional(state: &dummyState, tx: nil) { txPtr in
+                    var tx = txPtr?.pointee ?? Tx()
+                    script.enter(tx: &tx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: onVisibleRowsFn, arg: .table(event))
+                    }
+                    txPtr?.pointee = tx
                 }
             }
         }
@@ -1258,28 +1271,35 @@ internal enum LuauUIBridge {
             let sel = try propFlag(v, k)
             el = el.itemSelected(sel).selected(sel ? "true" : nil)
         case "fadeOut":
-            _ = try propNum(v, k)
+            _ = try propFlag(v, k)
+            env.warnOnce("fadeOut has no effect on Swift El yet")
         case "dir":
             switch try propStr(v, k) {
             case "auto", "ltr", "rtl": break
             case let other: throw LuauRuntimeError(value: .string("dir must be auto, ltr or rtl, got \(other)"))
             }
+            env.warnOnce("dir has no effect on Swift El yet")
         case "hoverTransition":
             switch try propStr(v, k) {
             case "default", "instant": break
             case let other: throw LuauRuntimeError(value: .string("hoverTransition must be default or instant, got \(other)"))
             }
+            env.warnOnce("hoverTransition has no effect on Swift El yet")
         case "hoverGroup":
-            _ = try propStr(v, k)
+            _ = try propFlag(v, k)
+            env.warnOnce("hoverGroup has no effect on Swift El yet")
         case "hoverGroupColor":
             _ = try env.resolveColor(try propStr(v, k))
+            env.warnOnce("hoverGroupColor has no effect on Swift El yet")
         case "revealOnHover":
             _ = try propFlag(v, k)
+            env.warnOnce("revealOnHover has no effect on Swift El yet")
         case "helpSide":
             switch try propStr(v, k) {
             case "top", "right", "bottom", "left": break
             case let other: throw LuauRuntimeError(value: .string("helpSide must be top, right, bottom or left, got \(other)"))
             }
+            env.warnOnce("helpSide has no effect on Swift El yet")
         case "onPress": state.onPressVal = v
         case "onHover": state.onHoverVal = v
         case "role":

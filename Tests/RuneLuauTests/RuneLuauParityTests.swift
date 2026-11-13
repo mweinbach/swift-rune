@@ -52,9 +52,10 @@ struct RuneLuauParityTests {
                             renderRow = function(i)
                                 return ui.text("row-" .. i, { key = "r-" .. i })
                             end,
-                            onVisibleRows = function(first, last)
-                                table.insert(visibleRanges, { first, last })
+                            onVisibleRows = function(ev)
+                                table.insert(visibleRanges, { kind = ev.kind, first = ev.first, last = ev.last })
                             end,
+                            onPress = function() end,
                         }),
                     })
                 end,
@@ -114,9 +115,12 @@ struct RuneLuauParityTests {
         let statsAfterScroll = try script.query("stats")
         let ranges = dataList(statsAfterScroll.get("ranges"))
         #expect(ranges.count >= 2)
-        let secondFirst = ranges.last.flatMap { dataList($0).first?.asInt64 } ?? 0
+        let lastRange = ranges.last
+        #expect(lastRange?.get("kind").asString == "visible-rows")
+        let secondFirst = lastRange?.get("first").asInt64 ?? 0
         #expect(secondFirst > 100)
         #expect(script.metrics.rows > initialRowsMetric)
+        #expect(script.log.contains { $0.level == .warn && $0.message == "ui.virtualList takes no onPress" })
 
         // Inline virtualList (`scrollY = false`) must NOT mark .scrollY()
         let inlineEl = script.surface(cx0, name: "inlineList")
@@ -238,8 +242,10 @@ struct RuneLuauParityTests {
 
         var tx = Tx()
         try script.spawnFn(incFn, args: [.number(5)], tx: &tx)
+        let verBeforeEval = script.version
         let out = try script.evalFn(getFn)
         #expect(out.first?.asInt == 15)
+        #expect(script.version == verBeforeEval)
 
         let el2: El<LuauTestState> = script.renderFn(
             "widget",
@@ -408,6 +414,12 @@ struct RuneLuauParityTests {
                 badRole = function()
                     return ui.box({ role = "spaceship" })
                 end,
+                badFadeOut = function()
+                    return ui.box({ fadeOut = 1 })
+                end,
+                badHoverGroup = function()
+                    return ui.box({ hoverGroup = "nav" })
+                end,
             }
             """),
             options: ScriptOptions().memoryLimit(256 * 1024)
@@ -437,6 +449,10 @@ struct RuneLuauParityTests {
 
         let roleErr = collectTexts(script.surface(cx, name: "badRole")).joined(separator: " ")
         #expect(roleErr.contains("unknown role spaceship"))
+        let fadeErr = collectTexts(script.surface(cx, name: "badFadeOut")).joined(separator: " ")
+        #expect(fadeErr.contains("fadeOut"))
+        let hoverErr = collectTexts(script.surface(cx, name: "badHoverGroup")).joined(separator: " ")
+        #expect(hoverErr.contains("hoverGroup"))
     }
 
     @Test("P1/P2: .config.luau aliases, deterministic timer ordering, unforgeable tokens, and watch in-place reload")
