@@ -543,6 +543,8 @@ public final class GlyphAtlas: @unchecked Sendable {
     public static let maxOverflowPages: Int = 8
     /// Upstream CPU byte budget for cached RGBA color glyphs (`atlas.rs:52`, `COLOR_GLYPH_BUDGET`).
     public static let colorGlyphBudgetBytes: Int = 16 * 1024 * 1024
+    /// Quarter-pixel Y glide phases matching `glyph_emit::GLIDE_PHASES`.
+    public static let glidePhases: UInt8 = 4
 
     private enum ShelfUse: Equatable {
         case idle
@@ -627,6 +629,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         var glyphID: CGGlyph
         var sizePx10: Int
         var subpixelBin: UInt8
+        var subpixelYBin: UInt8
         var smoothing: FontSmoothing
     }
 
@@ -1108,15 +1111,19 @@ public final class GlyphAtlas: @unchecked Sendable {
         glyph: CGGlyph,
         fontSizePx: Float,
         subpixelX: Float = 0,
+        subpixelYBin: UInt8 = 0,
         smoothing: FontSmoothing = .systemDefault
     ) -> Entry? {
         let bin = UInt8(((subpixelX - floorf(subpixelX)) * 4.0).rounded()) & 3
+        let binY = subpixelYBin & 3
         let subShift = Float(bin) * 0.25
+        let shiftY = Float(binY) * 0.25
         let key = GlyphKey(
             fontHash: CFHash(font),
             glyphID: glyph,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
             subpixelBin: bin,
+            subpixelYBin: binY,
             smoothing: smoothing
         )
         lock.lock()
@@ -1145,20 +1152,20 @@ public final class GlyphAtlas: @unchecked Sendable {
 
         let pad = 2
         let minX = Int(floor(bbox.minX)) - pad
-        let maxX = Int(ceil(bbox.maxX + CGFloat(subShift))) + pad
+        let maxX = Int(ceil(bbox.maxX)) + pad
         let minY = Int(floor(bbox.minY)) - pad
         let maxY = Int(ceil(bbox.maxY)) + pad
-        let bw = max(1, maxX - minX)
-        let bh = max(1, maxY - minY)
+        let baseBw = max(1, maxX - minX)
+        let baseBh = max(1, maxY - minY)
 
-        var bitmap = Array<UInt8>(repeating: 0, count: bw * bh)
+        var baseBitmap = Array<UInt8>(repeating: 0, count: baseBw * baseBh)
         let graySpace = CGColorSpaceCreateDeviceGray()
         guard let ctx = CGContext(
-            data: &bitmap,
-            width: bw,
-            height: bh,
+            data: &baseBitmap,
+            width: baseBw,
+            height: baseBh,
             bitsPerComponent: 8,
-            bytesPerRow: bw,
+            bytesPerRow: baseBw,
             space: graySpace,
             bitmapInfo: CGImageAlphaInfo.none.rawValue
         ) else {
@@ -1174,8 +1181,55 @@ public final class GlyphAtlas: @unchecked Sendable {
         ctx.setShouldSubpixelPositionFonts(true)
         ctx.setFillColor(gray: 1.0, alpha: 1.0)
 
-        var pos = CGPoint(x: CGFloat(-minX) + CGFloat(subShift), y: CGFloat(-minY))
+        var pos = CGPoint(x: CGFloat(-minX), y: CGFloat(-minY))
         CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
+
+        // CoreGraphics snaps `pos.y` to integer device rows and applies hinting shifts to
+        // small `pos.x` offsets, so shift non-zero quarter-pixel X/Y phases analytically in
+        // bitmap space (`bilinear` / separable box-filter weights `subShift`, `shiftY`) so all
+        // 4 glide phases per axis align to 1/4 px cleanly while resting (`bin == 0`) stays exact.
+        let bw = bin == 0 ? baseBw : baseBw + 1
+        let bh = binY == 0 ? baseBh : baseBh + 1
+        let bitmap: [UInt8]
+        if bin == 0 && binY == 0 {
+            bitmap = baseBitmap
+        } else {
+            var xShifted: [Float]
+            if bin == 0 {
+                xShifted = baseBitmap.map(Float.init)
+            } else {
+                xShifted = Array<Float>(repeating: 0, count: bw * baseBh)
+                let wx0 = 1.0 - subShift
+                let wx1 = subShift
+                for y in 0..<baseBh {
+                    let srcRow = y * baseBw
+                    let dstRow = y * bw
+                    for x in 0..<bw {
+                        let a = x < baseBw ? Float(baseBitmap[srcRow + x]) : 0.0
+                        let b = (x > 0 && x - 1 < baseBw) ? Float(baseBitmap[srcRow + x - 1]) : 0.0
+                        xShifted[dstRow + x] = a * wx0 + b * wx1
+                    }
+                }
+            }
+            if binY == 0 {
+                bitmap = xShifted.map { UInt8($0.rounded().clamped(to: 0.0...255.0)) }
+            } else {
+                var out = Array<UInt8>(repeating: 0, count: bw * bh)
+                let wy0 = 1.0 - shiftY
+                let wy1 = shiftY
+                for y in 0..<bh {
+                    let rCur = y < baseBh ? y * bw : -1
+                    let rPrev = (y > 0 && y - 1 < baseBh) ? (y - 1) * bw : -1
+                    let dstRow = y * bw
+                    for x in 0..<bw {
+                        let a = rCur >= 0 ? xShifted[rCur + x] : 0.0
+                        let b = rPrev >= 0 ? xShifted[rPrev + x] : 0.0
+                        out[dstRow + x] = UInt8((a * wy0 + b * wy1).rounded().clamped(to: 0.0...255.0))
+                    }
+                }
+                bitmap = out
+            }
+        }
 
         lock.lock()
         guard let placed = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
@@ -2319,7 +2373,8 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        glidePx: Vec2 = .zero
     ) -> ShapedText {
         measureFramePhase(.text) {
             shapeImpl(
@@ -2329,7 +2384,8 @@ public final class TextSystem: @unchecked Sendable {
                 style: style,
                 maxWidth: maxWidth,
                 pixelScale: pixelScale,
-                emitGlyphs: emitGlyphs
+                emitGlyphs: emitGlyphs,
+                glidePx: glidePx
             )
         }
     }
@@ -2341,7 +2397,8 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        glidePx: Vec2 = .zero
     ) -> ShapedText {
         let scale = max(pixelScale, 1.0)
         let lhPt = style.resolvedLineHeight
@@ -2945,22 +3002,49 @@ public final class TextSystem: @unchecked Sendable {
                         continue
                     }
 
+                    let quadXPx: Float
+                    let quadYPx: Float
+                    let subXArg: Float
+                    let binYArg: UInt8
+                    let posXPx: Float
+                    if glidePx != .zero {
+                        let phases = Float(GlyphAtlas.glidePhases)
+                        let totalX = gxPx + (glidePx.x * phases).rounded() / phases
+                        let qx = (totalX * phases).rounded()
+                        let fx = floorf(qx / phases)
+                        let binX = UInt8(Int(qx - fx * phases)) & 3
+                        let subShiftX = Float(binX) * 0.25
+                        let totalY = gyPx + (glidePx.y * phases).rounded() / phases
+                        let qy = (totalY * phases).rounded()
+                        let fy = floorf(qy / phases)
+                        binYArg = UInt8(Int(qy - fy * phases)) & 3
+                        subXArg = subShiftX
+                        posXPx = totalX
+                        quadYPx = totalY - Float(binYArg) * 0.25
+                    } else {
+                        subXArg = subX
+                        binYArg = 0
+                        posXPx = floorX + subX
+                        quadYPx = gyPx
+                    }
+
                     guard let entry = glyphAtlas.rasterizeGlyph(
                         font: runFont,
                         glyph: glyphs[i],
                         fontSizePx: runFontSizePx,
-                        subpixelX: subX,
+                        subpixelX: subXArg,
+                        subpixelYBin: binYArg,
                         smoothing: style.fontSmoothing
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
 
-                    let quadXPx = floorX + subX + entry.bearingPx.x
-                    let quadYPx = gyPx + entry.bearingPx.y
+                    quadXPx = posXPx + entry.bearingPx.x
+                    let finalQuadYPx = quadYPx + entry.bearingPx.y
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
-                            quadYPx * invS,
+                            finalQuadYPx * invS,
                             Float(entry.pixelSize.x) * invS,
                             Float(entry.pixelSize.y) * invS
                         ),

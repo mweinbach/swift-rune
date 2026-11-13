@@ -548,6 +548,7 @@ public final class Runtime<State> {
     private var pendingLaunches: [PendingFlightRequest] = []
     private var pendingUnclippedFlights: Bool = false
     internal var activeTextFlights: [ActiveTextFlight] = []
+    private var lastViewReadScroll: Bool = false
     private struct FocusReturnEntry {
         var ownerPath: String
         var returnPath: String?
@@ -624,6 +625,8 @@ public final class Runtime<State> {
     private var pageModeEnabled: Bool = false
     private var pageScrollOffsetY: Float = 0.0
     private var pendingLayoutActions: [PendingLayoutAction] = []
+    private var pendingLayoutFeedbackRan: Bool = false
+    private var pendingExternalLayoutActionRan: Bool = false
     private var layoutSeen = LayoutSeenState()
     private var layoutKeyIndex = LayoutKeyIndex()
     private var layoutCommitGen: UInt64 = 0
@@ -907,7 +910,9 @@ public final class Runtime<State> {
         _ = reportLayoutAndScreen(reportLocal: true, reportScreen: true)
         _ = reportDrawn()
         _ = reportVisible()
-        _ = drainLayoutActions(at: now)
+        let (postFeedback, postExternal) = drainLayoutActions(at: now)
+        pendingLayoutFeedbackRan = pendingLayoutFeedbackRan || postFeedback
+        pendingExternalLayoutActionRan = pendingExternalLayoutActionRan || postExternal
         isAnimating = isAnimating || ((pixelSnapGlides.isEasing || wroteDrawn) && cxSettings.viewTimeScale > 0.0)
         if layoutFeedback.isOpen && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
@@ -941,7 +946,11 @@ public final class Runtime<State> {
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
         flushPendingPasteRequests(at: now)
-        let (ranLayoutFeedback, ranExternalLayoutAction) = drainLayoutActions(at: now)
+        let (drainedFeedback, drainedExternal) = drainLayoutActions(at: now)
+        let ranLayoutFeedback = pendingLayoutFeedbackRan || drainedFeedback
+        let ranExternalLayoutAction = pendingExternalLayoutActionRan || drainedExternal
+        pendingLayoutFeedbackRan = false
+        pendingExternalLayoutActionRan = false
 
         if let attempt = virtualFill.wake(at: now) {
             if virtualFill.step(.due(attempt: attempt, now: now)) == .draw {
@@ -1054,7 +1063,7 @@ public final class Runtime<State> {
             }
             if anyScrollMoved {
                 scrollMovedSinceLastFrame = true
-                if !activeVirtualPaths.isEmpty || hasScrollCallbacks() {
+                if scrollRequiresCommit {
                     commitTree(at: now, cut: false)
                 } else {
                     updateScrollPositions(at: now)
@@ -1210,6 +1219,10 @@ public final class Runtime<State> {
         }
     }
 
+    private var scrollRequiresCommit: Bool {
+        !activeVirtualPaths.isEmpty || lastViewReadScroll || hasScrollCallbacks()
+    }
+
     private struct MeasurePassResult {
         var nodes: [FlatNode]
         var byPath: [String: Int]
@@ -1286,6 +1299,7 @@ public final class Runtime<State> {
         collector: LayoutReadCollector
     ) -> (rootEl: El<State>, helpLook: HelpLook?)? {
         viewCallCount += 1
+        lastViewReadScroll = false
         var cx = Cx<State>(
             viewport: viewport,
             pixelScale: pixelScale,
@@ -1298,6 +1312,7 @@ public final class Runtime<State> {
             waker: waker,
             scrollLookup: { [weak self] key in
                 guard let self else { return .zero }
+                self.lastViewReadScroll = true
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollOffsets[match.path] ?? .zero
                 }
@@ -1305,6 +1320,7 @@ public final class Runtime<State> {
             },
             scrollMaxLookup: { [weak self] key in
                 guard let self else { return .zero }
+                self.lastViewReadScroll = true
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollMaxExtents[match.path] ?? .zero
                 }
@@ -1312,6 +1328,7 @@ public final class Runtime<State> {
             },
             viewportSizeLookup: { [weak self] key in
                 guard let self else { return .zero }
+                self.lastViewReadScroll = true
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollViewportSizes[match.path] ?? Vec2(match.targetRect.width, match.targetRect.height)
                 }
@@ -1319,6 +1336,7 @@ public final class Runtime<State> {
             },
             contentSizeLookup: { [weak self] key in
                 guard let self else { return .zero }
+                self.lastViewReadScroll = true
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollContentSizes[match.path] ?? match.contentSize
                 }
@@ -1640,7 +1658,7 @@ public final class Runtime<State> {
                 childClip = inheritedClip
             }
             let (staticBounds, childStaticInh) = Self.computeStaticTransform(
-                baseRect: targetRect,
+                baseRect: unscrolledRect,
                 el: el,
                 inh: staticInh
             )
@@ -1872,22 +1890,110 @@ public final class Runtime<State> {
 
     private func rectForRead(key: String, nodes: [FlatNode], index: LayoutKeyIndex?) -> [Float]? {
         let (cleanKey, scrolled) = LayoutReadConstants.stripWindowPrefix(key)
-        guard let idx = LayoutKeyIndex.firstMatch(
+        if let idx = LayoutKeyIndex.firstMatch(
             selector: cleanKey,
             index: index,
             nodes: nodes,
             keyOf: { $0.key },
             parentOf: { $0.parentIndex }
-        ) else {
-            return nil
+        ) {
+            let r = scrolled ? nodes[idx].targetRect : nodes[idx].unscrolledRect
+            return LayoutReadConstants.rectArray(r)
         }
-        let r = scrolled ? nodes[idx].targetRect : nodes[idx].unscrolledRect
-        return LayoutReadConstants.rectArray(r)
+        return highlightTarget(selector: cleanKey, nodes: nodes, index: index, scrolled: scrolled)
+    }
+
+    private func highlightBoxes(
+        node: FlatNode,
+        boxRect: MotionRect,
+        scale: Vec2 = Vec2(1, 1)
+    ) -> [(highlightIndex: Int, rect: MotionRect)] {
+        let el = node.el
+        guard let hls = el.textHighlights, !hls.isEmpty else { return [] }
+        let content = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+        guard !content.isEmpty else { return [] }
+        let padL = el.layout.padding.left * scale.x
+        let padT = el.layout.padding.top * scale.y
+        let padR = el.layout.padding.right * scale.x
+        let innerW = max(0, boxRect.width - padL - padR)
+        let wrapWidth = (innerW / max(1e-4, scale.x)) + 0.5
+        let shaped = textSystem.shape(
+            text: content,
+            spans: el.richSpans,
+            style: el.textStyle,
+            maxWidth: wrapWidth,
+            pixelScale: pixelScale,
+            emitGlyphs: false
+        )
+        let ox = boxRect.x + padL
+        let oy = boxRect.y + padT
+        let utf8Len = content.utf8.count
+        var out: [(Int, MotionRect)] = []
+        for (k, hl) in hls.enumerated() {
+            let a = max(0, min(hl.byteRange.lowerBound, utf8Len))
+            let b = max(a, min(hl.byteRange.upperBound, utf8Len))
+            guard a < b else { continue }
+            for r in textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pixelScale) where r.z > 0 {
+                let x = ox + r.x * scale.x
+                let y = oy + r.y * scale.y
+                let w = r.z * scale.x
+                let h = r.w * scale.y
+                out.append((k, MotionRect.fromXYWH(x, y, w, h)))
+            }
+        }
+        return out
+    }
+
+    private func highlightTarget(
+        selector: String,
+        nodes: [FlatNode],
+        index: LayoutKeyIndex?,
+        scrolled: Bool
+    ) -> [Float]? {
+        let candidates = LayoutKeyIndex.markedCandidates(selector: selector, index: index, nodes: nodes)
+            ?? Array(nodes.indices)
+        var union: MotionRect? = nil
+        for i in candidates {
+            let n = nodes[i]
+            guard let hls = n.el.textHighlights, !hls.isEmpty else { continue }
+            let matches: [Bool] = hls.map { hl in
+                guard let hkey = hl.key else { return false }
+                return LayoutKeyIndex.selectsUnder(
+                    selector: selector,
+                    nodeIndex: i,
+                    nodes: nodes,
+                    keyOf: { $0.key },
+                    parentOf: { $0.parentIndex },
+                    highlightKey: hkey
+                )
+            }
+            guard matches.contains(true) else { continue }
+            let baseRect = scrolled ? n.targetRect : n.unscrolledRect
+            for (k, r) in highlightBoxes(node: n, boxRect: baseRect) where matches[k] {
+                if let u = union {
+                    union = MotionRect(
+                        left: min(u.left, r.left),
+                        top: min(u.top, r.top),
+                        right: max(u.right, r.right),
+                        bottom: max(u.bottom, r.bottom)
+                    )
+                } else {
+                    union = r
+                }
+            }
+        }
+        return union.map { LayoutReadConstants.rectArray($0) }
     }
 
     private func refreshLayoutSeen() {
         guard !layoutSeen.isEmpty else { return }
-        layoutKeyIndex.prepare(nodes: flatNodes, stamp: layoutCommitGen, lookups: layoutSeen.reads.count) { $0.key }
+        layoutKeyIndex.prepare(
+            nodes: flatNodes,
+            stamp: layoutCommitGen,
+            lookups: layoutSeen.reads.count,
+            keyOf: { $0.key },
+            highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] }
+        )
         let idx = layoutKeyIndex.indexIfValid(stamp: layoutCommitGen)
         var nextRects: [String: [Float]?] = [:]
         for r in layoutSeen.reads {
@@ -1903,7 +2009,11 @@ public final class Runtime<State> {
         var passIndex = LayoutKeyIndex()
         let activeIdx: LayoutKeyIndex?
         if reads.count > LayoutReadConstants.scanReads {
-            passIndex.build(nodes: nodes) { $0.key }
+            passIndex.build(
+                nodes: nodes,
+                keyOf: { $0.key },
+                highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] }
+            )
             activeIdx = passIndex
         } else {
             activeIdx = nil
@@ -1933,7 +2043,13 @@ public final class Runtime<State> {
 
     private func layoutReadsMoved() -> Bool {
         guard layoutFeedback.isOpen, !layoutSeen.isEmpty else { return false }
-        layoutKeyIndex.prepare(nodes: flatNodes, stamp: layoutCommitGen, lookups: layoutSeen.reads.count) { $0.key }
+        layoutKeyIndex.prepare(
+            nodes: flatNodes,
+            stamp: layoutCommitGen,
+            lookups: layoutSeen.reads.count,
+            keyOf: { $0.key },
+            highlightKeysOf: { $0.el.textHighlights?.compactMap(\.key) ?? [] }
+        )
         let idx = layoutKeyIndex.indexIfValid(stamp: layoutCommitGen)
         for entry in layoutSeen.reads {
             let cur = rectForRead(key: entry.key, nodes: flatNodes, index: idx)
@@ -2176,13 +2292,13 @@ public final class Runtime<State> {
         reconcilePlaygroundAfterCommit(at: now)
 
         lastPixelsSizeByPath.removeAll(keepingCapacity: true)
-        for node in newFlat {
+        for node in pass.nodes {
             if let px = node.el.pixelsPayload {
                 let sz = px.size
                 lastPixelsSizeByPath[node.path] = (sz.width, sz.height)
             }
         }
-        rebuildHoverCurves(for: newFlat)
+        rebuildHoverCurves(for: pass.nodes)
         if cut || viewCommitCount == 1 {
             hoverHoldState = .free
             syncHoverTracks(at: lastScaledAnimNow, cut: true, held: false)
@@ -2307,7 +2423,6 @@ public final class Runtime<State> {
                         }
                         continue
                     }
-                    guard isFreshOrExiting(dstNode.nodeId) else { continue }
                     let dstExtent = laidOutTextExtent(for: dstNode, rect: dstNode.targetRect, in: pass.nodes)
                     var tf = TextFlightState(
                         sourceKey: req.source,
@@ -2572,7 +2687,7 @@ public final class Runtime<State> {
                 ? intersectRects(inheritedClip, newTarget)
                 : inheritedClip
             let (sb, cInh) = Self.computeStaticTransform(
-                baseRect: newTarget,
+                baseRect: flatNodes[i].unscrolledRect,
                 el: flatNodes[i].el,
                 inh: inheritedStaticInh
             )
@@ -3627,17 +3742,21 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
             ))
             let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
-            let snapLayer = (canSnap && hasOwnScale)
+            let isAnchoredOverlay = el.anchor != nil
+            let isGrowthRow = growthRows["growth:\(snap.path)"] != nil || growthRows["fold:\(snap.path)"] != nil
+            let opensSnapLayer = hasOwnScale || (isAnchoredOverlay && !unscaled)
+            let snapLayer = (canSnap && opensSnapLayer)
                 ? pixelSnapGlides.layer(id: p.id, r: rExact, unscaled: rawEdgesPx, rigid: rigidPx, cached: el.isolatedLayer)
                 : inh.snap.layer
             let restForMotion: MotionRect? = (snaps && nodeMoving) ? rawRestRect : nil
+            let gliding = snaps && (restForMotion != nil || !unscaled)
             let (snappedEdgesPx, snapRest): (SIMD4<Float>, PixelSnap.Parent?)
             if !snaps {
                 (snappedEdgesPx, snapRest) = (rExact, nil)
             } else if restForMotion == nil && unscaled {
                 (snappedEdgesPx, snapRest) = pixelSnapGlides.atRest(id: p.id, r: rExact, rigid: rigidPx, parent: inh.snap.parent)
             } else {
-                let mot = PixelSnap.motion(rect: rawRect, rest: restForMotion, scale: pxScale, anchored: false, growthRow: false)
+                let mot = PixelSnap.motion(rect: rawRect, rest: restForMotion, scale: pxScale, anchored: isAnchoredOverlay, growthRow: isGrowthRow)
                 let rawArg = unscaled ? rExact : rawEdgesPx
                 let avgScale = (scaleVec.x + scaleVec.y) * 0.5
                 (snappedEdgesPx, snapRest) = pixelSnapGlides.snapped(
@@ -4093,6 +4212,19 @@ public final class Runtime<State> {
                 let innerW = max(0, (snappedEdgesPx[2] - snappedEdgesPx[0]) / pxScale - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
                 let textOriginX = snappedOriginX + padL
                 let textOriginY = snappedOriginY + padT
+                // A gliding box's text lays out from its nearest whole pixel and glides the remainder (`content.rs:221-236`).
+                let isGliding = gliding && flightCover == nil && abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5
+                let glidePx: Vec2 = isGliding
+                    ? Vec2(PixelSnap.textGlide(snappedEdgesPx[0]), PixelSnap.textGlide(snappedEdgesPx[1]))
+                    : .zero
+                let glideOffPx: Vec2 = isGliding
+                    ? Vec2(
+                        snappedEdgesPx[0] - snappedEdgesPx[0].rounded(.toNearestOrAwayFromZero),
+                        snappedEdgesPx[1] - snappedEdgesPx[1].rounded(.toNearestOrAwayFromZero)
+                    )
+                    : .zero
+                let restOriginX = textOriginX - glideOffPx.x / pxScale
+                let restOriginY = textOriginY - glideOffPx.y / pxScale
                 let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
@@ -4111,7 +4243,8 @@ public final class Runtime<State> {
                         style: inputStyle,
                         maxWidth: edit.multiline ? innerW : nil,
                         pixelScale: pxScale,
-                        emitGlyphs: !renderedStr.isEmpty
+                        emitGlyphs: !renderedStr.isEmpty,
+                        glidePx: glidePx
                     )
 
                     let inputClip = intersectRects(visClip, rect)
@@ -4134,8 +4267,8 @@ public final class Runtime<State> {
                             let sw = max(2.0, abs(cEnd.x - cStart.x))
                             primitives.append(.roundedRect(
                                 rect: SIMD4<Float>(
-                                    (textOriginX + sx) * pxScale,
-                                    (textOriginY + cStart.y) * pxScale,
+                                    (restOriginX + sx) * pxScale,
+                                    (restOriginY + cStart.y) * pxScale,
                                     sw * pxScale,
                                     cStart.w * pxScale
                                 ),
@@ -4147,8 +4280,8 @@ public final class Runtime<State> {
                             // Multi-line selection highlight: first line to right edge + last line from left edge
                             primitives.append(.roundedRect(
                                 rect: SIMD4<Float>(
-                                    (textOriginX + cStart.x) * pxScale,
-                                    (textOriginY + cStart.y) * pxScale,
+                                    (restOriginX + cStart.x) * pxScale,
+                                    (restOriginY + cStart.y) * pxScale,
                                     max(4, innerW - cStart.x) * pxScale,
                                     cStart.w * pxScale
                                 ),
@@ -4157,8 +4290,8 @@ public final class Runtime<State> {
                             ))
                             primitives.append(.roundedRect(
                                 rect: SIMD4<Float>(
-                                    textOriginX * pxScale,
-                                    (textOriginY + cEnd.y) * pxScale,
+                                    restOriginX * pxScale,
+                                    (restOriginY + cEnd.y) * pxScale,
                                     max(4, cEnd.x) * pxScale,
                                     cEnd.w * pxScale
                                 ),
@@ -4174,8 +4307,8 @@ public final class Runtime<State> {
                         let primIdx = primitives.count
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
-                                (textOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                (textOriginY + g.rect.y * scaleVec.y) * pxScale,
+                                (restOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                (restOriginY + g.rect.y * scaleVec.y) * pxScale,
                                 g.rect.z * scaleVec.x * pxScale,
                                 g.rect.w * scaleVec.y * pxScale
                             ),
@@ -4192,7 +4325,14 @@ public final class Runtime<State> {
                     if isFocused {
                         let byteOff = showingPlaceholder ? 0 : edit.cursor
                         let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
-                        let worldCaret = [textOriginX + cRect.x, textOriginY + cRect.y, cRect.z, cRect.w]
+                        let caretXPt: Float
+                        if isGliding {
+                            let cxPx = (textOriginX + cRect.x) * pxScale
+                            caretXPt = ((cxPx - glidePx.x).rounded(.toNearestOrAwayFromZero) + glidePx.x) / pxScale
+                        } else {
+                            caretXPt = textOriginX + cRect.x
+                        }
+                        let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
                         caretOut = worldCaret
                         if windowFocused {
                             let cc = (el.caretColor ?? Tok.accent(0, dark: systemDark))
@@ -4219,7 +4359,8 @@ public final class Runtime<State> {
                         style: el.textStyle,
                         maxWidth: wrapWidth,
                         pixelScale: pxScale,
-                        emitGlyphs: true
+                        emitGlyphs: true,
+                        glidePx: glidePx
                     )
                     if el.isHelpWhenTruncated {
                         let naturalSize = textSystem.measure(
@@ -4235,7 +4376,7 @@ public final class Runtime<State> {
                     }
                     let selPaintInk = emitSelectableHighlightIfNeeded(
                         snap: snap, el: el, isExiting: p.isExiting, activeSelectionRanges: activeSelectionRanges,
-                        textOriginX: textOriginX, textOriginY: textOriginY, scaleVec: scaleVec, pxScale: pxScale,
+                        textOriginX: restOriginX, textOriginY: restOriginY, scaleVec: scaleVec, pxScale: pxScale,
                         localAlpha: localAlpha, shaped: shaped, devClip: devClip, useLayer: useLayer, effRotate: effRotate,
                         into: &primitives
                     )
@@ -4253,6 +4394,48 @@ public final class Runtime<State> {
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
+                    if let hls = el.textHighlights, !hls.isEmpty, let txt = paintedLabelValue, !txt.isEmpty {
+                        let quads = TextHighlightPainter.quads(
+                            highlights: hls,
+                            in: txt,
+                            shaped: shaped,
+                            textSystem: textSystem,
+                            pixelScale: pxScale,
+                            origin: .zero
+                        )
+                        for q in quads {
+                            let hlRect = SIMD4<Float>(
+                                restOriginX * pxScale + q.rect.x * scaleVec.x,
+                                restOriginY * pxScale + q.rect.y * scaleVec.y,
+                                q.rect.z * scaleVec.x,
+                                q.rect.w * scaleVec.y
+                            )
+                            let bgColor = q.bg.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            if bgColor.w > 0.0005 {
+                                primitives.append(attachFade(.roundedRect(
+                                    rect: hlRect,
+                                    radii: SIMD4<Float>(repeating: q.cornerRadius * scaleVec.x),
+                                    fill: bgColor,
+                                    clip: devClip,
+                                    turn: useLayer ? 0 : effRotate
+                                )))
+                            }
+                            if let ring = q.ring, ring.width > 0 {
+                                let ringColor = ring.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                if ringColor.w > 0.0005 {
+                                    primitives.append(attachFade(.roundedRect(
+                                        rect: hlRect,
+                                        radii: SIMD4<Float>(repeating: q.cornerRadius * scaleVec.x),
+                                        fill: .zero,
+                                        borderColor: ringColor,
+                                        borderWidth: ring.width * scaleVec.x,
+                                        clip: devClip,
+                                        turn: useLayer ? 0 : effRotate
+                                    )))
+                                }
+                            }
+                        }
+                    }
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha
                     if glyphAlpha > 0.0005 {
                         for g in shaped.glyphs {
@@ -4260,8 +4443,8 @@ public final class Runtime<State> {
                             let primIdx = primitives.count
                             primitives.append(attachFade(.glyph(
                                 rect: SIMD4<Float>(
-                                    (textOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                    (textOriginY + g.rect.y * scaleVec.y) * pxScale,
+                                    (restOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                    (restOriginY + g.rect.y * scaleVec.y) * pxScale,
                                     g.rect.z * scaleVec.x * pxScale,
                                     g.rect.w * scaleVec.y * pxScale
                                 ),
@@ -4387,6 +4570,73 @@ public final class Runtime<State> {
                 a11yHidden: el.isA11yHidden,
                 stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x
             ))
+            if let hls = el.textHighlights, !hls.isEmpty,
+               let txt = elementTextValue, !txt.isEmpty,
+               snap.index < flatNodes.count {
+                let hlNode = flatNodes[snap.index]
+                let drawnBoxes = highlightBoxes(node: hlNode, boxRect: rect, scale: scaleVec)
+                let targetBoxes = highlightBoxes(node: hlNode, boxRect: snap.targetRect)
+                var drawnUnions = [MotionRect?](repeating: nil, count: hls.count)
+                var targetUnions = [MotionRect?](repeating: nil, count: hls.count)
+                for (k, r) in drawnBoxes {
+                    drawnUnions[k] = drawnUnions[k].map {
+                        MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
+                    } ?? r
+                }
+                for (k, r) in targetBoxes {
+                    targetUnions[k] = targetUnions[k].map {
+                        MotionRect(left: min($0.left, r.left), top: min($0.top, r.top), right: max($0.right, r.right), bottom: max($0.bottom, r.bottom))
+                    } ?? r
+                }
+                let txtUtf8 = Array(txt.utf8)
+                for (k, hl) in hls.enumerated() {
+                    guard let r = drawnUnions[k] else { continue }
+                    let t = targetUnions[k] ?? r
+                    let vis = intersectRects(r, visibleRect)
+                    let a = max(0, min(hl.byteRange.lowerBound, txtUtf8.count))
+                    let b = max(a, min(hl.byteRange.upperBound, txtUtf8.count))
+                    let words = (a < b) ? String(decoding: txtUtf8[a..<b], as: UTF8.self) : nil
+                    infos.append(ElementInfo(
+                        path: "\(snap.path)#mark-\(k)",
+                        key: hl.key,
+                        parentIndex: snap.index,
+                        role: .mark,
+                        rect: r.xywh,
+                        target: t.xywh,
+                        visible: vis.xywh,
+                        opacity: alpha,
+                        scale: scaleVec.x,
+                        blur: blurPt,
+                        radius: 4.0,
+                        fill: hl.bg,
+                        textColor: el.textColor ?? cxSettings.viewDefaults.foreground,
+                        text: words,
+                        label: words,
+                        help: resolvedRawHelp.map(runeHelpWords),
+                        selected: nil,
+                        expanded: nil,
+                        level: nil,
+                        itemSelected: false,
+                        focusable: false,
+                        focused: false,
+                        focusVisible: false,
+                        inert: snap.effectiveInert,
+                        moving: p.isMoving,
+                        exiting: p.isExiting,
+                        hover: 0,
+                        press: 0,
+                        scrolled: [scrolled.x, scrolled.y],
+                        caret: nil,
+                        secure: nodeIsSecure,
+                        disabled: el.a11yDisabled,
+                        checked: el.a11yChecked,
+                        a11yValue: el.a11yValue,
+                        a11yDescription: el.a11yDescription,
+                        a11yHidden: el.isA11yHidden,
+                        stuck: 0
+                    ))
+                }
+            }
 
             let ownClipCorners: Corners? = el.clipCorners ?? el.clipRadius.map { r in
                 el.corners.maxMagnitude > 0.001 ? p.corners : Corners(r, r, r, r)
@@ -5424,7 +5674,7 @@ public final class Runtime<State> {
                     directScrolledPaths.insert(path)
                     scrollRequestsState.stepCancel()
                     scrollMovedSinceLastFrame = true
-                    if !activeVirtualPaths.isEmpty || hasScrollCallbacks() {
+                    if scrollRequiresCommit {
                         pendingCommitKind = pendingCommitKind.instant()
                         dirtyCommit(at: now)
                     } else {
@@ -6237,8 +6487,7 @@ public final class Runtime<State> {
             && !tx.isForceCommitRequested
             && !nonOffsetCommitRequests
             && !flatNodes.isEmpty
-            && activeVirtualPaths.isEmpty
-            && !hasScrollCallbacks()
+            && !scrollRequiresCommit
         if canFastApplyOffsets {
             var anySnapped = false
             for req in tx.scrollOffsetRequests {

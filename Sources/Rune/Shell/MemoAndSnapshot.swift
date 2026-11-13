@@ -320,6 +320,33 @@ public enum MemoScope {
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
 
+    static func peekLayoutRect(_ key: String, window: Bool) -> [Float]? {
+        let rect = window ? current?.geometry[key]?.windowRect : current?.geometry[key]?.rect
+        return rect.map { [$0.left, $0.top, $0.width, $0.height] }
+    }
+
+    static func recordLayoutRead(_ read: MemoRead) {
+        current?.record(read)
+    }
+
+    static func makeLayoutWithRead<T: Equatable>(
+        _ key: String,
+        window: Bool,
+        rect: [Float]?,
+        _ transform: @escaping ([Float]) -> T
+    ) -> (read: MemoRead, value: T?) {
+        let initial = rect.map(transform)
+        let tag = MemoReadTag.next()
+        let box = UncheckedMotionPredicateBox { nextRect in
+            let next = nextRect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
+            return next == initial
+        }
+        let read: MemoRead = window
+            ? .windowLayoutWith(key: key, tag: tag) { box.matches($0) }
+            : .layoutWith(key: key, tag: tag) { box.matches($0) }
+        return (read, initial)
+    }
+
     static func readLayoutWith<T: Equatable & Sendable>(
         _ key: String,
         _ transform: @escaping @Sendable ([Float]) -> T,
@@ -380,6 +407,18 @@ public enum MemoScope {
         let rect = current?.geometry[key]?.caretRect
         current?.record(.caret(key: key, rect: rect))
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
+    }
+}
+
+private final class UncheckedMotionPredicateBox: @unchecked Sendable {
+    private let fn: (MotionRect?) -> Bool
+
+    init(_ fn: @escaping (MotionRect?) -> Bool) {
+        self.fn = fn
+    }
+
+    func matches(_ nextRect: MotionRect?) -> Bool {
+        fn(nextRect)
     }
 }
 

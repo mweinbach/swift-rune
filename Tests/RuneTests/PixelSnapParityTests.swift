@@ -642,4 +642,172 @@ struct PixelSnapParityTests {
             #expect(start.y != end.y || (start.y + start.w) != (end.y + end.w))
         }
     }
+
+    // MARK: - Pixel Scale & Text Glide Parity (`pixel_scale.rs` & `text_glide.rs`)
+
+    private func primitivesMatchWithColorTol(_ a: [Primitive], _ b: [Primitive], tol: Float = 1e-5) -> Bool {
+        guard a.count == b.count else { return false }
+        for (pa, pb) in zip(a, b) {
+            if pa.rect != pb.rect || pa.radii != pb.radii || pa.params != pb.params || pa.uv != pb.uv
+                || pa.clip != pb.clip || pa.fade != pb.fade || pa.fadeOrigin != pb.fadeOrigin || pa.turn != pb.turn {
+                return false
+            }
+            for k in 0..<4 {
+                if abs(pa.fill[k] - pb.fill[k]) > tol || abs(pa.border[k] - pb.border[k]) > tol {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    @Test("pixel_scale_change_matches_instances_from_a_fresh_runtime")
+    func pixelScaleChangeMatchesFreshRuntime() {
+        func makeRt(scale: Float) -> Runtime<()> {
+            Runtime(state: (), viewport: Vec2(240, 150), pixelScale: scale) { (_: (), _: inout Cx<()>) -> El<()> in
+                col().wFull().hFull().child(
+                    el().key("row").absolute(x: 0.123, y: 0.137).size(30.123, 20.137)
+                        .bg(.white).hover(.black).onClick { _ in }
+                )
+            }
+        }
+        let rt = makeRt(scale: 1.0)
+        _ = rt.frame(at: 0.0)
+        for scale: Float in [2.0, 1.5, 1.0] {
+            rt.setViewport(Vec2(240, 150), pixelScale: scale)
+            let p1 = rt.frame(at: 0.0).primitives
+            let fresh = makeRt(scale: scale)
+            let p2 = fresh.frame(at: 0.0).primitives
+            #expect(primitivesMatchWithColorTol(p1, p2), "settled hover rows resnap at scale \(scale)")
+        }
+    }
+
+    private struct GlideCard {
+        var at: SIMD2<Float>
+        var spring: Float
+    }
+
+    private func makeGlideRuntime(at: SIMD2<Float> = .zero, spring: Float) -> Runtime<GlideCard> {
+        Runtime(state: GlideCard(at: at, spring: spring), viewport: Vec2(240, 120), pixelScale: 2.0) { s, _ in
+            let label: El<GlideCard> = text("Quiet harbor glides")
+                .font(TextStyle(size: 13.0, weight: 500.0))
+                .color(.white)
+            let sp = Spring(duration: s.spring, bounce: 0.0)
+            let root: El<GlideCard> = el()
+            let card: El<GlideCard> = col()
+            return root.size(240, 120).child(
+                card.absolute(x: 20, y: 30).p(12).rounded(10)
+                    .bg(Color.white.mix(with: .black, t: 0.8))
+                    .border(1.0, Color.white.mix(with: .black, t: 0.6))
+                    .offset(s.at.x, s.at.y)
+                    .animate(sp)
+                    .child(label)
+            )
+        }
+    }
+
+    private func glideCardAt(_ scene: RefScene) -> SIMD2<Float> {
+        let r = scene.primitives.first { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.w > 0 }!.rect
+        return SIMD2<Float>(r.x, r.y)
+    }
+
+    private func glideInkAt(_ rt: Runtime<GlideCard>, scene: RefScene) -> SIMD2<Float> {
+        let atlas = rt.textSystem.glyphAtlas.atlas
+        var sum: Double = 0
+        var at = SIMD2<Double>(0, 0)
+        for p in scene.primitives where p.params.y == Float(PrimitiveKind.glyph.rawValue) {
+            let u = Int((p.uv.x * Float(atlas.width)).rounded())
+            let v = Int((p.uv.y * Float(atlas.height)).rounded())
+            let w = Int(p.rect.z.rounded())
+            let h = Int(p.rect.w.rounded())
+            for y in 0..<h {
+                for x in 0..<w {
+                    let row = v + y
+                    let col = u + x
+                    guard row >= 0, row < atlas.height, col >= 0, col < atlas.width else { continue }
+                    let c = Double(atlas.texels[row * atlas.width + col])
+                    sum += c
+                    at.x += c * (Double(p.rect.x) + Double(x) + 0.5)
+                    at.y += c * (Double(p.rect.y) + Double(y) + 0.5)
+                }
+            }
+        }
+        #expect(sum > 0, "draws glyphs")
+        return SIMD2<Float>(Float(at.x / sum), Float(at.y / sum))
+    }
+
+    private func runGlide(axis: Int, spring: Float, hz: Int) -> (spread: Float, travel: Float, masks: Int) {
+        let rt = makeGlideRuntime(spring: spring)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        let startMasks = rt.textSystem.glyphAtlas.cachedEntryCount
+        var lo: Float = .greatestFiniteMagnitude
+        var hi: Float = -.greatestFiniteMagnitude
+        var topLo: Float = .greatestFiniteMagnitude
+        var topHi: Float = -.greatestFiniteMagnitude
+        let steps = 5 * hz
+        for k in 1...steps {
+            let phase = Float(k) / Float(hz)
+            let d = -2.5 * (0.5 - 0.5 * cos(Float.pi * 2.0 * phase / 5.0))
+            rt.update(at: t) { st, _ in st.at[axis] = d }
+            t += 1.0 / Double(hz)
+            let scene = rt.frame(at: t)
+            let ink = glideInkAt(rt, scene: scene)
+            let card = glideCardAt(scene)
+            let off = ink[axis] - card[axis]
+            lo = min(lo, off)
+            hi = max(hi, off)
+            lo = min(lo, off)
+            hi = max(hi, off)
+            topLo = min(topLo, card[axis])
+            topHi = max(topHi, card[axis])
+        }
+        return (hi - lo, topHi - topLo, rt.textSystem.glyphAtlas.cachedEntryCount - startMasks)
+    }
+
+    @Test("text_glides_with_its_box")
+    func textGlidesWithItsBox() {
+        var ticks: [(Float, Int, Int, Float)] = []
+        for (spring, hz) in [(Float(0.08), 120), (Float(0.08), 60), (Float(0.3), 60), (Float(1.0), 120)] {
+            for axis in [1, 0] {
+                let (spread, travel, _) = runGlide(axis: axis, spring: spring, hz: hz)
+                #expect(travel > 4.5, "card moves ~5 device px: \(travel)")
+                if spread > 0.3 {
+                    ticks.append((spring, hz, axis, spread))
+                }
+            }
+        }
+        #expect(ticks.isEmpty, "ink ticks against card: \(ticks)")
+    }
+
+    @Test("a_glide_keeps_the_atlas_bounded")
+    func glideKeepsAtlasBounded() {
+        let rt = makeGlideRuntime(spring: 0.3)
+        let scene = rt.frame(at: 0.0)
+        let glyphs = scene.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }.count
+        let (_, _, masks) = runGlide(axis: 1, spring: 0.3, hz: 60)
+        #expect(masks <= glyphs * Int(GlyphAtlas.glidePhases), "\(masks) new masks for \(glyphs) glyphs")
+    }
+
+    @Test("a_glide_lands_on_the_resting_frame")
+    func glideLandsOnRestingFrame() {
+        let rt = makeGlideRuntime(spring: 0.3)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        for k in 1...40 {
+            rt.update(at: t) { st, _ in
+                st.at = SIMD2<Float>(0.7 * Float(k) / 40.0, -1.3 * Float(k) / 40.0)
+            }
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        for _ in 0..<120 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        let landed = rt.frame(at: t).primitives
+        let still = makeGlideRuntime(at: SIMD2<Float>(0.7, -1.3), spring: 0.3)
+        let stillPrims = still.frame(at: 0.0).primitives
+        #expect(primitivesMatchWithColorTol(landed, stillPrims), "landed card draws identically to a still one")
+    }
 }

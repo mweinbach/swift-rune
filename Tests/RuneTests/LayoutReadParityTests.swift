@@ -750,7 +750,9 @@ struct LayoutReadParityTests {
 
         for scaleMode in [false, true] {
             let rt = makeRt(scaleMode: scaleMode)
-            rt.reducedMotion = true
+            if scaleMode {
+                rt.reducedMotion = true
+            }
             var t = 0.0
             _ = rt.frame(at: t)
             var frames = 0
@@ -986,5 +988,232 @@ struct LayoutReadParityTests {
             _ = rt3.frame(at: t3)
         }
         #expect(abs(findInfo(rt3, key: "tag")!.target[1] - findInfo(rt3, key: "row10")!.rect[1]) < 0.01)
+    }
+
+    // MARK: - Missing Upstream Parity Tests (`layout_read.rs` & `layout_read_highlights.rs`)
+
+    @Test("drift_below_the_threshold_adds_up_until_a_whole_rect_read_re_runs")
+    func driftBelowThresholdAddsUp() {
+        struct S {}
+        let rt: Runtime<S> = Runtime(state: S(), viewport: Vec2(300, 400), pixelScale: 2.0) { (_: S, cx: inout Cx<S>) -> El<S> in
+            var rows: El<S> = col().wFull()
+            for i in 0..<40 {
+                rows = rows.child(el().key("r\(i)").wFull().h(30).shrink(0))
+            }
+            var root: El<S> = col().wFull().hFull().itemsStart()
+                .child(col().key("scroll").wFull().h(300).scroll(stickBottom: false).child(rows))
+            if let r = cx.windowLayout("r10") {
+                root = root.child(el().key("marker").absolute(x: r[0], y: r[1]).size(10, 10))
+            }
+            return root
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        for _ in 0..<100 {
+            t += 1.0 / 120.0
+            rt.wheel(WheelEvent(dx: 0, dy: -0.4), at: Vec2(100, 100), now: t)
+            _ = rt.frame(at: t)
+        }
+        let rowY = findInfo(rt, key: "r10")!.rect[1]
+        let markerY = findInfo(rt, key: "marker")!.target[1]
+        #expect(rowY < 270.0)
+        #expect(abs(markerY - rowY) <= 0.5)
+    }
+
+    @Test("a_field_that_appears_on_the_re_run_takes_the_focus_it_asks_for")
+    func fieldAppearingOnRerunTakesFocus() {
+        struct Editor {
+            var editing = false
+            var focusField = false
+            var field = TextEdit()
+        }
+        let rt: Runtime<Editor> = Runtime(state: Editor(), viewport: Vec2(300, 200), pixelScale: 2.0) { (s: Editor, cx: inout Cx<Editor>) -> El<Editor> in
+            var root: El<Editor> = col().wFull().hFull().p(10).child(el().key("node").size(120, 30))
+            if s.editing, let r = cx.layout("node") {
+                root = root.child(
+                    textInput(key: "editor", \Editor.field)
+                        .font(TextStyle(size: 14, weight: 400))
+                        .focused(s.focusField)
+                        .absolute(x: r[0], y: r[1])
+                        .w(r[2])
+                )
+            }
+            return root
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        rt.update(at: t) { st, _ in
+            st.editing = true
+            st.focusField = true
+        }
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        let editor = findInfo(rt, key: "editor")
+        #expect(editor != nil)
+        #expect(editor!.target[0] == 10.0 && editor!.target[1] == 10.0)
+        #expect(editor!.focused)
+        _ = rt.keyDown(KeyEvent(key: .text("a")), at: t)
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        #expect(rt.state.field.text == "a")
+    }
+
+    @Test("a_memo_layout_read_inside_a_scrolled_viewport_commits_nothing_while_it_scrolls")
+    func memoLayoutReadInScrolledViewportCommitsNothingWhileScrolling() {
+        final class Counter: @unchecked Sendable { var count = 0 }
+        struct Board {
+            var tall = false
+            let builds = Counter()
+            let withBuilds = Counter()
+        }
+        let rt: Runtime<Board> = Runtime(state: Board(), viewport: Vec2(300, 400), pixelScale: 2.0) { (s: Board, cx: inout Cx<Board>) -> El<Board> in
+            var rows: El<Board> = col().wFull()
+            for i in 0..<40 {
+                rows = rows.child(el().key("r\(i)").wFull().h(i == 10 && s.tall ? 50 : 30).shrink(0))
+            }
+            let memoLabel: El<Board> = memo("label", UInt64(0)) {
+                s.builds.count += 1
+                let r = Rune.layoutRect("r10")
+                let txt = r.map { "[\($0[0]), \($0[1]), \($0[2]), \($0[3])]" } ?? "nil"
+                return text(txt).key("label")
+            }
+            let memoWith: El<Board> = memo("cxWith", UInt64(0)) {
+                s.withBuilds.count += 1
+                let h = cx.layoutWith("r10") { Int($0[3].rounded()) } ?? -1
+                return text("h=\(h)").key("cxWithLabel")
+            }
+            return col().wFull().hFull().itemsStart()
+                .child(col().key("scroll").wFull().h(300).scroll(stickBottom: false).child(rows))
+                .child(memoLabel)
+                .child(memoWith)
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        stepFrames(rt, count: 10, t: &t)
+        let labelText = { findInfo(rt, key: "label")?.text }
+        let withText = { findInfo(rt, key: "cxWithLabel")?.text }
+        let r10Rect = { findInfo(rt, key: "r10")!.rect }
+        #expect(labelText() == "[0.0, 300.0, 300.0, 30.0]")
+        #expect(withText() == "h=30")
+        let commits = rt.viewCommitCount
+        let builds = rt.state.builds.count
+        let withBuilds = rt.state.withBuilds.count
+
+        // Programmatic scroll + wheel scroll should NOT commit or invalidate memo builds
+        _ = rt.updateIf(at: t) { _, tx in
+            tx.scrollToY("scroll", 200)
+            return false
+        }
+        stepFrames(rt, count: 60, t: &t)
+        #expect(abs(r10Rect()[1] - 100.0) < 0.5)
+        for _ in 0..<60 {
+            t += 1.0 / 120.0
+            rt.wheel(WheelEvent(dx: 0, dy: -3.0), at: Vec2(100, 100), now: t)
+            _ = rt.frame(at: t)
+        }
+        stepFrames(rt, count: 60, t: &t)
+        #expect(r10Rect()[1] < 0.0)
+        #expect(rt.viewCommitCount == commits)
+        #expect(rt.state.builds.count == builds)
+        #expect(rt.state.withBuilds.count == withBuilds)
+        #expect(labelText() == "[0.0, 300.0, 300.0, 30.0]")
+        #expect(withText() == "h=30")
+
+        // Real size change rebuilds on the commit that made it
+        rt.update(at: t) { st, _ in st.tall = true }
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        #expect(labelText() == "[0.0, 300.0, 300.0, 50.0]")
+        #expect(withText() == "h=50")
+        #expect(rt.state.builds.count > builds)
+        #expect(rt.state.withBuilds.count > withBuilds)
+    }
+
+    private func runScopedHighlightReadFollowsScrollsAndCommits(extraReads: Int) {
+        final class Box: @unchecked Sendable {
+            var seen: [Float]? = nil
+            var seenRows: [[Float]?] = []
+        }
+        struct S {
+            var hitRow: Int
+            var extraReads: Int
+            var box = Box()
+        }
+        let rt: Runtime<S> = Runtime(state: S(hitRow: 6, extraReads: extraReads), viewport: Vec2(300, 300), pixelScale: 1.0) { (s: S, cx: inout Cx<S>) -> El<S> in
+            s.box.seen = cx.windowLayout("row\(s.hitRow)/mark")
+            s.box.seenRows = (0..<s.extraReads).map { cx.windowLayout("row\($0)") }
+            var rows: El<S> = col().wFull()
+            for i in 0..<30 {
+                let body: El<S> = text("row \(i) text with a mark in it")
+                    .font(TextStyle(size: 14, weight: 400))
+                    .lineHeight(20)
+                    .textHighlight(TextHighlight(18..<22, bg: .white).key("mark"))
+                rows = rows.child(col().key("row\(i)").wFull().h(40).shrink(0).py(10).child(body))
+            }
+            return col().wFull().hFull().child(
+                col().key("list").wFull().h(200).scroll(stickBottom: false).child(rows)
+            )
+        }
+        func settle(_ t: inout Double) {
+            for _ in 0..<600 {
+                t += 1.0 / 60.0
+                _ = rt.frame(at: t)
+                if !rt.isAnimating && !rt.hasPendingActions && !rt.hasPendingCommit { return }
+            }
+            Issue.record("never settled")
+        }
+        func markOf(row: Int) -> [Float] {
+            let scope = "@row\(row)/"
+            let e = rt.elements().first { $0.key == "mark" && $0.path.contains(scope) }
+            #expect(e != nil, "mark in row \(row)")
+            return e?.rect ?? [0, 0, 0, 0]
+        }
+        func check(_ when: String) {
+            let seen = rt.state.box.seen
+            #expect(seen != nil, "\(when): read saw nothing")
+            if let seen {
+                let mark = markOf(row: rt.state.hitRow)
+                #expect(near4(seen, mark, tol: 0.75), "\(when): read \(seen) vs mark \(mark)")
+            }
+            for (i, sr) in rt.state.box.seenRows.enumerated() {
+                #expect(sr != nil, "\(when): row\(i) saw nothing")
+                if let sr {
+                    let row = findInfo(rt, key: "row\(i)")!.rect
+                    #expect(near4(sr, row, tol: 0.75), "\(when): row\(i) read \(sr) vs row \(row)")
+                }
+            }
+        }
+
+        var t = 0.0
+        _ = rt.frame(at: t)
+        settle(&t)
+        check("first layout")
+
+        for dy: Float in [-120.0, -160.0, 200.0] {
+            let before = markOf(row: rt.state.hitRow)[1]
+            t += 1.0 / 60.0
+            rt.wheel(WheelEvent(dx: 0, dy: dy), at: Vec2(100, 100), now: t)
+            settle(&t)
+            #expect(markOf(row: rt.state.hitRow)[1] != before, "the wheel scrolled")
+            check("wheeled \(dy)")
+        }
+
+        rt.update(at: t) { st, _ in st.hitRow = 2 }
+        settle(&t)
+        check("after commit")
+        t += 1.0 / 60.0
+        rt.wheel(WheelEvent(dx: 0, dy: 400.0), at: Vec2(100, 100), now: t)
+        settle(&t)
+        check("wheeled back after commit")
+    }
+
+    @Test("a_scoped_highlight_read_follows_scrolls_and_commits")
+    func scopedHighlightReadFollowsScrollsAndCommits() {
+        runScopedHighlightReadFollowsScrollsAndCommits(extraReads: 0)
+    }
+
+    @Test("many_reads_follow_scrolls_and_commits")
+    func manyReadsFollowScrollsAndCommits() {
+        runScopedHighlightReadFollowsScrollsAndCommits(extraReads: 12)
     }
 }

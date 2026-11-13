@@ -195,6 +195,7 @@ struct LayoutSeenState {
 /// Fast key/path lookup index mirroring `crates/rune/src/runtime/key_index.rs`.
 struct LayoutKeyIndex {
     private var byLeafKey: [String: [Int]] = [:]
+    private var byHighlightKey: [String: [Int]] = [:]
     private var builtStamp: UInt64 = 0
     private var seenStamp: UInt64 = 0
     private var isBuilt: Bool = false
@@ -204,9 +205,15 @@ struct LayoutKeyIndex {
         seenStamp = 0
     }
 
-    mutating func prepare<N>(nodes: [N], stamp: UInt64, lookups: Int, keyOf: (N) -> String?) {
+    mutating func prepare<N>(
+        nodes: [N],
+        stamp: UInt64,
+        lookups: Int,
+        keyOf: (N) -> String?,
+        highlightKeysOf: ((N) -> [String])? = nil
+    ) {
         if (!isBuilt || builtStamp != stamp) && (lookups > LayoutReadConstants.scanReads || (seenStamp == stamp && stamp != 0)) {
-            build(nodes: nodes, keyOf: keyOf)
+            build(nodes: nodes, keyOf: keyOf, highlightKeysOf: highlightKeysOf)
             builtStamp = stamp
             isBuilt = true
         }
@@ -217,11 +224,25 @@ struct LayoutKeyIndex {
         (isBuilt && builtStamp == stamp) ? self : nil
     }
 
-    mutating func build<N>(nodes: [N], keyOf: (N) -> String?) {
+    mutating func build<N>(
+        nodes: [N],
+        keyOf: (N) -> String?,
+        highlightKeysOf: ((N) -> [String])? = nil
+    ) {
         byLeafKey.removeAll(keepingCapacity: true)
+        byHighlightKey.removeAll(keepingCapacity: true)
         for (i, node) in nodes.enumerated() {
             if let k = keyOf(node) {
                 byLeafKey[k, default: []].append(i)
+            }
+            if let highlightKeysOf {
+                let hKeys = highlightKeysOf(node)
+                if !hKeys.isEmpty {
+                    var seenForNode: Set<String> = []
+                    for hk in hKeys where seenForNode.insert(hk).inserted {
+                        byHighlightKey[hk, default: []].append(i)
+                    }
+                }
             }
         }
     }
@@ -250,6 +271,49 @@ struct LayoutKeyIndex {
             curParent = parentOf(nodes[p])
         }
         return true
+    }
+
+    /// Mirrors `crate::flight::selects_under(selector, path, highlightKey)`: checks whether `selector`
+    /// selects a highlight keyed `highlightKey` on `nodes[nodeIndex]` under its keyed ancestors.
+    static func selectsUnder<N>(
+        selector: String,
+        nodeIndex: Int,
+        nodes: [N],
+        keyOf: (N) -> String?,
+        parentOf: (N) -> Int?,
+        highlightKey: String
+    ) -> Bool {
+        if !selector.contains("/") {
+            return selector == highlightKey
+        }
+        let parts = selector.split(separator: "/", omittingEmptySubsequences: false)
+        guard let leaf = parts.last, leaf == highlightKey else { return false }
+        var cur: Int? = nodeIndex
+        for seg in parts.dropLast().reversed() {
+            while let p = cur, keyOf(nodes[p]) == nil {
+                cur = parentOf(nodes[p])
+            }
+            guard let p = cur, let pKey = keyOf(nodes[p]), pKey == seg else {
+                return false
+            }
+            cur = parentOf(nodes[p])
+        }
+        return true
+    }
+
+    static func markedCandidates<N>(
+        selector: String,
+        index: LayoutKeyIndex?,
+        nodes: [N]
+    ) -> [Int]? {
+        guard let index else { return nil }
+        let leaf: String
+        if let slash = selector.lastIndex(of: "/") {
+            leaf = String(selector[selector.index(after: slash)...])
+        } else {
+            leaf = selector
+        }
+        return (index.byHighlightKey[leaf] ?? []).filter { $0 < nodes.count }
     }
 
     static func firstMatch<N>(
@@ -316,10 +380,15 @@ extension Cx {
         token: AnyHashable? = nil,
         _ transform: @escaping ([Float]) -> T
     ) -> T? {
-        let rect = layoutCollector.seenRect(for: key)
-        let value = rect.map(transform)
+        let memoRect = MemoScope.isInsideMemo ? MemoScope.peekLayoutRect(key, window: false) : nil
+        let rect = layoutCollector.seenRect(for: key) ?? memoRect
+        let built = MemoScope.makeLayoutWithRead(key, window: false, rect: rect, transform)
+        if MemoScope.isInsideMemo {
+            MemoScope.recordLayoutRead(built.read)
+        }
         layoutCollector.noteRead(key: key, same: LayoutSame.make(token: token, transform))
-        return value
+        envState.reads.layoutReads.append(built.read)
+        return built.value
     }
 
     /// `[width, height]` of `Cx.layout(key)`, re-running only when size changes.
@@ -348,7 +417,16 @@ extension Cx {
         token: AnyHashable? = nil,
         _ transform: @escaping ([Float]) -> T
     ) -> T? {
-        layoutWith(LayoutReadConstants.windowKey(key), token: token, transform)
+        let winKey = LayoutReadConstants.windowKey(key)
+        let memoRect = MemoScope.isInsideMemo ? MemoScope.peekLayoutRect(key, window: true) : nil
+        let rect = layoutCollector.seenRect(for: winKey) ?? memoRect
+        let built = MemoScope.makeLayoutWithRead(key, window: true, rect: rect, transform)
+        if MemoScope.isInsideMemo {
+            MemoScope.recordLayoutRead(built.read)
+        }
+        layoutCollector.noteRead(key: winKey, same: LayoutSame.make(token: token, transform))
+        envState.reads.layoutReads.append(built.read)
+        return built.value
     }
 }
 
@@ -392,6 +470,7 @@ extension El {
     /// Writes each frame's drawn `MotionRect` directly into `rect` with no handler or commit.
     public func drawnRectInto(_ rect: Live<MotionRect>) -> Self {
         var copy = self
+        copy.drawnRectLive = rect
         copy.handlers.drawnRectUpdate = { r in rect.set(r) }
         return copy
     }

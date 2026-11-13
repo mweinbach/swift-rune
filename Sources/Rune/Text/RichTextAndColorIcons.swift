@@ -447,6 +447,12 @@ public struct TextHighlight: Sendable, Hashable {
         h.pad = max(0, p)
         return h
     }
+
+    public func key(_ k: String) -> Self {
+        var h = self
+        h.key = k
+        return h
+    }
 }
 
 /// Computed highlight quad (merging contiguous same-line boxes per `decorations.rs:239-250`).

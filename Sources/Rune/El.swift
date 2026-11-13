@@ -605,6 +605,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case list = "list"
     case menuItemCheckbox = "menu-item-check-box"
     case passwordInput = "password-input"
+    case mark = "mark"
 }
 
 /// Live property binding entry attached to an `El`.
@@ -749,6 +750,7 @@ struct ElColdData<State> {
     var a11yHref: String? = nil
 
     var richSpans: [TextSpan]? = nil
+    var textHighlights: [TextHighlight]? = nil
     var liveText: LiveText? = nil
     var placeholder: String? = nil
     var placeholderColor: Color? = nil
@@ -840,6 +842,7 @@ public struct El<State> {
 
     // Cold / CoW properties (keeps `El<State>` compact on worker thread stacks)
     public var richSpans: [TextSpan]? { get { _cold?.data.richSpans } set { ensureCold().data.richSpans = newValue } }
+    public var textHighlights: [TextHighlight]? { get { _cold?.data.textHighlights } set { ensureCold().data.textHighlights = newValue } }
     public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
     public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
     public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
@@ -1916,6 +1919,24 @@ public struct El<State> {
     public func focusHighlight(_ color: Color) -> Self {
         var copy = self
         copy.focusHighlightColor = color
+        return copy
+    }
+
+    /// Paint-only background highlight over UTF-8 byte ranges of text (`El::text_highlight`).
+    public func textHighlight(_ highlight: TextHighlight) -> Self {
+        var copy = self
+        var list = copy.textHighlights ?? []
+        list.append(highlight)
+        copy.textHighlights = list
+        return copy
+    }
+
+    /// Attaches multiple paint-only text highlights (`El::text_highlights`).
+    public func textHighlights(_ highlights: [TextHighlight]) -> Self {
+        var copy = self
+        var list = copy.textHighlights ?? []
+        list.append(contentsOf: highlights)
+        copy.textHighlights = list
         return copy
     }
 
