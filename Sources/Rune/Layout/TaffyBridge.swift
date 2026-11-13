@@ -382,8 +382,12 @@ enum TaffyBridge {
             }
             let cx = child.layout.location.x
             let cy = child.layout.location.y
-            let rightEdge = cx + max(child.layout.size.width, child.content.x) + child.layout.margin.right + padRight
-            let bottomEdge = cy + max(child.layout.size.height, child.content.y) + child.layout.margin.bottom + padBottom
+            let clipsX = child.style.overflow.x != .visible
+            let clipsY = child.style.overflow.y != .visible
+            let childW = clipsX ? child.layout.size.width : max(child.layout.size.width, child.content.x)
+            let childH = clipsY ? child.layout.size.height : max(child.layout.size.height, child.content.y)
+            let rightEdge = cx + childW + child.layout.margin.right + padRight
+            let bottomEdge = cy + childH + child.layout.margin.bottom + padBottom
             maxX = max(maxX, rightEdge)
             maxY = max(maxY, bottomEdge)
         }

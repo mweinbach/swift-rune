@@ -358,6 +358,7 @@ extension Runtime {
                     rowEl = rowEl.key(rowKey)
                 }
             }
+            var walkSeen = rowSeenKeys
             let (rowSeg, _) = layoutPathSegment(
                 keyId: rowEl.keyId,
                 siblingIndex: built.count,
@@ -369,7 +370,7 @@ extension Runtime {
                 &rowEl,
                 parentPath: path,
                 siblingIndex: built.count,
-                siblingKeysSeen: &rowSeenKeys,
+                siblingKeysSeen: &walkSeen,
                 scrollPath: nextScrollPath,
                 scrollStickBottom: nextStickBottom,
                 remountRowCache: remountRowCache,
