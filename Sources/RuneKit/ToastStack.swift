@@ -605,6 +605,7 @@ public struct Toast<State> {
                     .font(kit.ty.uiMedium.lh(20))
                     .color(fgCol)
                     .ellipsis()
+                    .a11yHidden()
             )
         if let descriptionText, !descriptionText.isEmpty {
             contentCol = contentCol.child(
@@ -613,15 +614,16 @@ public struct Toast<State> {
                     .font(kit.ty.ui)
                     .color(variant == .neutral ? kit.c.textMuted : fgCol.alpha(0.85))
                     .wFull()
+                    .a11yHidden()
             )
         }
 
         var topRow: El<State> = row().key("\(key)-top").wFull().gap(12).itemsStart()
         if let customLead {
-            topRow = topRow.child(el().key("\(key)-icon").w(16).h(20).center().child(customLead))
+            topRow = topRow.child(el().key("\(key)-icon").w(16).h(20).center().a11yHidden().child(customLead))
         } else if let svg = iconSvg ?? toneIcon {
             let tint = iconColor ?? ((variant == .accent) ? kit.c.textAccent : (variant == .neutral ? kit.c.iconBase : fgCol))
-            topRow = topRow.child(el().key("\(key)-icon").w(16).h(20).center().child(Rune.icon(svg, size: 16).color(tint)))
+            topRow = topRow.child(el().key("\(key)-icon").w(16).h(20).center().a11yHidden().child(Rune.icon(svg, size: 16).color(tint)))
         }
         topRow = topRow.child(contentCol)
 
@@ -637,7 +639,7 @@ public struct Toast<State> {
                 .focusable()
                 .focusRing(kit.c.borderFocus, offset: 0)
                 .hover(kit.c.hover)
-                .child(Rune.icon(kit.glyph.close, size: 16).color(kit.c.iconMuted))
+                .child(Rune.icon(kit.glyph.close, size: 16).color(kit.c.iconMuted).a11yHidden())
             if let closeHandler {
                 closeBtn = closeBtn.onClick(closeHandler)
             }
@@ -646,6 +648,8 @@ public struct Toast<State> {
 
         var root: El<State> = col()
             .key(key)
+            .role(.alert) // Blocked on @el: ElementRole.status
+            .liveRegion(.polite)
             .label(titleText)
             .w(ToastMetrics.toastWidth)
             .p(12)
@@ -659,7 +663,7 @@ public struct Toast<State> {
             root = root.border(1.0, borderCol)
         }
         if let descriptionText, !descriptionText.isEmpty {
-            root = root.help(descriptionText)
+            root = root.description(descriptionText)
         }
         root = root.child(topRow)
 
@@ -725,6 +729,7 @@ public struct ToastRegion<State> {
     public func build() -> El<State> {
         var stack: El<State> = col()
             .key(key)
+            .role(.region)
             .label("Notifications")
             .gap(gap)
             .z(zIndex)

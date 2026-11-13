@@ -667,14 +667,20 @@ extension Kit {
         }
 
         let contentEl: El<State> = if caps.isEmpty {
-            text(placeholder).font(ty.uiCompact).color(c.textFaint)
+            text(placeholder).font(ty.uiCompact).color(c.textFaint).a11yHidden()
         } else {
-            keybind(caps)
+            keybind(caps).a11yHidden()
         }
+
+        let displayValue = state.isRecording
+            ? "Press shortcut"
+            : (caps.isEmpty ? placeholder : caps.joined(separator: " "))
 
         var control: El<State> = row()
             .key(key)
             .role(.button)
+            .disabled(disabled)
+            .a11yValue(displayValue)
             .w(width)
             .h(32)
             .px(8)
@@ -692,7 +698,9 @@ extension Kit {
             control = control.label(caps.isEmpty ? placeholder : caps.joined(separator: " "))
         }
         if state.isRecording {
-            control = control.help("Press a shortcut. Escape cancels; Backspace clears.")
+            control = control
+                .description("Press a shortcut, or Escape to cancel")
+                .help("Press a shortcut. Escape cancels; Backspace clears.")
         }
 
         if let onClear, state.shortcut != nil, !disabled {

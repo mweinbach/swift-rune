@@ -184,9 +184,10 @@ public struct Select<State> {
 
             var item: El<State> = row()
                 .key(optKey)
-                .role(.listItem) // maps to .option once ElementRole adds it
+                .role(.option)
                 .focusable(true)
                 .itemSelected(isSel)
+                .positionInSet(i + 1, size: opts.count)
                 .autofocus(isSel || (currentValue == nil && i == 0))
                 .label(entry.label)
                 .h(28.0)
@@ -199,17 +200,18 @@ public struct Select<State> {
                 .bg(isHL ? c.hover : .transparent)
                 .hover(c.hover)
                 .focusRing(c.borderFocus)
-                .child(text(entry.label).key("label").font(k.ty.uiCompact).color(c.textBase).grow(1.0).shrink(1.0).ellipsis())
+                .child(text(entry.label).key("label").font(k.ty.uiCompact).color(c.textBase).grow(1.0).shrink(1.0).ellipsis().a11yHidden())
                 .child(
                     el()
                         .key("indicator")
                         .size(16.0, 16.0)
                         .center()
+                        .a11yHidden()
                         .child(icon(KitIcons.checkSmall, size: 14.0).color(c.iconBase).opacity(isSel ? 1.0 : 0.0))
                 )
 
             if i < optionDetails.count, let desc = optionDetails[i] {
-                item = item.help(desc)
+                item = item.description(desc)
             }
 
             let optVal = entry.label
@@ -261,7 +263,7 @@ public struct Select<State> {
         let boxName = a11yName ?? placeholderText
         let listbox: El<State> = col()
             .key("listbox")
-            .role(.group)
+            .role(.listbox)
             .label(boxName)
             .focusGroup(true)
             .maxH(Self.listboxMaxHeight)
@@ -271,6 +273,7 @@ public struct Select<State> {
 
         var content: El<State> = col()
             .key("\(key)-content")
+            .role(.dialog)
             .label(boxName)
             .minW(160.0)
             .maxW(368.0)
@@ -305,6 +308,7 @@ public struct Select<State> {
                 .absolute(x: 0.0, y: 0.0)
                 .wFull()
                 .hFull()
+                .a11yHidden()
                 .onClick { s, tx in
                     closeCb(&s, &tx)
                     tx.focus(anchorKey)
@@ -342,15 +346,16 @@ public struct Select<State> {
 
         var trigger: El<State> = row()
             .key(anchorKey)
-            .role(.button) // maps to .combobox once ElementRole adds it
+            .role(.combobox)
             .label(name)
             .expanded(isOpen)
+            .disabled(disabled)
             .inert(disabled)
             .itemsCenter()
             .focusable(!disabled)
 
         if let currentValue {
-            trigger = trigger.help(currentValue)
+            trigger = trigger.a11yValue(currentValue)
         }
 
         switch appearanceStyle {
@@ -364,8 +369,8 @@ public struct Select<State> {
                 .py(4.0)
                 .gap(4.0)
                 .rounded(k.radius.sm)
-                .child(text(labelText).key("value").font(font).color(ink).ellipsis())
-                .child(icon(chevron, size: 16.0).key("chevron").color(c.iconMuted))
+                .child(text(labelText).key("value").font(font).color(ink).ellipsis().a11yHidden())
+                .child(icon(chevron, size: 16.0).key("chevron").color(c.iconMuted).a11yHidden())
             if isHover {
                 trigger = trigger.bg(c.hover)
             } else if controlState == .pressed {
@@ -389,12 +394,14 @@ public struct Select<State> {
                         .grow(1.0)
                         .shrink(1.0)
                         .pl(8.0)
-                        .child(text(labelText).font(k.ty.uiCompact).color(ink).ellipsis())
+                        .a11yHidden()
+                        .child(text(labelText).font(k.ty.uiCompact).color(ink).ellipsis().a11yHidden())
                 )
                 .child(
                     el()
                         .size(20.0, 20.0)
                         .center()
+                        .a11yHidden()
                         .child(icon(chevron, size: 16.0).key("chevron").color(c.iconMuted))
                 )
 
@@ -535,10 +542,10 @@ public struct Dialog<State> {
         var titleCol: El<State> = col()
             .grow(1.0)
             .gap(4.0)
-            .child(text(titleText).font(titleFont).color(k.c.textBase))
+            .child(text(titleText).font(titleFont).color(k.c.textBase).a11yHidden())
 
         if let desc = descriptionText {
-            titleCol = titleCol.child(text(desc).font(k.ty.ui.lh(20.0)).color(k.c.textMuted))
+            titleCol = titleCol.child(text(desc).font(k.ty.ui.lh(20.0)).color(k.c.textMuted).a11yHidden())
         }
 
         var bodyCol: El<State> = col().key("body").wFull()
@@ -553,6 +560,7 @@ public struct Dialog<State> {
             .key("\(key)-dialog")
             .role(.dialog)
             .label(titleText)
+            .modalTx(clickOutside: outsideDismiss, dismiss: closeHandler)
             .wFull()
             .maxW(widthValue)
             .rounded(6.0)
@@ -579,7 +587,7 @@ public struct Dialog<State> {
             }
 
         if let desc = descriptionText {
-            panel = panel.help(desc)
+            panel = panel.description(desc)
         }
 
         var scrim: El<State> = el()
@@ -589,6 +597,7 @@ public struct Dialog<State> {
             .hFull()
             .bg(k.c.scrim)
             .animate(k.motion.overlay)
+            .a11yHidden()
 
         if outsideDismiss {
             scrim = scrim.onClick { s, tx in
@@ -745,16 +754,16 @@ public struct MenuItem<State> {
         let danger = isDanger && !disabled
         let ink = danger ? c.danger.fg : baseInk
 
-        var content: El<State> = row().key("content").grow(1.0).shrink(1.0).gap(8.0).itemsCenter()
+        var content: El<State> = row().key("content").grow(1.0).shrink(1.0).gap(8.0).itemsCenter().a11yHidden()
         if let leadEl {
             content = content.child(leadEl)
         }
         if let svg = iconSVG {
             let iconColor = danger ? c.danger.fg : (standard ? stdIcon : c.iconBase)
-            content = content.child(Rune.icon(svg, size: 14.0).key("icon").color(iconColor))
+            content = content.child(Rune.icon(svg, size: 14.0).key("icon").color(iconColor).a11yHidden())
         }
 
-        let labelEl: El<State> = text(labelText).key("label").font(font).color(ink).ellipsis()
+        let labelEl: El<State> = text(labelText).key("label").font(font).color(ink).ellipsis().a11yHidden()
         if let d = descriptionText {
             let dFont = standard ? k.ty.textXsmall : k.ty.small
             let dColor = standard ? weak : c.textFaint
@@ -765,7 +774,7 @@ public struct MenuItem<State> {
                     .shrink(1.0)
                     .gap(2.0)
                     .child(labelEl)
-                    .child(text(d).key("description").font(dFont).color(dColor).ellipsis())
+                    .child(text(d).key("description").font(dFont).color(dColor).ellipsis().a11yHidden())
             )
         } else {
             content = content.child(labelEl)
@@ -773,19 +782,24 @@ public struct MenuItem<State> {
 
         var e: El<State> = row()
             .key(key)
+            // Blocked on @el: checked menu items use `.role(.menuItemCheckbox)` once ElementRole adds it.
             .role(.menuItem)
             .label(labelText)
+            .disabled(disabled)
             .rounded(standard ? k.radius.sm : 4.0)
             .gap(8.0)
             .itemsCenter()
 
         if let on = checkedState {
-            e = e.itemSelected(on)
+            e = e.checked(on).itemSelected(on)
         }
         if let d = descriptionText, let b = badgeText {
-            e = e.help("\(d), \(b)")
+            e = e.description("\(d), \(b)")
         } else if let d = descriptionText ?? badgeText {
-            e = e.help(d)
+            e = e.description(d)
+        }
+        if let s = shortcutText {
+            e = e.shortcutHint(s)
         }
         if let sub = submenuData {
             e = e.expanded(sub.open)
@@ -810,7 +824,7 @@ public struct MenuItem<State> {
 
         if let s = shortcutText {
             let st = k.ty.smallMedium.lh(11.0)
-            e = e.child(text(s).key("shortcut").font(st).color(c.textFaint))
+            e = e.child(text(s).key("shortcut").font(st).color(c.textFaint).a11yHidden())
         }
         if let b = badgeText {
             e = e.child(
@@ -822,6 +836,7 @@ public struct MenuItem<State> {
                     .rounded(2.0)
                     .bg(c.layer02)
                     .border(0.5, c.borderBase)
+                    .a11yHidden()
                     .child(text(b).font(k.ty.smallMedium.lh(11.0)).color(c.textMuted))
             )
         }
@@ -829,13 +844,14 @@ public struct MenuItem<State> {
             let mark: El<State> = Rune.icon(KitIcons.checkSmall, size: 14.0)
                 .color(standard ? stdIcon : c.iconBase)
                 .opacity(on ? 1.0 : 0.0)
-            e = e.child(el().key("indicator").size(16.0, 16.0).center().child(mark))
+            e = e.child(el().key("indicator").size(16.0, 16.0).center().a11yHidden().child(mark))
         }
         if let (entries, subOpen) = submenuData {
             e = e.child(
                 Rune.icon(KitIcons.caretRight, size: 16.0)
                     .key("chevron")
                     .color(standard ? stdIcon : c.textFaint)
+                    .a11yHidden()
             )
             if subOpen {
                 var subMenu = Menu<State>("\(key)-sub")
@@ -1004,7 +1020,7 @@ public struct Menu<State> {
             case .separator:
                 let m: Float = isStandard ? 4.0 : 2.0
                 let sepCol = isStandard ? weakBorder : c.borderMuted
-                list = list.child(el().key("sep\(i)").h(1.0).mt(m).mb(m).ml(-m).mr(-m).bg(sepCol))
+                list = list.child(el().key("sep\(i)").h(1.0).mt(m).mb(m).ml(-m).mr(-m).bg(sepCol).a11yHidden())
             case .label(let l):
                 let e: El<State> = row().key("label\(i)").itemsCenter()
                 if isStandard {
@@ -1089,6 +1105,7 @@ public struct Menu<State> {
                 .absolute(x: 0.0, y: 0.0)
                 .wFull()
                 .hFull()
+                .a11yHidden()
                 .onClick { s, tx in
                     closeHandler(&s, &tx)
                     tx.focus(returnKey)
@@ -1229,7 +1246,8 @@ public struct List<State> {
         let isListbox = itemList.contains { $0.selectHandler != nil }
         var scrollCol: El<State> = col()
             .key("scroll")
-            .role(.group)
+            // Blocked on @el: non-listbox List uses `.role("list")`, not in ElementRole yet.
+            .role(isListbox ? .listbox : .group)
             .wFull()
             .gap(12.0)
         if isListbox {
@@ -1253,6 +1271,21 @@ public struct List<State> {
         var groups: [El<State>] = []
         var currentGroup: (name: String?, el: El<State>)? = nil
         let n = itemList.count
+        var places: [(Int, Int)] = Array(repeating: (1, max(1, n)), count: n)
+        do {
+            var runStart = 0
+            while runStart < n {
+                var runEnd = runStart + 1
+                while runEnd < n && itemList[runEnd].groupName == itemList[runStart].groupName {
+                    runEnd += 1
+                }
+                let runCount = runEnd - runStart
+                for j in 0..<runCount {
+                    places[runStart + j] = (j + 1, runCount)
+                }
+                runStart = runEnd
+            }
+        }
 
         for (i, item) in itemList.enumerated() {
             if currentGroup == nil || currentGroup?.name != item.groupName {
@@ -1273,6 +1306,7 @@ public struct List<State> {
                                 .pl(8.0)
                                 .pr(12.0)
                                 .bg(c.surfaceRaised)
+                                .a11yHidden()
                                 .child(text(gName).font(itemFont).color(weak))
                         )
                 }
@@ -1284,23 +1318,24 @@ public struct List<State> {
 
             var r: El<State> = row()
                 .key("item\(i)")
-                .role(.listItem)
+                .role(pressable ? .option : .listItem)
                 .label(item.label)
+                .positionInSet(places[i].0, size: places[i].1)
                 .wFull()
                 .px(8.0)
                 .py(6.0)
                 .itemsCenter()
                 .rounded(k.radius.md)
                 .gap(4.0)
-                .child(text(item.label).font(itemFont).color(strong).shrink(1.0).ellipsis())
+                .child(text(item.label).font(itemFont).color(strong).shrink(1.0).ellipsis().a11yHidden())
 
             if item.isSelected {
-                r = r.child(icon(KitIcons.checkSmall, size: 16.0).color(stdIcon))
+                r = r.child(icon(KitIcons.checkSmall, size: 16.0).color(stdIcon).a11yHidden())
             }
             if isAct {
                 r = r.bg(raisedHover)
                 if let ai = activeIconSVG {
-                    r = r.child(icon(ai, size: 16.0).color(stdIcon))
+                    r = r.child(icon(ai, size: 16.0).color(stdIcon).a11yHidden())
                 }
             } else {
                 r = r.hover(raisedHover)
@@ -1310,7 +1345,7 @@ public struct List<State> {
                 r = r.focusable(true).itemSelected(item.isSelected).focusRing(c.borderFocus)
             }
             if hasDivider && i + 1 < n {
-                r = r.child(el().key("divider").h(1.0).pin(right: 16.0, bottom: 0.0, left: 16.0).bg(weakBorder))
+                r = r.child(el().key("divider").h(1.0).pin(right: 16.0, bottom: 0.0, left: 16.0).bg(weakBorder).a11yHidden())
             }
             if let handler = item.selectHandler {
                 let pIdx = pressableIndices.firstIndex(of: i)

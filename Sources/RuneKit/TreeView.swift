@@ -260,7 +260,8 @@ public struct TreeRowItem<State> {
             said.append(badgeText)
         }
         if !said.isEmpty {
-            e = e.help(said.joined(separator: ", "))
+            let desc = said.joined(separator: ", ")
+            e = e.description(desc).help(desc)
         }
 
         e = r.selected ? e.bg(style.selected) : e.hover(style.hover)
@@ -283,7 +284,7 @@ public struct TreeRowItem<State> {
 
         let isFolder = r.expanded != nil
         let iconInLane = style.chevronOnly && !isFolder && iconSVG != nil
-        let chevronBox: El<State> = el().key("chevron").size(chevronW, chevronW).itemsCenter().justifyCenter()
+        let chevronBox: El<State> = el().key("chevron").size(chevronW, chevronW).itemsCenter().justifyCenter().a11yHidden()
         if let open = r.expanded {
             let chevronColor = r.selected ? style.chevronSelected : style.chevronRest
             let chevronGlyph: El<State> = Rune.icon(style.chevron ?? KitIcons.chevronDown, size: 16.0)
@@ -302,6 +303,7 @@ public struct TreeRowItem<State> {
                 Rune.icon(svg, size: 16.0)
                     .key("icon")
                     .color(iconColorValue ?? c.iconMuted)
+                    .a11yHidden()
             )
         }
 
@@ -339,10 +341,11 @@ public struct TreeRowItem<State> {
                 .shrink(1.0)
                 .minW(0.0)
                 .ellipsis()
+                .a11yHidden()
         )
 
         if let (add, del) = changesPair {
-            var counts: El<State> = row().key("changes").gap(4.0).itemsCenter()
+            var counts: El<State> = row().key("changes").gap(4.0).itemsCenter().a11yHidden()
             let f = k.ty.textXsmall
             if add > 0 {
                 counts = counts.child(text("+\(add)").key("added").font(f).color(c.success.icon))
@@ -354,10 +357,10 @@ public struct TreeRowItem<State> {
         }
 
         if let b = badgeText {
-            e = e.child(text(b).key("badge").font(k.ty.textXsmallMedium).color(c.textMuted))
+            e = e.child(text(b).key("badge").font(k.ty.textXsmallMedium).color(c.textMuted).a11yHidden())
         }
         if let d = dotColor {
-            e = e.child(el().key("dot").size(6.0, 6.0).rounded(3.0).bg(d).ml(5.0).mr(5.0))
+            e = e.child(el().key("dot").size(6.0, 6.0).rounded(3.0).bg(d).ml(5.0).mr(5.0).a11yHidden())
         }
         for t in trailingElements {
             e = e.child(t)

@@ -625,8 +625,9 @@ public struct TableView<State> {
             let selected = st.isSelected(id)
             var r: El<State> = row()
                 .key(id)
-                .role(.listItem) // will map to .row when ElementRole adds it
+                .role(.row)
                 .itemSelected(selected)
+                .positionInSet(i + 1, size: count)
                 .wFull()
                 .h(style.rowHeight)
                 .shrink(0.0)
@@ -644,8 +645,12 @@ public struct TableView<State> {
                 r = r.border(1.0, k.c.borderFocus)
             }
 
+            var rowWords: [String] = []
             for (j, colDef) in columns.enumerated() {
                 let cellContent = cellBuilder?(s, i, colDef.id) ?? .text("")
+                if case .text(let txt) = cellContent.content, !txt.isEmpty {
+                    rowWords.append(txt)
+                }
                 let colW = resolvedWidths[j]
                 let cellEl = buildCell(
                     colDef,
@@ -655,6 +660,9 @@ public struct TableView<State> {
                     style: style
                 ).key(colDef.id)
                 r = r.child(cellEl)
+            }
+            if !rowWords.isEmpty {
+                r = r.label(rowWords.joined(separator: " "))
             }
 
             let upd = update
@@ -706,7 +714,7 @@ public struct TableView<State> {
 
         var rootEl: El<State> = col()
             .key(tableKey)
-            .role(.group) // will map to .grid when ElementRole adds it
+            .role(.grid)
             .focusable(true)
             .wFull()
             .clip(true)
@@ -748,6 +756,9 @@ public struct TableView<State> {
         if let a11yName {
             rootEl = rootEl.label(a11yName)
         }
+        if let cur = st.cursor {
+            rootEl = rootEl.activeDescendant(cur)
+        }
         return rootEl
     }
 
@@ -781,8 +792,10 @@ public struct TableView<State> {
         style: TableStyle
     ) -> El<State> {
         let inner: El<State>
+        var cellLabel: String? = nil
         switch cell.content {
         case .text(let t):
+            if !t.isEmpty { cellLabel = t }
             let color = cell.color ?? (cell.isMuted ? style.muted : style.text)
             let font = cell.isMono ? style.mono : style.font
             let textAlign: TextAlign = switch c.align {
@@ -796,6 +809,7 @@ public struct TableView<State> {
                 .ellipsis()
                 .shrink(1.0)
                 .minW(0.0)
+                .a11yHidden()
             let availW = max(0, resolvedWidth - style.cellPad * 2.0)
             let measured = Self.sharedTextSystem.measure(t, style: font, maxWidth: nil, pixelScale: 1.0)
             if measured.x > availW + 0.5 {
@@ -806,12 +820,15 @@ public struct TableView<State> {
             inner = e
         }
 
-        let base: El<State> = row()
-            .role(.group) // will map to .gridCell when ElementRole adds it
+        var base: El<State> = row()
+            .role(.gridCell)
             .hFull()
             .px(style.cellPad)
             .itemsCenter()
             .clip(true)
+        if let cellLabel {
+            base = base.label(cellLabel)
+        }
         return justify(sized(base, c, widthSpec), c.align).child(inner)
     }
 
@@ -834,6 +851,7 @@ public struct TableView<State> {
                     .pin(right: 0.0, bottom: 0.0, left: 0.0)
                     .h(1.0)
                     .bg(style.rule)
+                    .a11yHidden()
             )
 
         let last = max(0, columns.count - 1)
@@ -846,17 +864,18 @@ public struct TableView<State> {
                 .ellipsis()
                 .shrink(1.0)
                 .minW(0.0)
+                .a11yHidden()
 
             var inner: El<State> = row().key("inner").gap(2.0).itemsCenter().minW(0.0).shrink(1.0).child(titleText)
             if let d = sortedDir {
                 let glyph = d == .ascending ? KitIcons.chevronUp : KitIcons.chevronDown
-                inner = inner.child(icon(glyph, size: 14.0).key("sort").color(style.text))
+                inner = inner.child(icon(glyph, size: 14.0).key("sort").color(style.text).a11yHidden())
             }
 
             var cell = justify(
                 sized(
                     row()
-                        .role(.button) // will map to .columnHeader when ElementRole adds it
+                        .role(.columnHeader)
                         .label(colDef.title)
                         .hFull()
                         .px(style.cellPad)
@@ -870,7 +889,9 @@ public struct TableView<State> {
             .child(inner)
 
             if let d = sortedDir {
-                cell = cell.help(d == .ascending ? "ascending" : "descending")
+                cell = cell
+                    .sorted(d == .ascending)
+                    .help(d == .ascending ? "ascending" : "descending")
             }
 
             if colDef.sortable {
@@ -927,9 +948,11 @@ public struct TableView<State> {
             .w(1.0)
             .hFull()
             .bg(isLast ? .transparent : rule)
+            .a11yHidden()
 
         return row()
             .key("\(colId)-resize")
+            // Blocked on @el: upstream uses `.role("splitter")`, not in ElementRole yet.
             .role(.separator)
             .label("Resize \(c.title)")
             .pin(top: 6.0, right: -4.0, bottom: 6.0)

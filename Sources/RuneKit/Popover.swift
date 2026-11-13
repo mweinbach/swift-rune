@@ -193,6 +193,7 @@ public enum PopoverAnchor {
     public static func scrim<State>(key: String, onClose: @escaping (inout State) -> Void) -> El<State> {
         el()
             .key(key)
+            .a11yHidden()
             .absolute(x: 0.0, y: 0.0)
             .wFull()
             .hFull()
@@ -387,7 +388,7 @@ public struct Popover<State> {
             content = content.label(lbl)
         }
         if let desc = descriptionText {
-            content = content.help(desc)
+            content = content.description(desc)
         }
 
         if let title = titleText {
@@ -410,14 +411,14 @@ public struct Popover<State> {
                     .gap(8.0)
                     .itemsCenter()
                     .justifyBetween()
-                    .child(text(title).key("title").font(k.ty.bodyMedium).color(strong).grow(1.0))
+                    .child(text(title).key("title").font(k.ty.bodyMedium).color(strong).grow(1.0).a11yHidden())
                     .child(closeBtn)
             )
         }
 
         if let desc = descriptionText {
             content = content.child(
-                row().key("description").px(12.0).child(text(desc).font(k.ty.textSmall).color(descColor))
+                row().key("description").px(12.0).child(text(desc).font(k.ty.textSmall).color(descColor).a11yHidden())
             )
         }
 
@@ -430,6 +431,7 @@ public struct Popover<State> {
         if let close = closeHandler {
             let scrimEl: El<State> = el()
                 .key("\(key)-scrim")
+                .a11yHidden()
                 .absolute(x: 0.0, y: 0.0)
                 .wFull()
                 .hFull()

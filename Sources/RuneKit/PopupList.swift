@@ -394,9 +394,11 @@ public struct PopupList<State> {
             let isActive = validActive == i
             var itemRow: El<State> = row()
                 .key("\(key)-option-\(optID)")
-                .role(.listItem) // maps to .option once ElementRole adds it
+                .role(.option)
                 .label(option.label)
                 .itemSelected(isActive)
+                .positionInSet(i + 1, size: itemList.count)
+                .disabled(option.isDisabled)
                 .wFull()
                 .h(rh)
                 .shrink(0.0)
@@ -407,21 +409,21 @@ public struct PopupList<State> {
                 .bg(isActive ? k.c.hover : .transparent)
 
             if let desc = option.descriptionText {
-                itemRow = itemRow.help(desc)
+                itemRow = itemRow.description(desc)
             }
             if let lead = option.leadingEl {
-                itemRow = itemRow.child(lead)
+                itemRow = itemRow.child(lead.a11yHidden())
             }
             if let desc = option.descriptionText {
                 itemRow = itemRow
-                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).shrink(1.0).ellipsis())
-                    .child(text(desc).key("description").font(k.ty.uiCompact).color(weakColor).grow(1.0).shrink(1.0).ellipsis())
+                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).shrink(1.0).ellipsis().a11yHidden())
+                    .child(text(desc).key("description").font(k.ty.uiCompact).color(weakColor).grow(1.0).shrink(1.0).ellipsis().a11yHidden())
             } else {
                 itemRow = itemRow
-                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).grow(1.0).shrink(1.0).ellipsis())
+                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).grow(1.0).shrink(1.0).ellipsis().a11yHidden())
             }
             if let trail = option.trailingEl {
-                itemRow = itemRow.child(trail)
+                itemRow = itemRow.child(trail.a11yHidden())
             }
 
             if option.isDisabled {
@@ -449,7 +451,7 @@ public struct PopupList<State> {
         let isEmpty = itemList.isEmpty
         var viewport: El<State> = col()
             .key(viewportKey)
-            .role(.group) // maps to .listbox once ElementRole adds it
+            .role(.listbox)
             .wFull()
             .h(viewportH)
             .minH(isEmpty ? 0.0 : rh)

@@ -181,7 +181,7 @@ struct OverlaysAndTableTests {
         #expect(abs(name.rect[2] - (500.0 - 180.0)) < 0.5)
 
         let bodySizeCells = rt.elements().filter {
-            !$0.exiting && $0.key == "size" && $0.label == nil
+            !$0.exiting && $0.key == "size" && $0.role == .gridCell
         }
         #expect(!bodySizeCells.isEmpty)
         for c in bodySizeCells {
@@ -353,7 +353,7 @@ struct OverlaysAndTableTests {
         #expect(rt.state.table.selected == ["f7"])
 
         let rt100k = makeTableRuntime(TableApp(n: 100_000, multi: false))
-        let builtRows = rt100k.elements().filter { !$0.exiting && $0.role == .listItem }.count
+        let builtRows = rt100k.elements().filter { !$0.exiting && $0.role == .row }.count
         #expect((5..<60).contains(builtRows))
     }
 

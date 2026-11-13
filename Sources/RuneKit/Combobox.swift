@@ -379,6 +379,9 @@ public struct Combobox<State> {
             .h(36.0)
             .px(8.0)
             .autofocus(true)
+        if let active, active < options.count {
+            field = field.activeDescendant("\(key)-option-\(options[active].id)")
+        }
 
         field = field
             .onChange { s, _, tx in

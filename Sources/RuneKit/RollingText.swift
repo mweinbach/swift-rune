@@ -448,6 +448,7 @@ public struct RollingText<State> {
             var glyphEl: El<State> = text(slot.glyph)
                 .key(slot.key)
                 .noWrap()
+                .a11yHidden()
                 .animate(enterSpring)
                 .transition(slotTransition)
             if let font {

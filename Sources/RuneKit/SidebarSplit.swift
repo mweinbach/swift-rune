@@ -160,20 +160,24 @@ public struct Toolbar<State> {
         }
         if let titleText, !titleText.isEmpty {
             var stack: El<State> = col().gap(1)
-                .child(text(titleText).font(k.ty.uiMedium).color(k.c.textBase).noWrap())
+                .child(text(titleText).font(k.ty.uiMedium).color(k.c.textBase).noWrap().a11yHidden())
             if let subtitleText, !subtitleText.isEmpty {
-                stack = stack.child(text(subtitleText).font(k.ty.small).color(k.c.textFaint).noWrap())
+                stack = stack.child(text(subtitleText).font(k.ty.small).color(k.c.textFaint).noWrap().a11yHidden())
             }
             left = left.child(stack)
         }
 
         var bar: El<State> = row()
             .key(keyId)
+            .role(.group) // Blocked on @el: ElementRole.toolbar
             .wFull()
             .h(Self.height)
             .itemsCenter()
             .justifyBetween()
             .bg(fillColor ?? k.c.page)
+        if let titleText, !titleText.isEmpty {
+            bar = bar.label(titleText)
+        }
         if hasBottomBorder {
             bar = bar.borderSides(bottom: 1.0, color: k.c.borderMuted)
         }
@@ -292,10 +296,13 @@ public struct SidebarSection<State> {
     public func children(_ rows: [El<State>]) -> Self { var c = self; c.items.append(contentsOf: rows); return c }
 
     public func build(_ k: Kit) -> El<State> {
-        var section: El<State> = col().key(keyId).wFull().gap(2)
+        var section: El<State> = col().key(keyId).role(.group).wFull().gap(2)
         if let titleText, !titleText.isEmpty {
+            section = section.label(titleText)
             var header: El<State> = row()
                 .key("\(keyId)-header")
+                .role((collapsible && onToggleFn != nil) ? .button : .heading)
+                .label(titleText)
                 .wFull()
                 .h(24)
                 .px(SidebarConstants.inset)
@@ -305,10 +312,10 @@ public struct SidebarSection<State> {
             var labelRow: El<State> = row().gap(4).itemsCenter().grow(1).minW(0)
             if collapsible {
                 let glyph = collapsed ? k.glyph.triangleRight : k.glyph.triangleDown
-                labelRow = labelRow.child(Rune.icon(glyph, size: 12).color(k.c.iconFaint))
+                labelRow = labelRow.child(Rune.icon(glyph, size: 12).color(k.c.iconFaint).a11yHidden())
             }
             labelRow = labelRow.child(
-                text(titleText).font(k.ty.smallMedium).color(k.c.textFaint).ellipsis()
+                text(titleText).font(k.ty.smallMedium).color(k.c.textFaint).ellipsis().a11yHidden()
             )
             header = header.child(labelRow)
             if let trailingEl {
@@ -470,11 +477,36 @@ public struct SidebarRow<State> {
         let fg: Color = isDisabled ? k.c.textFaint : ((selected || active) ? k.c.textBase : k.c.textMuted)
         let subColor = k.c.textFaint
 
+        let descParts: [String] = {
+            var parts: [String] = []
+            switch rowStatus {
+            case .none:
+                break
+            case .badge(let label, _):
+                if !label.isEmpty { parts.append(label) }
+            case .count(let n):
+                parts.append("\(n)")
+            case .dot:
+                break
+            case .spinner(let label):
+                parts.append(label ?? "Working")
+            case .custom:
+                break
+            }
+            return parts
+        }()
+        let rowLabel = if let subtitleText, !subtitleText.isEmpty {
+            "\(titleText), \(subtitleText)"
+        } else {
+            titleText
+        }
+
         var content: El<State> = row()
             .key(keyId)
             .role(.listItem)
-            .label(titleText)
+            .label(rowLabel)
             .itemSelected(selected)
+            .disabled(isDisabled)
             .wFull()
             .h(height)
             .pl(padLeft)
@@ -483,11 +515,14 @@ public struct SidebarRow<State> {
             .itemsCenter()
             .rounded(k.radius.sm)
             .bg(bg)
+        if !descParts.isEmpty {
+            content = content.description(descParts.joined(separator: ", "))
+        }
 
         if let leadingEl {
             content = content.child(leadingEl)
         } else if let iconSpec {
-            content = content.child(Rune.icon(iconSpec.svg, size: 15).color(iconSpec.color ?? k.c.iconMuted))
+            content = content.child(Rune.icon(iconSpec.svg, size: 15).color(iconSpec.color ?? k.c.iconMuted).a11yHidden())
         }
 
         if let renameConfig {
@@ -516,7 +551,7 @@ public struct SidebarRow<State> {
             }
             content = content.child(input)
         } else {
-            var textBlock: El<State> = col().grow(1).minW(0).gap(1)
+            var textBlock: El<State> = col().grow(1).minW(0).gap(1).a11yHidden()
                 .child(text(titleText).font(selected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
             if let subtitleText, !subtitleText.isEmpty {
                 textBlock = textBlock.child(text(subtitleText).font(k.ty.small).color(subColor).ellipsis())
@@ -528,13 +563,13 @@ public struct SidebarRow<State> {
         case .none:
             break
         case .badge(let label, let tone):
-            content = content.child(k.badge(label, tone: tone))
+            content = content.child(k.badge(label, tone: tone).a11yHidden())
         case .count(let n):
-            content = content.child(text("\(n)").font(k.ty.small).color(k.c.textFaint).noWrap())
+            content = content.child(text("\(n)").font(k.ty.small).color(k.c.textFaint).noWrap().a11yHidden())
         case .dot(let color):
-            content = content.child(el().w(7).h(7).rounded(3.5).bg(color))
+            content = content.child(el().w(7).h(7).rounded(3.5).bg(color).a11yHidden())
         case .spinner:
-            content = content.child(k.radarSpinner(key: "\(keyId)-spin", size: 12))
+            content = content.child(k.radarSpinner(key: "\(keyId)-spin", size: 12).a11yHidden())
         case .custom(let customEl):
             content = content.child(customEl)
         }
@@ -608,6 +643,7 @@ public struct Sidebar<State> {
     public func build(_ k: Kit) -> El<State> {
         var body: El<State> = col()
             .key("\(keyId)-body")
+            .role(.group) // Blocked on @el: ElementRole.list
             .wFull()
             .grow(1)
             .minH(0)
@@ -633,6 +669,7 @@ public struct Sidebar<State> {
 public struct SidebarToggle<State> {
     private var keyId: String
     private var inspector: Bool
+    private var openState: Bool?
     private var onToggleFn: (inout State, inout Tx) -> Void
 
     public init(
@@ -655,15 +692,30 @@ public struct SidebarToggle<State> {
         self.onToggleFn = onToggle
     }
 
+    public func open(_ isOpen: Bool?) -> Self { var c = self; c.openState = isOpen; return c }
+
     public func build(_ k: Kit) -> El<State> {
-        k.iconButton(
+        let lbl: String = if let openState {
+            if inspector {
+                openState ? "Hide inspector" : "Show inspector"
+            } else {
+                openState ? "Hide sidebar" : "Show sidebar"
+            }
+        } else {
+            inspector ? "Toggle Inspector" : "Toggle Sidebar"
+        }
+        var btn = k.iconButton(
             key: keyId,
             svg: inspector ? KitIcons.inspector : KitIcons.sidebar,
-            label: inspector ? "Toggle Inspector" : "Toggle Sidebar",
+            label: lbl,
             size: .sm,
             variant: .ghost,
             onClick: onToggleFn
         )
+        if let openState {
+            btn = btn.expanded(openState)
+        }
+        return btn
     }
 }
 
@@ -746,6 +798,10 @@ public struct SplitView<State> {
             let isActive = cfg.state.isResizing
             var handle: El<State> = col()
                 .key(gripKey)
+                .role(.separator) // Blocked on @el: ElementRole.splitter
+                .label(positiveGrows ? "Resize sidebar" : "Resize inspector")
+                .rangeValue(cfg.state.width, min: cfg.state.minWidth, max: cfg.state.maxWidth)
+                .rangeStep(Self.gripStep)
                 .w(Self.gripWidth)
                 .hFull()
                 .center()
@@ -779,19 +835,19 @@ public struct SplitView<State> {
                 }
             let dotAlpha: Float = isActive ? 0.55 : Self.dotFade
             for _ in 0..<3 {
-                handle = handle.child(el().w(2).h(2).rounded(1).bg(k.c.textMuted.alpha(dotAlpha)))
+                handle = handle.child(el().w(2).h(2).rounded(1).bg(k.c.textMuted.alpha(dotAlpha)).a11yHidden())
             }
             return handle
         }
 
         // Main center column (optional top toolbar + content)
-        var mainCol: El<State> = col().key("\(keyId)-main").grow(1).minW(0).hFull()
+        var mainCol: El<State> = col().key("\(keyId)-main").role(.main).grow(1).minW(0).hFull()
         var effectiveToolbar = toolbarEl
         if let sidebarCfg, showSidebarToggle, sidebarCfg.state.isCollapsed {
             let toggleBtn = SidebarToggle<State>(
                 key: "\(keyId)-sidebar-toggle",
                 keyPath: sidebarCfg.keyPath
-            ).build(k)
+            ).open(!sidebarCfg.state.isCollapsed).build(k)
             if let bar = effectiveToolbar {
                 effectiveToolbar = row().key("\(keyId)-toolbar-wrap").wFull().itemsCenter()
                     .child(row().pl(8).child(toggleBtn))
@@ -834,6 +890,8 @@ public struct SplitView<State> {
             if sbW > 0 {
                 var sbPane: El<State> = col()
                     .key("\(keyId)-sidebar-pane")
+                    .role(.region)
+                    .label("Sidebar")
                     .w(sbW)
                     .hFull()
                     .p(sidebarPaddingValue)
@@ -850,6 +908,7 @@ public struct SplitView<State> {
                 let sbKeyPath = sidebarCfg.keyPath
                 let edgeTrigger: El<State> = el()
                     .key("\(keyId)-peek-edge")
+                    .a11yHidden()
                     .pin(top: sidebarPeekValue.belowY ?? titlebarInsetValue.top, bottom: 0, left: 0)
                     .w(sidebarPeekValue.edgeWidth)
                     .z(34)
@@ -862,6 +921,8 @@ public struct SplitView<State> {
                 if pane.isPeeking {
                     var peekDrawer: El<State> = col()
                         .key("\(keyId)-sidebar-peek")
+                        .role(.region)
+                        .label("Sidebar")
                         .pin(top: max(8, titlebarInsetValue.top + 8), bottom: 8, left: 8)
                         .w(pane.width)
                         .rounded(k.radius.lg)
@@ -892,6 +953,8 @@ public struct SplitView<State> {
             if insW > 0 {
                 var insPane: El<State> = col()
                     .key("\(keyId)-inspector-pane")
+                    .role(.region)
+                    .label("Inspector")
                     .w(insW)
                     .hFull()
                     .p(sidebarPaddingValue)

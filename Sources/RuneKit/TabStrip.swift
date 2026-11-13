@@ -627,6 +627,7 @@ public struct TabStrip<State> {
                 .label(item.title)
                 .selected(isSelected ? "true" : "false")
                 .itemSelected(isSelected)
+                .disabled(item.isDisabled)
                 .positionInSet(index + 1, size: tabBarCount)
                 .h(tabH)
                 .px(item.isPinned ? 8 : 10)
@@ -657,13 +658,13 @@ public struct TabStrip<State> {
             // Leading icon / status slot
             if let svg = item.iconSvg {
                 tab = tab.child(
-                    el().w(StripTabItem<State>.iconSlot).h(tabH).center()
+                    el().w(StripTabItem<State>.iconSlot).h(tabH).center().a11yHidden()
                         .child(Rune.icon(svg, size: 14).color(isSelected ? k.c.iconBase : k.c.iconMuted))
                 )
             }
 
             if !item.isPinned {
-                var textStack: El<State> = col().grow(1).minW(0)
+                var textStack: El<State> = col().grow(1).minW(0).a11yHidden()
                     .child(text(item.title).font(isSelected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
                 if let sub = item.subtitle, !sub.isEmpty {
                     textStack = textStack.child(text(sub).font(k.ty.small).color(k.c.textFaint).ellipsis())
@@ -675,17 +676,17 @@ public struct TabStrip<State> {
             case .none:
                 break
             case .dirty:
-                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent))
+                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent).a11yHidden())
             case .dot(let col):
-                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col))
+                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col).a11yHidden())
             case .badge(let label, let tone):
-                tab = tab.child(k.badge(label, tone: tone))
+                tab = tab.child(k.badge(label, tone: tone).a11yHidden())
             case .spinner:
-                tab = tab.child(k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12))
+                tab = tab.child(k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12).a11yHidden())
             }
 
             if let badgeText = item.badgeText, !badgeText.isEmpty, case .none = item.status {
-                tab = tab.child(k.badge(badgeText, tone: .neutral))
+                tab = tab.child(k.badge(badgeText, tone: .neutral).a11yHidden())
             }
 
             if item.isClosable && !item.isPinned && !item.isDisabled, let onCloseFn {
