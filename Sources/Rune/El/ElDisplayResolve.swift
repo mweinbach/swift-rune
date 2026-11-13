@@ -159,6 +159,10 @@ internal enum ElDisplayResolver {
 
         let shapeMaxW: Float? = (inputStyle.direction == .rtl || (!isSingle && inputStyle.wrap != .noWrap)) ? innerWidth : nil
         let isSecureHidden = edit.isSecure && !edit.isRevealed
+        if isSecureHidden {
+            inputStyle.wrap = .noWrap
+            inputStyle.wrapAnywhere = false
+        }
         let rawDisplay = edit.displayString
         let showingPlaceholder = rawDisplay.isEmpty && (edit.preedit?.text.isEmpty ?? true)
         if showingPlaceholder {

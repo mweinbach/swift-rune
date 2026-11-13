@@ -269,14 +269,26 @@ struct ElKitcSecureTextParityTests {
             pixelScale: 1.0,
             systemDark: true
         ) { _, _ in
-            textInput(key: "secret", \S.edit)
-                .font(TextStyle(size: 14, weight: 400))
-                .wrapAnywhere()
-                .w(12)
+            col().size(50, 100).child(
+                textInput(key: "secret", \S.edit)
+                    .font(TextStyle(size: 14, weight: 400))
+                    .wrapAnywhere()
+                    .w(12)
+            )
         }
         _ = narrow.frame(at: 0.0)
         let narrowEl = narrow.element(byKey: "secret")!
         #expect(abs(narrowEl.rect[3] - lineH) <= 1.0, "w=12 wrapAnywhere hidden mask must stay 1 line")
+        let narrowNode = narrow.flatNodes.first(where: { $0.key == "secret" })!
+        let narrowResolved = ElDisplayResolver.resolveInput(el: narrowNode.el, edit: narrow.state.edit, innerWidth: 12)
+        let narrowShaped = narrow.textSystem.shape(
+            text: narrowResolved.renderedString,
+            style: narrowResolved.style,
+            maxWidth: narrowResolved.maxWidthForShape,
+            pixelScale: 1.0,
+            emitGlyphs: false
+        )
+        #expect(narrowShaped.lineCount == 1)
     }
 
     @Test("secure_text (#236): secure labels mask, reveal, conceal cleanly, and never leak plaintext")
@@ -297,11 +309,11 @@ struct ElKitcSecureTextParityTests {
                     .textCase(.uppercase)
                     .transition(.blurReplace())
                     .key("single")
-                let truncEl: El<State> = text(singleSecret)
+                let truncEl: El<State> = (text(singleSecret) as El<State>)
                     .selectable(true)
                     .secure(true)
                     .revealed(s.revealed)
-                    .truncate()
+                    .wrap(.ellipsis)
                     .w(60)
                     .key("trunc")
                 let multiEl: El<State> = (col() as El<State>)

@@ -821,6 +821,7 @@ public final class Runtime<State> {
     internal var growthStacks: [String: RuntimeGrowthStackState] = [:]
     internal var growthSubstepAccumulator: Double = 0
     internal var lastGrowthStepTime: Double? = nil
+    internal var pendingGrowthStepNow: Double? = nil
     internal var atBottomStates: [String: Bool] = [:]
     internal var farFromBottomStates: [String: Bool] = [:]
     internal var lastScrollOffsetReports: [String: ScrollPos] = [:]
@@ -1695,8 +1696,6 @@ public final class Runtime<State> {
         }
         stepKitDragRepeatOnFrame(at: now)
         stepKitHoverDelaysOnFrame(at: now)
-        let preCommitGrowthDt: Double = lastGrowthStepTime.map { max(0, min(0.1, now - $0)) } ?? 0
-        var growthMoving = advanceGrowthRows(at: now)
         fireHoverDelays(at: now)
         flushPendingSentKeys(at: now)
         insideFramePollOrInput = false
@@ -1733,6 +1732,7 @@ public final class Runtime<State> {
         }
 
         let didEdgeScroll = stepSelectableEdgeScroll(at: now)
+        var growthMoving = needsCommit ? false : advanceGrowthRows(at: now)
         let isInitiallyScrolling = scrollMovedSinceLastFrame || scrollStore.isAnimating
         if isInitiallyScrolling {
             layoutFeedback.step(.reopened)
@@ -1768,7 +1768,9 @@ public final class Runtime<State> {
                 scene: scene,
                 tracks: &loopRuntime.tracks
             )
-            kitHooks.frameGrowthStepDt = preCommitGrowthDt
+            kitHooks.frameGrowthStepDt = 0
+            pendingGrowthStepNow = now
+            defer { pendingGrowthStepNow = nil }
             commitTree(at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
@@ -2523,7 +2525,16 @@ public final class Runtime<State> {
             reducedMotionOverride: reducedMotion,
             at: now
         )
-        if growthCapture.needsClampedRelayout {
+        let growthStepNow = pendingGrowthStepNow ?? now
+        let steppedAfterRetarget = (lastGrowthStepTime != growthStepNow && !cut && !commitKind.lands && !reducedMotion)
+            ? advanceGrowthRows(at: growthStepNow, markRelayoutDirty: false)
+            : false
+        let needsGrowthClamp = growthCapture.needsClampedRelayout || steppedAfterRetarget || growthRows.values.contains { entry in
+            let t = entry.track
+            return (t.moving && (abs(t.h - t.target) > 1e-4 || t.isShuttingFold))
+                || (t.streaming && (t.h < entry.naturalHeight - 0.1 || entry.withheld > 0.01))
+        }
+        if needsGrowthClamp {
             layoutRoot = applyGrowthConstraints(in: layoutRoot)
             textLayoutCollector.map.removeAll(keepingCapacity: true)
             textLayoutCollector.liveIds.removeAll(keepingCapacity: true)

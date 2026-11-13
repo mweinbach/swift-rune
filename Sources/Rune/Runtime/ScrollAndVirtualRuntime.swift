@@ -1049,7 +1049,7 @@ extension Runtime {
         return walk(rootEl, parentPath: "", siblingIndex: 0, siblingKeysSeen: &rootSeen, inGrowthSpec: nil)
     }
 
-    internal func advanceGrowthRows(at now: Double) -> Bool {
+    internal func advanceGrowthRows(at now: Double, markRelayoutDirty: Bool = true) -> Bool {
         var flushedHold = false
         let prevNow = lastGrowthStepTime
         let hasDeferredAtEnd = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
@@ -1078,7 +1078,7 @@ extension Runtime {
 
         if dt <= 0 {
             flushReleasedHolds(at: now)
-            if flushedHold {
+            if flushedHold && markRelayoutDirty {
                 needsCommit = true
                 pendingGrowthRelayout = true
             }
@@ -1161,7 +1161,7 @@ extension Runtime {
             }
         }
         let hasPendingHold = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
-        if anyChanged || flushedHold {
+        if (anyChanged || flushedHold) && markRelayoutDirty {
             needsCommit = true
             pendingGrowthRelayout = true
         }
