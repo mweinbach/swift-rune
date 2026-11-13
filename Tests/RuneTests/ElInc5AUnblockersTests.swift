@@ -192,7 +192,10 @@ struct ElInc5AUnblockersTests {
         let plusLighterLayers = rf.instances.filter { $0.params.y == KIND_LAYER && $0.params.x == 1.0 }
         #expect(plusLighterLayers.count == 1)
 
-        rt.update(at: 0.05) { s, _ in s.op = 1.0 }
+        rt.update(at: 0.05) { s, tx in
+            s.op = 1.0
+            tx.instant()
+        }
         let rfOpaque = rt.renderFrame(at: 0.1)
         let plusAfterOpaque = rfOpaque.instances.filter { $0.params.y == KIND_LAYER && $0.params.x == 1.0 }
         #expect(plusAfterOpaque.isEmpty)
