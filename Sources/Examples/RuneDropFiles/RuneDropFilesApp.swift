@@ -2,18 +2,23 @@ import Foundation
 import Rune
 
 /// Port of `examples/drop-files`: drop zones for pictures and any file, with hover highlight and status.
-struct DropFilesState {
-    var over: String? = nil
-    var last: (String, [DroppedFile])? = nil
-    var dropState = FileDropState()
-    var acceptedImageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic"]
+public struct DropFilesState: Sendable {
+    public var over: String? = nil
+    public var last: (String, [DroppedFile])? = nil
+    public var dropState = FileDropState()
+    public var acceptedImageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "heic"]
+
+    public init(over: String? = nil, last: (String, [DroppedFile])? = nil) {
+        self.over = over
+        self.last = last
+    }
 }
 
-func formatNames(_ files: [DroppedFile]) -> String {
+public func formatNames(_ files: [DroppedFile]) -> String {
     files.map(\.name).joined(separator: ", ")
 }
 
-func dropZone(
+public func dropZone(
     _ s: DropFilesState,
     accent: Color,
     key: String,
@@ -42,7 +47,6 @@ func dropZone(
             }
         }
         .onClick { state in
-            // Interactive demo simulation when clicked
             let sample = extensions != nil
                 ? DroppedFile(path: "/tmp/sunset.png", name: "sunset.png", sizeBytes: 42_180)
                 : DroppedFile(path: "/tmp/notes.txt", name: "notes.txt", sizeBytes: 1_024)
@@ -52,7 +56,7 @@ func dropZone(
         }
 }
 
-func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -> El<DropFilesState> {
+public func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -> El<DropFilesState> {
     let t = Tok.theme(dark: true)
     let accent = cx.focusColor()
     let status: String = if let (target, files) = s.last {
@@ -88,22 +92,29 @@ func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -> El<Dr
         .child(text(status).key("status").size(13).color(t.textSecondary))
 }
 
-let spec = AppSpec<DropFilesState>(
-    title: "Drop Files",
-    size: Vec2(520, 240),
-    dark: true,
-    state: DropFilesState(),
-    view: dropFilesView
-)
-.scene("idle") { $0.over = nil; $0.last = nil }
-.scene("hover-pictures") { $0.over = "pictures"; $0.last = nil }
-.scene("dropped-pictures") {
-    $0.over = nil
-    $0.last = ("pictures", [DroppedFile(path: "/tmp/a.png", name: "a.png", sizeBytes: 2048)])
-}
-.scene("dropped-window") {
-    $0.over = nil
-    $0.last = ("window", [DroppedFile(path: "/tmp/notes.txt", name: "notes.txt", sizeBytes: 512)])
-}
+@main
+public enum RuneDropFilesApp {
+    public static func buildSpec() -> AppSpec<DropFilesState> {
+        AppSpec<DropFilesState>(
+            title: "Drop Files",
+            size: Vec2(520, 240),
+            dark: true,
+            state: DropFilesState(),
+            view: dropFilesView
+        )
+        .scene("idle") { $0.over = nil; $0.last = nil }
+        .scene("hover-pictures") { $0.over = "pictures"; $0.last = nil }
+        .scene("dropped-pictures") {
+            $0.over = nil
+            $0.last = ("pictures", [DroppedFile(path: "/tmp/a.png", name: "a.png", sizeBytes: 2048)])
+        }
+        .scene("dropped-window") {
+            $0.over = nil
+            $0.last = ("window", [DroppedFile(path: "/tmp/notes.txt", name: "notes.txt", sizeBytes: 512)])
+        }
+    }
 
-try RuneApp.run(spec)
+    public static func main() throws {
+        try RuneApp.run(buildSpec())
+    }
+}

@@ -2,13 +2,25 @@ import Foundation
 import Rune
 
 /// Port of `examples/drag-out`: drag a file, an app bundle, or a line of text out of a Rune window.
-struct DragOutState {
-    var file: URL
-    var app: URL
-    var last: (String, DragOutcome)? = nil
-    var dragging: String? = nil
+public struct DragOutState: Sendable {
+    public var file: URL
+    public var app: URL
+    public var last: (String, DragOutcome)? = nil
+    public var dragging: String? = nil
 
-    static func initial() -> DragOutState {
+    public init(
+        file: URL,
+        app: URL,
+        last: (String, DragOutcome)? = nil,
+        dragging: String? = nil
+    ) {
+        self.file = file
+        self.app = app
+        self.last = last
+        self.dragging = dragging
+    }
+
+    public static func initial() -> DragOutState {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("Dragged out of Rune.txt")
         try? "This file was dragged out of a Rune window.\n".write(to: file, atomically: true, encoding: .utf8)
         let appPath = ProcessInfo.processInfo.environment["DRAG_OUT_APP"] ?? "/System/Applications/Calculator.app"
@@ -16,12 +28,12 @@ struct DragOutState {
     }
 }
 
-func dragOutTile(
+public func dragOutTile(
     _ s: DragOutState,
     key: String,
     title: String,
     detail: String,
-    makeItem: @escaping (DragOutState) -> DragItem
+    makeItem: @escaping @Sendable (DragOutState) -> DragItem
 ) -> El<DragOutState> {
     let t = Tok.theme(dark: true)
     let isDragging = s.dragging == key
@@ -53,7 +65,6 @@ func dragOutTile(
             state.last = (key, .copied)
         }
         .onClick { state in
-            // Allow single-click preview/test in interactive mode
             let item = makeItem(state).opaque(t.bg)
             if let txt = item.text {
                 Clipboard.shared.writeText(txt)
@@ -62,7 +73,7 @@ func dragOutTile(
         }
 }
 
-func dragOutView(_ s: DragOutState, _ cx: inout Cx<DragOutState>) -> El<DragOutState> {
+public func dragOutView(_ s: DragOutState, _ cx: inout Cx<DragOutState>) -> El<DragOutState> {
     let t = Tok.theme(dark: true)
     let status: String = if let (key, outcome) = s.last {
         "Last drag: \(key), \(outcome)"
@@ -91,15 +102,19 @@ func dragOutView(_ s: DragOutState, _ cx: inout Cx<DragOutState>) -> El<DragOutS
         .child(text(status).key("status").size(13).color(t.textSecondary))
 }
 
-let spec = AppSpec<DragOutState>(
-    title: "Drag Out",
-    size: Vec2(520, 200),
-    dark: true,
-    state: DragOutState.initial(),
-    view: dragOutView
-)
-.scene("idle") { $0.dragging = nil; $0.last = nil }
-.scene("dragging") { $0.dragging = "app"; $0.last = nil }
-.scene("completed") { $0.dragging = nil; $0.last = ("file", .copied) }
+@main
+public enum RuneDragOutApp {
+    public static func buildSpec() -> AppSpec<DragOutState> {
+        AppSpec<DragOutState>(
+            title: "Drag Out",
+            size: Vec2(520, 200),
+            dark: true,
+            state: DragOutState.initial(),
+            view: dragOutView
+        )
+    }
 
-try RuneApp.run(spec)
+    public static func main() throws {
+        try RuneApp.run(buildSpec())
+    }
+}

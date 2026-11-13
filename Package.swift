@@ -432,6 +432,11 @@ let package = Package(
                 "RuneLab",
                 "RuneMotionBento",
                 "RuneSketch",
+                "RuneKitGallery",
+                "RuneRichClipboard",
+                "RuneDragOut",
+                "RuneDropFiles",
+                "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
         ),
