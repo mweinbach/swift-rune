@@ -326,7 +326,7 @@ struct RuneKnobsTests {
         #expect(differed)
     }
 
-    @Test func sideKeyLeavesEscapeAndTabAndSettlesTx() {
+    @Test func sideKeyLeavesEscapeAndTabAndInstantsTx() {
         let g1 = KnobGroup("Left", region: "left", knobs: [Knob.float("l", min: 0, max: 10, default: 5, step: 0.5)])
         let g2 = KnobGroup("Right", region: "right", knobs: [Knob.float("r", min: 0, max: 10, default: 2, step: 1)])
         let groups = [g1, g2]
@@ -972,6 +972,9 @@ struct RuneKnobsTests {
         #expect(rt1.state.knobs.values == valsBefore)
         _ = rt1.keyDown(KeyEvent(key: .arrowLeft, mods: Mods(shift: true)), at: 1.5); tick1()
         #expect(rt1.state.knobs.edit.selectedUTF8Range == 2..<3)
+        // Unhandled modifier chord while filtering must not clear `filtering` (tree.rs:205-212)
+        _ = rt1.keyDown(KeyEvent(key: .text("q"), mods: Mods(cmd: true)), at: 1.55); tick1()
+        #expect(rt1.state.knobs.filtering)
         _ = rt1.keyDown(KeyEvent(key: .text("a"), mods: Mods(cmd: true)), at: 1.6); tick1()
         #expect(rt1.state.knobs.edit.selectedUTF8Range == 0..<5)
         _ = rt1.keyDown(KeyEvent(key: .text("left")), at: 1.7); tick1()

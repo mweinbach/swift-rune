@@ -414,9 +414,6 @@ public extension RuneKnobs {
             .gap(8)
             .focusable(true)
             .onKey { state, ev, tx in
-                if state[keyPath: keyPath].filtering {
-                    state[keyPath: keyPath].filtering = false
-                }
                 let isToggleShortcut: Bool = {
                     switch ev.key {
                     case .command(let ch) where (ch == "k" || ch == "K") && ev.mods.shift:
@@ -431,6 +428,12 @@ public extension RuneKnobs {
                     state[keyPath: keyPath].toggle()
                     tx.instant()
                     return true
+                }
+                if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl {
+                    return false
+                }
+                if state[keyPath: keyPath].filtering {
+                    state[keyPath: keyPath].filtering = false
                 }
                 let wasFiltering = state[keyPath: keyPath].filtering
                 if KnobTree.handleKey(&state[keyPath: keyPath], groups: groups, seen: seen, event: ev) {

@@ -463,6 +463,16 @@ struct RuneMotionTests {
         #expect(abs(stag.delay(index: 0, count: 3) - 0.05) < 1e-6)
         #expect(abs(stag.delay(index: 2, count: 3) - 0.05) < 1e-6)
         #expect(stag.delay(index: 0, count: 1) == 0.0)
+        // stagger_delays_ripple_from_the_origin (choreo.rs:5-16)
+        let dFirst = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .start) }
+        #expect(dFirst == [0.0, 0.1, 0.2, 0.3, 0.4])
+        let dLast = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .end) }
+        #expect(dLast == [0.4, 0.3, 0.2, 0.1, 0.0])
+        let dCenter = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .center) }
+        #expect(abs(dCenter[0] - 0.2) < 1e-6 && dCenter[2] == 0.0 && abs(dCenter[4] - 0.2) < 1e-6)
+        let eased = Stagger(step: 0.1).ease(.easeIn)
+        #expect(eased.delay(index: 0, count: 5) == 0.0 && abs(eased.delay(index: 4, count: 5) - 0.4) < 1e-5)
+        #expect(eased.delay(index: 1, count: 5) < 0.1)
         let uncapped = Stagger(step: 0.05)
         #expect(uncapped.maxDelay == 0.0)
         #expect(abs(uncapped.delay(index: 10, count: 12) - 0.50) < 1e-6)
@@ -529,6 +539,28 @@ struct RuneMotionTests {
         #expect(choreo.isDone(in: store))
         #expect(store.get(n2, Props.OPACITY) == 1.0)
 
+        // sequence_starts_on_arrival_not_on_physical_rest (choreo.rs:19-50)
+        var arrStore = AnimationStore()
+        let (a, b, c) = (NodeId(1), NodeId(2), NodeId(3))
+        for n in [a, b, c] { arrStore.snap(n, Props.OPACITY, to: 0.0) }
+        var chArr = Choreography()
+        let s1 = chArr.step(.now()) { $0.animate(a, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SETTLE)) }
+        let s2 = chArr.step(.arrived(s1).after(0.05)) { $0.animate(b, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SETTLE)) }
+        let s3 = chArr.step(.settled(s2).notBefore(1.5)) { $0.animate(c, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SNAP)) }
+        var ct = 0.0
+        while ct < 4.0 {
+            arrStore.setTime(ct)
+            chArr.tick(store: &arrStore, at: ct)
+            arrStore.tick()
+            ct += 1.0 / 120.0
+        }
+        #expect(abs((chArr.startTime(of: s2) ?? -1.0) - 0.35) < 1e-6)
+        #expect((chArr.startTime(of: s3) ?? 0.0) >= 1.5)
+        #expect(chArr.isDone(in: arrStore))
+        for n in [a, b, c] {
+            #expect(arrStore.get(n, Props.OPACITY) == 1.0)
+        }
+
         // ChoreographyPhaseAnimator
         var store2 = AnimationStore(pixelScale: 2.0)
         let box = NodeId(103)
@@ -552,6 +584,22 @@ struct RuneMotionTests {
         rot.retime(spec: .rotation(period: 2.0), at: 0.25)
         #expect(abs(rot.phase(at: 0.25) - 0.25) < 1e-6)
         #expect(abs(rot.phase(at: 1.25) - 0.75) < 1e-6)
+
+        // cycle_preserves_wall_phase_stops_still_and_cadence (looping.rs:249-258)
+        let cyc = Cycle(
+            period: 1.7,
+            phase: 0.3,
+            stops: [(0.0, 0.2), (0.2, 1.0), (0.7, 0.1), (1.0, 0.2)],
+            still: 0.4,
+            fps: 30.0
+        )
+        let cycTrack = LoopTrack(spec: .cycle(cyc), now: 4.0)
+        for i in 0..<200 {
+            let wall = Double(i) * 0.037
+            #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: false) == cyc.sample(at: wall))
+            #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: true) == cyc.still)
+        }
+        #expect(cycTrack.frameInterval() == 1.0 / Double(Float(30.0)))
 
         // Ping-pong & count modes
         let pp = LoopSpec.opacity(period: 1.0, low: 0.0, high: 1.0).mode(.pingPong)
