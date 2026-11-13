@@ -502,6 +502,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         self.appShared = appShared
         self.reports = reports
         self.surfaceMeter = surfaceMeter
+        if let surfaceMeter {
+            runtime.surfaceMeter = surfaceMeter
+        }
         self.devStatsReceiver = devStatsReceiver
         self.windowHandle = windowHandle
         self.minWindowSize = minWindowSize

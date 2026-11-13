@@ -621,7 +621,40 @@ public final class Runtime<State> {
     public private(set) var closeWindowRequested: Bool = false
     public private(set) var minimizeRequested: Bool = false
     public private(set) var relaunchRequested: Bool = false
-    public internal(set) var nextWakeDeadline: Double? = nil
+    public internal(set) var wakeDeadlines: [Double] = []
+    internal var pendingUpdateWakes: [(scheduledAt: Double, delay: Double)] = []
+    internal var pendingFrameWakes: [(scheduledAt: Double, delay: Double)] = []
+    internal var insideFramePollOrInput: Bool = false
+    public var wallStart: Double? = nil
+    public var timerWake = TimerWake()
+    public var surfaceMeter: SurfaceMeter? = nil
+    public internal(set) var nextWakeDeadline: Double? {
+        get {
+            var best = wakeDeadlines.first
+            for entry in pendingUpdateWakes {
+                let d = entry.scheduledAt + entry.delay
+                best = best.map { min($0, d) } ?? d
+            }
+            for entry in pendingFrameWakes {
+                let d = entry.scheduledAt + entry.delay
+                best = best.map { min($0, d) } ?? d
+            }
+            return best
+        }
+        set {
+            if let due = newValue {
+                if insideFramePollOrInput {
+                    pendingFrameWakes.append((scheduledAt: due, delay: 0.0))
+                } else {
+                    pendingUpdateWakes.append((scheduledAt: due, delay: 0.0))
+                }
+            } else {
+                wakeDeadlines.removeAll(keepingCapacity: true)
+                pendingUpdateWakes.removeAll(keepingCapacity: true)
+                pendingFrameWakes.removeAll(keepingCapacity: true)
+            }
+        }
+    }
     public var helpDelay: Double = 0.5
     public var nativeHelp: Bool = false
     public var clipboard = ClipboardContent("")
@@ -864,6 +897,10 @@ public final class Runtime<State> {
     internal var activeModalPath: String? = nil
     private var viewHelpLook: HelpLook? = nil
     private var helpState = HelpRuntimeState()
+    internal var isTooltipWaiting: Bool {
+        if case .waiting = helpState.tipState { return true }
+        return false
+    }
     internal var boundClipboard: Clipboard? = nil
     internal var pendingPasteRequests: Int = 0
     internal var inheritedHoverCurvesByPath: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
@@ -1252,16 +1289,51 @@ public final class Runtime<State> {
     public func frame(at now: Double) -> RefScene {
         RuntimeIdScope.$current.withValue(runtimeId) {
             Theme.withBlend(srgbBlend) {
-                frameWithBlendScope(at: now)
+                frameWithBlendScope(at: wallClock() ?? now)
             }
         }
     }
 
     internal func runFrameSplit(catchUp: Double, dt: Double, hostDelta: Double) -> Bool {
+        let elapsed = max(0.0, hostDelta)
+        if wallStart == nil {
+            let target = currentTime + elapsed
+            if nextTimerStepDeadline(before: target) != nil {
+                var remainingCatchUp = max(0.0, catchUp)
+                while let at = nextTimerStepDeadline(before: target) {
+                    let step = max(0.0, at - currentTime)
+                    let old = min(step, remainingCatchUp)
+                    remainingCatchUp -= old
+                    _ = runSingleFrameSplitPass(at: at, catchUp: old, dt: step - old, hostDelta: step)
+                }
+                let finalStep = max(0.0, target - currentTime)
+                let finalOld = min(finalStep, remainingCatchUp)
+                return runSingleFrameSplitPass(
+                    at: target,
+                    catchUp: finalOld,
+                    dt: finalStep - finalOld,
+                    hostDelta: finalStep
+                )
+            }
+        }
+        return runSingleFrameSplitPass(
+            at: wallClock() ?? (currentTime + elapsed),
+            catchUp: catchUp,
+            dt: dt,
+            hostDelta: hostDelta
+        )
+    }
+
+    private func runSingleFrameSplitPass(
+        at now: Double,
+        catchUp: Double,
+        dt: Double,
+        hostDelta: Double
+    ) -> Bool {
         _ = RuntimeIdScope.$current.withValue(runtimeId) {
             Theme.withBlend(srgbBlend) {
                 frameWithBlendScope(
-                    at: currentTime + max(0.0, hostDelta),
+                    at: now,
                     split: (catchUp: catchUp, dt: dt, hostDelta: hostDelta)
                 )
             }
@@ -1279,7 +1351,11 @@ public final class Runtime<State> {
     ) -> RefScene {
         lastWasSettled = false
         let wasQuiet = !frameHadInputSinceLastFrame && !isAnimating
-        let dueTimer = nextWakeDeadline.map { now >= $0 } ?? false
+        let dueTimerDeadline = wakeDeadlines.first.map { now >= $0 } ?? false
+        let pendingDue = pendingUpdateWakes.contains { ($0.scheduledAt + $0.delay) <= now }
+        let dueTimer = dueTimerDeadline || pendingDue
+        let timerAlreadyPolled = timerWake.framePolled(due: dueTimerDeadline)
+        drainDueWakeDeadlines(through: now)
         let wasLive = frameHadLiveWake
         frameHadInputSinceLastFrame = false
         frameHadLiveWake = false
@@ -1307,7 +1383,11 @@ public final class Runtime<State> {
             splitStep = nil
         }
 
-        let (frameOut, animNow) = stepToFrameOutputScaled(at: now, splitStep: splitStep)
+        let (frameOut, animNow) = stepToFrameOutputScaled(
+            at: now,
+            splitStep: splitStep,
+            skipFramePoll: timerAlreadyPolled
+        )
         let sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
         }
@@ -1479,7 +1559,8 @@ public final class Runtime<State> {
     @inline(never)
     private func prepareAndCommitFrame(
         at now: Double,
-        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil
+        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil,
+        skipFramePoll: Bool = false
     ) -> (animNow: Double, growthMoving: Bool) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
@@ -1489,7 +1570,10 @@ public final class Runtime<State> {
         }
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
-        _ = runPoll(at: now)
+        insideFramePollOrInput = true
+        if !skipFramePoll {
+            _ = runPoll(at: now)
+        }
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
@@ -1510,6 +1594,8 @@ public final class Runtime<State> {
         var growthMoving = advanceGrowthRows(at: now)
         fireHoverDelays(at: now)
         flushPendingSentKeys(at: now)
+        insideFramePollOrInput = false
+        promotePendingWakes(at: now)
 
         // Release any `enterDelay` elements whose wait window has elapsed
         var releasedAny = false
@@ -1713,9 +1799,14 @@ public final class Runtime<State> {
 
     internal func stepToFrameOutputScaled(
         at now: Double,
-        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil
+        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil,
+        skipFramePoll: Bool = false
     ) -> (frameOut: FrameOutput, animNow: Double) {
-        let (animNow, growthMoving) = prepareAndCommitFrame(at: now, splitStep: splitStep)
+        let (animNow, growthMoving) = prepareAndCommitFrame(
+            at: now,
+            splitStep: splitStep,
+            skipFramePoll: skipFramePoll
+        )
 
         // Sample Scene & Live property bindings using scaled animation clock
         elSliceRenderState.loopCatchUp.loopsStepped(hostNow: currentTime, animEnd: animNow)
@@ -9001,9 +9092,17 @@ public final class Runtime<State> {
         if tx.isRelaunchRequested {
             relaunchRequested = true
         }
-        if let wakeAfter = tx.wakeAfterSeconds {
-            let candidate = now + wakeAfter
-            nextWakeDeadline = min(nextWakeDeadline ?? candidate, candidate)
+        let wakeDelays = tx.wakeAfterSecondsList
+        if !wakeDelays.isEmpty {
+            if insideFramePollOrInput {
+                for delay in wakeDelays {
+                    pendingFrameWakes.append((scheduledAt: now, delay: delay))
+                }
+            } else {
+                for delay in wakeDelays {
+                    pendingUpdateWakes.append((scheduledAt: now, delay: delay))
+                }
+            }
         }
         if tx.quitRequested {
             quitRequested = true
@@ -9409,18 +9508,26 @@ public final class Runtime<State> {
         guard liveVisible else { return false }
         return livePendingDirty || liveWake.isVisiblePending
     }
+    internal var hasPendingHiddenWork: Bool {
+        needsCommit
+            || !pendingScrollBottoms.isEmpty
+            || !pendingScrollReveals.isEmpty
+            || !pendingTextFlights.isEmpty
+            || !pendingLaunches.isEmpty
+    }
+
     /// Runs `poll` while the window is hidden (`Runtime::poll_hidden`), returning `true` if
     /// the view or pending scroll/flight state became out of date.
     @discardableResult
     public func pollHidden(at now: Double) -> Bool {
         currentTime = now
-        let changed = runPoll(at: now)
-        return changed
-            || needsCommit
-            || !pendingScrollBottoms.isEmpty
-            || !pendingScrollReveals.isEmpty
-            || !pendingTextFlights.isEmpty
-            || !pendingLaunches.isEmpty
+        if timerWake.isAsked && (wakeDeadlines.first.map { $0 > now } ?? true) {
+            cancelTimerFrame()
+            return hasPendingHiddenWork
+        }
+        let changed = pollAlone(at: now)
+        schedulePendingWakes(from: now)
+        return changed || hasPendingHiddenWork
     }
 
     internal func focusedInputElement(at path: String) -> El<State>? {
@@ -9745,7 +9852,7 @@ public final class Runtime<State> {
     /// or runs `poll` without building the view tree, returning whether the drawn frame is invalidated.
     @discardableResult
     public func hiddenWake(at now: Double? = nil) -> Bool {
-        let t = now ?? currentTime
+        let t = now ?? nowClock()
         if hasPendingInput {
             let prevCommits = commitCount
             _ = frame(at: t)
@@ -9754,8 +9861,10 @@ public final class Runtime<State> {
             }
             return commitCount != prevCommits
         }
-        let pollChanged = runPoll(at: t)
-        return pollChanged || needsCommit
+        if let explicit = now {
+            return pollHidden(at: explicit)
+        }
+        return pollHidden()
     }
 
     /// Snaps all in-flight transitions and reveals before the next frame (`Runtime::settle_all`).
