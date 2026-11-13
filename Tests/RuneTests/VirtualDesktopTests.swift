@@ -250,4 +250,132 @@ struct VirtualDesktopTests {
         ]
         #expect(DesktopReopen.target(hiddenOnly) == 1)
     }
+
+    #if canImport(CoreGraphics) && canImport(ImageIO)
+    @Test("virtual_desktop/tests.rs: fitBackdrop crops to output aspect, keeps same-size pixels, and refuses over-max before decode")
+    func fitBackdropCropsToAspectAndRefusesOverMax() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rune-backdrop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        func writePNG(path: URL, width: Int, height: Int, rgba: [UInt8]) throws {
+            let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+            guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+                  let image = CGImage(
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bitsPerPixel: 32,
+                    bytesPerRow: width * 4,
+                    space: cs,
+                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                    provider: provider,
+                    decode: nil,
+                    shouldInterpolate: false,
+                    intent: .defaultIntent
+                  ),
+                  let dest = CGImageDestinationCreateWithURL(path as CFURL, "public.png" as CFString, 1, nil) else {
+                Issue.record("Failed to encode test PNG \(path.lastPathComponent)")
+                return
+            }
+            CGImageDestinationAddImage(dest, image, nil)
+            #expect(CGImageDestinationFinalize(dest))
+        }
+
+        // Red, green, blue thirds side-by-side: square output keeps the green middle.
+        var wideRGBA = [UInt8](repeating: 0, count: 300 * 100 * 4)
+        for y in 0..<100 {
+            for x in 0..<300 {
+                let idx = (y * 300 + x) * 4
+                wideRGBA[idx + 0] = x < 100 ? 255 : 0
+                wideRGBA[idx + 1] = (100..<200).contains(x) ? 255 : 0
+                wideRGBA[idx + 2] = x >= 200 ? 255 : 0
+                wideRGBA[idx + 3] = 255
+            }
+        }
+        let wideURL = dir.appendingPathComponent("wide.png")
+        try writePNG(path: wideURL, width: 300, height: 100, rgba: wideRGBA)
+
+        let px = try DesktopComposite.fitBackdrop(imagePath: wideURL.path, targetSize: (50, 50))
+        #expect(px.count == 50 * 50 * 4)
+        for p in stride(from: 0, to: px.count, by: 4) {
+            #expect(px[p + 1] > 200 && px[p] < 40 && px[p + 2] < 40)
+        }
+        let same = try DesktopComposite.fitBackdrop(imagePath: wideURL.path, targetSize: (300, 100))
+        #expect(Array(same.prefix(4)) == [255, 0, 0, 255])
+
+        let hugeW = DesktopComposite.maxBackdropSide + 1
+        let hugeURL = dir.appendingPathComponent("huge.png")
+        let hugeRGBA = [UInt8](repeating: 0, count: hugeW * 4)
+        try writePNG(path: hugeURL, width: hugeW, height: 1, rgba: hugeRGBA)
+        do {
+            _ = try DesktopComposite.fitBackdrop(imagePath: hugeURL.path, targetSize: (10, 10))
+            Issue.record("Expected huge backdrop to throw")
+        } catch let err as VirtualDesktopError {
+            #expect(err.localizedDescription.contains("\(hugeW)x1"))
+        }
+    }
+    #endif
+
+    @Test("virtual_desktop/tests.rs: hidden window lets go of a captured pointer")
+    func hiddenWindowReleasesCapturedPointer() {
+        let a = MockMember(key: "a", frame: [0, 0, 100, 100])
+        let b = MockMember(key: "b", frame: [100, 0, 100, 100])
+        let desk = VirtualDesk(members: [a, b])
+
+        desk.pointerInput(kind: .down(), at: (150, 50))
+        #expect(desk.pointer == .pressed(1))
+        desk.pointerInput(kind: .move, at: (50, 50))
+        #expect(a.inputs.isEmpty && !b.inputs.isEmpty)
+
+        b.visible = false
+        desk.focus = DesktopFocus(keyIndex: 0, active: true)
+        desk.settleKey()
+        #expect(desk.pointer == .out)
+
+        desk.pointerInput(kind: .move, at: (50, 50))
+        #expect(!a.inputs.isEmpty)
+        #expect(desk.pointer == .over(0))
+    }
+
+    @Test("virtual_desktop/tests.rs: each window takes its tab opt-in and titlebar inset")
+    func eachWindowTabOptInAndTitlebarInset() {
+        func runWindow(tabVisitsControls: Bool, borderless: Bool) -> (String?, Float) {
+            let opts = WindowOptions(borderless: borderless)
+            let app = App<Int>(
+                title: "W",
+                size: Vec2(300, 100),
+                state: 0,
+                view: { _, cx in
+                    col().size(300, 100)
+                        .child(row().child(el().key("inset").size(max(cx.titlebarInset(), 1.0), 10.0)))
+                        .child(el().key("button").size(30, 30).focusable(true).role(.button))
+                }
+            )
+            .chrome(.default)
+            .tabVisitsControls(tabVisitsControls)
+            .windowOptions(opts)
+
+            let win = DesktopWindow<Int>(key: "w", app: app, scale: 1.0)
+            win.start(desktop: .single(scale: 1.0))
+            _ = win.runtime.frame(at: 0.0)
+            win.runtime.setFullKeyboardAccess(false)
+            win.runtime.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.0)
+            _ = win.runtime.frame(at: 0.1)
+            let focused = win.runtime.elements().first(where: \.focused)?.key
+            let insetW = win.runtime.element(byKey: "inset")?.rect[2] ?? 0.0
+            return (focused, insetW)
+        }
+
+        let res1 = runWindow(tabVisitsControls: true, borderless: false)
+        #expect(res1.0 == "button")
+        #expect(res1.1 == 67.0)
+
+        let res2 = runWindow(tabVisitsControls: false, borderless: false)
+        #expect(res2.0 == nil)
+
+        let res3 = runWindow(tabVisitsControls: true, borderless: true)
+        #expect(res3.1 == 1.0)
+    }
 }

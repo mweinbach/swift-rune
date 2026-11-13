@@ -457,4 +457,20 @@ struct ToolingHTMLAndHeadlessTests {
         #expect(count >= 1)
         #endif
     }
+
+    @Test("tooling/html_tests.rs: fills markers or head/body and defaultTemplate contains both markers")
+    func toolingHtmlFillMarkersAndDefaultTemplate() {
+        let marked = "<head><!-- rune:css --></head><body><nav></nav><!-- rune:body --></body>"
+        #expect(
+            ToolingHTML.fill(template: marked, css: ".a{}", body: "<main></main>")
+                == "<head><style data-rune-static>.a{}</style></head><body><nav></nav><main></main></body>"
+        )
+        let plain = "<html><head><title>x</title></head><body class=\"k\"></body></html>"
+        #expect(
+            ToolingHTML.fill(template: plain, css: ".a{}", body: "<main></main>")
+                == "<html><head><title>x</title><style data-rune-static>.a{}</style></head><body class=\"k\"><main></main></body></html>"
+        )
+        #expect(ToolingHTML.defaultTemplate.contains(ToolingHTML.cssMarker))
+        #expect(ToolingHTML.defaultTemplate.contains(ToolingHTML.bodyMarker))
+    }
 }

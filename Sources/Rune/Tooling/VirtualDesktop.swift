@@ -740,6 +740,12 @@ public final class DesktopWindow<State>: DesktopMember {
         )
         rt.windowTitle = spec.appSpec.title
         rt.tabVisitsControls = tabVisitsControls
+        let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
+        if resolvedChrome.fullSizeContent && !(spec.options.borderless || spec.chrome.borderless) {
+            rt.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
+        } else {
+            rt.cxSettings.titlebarInset = 0.0
+        }
         rt.onClose = onClose
         rt.onReopen = spec.onReopen
         rt.onFocus = onFocus

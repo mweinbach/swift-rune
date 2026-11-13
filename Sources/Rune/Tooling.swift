@@ -448,6 +448,7 @@ public struct ScriptStep: Sendable {
         case wheel(WheelEvent)
         case fling(vx: Float, vy: Float)
         case resize(Vec2)
+        case resizeDelta(dw: Float, dh: Float)
         case windowFocus(Bool)
         case mark(String)
         case reopen
@@ -784,9 +785,25 @@ public enum HeadlessRunner {
                 out.append(ScriptStep(t: t, position: pos, action: .fling(vx: vx, vy: vy)))
 
             case "resize":
-                let w = (e["w"] as? NSNumber)?.floatValue ?? 800
-                let h = (e["h"] as? NSNumber)?.floatValue ?? 600
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .resize(Vec2(w, h))))
+                if e["dw"] != nil || e["dh"] != nil || (e["w"] == nil && e["h"] == nil) {
+                    let dw = (e["dw"] as? NSNumber)?.floatValue ?? 0
+                    let dh = (e["dh"] as? NSNumber)?.floatValue ?? 0
+                    let dur = max(0.01, (e["dur"] as? NSNumber)?.doubleValue ?? 0.3)
+                    let steps = max(1, Int(ceil(dur * 120.0)))
+                    for s in 0...steps {
+                        let f = Float(s) / Float(steps)
+                        let eased = f * f * (3.0 - 2.0 * f)
+                        out.append(ScriptStep(
+                            t: t + dur * Double(s) / Double(steps),
+                            position: .relative(0, 0),
+                            action: .resizeDelta(dw: dw * eased, dh: dh * eased)
+                        ))
+                    }
+                } else {
+                    let w = (e["w"] as? NSNumber)?.floatValue ?? 800
+                    let h = (e["h"] as? NSNumber)?.floatValue ?? 600
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .resize(Vec2(w, h))))
+                }
 
             case "wait":
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .move))
@@ -1169,6 +1186,7 @@ public enum HeadlessRunner {
         // Initial settled frame at t = 0 (or `--at` if specified)
         var windowFrameMove: WindowFrameMove? = nil
         var currentOuterFrame: [Float] = [0, 0, vp.x, vp.y]
+        var scriptedResizeFrom: Vec2 = vp
         func stepWindowFrame(at now: Double) {
             if case .moving(let anim, _, _) = windowFrameMove {
                 let (pos, _) = anim.sample(at: now)
@@ -1320,7 +1338,18 @@ public enum HeadlessRunner {
                     case .resize(let newVP):
                         windowFrameMove = nil
                         currentOuterFrame = [currentOuterFrame[0], currentOuterFrame[1], newVP.x, newVP.y]
-                        runtime.setViewport(newVP)
+                        runtime.setViewport(newVP, pixelScale: args.pixelScale)
+                    case let .resizeDelta(dw, dh):
+                        if dw == 0.0 && dh == 0.0 {
+                            scriptedResizeFrom = runtime.viewport
+                        }
+                        let nextVP = Vec2(
+                            max(1.0, scriptedResizeFrom.x + dw),
+                            max(1.0, scriptedResizeFrom.y + dh)
+                        )
+                        windowFrameMove = nil
+                        currentOuterFrame = [currentOuterFrame[0], currentOuterFrame[1], nextVP.x, nextVP.y]
+                        runtime.setViewport(nextVP, pixelScale: args.pixelScale)
                     case .windowFocus(let foc):
                         runtime.windowFocused = foc
                     case .mark(let markName):
