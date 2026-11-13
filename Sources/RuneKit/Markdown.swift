@@ -1449,7 +1449,9 @@ public struct MarkdownStream: Sendable, Equatable {
 
         if let patch = MarkdownTailStream.closeTail(work) {
             let prefixEnd = work.utf8.index(work.utf8.startIndex, offsetBy: min(patch.cut, work.utf8.count))
-            return String(work[..<prefixEnd]) + patch.closers
+            let rawKept = String(work[..<prefixEnd])
+            let kept = patch.closers.isEmpty ? rawKept : rawKept.trimmingTrailingWhitespaceOnly()
+            return kept + patch.closers
         }
         return work
     }
@@ -1491,21 +1493,66 @@ public struct MarkdownTailStream: Sendable, Equatable {
     }
 
     public func document(streaming: Bool = true) -> MarkdownParsedDoc {
+        let rawDoc = MarkdownDocCache.shared.docCached(source, autolink: autolink)
         if !streaming {
-            return MarkdownDocCache.shared.docCached(source, autolink: autolink)
+            return rawDoc
         }
         if MarkdownStream.unclosedFence(in: source) != nil {
-            return MarkdownDocCache.shared.docCached(source, autolink: autolink)
+            return rawDoc
         }
-        let s = stabilizedSource
-        var doc = MarkdownDocCache.shared.docCached(s, autolink: autolink)
-        let work = Self.heldTableEndByte(in: source, parseLastBlock: {
-            MarkdownParser.parseDocument(source, autolink: autolink).blocks.last
-        }).flatMap { utf8Slice(source, range: 0..<$0) } ?? source
-        if let patch = Self.closeTail(work), patch.inCode {
-            Self.dropClosingPad(in: &doc)
+        let end = Self.heldTableEndByte(in: source, parseLastBlock: { rawDoc.blocks.last }) ?? source.utf8.count
+        let work = (end == source.utf8.count) ? source : (utf8Slice(source, range: 0..<end) ?? source)
+        guard let patch = Self.closeTail(work) else {
+            return (end == source.utf8.count) ? rawDoc : MarkdownDocCache.shared.docCached(work, autolink: autolink)
         }
-        return doc
+        if !patch.closers.isEmpty {
+            let rawKept = utf8Slice(work, range: 0..<patch.cut) ?? work
+            let kept = rawKept.trimmingTrailingWhitespaceOnly()
+            let view = kept + patch.closers
+            var doc = MarkdownDocCache.shared.docCached(view, autolink: autolink)
+            let added = kept.utf8.count..<view.utf8.count
+            let anyMarkerShown = (patch.markers + [added]).contains { r in
+                doc.maps.contains { Self.blockMap($0, shows: r) }
+            }
+            if !anyMarkerShown {
+                if patch.inCode {
+                    Self.dropClosingPad(in: &doc)
+                }
+                return doc
+            }
+        }
+        let cutSrc = utf8Slice(work, range: 0..<patch.cut) ?? work
+        let cutDoc = MarkdownDocCache.shared.docCached(cutSrc, autolink: autolink)
+        let rawCols = Self.tableColumns(in: rawDoc)
+        if Self.tableColumns(in: cutDoc) >= rawCols {
+            return cutDoc
+        }
+        // Leaving markers out of a header's last cell (`| a | *`) drops that column; keep it empty.
+        let paddedDoc = MarkdownDocCache.shared.docCached(cutSrc + "|", autolink: autolink)
+        return Self.tableColumns(in: paddedDoc) >= rawCols ? paddedDoc : rawDoc
+    }
+
+    private static func tableColumns(in doc: MarkdownParsedDoc) -> Int {
+        guard case let .table(t) = doc.blocks.last else { return 0 }
+        return max(t.align.count, t.head.count)
+    }
+
+    private static func blockMap(_ map: MarkdownBlockMap, shows range: Range<Int>) -> Bool {
+        func hit(_ spanMap: MarkdownSpanMap) -> Bool {
+            spanMap.segments.contains { $0.src.lowerBound < range.upperBound && range.lowerBound < $0.src.upperBound }
+        }
+        switch map {
+        case let .inline(m), let .code(m):
+            return hit(m)
+        case let .list(items):
+            return items.contains { $0.contains { blockMap($0, shows: range) } }
+        case let .quote(inner):
+            return inner.contains { blockMap($0, shows: range) }
+        case let .table(head, rows):
+            return head.contains(where: hit) || rows.contains { $0.contains(where: hit) }
+        case .none:
+            return false
+        }
     }
 
     static func heldTableEndByte(in source: String, parseLastBlock: () -> MarkdownDocBlock?) -> Int? {
@@ -1632,13 +1679,33 @@ public struct MarkdownTailStream: Sendable, Equatable {
                         i = relClose + 1
                     } else {
                         stack.removeSubrange((p + 1)...)
-                        stack[p].ch = 0x28
+                        var destCh: UInt8 = 0x28
+                        if let wsIdx = afterParen.firstIndex(where: { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }) {
+                            var t = wsIdx + 1
+                            while t < b.count && (b[t] == 0x20 || b[t] == 0x09 || b[t] == 0x0A || b[t] == 0x0D) {
+                                t += 1
+                            }
+                            if t < b.count && (b[t] == 0x22 || b[t] == 0x27) {
+                                let q = b[t]
+                                if !(b.count - t > 1 && b.last == q) {
+                                    destCh = q
+                                }
+                            }
+                        }
+                        stack[p].ch = destCh
                         i = b.count
                     }
                 } else {
                     stack.remove(at: p)
                     i += 1
                 }
+            case 0x68 where urlAt(runBytes: b, at: i), 0x77 where urlAt(runBytes: b, at: i): // 'h', 'w' bare URL
+                var k = i
+                while k < b.count {
+                    if let c = charAt(k), c.isWhitespace { break }
+                    k += 1
+                }
+                i = k
             case 0x2A, 0x5F, 0x7E: // '*', '_', '~'
                 let ch = b[i]
                 let n = runLen(b, i)
@@ -1722,6 +1789,9 @@ public struct MarkdownTailStream: Sendable, Equatable {
                     tailSlice[(parenIdx + 1)...].allSatisfy { $0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D }
                 } ?? false
                 closers.append(hasEmptyDest ? "#)" : ")")
+            case 0x22, 0x27:
+                closers.append(String(UnicodeScalar(o.ch)))
+                closers.append(")")
             default:
                 closers.append(String(repeating: Character(UnicodeScalar(o.ch)), count: o.count))
             }
@@ -1729,6 +1799,16 @@ public struct MarkdownTailStream: Sendable, Equatable {
         }
         guard cut < b.count || !closers.isEmpty else { return nil }
         return Patch(cut: base + cut, closers: closers, markers: markers, inCode: code != nil)
+    }
+
+    private static func urlAt(runBytes b: [UInt8], at i: Int) -> Bool {
+        let rest = b[i...]
+        let matchesPrefix = rest.starts(with: Array("https://".utf8))
+            || rest.starts(with: Array("http://".utf8))
+            || rest.starts(with: Array("www.".utf8))
+        guard matchesPrefix else { return false }
+        guard i > 0, let prev = String(bytes: b[..<i], encoding: .utf8)?.last else { return true }
+        return prev.isWhitespace || "(<[".contains(prev)
     }
 
     private static func runLen(_ b: [UInt8], _ i: Int) -> Int {
@@ -2467,12 +2547,40 @@ public enum MarkdownParser {
             return s0..<max(s0, s1)
         }
 
+        func pushMappedRanges(inputLo: Int, inputHi: Int, outLo: Int, outHi: Int) {
+            guard outLo < outHi, inputLo < inputHi else { return }
+            guard let customSrcMap, !customSrcMap.isEmpty, (outHi - outLo) == (inputHi - inputLo) else {
+                map.push(src: mapInputRange(inputLo, inputHi), out: outLo..<outHi)
+                return
+            }
+            var curOut = outLo
+            var pushed = false
+            for seg in customSrcMap where seg.out.upperBound > inputLo && seg.out.lowerBound < inputHi {
+                let overlap0 = max(inputLo, seg.out.lowerBound)
+                let overlap1 = min(inputHi, seg.out.upperBound)
+                guard overlap0 < overlap1 else { continue }
+                pushed = true
+                let rel0 = overlap0 - seg.out.lowerBound
+                let rel1 = overlap1 - seg.out.lowerBound
+                let s0 = seg.src.lowerBound + min(rel0, seg.src.count)
+                let s1 = seg.src.lowerBound + min(rel1, seg.src.count)
+                let segLen = overlap1 - overlap0
+                if s0 < s1 {
+                    map.push(src: s0..<s1, out: curOut..<(curOut + segLen))
+                }
+                curOut += segLen
+            }
+            if !pushed {
+                map.push(src: (baseOffset + inputLo)..<(baseOffset + inputHi), out: outLo..<outHi)
+            }
+        }
+
         func appendRaw(_ s: String, srcLo: Int, srcHi: Int) {
             guard !s.isEmpty else { return }
             let out0 = text.utf8.count
             text.append(s)
             let out1 = text.utf8.count
-            map.push(src: mapInputRange(srcLo, srcHi), out: out0..<out1)
+            pushMappedRanges(inputLo: srcLo, inputHi: srcHi, outLo: out0, outHi: out1)
         }
 
         func parseRange(_ lo: Int, _ hi: Int, linkDepth: Int, emDepth: Int) {
@@ -2530,7 +2638,7 @@ public enum MarkdownParser {
                         spans.append(MarkdownStyleSpan(start: codeStart, end: codeEnd, style: .code))
                         spans.append(MarkdownStyleSpan(start: codeEnd, end: padCloseEnd, style: .codePad))
                         if codeStart < codeEnd {
-                            map.push(src: mapInputRange(contentLo, contentHi), out: codeStart..<codeEnd)
+                            pushMappedRanges(inputLo: contentLo, inputHi: contentHi, outLo: codeStart, outHi: codeEnd)
                         }
                         i = closeStart + tickCount
                         continue
@@ -3696,7 +3804,7 @@ private func applyUTF8Highlights(
 
 // MARK: - MarkdownStyle & Sub-Styles (`rune_kit::markdown::style`)
 
-public struct MarkdownTaskPaint: Sendable, Equatable {
+public struct MarkdownTaskPaint: Sendable, Equatable, Hashable {
     public var fillOn: Color
     public var borderOn: Color
     public var borderOff: Color
@@ -3748,7 +3856,7 @@ public struct MarkdownTableFrame: Sendable, Equatable, Hashable {
     }
 }
 
-public struct MarkdownTableBody: Sendable, Equatable {
+public struct MarkdownTableBody: Sendable, Equatable, Hashable {
     public var fill: Color
     public var radius: Float
     public var shadows: [Shadow]
@@ -3784,7 +3892,7 @@ public enum MarkdownLinkIconPosition: Sendable, Equatable, Hashable {
 }
 
 /// Visual tokens for a rendered Markdown document (`rune_kit::markdown::MarkdownStyle`).
-public struct MarkdownStyle: Sendable, Equatable {
+public struct MarkdownStyle: Sendable, Equatable, Hashable {
     public var text: Color
     public var muted: Color
     public var accent: Color
@@ -3884,6 +3992,76 @@ public struct MarkdownStyle: Sendable, Equatable {
         lhs.highlightCurrentBg == rhs.highlightCurrentBg && lhs.highlightCurrentFg == rhs.highlightCurrentFg &&
         lhs.highlightCurrentRing?.0 == rhs.highlightCurrentRing?.0 && lhs.highlightCurrentRing?.1 == rhs.highlightCurrentRing?.1 &&
         lhs.task == rhs.task && lhs.diagram == rhs.diagram
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(text)
+        hasher.combine(muted)
+        hasher.combine(accent)
+        hasher.combine(linkUnderline)
+        hasher.combine(codeBg)
+        hasher.combine(codeBlockFill)
+        hasher.combine(codeBlockBorder)
+        hasher.combine(quoteRule)
+        hasher.combine(quote)
+        hasher.combine(rule)
+        hasher.combine(body)
+        hasher.combine(headings)
+        hasher.combine(codeBlock)
+        hasher.combine(codeText)
+        hasher.combine(plainCodeText)
+        hasher.combine(shell)
+        hasher.combine(linkHover)
+        hasher.combine(listOutside)
+        hasher.combine(listNested)
+        hasher.combine(tableAlign)
+        hasher.combine(inlineCodeScale)
+        hasher.combine(inlineCodeWeight)
+        hasher.combine(inlineCodePad)
+        hasher.combine(codeBlockPad)
+        hasher.combine(listIndent)
+        hasher.combine(listGap)
+        hasher.combine(strongWeight)
+        hasher.combine(tableOutline)
+        hasher.combine(tableRule)
+        hasher.combine(tableHeadFill)
+        hasher.combine(tableHeadText)
+        hasher.combine(tableHeadRule)
+        hasher.combine(tableHeadWeight)
+        hasher.combine(tableMinColumn)
+        hasher.combine(tableTabular)
+        hasher.combine(tableFont)
+        hasher.combine(tablePad)
+        hasher.combine(tableFlushLeft)
+        hasher.combine(tableFrame)
+        hasher.combine(tableBody)
+        hasher.combine(tableHeadPad)
+        hasher.combine(tableFullWidth)
+        hasher.combine(tableMargin)
+        hasher.combine(codeMargin)
+        hasher.combine(tableBar)
+        hasher.combine(textWidth)
+        hasher.combine(wideFade)
+        hasher.combine(linkIcon)
+        hasher.combine(diffAdd)
+        hasher.combine(diffRemove)
+        hasher.combine(diffAddText)
+        hasher.combine(diffRemoveText)
+        hasher.combine(diffHues)
+        hasher.combine(diffHunk)
+        hasher.combine(syntax)
+        hasher.combine(highlight)
+        hasher.combine(selection)
+        hasher.combine(highlightBg)
+        hasher.combine(highlightFg)
+        hasher.combine(highlightRing?.0)
+        hasher.combine(highlightRing?.1)
+        hasher.combine(highlightCurrentBg)
+        hasher.combine(highlightCurrentFg)
+        hasher.combine(highlightCurrentRing?.0)
+        hasher.combine(highlightCurrentRing?.1)
+        hasher.combine(task)
+        hasher.combine(diagram)
     }
 
     public static func fromKit(_ k: Kit) -> MarkdownStyle {
@@ -4339,8 +4517,52 @@ public enum MarkdownLinkIcons {
     }
 }
 
+/// Rich per-link paint configuration for `Markdown.linkStyle` (`rune::LinkPaint`).
+public struct MarkdownLinkStyle: Sendable, Equatable {
+    public var color: Color?
+    public var underline: Bool
+    public var weight: Float?
+    public var bg: Color?
+    public var hoverColor: Color?
+    public var hoverBg: Color?
+
+    public init(
+        color: Color? = nil,
+        underline: Bool = true,
+        weight: Float? = nil,
+        bg: Color? = nil,
+        hoverColor: Color? = nil,
+        hoverBg: Color? = nil
+    ) {
+        self.color = color
+        self.underline = underline
+        self.weight = weight
+        self.bg = bg
+        self.hoverColor = hoverColor
+        self.hoverBg = hoverBg
+    }
+}
+
 /// Fluent, full-parity CommonMark + GFM Markdown component (`rune_kit::markdown::Markdown`).
 public struct Markdown: Sendable {
+    final class UncachedRenderCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Int = 0
+        func increment() { lock.lock(); value += 1; lock.unlock() }
+        func take() -> Int { lock.lock(); defer { value = 0; lock.unlock() }; return value }
+    }
+
+    @TaskLocal static var activeRenderCounter: UncachedRenderCounter?
+
+    static func withRenderCounter<T>(_ body: (UncachedRenderCounter) -> T) -> T {
+        let box = UncachedRenderCounter()
+        return $activeRenderCounter.withValue(box) { body(box) }
+    }
+
+    static func recordUncachedRender() {
+        activeRenderCounter?.increment()
+    }
+
     public var source: String
     public var customStyle: MarkdownStyle?
     public var revealDelay: Float = -1.0
@@ -4355,6 +4577,7 @@ public struct Markdown: Sendable {
     public var areTasksReadOnly: Bool = false
     public var syntaxHighlighter: SyntaxHighlighter = .builtin
     public var linkLookFn: (@Sendable (String) -> (color: Color?, underline: Bool, weight: Float?, hoverColor: Color?)?)?
+    public var linkPaintFn: (@Sendable (String) -> MarkdownLinkStyle?)?
     public var linkRingFn: (@Sendable (String) -> (Color, Float)?)?
     public var linkHelpFn: (@Sendable (String) -> String?)?
     public var linkFaviconFn: (@Sendable (String) -> RGBA8Atlas?)?
@@ -4385,7 +4608,10 @@ public struct Markdown: Sendable {
         return c
     }
     public func linkStyle(_ fn: @escaping @Sendable (String) -> (color: Color?, underline: Bool, weight: Float?, hoverColor: Color?)?) -> Markdown {
-        var c = self; c.linkLookFn = fn; return c
+        var c = self; c.linkLookFn = fn; c.linkPaintFn = nil; return c
+    }
+    public func linkStyle(_ fn: @escaping @Sendable (String) -> MarkdownLinkStyle?) -> Markdown {
+        var c = self; c.linkPaintFn = fn; c.linkLookFn = nil; return c
     }
     public func linkRing(_ fn: @escaping @Sendable (String) -> (Color, Float)?) -> Markdown {
         var c = self; c.linkRingFn = fn; return c
@@ -4576,7 +4802,10 @@ public struct MarkdownView<State>: Sendable {
         var c = self; c.config = c.config.codeLink(match: match, color: color); return c
     }
     public func linkStyle(_ fn: @escaping @Sendable (String) -> (color: Color?, underline: Bool, weight: Float?, hoverColor: Color?)?) -> Self {
-        var c = self; c.config.linkLookFn = fn; return c
+        var c = self; c.config.linkLookFn = fn; c.config.linkPaintFn = nil; return c
+    }
+    public func linkStyle(_ fn: @escaping @Sendable (String) -> MarkdownLinkStyle?) -> Self {
+        var c = self; c.config.linkPaintFn = fn; c.config.linkLookFn = nil; return c
     }
     public func linkRing(_ fn: @escaping @Sendable (String) -> (Color, Float)?) -> Self {
         var c = self; c.config.linkRingFn = fn; return c
@@ -4619,6 +4848,52 @@ public struct MarkdownView<State>: Sendable {
     }
 
     public func render(_ style: MarkdownStyle) -> El<State> {
+        let canCache = !config.isStreaming
+            && onLinkHandler == nil
+            && onLinkSecondaryHandler == nil
+            && config.linkLookFn == nil
+            && config.linkPaintFn == nil
+            && config.linkHelpFn == nil
+            && config.linkRingFn == nil
+            && config.codeLinkMatchFn == nil
+            && onTaskHandler == nil
+            && !(config.isSelectable && config.copySourceMode)
+            && config.syntaxHighlighter.id == SyntaxHighlighter.builtin.id
+            && diagramFrameHandler == nil
+            && codeFrameHandler == nil
+            && quoteFrameHandler == nil
+            && imageFrameHandler == nil
+            && config.linkFaviconFn == nil
+            && !config.source.contains("mermaid")
+        if canCache {
+            var h = Hasher()
+            h.combine(config.source)
+            h.combine(style)
+            for item in config.callerBlockKeys {
+                h.combine(item.offset)
+                h.combine(item.key)
+            }
+            for item in config.highlightsList {
+                h.combine(item.ranges)
+                h.combine(item.style)
+            }
+            h.combine(config.isAutolinkEnabled)
+            h.combine(config.revealDelay.bitPattern)
+            h.combine(config.areTasksReadOnly)
+            h.combine(config.isSelectable)
+            h.combine(config.isScrollWide)
+            h.combine(config.tentativeDirection)
+            h.combine(config.imageAltVisible)
+            let digest = UInt64(bitPattern: Int64(h.finalize()))
+            return Rune.cached(digest) {
+                self.renderUncached(style)
+            }
+        }
+        return renderUncached(style)
+    }
+
+    private func renderUncached(_ style: MarkdownStyle) -> El<State> {
+        Markdown.recordUncachedRender()
         let doc = config.document()
         let keys = matchBlockKeys(starts: doc.blockStarts, callerKeys: config.callerBlockKeys)
         let renderer = MarkdownRenderer<State>(view: self, style: style, doc: doc)
@@ -4898,7 +5173,7 @@ private final class MarkdownRenderer<State> {
             return imgBox
 
         case .rule:
-            return s.rule.a <= 0 ? el().wFull().h(0) : el().wFull().h(0.5).bg(s.rule).role(.separator)
+            return s.rule.a <= 0 ? el().wFull().h(0) : el().wFull().h(0.5).bg(s.rule)
         }
     }
 
@@ -4993,10 +5268,11 @@ private final class MarkdownRenderer<State> {
             }
 
             if let link {
-                if let custom = view.config.linkLookFn?(link.url) {
+                if let custom = resolvedLinkStyle(link.url) {
                     fg = custom.color ?? s.accent
                     underline = custom.underline
                     if !isStrong && !isCode, let w = custom.weight { weight = w }
+                    if !isCode, let lbg = custom.bg { bg = lbg }
                 } else if !isCode {
                     fg = s.accent
                     underline = true
@@ -5071,19 +5347,39 @@ private final class MarkdownRenderer<State> {
         return out
     }
 
+    private func resolvedLinkStyle(_ url: String) -> MarkdownLinkStyle? {
+        if let p = view.config.linkPaintFn?(url) {
+            return p
+        }
+        if let legacy = view.config.linkLookFn?(url) {
+            return MarkdownLinkStyle(
+                color: legacy.color,
+                underline: legacy.underline,
+                weight: legacy.weight,
+                bg: nil,
+                hoverColor: legacy.hoverColor,
+                hoverBg: nil
+            )
+        }
+        return nil
+    }
+
     private func wireLinks(_ node: El<State>, inl: MarkdownInline) -> El<State> {
         guard !inl.links.isEmpty else { return node }
-        let interactive = view.onLinkHandler != nil || view.onLinkSecondaryHandler != nil || view.config.linkHelpFn != nil || view.config.linkLookFn != nil || view.config.linkRingFn != nil || s.linkHover != nil
+        let interactive = view.onLinkHandler != nil || view.onLinkSecondaryHandler != nil || view.config.linkHelpFn != nil || view.config.linkLookFn != nil || view.config.linkPaintFn != nil || view.config.linkRingFn != nil || s.linkHover != nil
         guard interactive else { return node }
         var out = node
         for link in inl.links {
-            let look = view.config.linkLookFn?(link.url)
+            let look = resolvedLinkStyle(link.url)
             let hoverInk = look?.hoverColor ?? s.linkHover
             let underlineOn = look?.underline ?? true
             let ringTuple = view.config.linkRingFn?(link.url)
             var paint = LinkPaint()
             if let hoverInk {
                 paint = paint.color(hoverInk)
+            }
+            if let hoverBg = look?.hoverBg {
+                paint = paint.bg(hoverBg)
             }
             if underlineOn {
                 paint = paint.underline(true)
@@ -5123,7 +5419,7 @@ private final class MarkdownRenderer<State> {
     private func renderPara(_ rawInl: MarkdownInline, map: MarkdownSpanMap?, font: TextStyle, color: Color, dir: MarkdownDirection?) -> El<State> {
         let inl = withCodeLinks(rawInl)
         let spans = buildTextSpans(inl, font: font, baseColor: color)
-        var elNode: El<State> = withReveal(rich(spans).font(font).color(color)).wFull()
+        var elNode: El<State> = withReveal(rich(spans).font(font).color(color).wrap(.wrap)).wFull()
         if let dir {
             elNode = elNode.textAlign(dir.textAlign)
         }
@@ -5137,7 +5433,7 @@ private final class MarkdownRenderer<State> {
 
     private func tabbedRich(_ code: String, spans: [TextSpan], highlights: [TextHighlight], style: TextStyle, color: Color) -> El<State> {
         if !code.contains("\t") || style.family == .monospace {
-            return rich(spans).font(style).color(color).textHighlights(highlights)
+            return rich(spans).font(style).color(color).wrap(.wrap).textHighlights(highlights)
         }
         // Expand tabs visually to 4-column stops while keeping tab characters and uncopied spaces for selection copy
         var shown = ""
@@ -5193,7 +5489,7 @@ private final class MarkdownRenderer<State> {
             c.byteRange = shiftByte(h.byteRange.lowerBound)..<shiftByte(h.byteRange.upperBound)
             return c
         }
-        var elNode: El<State> = rich(outSpans).font(style).color(color).textHighlights(shiftedHighlights)
+        var elNode: El<State> = rich(outSpans).font(style).color(color).wrap(.wrap).textHighlights(shiftedHighlights)
         for t in tabs where t.pad > 0 {
             elNode = elNode.uncopied((t.shownByte + 1)..<(t.shownByte + 1 + t.pad))
         }
@@ -5251,6 +5547,7 @@ private final class MarkdownRenderer<State> {
             .rounded(6)
             .bg(fill)
             .border(0.5, border)
+            .borderLayout()
 
         if view.config.isScrollWide {
             var viewport: El<State> = col().key("scroll").wFull().scrollX()
@@ -5264,7 +5561,7 @@ private final class MarkdownRenderer<State> {
 
     private func renderDiff(_ src: String, map: MarkdownSpanMap?) -> El<State> {
         let hls = makeTextHighlights(for: src, map: map)
-        var c: El<State> = col().role(.code).wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder)
+        var c: El<State> = col().role(.code).wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder).borderLayout()
         var offset = 0
         let rawLines = src.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let last = max(0, rawLines.count - 1)
@@ -5484,7 +5781,7 @@ private final class MarkdownRenderer<State> {
                     let rmap = i < rowMaps.count ? rowMaps[i] : []
                     var rowEl = renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)")
                     if i + 1 < t.rows.count {
-                        rowEl = rowEl.borderSides(bottom: 0.5, color: s.tableRule)
+                        rowEl = rowEl.borderSides(bottom: 0.5, color: s.tableRule).borderLayout()
                     }
                     rowsCol = rowsCol.child(rowEl)
                 }

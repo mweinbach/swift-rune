@@ -800,7 +800,8 @@ let package = Package(
         .testTarget(
             name: "OpenCodeThemeTests",
             dependencies: ["OpenCodeTheme", "Rune", "RuneKit"],
-            path: "Tests/OpenCodeThemeTests"
+            path: "Tests/OpenCodeThemeTests",
+            exclude: ["Fixtures"]
         ),
         .testTarget(
             name: "RuneTaffyTests",

@@ -395,4 +395,27 @@ struct KitContentCloseoutTests {
         return out
     }
     #endif
+
+    @MainActor
+    @Test("§2 #358/#367/#368: IconButton.variant(.accent).onPress mounts and handles pointer click")
+    func iconButtonVariantOnPressParity() {
+        struct S: Sendable { var clicks = 0 }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(240, 120)) { _, _ in
+            col().p(12)
+                .child(
+                    IconButton<S>(key: "ib-accent", svg: KitIcons.close)
+                        .label("Close")
+                        .variant(.accent)
+                        .onPress { st, _ in st.clicks += 1 }
+                        .build(kit)
+                )
+        }
+        _ = rt.frame(at: 0)
+        let el = rt.element(byKey: "ib-accent")!
+        let pt = Vec2(el.rect[0] + el.rect[2] * 0.5, el.rect[1] + el.rect[3] * 0.5)
+        rt.pointerDown(at: pt, at: 0.05)
+        rt.pointerUp(at: pt, at: 0.1)
+        #expect(rt.state.clicks == 1)
+    }
 }

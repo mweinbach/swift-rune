@@ -73,6 +73,7 @@ struct MarkdownParityTests {
     }
 
     @Test("Search match highlighting and automatic mermaid block rendering in Kit.markdown")
+    @MainActor
     func searchHighlightingAndMermaidInMarkdown() {
         let kit = Kit.neutral(dark: true)
         let spans = MarkdownParser.inlineSpans(

@@ -240,4 +240,52 @@ struct WidgetsAndShellTests {
         #expect(items[0].children.map(\.label) == ["FileTree.swift", "Kit.swift"])
         #expect(items[1].label == "README.md")
     }
+
+    @Test("src/notes_tests.rs #56: Note mounts all 7 primitive pieces headlessly with laid-out rects")
+    @MainActor
+    func noteMountsAndLaysOutAllPrimitivesHeadlessly() {
+        let sampleNote = """
+        Lead summary line with enough prose width to span more than one hundred points cleanly.
+
+        > [!note]
+        > Attention callout paragraph.
+
+        ```facts
+        Latency: {verified} 11.9 ms
+        Mode: `Rgba16Float`
+        ```
+
+        ```compare
+        Before: Software rasterized overlay loop.
+        After: Single-pass GPU uber-quad exposure.
+        ```
+
+        ```steps
+        {built} Shared shutter pass · verified
+        {proposed} Live preview window
+        ```
+
+        ```size
+        app +120 −30 · tests +45 −0 · 4 files
+        ```
+
+        ```rust title="shutter.rs" {2-3}
+        fn add_sample(c: Vec4, w: f32) -> Vec4 {
+        +   c * w
+        }
+        ```
+        """
+        let pieces = NoteParser.parse(sampleNote)
+        #expect(pieces.count == 7)
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(480, 720)) { _, _ in
+            Note(sampleNote).key("doc").build(kit)
+        }
+        _ = rt.frame(at: 0)
+        for idx in 0..<7 {
+            let el = rt.element(byKey: "doc/p\(idx)")!
+            #expect(el.rect[2] > 100 && el.rect[3] > 10, "Piece doc/p\(idx) rect \(el.rect) collapsed")
+            #expect(el.opacity == 1)
+        }
+    }
 }
