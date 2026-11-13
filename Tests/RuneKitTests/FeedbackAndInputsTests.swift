@@ -110,7 +110,9 @@ struct FeedbackAndInputsTests {
         let actionRect = try #require(rt.element(byKey: "toast-save-action")).rect
         let dismissRect = try #require(rt.element(byKey: "toast-save-dismiss")).rect
         let toastRect = try #require(rt.element(byKey: "toast-save")).rect
-        #expect(toastRect[0] > 200 && toastRect[1] > 200)
+        #expect(abs((toastRect[0] + toastRect[2]) - (480 - ToastMetrics.regionRight)) < 1.0)
+        #expect(toastRect[2] == ToastMetrics.toastWidth)
+        #expect(toastRect[1] > 180)
 
         let ax = actionRect[0] + actionRect[2] * 0.5
         let ay = actionRect[1] + actionRect[3] * 0.5
@@ -241,13 +243,13 @@ struct FeedbackAndInputsTests {
         #expect(vis.isWide)
         #expect(vis.acceptsPointerHits)
 
-        // Leaving bar holds for fadeDelay (0.8s) then hides
+        // Leaving bar holds for fadeDelay (0.75s) then hides
         vis.setPointerOverBar(false, now: 2.0)
         #expect(vis.opacity == 1.0)
         #expect(!vis.isWide)
-        vis.tick(now: 2.79)
+        vis.tick(now: 2.74)
         #expect(vis.opacity == 1.0)
-        vis.tick(now: 2.81)
+        vis.tick(now: 2.76)
         #expect(vis.opacity == 0.0)
         #expect(!vis.acceptsPointerHits)
 
@@ -344,24 +346,41 @@ struct FeedbackAndInputsTests {
         let initSlots = RollingTextDiff.transition(
             labelKey: "odo",
             previous: [],
-            to: "$1,234",
+            to: "$1.98",
             trailing: true,
             nextSeq: &seq
         )
         let nextSlots = RollingTextDiff.transition(
             labelKey: "odo",
             previous: initSlots.map { ($0.glyph, $0.key) },
-            to: "$1,240",
+            to: "$1.99",
             trailing: true,
             nextSeq: &seq
         )
-        // "$1,2" unchanged; '4' is reused or fresh depending on match, '0' is new
+        // "$1.9" matches as prefix + middle run; '9' is fresh
         #expect(nextSlots[0].key == initSlots[0].key)
         #expect(nextSlots[1].key == initSlots[1].key)
         #expect(nextSlots[2].key == initSlots[2].key)
         #expect(nextSlots[3].key == initSlots[3].key)
-        #expect(nextSlots[4].key == initSlots[5].key) // trailing '4' aligned from right!
-        #expect(!nextSlots[5].retained)
+        #expect(!nextSlots[4].retained)
+
+        func keptMask(_ old: String, _ new: String, trailing: Bool) -> String {
+            let oldArr = old.map { String($0) }
+            let newArr = new.map { String($0) }
+            let idx = RollingTextDiff.matchIndices(old: oldArr, new: newArr, trailing: trailing)
+            return zip(idx, newArr).map { $0 != nil ? $1 : "_" }.joined()
+        }
+
+        // Exact upstream rolling_text.rs:397-422 cases
+        #expect(keptMask("10s", "100s", trailing: true) == "__0s")
+        #expect(keptMask("19s", "100s", trailing: true) == "___s")
+        #expect(keptMask("9s", "10s", trailing: true) == "__s")
+        #expect(keptMask("$1.98", "$1.99", trailing: true) == "$1.9_")
+        #expect(keptMask("$9.99", "$10.00", trailing: true) == "$__.__")
+        #expect(keptMask("59s", "1m 00s", trailing: true) == "_____s")
+        #expect(keptMask("1:00", "0:59", trailing: false) == "_:__")
+        #expect(keptMask("Copy password", "Copied, clears in 0:30", trailing: false) == "Cop___________________")
+        #expect(keptMask("xxabyy", "xqqqabzyy", trailing: false) == "x___ab_yy")
 
         // Grapheme clusters (emoji + combining accent) stay whole
         let emojiSlots = RollingTextDiff.transition(
@@ -535,5 +554,140 @@ struct FeedbackAndInputsTests {
         #expect(rt.state.rec.shortcut == ShortcutChord(key: "k", modifiers: [.command, .shift]))
         #expect(rt.state.rec.isSwallowing)
         #expect(rt.element(byKey: "sr-error") == nil)
+    }
+
+    @Test("Sonner ToastStack state machine coalesces keys, pulses, pauses stack-wide, and places slots")
+    func sonnerToastStackParity() throws {
+        var stack = ToastStack<String>()
+        // Shown twice on front with same key pulses in place
+        let e1 = stack.step(.shown(key: "k1", options: "Saved", secs: 4.0, now: 1.0))
+        let id1 = try #require(stack.front?.id)
+        #expect(e1.contains(.wakeAt(5.0)))
+
+        let pulseEff = stack.step(.shown(key: "k1", options: "Saved again", secs: 4.0, now: 2.0))
+        #expect(pulseEff.contains(.pulse(id1)))
+        #expect(stack.entries.count == 1)
+        #expect(stack.front?.options == "Saved again")
+
+        // Second & third toast push onto front; buried key moves to front cleanly
+        _ = stack.step(.shown(key: "k2", options: "Second", secs: 4.0, now: 2.0))
+        _ = stack.step(.shown(key: "k3", options: "Third", secs: 4.0, now: 2.0))
+        let id2 = stack.entries[1].id
+        let id3 = stack.entries[2].id
+        #expect(stack.entries.count == 3)
+
+        // Collapsed placement: front has lift 0 scale 1.0 content true; behind has peek 12 and shrink 0.05
+        let heights: [UInt64: Float] = [id1: 50, id2: 60, id3: 44]
+        let pFront = try #require(stack.place(id: id3) { heights[$0] ?? 40 })
+        let pMid = try #require(stack.place(id: id2) { heights[$0] ?? 40 })
+        let pBack = try #require(stack.place(id: id1) { heights[$0] ?? 40 })
+        #expect(pFront == ToastSlotPlacement(lift: 0, scale: 1.0, height: 44, content: true, visible: true, index: 0))
+        #expect(abs(pMid.lift - 12.0) < 1e-4 && abs(pMid.scale - 0.95) < 1e-4 && !pMid.content && pMid.height == 44)
+        #expect(abs(pBack.lift - 24.0) < 1e-4 && abs(pBack.scale - 0.90) < 1e-4 && !pBack.content)
+
+        // Pointer over expands and pauses stack-wide timers
+        _ = stack.step(.pointerOver(now: 3.0))
+        #expect(stack.stackState == .expanded)
+        #expect(stack.nextDue == nil)
+        let expMid = try #require(stack.place(id: id2) { heights[$0] ?? 40 })
+        #expect(abs(expMid.lift - (44.0 + 12.0)) < 1e-4 && expMid.scale == 1.0 && expMid.content)
+
+        // Pressed + PointerLeft holds until Released outside
+        _ = stack.step(.pressed(now: 4.0))
+        _ = stack.step(.pointerLeft(now: 4.5))
+        #expect(stack.stackState == .held(left: true))
+        _ = stack.step(.released(now: 5.0))
+        #expect(stack.stackState == .collapsed)
+
+        // Page hidden pauses; shown resumes; dismissing to 1 collapses expanded stack
+        _ = stack.step(.hotkey(now: 5.1))
+        #expect(stack.stackState == .expanded)
+        _ = stack.step(.dismissed(id: id1, now: 5.2))
+        _ = stack.step(.dismissed(id: id2, now: 5.2))
+        #expect(stack.entries.count == 1)
+        #expect(stack.stackState == .collapsed)
+
+        // Rich Toast card + ToastRegion layout checks
+        struct Dummy {}
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: Dummy(), viewport: Vec2(500, 300), systemDark: false) { _, _ in
+            el().sizeFull().child(
+                ToastRegion<Dummy>()
+                    .toast(
+                        Toast<Dummy>(key: "t", title: "Title")
+                            .description("More detail")
+                            .action("Primary", primary: true) { _, _ in }
+                            .action("Secondary", primary: false) { _, _ in }
+                            .closable()
+                            .build(using: kit)
+                    )
+                    .build()
+            )
+        }
+        rt.frame(at: 0.0)
+        let regionRect = try #require(rt.element(byKey: "toast-region")).rect
+        let cardRect = try #require(rt.element(byKey: "t")).rect
+        #expect(abs(cardRect[2] - 320.0) < 0.5)
+        #expect(abs((regionRect[0] + regionRect[2]) - (500.0 - 32.0)) < 1.0)
+        #expect(abs((regionRect[1] + regionRect[3]) - (300.0 - 48.0)) < 1.0)
+    }
+
+    @Test("RollingText value(Double) direction, ScrollBar Chromium presets & live store, and ShortcutRecorder finishing key")
+    func parityFixesVerification() throws {
+        // RollingText value(Double) falling flips edge + font defaults to ui
+        let store = RollingTextStore()
+        _ = store.updateWithDirection(key: "n", value: "10s", numericValue: 10.0)
+        let fall = store.updateWithDirection(key: "n", value: "8s", numericValue: 8.0)
+        let hold = store.updateWithDirection(key: "n", value: "8 s", numericValue: 8.0)
+        let nanStep = store.updateWithDirection(key: "n", value: "-", numericValue: .nan)
+        let resumeFall = store.updateWithDirection(key: "n", value: "7s", numericValue: 7.0)
+        #expect(fall.falling)
+        #expect(!hold.falling)
+        #expect(!nanStep.falling)
+        #expect(resumeFall.falling)
+
+        let kit = Kit.neutral(dark: false)
+        struct Dummy {}
+        let rtView = RollingText<Dummy>(key: "rt-font", value: "42", kit: kit, store: RollingTextStore()).value(42)
+        #expect(rtView.font?.size == kit.ty.ui.size)
+
+        // ScrollBar presets & Chromium pixel truncation + travel<=0 + LiveStore
+        let sv = KitScrollBarStyle.scrollView(kit)
+        let nat = KitScrollBarStyle.native(thumb: kit.c.borderMuted, thumbHover: kit.c.borderStrong)
+        let menu = KitScrollBarStyle.menuScroll(thumb: kit.c.borderMuted, thumbHover: kit.c.borderStrong)
+        #expect(sv.stripWidth == 12 && sv.edgeInset == 4 && sv.trackStartInset == 8 && sv.minThumb == 32)
+        #expect(nat.stripWidth == 8 && nat.gutter && nat.border == 2 && nat.minThumb == 32)
+        #expect(menu.stripWidth == 8 && menu.scrollOnly && menu.minThumb == 24)
+        #expect(ScrollBarMetrics.fadeDelay == 0.75)
+
+        let pxThumb = ScrollBarMath.thumbAlong(
+            ScrollAxisMetrics(offset: 1, content: 1000, viewport: 100),
+            trackLength: 100,
+            minThumb: 24,
+            devicePixels: true,
+            scale: 1.0
+        )
+        #expect(pxThumb.start == 1.0) // Chromium (0..<1) -> 1
+        #expect(ScrollBarMath.offsetAlong(thumbStart: 10, trackLength: 24, thumbLength: 24, maxScroll: 100, currentOffset: 42) == 42)
+        #expect(!ScrollBarMath.trackLength(for: ScrollAxisMetrics(offset: 0, content: 100, viewport: 20), minThumb: 24).shows)
+
+        let liveSlot = ScrollBarLiveStore.shared.slot(for: "sb-test", style: sv)
+        liveSlot.hover(true, style: sv, now: 1.0)
+        #expect(liveSlot.liveOpacity.get() == 1.0)
+        #expect(liveSlot.liveFill.get() == sv.thumbHoverColor)
+
+        // ShortcutRecorder ignores bare modifier keyDown & swallows finishing key repeat in capturing
+        var rec = ShortcutRecorderState()
+        rec.begin()
+        let bareModHandled = rec.handle(.keyDown(key: "ShiftLeft", modifiers: [.shift], isRepeat: false))
+        #expect(bareModHandled)
+        #expect(rec.error == nil)
+        let kHandled = rec.handle(.keyDown(key: "k", modifiers: [], isRepeat: false))
+        #expect(kHandled)
+        #expect(rec.error == .missingModifier)
+        #expect(rec.phase.finishingKey == "k")
+        let kUpHandled = rec.handle(.keyUp("k"))
+        #expect(kUpHandled)
+        #expect(rec.phase.finishingKey == nil)
     }
 }

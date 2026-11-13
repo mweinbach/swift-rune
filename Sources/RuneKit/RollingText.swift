@@ -17,6 +17,13 @@ public enum RollingSlideEdge: Sendable, Equatable {
     case bottom
     case top
 
+    public var opposite: RollingSlideEdge {
+        switch self {
+        case .bottom: return .top
+        case .top: return .bottom
+        }
+    }
+
     var transitionEdge: MotionEdge {
         switch self {
         case .bottom: return .bottom
@@ -110,35 +117,41 @@ public enum RollingTextDiff {
         return result
     }
 
-    /// Maps each index in `new` to the matched index in `old` (or `nil` if newly inserted).
+    private static func isAsciiDigit(_ cluster: String) -> Bool {
+        !cluster.isEmpty && cluster.utf8.allSatisfy { $0 >= 48 && $0 <= 57 }
+    }
+
+    /// Maps each index in `new` to the matched index in `old` (or `nil` if newly inserted),
+    /// matching `rune_kit::rolling_text::diff`.
     static func matchIndices(old: [String], new: [String], trailing: Bool) -> [Int?] {
         let n = old.count
         let m = new.count
+        let minLen = min(n, m)
         var mapping: [Int?] = Array(repeating: nil, count: m)
         if n == 0 || m == 0 { return mapping }
 
-        // Trim common prefix (when not odometer-trailing, prefix is maximally preferred)
-        // or common suffix when trailing is enabled, then solve DP on the interior within budget.
         var prefix = 0
-        if !trailing {
-            while prefix < n && prefix < m && old[prefix] == new[prefix] {
-                mapping[prefix] = prefix
-                prefix += 1
+        var suffix = 0
+
+        if trailing {
+            while suffix < minLen - prefix && old[n - 1 - suffix] == new[m - 1 - suffix] {
+                mapping[m - 1 - suffix] = n - 1 - suffix
+                suffix += 1
             }
         }
 
-        var suffix = 0
-        while prefix + suffix < n && prefix + suffix < m
-            && old[n - 1 - suffix] == new[m - 1 - suffix]
+        while prefix < minLen - suffix
+            && old[prefix] == new[prefix]
+            && !(trailing && isAsciiDigit(new[prefix]))
         {
-            mapping[m - 1 - suffix] = n - 1 - suffix
-            suffix += 1
+            mapping[prefix] = prefix
+            prefix += 1
         }
 
-        if trailing {
-            while prefix + suffix < n && prefix + suffix < m && old[prefix] == new[prefix] {
-                mapping[prefix] = prefix
-                prefix += 1
+        if !trailing {
+            while suffix < minLen - prefix && old[n - 1 - suffix] == new[m - 1 - suffix] {
+                mapping[m - 1 - suffix] = n - 1 - suffix
+                suffix += 1
             }
         }
 
@@ -152,56 +165,60 @@ public enum RollingTextDiff {
             return mapping
         }
 
-        // Budget guard: skip O(sn*sm) DP above budget (2304 cells); prefix/suffix trim above is already kept!
+        // Budget guard: skip O(sn*sm) DP above budget (2304 cells); prefix/suffix trim above is already kept.
         if sn * sm > RollingTextLimits.lcsBudget {
             return mapping
         }
 
-        // Weighted DP maximizing match count first, with subtle position bias:
-        // - normal: prefer earlier (left) matches
-        // - trailing (odometer): prefer rightmost alignment so tail digits match in place
+        @inline(__always)
+        func shift(_ i: Int, _ j: Int) -> Int {
+            let end = abs((sn - i) - (sm - j))
+            return trailing ? end : min(abs(i - j), end)
+        }
+
+        @inline(__always)
+        func weight(_ i: Int, _ j: Int) -> Int64 {
+            Int64(8 - min(shift(i, j), 7))
+        }
+
         let cols = sm + 1
         var dp = Array(repeating: Int64(0), count: (sn + 1) * cols)
-        let baseWeight: Int64 = 1_000_000
 
         for i in (0..<sn).reversed() {
             for j in (0..<sm).reversed() {
-                let down = dp[(i + 1) * cols + j]
-                let right = dp[i * cols + (j + 1)]
-                var best = max(down, right)
+                let skip = max(dp[(i + 1) * cols + j], dp[i * cols + (j + 1)])
                 if old[subOldStart + i] == new[subNewStart + j] {
-                    let posBonus: Int64 = trailing
-                        ? Int64(j + 1) * 16 + Int64(i + 1)
-                        : Int64(sm - j) * 16 + Int64(sn - i)
-                    let diag = dp[(i + 1) * cols + (j + 1)] + baseWeight + posBonus
-                    if diag >= best {
-                        best = diag
-                    }
+                    dp[i * cols + j] = max(skip, dp[(i + 1) * cols + (j + 1)] + weight(i, j))
+                } else {
+                    dp[i * cols + j] = skip
                 }
-                dp[i * cols + j] = best
             }
         }
 
+        var pairs: [(Int, Int)] = []
         var i = 0
         var j = 0
         while i < sn && j < sm {
-            let cur = dp[i * cols + j]
-            if old[subOldStart + i] == new[subNewStart + j] {
-                let posBonus: Int64 = trailing
-                    ? Int64(j + 1) * 16 + Int64(i + 1)
-                    : Int64(sm - j) * 16 + Int64(sn - i)
-                let diag = dp[(i + 1) * cols + (j + 1)] + baseWeight + posBonus
-                if cur == diag {
-                    mapping[subNewStart + j] = subOldStart + i
-                    i += 1
-                    j += 1
-                    continue
-                }
-            }
-            if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
+            if old[subOldStart + i] == new[subNewStart + j]
+                && dp[i * cols + j] == dp[(i + 1) * cols + (j + 1)] + weight(i, j)
+            {
+                pairs.append((i, j))
+                i += 1
+                j += 1
+            } else if dp[(i + 1) * cols + j] >= dp[i * cols + (j + 1)] {
                 i += 1
             } else {
                 j += 1
+            }
+        }
+
+        // Keep middle matches in runs of >= 2, or alone only when shift == 0.
+        for k in pairs.indices {
+            let (pi, pj) = pairs[k]
+            let prevRun = k > 0 && pairs[k - 1] == (pi - 1, pj - 1)
+            let nextRun = k + 1 < pairs.count && pairs[k + 1] == (pi + 1, pj + 1)
+            if prevRun || nextRun || shift(pi, pj) == 0 {
+                mapping[subNewStart + pj] = subOldStart + pi
             }
         }
 
@@ -215,6 +232,7 @@ public final class RollingTextStore: @unchecked Sendable {
 
     struct Entry {
         var value: String
+        var numericValue: Double?
         var slots: [RollingSlot]
         var byteCost: Int
     }
@@ -260,10 +278,21 @@ public final class RollingTextStore: @unchecked Sendable {
 
     /// Computes and stores the next slot layout for `key`, evicting oldest entries when over bounds.
     public func update(key: String, value: String, trailing: Bool = false) -> [RollingSlot] {
+        updateWithDirection(key: key, value: value, numericValue: nil, trailing: trailing).slots
+    }
+
+    /// Computes next slots along with whether a finite `numericValue` fell below the previous finite value.
+    public func updateWithDirection(
+        key: String,
+        value: String,
+        numericValue: Double?,
+        trailing: Bool = false
+    ) -> (slots: [RollingSlot], falling: Bool) {
         lock.lock()
         defer { lock.unlock() }
 
-        let previous = entries[key]?.slots.map { (glyph: $0.glyph, key: $0.key) } ?? []
+        let prevEntry = entries[key]
+        let previous = prevEntry?.slots.map { (glyph: $0.glyph, key: $0.key) } ?? []
         let slots = RollingTextDiff.transition(
             labelKey: key,
             previous: previous,
@@ -272,15 +301,24 @@ public final class RollingTextStore: @unchecked Sendable {
             nextSeq: &nextSeq
         )
 
+        let prevNumeric = prevEntry?.numericValue
+        let falling: Bool
+        if let old = prevNumeric, let cur = numericValue, cur.isFinite, cur < old {
+            falling = true
+        } else {
+            falling = false
+        }
+        let nextNumeric: Double? = (numericValue?.isFinite == true) ? numericValue : prevNumeric
+
         let entryBytes = estimateBytes(key: key, value: value, slots: slots)
         if let existing = entries[key] {
             totalBytes -= existing.byteCost
         }
-        entries[key] = Entry(value: value, slots: slots, byteCost: entryBytes)
+        entries[key] = Entry(value: value, numericValue: nextNumeric, slots: slots, byteCost: entryBytes)
         totalBytes += entryBytes
         touchLRU(key)
         evictIfNeeded(keeping: key)
-        return slots
+        return (slots, falling)
     }
 
     private func estimateBytes(key: String, value: String, slots: [RollingSlot]) -> Int {
@@ -302,7 +340,6 @@ public final class RollingTextStore: @unchecked Sendable {
         while (entries.count > maxLabels || totalBytes > maxBytes), lruOrder.count > 1 {
             guard let oldest = lruOrder.first else { break }
             if oldest == activeKey {
-                // Keep the just-inserted entry; evict the next oldest if any.
                 if lruOrder.count > 1 {
                     let second = lruOrder.remove(at: 1)
                     if let removed = entries.removeValue(forKey: second) {
@@ -324,6 +361,7 @@ public final class RollingTextStore: @unchecked Sendable {
 public struct RollingText<State> {
     public var key: String
     public var value: String
+    public var numericValue: Double?
     public var font: TextStyle?
     public var color: Color?
     public var trailing: Bool
@@ -334,6 +372,7 @@ public struct RollingText<State> {
     public init(
         key: String,
         value: String,
+        numericValue: Double? = nil,
         font: TextStyle? = nil,
         color: Color? = nil,
         trailing: Bool = false,
@@ -344,12 +383,17 @@ public struct RollingText<State> {
     ) {
         self.key = key
         self.value = value
-        self.font = font ?? kit.ty.uiMedium
+        self.numericValue = numericValue
+        self.font = font ?? kit.ty.ui
         self.color = color ?? kit.c.textBase
         self.trailing = trailing
         self.slideFrom = slideFrom
         self.spring = spring ?? kit.motion.control
         self.store = store
+    }
+
+    public func value(_ numeric: Double) -> Self {
+        var copy = self; copy.numericValue = numeric; return copy
     }
 
     public func font(_ value: TextStyle) -> Self {
@@ -377,17 +421,35 @@ public struct RollingText<State> {
     }
 
     public func build() -> El<State> {
-        let slots = store.update(key: key, value: value, trailing: trailing)
+        let (slots, falling) = store.updateWithDirection(
+            key: key,
+            value: value,
+            numericValue: numericValue,
+            trailing: trailing
+        )
+        let effectiveFrom = falling ? slideFrom.opposite : slideFrom
+        let push = Transition.push(from: effectiveFrom.transitionEdge)
+
         var container: El<State> = row()
             .key(key)
+            .role(.text)
+            .label(value)
             .clip(true)
             .animateLayout(spring)
 
         for slot in slots {
+            let enterSpring = slot.retained
+                ? spring
+                : Spring(duration: spring.duration + Float(slot.enterDelay), bounce: spring.bounce)
+            let slotTransition = slot.retained
+                ? Transition.asymmetric(insertion: .identity, removal: push.spring(spring))
+                : push.springs(SpringPair(enter: enterSpring, exit: spring))
+
             var glyphEl: El<State> = text(slot.glyph)
                 .key(slot.key)
                 .noWrap()
-                .transition(Transition.push(from: slideFrom.transitionEdge).spring(spring))
+                .animate(enterSpring)
+                .transition(slotTransition)
             if let font {
                 glyphEl = glyphEl.font(font)
             }

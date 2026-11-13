@@ -5,15 +5,19 @@ import RuneMotion
 // MARK: - ScrollBar Constants (`rune_kit::scroll_bar`)
 
 public enum ScrollBarMetrics {
-    public static let thumbWidth: Float = 4.0
-    public static let thumbHoverWidth: Float = 8.0
+    public static let thumbWidth: Float = 6.0
+    public static let thumbHoverWidth: Float = 10.0
     public static let inset: Float = 2.0
-    public static let stripWidth: Float = 10.0
-    public static let hoverStripWidth: Float = 24.0
-    public static let minThumbLength: Float = 20.0
-    public static let fadeDelay: Double = 0.8
-    public static let pageDelay: Double = 0.4
-    public static let pageInterval: Double = 0.08
+    public static let stripWidth: Float = 14.0
+    public static let hoverStripWidth: Float = 20.0
+    public static let minThumbLength: Float = 24.0
+    public static let fadeDelay: Double = 0.75
+    public static let pageDelay: Double = 0.3
+    public static let pageInterval: Double = 0.06
+    public static let enterSpring = Spring(duration: 0.14, bounce: 0.0)
+    public static let leaveSpring = Spring(duration: 0.28, bounce: 0.0)
+    public static let widenSpring = Spring(duration: 0.12, bounce: 0.0)
+    public static let keptLimit: Int = 256
 }
 
 // MARK: - Style & Configuration (`KitScrollBarStyle`)
@@ -25,6 +29,11 @@ public struct KitScrollBarStyle: Sendable, Equatable {
     public var thumbKey: String = "thumb"
     public var horizontal: Bool = false
     public var inside: Bool = false
+    public var overlay: Bool = false
+    public var gutter: Bool = false
+    public var areaReveals: Bool = false
+    public var scrollOnly: Bool = false
+    public var border: Float = 0.0
     public var hoverTarget: String? = nil
     public var trackStartInset: Float = ScrollBarMetrics.inset
     public var trackEndInset: Float = ScrollBarMetrics.inset
@@ -34,6 +43,10 @@ public struct KitScrollBarStyle: Sendable, Equatable {
     public var width: Float = ScrollBarMetrics.thumbWidth
     public var hoverWidth: Float = ScrollBarMetrics.thumbHoverWidth
     public var minThumb: Float = ScrollBarMetrics.minThumbLength
+    public var holdDuration: Double = ScrollBarMetrics.fadeDelay
+    public var enterSpring: Spring = ScrollBarMetrics.enterSpring
+    public var leaveSpring: Spring = ScrollBarMetrics.leaveSpring
+    public var tintSpring: Spring = ScrollBarMetrics.widenSpring
     public var thumbColor: Color
     public var thumbHoverColor: Color
     public var trackColor: Color? = nil
@@ -62,35 +75,100 @@ public struct KitScrollBarStyle: Sendable, Equatable {
     }
 
     public static func fromKit(_ kit: Kit) -> KitScrollBarStyle {
-        KitScrollBarStyle(
-            thumbColor: kit.c.borderStrong.alpha(0.65),
+        var s = KitScrollBarStyle(
+            thumbColor: kit.c.borderBase,
             thumbHoverColor: kit.c.borderStrong,
             trackColor: nil
         )
+        s.width = ScrollBarMetrics.thumbWidth
+        s.hoverWidth = ScrollBarMetrics.thumbHoverWidth
+        s.stripWidth = ScrollBarMetrics.stripWidth
+        s.hoverStripWidth = ScrollBarMetrics.hoverStripWidth
+        s.minThumb = ScrollBarMetrics.minThumbLength
+        s.edgeInset = ScrollBarMetrics.inset
+        s.holdDuration = ScrollBarMetrics.fadeDelay
+        return s
     }
 
-    /// Preset tuned for general application scroll viewports (`ScrollBarStyle::scroll_view`).
+    /// Preset tuned for `@opencode/ui` ScrollView (`SCROLL_VIEW_TRACK`).
     public static func scrollView(_ kit: Kit) -> KitScrollBarStyle {
-        fromKit(kit)
-            .inside(true)
-            .width(ScrollBarMetrics.thumbWidth)
-            .hoverWidth(ScrollBarMetrics.thumbHoverWidth)
+        var s = KitScrollBarStyle(
+            thumbColor: kit.c.borderMuted,
+            thumbHoverColor: kit.c.borderStrong
+        )
+        s.stripWidth = 12.0
+        s.edgeInset = 4.0
+        s.trackStartInset = 8.0
+        s.trackEndInset = 8.0
+        s.minThumb = 32.0
+        s.width = 4.0
+        s.hoverWidth = 4.0
+        s.overlay = true
+        s.inside = true
+        s.areaReveals = true
+        s.holdDuration = 0.8
+        s.enterSpring = Spring(duration: 0.2, bounce: 0.0)
+        s.leaveSpring = Spring(duration: 0.2, bounce: 0.0)
+        s.tintSpring = Spring(duration: 0.15, bounce: 0.0)
+        return s
     }
 
-    /// Native desktop overlay/inset scrollbar preset (`ScrollBarStyle::native`).
+    /// Native `@opencode/ui` `scrollbar.css` preset (`NATIVE_TRACK`).
+    public static func native(thumb: Color, thumbHover: Color) -> KitScrollBarStyle {
+        var s = KitScrollBarStyle(thumbColor: thumb, thumbHoverColor: thumbHover)
+        s.stripWidth = 8.0
+        s.edgeInset = 2.0
+        s.trackStartInset = 4.0
+        s.trackEndInset = 4.0
+        s.minThumb = 32.0
+        s.border = 2.0
+        s.width = 4.0
+        s.hoverWidth = 4.0
+        s.overlay = true
+        s.gutter = true
+        s.areaReveals = true
+        s.holdDuration = 0.0
+        s.enterSpring = .none
+        s.leaveSpring = .none
+        s.tintSpring = .none
+        s.devicePixels = true
+        return s
+    }
+
+    /// Native `@opencode/ui` `scrollbar.css` preset derived from `Kit` tokens (`NATIVE_TRACK`).
     public static func native(_ kit: Kit) -> KitScrollBarStyle {
-        fromKit(kit)
-            .inside(true)
-            .devicePixels(true)
+        native(thumb: kit.c.borderMuted, thumbHover: kit.c.borderStrong)
     }
 
-    /// Compact scrollbar preset for menus, popups, and lists (`ScrollBarStyle::menu_scroll`).
+    /// Compact scrollbar preset for menus, popups, and lists (`MENU_SCROLL_TRACK`).
+    public static func menuScroll(thumb: Color, thumbHover: Color) -> KitScrollBarStyle {
+        var s = KitScrollBarStyle(thumbColor: thumb, thumbHoverColor: thumbHover)
+        s.stripWidth = 8.0
+        s.edgeInset = 2.0
+        s.trackStartInset = 4.0
+        s.trackEndInset = 4.0
+        s.minThumb = 24.0
+        s.width = 4.0
+        s.hoverWidth = 4.0
+        s.overlay = true
+        s.inside = true
+        s.areaReveals = true
+        s.scrollOnly = true
+        s.holdDuration = 0.8
+        s.enterSpring = Spring(duration: 0.2, bounce: 0.0)
+        s.leaveSpring = Spring(duration: 0.2, bounce: 0.0)
+        s.tintSpring = .none
+        return s
+    }
+
+    /// Compact scrollbar preset derived from `Kit` tokens (`MENU_SCROLL_TRACK`).
     public static func menuScroll(_ kit: Kit) -> KitScrollBarStyle {
-        fromKit(kit)
-            .inside(true)
-            .width(3.5)
-            .hoverWidth(6.0)
-            .minThumb(16.0)
+        menuScroll(thumb: kit.c.borderMuted, thumbHover: kit.c.borderStrong)
+    }
+
+    /// Subtracts the clear border around Chromium-style pills (`Track::pill`).
+    public func pillExtent(start: Float, length: Float) -> (start: Float, length: Float) {
+        (start + border, max(0, length - 2.0 * border))
     }
 
     public func key(_ value: String) -> Self {
@@ -210,32 +288,32 @@ public enum ScrollBarMath {
         return (value * scale).rounded() / scale
     }
 
-    /// Computes usable track length and whether the scrollbar should appear.
+    /// Computes usable track length and whether the scrollbar should appear (`len >= minThumb`).
     public static func trackLength(
         for metrics: ScrollAxisMetrics,
         startInset: Float = ScrollBarMetrics.inset,
-        endInset: Float = ScrollBarMetrics.inset
+        endInset: Float = ScrollBarMetrics.inset,
+        minThumb: Float = ScrollBarMetrics.minThumbLength
     ) -> (length: Float, shows: Bool) {
         let len = max(0, metrics.viewport - startInset - endInset)
-        let shows = metrics.content > metrics.viewport + 0.5 && len > 0
+        let shows = metrics.content > metrics.viewport + 0.5 && len >= minThumb
         return (len, shows)
     }
 
-    /// Computes thumb `(start, length)` along the track, including rubber-band overscroll compression.
+    /// Computes thumb `(start, length)` along the track, including Chromium pixel alignment
+    /// (length rounded, position truncated, `(0..<1) -> 1`) and rubber-band overscroll compression.
     public static func thumbAlong(
         _ metrics: ScrollAxisMetrics,
         trackLength: Float,
         minThumb: Float = ScrollBarMetrics.minThumbLength,
-        devicePixels: Bool = true,
+        devicePixels: Bool = false,
         scale: Float = 1.0
     ) -> (start: Float, length: Float) {
         guard trackLength > 0, metrics.content > 0, metrics.viewport > 0 else {
             return (0, 0)
         }
-        let ratio = min(1.0, metrics.viewport / metrics.content)
-        let rawLen = trackLength * ratio
         let maxScroll = metrics.maxScroll
-
+        let total = max(1.0, metrics.viewport + maxScroll)
         let over: Float
         if metrics.offset < 0 {
             over = -metrics.offset
@@ -244,36 +322,41 @@ public enum ScrollBarMath {
         } else {
             over = 0
         }
+        let frac: Float = maxScroll > 0 ? (metrics.offset / maxScroll).clamped(to: 0...1) : 0
 
-        let compressed: Float
-        if over > 0 {
-            let scaleDown = metrics.viewport / (metrics.viewport + over)
-            compressed = rawLen * scaleDown
-        } else {
-            compressed = rawLen
+        if devicePixels && scale > 0 {
+            let trPx = (trackLength * scale).rounded()
+            let baseLenPx = (trPx * metrics.viewport / total).rounded()
+            let minPx = (minThumb * scale).rounded()
+            let compressedPx = over > 0
+                ? (baseLenPx * (metrics.viewport / (metrics.viewport + over))).rounded()
+                : baseLenPx
+            let lenPx = min(trPx, max(minPx, compressedPx))
+            let rawPos = maxScroll > 0 ? (trPx - lenPx) * frac : 0
+            let posPx: Float = (rawPos > 0 && rawPos < 1.0) ? 1.0 : rawPos.rounded(.towardZero)
+            return (posPx / scale, lenPx / scale)
         }
 
-        let len = min(trackLength, align(max(minThumb, compressed), devicePixels: devicePixels, scale: scale))
+        let ratio = min(1.0, metrics.viewport / total)
+        let rawLen = trackLength * ratio
+        let compressed: Float = over > 0 ? rawLen * (metrics.viewport / (metrics.viewport + over)) : rawLen
+        let len = min(trackLength, max(minThumb, compressed))
         let travel = max(0, trackLength - len)
-        let frac: Float
-        if maxScroll <= 0 {
-            frac = 0
-        } else {
-            frac = (metrics.offset / maxScroll).clamped(to: 0...1)
-        }
-        let start = align(frac * travel, devicePixels: devicePixels, scale: scale).clamped(to: 0...travel)
+        let start = (frac * travel).clamped(to: 0...travel)
         return (start, len)
     }
 
-    /// Maps a thumb start position along the track back to content scroll offset.
+    /// Maps a thumb start position along the track back to content scroll offset (`currentOffset` when `travel <= 0`).
     public static func offsetAlong(
         thumbStart: Float,
         trackLength: Float,
         thumbLength: Float,
-        maxScroll: Float
+        maxScroll: Float,
+        currentOffset: Float = 0
     ) -> Float {
         let travel = trackLength - thumbLength
-        guard travel > 0, maxScroll > 0 else { return 0 }
+        guard travel > 0 else { return currentOffset }
+        guard maxScroll > 0 else { return 0 }
         let frac = (thumbStart / travel).clamped(to: 0...1)
         return frac * maxScroll
     }
@@ -284,13 +367,15 @@ public enum ScrollBarMath {
         grab: Float,
         trackLength: Float,
         thumbLength: Float,
-        maxScroll: Float
+        maxScroll: Float,
+        currentOffset: Float = 0
     ) -> Float {
         offsetAlong(
             thumbStart: pointerAlongTrack - grab,
             trackLength: trackLength,
             thumbLength: thumbLength,
-            maxScroll: maxScroll
+            maxScroll: maxScroll,
+            currentOffset: currentOffset
         )
     }
 }
@@ -475,7 +560,167 @@ public struct ScrollBarVisibility: Sendable, Equatable {
     }
 }
 
-// MARK: - El & Kit ScrollBar Builders
+// MARK: - Live Kept Store (`KEPT = 256`) & El / Kit ScrollBar Builders
+
+/// Live presentation bindings + interaction trackers retained across frames per scrollbar key.
+public final class ScrollBarLiveSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    public let liveTrack: Live<MotionRect>
+    public let liveThumb: Live<MotionRect>
+    public let liveOpacity: Live<Float>
+    public let liveFill: Live<Color>
+    public var visibility: ScrollBarVisibility
+    public var pressTracker: ScrollBarPressTracker
+    public var lastMetrics: ScrollAxisMetrics
+
+    public init(style: KitScrollBarStyle) {
+        self.liveTrack = Live(MotionRect(left: 0, top: 0, right: style.resolvedStripWidth, bottom: 100))
+        self.liveThumb = Live(MotionRect(left: style.edgeInset, top: style.trackStartInset, right: style.edgeInset + style.width, bottom: style.trackStartInset + style.minThumb))
+        self.liveOpacity = Live(style.alwaysVisible || !style.overlay ? 1.0 : 0.0)
+        self.liveFill = Live(style.thumbColor)
+        self.visibility = ScrollBarVisibility(alwaysVisible: style.alwaysVisible || !style.overlay, shows: true)
+        self.pressTracker = ScrollBarPressTracker()
+        self.lastMetrics = ScrollAxisMetrics(offset: 0, content: 400, viewport: 100)
+    }
+
+    public func syncStyle(_ style: KitScrollBarStyle) {
+        lock.lock()
+        defer { lock.unlock() }
+        visibility.setAlwaysVisible(style.alwaysVisible || !style.overlay, now: 0)
+        liveFill.set((visibility.isWide || pressTracker.isHeld) ? style.thumbHoverColor : style.thumbColor)
+        liveOpacity.set(visibility.opacity)
+    }
+
+    public func hover(_ inside: Bool, style: KitScrollBarStyle, now: Double = ProcessInfo.processInfo.systemUptime) {
+        lock.lock()
+        defer { lock.unlock() }
+        visibility.setPointerOverBar(inside, now: now)
+        liveOpacity.set(visibility.opacity)
+        liveFill.set((inside || pressTracker.isHeld) ? style.thumbHoverColor : style.thumbColor)
+        let current = liveThumb.get()
+        let activeW = (inside || pressTracker.isHeld) ? style.hoverWidth : style.width
+        if style.horizontal {
+            let y0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveThumb.set(MotionRect(left: current.left, top: y0, right: current.right, bottom: y0 + activeW))
+        } else {
+            let x0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveThumb.set(MotionRect(left: x0, top: current.top, right: x0 + activeW, bottom: current.bottom))
+        }
+    }
+
+    public func pointerDown(
+        along: Float,
+        windowPoint: Vec2,
+        trackLength: Float,
+        altPressed: Bool,
+        jumpPreference: Bool,
+        style: KitScrollBarStyle,
+        now: Double = ProcessInfo.processInfo.systemUptime
+    ) -> ScrollBarPress {
+        lock.lock()
+        defer { lock.unlock() }
+        let thumb = liveThumb.get()
+        let thumbStart = style.horizontal ? (thumb.left - style.trackStartInset) : (thumb.top - style.trackStartInset)
+        let thumbLen = max(style.minThumb, style.horizontal ? thumb.width : thumb.height)
+        let action = ScrollBarPress.begin(
+            pointerAlongTrack: along,
+            thumbStart: thumbStart,
+            thumbLength: thumbLen,
+            altPressed: altPressed,
+            jumpPreference: jumpPreference,
+            horizontal: style.horizontal
+        )
+        pressTracker.pointerDown(action, at: windowPoint)
+        visibility.setHeld(true, now: now)
+        liveOpacity.set(visibility.opacity)
+        liveFill.set(style.thumbHoverColor)
+        return action
+    }
+
+    public func drag(
+        along: Float,
+        windowPoint: Vec2,
+        trackSize: Vec2,
+        style: KitScrollBarStyle
+    ) -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = pressTracker.dragMoved(to: windowPoint)
+        let rawSpan = style.horizontal ? trackSize.x : trackSize.y
+        let effectiveLen = max(style.minThumb, rawSpan - style.trackStartInset - style.trackEndInset)
+        let thumb = liveThumb.get()
+        let thumbLen = min(effectiveLen, max(style.minThumb, style.horizontal ? thumb.width : thumb.height))
+        let grab: Float
+        if case .thumb(let g) = pressTracker.activePress {
+            grab = g
+        } else {
+            grab = thumbLen * 0.5
+        }
+        let maxScroll = max(effectiveLen, lastMetrics.maxScroll)
+        let clampedStart = (along - grab).clamped(to: 0...max(0, effectiveLen - thumbLen))
+        let nextOffset = ScrollBarMath.offsetAlong(
+            thumbStart: clampedStart,
+            trackLength: effectiveLen,
+            thumbLength: thumbLen,
+            maxScroll: maxScroll,
+            currentOffset: lastMetrics.offset
+        )
+        lastMetrics.offset = nextOffset
+        let (pillStart, pillLen) = style.pillExtent(start: clampedStart, length: thumbLen)
+        let activeW = style.hoverWidth
+        if style.horizontal {
+            let y0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveThumb.snap(MotionRect(
+                left: style.trackStartInset + pillStart,
+                top: y0,
+                right: style.trackStartInset + pillStart + pillLen,
+                bottom: y0 + activeW
+            ))
+        } else {
+            let x0 = max(0, style.resolvedStripWidth - style.edgeInset - activeW)
+            liveThumb.snap(MotionRect(
+                left: x0,
+                top: style.trackStartInset + pillStart,
+                right: x0 + activeW,
+                bottom: style.trackStartInset + pillStart + pillLen
+            ))
+        }
+        return nextOffset
+    }
+
+    public func release(style: KitScrollBarStyle, now: Double = ProcessInfo.processInfo.systemUptime) {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = pressTracker.pointerUp()
+        visibility.setHeld(false, now: now)
+        liveOpacity.set(visibility.opacity)
+        liveFill.set(visibility.overBar ? style.thumbHoverColor : style.thumbColor)
+    }
+}
+
+/// Bounded kept scrollbar live-binding store (`KEPT = 256`).
+public final class ScrollBarLiveStore: @unchecked Sendable {
+    public static let shared = ScrollBarLiveStore()
+    private let lock = NSLock()
+    private var slots: [String: ScrollBarLiveSlot] = [:]
+
+    public init() {}
+
+    public func slot(for key: String, style: KitScrollBarStyle) -> ScrollBarLiveSlot {
+        lock.lock()
+        defer { lock.unlock() }
+        if slots.count >= ScrollBarMetrics.keptLimit, slots[key] == nil {
+            slots.removeAll(keepingCapacity: true)
+        }
+        if let existing = slots[key] {
+            existing.syncStyle(style)
+            return existing
+        }
+        let created = ScrollBarLiveSlot(style: style)
+        slots[key] = created
+        return created
+    }
+}
 
 extension Kit {
     /// Renders an interactive standalone scrollbar strip using `KitScrollBarStyle` math.
@@ -490,16 +735,18 @@ extension Kit {
         let (trackLen, shows) = ScrollBarMath.trackLength(
             for: metrics,
             startInset: style.trackStartInset,
-            endInset: style.trackEndInset
+            endInset: style.trackEndInset,
+            minThumb: style.minThumb
         )
         let effectiveLen = max(trackLen, max(0, metrics.viewport - style.trackStartInset - style.trackEndInset))
-        let (thumbStart, thumbLen) = ScrollBarMath.thumbAlong(
+        let (rawStart, rawLen) = ScrollBarMath.thumbAlong(
             metrics,
             trackLength: effectiveLen,
             minThumb: style.minThumb,
             devicePixels: style.devicePixels,
             scale: style.scale
         )
+        let (thumbStart, thumbLen) = style.pillExtent(start: rawStart, length: rawLen)
         let activeWidth = (hovered || held) ? style.hoverWidth : style.width
         let thumbFill = (hovered || held) ? style.thumbHoverColor : style.thumbColor
         let strip = style.resolvedStripWidth
@@ -551,7 +798,8 @@ extension Kit {
                     grab: thumbLen * 0.5,
                     trackLength: effectiveLen,
                     thumbLength: thumbLen,
-                    maxScroll: metrics.maxScroll
+                    maxScroll: metrics.maxScroll,
+                    currentOffset: metrics.offset
                 )
                 onJump(&s, nextOffset, &tx)
             }
@@ -567,14 +815,18 @@ extension El {
         scrollBarStyled(.scrollView(kit), viewportKey: viewportKey)
     }
 
-    /// Attaches a styled scrollbar track/thumb pair overlaid along the scrollable viewport edge (`El::scroll_bar_styled`).
+    /// Attaches a styled scrollbar track/thumb pair overlaid along the scrollable viewport edge (`El::scroll_bar_styled`),
+    /// wired to `ScrollBarVisibility`, `ScrollBarPressTracker`, and live `MotionRect`/`Opacity`/`Fill` bindings.
     public func scrollBarStyled(_ style: KitScrollBarStyle, viewportKey: String = "scroll") -> El<State> {
         let stripW = style.resolvedStripWidth
+        let slot = ScrollBarLiveStore.shared.slot(for: "\(style.key)::\(viewportKey)", style: style)
+
         var thumb: El<State> = el()
             .key(style.thumbKey)
             .rounded(style.thumbRadius)
             .bg(style.thumbColor)
-            .transition(Transition.opacity.spring(.snappy))
+            .liveRect(slot.liveThumb.smooth(style.tintSpring))
+            .liveFill(slot.liveFill.smooth(style.tintSpring))
 
         if style.horizontal {
             thumb = thumb.w(max(style.minThumb, 24)).h(style.width).pill()
@@ -586,6 +838,42 @@ extension El {
             .key(style.key)
             .rounded(style.trackRadius)
             .p(style.edgeInset)
+            .liveOpacity(slot.liveOpacity.smooth(style.enterSpring).rest(style.leaveSpring))
+            .onHover { _, inside, tx in
+                slot.hover(inside, style: style)
+                tx.liveOnly()
+            }
+            .onPointerDown { _, press, tx in
+                let along = (style.horizontal ? press.local.x : press.local.y) - style.trackStartInset
+                let trackSpan = max(style.minThumb, (style.horizontal ? press.elementSize.x : press.elementSize.y) - style.trackStartInset - style.trackEndInset)
+                let action = slot.pointerDown(
+                    along: along,
+                    windowPoint: press.window,
+                    trackLength: trackSpan,
+                    altPressed: press.mods.alt,
+                    jumpPreference: false,
+                    style: style
+                )
+                if case .pages(let toward) = action {
+                    let step = max(style.minThumb, trackSpan * 0.85) * Float(toward)
+                    let next = max(0, slot.lastMetrics.offset + step)
+                    slot.lastMetrics.offset = next
+                    tx.scrollTo(viewportKey, offset: style.horizontal ? Vec2(next, 0) : Vec2(0, next), animated: true)
+                }
+            }
+            .onDrag { _, d, tx in
+                let along = (style.horizontal ? d.local.x : d.local.y) - style.trackStartInset
+                let nextOffset = slot.drag(along: along, windowPoint: d.window, trackSize: d.size, style: style)
+                tx.scrollTo(
+                    viewportKey,
+                    offset: style.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),
+                    animated: false
+                )
+            }
+            .onDragEnd { _, _, tx in
+                slot.release(style: style)
+                tx.liveOnly()
+            }
             .child(thumb)
 
         if let trackColor = style.trackColor {
@@ -599,16 +887,10 @@ extension El {
             track = track
                 .h(stripW)
                 .pin(right: style.trackEndInset, bottom: 0, left: style.trackStartInset)
-                .onDrag { _, d, tx in
-                    tx.scrollTo(viewportKey, offset: Vec2(max(0, d.local.x), 0), animated: false)
-                }
         } else {
             track = track
                 .w(stripW)
                 .pin(top: style.trackStartInset, right: 0, bottom: style.trackEndInset)
-                .onDrag { _, d, tx in
-                    tx.scrollTo(viewportKey, offset: Vec2(0, max(0, d.local.y)), animated: false)
-                }
         }
 
         return el()

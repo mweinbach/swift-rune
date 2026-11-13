@@ -115,8 +115,16 @@ public enum ShortcutInputEvent: Sendable, Equatable {
 public struct ShortcutRecorderState: Sendable, Equatable {
     public enum Phase: Sendable, Equatable {
         case idle
-        case capturing(error: ShortcutValidationError?, refused: ShortcutChord?)
+        case capturing(error: ShortcutValidationError?, refused: ShortcutChord?, finishing: String?)
         case swallowing(key: String)
+
+        public var finishingKey: String? {
+            switch self {
+            case .capturing(_, _, let key): return key
+            case .swallowing(let key): return key
+            case .idle: return nil
+            }
+        }
     }
 
     public var shortcut: ShortcutChord?
@@ -131,6 +139,19 @@ public struct ShortcutRecorderState: Sendable, Equatable {
         self.unregistered = false
     }
 
+    public static func isModifierKey(_ key: String) -> Bool {
+        switch key.lowercased() {
+        case "shift", "shiftleft", "shiftright",
+             "control", "controlleft", "controlright", "ctrl",
+             "alt", "altleft", "altright", "option", "optionleft", "optionright",
+             "super", "superleft", "superright", "command", "cmd", "meta", "logo",
+             "fn", "fnlock":
+            return true
+        default:
+            return false
+        }
+    }
+
     public var isRecording: Bool {
         if case .capturing = phase { return true }
         return false
@@ -142,12 +163,12 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     }
 
     public var error: ShortcutValidationError? {
-        if case .capturing(let err, _) = phase { return err }
+        if case .capturing(let err, _, _) = phase { return err }
         return nil
     }
 
     public var refusedChord: ShortcutChord? {
-        if case .capturing(_, let chord) = phase { return chord }
+        if case .capturing(_, let chord, _) = phase { return chord }
         return nil
     }
 
@@ -170,11 +191,16 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     }
 
     public mutating func begin() {
-        phase = .capturing(error: nil, refused: nil)
+        phase = .capturing(error: nil, refused: nil, finishing: nil)
     }
 
+    /// Ends the capture, keeping any finishing key so its repeats and release remain swallowed.
     public mutating func cancel() {
-        phase = .idle
+        if let finishing = phase.finishingKey {
+            phase = .swallowing(key: finishing)
+        } else {
+            phase = .idle
+        }
         heldModifiers = []
     }
 
@@ -198,7 +224,17 @@ public struct ShortcutRecorderState: Sendable, Equatable {
     }
 
     public mutating func refuse(_ error: ShortcutValidationError, chord: ShortcutChord? = nil) {
-        phase = .capturing(error: error, refused: chord)
+        let existingFinishing = phase.finishingKey
+        phase = .capturing(error: error, refused: chord, finishing: existingFinishing)
+    }
+
+    /// Pressing a newly added modifier starts a new chord and clears any previous refusal.
+    private mutating func hold(_ mods: ShortcutModifiers) {
+        let added = mods.subtracting(heldModifiers)
+        if !added.isEmpty, case .capturing(_, _, let finishing) = phase {
+            phase = .capturing(error: nil, refused: nil, finishing: finishing)
+        }
+        heldModifiers = mods
     }
 
     /// Processes a key or modifier event; returns `true` if handled.
@@ -225,33 +261,33 @@ public struct ShortcutRecorderState: Sendable, Equatable {
         case .focusLost:
             let wasActive = isRecording || isSwallowing
             cancel()
+            phase = .idle
             return wasActive
 
         case .modifiersChanged(let mods):
-            let added = mods.subtracting(heldModifiers)
-            if !added.isEmpty, case .capturing = phase {
-                phase = .capturing(error: nil, refused: nil)
-            }
-            heldModifiers = mods
+            hold(mods)
             return isRecording
 
         case let .keyDown(key, mods, isRepeat):
             let lower = key.lowercased()
-            if case .swallowing(let expected) = phase {
-                if isRepeat && lower == expected {
-                    return true
-                }
+            hold(mods)
+            if phase.finishingKey == lower {
+                return true
+            }
+            if case .swallowing = phase {
                 phase = .idle
                 return false
             }
 
-            heldModifiers = mods
             guard isRecording else { return false }
-            if isRepeat { return true }
+            if isRepeat || Self.isModifierKey(lower) { return true }
+
+            if case .capturing(let err, let ref, _) = phase {
+                phase = .capturing(error: err, refused: ref, finishing: lower)
+            }
 
             if lower == "escape" || lower == "esc" {
-                phase = .swallowing(key: lower)
-                heldModifiers = []
+                cancel()
                 return true
             }
             if lower == "backspace" || lower == "delete" {
@@ -260,8 +296,7 @@ public struct ShortcutRecorderState: Sendable, Equatable {
                 } else {
                     shortcut = nil
                     unregistered = false
-                    phase = .swallowing(key: lower)
-                    heldModifiers = []
+                    cancel()
                 }
                 return true
             }
@@ -272,8 +307,7 @@ public struct ShortcutRecorderState: Sendable, Equatable {
                 return true
             }
             if shortcut == chord && !unregistered {
-                phase = .swallowing(key: lower)
-                heldModifiers = []
+                cancel()
                 return true
             }
             if let err = validate(chord) {
@@ -281,18 +315,20 @@ public struct ShortcutRecorderState: Sendable, Equatable {
             } else {
                 shortcut = chord
                 unregistered = false
-                phase = .swallowing(key: lower)
-                heldModifiers = []
+                cancel()
             }
             return true
 
         case .keyUp(let key):
-            if case .swallowing(let expected) = phase {
-                if key.lowercased() == expected {
+            let lower = key.lowercased()
+            if phase.finishingKey == lower {
+                switch phase {
+                case .capturing(let err, let ref, _):
+                    phase = .capturing(error: err, refused: ref, finishing: nil)
+                case .swallowing, .idle:
                     phase = .idle
-                    return true
                 }
-                return false
+                return true
             }
             return isRecording
         }
@@ -377,6 +413,11 @@ public struct ShortcutRecorder<State> {
                 .onKey { s, ev, tx in
                     guard let event = Self.mapKeyEvent(ev) else { return false }
                     var recCopy = s[keyPath: stateKeyPath]
+                    let wasRecording = recCopy.isRecording
+                    if case .capturing(let err, let ref, _) = recCopy.phase {
+                        // El.onKey only delivers keyDown until El.onPhysicalInput lands.
+                        recCopy.phase = .capturing(error: err, refused: ref, finishing: nil)
+                    }
                     let handled = recCopy.handleWithValidator(
                         event,
                         allowUnmodified: allowUnmodified
@@ -384,7 +425,7 @@ public struct ShortcutRecorder<State> {
                         onChange?(&s, chord)
                     }
                     s[keyPath: stateKeyPath] = recCopy
-                    if handled && !recCopy.isRecording && !recCopy.isSwallowing {
+                    if wasRecording && !recCopy.isRecording {
                         tx.blur()
                     }
                     return handled
@@ -490,12 +531,16 @@ extension Kit {
             .rounded(radius.md)
             .bg(c.bgBase)
             .border(1.0, borderColor)
+            .focusable(!disabled)
             .child(contentEl)
 
         if let label {
             control = control.label(label)
         } else {
             control = control.label(caps.isEmpty ? placeholder : caps.joined(separator: " "))
+        }
+        if state.isRecording {
+            control = control.help("Press a shortcut. Escape cancels; Backspace clears.")
         }
 
         if let onClear, state.shortcut != nil, !disabled {
@@ -506,8 +551,12 @@ extension Kit {
             )
         }
 
-        if !disabled {
-            control = control.onClick { s in onBegin(&s) }
+        if disabled {
+            control = control.inert(true).opacity(0.5)
+        } else {
+            control = control
+                .focusRing(c.borderFocus, offset: 2.0)
+                .onClick { s in onBegin(&s) }
         }
 
         var root: El<State> = col().key("\(key)-field").gap(4).child(control)
