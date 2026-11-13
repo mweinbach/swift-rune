@@ -13,28 +13,51 @@ struct LoopRuntime {
     private var entries: [NodeId: LoopSpec] = [:]
     var tracks: [NodeId: LoopTrack] = [:]
 
-    mutating func sync(specs: [(id: NodeId, spec: LoopSpec)], at now: Double, reducedMotion: Bool, cut: Bool) {
+    mutating func sync(
+        specs: [(id: NodeId, spec: LoopSpec)],
+        startFor: (NodeId) -> Double,
+        sceneContains: (NodeId) -> Bool,
+        reducedMotion: Bool,
+        cut: Bool
+    ) {
         _ = reducedMotion
+        entries = entries.filter { sceneContains($0.key) }
+        tracks = tracks.filter { sceneContains($0.key) }
         var seen = Set<NodeId>(minimumCapacity: specs.count)
         for (id, spec) in specs {
             seen.insert(id)
+            let nodeStart = startFor(id)
             if let existingSpec = entries[id], var existingTrack = tracks[id] {
                 if existingSpec != spec {
-                    existingTrack.retime(spec: spec, at: now)
+                    existingTrack.retime(spec: spec, at: nodeStart)
                     entries[id] = spec
-                    tracks[id] = existingTrack
                 }
+                existingTrack.setEnabled(true, at: nodeStart)
+                if cut {
+                    existingTrack.finish()
+                }
+                tracks[id] = existingTrack
                 continue
             }
-            var track = LoopTrack(spec: spec, now: now)
+            var track = LoopTrack(spec: spec, now: nodeStart)
             if cut {
                 track.finish()
             }
             entries[id] = spec
             tracks[id] = track
         }
-        entries = entries.filter { seen.contains($0.key) }
-        tracks = tracks.filter { seen.contains($0.key) }
+        for id in Array(tracks.keys) where !seen.contains(id) {
+            if sceneContains(id) {
+                let nodeStart = startFor(id)
+                tracks[id]?.setEnabled(false, at: nodeStart)
+                if cut {
+                    tracks[id]?.finish()
+                }
+            } else {
+                tracks.removeValue(forKey: id)
+                entries.removeValue(forKey: id)
+            }
+        }
     }
 
     mutating func settleAll(at now: Double) {
@@ -61,7 +84,7 @@ struct LoopRuntime {
         return res
     }
 
-    func hasActiveLoops(at now: Double, reducedMotion: Bool) -> Bool {
+    func hasActiveLoops(nodeTime: (NodeId) -> Double, wall: Double, reducedMotion: Bool) -> Bool {
         if reducedMotion {
             return false
         }
@@ -69,11 +92,22 @@ struct LoopRuntime {
             if case .opacityCycle = entries[id]?.kind {
                 return true
             }
-            if track.isActive(at: now) {
+            if track.isActive(at: nodeTime(id)) {
                 return true
             }
         }
+        _ = wall
         return false
+    }
+
+    func isSlideActive(id: NodeId, nodeTime: Double, reducedMotion: Bool) -> Bool {
+        guard !reducedMotion, let spec = entries[id], let track = tracks[id] else { return false }
+        switch spec.kind {
+        case .slide, .slideEased:
+            return track.isActive(at: nodeTime)
+        case .opacity, .opacityCycle, .rotation, .sequence:
+            return false
+        }
     }
 
     func nextFrameInterval(reducedMotion: Bool) -> Double? {

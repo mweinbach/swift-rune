@@ -86,6 +86,7 @@ internal enum RenderExtrasKey {
     static let shapeTrim = "rune.render.shapeTrim"
     static let cacheEnabled = "rune.render.cacheEnabled"
     static let cacheKey = "rune.render.cacheKey"
+    static let hoverGroupFocus = "rune.render.hoverGroupFocus"
 }
 
 extension El {
@@ -421,7 +422,7 @@ private func fnvMixFloat4(_ h: inout UInt64, _ v: SIMD4<Float>) {
 
 private func hashCachedLayerContent(
     instances: ArraySlice<RenderInstance>,
-    glyphFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16)>,
+    glyphFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)>,
     imageFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)>,
     surfacesCount: Int,
     origin: SIMD2<Float>,
@@ -489,6 +490,7 @@ private func hashCachedLayerContent(
         fnvMixFloat4(&h, fix.normUV)
         fnvMixFloat(&h, fix.texW)
         fnvMixFloat(&h, fix.texH)
+        fnvMix(&h, fix.forceScaled ? 1 : 0)
     }
     for fix in imageFixups {
         fnvMixFloat4(&h, fix.normUV)
@@ -551,6 +553,15 @@ extension Runtime {
             Theme.withBlend(srgbBlend) {
                 let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
                 let rf = buildRenderFrame(frameOut: frameOut, now: animNow)
+                if hasMovingScaleSettle && cxSettings.viewTimeScale > 0.0 {
+                    isAnimating = true
+                    animSources |= AnimSource.scaleSettle
+                } else if !hasMovingScaleSettle {
+                    animSources &= ~AnimSource.scaleSettle
+                    if animSources == 0 {
+                        isAnimating = false
+                    }
+                }
                 finishPostFrameHooks(at: now)
                 return rf
             }
@@ -630,7 +641,7 @@ extension Runtime {
         var materials: [MaterialDraw] = []
 
         // Normalized-to-texel fixups applied once glyph/image atlases reach final size
-        var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16)] = []
+        var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)] = []
         var imageFixups: [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)] = []
 
         var childrenByParent: [Int: [FlatNode]] = [:]
@@ -662,7 +673,11 @@ extension Runtime {
         var nodeOwnOpacityById: [NodeId: Float] = [:]
         var nodeHoverFracById: [NodeId: Float] = [:]
         var inheritedGroupFracById: [NodeId: Float] = [:]
-        func collectHoverAndOwnOpacity(_ n: FlatNode, inheritedInert: Bool, inheritedGroupFrac: Float) {
+        func collectHoverAndOwnOpacity(
+            _ n: FlatNode,
+            inheritedInert: Bool,
+            inheritedGroupFrac: Float
+        ) {
             let effInert = inheritedInert || n.el.isInert
             let nid = n.nodeId
             let el = n.el
@@ -674,25 +689,35 @@ extension Runtime {
                 else if b.target == .rect, let r = liveStore.get(lnid, Props.RECT) { liveRect = r }
             }
             let baseSize = (liveRect ?? rectMap[nid] ?? n.targetRect).size
-            let loopOp = sampleLoopPresentation(id: nid, nodeSize: baseSize, wallNow: now)?.opacity ?? 1.0
-            let groupFactor: Float = el.groupOpacity.map { restOp, hovOp in
-                restOp + (hovOp - restOp) * inheritedGroupFrac
-            } ?? 1.0
+            let loopOp = sampleLoopPresentation(id: nid, nodeSize: baseSize, wallNow: currentTime)?.opacity ?? 1.0
+            let groupFactor = resolveGroupOpacityFactor(
+                nodeId: nid,
+                el: el,
+                nodePath: n.path,
+                inheritedGroupFrac: inheritedGroupFrac
+            )
             let ownOp = ((liveOp ?? opacityMap[nid] ?? el.opacity) * groupFactor * loopOp).clamped(to: 0...1)
             let ownHoverFrac = resolveNodeHoverFrac(n, inert: effInert)
             nodeOwnOpacityById[nid] = ownOp
             nodeHoverFracById[nid] = ownHoverFrac
             inheritedGroupFracById[nid] = inheritedGroupFrac
 
-            let nextGroupFrac = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
-                ? ownHoverFrac
-                : inheritedGroupFrac
+            let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
+            let nextGroupFrac = isGroupScope ? ownHoverFrac : inheritedGroupFrac
             for child in childrenByParent[n.index] ?? [] {
-                collectHoverAndOwnOpacity(child, inheritedInert: effInert, inheritedGroupFrac: nextGroupFrac)
+                collectHoverAndOwnOpacity(
+                    child,
+                    inheritedInert: effInert,
+                    inheritedGroupFrac: nextGroupFrac
+                )
             }
         }
         for r in roots {
-            collectHoverAndOwnOpacity(r, inheritedInert: false, inheritedGroupFrac: 0.0)
+            collectHoverAndOwnOpacity(
+                r,
+                inheritedInert: false,
+                inheritedGroupFrac: 0.0
+            )
         }
 
         // Direct children with intermediate opacity activate `.plusLighter` dissolve (`runtime/paint/build.rs:81-89`).
@@ -738,7 +763,8 @@ extension Runtime {
             inheritedInert: Bool,
             parentOpacity: Float,
             inheritedTransform: PresentedTransform,
-            parentIsDissolve: Bool
+            parentIsDissolve: Bool,
+            parentScaleMotion: PaintScaleMotion
         ) -> (
             continueSubtree: Bool,
             subtreeDynamic: Bool,
@@ -757,7 +783,8 @@ extension Runtime {
             layerStartIdx: Int,
             surfaceStartIdx: Int,
             glyphFixupStartIdx: Int,
-            imageFixupStartIdx: Int
+            imageFixupStartIdx: Int,
+            scaleMotion: PaintScaleMotion
         ) {
             let nid = node.nodeId
             let el = node.el
@@ -794,9 +821,12 @@ extension Runtime {
             let baseRect = liveRect ?? rectMap[nid] ?? node.targetRect
             let pinh: PresentedTransform = (el.anchor == nil ? inheritedTransform : .identity)
             let lo = liveOffset ?? .zero
-            let baseSc = scaleMap[nid] ?? el.scale
-            let ownSc = liveScale.map { Vec2(baseSc.x * max(0, $0.x), baseSc.y * max(0, $0.y)) } ?? baseSc
+            let baseScNoPress = scaleMap[nid] ?? el.scale
+            let ownScNoPress = liveScale.map { Vec2(baseScNoPress.x * max(0, $0.x), baseScNoPress.y * max(0, $0.y)) } ?? baseScNoPress
+            let pressSc = pressScaleValue(for: nid)
+            let ownSc = Vec2(ownScNoPress.x * pressSc, ownScNoPress.y * pressSc)
             let sc = Vec2(pinh.scale.x * ownSc.x, pinh.scale.y * ownSc.y)
+            let scNoPress = Vec2(pinh.scale.x * ownScNoPress.x, pinh.scale.y * ownScNoPress.y)
             let norm = node.anchorAttachNorm ?? el.origin
             let pivot = Vec2(baseRect.x + baseRect.width * norm.x, baseRect.y + baseRect.height * norm.y)
             let ownDx = pinh.dx + lo.x
@@ -806,8 +836,10 @@ extension Runtime {
                 pinh.anchorTo.x + (centre.x - pinh.anchor.x) * pinh.scale.x,
                 pinh.anchorTo.y + (centre.y - pinh.anchor.y) * pinh.scale.y
             )
-            let hasOwnScale = abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
+            let hasOwnScaleNoPress = abs(ownScNoPress.x - 1.0) > 1e-5 || abs(ownScNoPress.y - 1.0) > 1e-5
+            let hasOwnScale = hasOwnScaleNoPress || abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
             let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
+            let (anchorRest, anchorRestTo) = hasOwnScaleNoPress ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
             let nextChildTransform = PresentedTransform(
                 dx: ownDx,
                 dy: ownDy,
@@ -817,6 +849,20 @@ extension Runtime {
             )
             let staticOffset = (rectMap[nid] == nil || liveRect != nil) ? el.offset : .zero
             let shifted = baseRect.offsetBy(Vec2(ownDx + staticOffset.x, ownDy + staticOffset.y))
+            let restingRect: MotionRect
+            if abs(scNoPress.x - 1.0) > 1e-5 || abs(scNoPress.y - 1.0) > 1e-5 || anchorRest != anchorRestTo {
+                restingRect = MotionRect(
+                    left: anchorRestTo.x + (shifted.left - anchorRest.x) * scNoPress.x,
+                    top: anchorRestTo.y + (shifted.top - anchorRest.y) * scNoPress.y,
+                    right: anchorRestTo.x + (shifted.right - anchorRest.x) * scNoPress.x,
+                    bottom: anchorRestTo.y + (shifted.bottom - anchorRest.y) * scNoPress.y
+                )
+            } else {
+                restingRect = shifted
+            }
+            if el.pressScaleFactor != nil {
+                recordPressRestingHit(path: node.path, rect: restingRect, clip: parentClip.rectPt, turn: el.rotate)
+            }
             let effRect: MotionRect
             if abs(sc.x - 1.0) > 1e-5 || abs(sc.y - 1.0) > 1e-5 || anchor != anchorTo {
                 effRect = MotionRect(
@@ -828,6 +874,21 @@ extension Runtime {
             } else {
                 effRect = shifted
             }
+            let ownScaleSpringMoving = scene.store.isAnimating(nid, Props.SCALE)
+                || scene.store.isAnimating(nid, Props.UNIFORM_SCALE)
+                || scene.store.isAnimating(nid, Props.PRESENCE)
+                || scene.store.isAnimating(nid, Props.PRESS_SCALE)
+            let ownLiveScaleMoving = el.liveBindings.contains { b in
+                b.target == .scale
+                    && (liveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
+            }
+            let isOwnAnimatedScale = ownScaleSpringMoving || ownLiveScaleMoving || parentScaleMotion == .moving
+            let settleResult = resolveScaleSettle(nodeId: nid, scale: sc.x, isAnimated: isOwnAnimatedScale, animNow: now)
+            let nodeScaleMotion: PaintScaleMotion = max(
+                parentScaleMotion,
+                max(ownScaleSpringMoving ? .moving : (ownLiveScaleMoving ? .live : .still), settleResult.motion)
+            )
+            let rasterScale = nodeScaleMotion.raster(sc: sc.x, rest: settleResult.raster)
             let ownOpacity = nodeOwnOpacityById[nid] ?? (liveOpacity ?? opacityMap[nid] ?? el.opacity)
             let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
             let effBlur = max(0, liveBlur ?? blurMap[nid] ?? el.blur)
@@ -916,7 +977,7 @@ extension Runtime {
 
             let isDissolveScope = dissolveParentIds.contains(nid)
             if effOpacity <= 0.001 && !isExiting {
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, false, 0, 0, 0, 0)
+                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, false, 0, 0, 0, 0, nodeScaleMotion)
             }
 
             let rectPx = SIMD4<Float>(effRect.x * scale, effRect.y * scale, effRect.width * scale, effRect.height * scale)
@@ -1711,7 +1772,7 @@ extension Runtime {
                         fade: activeFade
                     ))
                     marks.append(0)
-                    glyphFixups.append((idx, placed.uv, pw, ph, placed.page))
+                    glyphFixups.append((idx, placed.uv, pw, ph, placed.page, false))
                 }
             }
 
@@ -1766,7 +1827,7 @@ extension Runtime {
                                 fade: activeFade
                             ))
                             marks.append(0)
-                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
+                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, false))
                         }
                     }
                     for cell in row.cells where !cell.text.isEmpty {
@@ -1796,7 +1857,7 @@ extension Runtime {
                                 fade: activeFade
                             ))
                             marks.append(0)
-                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
+                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, false))
                         }
                     }
                     if let overlay = row.overlayShape {
@@ -1861,16 +1922,19 @@ extension Runtime {
                     rawText: el.liveText?.get() ?? el.plainText,
                     isSecure: el.isSecure
                 )
-                let textLeft = effRect.x + el.layout.padding.left
-                let textTop = effRect.y + el.layout.padding.top
-                let availW = max(1, effRect.width - el.layout.padding.left - el.layout.padding.right)
-                let innerH = max(0, effRect.height - el.layout.padding.top - el.layout.padding.bottom)
+                let textLeft = effRect.x + el.layout.padding.left * sc.x
+                let textTop = effRect.y + el.layout.padding.top * sc.y
+                let availW = max(1, (effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x) / max(1e-4, sc.x) + 0.5)
+                let innerH = max(0, (effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y) / max(1e-4, sc.y))
                 let shaped = resolvedText.shape(
                     using: textSystem,
                     maxWidth: availW,
-                    pixelScale: scale,
+                    pixelScale: rasterScale * scale,
                     emitGlyphs: true
                 )
+                let forceScaled = nodeScaleMotion != .still
+                    || abs(sc.x - rasterScale) > 1e-4
+                    || abs(sc.y - rasterScale) > 1e-4
                 var glyphClipEdges = activeClip
                 var glyphFade = activeFade
                 if resolvedText.truncateFade {
@@ -1880,7 +1944,7 @@ extension Runtime {
                         shaped: shaped,
                         innerW: availW,
                         innerH: innerH,
-                        scaleVec: Vec2(1, 1),
+                        scaleVec: sc,
                         pxScale: scale,
                         textOriginX: textLeft,
                         textOriginY: textTop,
@@ -1917,10 +1981,10 @@ extension Runtime {
                 }
                 let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
                 for gq in shaped.glyphs {
-                    let gx = (textLeft + gq.rect.x) * scale
-                    let gy = (textTop + gq.rect.y) * scale
-                    let gw = max(1.0, gq.rect.z * scale)
-                    let gh = max(1.0, gq.rect.w * scale)
+                    let gx = (textLeft + gq.rect.x * sc.x) * scale
+                    let gy = (textTop + gq.rect.y * sc.y) * scale
+                    let gw = max(1.0, gq.rect.z * sc.x * scale)
+                    let gh = max(1.0, gq.rect.w * sc.y * scale)
                     let gcol = premulSIMD4(gq.color ?? defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
                     let idx = instances.count
                     instances.append(RenderInstance(
@@ -1934,11 +1998,11 @@ extension Runtime {
                         fade: glyphFade
                     ))
                     marks.append(0)
-                    glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
+                    glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
                 }
             }
 
-            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx)
+            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion)
         }
 
         @inline(never)
@@ -2036,14 +2100,38 @@ extension Runtime {
         }
 
         @discardableResult
-        func paintSubtree(_ node: FlatNode, parentClip: RenderClipState, inheritedInert: Bool, parentOpacity: Float, inheritedTransform: PresentedTransform = .identity, parentIsDissolve: Bool = false) -> Bool {
-            let h = paintNodeHeader(node, parentClip: parentClip, inheritedInert: inheritedInert, parentOpacity: parentOpacity, inheritedTransform: inheritedTransform, parentIsDissolve: parentIsDissolve)
+        func paintSubtree(
+            _ node: FlatNode,
+            parentClip: RenderClipState,
+            inheritedInert: Bool,
+            parentOpacity: Float,
+            inheritedTransform: PresentedTransform = .identity,
+            parentIsDissolve: Bool = false,
+            parentScaleMotion: PaintScaleMotion = .still
+        ) -> Bool {
+            let h = paintNodeHeader(
+                node,
+                parentClip: parentClip,
+                inheritedInert: inheritedInert,
+                parentOpacity: parentOpacity,
+                inheritedTransform: inheritedTransform,
+                parentIsDissolve: parentIsDissolve,
+                parentScaleMotion: parentScaleMotion
+            )
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
             let childOpacity = h.needsLayer ? 1.0 : h.effOpacity
             for child in childrenByParent[node.index] ?? [] {
-                if paintSubtree(child, parentClip: h.nextChildClip, inheritedInert: h.nextInert, parentOpacity: childOpacity, inheritedTransform: h.nextChildTransform, parentIsDissolve: h.isDissolveScope) {
+                if paintSubtree(
+                    child,
+                    parentClip: h.nextChildClip,
+                    inheritedInert: h.nextInert,
+                    parentOpacity: childOpacity,
+                    inheritedTransform: h.nextChildTransform,
+                    parentIsDissolve: h.isDissolveScope,
+                    parentScaleMotion: h.scaleMotion
+                ) {
                     subtreeDynamic = true
                 }
             }
@@ -2067,6 +2155,7 @@ extension Runtime {
             return subtreeDynamic
         }
 
+        clearPressRestingHits()
         for r in roots {
             paintSubtree(r, parentClip: rootClip, inheritedInert: false, parentOpacity: 1.0)
         }
@@ -2084,7 +2173,7 @@ extension Runtime {
             let v0 = ny0 * glyphH
             let uw = max(1.0, (fix.normUV.z - fix.normUV.x) * glyphW)
             let vh = max(1.0, (ny1 - ny0) * glyphH)
-            let scaled = abs(uw - fix.texW) > 0.5 || abs(vh - fix.texH) > 0.5
+            let scaled = fix.forceScaled || abs(uw - fix.texW) > 0.5 || abs(vh - fix.texH) > 0.5
             instances[fix.index].uv = SIMD4<Float>(u0, v0, scaled ? uw : 0, scaled ? vh : 0)
         }
 

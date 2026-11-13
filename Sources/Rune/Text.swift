@@ -2662,7 +2662,7 @@ public final class TextSystem: @unchecked Sendable {
         glidePx: Vec2 = .zero
     ) -> ShapedText {
         let authText = spans.map { $0.map(\.text).joined() } ?? text
-        let scale = max(pixelScale, 1.0)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         if authText.isEmpty {
             return shapeCoreImpl(
                 text: text,
@@ -3103,7 +3103,7 @@ public final class TextSystem: @unchecked Sendable {
         emitGlyphs: Bool = true,
         glidePx: Vec2 = .zero
     ) -> ShapedText {
-        let scale = max(pixelScale, 1.0)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let lhPt = style.resolvedLineHeight
         let lhPx = lhPt * scale
         let authText = spans.map { $0.map(\.text).joined() } ?? text
@@ -3853,7 +3853,7 @@ public final class TextSystem: @unchecked Sendable {
 
     /// Computes caret `(x, y, height)` in element-local logical points for `utf8Offset` in `shaped`.
     public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
-        let scale = max(pixelScale, 1.0)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         guard !shaped.lineStrings.isEmpty else {
             return SIMD4<Float>(0, 0, 1.5, shaped.lineHeight)
         }
@@ -3879,7 +3879,7 @@ public final class TextSystem: @unchecked Sendable {
     /// Hit-tests `(localX, localY)` in element-local logical points to a UTF-8 byte offset.
     public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
         guard !shaped.lineStrings.isEmpty else { return 0 }
-        let scale = max(pixelScale, 1.0)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let lineIdx = Int(floorf(max(0, localY) / max(1, shaped.lineHeight)))
             .clamped(to: 0...(shaped.lineStrings.count - 1))
         let rec = shaped.lineStrings[lineIdx]
@@ -3912,7 +3912,7 @@ public final class TextSystem: @unchecked Sendable {
     /// Computes per-line selection rectangles `[x, y, width, height]` in logical points for `utf8Range`.
     public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
         guard !utf8Range.isEmpty, !shaped.lineStrings.isEmpty else { return [] }
-        let scale = max(pixelScale, 1.0)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let invS = 1.0 / scale
         var rects: [SIMD4<Float>] = []
         for (lineIdx, rec) in shaped.lineStrings.enumerated() {
@@ -4160,7 +4160,7 @@ public final class TextSystem: @unchecked Sendable {
         #if canImport(CoreText) && canImport(CoreGraphics)
         if lineIdx < shaped.lineStrings.count {
             let ctRec = shaped.lineStrings[lineIdx]
-            let scale = max(pixelScale, 1.0)
+            let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
             var xPt = ctRec.originX
             if let ctLine = ctRec.ctLine {
                 let globalU16 = Self.globalShapedU16Index(in: shaped, lineIdx: lineIdx, authUTF8: utf8Offset, ctLine: ctLine)
@@ -4230,7 +4230,7 @@ public final class TextSystem: @unchecked Sendable {
         pixelScale: Float,
         emitGlyphs: Bool = true
     ) -> ShapedText {
-        let scale = max(1.0, pixelScale)
+        let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let invS = 1.0 / scale
         let lineH = style.resolvedLineHeight
         let fullText = spans.map { $0.map(\.text).joined() } ?? text
