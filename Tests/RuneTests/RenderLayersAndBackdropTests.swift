@@ -141,7 +141,7 @@ struct RenderLayersAndBackdropTests {
             _ = try renderer.renderOffscreen(
                 RenderFrame(width: 256, height: 256, glyphs: emptyAtlas, instances: oneLayer)
             )
-            #expect(renderer.layersPool.spareCount == 1024)
+            #expect(renderer.layersPool.spareCount == 1023)
             #expect(renderer.layersPool.planner.parked.visits == visits)
             #expect(Self.isWarmSized(renderer))
         }

@@ -449,7 +449,7 @@ public final class Runtime<State> {
 
     internal struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
-        var revision: UInt64 = 1
+        var revision: UInt64 = ImageAtlasRevisionSeed.allocate()
         var shelfX: Int = 1
         var shelfY: Int = 1
         var shelfH: Int = 0
@@ -978,6 +978,8 @@ public final class Runtime<State> {
     internal var virtualFillNeedsCommit: Bool = false
     internal var forceInitialSettle: Bool = true
     internal var lastWasSettled: Bool = false
+    private var explicitSettleRequested: Bool = false
+    private var activeExplicitSettleCut: Bool = false
     internal var pendingEventTime: Double? = nil
 
     /// Whether the most recently presented frame included a settling cut (`Runtime::settled`).
@@ -1185,6 +1187,7 @@ public final class Runtime<State> {
         pendingEventTime = nil
         if settle {
             forceInitialSettle = true
+            explicitSettleRequested = true
         }
     }
 
@@ -1620,7 +1623,7 @@ public final class Runtime<State> {
         at now: Double,
         splitStep: (catchUpAnimNow: Double, dt: Double)? = nil,
         skipFramePoll: Bool = false
-    ) -> (animNow: Double, growthMoving: Bool) {
+    ) -> (animNow: Double, prevAnimNow: Double, growthMoving: Bool) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
@@ -1853,7 +1856,7 @@ public final class Runtime<State> {
             needsCommit = true
         }
         scrollMovedSinceLastFrame = false
-        return (animNow, growthMoving)
+        return (animNow, prevAnimNow, growthMoving)
     }
 
     internal func stepToFrameOutputScaled(
@@ -1861,7 +1864,7 @@ public final class Runtime<State> {
         splitStep: (catchUpAnimNow: Double, dt: Double)? = nil,
         skipFramePoll: Bool = false
     ) -> (frameOut: FrameOutput, animNow: Double) {
-        let (animNow, growthMoving) = prepareAndCommitFrame(
+        let (animNow, prevAnimNow, growthMoving) = prepareAndCommitFrame(
             at: now,
             splitStep: splitStep,
             skipFramePoll: skipFramePoll
@@ -1881,7 +1884,7 @@ public final class Runtime<State> {
         currentFrameCommitInstant = false
         let liveActive: Bool
         if liveVisible {
-            liveActive = updateLiveBindings(at: animNow)
+            liveActive = updateLiveBindings(at: animNow, launchAt: prevAnimNow)
             livePendingDirty = liveActive
         } else {
             liveActive = false
@@ -2004,10 +2007,14 @@ public final class Runtime<State> {
     internal func commitTree(at now: Double, cut: Bool, resizeSnap: Bool = false) {
         let prevResizeSnap = activeResizeSnap
         let prevExplicitSnap = activeExplicitSnap
+        let prevExplicitSettleCut = activeExplicitSettleCut
         activeResizeSnap = resizeSnap
+        activeExplicitSettleCut = explicitSettleRequested
+        explicitSettleRequested = false
         defer {
             activeResizeSnap = prevResizeSnap
             activeExplicitSnap = prevExplicitSnap
+            activeExplicitSettleCut = prevExplicitSettleCut
         }
         measureFramePhase(.commit) {
             activeExplicitSnap = pendingCommitKind.snaps
@@ -2432,6 +2439,16 @@ public final class Runtime<State> {
             snaps: commitKind.snaps,
             lands: commitKind.lands
         )
+        func preResolveInputPillsTree(_ el: inout El<State>) {
+            if let editLens = el.handlers.editLens,
+               (el.pillStyleLookup != nil || el.pillIconLookup != nil || el.pillColorsSpec != nil) {
+                ElDisplayResolver.preResolveInputPills(el: &el, edit: editLens.get(state))
+            }
+            for i in el.children.indices {
+                preResolveInputPillsTree(&el.children[i])
+            }
+        }
+        preResolveInputPillsTree(&layoutRoot)
         var solvedRoot = measureFramePhase(.layout) {
             retainedLayout.compute(
                 root: layoutRoot,
@@ -3556,6 +3573,16 @@ public final class Runtime<State> {
         commitCut: Bool,
         prevMountedIds: Set<NodeId>
     ) {
+        for i in flatNodes.indices {
+            if let editLens = flatNodes[i].el.handlers.editLens,
+               (flatNodes[i].el.pillStyleLookup != nil || flatNodes[i].el.pillIconLookup != nil || flatNodes[i].el.pillColorsSpec != nil) {
+                ElDisplayResolver.preResolveInputPills(el: &flatNodes[i].el, edit: editLens.get(state))
+                nodeById[flatNodes[i].nodeId] = flatNodes[i]
+                if exitingSnapshots[flatNodes[i].nodeId] != nil {
+                    exitingSnapshots[flatNodes[i].nodeId] = flatNodes[i]
+                }
+            }
+        }
 
         virtualInputs = pass.virtualExpansion.virtualInputs
         reconcilePrunedHoverWithin(prevNodes: prevFlatNodesSnapshot, newByPath: pass.byPath, cut: cut, at: now)
@@ -3870,7 +3897,11 @@ public final class Runtime<State> {
                 snapNewMounts: commitKind.snaps || commitCut
             )
         }
-        syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut)
+        syncMotionLoops(
+            specs: pass.loopSpecs,
+            at: now,
+            cut: activeExplicitSettleCut || commitKind.lands || reducedMotion
+        )
         setGroupRestAfterCommit(
             nodes: pass.nodes,
             preState: preGroupSnapshot,
@@ -4680,7 +4711,7 @@ public final class Runtime<State> {
 
     // MARK: - Live Property Evaluation
 
-    private func updateLiveBindings(at now: Double) -> Bool {
+    private func updateLiveBindings(at now: Double, launchAt: Double) -> Bool {
         var anyTweenOrPulsePending = false
         for node in flatNodes where !node.el.liveBindings.isEmpty {
             for b in node.el.liveBindings {
@@ -4709,7 +4740,8 @@ public final class Runtime<State> {
                 // Release any expired pulse hold
                 if let pulse = livePulseRelease[lk], now >= pulse.releaseAt {
                     livePulseRelease.removeValue(forKey: lk)
-                    animateLiveTrack(nid: nid, target: b.target, lanes: pulse.rest, spring: pulse.spring, at: now)
+                    let releaseStart = min(now, max(pulse.releaseAt, launchAt))
+                    animateLiveTrack(nid: nid, target: b.target, lanes: pulse.rest, spring: pulse.spring, at: releaseStart)
                 } else if livePulseRelease[lk] != nil {
                     anyTweenOrPulsePending = true
                 }
@@ -4731,16 +4763,18 @@ public final class Runtime<State> {
                 case .set(let lanes):
                     livePulseRelease.removeValue(forKey: lk)
                     if let sp = b.spring {
-                        animateLiveTrack(nid: nid, target: b.target, lanes: lanes, spring: sp, at: now)
+                        animateLiveTrack(nid: nid, target: b.target, lanes: lanes, spring: sp, at: launchAt)
+                    } else if b.target == .opacity, let anim = node.el.opacityMotionAnim {
+                        liveStore.set(nid, Props.OPACITY, to: lanes.l0, anim: reducedMotion ? .instant : anim, at: launchAt)
                     } else {
                         snapLiveTrack(nid: nid, target: b.target, lanes: lanes)
                     }
 
                 case let .pulse(active, rest, holdSeconds):
                     if let sp = b.spring {
-                        animateLiveTrack(nid: nid, target: b.target, lanes: active, spring: sp, at: now)
+                        animateLiveTrack(nid: nid, target: b.target, lanes: active, spring: sp, at: launchAt)
                         let leave = b.restSpring ?? sp
-                        livePulseRelease[lk] = (now + holdSeconds, rest, leave)
+                        livePulseRelease[lk] = (launchAt + holdSeconds, rest, leave)
                         anyTweenOrPulsePending = true
                     } else {
                         snapLiveTrack(nid: nid, target: b.target, lanes: rest)
@@ -10405,6 +10439,7 @@ public final class Runtime<State> {
     /// Snaps all in-flight transitions and reveals before the next frame (`Runtime::settle_all`).
     public func settleAll() {
         forceInitialSettle = true
+        explicitSettleRequested = true
         needsCommit = true
     }
 

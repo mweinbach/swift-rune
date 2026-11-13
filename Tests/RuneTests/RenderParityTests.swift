@@ -573,6 +573,7 @@ struct RenderGPUAndShaderParityTests {
                             .size(60, 60)
                             .absolute(x: 20, y: 20)
                             .clipRounded(4)
+                            .opacity(0.99)
                             .child(
                                 el()
                                     .size(40, 40)
