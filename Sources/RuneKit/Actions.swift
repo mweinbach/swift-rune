@@ -197,15 +197,20 @@ extension Kit {
             node = node.shortcutHint(cleanShortcut)
         }
 
+        let isRolling: Bool = if case .rolling = labelSpec { true } else { false }
         if let svg = leadingIcon {
-            node = node.child(icon(svg, size: 14).key("icon").color(fgCol).a11yHidden())
+            var ic: El<State> = icon(svg, size: 14).key("icon").color(fgCol).a11yHidden()
+            if isRolling {
+                ic = ic.animateLayout(LayoutAnim.widthLeads(motion.control))
+            }
+            node = node.child(ic)
         }
         switch labelSpec {
         case let .text(title):
             node = node.child(text(title).key("label").font(fontStyle).color(fgCol).noWrap().a11yHidden())
         case let .rolling(rollingKey, title):
             node = node
-                .animateLayout(motion.control)
+                .animateLayout(LayoutAnim.widthLeads(motion.control))
                 .child(rollingText(key: rollingKey, title, font: fontStyle, color: fgCol).a11yHidden())
         case let .custom(_, builder):
             node = node.child(builder(fontStyle, fgCol).a11yHidden())
