@@ -558,7 +558,7 @@ public struct RewindTape: Sendable {
 
     public init(window: Double = 60.0, maxBytes: Int = 24 << 20) {
         self.window = max(0.0, window)
-        self.maxBytes = max(1024, maxBytes)
+        self.maxBytes = max(0, maxBytes)
     }
 
     public static func quantize(rect: MotionRect, opacity: Float) -> Quantized {
@@ -759,7 +759,7 @@ public final class RewindRecorder: @unchecked Sendable {
     }
     public var maxBytes: Int {
         get { lock.withLock { tape.maxBytes } }
-        set { lock.withLock { tape.maxBytes = max(1024, newValue) } }
+        set { lock.withLock { tape.maxBytes = max(0, newValue) } }
     }
     public var viewport: Vec2 { lock.withLock { tape.viewport } }
     public var isPaused: Bool { lock.withLock { tape.paused } }
@@ -778,7 +778,7 @@ public final class RewindRecorder: @unchecked Sendable {
     /// Builder-style memory budget (`Rewind::max_bytes`).
     @discardableResult
     public func maxBytes(_ bytes: Int) -> Self {
-        lock.withLock { tape.maxBytes = max(1024, bytes) }
+        lock.withLock { tape.maxBytes = max(0, bytes) }
         return self
     }
 

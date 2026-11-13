@@ -290,6 +290,13 @@ struct ShellPartialCloseoutTests {
         defer { try? fm.removeItem(at: tmpRoot) }
 
         let env = ["RUNE_PREFS_DIR": tmpRoot.path]
+        let rootedEnv = ["RUNE_DIRS_ROOT": tmpRoot.appendingPathComponent("rooted").path]
+        let rootedPrefs = Prefs.open(appId: "rooted-app", environment: rootedEnv)
+        #expect(rootedPrefs.isPersistent)
+        #expect(rootedPrefs.path?.path == tmpRoot.appendingPathComponent("rooted/config/rooted-app/prefs.json").path)
+        try rootedPrefs.set("theme", value: "dark")
+        #expect(Prefs.open(appId: "rooted-app", environment: rootedEnv).get("theme", as: String.self) == "dark")
+
         let p = Prefs.open(appId: "../bad/app:name", environment: env)
         #expect(p.isPersistent)
         #expect(p.path?.lastPathComponent.contains("..") == false)
@@ -400,16 +407,16 @@ struct ShellPartialCloseoutTests {
         #expect(abs(clip.duration - 0.5) < 1e-6)
         #expect(abs(clip.frames[1].elements[0].rect.left - 30.0) < 0.2)
 
-        // maxBytes budget evicts oldest frames while retaining newest
-        let tight = RewindRecorder().seconds(120.0).maxBytes(120)
+        // maxBytes budget evicts oldest frames while retaining newest without 1024 floor
+        let tight = RewindRecorder().seconds(120.0).maxBytes(250)
+        #expect(tight.maxBytes == 250)
         for i in 0..<20 {
             tight.recordFrame(at: Double(i) * 0.1, elements: [
-                RewindElementSnapshot(key: "item-\(i % 5)", rect: MotionRect.fromXYWH(Float(i * 4), 10, 40, 20), opacity: 1.0),
-                RewindElementSnapshot(key: "other-\(i % 5)", rect: MotionRect.fromXYWH(Float(i * 4), 40, 40, 20), opacity: 0.8),
+                RewindElementSnapshot(key: "item", rect: MotionRect.fromXYWH(Float(i * 4), 10, 40, 20), opacity: 1.0),
             ])
         }
-        #expect(tight.frameCount < 20)
-        #expect(tight.estimatedBytes <= 120 || tight.frameCount <= 1)
+        #expect(tight.frameCount > 1 && tight.frameCount < 20)
+        #expect(tight.estimatedBytes <= 250)
     }
 
     // MARK: - 6. FrameReports (6/6) & HeadlessRunner multi-frame Compositor.render
