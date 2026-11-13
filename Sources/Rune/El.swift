@@ -1542,8 +1542,10 @@ public struct El<State> {
 
     public func clipRounded(_ radius: Float) -> Self {
         var copy = self
-        copy.clipCorners = nil
-        copy.clipRadius = max(0, radius)
+        copy.applyParityClip { target in
+            target.clipCorners = nil
+            target.clipRadius = max(0, radius)
+        }
         return copy
     }
 
@@ -1555,27 +1557,35 @@ public struct El<State> {
             max(0, radii.bottomRight),
             max(0, radii.bottomLeft)
         )
-        copy.clipCorners = clamped
-        copy.clipRadius = clamped.maxMagnitude
+        copy.applyParityClip { target in
+            target.clipCorners = clamped
+            target.clipRadius = clamped.maxMagnitude
+        }
         return copy
     }
 
     public func clipSoft(_ fade: Float) -> Self {
         let f = max(0, fade)
         var copy = self
-        copy.clipFade = SIMD4<Float>(f, f, f, f)
+        copy.applyParityClip { target in
+            target.clipFade = SIMD4<Float>(f, f, f, f)
+        }
         return copy
     }
 
     public func clipFade(left: Float = 0, top: Float = 0, right: Float = 0, bottom: Float = 0) -> Self {
         var copy = self
-        copy.clipFade = SIMD4<Float>(max(0, left), max(0, top), max(0, right), max(0, bottom))
+        copy.applyParityClip { target in
+            target.clipFade = SIMD4<Float>(max(0, left), max(0, top), max(0, right), max(0, bottom))
+        }
         return copy
     }
 
     public func clipFadeLinear(left: Float = 0, top: Float = 0, right: Float = 0, bottom: Float = 0) -> Self {
         var copy = self
-        copy.clipFade = SIMD4<Float>(-max(0, left), -max(0, top), -max(0, right), -max(0, bottom))
+        copy.applyParityClip { target in
+            target.clipFade = SIMD4<Float>(-max(0, left), -max(0, top), -max(0, right), -max(0, bottom))
+        }
         return copy
     }
 
@@ -1719,7 +1729,13 @@ public struct El<State> {
     public func noWrap() -> Self { var c = self; c.textStyle.wrap = .noWrap; return c }
     public func wrapText() -> Self { var c = self; c.textStyle.wrap = .wrap; return c }
     public func wrap(_ mode: TextWrap) -> Self { var c = self; c.textStyle.wrap = mode; return c }
-    public func ellipsis() -> Self { var c = self; c.textStyle.wrap = .ellipsis; return c }
+    public func ellipsis() -> Self {
+        var c = self
+        c.textStyle.wrap = .ellipsis
+        c.layout.flexShrink = 1.0
+        c.layout.minWidth = .points(0)
+        return c
+    }
 
     public func color(_ c: Color) -> Self {
         var copy = self

@@ -419,7 +419,175 @@ struct RuneFXBlendAndPipelineTests {
     }
     #endif
 
-    @Test func catalogToSwiftAndHexRoundTrip() {
+    private func evalEmittedSwift(_ code: String) throws -> FillParams {
+        struct ParseFailure: Error { let msg: String }
+
+        func parseHex(_ token: String) throws -> UInt32 {
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("0x") || trimmed.hasPrefix("0X"),
+                  let val = UInt32(trimmed.dropFirst(2), radix: 16) else {
+                throw ParseFailure(msg: "bad hex: \(trimmed)")
+            }
+            return val
+        }
+
+        func parseVec2(_ expr: String) throws -> SIMD2<Float> {
+            let trimmed = expr.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("SIMD2<Float>("), trimmed.hasSuffix(")") else {
+                throw ParseFailure(msg: "bad vec2: \(trimmed)")
+            }
+            let inner = String(trimmed.dropFirst("SIMD2<Float>(".count).dropLast())
+            let parts = inner.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard parts.count == 2, let x = Float(parts[0]), let y = Float(parts[1]) else {
+                throw ParseFailure(msg: "bad vec2 components: \(inner)")
+            }
+            return SIMD2<Float>(x, y)
+        }
+
+        func parseLiteral(_ lit: String, param: FxParam) throws -> FxValue {
+            let s = lit.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch param.kind {
+            case .number:
+                guard let x = Float(s) else { throw ParseFailure(msg: "bad float: \(s)") }
+                return .number(x)
+            case .count:
+                guard let n = UInt32(s) else { throw ParseFailure(msg: "bad count: \(s)") }
+                return .count(n)
+            case .toggle:
+                if s == "true" { return .toggle(true) }
+                if s == "false" { return .toggle(false) }
+                throw ParseFailure(msg: "bad toggle: \(s)")
+            case .choice(let choices):
+                guard let idx = choices.firstIndex(where: { $0.swiftLiteral == s }) else {
+                    throw ParseFailure(msg: "bad choice '\(s)' for \(param.id)")
+                }
+                return .choice(idx)
+            case .color:
+                guard s.hasPrefix("rgb("), s.hasSuffix(")") else {
+                    throw ParseFailure(msg: "bad rgb: \(s)")
+                }
+                let inner = String(s.dropFirst(4).dropLast())
+                return .color(rgb(try parseHex(inner)))
+            case .colors:
+                guard s.hasPrefix("Stops.hex(["), s.hasSuffix("])") else {
+                    throw ParseFailure(msg: "bad Stops.hex: \(s)")
+                }
+                let inner = String(s.dropFirst("Stops.hex([".count).dropLast(2))
+                let vals = try inner.split(separator: ",").map { try parseHex(String($0)) }
+                return .colors(Stops.hex(vals))
+            case .point:
+                return .point(try parseVec2(s))
+            case .points:
+                guard s.hasPrefix("["), s.hasSuffix("]") else {
+                    throw ParseFailure(msg: "bad points array: \(s)")
+                }
+                let inner = String(s.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+                if inner.isEmpty { return .points([]) }
+                var items: [SIMD2<Float>] = []
+                var depth = 0
+                var start = inner.startIndex
+                for idx in inner.indices {
+                    let ch = inner[idx]
+                    if ch == "(" { depth += 1 }
+                    else if ch == ")" { depth -= 1 }
+                    else if ch == "," && depth == 0 {
+                        items.append(try parseVec2(String(inner[start..<idx])))
+                        start = inner.index(after: idx)
+                    }
+                }
+                items.append(try parseVec2(String(inner[start..<inner.endIndex])))
+                return .points(items)
+            }
+        }
+
+        func paramId(fromSwiftField field: String) -> String {
+            switch field {
+            case "tintAmount": return "tint_amount"
+            case "edgeColor": return "edge_color"
+            case "rampAngle": return "ramp_angle"
+            default: return field
+            }
+        }
+
+        guard code.hasPrefix("Fx.fill("), code.hasSuffix(")") else {
+            throw ParseFailure(msg: "missing Fx.fill wrapper: \(code)")
+        }
+        var body = String(code.dropFirst("Fx.fill(".count).dropLast())
+
+        var intensity: Float = 1.0
+        if let range = body.range(of: ").intensity(", options: .backwards) {
+            let numStr = String(body[range.upperBound...].dropLast())
+            guard let v = Float(numStr) else { throw ParseFailure(msg: "bad intensity: \(numStr)") }
+            intensity = v
+            body = String(body[..<range.lowerBound]) + ")"
+        }
+
+        var border: Float = 0.0
+        if let range = body.range(of: ").border(", options: .backwards) {
+            let numStr = String(body[range.upperBound...].dropLast())
+            guard let v = Float(numStr) else { throw ParseFailure(msg: "bad border: \(numStr)") }
+            border = v
+            body = String(body[..<range.lowerBound]) + ")"
+        }
+
+        guard body.hasPrefix("FillParams("), body.hasSuffix(")") else {
+            throw ParseFailure(msg: "missing FillParams wrapper: \(body)")
+        }
+        let inner = String(body.dropFirst("FillParams(".count).dropLast())
+        guard let paren = inner.firstIndex(of: "("), inner.hasSuffix(")") else {
+            throw ParseFailure(msg: "missing case paren: \(inner)")
+        }
+        let styleExpr = String(inner[inner.index(after: paren)..<inner.index(before: inner.endIndex)])
+
+        var presetExpr = styleExpr
+        var assignments: [(String, String)] = []
+        if styleExpr.hasPrefix("{ var p = "), styleExpr.hasSuffix("; return p }()") {
+            let stmts = String(styleExpr.dropFirst(2).dropLast(3))
+                .split(separator: ";")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard stmts.count >= 2, stmts[0].hasPrefix("var p = "), stmts.last == "return p" else {
+                throw ParseFailure(msg: "bad mutation closure: \(styleExpr)")
+            }
+            presetExpr = String(stmts[0].dropFirst("var p = ".count))
+            for assign in stmts.dropFirst().dropLast() {
+                guard assign.hasPrefix("p."),
+                      let eq = assign.range(of: " = ") else {
+                    throw ParseFailure(msg: "bad assignment: \(assign)")
+                }
+                let field = String(assign[assign.index(assign.startIndex, offsetBy: 2)..<eq.lowerBound])
+                let rhs = String(assign[eq.upperBound...])
+                assignments.append((field, rhs))
+            }
+        }
+
+        var matchedInfo: FxStyleInfo?
+        var matchedFill: FillParams?
+        for info in fillStyles() {
+            if let preset = info.presets.first(where: { $0.swiftCode == presetExpr }) {
+                matchedInfo = info
+                matchedFill = preset.fill()
+                break
+            }
+        }
+        guard let info = matchedInfo, var fill = matchedFill else {
+            throw ParseFailure(msg: "unknown preset swiftCode: \(presetExpr)")
+        }
+
+        for (field, rhs) in assignments {
+            let id = paramId(fromSwiftField: field)
+            guard let param = info.params.first(where: { $0.id == id }) else {
+                throw ParseFailure(msg: "unknown param \(id) on \(info.id)")
+            }
+            let val = try parseLiteral(rhs, param: param)
+            guard fill.set(id, val) else {
+                throw ParseFailure(msg: "failed to set \(id) on \(info.id)")
+            }
+        }
+
+        return fill.border(border).intensity(intensity)
+    }
+
+    @Test func catalogToSwiftAndHexRoundTrip() throws {
         for hex in [UInt32(0x000000), 0xffffff, 0xf3c56b, 0x0b3d5c, 0x808080] {
             #expect(rgb(hex).hex() == hex)
         }
@@ -433,22 +601,41 @@ struct RuneFXBlendAndPipelineTests {
         #expect(f.toSwift() == "Fx.fill(FillParams(.liquidMetal({ var p = LiquidMetalParams.rose(); p.flow = 0.8; return p }())).border(4.0))")
 
         for style in fillStyles() {
-            for preset in style.presets {
+            for (presetIndex, preset) in style.presets.enumerated() {
                 let base = preset.fill()
-                #expect(base.toSwift() == "Fx.fill(FillParams(\(base.toSwift().dropFirst("Fx.fill(FillParams(".count).dropLast(2))))")
-                var modified = base.border(3.5).intensity(0.75)
+                let baseCode = base.toSwift()
+                #expect(try evalEmittedSwift(baseCode) == base)
+                if presetIndex == 0 {
+                    #expect(!baseCode.contains("{ var p = "))
+                }
+
+                // Single-field modification round-trip through emitted Swift for every param.
+                var modifiedAll = base.border(3.5).intensity(0.75)
                 for param in style.params {
                     let alt: FxValue
                     switch param.kind {
                     case .number(let minV, let maxV, _, _):
-                        alt = .number((minV + maxV) * 0.5 + 0.125)
-                    case .count(_, let maxC):
-                        alt = .count(maxC)
+                        let cur: Float = {
+                            if case .number(let x)? = base.get(param.id) { return x }
+                            return minV
+                        }()
+                        let candidate = (minV + maxV) * 0.5 + 0.125
+                        alt = .number(abs(candidate - cur) > 1e-4 ? candidate : minV)
+                    case .count(let minC, let maxC):
+                        let cur: UInt32 = {
+                            if case .count(let n)? = base.get(param.id) { return n }
+                            return minC
+                        }()
+                        alt = .count(cur != maxC ? maxC : minC)
                     case .toggle:
                         let cur = (base.get(param.id) == .toggle(true))
                         alt = .toggle(!cur)
                     case .choice(let choices):
-                        alt = .choice(choices.count - 1)
+                        let cur: Int = {
+                            if case .choice(let k)? = base.get(param.id) { return k }
+                            return 0
+                        }()
+                        alt = .choice((cur + 1) % choices.count)
                     case .color:
                         alt = .color(rgb(0xabcdef))
                     case .colors(let minS, _):
@@ -459,12 +646,15 @@ struct RuneFXBlendAndPipelineTests {
                     case .points:
                         alt = .points(Array(repeating: SIMD2<Float>(0.25, 0.75), count: maxStops))
                     }
-                    let didSet = modified.set(param.id, alt)
-                    #expect(didSet)
+                    var single = base
+                    let okSingle = single.set(param.id, alt)
+                    #expect(okSingle)
+                    #expect(try evalEmittedSwift(single.toSwift()) == single, "\(style.id).\(param.id)")
+                    let okAll = modifiedAll.set(param.id, alt)
+                    #expect(okAll)
                 }
-                let emitted = modified.toSwift()
-                #expect(emitted.contains(".border(3.5)"))
-                #expect(emitted.contains(".intensity(0.75)"))
+                let emitted = modifiedAll.toSwift()
+                #expect(try evalEmittedSwift(emitted) == modifiedAll, "\(style.id)/\(preset.id) all-modified round-trip")
             }
         }
     }
@@ -596,19 +786,35 @@ struct RuneFXBlendAndPipelineTests {
         // 3. grain_is_symmetric_in_both_blend_modes
         let grain = Fx.grain(GrainParams(amount: 0.06)).on(.rounded(x: 0, y: 0, w: 96, h: 96, radius: 0))
         let grainZero = Fx.grain(GrainParams(amount: 0.0)).on(.rounded(x: 0, y: 0, w: 96, h: 96, radius: 0))
-        let gImg = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0.5, 0.5, 0.5, 1), layers: [grain], mode: .normal, srgb: true, backdrop: nil)
-        let gBase = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0.5, 0.5, 0.5, 1), layers: [grainZero], mode: .normal, srgb: true, backdrop: nil)
-        var up = 0.0
-        var down = 0.0
-        for p in 0..<(96 * 96) {
-            let v = Double(gImg[p * 4]) / 255.0
-            let b = Double(gBase[p * 4]) / 255.0
-            if v > b { up += (v - b) / max(1.0 - b, 1e-4) } else { down += (b - v) / max(b, 1e-4) }
+        for srgb in [false, true] {
+            let fx = srgb ? fxGam : fxLin
+            let fmt: MTLPixelFormat = srgb ? .rgba8Unorm : .rgba8Unorm_srgb
+            let midLin = Double(srgbDecode(128.0 / 255.0))
+            let midGam = 128.0 / 255.0
+            let clear = srgb ? (midGam, midGam, midGam, 1.0) : (midLin, midLin, midLin, 1.0)
+            let gImg = try renderBlendCase(device: device, queue: queue, fx: fx, format: fmt, clear: clear, layers: [grain], mode: .normal, srgb: srgb, backdrop: nil)
+            let gBase = try renderBlendCase(device: device, queue: queue, fx: fx, format: fmt, clear: clear, layers: [grainZero], mode: .normal, srgb: srgb, backdrop: nil)
+            var up = 0.0
+            var down = 0.0
+            var rawSum = 0.0
+            for p in 0..<(96 * 96) {
+                let rawV = Double(gImg[p * 4])
+                let rawB = Double(gBase[p * 4])
+                rawSum += rawV - rawB
+                let v = srgb ? rawV / 255.0 : Double(srgbDecode(Float(rawV / 255.0)))
+                let b = srgb ? rawB / 255.0 : Double(srgbDecode(Float(rawB / 255.0)))
+                if v > b { up += (v - b) / max(1.0 - b, 1e-4) } else { down += (b - v) / max(b, 1e-4) }
+            }
+            let nPx = Double(96 * 96)
+            up /= nPx
+            down /= nPx
+            #expect(up > 0.005 && down > 0.005, "srgb=\(srgb) up=\(up) down=\(down)")
+            #expect(abs(up - down) <= 0.1 * (up + down) / 2.0, "srgb=\(srgb) asymmetric grain")
+            if srgb {
+                let rawMean = rawSum / nPx
+                #expect(abs(rawMean) <= 1.0, "srgb grain shifted mean by \(rawMean)")
+            }
         }
-        up /= Double(96 * 96)
-        down /= Double(96 * 96)
-        #expect(up > 0.005 && down > 0.005)
-        #expect(abs(up - down) <= 0.15 * (up + down) / 2.0)
 
         // 4. slot_scale_scales_effect_lengths_and_radii_without_bleed
         let ring6 = Fx.fill(FillParams(.meshGradient(.dusk())).border(6.0)).on(.rounded(x: 8, y: 8, w: 32, h: 32, radius: 8))
@@ -698,28 +904,37 @@ struct RuneFXBlendAndPipelineTests {
             SIMD4<Float>(16, 16, 80, 80),
             fade: SIMD4<UInt32>(0, bottomFadeBits, 0, radius24Bits)
         )
-        let plainOut = try renderBlendCase(device: device, queue: queue, fx: fx, format: .rgba8Unorm_srgb, clear: (0.125, 0.125, 0.125, 1), layers: [orangeFill], mode: .normal, srgb: false, backdrop: nil)
-        let clippedTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba8Unorm_srgb)
-        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [orangeFill]), slots: [clipSlot])
-        let clipCmd = try #require(queue.makeCommandBuffer())
-        let clipRpd = MTLRenderPassDescriptor()
-        clipRpd.colorAttachments[0].texture = clippedTarget
-        clipRpd.colorAttachments[0].loadAction = .clear
-        clipRpd.colorAttachments[0].clearColor = MTLClearColor(red: 0.125, green: 0.125, blue: 0.125, alpha: 1)
-        clipRpd.colorAttachments[0].storeAction = .store
-        let clipEnc = try #require(clipCmd.makeRenderCommandEncoder(descriptor: clipRpd))
-        try fx.drawLayer(encoder: clipEnc, format: .rgba8Unorm_srgb, origin: .zero, layer: 0)
-        clipEnc.endEncoding()
-        clipCmd.commit()
-        clipCmd.waitUntilCompleted()
-        let clippedOut = readRGBA8(from: clippedTarget)
+        for srgb in [false, true] {
+            fx.setSrgbBlend(srgb)
+            let fmt: MTLPixelFormat = srgb ? .rgba8Unorm : .rgba8Unorm_srgb
+            let clearV = srgb ? Double(srgbEncode(0.125)) : 0.125
+            let expectedBgByte = UInt8((srgbEncode(0.125) * 255.0).rounded())
+            let plainOut = try renderBlendCase(device: device, queue: queue, fx: fx, format: fmt, clear: (clearV, clearV, clearV, 1), layers: [orangeFill], mode: .normal, srgb: srgb, backdrop: nil)
+            let clippedTarget = try makeTexture(device: device, width: 96, height: 96, format: fmt)
+            fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [orangeFill]), slots: [clipSlot])
+            let clipCmd = try #require(queue.makeCommandBuffer())
+            let clipRpd = MTLRenderPassDescriptor()
+            clipRpd.colorAttachments[0].texture = clippedTarget
+            clipRpd.colorAttachments[0].loadAction = .clear
+            clipRpd.colorAttachments[0].clearColor = MTLClearColor(red: clearV, green: clearV, blue: clearV, alpha: 1)
+            clipRpd.colorAttachments[0].storeAction = .store
+            let clipEnc = try #require(clipCmd.makeRenderCommandEncoder(descriptor: clipRpd))
+            try fx.drawLayer(encoder: clipEnc, format: fmt, origin: .zero, layer: 0)
+            clipEnc.endEncoding()
+            clipCmd.commit()
+            clipCmd.waitUntilCompleted()
+            let clippedOut = readRGBA8(from: clippedTarget)
+            let cornerIdx = (17 * 96 + 17) * 4
+            #expect(abs(Int(clippedOut[cornerIdx]) - Int(expectedBgByte)) <= 6, "srgb=\(srgb)")
+            let centerIdx = (48 * 96 + 48) * 4
+            #expect(abs(Int(clippedOut[centerIdx]) - Int(plainOut[centerIdx])) <= 4, "srgb=\(srgb)")
+            let midFadeIdx = (72 * 96 + 48) * 4
+            #expect(clippedOut[midFadeIdx] < plainOut[midFadeIdx] - 15, "srgb=\(srgb)")
+            #expect(clippedOut[midFadeIdx] > 40, "srgb=\(srgb)")
+        }
+        fx.setSrgbBlend(false)
         let cornerIdx = (17 * 96 + 17) * 4
-        #expect(abs(Int(clippedOut[cornerIdx]) - 99) <= 6) // linear clear 0.125 encodes to ~99 in sRGB
         let centerIdx = (48 * 96 + 48) * 4
-        #expect(abs(Int(clippedOut[centerIdx]) - Int(plainOut[centerIdx])) <= 4)
-        let midFadeIdx = (72 * 96 + 48) * 4
-        #expect(clippedOut[midFadeIdx] < plainOut[midFadeIdx] - 15)
-        #expect(clippedOut[midFadeIdx] > 40)
 
         let isoFillTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
         fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [orangeFill]), slots: [clipSlot])
@@ -840,6 +1055,101 @@ struct RuneFXBlendAndPipelineTests {
         // Rect [20, 52) shifted by origin -8.25,-9.75 lands at [28.25..60.25, 29.75..61.75): (56, 56) is inside, (24, 24) is outside.
         #expect(negPx[(56 * 96 + 56) * 4 + 2] > 200)
         #expect(negPx[(24 * 96 + 24) * 4 + 2] < 10)
+    }
+
+    @Test
+    func srgbBlendDecodesBackdropWithoutDoubleEncodingOnFrameAndLayerTargets() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+
+        let fx = try FxRenderer(device: device, pixelFormat: .rgba8Unorm_srgb, options: FxOptions(dither: false, srgbBlend: false))
+        fx.addFormat(.rgba8Unorm)
+        fx.addFormat(.rgba16Float)
+
+        let clearGlass = Fx.fill(FillParams(.flutedGlass(FlutedGlassParams(refraction: 0, frost: 0, dispersion: 0, highlight: 0, tintAmount: 0))))
+            .on(.rounded(x: 16, y: 16, w: 20, h: 64, radius: 0))
+        let frostGlass = Fx.fill(FillParams(.flutedGlass(FlutedGlassParams(refraction: 0, frost: 0.6, dispersion: 0, highlight: 0, tintAmount: 0))))
+            .on(.rounded(x: 36, y: 16, w: 20, h: 64, radius: 0))
+        let ditherLayer = Fx.fill(FillParams(.dither(DitherParams.backdrop())))
+            .on(.rounded(x: 56, y: 16, w: 24, h: 64, radius: 0))
+        let layers = [clearGlass, frostGlass, ditherLayer]
+
+        func runMidtone(format: MTLPixelFormat, srgb: Bool) throws -> [UInt8] {
+            fx.setSrgbBlend(srgb)
+            let bdTex = try makeTexture(device: device, width: 96, height: 96, format: format)
+            let outTex = try makeTexture(device: device, width: 96, height: 96, format: format)
+            let rVal = srgb ? Double(128.0 / 255.0) : Double(srgbDecode(128.0 / 255.0))
+            let gVal = srgb ? Double(64.0 / 255.0) : Double(srgbDecode(64.0 / 255.0))
+            let bVal = srgb ? Double(32.0 / 255.0) : Double(srgbDecode(32.0 / 255.0))
+            let clearCol = MTLClearColor(red: rVal, green: gVal, blue: bVal, alpha: 1.0)
+
+            let frame = FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: layers, backdrop: bdTex)
+            let slots = srgb ? Array(repeating: FxSlot().backdropSrgb(true), count: layers.count) : []
+            _ = fx.prepare(frame: frame, slots: slots)
+
+            let cmd = try #require(queue.makeCommandBuffer())
+            let bdRpd = MTLRenderPassDescriptor()
+            bdRpd.colorAttachments[0].texture = bdTex
+            bdRpd.colorAttachments[0].loadAction = .clear
+            bdRpd.colorAttachments[0].clearColor = clearCol
+            bdRpd.colorAttachments[0].storeAction = .store
+            let bdEnc = try #require(cmd.makeRenderCommandEncoder(descriptor: bdRpd))
+            bdEnc.endEncoding()
+
+            let outRpd = MTLRenderPassDescriptor()
+            outRpd.colorAttachments[0].texture = outTex
+            outRpd.colorAttachments[0].loadAction = .clear
+            outRpd.colorAttachments[0].clearColor = clearCol
+            outRpd.colorAttachments[0].storeAction = .store
+            for i in 0..<layers.count {
+                _ = try fx.blurBackdrop(commandBuffer: cmd, backdrop: bdTex, layer: i)
+            }
+            let outEnc = try #require(cmd.makeRenderCommandEncoder(descriptor: outRpd))
+            for i in 0..<layers.count {
+                try fx.drawLayer(encoder: outEnc, format: format, origin: .zero, layer: i)
+            }
+            outEnc.endEncoding()
+            cmd.commit()
+            cmd.waitUntilCompleted()
+
+            if format == .rgba16Float {
+                var words = [UInt16](repeating: 0, count: 96 * 96 * 4)
+                words.withUnsafeMutableBytes { raw in
+                    outTex.getBytes(raw.baseAddress!, bytesPerRow: 96 * 8, from: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0)
+                }
+                return words.map { UInt8(min(max((Float(Float16(bitPattern: $0)) * 255.0).rounded(), 0), 255)) }
+            }
+            return readRGBA8(from: outTex)
+        }
+
+        let lin = try runMidtone(format: .rgba8Unorm_srgb, srgb: false)
+        let gam = try runMidtone(format: .rgba8Unorm, srgb: true)
+        let clearIdx = (48 * 96 + 24) * 4
+        #expect(abs(Int(lin[clearIdx + 0]) - 128) <= 3 && abs(Int(lin[clearIdx + 1]) - 64) <= 3 && abs(Int(lin[clearIdx + 2]) - 32) <= 3)
+        #expect(abs(Int(gam[clearIdx + 0]) - 128) <= 3 && abs(Int(gam[clearIdx + 1]) - 64) <= 3 && abs(Int(gam[clearIdx + 2]) - 32) <= 3)
+
+        let frostIdx = (48 * 96 + 46) * 4
+        for c in 0..<3 {
+            #expect(abs(Int(lin[frostIdx + c]) - Int(gam[frostIdx + c])) <= 3)
+        }
+
+        var ditherDiff = 0
+        for y in 24..<72 {
+            for x in 60..<76 {
+                let idx = (y * 96 + x) * 4
+                let diff = abs(Int(lin[idx + 0]) - Int(gam[idx + 0]))
+                    + abs(Int(lin[idx + 1]) - Int(gam[idx + 1]))
+                    + abs(Int(lin[idx + 2]) - Int(gam[idx + 2]))
+                ditherDiff = max(ditherDiff, diff)
+            }
+        }
+        #expect(ditherDiff <= 6)
+
+        let layerGam = try runMidtone(format: .rgba16Float, srgb: true)
+        for c in 0..<3 {
+            #expect(abs(Int(layerGam[clearIdx + c]) - [128, 64, 32][c]) <= 3)
+        }
+        #expect(layerGam[frostIdx + 0] < 135 && layerGam[frostIdx + 1] < 70)
     }
     #endif
 }

@@ -723,7 +723,13 @@ extension Runtime {
                 else if b.target == .blur, let bl = liveStore.get(lnid, Props.BLUR) { liveBlur = bl.radius }
                 else if b.target == .offset, let o = liveStore.get(lnid, Props.OFFSET) { liveOffset = o }
                 else if b.target == .trim, let tr = liveStore.get(lnid, Props.OFFSET) { liveTrim = tr }
-                else if b.target == .fill, let mc = liveStore.get(lnid, Props.FILL) { liveFill = Color(mc) }
+                else if b.target == .fill {
+                    if !liveStore.isMoving(lnid, Props.FILL), let exact = liveFillTargets[lnid] {
+                        liveFill = exact
+                    } else if let mc = liveStore.get(lnid, Props.FILL) {
+                        liveFill = Color(mc)
+                    }
+                }
                 else if b.target == .rect, let r = liveStore.get(lnid, Props.RECT) { liveRect = r }
             }
 

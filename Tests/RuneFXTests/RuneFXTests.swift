@@ -36,10 +36,26 @@ struct RuneFXTests {
         #expect(abs(heat.at(1.25) - 1.0) < 1e-5)
         #expect(!heat.isActive(at: 1.25))
 
+        // Continuity on switch-off and 100-step monotonic decay + continuity on mid-cool switch-on
+        let beforeOff = heat.at(2.0)
         heat.set(at: 2.0, on: false)
+        #expect(abs(heat.at(2.0) - beforeOff) < 1e-5)
+        var prev = beforeOff
+        for i in 1...100 {
+            let cur = heat.at(2.0 + Float(i) * 0.01)
+            #expect(cur <= prev + 1e-6)
+            prev = cur
+        }
         #expect(heat.isActive(at: 2.1))
         #expect(heat.at(2.4) < 0.5)
         #expect(!heat.isActive(at: 10.0))
+
+        var midHeat = Heat(attack: 0.2, cool: 0.4)
+        midHeat.set(at: 0.0, on: true)
+        midHeat.set(at: 0.5, on: false)
+        let mid = midHeat.at(0.65)
+        midHeat.set(at: 0.65, on: true)
+        #expect(abs(midHeat.at(0.65) - mid) < 1e-5)
     }
 
     @Test func oneShotsPoolAndRetireSmoothly() {
@@ -62,9 +78,20 @@ struct RuneFXTests {
         #expect(zeroGlow.isSilent)
         #expect(zeroGlow.pack() == nil)
 
+        let zeroHeatGlow = Fx.glow(GlowParams(intensity: 1.0, heat: 0.0)).on(card)
+        #expect(zeroHeatGlow.isSilent)
+        #expect(zeroHeatGlow.pack() == nil)
+
+        let ripple = Fx.pulse(PulseParams(style: .ripple(at: SIMD2<Float>(220, 170)), t0: 1.0, duration: 0.5)).on(card)
+        #expect(ripple.at(0.5).pack() == nil)
+        #expect(ripple.at(1.2).isAnimating && ripple.at(1.2).pack() != nil)
+        #expect(!ripple.at(1.6).isAnimating && ripple.at(1.6).pack() == nil)
+
         let zeroOpacity = Fx.glow(GlowParams()).on(card).opacity(0.0)
         #expect(zeroOpacity.isSilent)
         #expect(zeroOpacity.pack() == nil)
+        let partialOpacity = Fx.glow(GlowParams()).on(card).opacity(0.4).pack()
+        #expect(partialOpacity?.inst.shape.z == 0.4)
 
         let zeroSize = Fx.fill(FillParams(.liquidMetal(.gold()))).on(.rounded(x: 0, y: 0, w: 0, h: 40, radius: 0))
         #expect(zeroSize.pack() == nil)
@@ -113,12 +140,17 @@ struct RuneFXTests {
         #expect(!resting.isMoving)
         #expect(resting.count == 1)
 
-        let moving = MotionSamples.fromMotion(params, rest: card.rect, at: 1.0, scale: 2.0) { t in
+        let slow = MotionSamples.fromMotion(params, rest: card.rect, at: 1.0, scale: 2.0) { t in
+            Transform2D(tx: t * 180.0, ty: 0, sx: 1, sy: 1, rot: 0)
+        }
+        let fast = MotionSamples.fromMotion(params, rest: card.rect, at: 1.0, scale: 2.0) { t in
             Transform2D(tx: t * 600.0, ty: 0, sx: 1, sy: 1, rot: t * 0.5)
         }
-        #expect(moving.isMoving)
-        #expect(moving.count > 1)
-        #expect(moving.bounds.w > card.rect.w)
+        #expect(fast.isMoving)
+        #expect(fast.count > slow.count)
+        #expect(fast.bounds.w > card.rect.w)
+        let weightSum = (0..<Int(fast.count)).reduce(Float(0)) { $0 + fast.xforms[$1 * 2 + 1].z }
+        #expect(abs(weightSum - 1.0) < 1e-4)
     }
 
     @Test func blueNoiseAndOklabProperties() {

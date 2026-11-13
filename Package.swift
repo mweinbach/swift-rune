@@ -140,6 +140,7 @@ let package = Package(
             path: "Sources/Rune",
             resources: [
                 .copy("Resources/Metal"),
+                .copy("Resources/Fonts"),
             ],
             linkerSettings: [
                 .linkedLibrary("user32", .when(platforms: [.windows])),
@@ -717,7 +718,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneLightTests",
-            dependencies: ["RuneLight", "Rune"],
+            dependencies: ["RuneLight", "RuneFX", "Rune"],
             path: "Tests/RuneLightTests"
         ),
         .testTarget(
@@ -841,6 +842,13 @@ let package = Package(
                 "RuneMenuProbe",
                 "RuneDockMenuProbe",
                 "RuneShortcutProbe",
+                "RuneFxFirstGlow",
+                "RuneFxGallery",
+                "RuneLightShaderFirstUse",
+                "RuneLightFrameBench",
+                "RuneLightDemos",
+                "RuneLightLive",
+                "RuneLightReel",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

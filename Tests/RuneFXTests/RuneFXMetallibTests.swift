@@ -45,6 +45,28 @@ struct RuneFXMetallibTests {
             )
             #expect(cached.functionNames.contains(entry.requiredFunction))
         }
+
+        let blurLib = try ShaderLibraryCache.load(
+            named: "fx_blur",
+            source: RuneFXShaders.blurShader,
+            requiredFunction: "fx_blur_vertex",
+            bundle: RuneFXShaders.resourceBundle,
+            on: device
+        )
+        #expect(blurLib.functionNames.contains("fx_blur_vertex"))
+        #expect(blurLib.functionNames.contains("fx_blur_down_fragment"))
+        #expect(blurLib.functionNames.contains("fx_blur_up_fragment"))
+
+        let simLib = try ShaderLibraryCache.load(
+            named: "fx_firesim",
+            source: RuneFXShaders.fireSimShader,
+            requiredFunction: "fx_firesim_step_kernel",
+            bundle: RuneFXShaders.resourceBundle,
+            on: device
+        )
+        for k in ["curl", "forces", "divergence", "jacobi", "project", "advect"] {
+            #expect(simLib.functionNames.contains(k))
+        }
         #endif
     }
 }

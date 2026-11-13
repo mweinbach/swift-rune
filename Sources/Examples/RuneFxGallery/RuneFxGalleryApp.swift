@@ -358,7 +358,10 @@ private func runTimings() throws -> String {
 @main
 enum RuneFxGalleryApp {
     static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
+        try run(args: Array(CommandLine.arguments.dropFirst()))
+    }
+
+    static func run(args: [String]) throws {
         func arg(_ key: String) -> String? {
             guard let idx = args.firstIndex(of: key), idx + 1 < args.count else { return nil }
             return args[idx + 1]

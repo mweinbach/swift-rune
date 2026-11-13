@@ -1673,6 +1673,8 @@ public struct Scene: Sendable {
         _ specs: [NodeSpec],
         at now: Double,
         initialCut: Bool = false,
+        snapMounts: Bool = false,
+        snapOmittedNonExiting: Bool = false,
         matchedStarts: [NodeId: MatchedFlightStart] = [:]
     ) {
         setTime(now)
@@ -1817,7 +1819,7 @@ public struct Scene: Sendable {
                     applyMatchedFlight(i, spec: spec, match: m)
                 }
             } else {
-                let mount: Mount = (cut || spec.transition == nil) ? .initial : .animated
+                let mount: Mount = (cut || snapMounts || spec.transition == nil) ? .initial : .animated
                 insert(spec.id, localSpec, mount)
                 if let i = slot(spec.id) {
                     nodes[i].compatHadTransition = (spec.transition != nil)
@@ -1849,7 +1851,15 @@ public struct Scene: Sendable {
             let nid = NodeId(rawId)
             if seen.contains(nid) { continue }
             guard let i = slot(nid), nodes[i].alive else { continue }
-            if cut || !nodes[i].compatHadTransition || matchedRemovedIds.contains(nid) {
+            if cut || matchedRemovedIds.contains(nid) {
+                unmount(nid)
+                continue
+            }
+            // Keep descendants of an omitted/exiting ancestor mounted in place while the ancestor fades out (upstream apply.rs:748).
+            let pIdx = nodes[i].parent
+            let parentRemainedPresent = (pIdx == Self.noneIdx) || seen.contains(nodes[Int(pIdx)].id)
+            guard parentRemainedPresent else { continue }
+            if !nodes[i].compatHadTransition || (snapOmittedNonExiting && !nodes[i].presence.isExiting) {
                 unmount(nid)
             } else if !nodes[i].presence.isExiting {
                 remove(nid)

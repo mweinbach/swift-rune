@@ -160,6 +160,9 @@ public final class Runtime<State> {
         var enclosingVScrollIndex: Int?
         var enclosingHScrollIndex: Int?
         var staticInh: StaticInh
+        var rowLayout: ParityRowLayout = .free
+        var parentHasGrowth: Bool = false
+        var parentNewlyMounted: Bool = false
     }
 
     private struct PaintInh {
@@ -597,6 +600,7 @@ public final class Runtime<State> {
     private var liveTweenStart: [ObjectIdentifier: Double] = [:]
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
+    internal var liveFillTargets: [NodeId: Color] = [:]
     private var customLiveWaker: Waker? = nil
     private var liveWake: LiveWake
     private var liveSubscriptions: [LiveSubscription] = []
@@ -1086,13 +1090,27 @@ public final class Runtime<State> {
             var anyScrollMoved = false
             for (path, maxExt) in scrollMaxExtents {
                 let nid = NodeId.hash("scroll:" + path)
-                if let cur = scrollStore.get(nid, Props.SCROLL) {
+                if var cur = scrollStore.get(nid, Props.SCROLL) {
+                    if scrollGlidingPaths.contains(path),
+                       scrollStore.isMoving(nid, Props.SCROLL),
+                       let target = scrollStore.target(nid, Props.SCROLL),
+                       let vel = scrollStore.velocity(nid, Props.SCROLL),
+                       abs(target.x - cur.x) < 0.1 && abs(vel.x) < 4.0,
+                       abs(target.y - cur.y) < 0.1 && abs(vel.y) < 4.0 {
+                        // Upstream offset.rs:183 (`LAND = 0.1`, `|v| < 40 * LAND`) lands scroll glides at exact target.
+                        cur = target
+                        scrollStore.snap(nid, Props.SCROLL, to: target)
+                        scrollGlidingPaths.remove(path)
+                    }
                     let clamped = Vec2(
                         cur.x.clamped(to: 0...maxExt.x),
                         cur.y.clamped(to: 0...maxExt.y)
                     )
                     if scrollOffsets[path] != clamped {
                         scrollOffsets[path] = clamped
+                        if !scrollGlidingPaths.contains(path) {
+                            markScrollMovedByHand(path: path)
+                        }
                         anyScrollMoved = true
                     }
                     // Stop fling immediately if clamped against boundary
@@ -1809,12 +1827,32 @@ public final class Runtime<State> {
                     && abs(curTarget.height - localTarget.height) < 0.1
             }
             var layoutAnimSpec: LayoutAnim?
+            let isStackContainer = (el.growthSpec != nil) || (el.virtualEstimate != nil)
+            let (selfInRow, childInRow) = ParityLayoutAnimation.resolveRowLayout(
+                parentInRow: item.rowLayout,
+                hasAbove: el.anchor != nil,
+                hasAnimateLayout: el.layoutAnim != nil,
+                isStackContainer: isStackContainer
+            )
             if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
             } else if commitKind.lands, el.layoutAnim != nil, isRunningSameSceneFrame() {
                 layoutAnimSpec = .instant
+            } else if selfInRow == .horizontal || item.parentHasGrowth {
+                let resolved = ParityLayoutAnimation.resolveNodeLayoutAnim(
+                    inRow: selfInRow,
+                    explicitLayoutAnim: el.layoutAnim,
+                    nodeSpring: el.styleSpring ?? MotionTokens.SETTLE,
+                    parentHasGrowth: item.parentHasGrowth,
+                    isInstant: false,
+                    isSameSceneFrame: false,
+                    commitLands: false
+                )
+                layoutAnimSpec = (el.layoutAnim != nil || selfInRow == .horizontal) ? resolved : nil
+            } else if selfInRow == .snaps {
+                layoutAnimSpec = el.layoutAnim != nil ? .instant : nil
             } else {
                 layoutAnimSpec = el.layoutAnim
             }
@@ -1930,7 +1968,10 @@ public final class Runtime<State> {
                     enclosingScrollIndex: !el.layout.scrollAxes.isEmpty ? myIndex : item.enclosingScrollIndex,
                     enclosingVScrollIndex: el.layout.scrollAxes.contains(.vertical) ? myIndex : item.enclosingVScrollIndex,
                     enclosingHScrollIndex: el.layout.scrollAxes.contains(.horizontal) ? myIndex : item.enclosingHScrollIndex,
-                    staticInh: childStaticInh
+                    staticInh: childStaticInh,
+                    rowLayout: childInRow,
+                    parentHasGrowth: el.growthSpec != nil,
+                    parentNewlyMounted: isFreshMount
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -2566,7 +2607,14 @@ public final class Runtime<State> {
         applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
         syncRideTrailingFlags(pass.nodes, on: &scene)
         measureFramePhase(.apply) {
-            scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: commitCut, matchedStarts: matchedStarts)
+            scene.commit(
+                specs,
+                at: cxSettings.scaledTime(at: now),
+                initialCut: commitCut,
+                snapMounts: commitKind.snaps,
+                snapOmittedNonExiting: commitKind.snaps,
+                matchedStarts: matchedStarts
+            )
         }
         scene.keepFlights(false)
         recordVirtualMeasurementsAndCallbacks(expansion: pass.virtualExpansion, at: now)
@@ -2786,6 +2834,7 @@ public final class Runtime<State> {
             }
         }
         scene.commit(lastCommittedSpecs, at: now, initialCut: false)
+        dispatchScrollCallbacks()
     }
 
     private func drainLayoutActions(at now: Double) -> (ranFeedback: Bool, ranExternal: Bool) {
@@ -3226,7 +3275,10 @@ public final class Runtime<State> {
         case .scale: liveStore.snap(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0))
         case .blur: liveStore.snap(nid, Props.BLUR, to: Blur(lanes.l0))
         case .offset, .trim: liveStore.snap(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1))
-        case .fill: liveStore.snap(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor)
+        case .fill:
+            let c = Color.decodeLiveLanes(lanes)
+            liveFillTargets[nid] = c
+            liveStore.snap(nid, Props.FILL, to: c.motionColor)
         case .rect: liveStore.snap(nid, Props.RECT, to: MotionRect.fromLanes(lanes))
         }
     }
@@ -3237,7 +3289,10 @@ public final class Runtime<State> {
         case .scale: liveStore.set(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0), anim: .spring(spring), at: now)
         case .blur: liveStore.set(nid, Props.BLUR, to: Blur(lanes.l0), anim: .spring(spring), at: now)
         case .offset, .trim: liveStore.set(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1), anim: .spring(spring), at: now)
-        case .fill: liveStore.set(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor, anim: .spring(spring), at: now)
+        case .fill:
+            let c = Color.decodeLiveLanes(lanes)
+            liveFillTargets[nid] = c
+            liveStore.set(nid, Props.FILL, to: c.motionColor, anim: .spring(spring), at: now)
         case .rect: liveStore.set(nid, Props.RECT, to: MotionRect.fromLanes(lanes), anim: .spring(spring), at: now)
         }
     }
@@ -3742,7 +3797,12 @@ public final class Runtime<State> {
             if let pf = p.fill {
                 let isPressedNode = (pressedPath == snap.path) && !snap.effectiveInert
                 let effFill = (isPressedNode ? el.pressBg.map { blendColorOver(bottom: el.background, top: $0, srgb: srgbBlend) } : nil) ?? el.background
-                fillColor = (pf == effFill.motionColor) ? effFill : Color(pf)
+                let settledMatch = !scene.store.isMoving(p.id, Props.FILL)
+                    && abs(pf.r - effFill.r) < 1e-3
+                    && abs(pf.g - effFill.g) < 1e-3
+                    && abs(pf.b - effFill.b) < 1e-3
+                    && abs(pf.a - effFill.a) < 1e-3
+                fillColor = (settledMatch || pf == effFill.motionColor) ? effFill : Color(pf)
             } else {
                 fillColor = el.background
             }
@@ -3750,8 +3810,12 @@ public final class Runtime<State> {
             var liveTrim: Vec2? = nil
             for b in el.liveBindings {
                 let lnid = NodeId.hash("live:\(snap.path):\(b.target)")
-                if b.target == .fill, let mc = liveStore.get(lnid, Props.FILL) {
-                    fillColor = Color(mc)
+                if b.target == .fill {
+                    if !liveStore.isMoving(lnid, Props.FILL), let exact = liveFillTargets[lnid] {
+                        fillColor = exact
+                    } else if let mc = liveStore.get(lnid, Props.FILL) {
+                        fillColor = Color(mc)
+                    }
                 } else if b.target == .blur, let bl = liveStore.get(lnid, Props.BLUR) {
                     blurPt = bl.radius
                 } else if b.target == .trim, let tr = liveStore.get(lnid, Props.OFFSET) {
@@ -3760,7 +3824,12 @@ public final class Runtime<State> {
             }
             let borderColor: Color
             if let pb = p.border {
-                borderColor = (pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
+                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER)
+                    && abs(pb.r - el.borderColor.r) < 1e-3
+                    && abs(pb.g - el.borderColor.g) < 1e-3
+                    && abs(pb.b - el.borderColor.b) < 1e-3
+                    && abs(pb.a - el.borderColor.a) < 1e-3
+                borderColor = (settledBorder || pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
             } else {
                 borderColor = el.borderColor
             }
@@ -5496,8 +5565,8 @@ public final class Runtime<State> {
                     )
                     var tx = makeTx(at: now, button: drag.button)
                     onDrag(&state, d, &tx)
-                    if !tx.askedMotion { tx.instant() }
-                    applyTx(tx, at: now)
+                    if !tx.askedMotion && !tx.liveOnlyRequested { tx.instant() }
+                    applyTx(tx, at: now, liveOnlyLabel: "onDrag")
                 }
             }
             return
@@ -5661,21 +5730,32 @@ public final class Runtime<State> {
         }
 
         let preservesSel = preservesTextSelectionInChain(node)
+        let preservesFocus = preservesFocusOnPressInChain(node)
+        let inEditSubtree = isInsideEditLensSubtree(node)
+        let onLink = hasActiveTextLinks(node.el)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         let prevPressedPath = pressedPath
         let prevFocusedPath = focusedPath
         let prevImeReset = imeReset
         pressedPath = node.path
         pressedKey = node.key
-        if cxSettings.viewDefaults.webFocus && !preservesSel {
+        if cxSettings.viewDefaults.webFocus && !preservesSel && !preservesFocus {
             webFocusTabStartPath = node.path
         }
-        if !preservesSel && !hasActiveTextLinks(node.el) && nodeTakesFocus(node.el) {
+        let isTextBox = node.el.handlers.editLens != nil
+        let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
+        if !preservesSel && !onLink && shouldFocusNode {
             if focusedPath != node.path {
                 imeReset = true
             }
             focusedPath = node.path
             focusedKey = node.key
+        } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
+            if focusedPath != nil {
+                focusedPath = nil
+                focusedKey = nil
+                imeReset = true
+            }
         }
         let pressVisualChanged = pressedPath != prevPressedPath && (node.el.pressBg != nil || node.el.pressScaleFactor != nil)
         let focusChanged = focusedPath != prevFocusedPath || imeReset != prevImeReset
@@ -5894,6 +5974,7 @@ public final class Runtime<State> {
                     scrollStore.snap(nid, Props.SCROLL, to: cur)
                     scrollGlidingPaths.remove(path)
                     directScrolledPaths.insert(path)
+                    markScrollMovedByHand(path: path)
                     scrollRequestsState.stepCancel()
                     scrollMovedSinceLastFrame = true
                     if scrollRequiresCommit {
@@ -5922,6 +6003,7 @@ public final class Runtime<State> {
         let cur = scrollOffsets[path] ?? .zero
         scrollGlidingPaths.remove(path)
         directScrolledPaths.insert(path)
+        markScrollMovedByHand(path: path)
         scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
@@ -6691,15 +6773,17 @@ public final class Runtime<State> {
         for prefix in tx.invalidateMemoPrefixes {
             MemoCache.shared.invalidateByPrefix(prefix)
         }
-        pendingCommitKind = pendingCommitKind.merge(tx.commitKind)
-        if let m = tx.motionSource {
-            pendingCommitMotion = m
-        }
-        if let cm = tx.colorMotionSpring {
-            pendingColorMotionSpring = cm
-        }
-        if tx.followEdgeRequested {
-            pendingFollowEdge = true
+        if !tx.liveOnlyRequested {
+            pendingCommitKind = pendingCommitKind.merge(tx.commitKind)
+            if let m = tx.motionSource {
+                pendingCommitMotion = m
+            }
+            if let cm = tx.colorMotionSpring {
+                pendingColorMotionSpring = cm
+            }
+            if tx.followEdgeRequested {
+                pendingFollowEdge = true
+            }
         }
         if !tx.scrollRevealRequests.isEmpty {
             pendingScrollReveals.append(contentsOf: tx.scrollRevealRequests)
@@ -6713,21 +6797,22 @@ public final class Runtime<State> {
         if !tx.keepOnScreenKeys.isEmpty {
             pendingKeepOnScreenKeys.append(contentsOf: tx.keepOnScreenKeys)
         }
-        let nonOffsetCommitRequests = tx.followEdgeRequested
+        let nonOffsetCommitRequests = (!tx.liveOnlyRequested && tx.followEdgeRequested)
             || tx.pasteRequested
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty
             || !tx.scrollPageRequests.isEmpty
             || !tx.keepOnScreenKeys.isEmpty
             || !tx.invalidateMemoPrefixes.isEmpty
-            || tx.commitKind.lands
+            || (!tx.liveOnlyRequested && tx.commitKind.lands)
+        let allowFastLiveScroll = tx.liveOnlyRequested && activeVirtualPaths.isEmpty && !lastViewReadScroll
         let canFastApplyOffsets = !tx.scrollOffsetRequests.isEmpty
             && tx.scrollOffsetRequests.allSatisfy { !$0.anchor }
-            && !markDirtyIfNotLiveOnly
+            && (!markDirtyIfNotLiveOnly || tx.liveOnlyRequested)
             && !tx.isForceCommitRequested
             && !nonOffsetCommitRequests
             && !flatNodes.isEmpty
-            && !scrollRequiresCommit
+            && (!scrollRequiresCommit || allowFastLiveScroll)
         if canFastApplyOffsets {
             var anySnapped = false
             for req in tx.scrollOffsetRequests {
@@ -6754,6 +6839,7 @@ public final class Runtime<State> {
                     scrollGlidingPaths.remove(path)
                     anySnapped = true
                 }
+                markScrollMovedByHand(path: path)
                 scrollMovedSinceLastFrame = true
             }
             if anySnapped {
@@ -7017,6 +7103,20 @@ public final class Runtime<State> {
             _ = liveWake.takeVisible()
             livePendingDirty = false
         }
+    }
+
+    /// Connects or replaces a closure wake callback for coalesced `Live` updates (`Runtime::set_live_waker`).
+    public func setLiveWaker(_ callback: @escaping @Sendable () -> Void) {
+        setLiveWaker(Waker(callback))
+    }
+
+    /// Clears any pending visible latch on the installed `LiveWake`.
+    @discardableResult
+    internal func takeParityLivePending() -> Bool {
+        let took = liveWake.takeVisible()
+        let had = livePendingDirty
+        livePendingDirty = false
+        return took || had
     }
 
     /// Updates whether this window is visible to `Live` publishers (`Runtime::set_live_visible`).

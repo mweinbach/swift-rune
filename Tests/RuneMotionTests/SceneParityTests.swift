@@ -1059,4 +1059,77 @@ struct SceneParityTests {
             maxDepth: 5
         )
     }
+
+    @Test("Exiting ancestor keeps omitted transitionless descendants mounted in place until exit settles")
+    func exitingAncestorKeepsOmittedDescendantsMountedUntilSettled() {
+        var scene = Scene()
+        let rootId = NodeId(100)
+        let popupId = NodeId(101)
+        let rowId = NodeId(102)
+        let rootSpec = NodeSpec(id: rootId, rect: .fromXYWH(0, 0, 400, 400))
+        let popupSpec = NodeSpec(
+            id: popupId,
+            parent: rootId,
+            rect: .fromXYWH(20, 40, 200, 120),
+            opacity: 1,
+            transition: Transition.opacity
+        )
+        let rowSpec = NodeSpec(
+            id: rowId,
+            parent: popupId,
+            rect: .fromXYWH(24, 120, 192, 28),
+            opacity: 1
+        )
+        scene.commit([rootSpec, popupSpec, rowSpec], at: 0.0, initialCut: true)
+        _ = scene.frame(at: 0.0)
+
+        // Omit both popup and its transitionless row child without cut
+        scene.commit([rootSpec], at: 0.1)
+        let mid = scene.frame(at: 0.15)
+        let popupMid = mid.nodes.first { $0.id == popupId }
+        let rowMid = mid.nodes.first { $0.id == rowId }
+        #expect(popupMid != nil && popupMid?.isExiting == true)
+        #expect(rowMid != nil)
+        #expect(abs((rowMid?.rect.top ?? 0) - 120.0) < 0.01)
+
+        // Once exit completes, both unmount together
+        let end = scene.frame(at: 2.0)
+        #expect(end.nodes.first { $0.id == popupId } == nil)
+        #expect(end.nodes.first { $0.id == rowId } == nil)
+    }
+
+    @Test("snapMounts and snapOmittedNonExiting unmount omitted live nodes while keeping prior exits and unrelated animations")
+    func instantCommitSnapsMountsAndUnmountsNonExitingOmitted() {
+        var scene = Scene()
+        let rootId = NodeId(200)
+        let keepId = NodeId(201)
+        let omitId = NodeId(202)
+        let oldExitId = NodeId(203)
+        let freshId = NodeId(204)
+
+        let rootSpec = NodeSpec(id: rootId, rect: .fromXYWH(0, 0, 400, 400))
+        let keep0 = NodeSpec(id: keepId, parent: rootId, rect: .fromXYWH(0, 0, 40, 40), layoutAnim: LayoutAnim(spring: MotionTokens.SMOOTH))
+        let omitSpec = NodeSpec(id: omitId, parent: rootId, rect: .fromXYWH(0, 50, 40, 40), transition: Transition.opacity)
+        let oldExitSpec = NodeSpec(id: oldExitId, parent: rootId, rect: .fromXYWH(0, 100, 40, 40), transition: Transition.opacity)
+
+        scene.commit([rootSpec, keep0, omitSpec, oldExitSpec], at: 0.0, initialCut: true)
+        _ = scene.frame(at: 0.0)
+
+        // Frame 1: start animating keepId and start oldExitId exiting normally
+        let keep1 = NodeSpec(id: keepId, parent: rootId, rect: .fromXYWH(200, 0, 40, 40), layoutAnim: LayoutAnim(spring: MotionTokens.SMOOTH))
+        scene.commit([rootSpec, keep1, omitSpec], at: 0.05)
+        _ = scene.frame(at: 0.06)
+        #expect(scene.contains(oldExitId))
+
+        // Frame 2 (instant): omit `omitSpec`, mount `freshSpec`, keep `keep1` animating
+        let freshSpec = NodeSpec(id: freshId, parent: rootId, rect: .fromXYWH(0, 160, 40, 40), opacity: 1, transition: Transition.opacity)
+        scene.commit([rootSpec, keep1, freshSpec], at: 0.07, initialCut: false, snapMounts: true, snapOmittedNonExiting: true)
+        let f2 = scene.frame(at: 0.07)
+        #expect(!scene.contains(omitId))
+        #expect(scene.contains(oldExitId))
+        let freshPresented = f2.nodes.first { $0.id == freshId }
+        #expect(abs((freshPresented?.opacity ?? 0) - 1.0) < 0.001)
+        let keepPresented = f2.nodes.first { $0.id == keepId }
+        #expect((keepPresented?.rect.left ?? 200) < 190)
+    }
 }
