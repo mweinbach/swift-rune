@@ -94,9 +94,9 @@ public enum MacOSApp {
         if opts.closable { mask.insert(.closable) }
         if opts.minimizable { mask.insert(.miniaturizable) }
         if opts.resizable { mask.insert(.resizable) }
-        if appBuilder.chromeStyle == .borderless {
+        if appBuilder.chromeStyle.borderless || opts.borderless {
             mask = [.borderless]
-        } else if appBuilder.chromeStyle == .titlebarIntegrated || appBuilder.customTitlebar != nil || appBuilder.macosWindowValue.fullSizeContentView {
+        } else if appBuilder.chromeStyle.fullSizeContent || appBuilder.chromeStyle == .titlebarIntegrated || appBuilder.customTitlebar != nil || appBuilder.macosWindowValue.fullSizeContentView {
             mask.insert(.fullSizeContentView)
         }
 
@@ -107,9 +107,8 @@ public enum MacOSApp {
             defer: false
         )
         window.title = appBuilder.title
-        if let minSz = appBuilder.minSize ?? opts.minSize {
-            window.contentMinSize = NSSize(width: CGFloat(minSz.x), height: CGFloat(minSz.y))
-        }
+        let minSz = appBuilder.minSize ?? opts.minSize ?? WindowOptions.defaultMinSize
+        window.contentMinSize = NSSize(width: CGFloat(minSz.x), height: CGFloat(minSz.y))
         if let maxSz = opts.maxSize {
             window.contentMaxSize = NSSize(width: CGFloat(maxSz.x), height: CGFloat(maxSz.y))
         }

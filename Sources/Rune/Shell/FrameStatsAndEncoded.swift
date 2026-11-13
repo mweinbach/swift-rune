@@ -522,19 +522,90 @@ public enum GpuBackend: String, Sendable, Equatable, Codable {
     case software
 }
 
-/// Window frame chrome style (`rune::Chrome`).
-public enum Chrome: String, Sendable, Equatable, Codable {
-    case standard
-    case borderless
-    case titlebarIntegrated
+/// Window frame chrome style & geometry (`rune::Chrome`).
+public struct Chrome: Sendable, Equatable, Codable {
+    public static let trafficLightSize: Float = 14.0
+    public static let trafficPitch: Float = 23.0
+
+    public var fullSizeContent: Bool
+    public var trafficLightsX: Float?
+    public var trafficLightsY: Float?
+    public var dragRegions: Bool
+    public var borderless: Bool
+
+    public static let standard = Chrome(fullSizeContent: false, trafficLights: nil, dragRegions: false, borderless: false)
+    public static let borderless = Chrome(fullSizeContent: false, trafficLights: nil, dragRegions: false, borderless: true)
+    public static let titlebarIntegrated = Chrome(fullSizeContent: true, trafficLights: nil, dragRegions: true, borderless: false)
+    public static let `default` = Chrome(fullSizeContent: true, trafficLights: nil, dragRegions: false, borderless: false)
+
+    public var trafficLights: (Float, Float)? {
+        get {
+            guard let x = trafficLightsX, let y = trafficLightsY else { return nil }
+            return (x, y)
+        }
+        set {
+            trafficLightsX = newValue?.0
+            trafficLightsY = newValue?.1
+        }
+    }
+
+    public init(
+        fullSizeContent: Bool = true,
+        trafficLights: (Float, Float)? = nil,
+        dragRegions: Bool = false,
+        borderless: Bool = false
+    ) {
+        self.fullSizeContent = fullSizeContent
+        self.trafficLightsX = trafficLights?.0
+        self.trafficLightsY = trafficLights?.1
+        self.dragRegions = dragRegions
+        self.borderless = borderless
+    }
+
+    /// Headless macOS 26 traffic-light rects `[x, y, w, h]` in points.
+    public func trafficLightRects() -> [[Float]]? {
+        if !fullSizeContent && trafficLights == nil {
+            return nil
+        }
+        let (x, y) = trafficLights ?? (7.0, 6.0)
+        return (0..<3).map { i in
+            [x + Float(i) * Self.trafficPitch, y, Self.trafficLightSize, Self.trafficLightSize]
+        }
+    }
+
+    /// Trailing edge of the zoom button in headless runs.
+    public func titlebarInset() -> Float {
+        guard let rects = trafficLightRects(), rects.count >= 3 else { return 0.0 }
+        return rects[2][0] + rects[2][2]
+    }
+
+    /// Whether drag regions govern dragging on macOS (`window::uses_drag_regions`).
+    public static func usesDragRegions(chrome: Chrome, borderless: Bool, isPanel: Bool) -> Bool {
+        chrome.dragRegions && (borderless || chrome.fullSizeContent) && !isPanel
+    }
 }
 
 /// Integrated custom titlebar geometry (`rune::Titlebar`).
 public struct Titlebar: Sendable, Equatable, Codable {
+    public static let captionButtonWidth: Float = 46.0
+
     public var height: Float
     public var insetLeading: Float
     public var insetTrailing: Float
     public var showsTitle: Bool
+    public var trafficLightsX: Float?
+    public var trafficLightsY: Float?
+
+    public var trafficLightsOrigin: (Float, Float)? {
+        get {
+            guard let x = trafficLightsX, let y = trafficLightsY else { return nil }
+            return (x, y)
+        }
+        set {
+            trafficLightsX = newValue?.0
+            trafficLightsY = newValue?.1
+        }
+    }
 
     public init(
         height: Float = 38.0,
@@ -546,6 +617,28 @@ public struct Titlebar: Sendable, Equatable, Codable {
         self.insetLeading = max(0.0, insetLeading)
         self.insetTrailing = max(0.0, insetTrailing)
         self.showsTitle = showsTitle
+        self.trafficLightsX = nil
+        self.trafficLightsY = nil
+    }
+
+    public init(height: Float, trafficLights: (Float, Float)?) {
+        self.height = max(0.0, height)
+        self.insetLeading = 72.0
+        self.insetTrailing = 0.0
+        self.showsTitle = false
+        self.trafficLightsX = trafficLights?.0
+        self.trafficLightsY = trafficLights?.1
+    }
+
+    public func trafficLights(_ x: Float, _ y: Float) -> Titlebar {
+        Titlebar(height: height, trafficLights: (x, y))
+    }
+
+    /// macOS chrome derived from this titlebar over base `chrome`.
+    public func macChrome(_ chrome: Chrome) -> Chrome {
+        let y = max(0.0, (height - Chrome.trafficLightSize) / 2.0).rounded()
+        let lights = trafficLightsOrigin ?? chrome.trafficLights ?? (16.0, y)
+        return Chrome(fullSizeContent: true, trafficLights: lights, dragRegions: true)
     }
 }
 
@@ -555,30 +648,55 @@ public struct ChromeInsets: Sendable, Equatable, Codable {
     public var trailing: Float
     public var top: Float
 
+    public var height: Float {
+        get { top }
+        set { top = max(0.0, newValue) }
+    }
+
     public init(leading: Float = 0.0, trailing: Float = 0.0, top: Float = 0.0) {
         self.leading = max(0.0, leading)
         self.trailing = max(0.0, trailing)
         self.top = max(0.0, top)
     }
 
+    public init(leading: Float = 0.0, trailing: Float = 0.0, height: Float) {
+        self.leading = max(0.0, leading)
+        self.trailing = max(0.0, trailing)
+        self.top = max(0.0, height)
+    }
+
     public static let zero = ChromeInsets()
+
+    public func zoomed(_ k: Float) -> ChromeInsets {
+        ChromeInsets(leading: leading / k, trailing: trailing / k, height: top / k)
+    }
+
+    public func bits() -> [UInt32] {
+        [leading.bitPattern, trailing.bitPattern, top.bitPattern]
+    }
 }
 
-/// Preferred target display (`rune::window::Display`).
+/// Preferred target display (`rune::window::Display` & `rune::overlay::Display`).
 public enum DisplayTarget: Sendable, Equatable, Codable {
     case primary
     case index(Int)
     case named(String)
+    case underPointer
+    case id(RuneDisplayId)
+    case native(NativeDisplayId)
 }
 
 /// Runtime launch options (`rune::RunOptions`).
 public struct RunOptions: Sendable, Equatable {
     public var display: DisplayTarget?
     public var arguments: [String]?
+    /// macOS: no Dock icon/default menu and no activation at launch. Ignored elsewhere.
+    public var accessory: Bool
 
-    public init(display: DisplayTarget? = nil, arguments: [String]? = nil) {
+    public init(display: DisplayTarget? = nil, arguments: [String]? = nil, accessory: Bool = false) {
         self.display = display
         self.arguments = arguments
+        self.accessory = accessory
     }
 }
 
@@ -588,6 +706,13 @@ public struct OpenAs: Sendable, Equatable, Codable {
     public var isFullScreen: Bool
 
     public static let normal = OpenAs(isMaximized: false, isFullScreen: false)
+    public static let maximized = OpenAs(isMaximized: true, isFullScreen: false)
+    public static func fullScreen(maximized: Bool = false) -> OpenAs {
+        OpenAs(isMaximized: maximized, isFullScreen: true)
+    }
+
+    public var maximizes: Bool { isMaximized }
+    public var fullScreens: Bool { isFullScreen }
 
     public init(isMaximized: Bool = false, isFullScreen: Bool = false) {
         self.isMaximized = isMaximized
@@ -606,6 +731,7 @@ public struct OpenAs: Sendable, Equatable, Codable {
 /// Cross-platform window configuration (`rune::WindowOptions`).
 public struct WindowOptions: Sendable, Equatable {
     public static let defaultMinSize = Vec2(420, 400)
+    public static let `default` = WindowOptions()
 
     public var minSize: Vec2?
     public var maxSize: Vec2?
@@ -615,16 +741,26 @@ public struct WindowOptions: Sendable, Equatable {
     public var transparent: Bool
     public var hasShadow: Bool
     public var alwaysOnTop: Bool
+    public var borderless: Bool
+    public var clickThrough: Bool
+    public var visible: Bool
+    public var position: (Int32, Int32)?
+    public var physicalSize: (UInt32, UInt32)?
 
     public init(
-        minSize: Vec2? = WindowOptions.defaultMinSize,
+        minSize: Vec2? = nil,
         maxSize: Vec2? = nil,
         resizable: Bool = true,
         closable: Bool = true,
         minimizable: Bool = true,
         transparent: Bool = false,
         hasShadow: Bool = true,
-        alwaysOnTop: Bool = false
+        alwaysOnTop: Bool = false,
+        borderless: Bool = false,
+        clickThrough: Bool = false,
+        visible: Bool = true,
+        position: (Int32, Int32)? = nil,
+        physicalSize: (UInt32, UInt32)? = nil
     ) {
         self.minSize = minSize
         self.maxSize = maxSize
@@ -634,6 +770,107 @@ public struct WindowOptions: Sendable, Equatable {
         self.transparent = transparent
         self.hasShadow = hasShadow
         self.alwaysOnTop = alwaysOnTop
+        self.borderless = borderless
+        self.clickThrough = clickThrough
+        self.visible = visible
+        self.position = position
+        self.physicalSize = physicalSize
+    }
+
+    public static func == (lhs: WindowOptions, rhs: WindowOptions) -> Bool {
+        lhs.minSize == rhs.minSize &&
+            lhs.maxSize == rhs.maxSize &&
+            lhs.resizable == rhs.resizable &&
+            lhs.closable == rhs.closable &&
+            lhs.minimizable == rhs.minimizable &&
+            lhs.transparent == rhs.transparent &&
+            lhs.hasShadow == rhs.hasShadow &&
+            lhs.alwaysOnTop == rhs.alwaysOnTop &&
+            lhs.borderless == rhs.borderless &&
+            lhs.clickThrough == rhs.clickThrough &&
+            lhs.visible == rhs.visible &&
+            lhs.position?.0 == rhs.position?.0 &&
+            lhs.position?.1 == rhs.position?.1 &&
+            lhs.physicalSize?.0 == rhs.physicalSize?.0 &&
+            lhs.physicalSize?.1 == rhs.physicalSize?.1
+    }
+
+    /// A hidden, retained launcher (`WindowOptions::launcher_panel`).
+    public static func launcherPanel() -> ConfiguredWindowOptions {
+        var native = MacWindowOptions().nonactivatingPanel(true)
+        native.launcher = true
+        let opts = WindowOptions(
+            minSize: Vec2(0.0, 0.0),
+            resizable: false,
+            transparent: true,
+            borderless: true,
+            visible: false
+        )
+        return opts.macos(native)
+    }
+
+    /// Attach AppKit-specific window properties.
+    public func macos(_ native: MacWindowOptions) -> ConfiguredWindowOptions {
+        ConfiguredWindowOptions(options: self, native: native)
+    }
+
+    /// One transparent, borderless, topmost, click-through overlay covering `display`.
+    public static func overlay(display: DisplayInfo) -> WindowOptions {
+        WindowOptions(
+            minSize: Vec2(0.0, 0.0),
+            maxSize: nil,
+            resizable: true,
+            transparent: true,
+            alwaysOnTop: true,
+            borderless: true,
+            clickThrough: true,
+            visible: true,
+            position: display.position,
+            physicalSize: display.size
+        )
+    }
+
+    /// The window's minimum and maximum content sizes, with `appMin` as fallback minimum.
+    public func sizeLimits(appMin: (Float, Float)?) -> ((Float, Float), (Float, Float)?) {
+        let minVec = minSize ?? appMin.map { Vec2($0.0, $0.1) } ?? Self.defaultMinSize
+        var minVal = (minVec.x, minVec.y)
+        let maxTuple = maxSize.map { ($0.x, $0.y) }
+        if let maxVal = maxTuple {
+            minVal = (min(minVal.0, maxVal.0), min(minVal.1, maxVal.1))
+        }
+        return (minVal, maxTuple)
+    }
+
+    /// The minimum a window that fits its content height opens with: content sets height.
+    public func fitMinSize(appMin: (Float, Float)?) -> (Float, Float)? {
+        if appMin == nil && minSize == nil {
+            return (Self.defaultMinSize.x, 0.0)
+        }
+        return appMin
+    }
+
+    /// Computes resolved window attributes (`WindowOptions::attributes`).
+    public func attributes(
+        title: String,
+        size: (Float, Float),
+        appMin: (Float, Float)?,
+        visible: Bool
+    ) -> WindowAttributesSnapshot {
+        let (minLim, maxTuple) = sizeLimits(appMin: appMin)
+        return WindowAttributesSnapshot(
+            title: title,
+            innerSize: size,
+            minInnerSize: minLim,
+            maxInnerSize: maxTuple,
+            position: position,
+            physicalSize: physicalSize,
+            resizable: resizable,
+            maximizeButtonEnabled: resizable,
+            transparent: transparent,
+            decorations: !borderless,
+            visible: visible,
+            alwaysOnTop: alwaysOnTop
+        )
     }
 }
 
@@ -644,19 +881,88 @@ public struct MacWindowOptions: Sendable, Equatable, Codable {
     public var hidesTitle: Bool
     public var movableByWindowBackground: Bool
     public var floatingLevel: Bool
+    public var shadow: Bool?
+    public var level: Int?
+    public var collectionBehavior: UInt?
+    public var excludeFromCapture: Bool?
+    public var nonactivatingPanel: Bool
+    public var launcher: Bool
+    public var cornerRadius: Float?
+    public var isCornerCurveCircular: Bool
 
     public init(
         fullSizeContentView: Bool = false,
         titlebarAppearsTransparent: Bool = false,
         hidesTitle: Bool = false,
         movableByWindowBackground: Bool = false,
-        floatingLevel: Bool = false
+        floatingLevel: Bool = false,
+        shadow: Bool? = nil,
+        level: Int? = nil,
+        collectionBehavior: UInt? = nil,
+        excludeFromCapture: Bool? = nil,
+        nonactivatingPanel: Bool = false,
+        launcher: Bool = false,
+        cornerRadius: Float? = nil,
+        isCornerCurveCircular: Bool = false
     ) {
         self.fullSizeContentView = fullSizeContentView
         self.titlebarAppearsTransparent = titlebarAppearsTransparent
         self.hidesTitle = hidesTitle
         self.movableByWindowBackground = movableByWindowBackground
         self.floatingLevel = floatingLevel
+        self.shadow = shadow
+        self.level = level
+        self.collectionBehavior = collectionBehavior
+        self.excludeFromCapture = excludeFromCapture
+        self.nonactivatingPanel = nonactivatingPanel
+        self.launcher = launcher
+        self.cornerRadius = cornerRadius
+        self.isCornerCurveCircular = isCornerCurveCircular
+    }
+
+    public func nonactivatingPanel(_ enabled: Bool) -> MacWindowOptions {
+        var copy = self
+        copy.nonactivatingPanel = enabled
+        if !enabled {
+            copy.launcher = false
+        }
+        return copy
+    }
+
+    public func shadow(_ enabled: Bool) -> MacWindowOptions {
+        var copy = self
+        copy.shadow = enabled
+        return copy
+    }
+
+    public func level(_ level: Int) -> MacWindowOptions {
+        var copy = self
+        copy.level = level
+        return copy
+    }
+
+    public func collectionBehavior(_ bits: UInt) -> MacWindowOptions {
+        var copy = self
+        copy.collectionBehavior = bits
+        return copy
+    }
+
+    public func excludeFromCapture(_ exclude: Bool) -> MacWindowOptions {
+        var copy = self
+        copy.excludeFromCapture = exclude
+        return copy
+    }
+
+    public func cornerRadius(_ radius: Float) -> MacWindowOptions {
+        var copy = self
+        copy.cornerRadius = max(0.0, radius)
+        return copy
+    }
+
+    public func cornerCurveCircular() -> MacWindowOptions {
+        var copy = self
+        copy.isCornerCurveCircular = true
+        return copy
     }
 }
 
@@ -668,6 +974,10 @@ public struct ConfiguredWindowOptions: Sendable, Equatable {
     public init(options: WindowOptions = WindowOptions(), native: MacWindowOptions = MacWindowOptions()) {
         self.options = options
         self.native = native
+    }
+
+    public func macos(_ amend: (MacWindowOptions) -> MacWindowOptions) -> ConfiguredWindowOptions {
+        ConfiguredWindowOptions(options: options, native: amend(native))
     }
 }
 
@@ -701,21 +1011,40 @@ public enum Ime: Sendable, Equatable {
     case deleteSurrounding(beforeUTF8: Int, afterUTF8: Int)
 }
 
-/// Handle to a native window delivered to `onWindow` / `onReady` (`rune::WindowHandle`).
+/// Handle to a native window delivered to `onWindow` / `onReady` or queued pre-bind (`rune::WindowHandle`).
 public final class WindowHandle: @unchecked Sendable {
+    private enum Route {
+        case unbound(queued: [WindowHandleRequest])
+        case bound(slot: Int, dispatch: @Sendable (Int, WindowHandleRequest) -> Void)
+    }
+
+    public let key: String
+
     private let lock = NSLock()
+    private var route: Route
     private var visibleFlag: Bool
     private var titleStorage: String
     private var positionStorage: Vec2?
-    private let closeImpl: @Sendable () -> Void
+    private var readyFlag = false
+    private var numberStorage: UInt32 = 0
+    private var statsStorage = WindowSurfaceStats()
+    private var placementProvider: (() -> WindowPlacement?)?
+    private var clickThroughApplier: ((Bool) -> Result<Void, Error>)?
     private let minimizeImpl: @Sendable () -> Void
-    private let focusImpl: @Sendable () -> Void
-    private let showImpl: @Sendable () -> Void
-    private let hideImpl: @Sendable () -> Void
-    private let setTitleImpl: @Sendable (String) -> Void
-    private let setPositionImpl: @Sendable (Vec2) -> Void
     private let placeImpl: @Sendable (PlaceRequest) -> Void
 
+    /// Creates an unbound handle for a named window (`WindowHandle::new(key)`).
+    public init(key: String) {
+        self.key = key
+        self.route = .unbound(queued: [])
+        self.titleStorage = key
+        self.visibleFlag = true
+        self.positionStorage = nil
+        self.minimizeImpl = {}
+        self.placeImpl = { _ in }
+    }
+
+    /// Creates a closure-backed handle delivered to `App.onWindow` / `App.onReady`.
     public init(
         title: String = "Rune",
         isVisible: Bool = true,
@@ -729,17 +1058,121 @@ public final class WindowHandle: @unchecked Sendable {
         onSetPosition: @escaping @Sendable (Vec2) -> Void = { _ in },
         onPlace: @escaping @Sendable (PlaceRequest) -> Void = { _ in }
     ) {
+        self.key = title
         self.titleStorage = title
         self.visibleFlag = isVisible
         self.positionStorage = position
-        self.closeImpl = onClose
         self.minimizeImpl = onMinimize
-        self.focusImpl = onFocus
-        self.showImpl = onShow
-        self.hideImpl = onHide
-        self.setTitleImpl = onSetTitle
-        self.setPositionImpl = onSetPosition
         self.placeImpl = onPlace
+        self.route = .bound(slot: 0) { _, request in
+            switch request {
+            case .close:
+                onClose()
+            case .focus:
+                onFocus()
+            case .show:
+                onShow()
+            case .hide:
+                onHide()
+            case .setTitle(let newTitle):
+                onSetTitle(newTitle)
+            case .setPosition(let x, let y):
+                onSetPosition(Vec2(Float(x), Float(y)))
+            default:
+                break
+            }
+        }
+    }
+
+    /// Routes queued and future requests to a live host slot.
+    public func bind(
+        slot: Int,
+        dispatch: @escaping @Sendable (Int, WindowHandleRequest) -> Void,
+        placementProvider: (() -> WindowPlacement?)? = nil,
+        clickThroughApplier: ((Bool) -> Result<Void, Error>)? = nil
+    ) {
+        lock.lock()
+        let pending: [WindowHandleRequest]
+        if case .unbound(let queued) = route {
+            pending = queued
+        } else {
+            pending = []
+        }
+        route = .bound(slot: slot, dispatch: dispatch)
+        self.placementProvider = placementProvider
+        self.clickThroughApplier = clickThroughApplier
+        lock.unlock()
+
+        for req in pending {
+            dispatch(slot, req)
+        }
+    }
+
+    /// Marks native teardown without discarding future queued requests (`WindowHandle::unbind`).
+    public func unbind() {
+        lock.lock()
+        readyFlag = false
+        numberStorage = 0
+        placementProvider = nil
+        clickThroughApplier = nil
+        route = .unbound(queued: [])
+        lock.unlock()
+    }
+
+    public func setReady(_ ready: Bool) {
+        lock.lock()
+        readyFlag = ready
+        lock.unlock()
+    }
+
+    public var isReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return readyFlag
+    }
+
+    public func setWindowNumber(_ number: UInt32) {
+        lock.lock()
+        numberStorage = number
+        lock.unlock()
+    }
+
+    public var windowNumber: UInt32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return numberStorage != 0 ? numberStorage : nil
+    }
+
+    public func updateSurfaceStats(_ stats: WindowSurfaceStats) {
+        lock.lock()
+        statsStorage = stats
+        lock.unlock()
+    }
+
+    public var surfaceStats: WindowSurfaceStats {
+        lock.lock()
+        defer { lock.unlock() }
+        return statsStorage
+    }
+
+    /// A headless run takes pending unbound requests each turn (`WindowHandle::take_headless`).
+    public func takeHeadless() -> [(slot: Int, request: WindowHandleRequest)] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .unbound(let queued) = route else {
+            return []
+        }
+        route = .unbound(queued: [])
+        return queued.map { (slot: 0, request: $0) }
+    }
+
+    public var headlessPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .unbound(let queued) = route else {
+            return false
+        }
+        return !queued.isEmpty
     }
 
     public var title: String {
@@ -760,42 +1193,92 @@ public final class WindowHandle: @unchecked Sendable {
         return positionStorage
     }
 
+    private func send(_ request: WindowHandleRequest) {
+        lock.lock()
+        let activeDispatch: ((Int, WindowHandleRequest) -> Void)?
+        let activeSlot: Int
+        switch route {
+        case .bound(let slot, let dispatch):
+            activeDispatch = dispatch
+            activeSlot = slot
+        case .unbound(var queued):
+            queued.append(request)
+            route = .unbound(queued: queued)
+            activeDispatch = nil
+            activeSlot = 0
+        }
+        lock.unlock()
+
+        activeDispatch?(activeSlot, request)
+    }
+
+    public func focus() { send(.focus) }
+    public func open() { send(.open) }
+
     public func close() {
         lock.lock()
         visibleFlag = false
         lock.unlock()
-        closeImpl()
+        send(.close)
     }
 
     public func minimize() { minimizeImpl() }
-    public func focus() { focusImpl() }
 
-    public func show() {
-        lock.lock()
-        visibleFlag = true
-        lock.unlock()
-        showImpl()
-    }
+    public func show() { setVisible(true) }
+    public func hide() { setVisible(false) }
 
-    public func hide() {
+    public func setVisible(_ visible: Bool) {
         lock.lock()
-        visibleFlag = false
+        visibleFlag = visible
         lock.unlock()
-        hideImpl()
-    }
-
-    public func setTitle(_ newTitle: String) {
-        lock.lock()
-        titleStorage = newTitle
-        lock.unlock()
-        setTitleImpl(newTitle)
+        send(visible ? .show : .hide)
     }
 
     public func setPosition(_ point: Vec2) {
         lock.lock()
         positionStorage = point
         lock.unlock()
-        setPositionImpl(point)
+        send(.setPosition(x: Int32(point.x.rounded()), y: Int32(point.y.rounded())))
+    }
+
+    public func setPosition(_ position: (Int32, Int32)) {
+        lock.lock()
+        positionStorage = Vec2(Float(position.0), Float(position.1))
+        lock.unlock()
+        send(.setPosition(x: position.0, y: position.1))
+    }
+
+    public func setAlwaysOnTop(_ on: Bool) { send(.setAlwaysOnTop(on)) }
+    public func resize(_ size: (Float, Float)) { send(.resize(width: size.0, height: size.1, animate: true)) }
+    public func resizeInstant(_ size: (Float, Float)) { send(.resize(width: size.0, height: size.1, animate: false)) }
+    public func center() { send(.center) }
+
+    public func setTitle(_ newTitle: String) {
+        lock.lock()
+        titleStorage = newTitle
+        lock.unlock()
+        send(.setTitle(newTitle))
+    }
+
+    public func setTaskbar(_ state: TaskbarState) { send(.setTaskbar(state)) }
+    public func flash(_ on: Bool) { send(.flash(on)) }
+
+    public func setClickThrough(_ clickThrough: Bool) throws {
+        lock.lock()
+        let applier = clickThroughApplier
+        lock.unlock()
+        if let applier {
+            try applier(clickThrough).get()
+        } else {
+            send(.setClickThrough(clickThrough))
+        }
+    }
+
+    public func placement() -> WindowPlacement? {
+        lock.lock()
+        let provider = placementProvider
+        lock.unlock()
+        return provider?()
     }
 
     public func place(_ request: PlaceRequest) {

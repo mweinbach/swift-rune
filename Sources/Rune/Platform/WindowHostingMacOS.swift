@@ -276,11 +276,11 @@ public enum RuneDragRegions {
     }
 
     @MainActor
-    public static func ownWindowDragging(window: NSWindow, chrome: RuneChrome) {
+    public static func ownWindowDragging(window: NSWindow, chrome: Chrome) {
         guard let contentView = window.contentView else { return }
         let isPanel = window is NSPanel
         let borderless = !window.styleMask.contains(.titled)
-        guard RuneChrome.usesDragRegions(chrome: chrome, borderless: borderless, isPanel: isPanel) else {
+        guard Chrome.usesDragRegions(chrome: chrome, borderless: borderless, isPanel: isPanel) else {
             return
         }
         scopeDragRegions(on: contentView)
@@ -337,7 +337,7 @@ public enum RuneWindowShape {
     @MainActor
     public static func applyCorners(
         to window: NSWindow,
-        options: RuneMacWindowOptions,
+        options: MacWindowOptions,
         transparent: Bool,
         borderless: Bool
     ) {
@@ -407,7 +407,7 @@ public final class RuneKeyablePanel: NSPanel {
 /// macOS native window construction and chrome synchronization (`platform/macos.rs`, `window/chrome.rs`).
 public enum RuneMacWindowConfig {
     @MainActor
-    public static func configureWindow(_ window: NSWindow, options: RuneMacWindowOptions) {
+    public static func configureWindow(_ window: NSWindow, options: MacWindowOptions) {
         if let shadow = options.shadow {
             window.hasShadow = shadow
         }
@@ -424,10 +424,10 @@ public enum RuneMacWindowConfig {
 
     @MainActor
     public static func frameChrome(
-        chrome: RuneChrome,
-        titlebar: RuneTitlebar?,
+        chrome: Chrome,
+        titlebar: Titlebar?,
         titlebarSet: TitlebarSet = TitlebarSet()
-    ) -> RuneChrome {
+    ) -> Chrome {
         guard let titlebar else { return chrome }
         return titlebarSet.over(titlebar).macChrome(chrome)
     }
@@ -435,10 +435,10 @@ public enum RuneMacWindowConfig {
     @MainActor
     public static func syncChrome(
         window: NSWindow,
-        chrome: RuneChrome,
-        titlebar: RuneTitlebar?,
+        chrome: Chrome,
+        titlebar: Titlebar?,
         titlebarSet: TitlebarSet = TitlebarSet()
-    ) -> RuneChromeInsets {
+    ) -> ChromeInsets {
         let effective = frameChrome(chrome: chrome, titlebar: titlebar, titlebarSet: titlebarSet)
         if let spot = effective.trafficLights {
             RuneTrafficLights.place(window, at: spot)
@@ -448,7 +448,7 @@ public enum RuneMacWindowConfig {
         let left: Float = lightsRight ? 0.0 : leading
         let right: Float = lightsRight ? leading : 0.0
         let bandHeight = titlebar.map { titlebarSet.over($0).height } ?? 0.0
-        return RuneChromeInsets(leading: left, trailing: right, height: bandHeight)
+        return ChromeInsets(leading: left, trailing: right, height: bandHeight)
     }
 
     @MainActor
@@ -493,11 +493,11 @@ public enum RuneMacWindowConfig {
         title: String,
         size: Vec2,
         minSize: Vec2?,
-        chrome: RuneChrome,
-        titlebar: RuneTitlebar?,
-        options: RuneWindowOptions,
-        macos: RuneMacWindowOptions,
-        openAs: RuneOpenAs
+        chrome: Chrome,
+        titlebar: Titlebar?,
+        options: WindowOptions,
+        macos: MacWindowOptions,
+        openAs: OpenAs
     ) -> NSWindow {
         var style: NSWindow.StyleMask = options.borderless ? [.borderless] : [.titled, .closable, .miniaturizable]
         if options.resizable && !options.borderless {
@@ -936,18 +936,18 @@ private final class RuneHostedMetalView: NSView {
 @MainActor
 public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
     private var slots: [HostedWindowSlot] = []
-    private let runOptions: RuneRunOptions
+    private let runOptions: RunOptions
     private let parsed: ToolingArgs
 
-    private init(runOptions: RuneRunOptions, parsed: ToolingArgs) {
+    private init(runOptions: RunOptions, parsed: ToolingArgs) {
         self.runOptions = runOptions
         self.parsed = parsed
         super.init()
     }
 
     public static func run(
-        _ windows: [AnyRuneWindowSpec],
-        options: RuneRunOptions = RuneRunOptions(),
+        _ windows: [AnyWindowSpec],
+        options: RunOptions = RunOptions(),
         parsed: ToolingArgs = ToolingArgs()
     ) throws {
         ReadySignal.runStarts()
@@ -1210,8 +1210,8 @@ extension MacOSApp {
     /// Launches a multi-window application using `RuneMultiWindowHost`.
     @MainActor
     public static func runWindows(
-        _ windows: [AnyRuneWindowSpec],
-        options: RuneRunOptions = RuneRunOptions(),
+        _ windows: [AnyWindowSpec],
+        options: RunOptions = RunOptions(),
         arguments: [String]? = nil
     ) throws {
         try RuneMultiWindow.runWindows(windows, options: options, arguments: arguments)

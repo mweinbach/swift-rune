@@ -2172,12 +2172,6 @@ extension Tx {
         try openUrl(url, sameTab: true)
     }
 
-    /// Requests quitting the app and relaunching it once exited (`Tx::relaunch`).
-    public mutating func relaunch() {
-        quitRequested = true
-        runtimeActions["relaunchRequested"] = true
-    }
-
     /// Initiates an outbound OS drag session with `item`.
     public mutating func dragOut(_ item: DragItem) {
         runtimeActions["dragOutItem"] = item
@@ -2241,7 +2235,7 @@ public enum OverlayKeyPolicy: Sendable, Equatable {
 public struct OverlayOptions: Sendable, Equatable {
     public var placement: OverlayPlacement
     public var legacyPlacement: OverlayPlacement?
-    public var display: OverlayDisplayTarget
+    public var display: DisplayTarget
     public var followPointer: Bool
     public var level: OverlayLevel
     public var excludeFromCapture: Bool
@@ -2284,7 +2278,7 @@ public struct OverlayOptions: Sendable, Equatable {
 
     public init(
         placement: OverlayPlacement? = nil,
-        display: OverlayDisplayTarget = .primary,
+        display: DisplayTarget = .primary,
         followPointer: Bool = false,
         level: OverlayLevel = .status,
         excludeFromCapture: Bool = false,
@@ -2822,7 +2816,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         #endif
     }
 
-    public func setDisplay(_ display: OverlayDisplayTarget) {
+    public func setDisplay(_ display: DisplayTarget) {
         lock.lock()
         options.display = display
         let currentPlacement = placementSpec

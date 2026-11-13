@@ -14,22 +14,22 @@ struct RunePlatformIncrement2Tests {
 
     @Test("WindowSpec: launcher preset is hidden and preserves ordinary defaults")
     func launcherPresetIsHiddenAndPreservesOrdinaryDefaults() {
-        let preset = RuneWindowOptions.launcherPanel()
+        let preset = WindowOptions.launcherPanel()
         #expect(preset.native.nonactivatingPanel && preset.native.launcher)
         #expect(!preset.options.visible && preset.options.borderless && preset.options.transparent)
-        #expect(!RuneMacWindowOptions().nonactivatingPanel(true).launcher)
+        #expect(!MacWindowOptions().nonactivatingPanel(true).launcher)
         #expect(!preset.native.nonactivatingPanel(false).launcher)
-        #expect(RuneWindowOptions.default.visible)
+        #expect(WindowOptions.default.visible)
 
         let spec = AppSpec<Int>(title: "launcher", size: Vec2(300, 100), state: 0) { _, _ in El<Int>() }
-        let window = RuneWindowSpec(key: "launcher", app: spec).configuredOptions(RuneWindowOptions.launcherPanel())
+        let window = AppWindowSpec(key: "launcher", app: spec).configuredOptions(WindowOptions.launcherPanel())
         #expect(window.macosWindow.launcher)
         #expect(!window.options.visible && window.options.transparent)
     }
 
     @Test("WindowSpec: amending launcher preset keeps launcher behaviour")
     func amendingPresetKeepsLauncherBehaviour() {
-        let preset = RuneWindowOptions.launcherPanel().macos { native in
+        let preset = WindowOptions.launcherPanel().macos { native in
             native.cornerRadius(16.0).shadow(true)
         }
         #expect(preset.native.launcher && preset.native.nonactivatingPanel)
@@ -37,7 +37,7 @@ struct RunePlatformIncrement2Tests {
         #expect(!preset.options.visible && preset.options.transparent)
 
         let spec = AppSpec<Int>(title: "launcher", size: Vec2(300, 100), state: 0) { _, _ in El<Int>() }
-        let window = RuneWindowSpec(key: "launcher", app: spec).configuredOptions(preset)
+        let window = AppWindowSpec(key: "launcher", app: spec).configuredOptions(preset)
         #expect(window.macosWindow.launcher)
         #expect(window.macosWindow.cornerRadius == 16.0)
     }
@@ -48,37 +48,37 @@ struct RunePlatformIncrement2Tests {
         let settingsSpec = AppSpec<String>(title: "settings", size: Vec2(100, 100), state: "") { _, _ in El<String>() }
         let otherSpec = AppSpec<Int>(title: "other", size: Vec2(100, 100), state: 0) { _, _ in El<Int>() }
 
-        let (main, handle) = RuneWindowSpec(key: "main", app: mainSpec)
-            .window(RuneWindowSpec(key: "settings", app: settingsSpec))
+        let (main, handle) = AppWindowSpec(key: "main", app: mainSpec)
+            .window(AppWindowSpec(key: "settings", app: settingsSpec))
         #expect(handle.key == "settings")
 
-        let other = RuneWindowSpec(key: "other", app: otherSpec)
+        let other = AppWindowSpec(key: "other", app: otherSpec)
         let flat = RuneMultiWindow.flatten([main.boxed(), other.boxed()])
         #expect(flat.map(\.key) == ["main", "settings", "other"])
         #expect(flat[1].secondary)
         #expect(!flat[0].secondary && !flat[2].secondary)
         try RuneMultiWindow.validate(flat)
 
-        let (clash, _) = RuneWindowSpec(key: "settings", app: mainSpec)
-            .window(RuneWindowSpec(key: "settings", app: settingsSpec))
+        let (clash, _) = AppWindowSpec(key: "settings", app: mainSpec)
+            .window(AppWindowSpec(key: "settings", app: settingsSpec))
         #expect(throws: MultiWindowError.emptyOrDuplicateKey("settings")) {
             try RuneMultiWindow.validate(RuneMultiWindow.flatten([clash.boxed()]))
         }
         #expect(throws: MultiWindowError.emptyOrDuplicateKey("")) {
-            try RuneMultiWindow.validate([RuneWindowSpec(key: "", app: mainSpec).boxed()])
+            try RuneMultiWindow.validate([AppWindowSpec(key: "", app: mainSpec).boxed()])
         }
     }
 
     @Test("WindowOptions: compact window overrides legacy minimum without changing defaults")
     func compactWindowOverridesLegacyMinimum() {
-        let defaults = RuneWindowOptions.default.attributes(title: "app", size: (560, 440), appMin: nil, visible: true)
+        let defaults = WindowOptions.default.attributes(title: "app", size: (560, 440), appMin: nil, visible: true)
         #expect(defaults.minInnerSize == (420, 400))
         #expect(defaults.resizable && defaults.decorations && defaults.visible)
         #expect(defaults.maxInnerSize == nil)
 
-        var compactOpts = RuneWindowOptions.default
-        compactOpts.minSize = (280, 80)
-        compactOpts.maxSize = (320, 120)
+        var compactOpts = WindowOptions.default
+        compactOpts.minSize = Vec2(280, 80)
+        compactOpts.maxSize = Vec2(320, 120)
         compactOpts.resizable = false
         compactOpts.borderless = true
         let compact = compactOpts.attributes(title: "compact", size: (300, 100), appMin: (860, 560), visible: false)
@@ -90,8 +90,8 @@ struct RunePlatformIncrement2Tests {
 
     @Test("WindowOptions: maximum alone caps inherited minimum per axis")
     func maximumAloneCapsInheritedMinimumPerAxis() {
-        var opts = RuneWindowOptions.default
-        opts.maxSize = (320, 120)
+        var opts = WindowOptions.default
+        opts.maxSize = Vec2(320, 120)
 
         let a = opts.attributes(title: "compact", size: (300, 100), appMin: nil, visible: true)
         #expect(a.minInnerSize == (320, 120))
@@ -104,17 +104,17 @@ struct RunePlatformIncrement2Tests {
 
     @Test("WindowOptions: default options inherit app minimum and fit-height drops min height")
     func defaultOptionsInheritAppMinAndFitMinSize() {
-        let attrs = RuneWindowOptions.default.attributes(title: "app", size: (900, 600), appMin: (860, 560), visible: true)
+        let attrs = WindowOptions.default.attributes(title: "app", size: (900, 600), appMin: (860, 560), visible: true)
         #expect(attrs.minInnerSize == (860, 560))
 
-        let fit = RuneWindowOptions.default.fitMinSize(appMin: nil)
-        let (minLim, maxLim) = RuneWindowOptions.default.sizeLimits(appMin: fit)
+        let fit = WindowOptions.default.fitMinSize(appMin: nil)
+        let (minLim, maxLim) = WindowOptions.default.sizeLimits(appMin: fit)
         #expect(minLim == (420, 0) && maxLim == nil)
-        #expect(RuneWindowOptions.default.fitMinSize(appMin: (300, 200))?.0 == 300)
-        #expect(RuneWindowOptions.default.fitMinSize(appMin: (300, 200))?.1 == 200)
+        #expect(WindowOptions.default.fitMinSize(appMin: (300, 200))?.0 == 300)
+        #expect(WindowOptions.default.fitMinSize(appMin: (300, 200))?.1 == 200)
 
-        var custom = RuneWindowOptions.default
-        custom.minSize = (300, 500)
+        var custom = WindowOptions.default
+        custom.minSize = Vec2(300, 500)
         let (customMin, _) = custom.sizeLimits(appMin: custom.fitMinSize(appMin: nil))
         #expect(customMin == (300, 500))
     }
@@ -129,11 +129,11 @@ struct RunePlatformIncrement2Tests {
             scale: 2.0,
             primary: false
         )
-        let opts = RuneWindowOptions.overlay(display: display)
+        let opts = WindowOptions.overlay(display: display)
         #expect(opts.transparent && opts.borderless && opts.clickThrough && opts.alwaysOnTop && opts.visible)
         #expect(opts.position?.0 == -1920 && opts.position?.1 == 100)
         #expect(opts.physicalSize?.0 == 3840 && opts.physicalSize?.1 == 2160)
-        #expect(opts.minSize?.0 == 0 && opts.minSize?.1 == 0)
+        #expect(opts.minSize?.x == 0 && opts.minSize?.y == 0)
         #expect(display.nativeBounds == [-1920.0, 100.0, 3840.0, 2160.0])
     }
 
@@ -141,7 +141,7 @@ struct RunePlatformIncrement2Tests {
 
     @Test("WindowHandle: unbound handle queues requests for host or headless run")
     func unboundHandleQueuesRequestsForHostOrHeadlessRun() {
-        let handle = RuneWindowHandle(key: "w")
+        let handle = WindowHandle(key: "w")
         #expect(!handle.headlessPending)
         handle.focus()
         handle.setPosition((3, 4))
@@ -164,7 +164,7 @@ struct RunePlatformIncrement2Tests {
             var items: [(Int, WindowHandleRequest)] = []
         }
         let collector = Collector()
-        let handle = RuneWindowHandle(key: "doc")
+        let handle = WindowHandle(key: "doc")
         handle.open()
         handle.resize((640, 480))
         handle.bind(slot: 2) { slot, req in
@@ -220,7 +220,7 @@ struct RunePlatformIncrement2Tests {
 
     @Test("OpenAs, Chrome, Titlebar, ChromeInsets & El.windowDrag")
     func openAsChromeTitlebarAndDragRegionParity() {
-        var openAs = RuneOpenAs.normal
+        var openAs = OpenAs.normal
         openAs = openAs.maximized(true)
         #expect(openAs.maximizes && !openAs.fullScreens)
         openAs = openAs.fullScreen(true)
@@ -228,7 +228,7 @@ struct RunePlatformIncrement2Tests {
         openAs = openAs.fullScreen(false)
         #expect(openAs == .maximized)
 
-        let tb = RuneTitlebar(height: 38.0)
+        let tb = Titlebar(height: 38.0)
         let macChrome = tb.macChrome(.default)
         // y = round((38 - 14) / 2) = 12
         #expect(macChrome.fullSizeContent && macChrome.dragRegions)
@@ -238,7 +238,7 @@ struct RunePlatformIncrement2Tests {
         let override = TitlebarSet(titlebar: nil, height: 44.0).over(tb)
         #expect(override.height == 44.0)
 
-        let insets = RuneChromeInsets(leading: 76.0, trailing: 0.0, height: 38.0)
+        let insets = ChromeInsets(leading: 76.0, trailing: 0.0, height: 38.0)
         let zoomed = insets.zoomed(2.0)
         #expect(zoomed.leading == 38.0 && zoomed.height == 19.0)
         #expect(insets.bits().count == 3)
@@ -248,8 +248,8 @@ struct RunePlatformIncrement2Tests {
         #expect(!El<Int>().isWindowDrag)
         #expect(!dragEl.windowDrag(false).isWindowDrag)
 
-        #expect(RuneChrome.usesDragRegions(chrome: macChrome, borderless: false, isPanel: false))
-        #expect(!RuneChrome.usesDragRegions(chrome: macChrome, borderless: false, isPanel: true))
+        #expect(Chrome.usesDragRegions(chrome: macChrome, borderless: false, isPanel: false))
+        #expect(!Chrome.usesDragRegions(chrome: macChrome, borderless: false, isPanel: true))
     }
 
     // MARK: - #836 RTL Traffic Lights & macOS Subclass Tests
@@ -457,7 +457,7 @@ struct RunePlatformIncrement2Tests {
 
     @Test("WindowSpec (window/spec.rs): explicit empty args never inspect host CLI and override scene/size")
     func windowArgsResolutionParity() {
-        let opts = RuneRunOptions(accessory: true)
+        let opts = RunOptions(accessory: true)
         let copied = opts
         #expect(opts.accessory && copied.accessory)
 
@@ -475,19 +475,19 @@ struct RunePlatformIncrement2Tests {
 
         let base = AppSpec(title: "test", size: Vec2(100, 100), state: ()) { _, _ in el() }
         let inheritedScene = ToolingArgs.parse(["--scene", "host-scene"])
-        let pill = RuneWindowSpec(key: "pill", app: base).args(["--size", "320x80"])
+        let pill = AppWindowSpec(key: "pill", app: base).args(["--size", "320x80"])
         let resolvedPill = pill.resolveArgs(inherited: { inheritedScene })
         #expect(resolvedPill.viewportOverride == Vec2(320, 80))
         #expect(resolvedPill.sceneName == nil)
 
-        let plain = RuneWindowSpec(key: "plain", app: base)
+        let plain = AppWindowSpec(key: "plain", app: base)
         #expect(plain.resolveArgs(inherited: { inheritedScene }).sceneName == "host-scene")
 
         let trace = ToolingArgs.parse(["--snap", "host.png"])
-        let isolated = RuneWindowSpec(key: "isolated", app: base).args([])
+        let isolated = AppWindowSpec(key: "isolated", app: base).args([])
         #expect(!isolated.resolveArgs(inherited: { trace }).isHeadlessRequested)
 
-        let traced = RuneWindowSpec(key: "traced", app: base).args(["--snap", "window.png"])
+        let traced = AppWindowSpec(key: "traced", app: base).args(["--snap", "window.png"])
         #expect(traced.resolveArgs(inherited: { ToolingArgs() }).isHeadlessRequested)
     }
 
@@ -527,9 +527,9 @@ struct RunePlatformIncrement2Tests {
         }
 
         // Case 1: chrome.dragRegions without Titlebar must allow bare .windowDrag() and reject interactive children
-        var chromeOnly = RuneChrome.default
+        var chromeOnly = Chrome.default
         chromeOnly.dragRegions = true
-        let chromeEntry = RuneWindowSpec<Int>(key: "chrome", app: app).chrome(chromeOnly).boxed().makeHostEntry()
+        let chromeEntry = AppWindowSpec<Int>(key: "chrome", app: app).chrome(chromeOnly).boxed().makeHostEntry()
         let rt1 = chromeEntry.createRuntime(pixelScale: 1.0, systemDark: true, reducedMotion: true, waker: Waker())
         _ = chromeEntry.frame(runtimeObj: rt1, at: 0.0)
         #expect(chromeEntry.copyTitlebarDragHits(runtimeObj: rt1, point: Vec2(120, 20)))
@@ -541,7 +541,7 @@ struct RunePlatformIncrement2Tests {
         let noMarkApp = AppSpec(title: "nomark", size: Vec2(200, 200), state: 0) { _, _ in
             col().w(200).h(200).child(el().key("plain-header").w(200).h(40))
         }
-        let tbEntry = RuneWindowSpec<Int>(key: "tb", app: noMarkApp).titlebar(RuneTitlebar(height: 40)).boxed().makeHostEntry()
+        let tbEntry = AppWindowSpec<Int>(key: "tb", app: noMarkApp).titlebar(Titlebar(height: 40)).boxed().makeHostEntry()
         let rt2 = tbEntry.createRuntime(pixelScale: 1.0, systemDark: true, reducedMotion: true, waker: Waker())
         _ = tbEntry.frame(runtimeObj: rt2, at: 0.0)
         #expect(!tbEntry.copyTitlebarDragHits(runtimeObj: rt2, point: Vec2(100, 20)))

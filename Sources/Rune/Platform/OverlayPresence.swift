@@ -395,13 +395,6 @@ public enum OverlayAlign: String, Sendable, Equatable, Hashable {
     case end
 }
 
-public enum OverlayDisplayTarget: Sendable, Equatable {
-    case primary
-    case underPointer
-    case id(RuneDisplayId)
-    case native(NativeDisplayId)
-}
-
 public enum OverlaySupport: String, Sendable, Equatable, Hashable {
     case unknown
     case supported

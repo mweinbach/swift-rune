@@ -625,23 +625,30 @@ public final class RuneOverlayMacOSHost<State> {
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return nil }
         let mouse = NSEvent.mouseLocation
-        let target: NSScreen? = screens.first(where: { screen in
-            let sid = Self.screenId(screen)
+        let target: NSScreen? = {
             switch options.display {
             case .primary:
-                return false
+                return screens.first
+            case .index(let idx):
+                return screens.indices.contains(idx) ? screens[idx] : screens.first
+            case .named(let name):
+                return screens.first(where: { $0.localizedName == name }) ?? screens.first
             case .underPointer:
-                return Self.containsAppKitPoint(screen.frame, point: mouse)
+                return screens.first(where: { Self.containsAppKitPoint($0.frame, point: mouse) })
+                    ?? screens.first(where: { lastDisplayId == Self.screenId($0) })
+                    ?? screens.first
             case let .id(displayId):
-                if case let .macOS(native) = displayId.native { return sid == native }
-                return false
+                if case let .macOS(native) = displayId.native {
+                    return screens.first(where: { Self.screenId($0) == native }) ?? screens.first
+                }
+                return screens.first
             case let .native(native):
-                if case let .macOS(id) = native { return sid == id }
-                return false
+                if case let .macOS(id) = native {
+                    return screens.first(where: { Self.screenId($0) == id }) ?? screens.first
+                }
+                return screens.first
             }
-        }) ?? screens.first(where: { screen in
-            options.display == .underPointer && lastDisplayId == Self.screenId(screen)
-        }) ?? screens.first
+        }()
 
         guard let screen = target else { return nil }
         lastDisplayId = Self.screenId(screen)
