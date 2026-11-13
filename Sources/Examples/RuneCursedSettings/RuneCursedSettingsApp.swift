@@ -704,6 +704,7 @@ private func developerPage(_ s: CursedState, _ kit: Kit) -> El<CursedState> {
 }
 
 func cursedView(_ s: CursedState, _ cx: inout Cx<CursedState>) -> El<CursedState> {
+    cx.reducedMotion(s.p.reduceMotion)
     let dark = isDarkTheme(s, systemDark: cx.systemDark)
     let kit = OpenCodeTheme.kit(dark: dark)
 

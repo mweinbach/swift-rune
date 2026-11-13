@@ -311,6 +311,9 @@ public func renderGalleryStory(_ s: GalleryState, _ k: Kit, overlays: inout [El<
 }
 
 public func galleryView(_ s: GalleryState, _ cx: inout Cx<GalleryState>) -> El<GalleryState> {
+    if s.reduced {
+        cx.reducedMotion(true)
+    }
     let k = resolveGalleryKit(s, dark: cx.systemDark)
     var overlays: [El<GalleryState>] = []
     let body = renderGalleryStory(s, k, overlays: &overlays)

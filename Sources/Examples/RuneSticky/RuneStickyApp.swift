@@ -2,8 +2,8 @@ import Foundation
 import Rune
 
 /// Port of `crates/rune/examples/sticky.rs`.
-/// Uses `El.stickyTop(0)` for section headers inside a scrollable timeline; `stuckShadow` and
-/// `Tx.keepOnScreen` will be wired once those modifiers land from `gap/el` and `gap/shell`.
+/// Uses `El.stickyTop(0)`, `El.stuckShadow`, and `Tx.keepOnScreen` for section headers inside
+/// a scrollable timeline.
 public struct StickyGroup: Sendable {
     public let title: String
     public let badge: String
@@ -69,12 +69,16 @@ public enum RuneStickyApp {
         let accent = oklch(0.72, 0.14, 250.0)
         let border = Color.white.alpha(0.08)
 
+        let divider = Shadow(x: 0, y: 1, blur: 0, spread: 0, color: Color.white.alpha(0.11))
+        let drop = Shadow(x: 0, y: 6, blur: 14, spread: 0, color: Color.black.alpha(0.45))
+
         var timeline: El<StickyState> = col().key("timeline").wFull().py(8).gap(10)
         for (i, g) in groups.enumerated() {
             let collapsed = i < state.collapsed.count ? state.collapsed[i] : false
             let chevron = collapsed ? "▸" : "▾"
+            let hdrKey = "hdr-\(i)"
             let header: El<StickyState> = row()
-                .key("hdr-\(i)")
+                .key(hdrKey)
                 .wFull()
                 .h(38)
                 .px(16)
@@ -82,9 +86,12 @@ public enum RuneStickyApp {
                 .itemsCenter()
                 .bg(hdrBg)
                 .stickyTop(0)
-                .onClick { s in
+                .stuckShadow(divider)
+                .stuckShadow(drop)
+                .onClick { s, tx in
                     if i < s.collapsed.count {
                         s.collapsed[i].toggle()
+                        tx.keepOnScreen(hdrKey)
                     }
                 }
                 .child(text(chevron).font(TextStyle(size: 13, weight: 600)).color(accent))

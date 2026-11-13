@@ -84,6 +84,9 @@ let package = Package(
         .executable(name: "rune-kit-diff", targets: ["RuneKitDiff"]),
         .executable(name: "rune-one-snap", targets: ["RuneOneSnap"]),
         .executable(name: "rune-custom-titlebar", targets: ["RuneCustomTitlebar"]),
+        .executable(name: "rune-keep-stuck", targets: ["RuneKeepStuck"]),
+        .executable(name: "rune-growth-reorder", targets: ["RuneGrowthReorder"]),
+        .executable(name: "rune-window-resize", targets: ["RuneWindowResize"]),
     ],
     targets: [
         .target(
@@ -472,6 +475,21 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneCustomTitlebar"
         ),
+        .executableTarget(
+            name: "RuneKeepStuck",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneKeepStuck"
+        ),
+        .executableTarget(
+            name: "RuneGrowthReorder",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneGrowthReorder"
+        ),
+        .executableTarget(
+            name: "RuneWindowResize",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneWindowResize"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -607,6 +625,9 @@ let package = Package(
                 "RuneKitDiff",
                 "RuneOneSnap",
                 "RuneCustomTitlebar",
+                "RuneKeepStuck",
+                "RuneGrowthReorder",
+                "RuneWindowResize",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
