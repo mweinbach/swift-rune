@@ -3,7 +3,7 @@ import Rune
 import RuneKit
 import RuneMotion
 
-/// Port of `examples/matched`: shared-element motion with `El.flightId`.
+/// Port of `examples/matched`: shared-element motion with `El.matched`.
 /// 1–4 picks a tile, Return (or click) zooms it to the whole stage, Escape zooms back.
 private let matchedScenes: [(sky: [UInt8], ground: [UInt8], sun: [UInt8])] = [
     ([255, 166, 120], [58, 40, 92], [255, 236, 170]),
@@ -65,12 +65,11 @@ private func tileEl(_ s: MatchedState, _ i: Int) -> El<MatchedState> {
     let id = "tile-\(i + 1)"
     var t: El<MatchedState> = el()
         .key(id)
-        .flightId(id)
+        .matched(id)
         .grow(1)
         .rounded(20)
         .clip(true)
         .bg(.black)
-        .animateLayout(Tok.Motion.DEFAULT)
         .onClick { state in
             if state.zoomed {
                 state.zoomed = false

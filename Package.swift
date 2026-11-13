@@ -81,6 +81,8 @@ let package = Package(
         .executable(name: "rune-light-demos", targets: ["RuneLightDemos"]),
         .executable(name: "rune-light-live", targets: ["RuneLightLive"]),
         .executable(name: "rune-light-reel", targets: ["RuneLightReel"]),
+        .executable(name: "rune-kit-diff", targets: ["RuneKitDiff"]),
+        .executable(name: "rune-one-snap", targets: ["RuneOneSnap"]),
     ],
     targets: [
         .target(
@@ -445,6 +447,16 @@ let package = Package(
             dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
             path: "Sources/Examples/RuneLightReel"
         ),
+        .executableTarget(
+            name: "RuneKitDiff",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneKitDiff"
+        ),
+        .executableTarget(
+            name: "RuneOneSnap",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneOneSnap"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -576,6 +588,8 @@ let package = Package(
                 "RuneSticky",
                 "RuneExpressivePress",
                 "RuneMotionCurves",
+                "RuneKitDiff",
+                "RuneOneSnap",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
