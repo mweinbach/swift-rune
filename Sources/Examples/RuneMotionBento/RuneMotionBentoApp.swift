@@ -3,16 +3,29 @@ import Rune
 import RuneKit
 import RuneMotion
 
+public func thousands(_ n: UInt32) -> String {
+    let s = String(n)
+    var out = ""
+    out.reserveCapacity(s.count + s.count / 3)
+    for (i, ch) in s.reversed().enumerated() {
+        if i > 0 && i % 3 == 0 {
+            out.append(",")
+        }
+        out.append(ch)
+    }
+    return String(out.reversed())
+}
+
 /// Port of `examples/motion-bento`: a smart-studio control center where tiles animate
 /// simultaneously via `RuneMotion` springs (`Spring`), `rollingText`, `progressCircle`,
 /// `progress`, and interactive scene/chaos stepping.
-enum StudioScene: Int, CaseIterable, CustomStringConvertible {
+public enum StudioScene: Int, CaseIterable, CustomStringConvertible, Sendable {
     case relax = 0
     case focus = 1
     case cinema = 2
     case night = 3
 
-    var description: String {
+    public var description: String {
         switch self {
         case .relax: return "Relax"
         case .focus: return "Focus"
@@ -21,7 +34,7 @@ enum StudioScene: Int, CaseIterable, CustomStringConvertible {
         }
     }
 
-    var accent: Color {
+    public var accent: Color {
         switch self {
         case .relax: return Color.hex("#4ea8de")!
         case .focus: return Color.hex("#52b788")!
@@ -31,21 +44,23 @@ enum StudioScene: Int, CaseIterable, CustomStringConvertible {
     }
 }
 
-struct MotionBentoState {
-    var scene: StudioScene = .relax
-    var step: Int = 0
-    var events: Int = 12
-    var targetTemp: Float = 21.5
-    var lightsOn: [Bool] = [true, true, false, true]
-    var playing: Bool = true
-    var volume: Float = 0.68
-    var locked: Bool = true
-    var powerWatts: Int = 420
-    var netDownMbps: Int = 640
-    var blindsOpen: Float = 0.72
-    var airQuality: Int = 94
+public struct MotionBentoState: Sendable {
+    public var scene: StudioScene = .relax
+    public var step: Int = 0
+    public var events: Int = 12
+    public var targetTemp: Float = 21.5
+    public var lightsOn: [Bool] = [true, true, false, true]
+    public var playing: Bool = true
+    public var volume: Float = 0.68
+    public var locked: Bool = true
+    public var powerWatts: Int = 420
+    public var netDownMbps: Int = 640
+    public var blindsOpen: Float = 0.72
+    public var airQuality: Int = 94
 
-    mutating func stepChaos() {
+    public init() {}
+
+    public mutating func stepChaos() {
         step += 1
         events += 3
         let nextIdx = (scene.rawValue + 1) % StudioScene.allCases.count
@@ -126,7 +141,7 @@ private func tileCard(
         .child(content)
 }
 
-func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<MotionBentoState> {
+public func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<MotionBentoState> {
     let bg = Color.hex("#0c0e13")!
     let fg = Color.hex("#eef1f6")!
     let kit = Kit.fromPalette(PaletteSeed(bg: bg, fg: fg, accent: s.scene.accent), focus: .accent)
@@ -178,7 +193,6 @@ func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<Mo
                 .child(stepBtn)
         )
 
-    // Row 1: Climate, Lights, Audio, Security
     let tempFrac = ((s.targetTemp - 16.0) / 12.0).clamped(to: 0...1)
     let climateTile = tileCard(
         key: "tile-climate",
@@ -271,7 +285,6 @@ func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<Mo
             )
     )
 
-    // Row 2: Energy, Network, Blinds, Air Quality
     let powerFrac = Float(s.powerWatts) / 1000.0
     let energyTile = tileCard(
         key: "tile-energy",
@@ -321,7 +334,6 @@ func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<Mo
             .child(text("CO₂ 412 ppm · 46% RH").font(kit.ty.small).color(kit.c.textMuted))
     )
 
-    // Bottom Dock: Scene selector
     var dock: El<MotionBentoState> = row()
         .key("dock")
         .wFull()
@@ -380,22 +392,29 @@ func bentoView(_ s: MotionBentoState, _ cx: inout Cx<MotionBentoState>) -> El<Mo
         .child(dock)
 }
 
-let spec = AppSpec<MotionBentoState>(
-    title: "Motion Bento",
-    size: Vec2(1060, 660),
-    dark: true,
-    state: MotionBentoState(),
-    onKey: { state, event, _ in
-        if event.key == .space {
-            state.stepChaos()
-            return true
-        }
-        return false
-    },
-    view: bentoView
-)
-.scene("relax") { $0.scene = .relax }
-.scene("cinema") { $0.stepChaos(); $0.stepChaos(); $0.scene = .cinema }
-.scene("night") { $0.stepChaos(); $0.stepChaos(); $0.stepChaos(); $0.scene = .night }
+@main
+public enum RuneMotionBentoApp {
+    public static func makeSpec() -> AppSpec<MotionBentoState> {
+        AppSpec<MotionBentoState>(
+            title: "Motion Bento",
+            size: Vec2(1060, 660),
+            dark: true,
+            state: MotionBentoState(),
+            onKey: { state, event, _ in
+                if event.key == .space {
+                    state.stepChaos()
+                    return true
+                }
+                return false
+            },
+            view: bentoView
+        )
+        .scene("relax") { $0.scene = .relax }
+        .scene("cinema") { $0.stepChaos(); $0.stepChaos(); $0.scene = .cinema }
+        .scene("night") { $0.stepChaos(); $0.stepChaos(); $0.stepChaos(); $0.scene = .night }
+    }
 
-try RuneApp.run(spec)
+    public static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}
