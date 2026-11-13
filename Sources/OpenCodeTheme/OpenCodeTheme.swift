@@ -116,6 +116,24 @@ public enum OpenCodeIcons {
 
 /// OpenCode's design language as a Rune / RuneKit theme (`themes/opencode`).
 public enum OpenCodeTheme {
+    /// The upstream theme as JSON (`themes/opencode/assets/theme.json`).
+    public static let themeJSON: String = OpenCodeAssets.themeJSON
+
+    /// Embedded Inter (variable) and IBM Plex Mono font data (`themes/opencode/assets/fonts/*.ttf`).
+    public static let fonts: [Data] = OpenCodeAssets.fonts
+
+    /// OpenCode's kit glyph overrides (`themes/opencode/src/lib.rs` `GLYPHS`).
+    public static let glyphs: Glyphs = {
+        var g = Glyphs.default
+        g.copy = OpenCodeIcons.copy
+        g.search = OpenCodeIcons.magnifyingGlass
+        g.circleX = OpenCodeIcons.circleX
+        g.triangleDown = OpenCodeIcons.fillTriangleDown
+        g.clear = OpenCodeIcons.xmarkSmall
+        g.close = OpenCodeIcons.close
+        return g
+    }()
+
     /// Font families (`sans`: Inter, `mono`: IBM Plex Mono).
     public static let families: (sans: String, mono: String) = ("Inter", "IBM Plex Mono")
 
@@ -198,7 +216,11 @@ public enum OpenCodeTheme {
     public static func scale(_ name: String, dark: Bool, step: Int) -> Color {
         precondition((1...12).contains(step), "Color scale steps run 1 to 12, got \(step)")
         let mode = dark ? "dark" : "light"
-        return theme(dark: dark)["\(name)-\(mode)-\(step)"] ?? .transparent
+        let key = "\(name)-\(mode)-\(step)"
+        guard let color = theme(dark: dark)[key] else {
+            preconditionFailure("theme has no colour \(key)")
+        }
+        return color
     }
 
     /// One step (`1...12`) of a strongly-typed `OpenCodeColorScale`.
@@ -243,44 +265,9 @@ public enum OpenCodeTheme {
         }
     }
 
-    /// Parses CSS `box-shadow` comma-separated layers into `[Rune.Shadow]`.
+    /// Parses CSS `box-shadow` comma-separated layers into `[Rune.Shadow]` using `KitCSS.boxShadows`.
     public static func parseBoxShadows(_ css: String, solve: (Color) -> Color = { $0 }) -> [Shadow] {
-        let layers = splitShadowLayers(css)
-        var out: [Shadow] = []
-        for layer in layers {
-            let trimmed = layer.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed == "none" { continue }
-
-            var inset = false
-            var color: Color? = nil
-            var lengths: [Float] = []
-
-            for token in tokenizeShadowLayer(trimmed) {
-                let lower = token.lowercased()
-                if lower == "inset" {
-                    inset = true
-                } else if let parsedColor = parseCSSColor(token) {
-                    color = solve(parsedColor)
-                } else if let px = parseCSSLength(token) {
-                    lengths.append(px)
-                }
-            }
-
-            guard lengths.count >= 2 else { continue }
-            let x = lengths[0]
-            let y = lengths[1]
-            let blur = lengths.count >= 3 ? lengths[2] : 0
-            let spread = lengths.count >= 4 ? lengths[3] : 0
-            out.append(Shadow(
-                x: x,
-                y: y,
-                blur: blur,
-                spread: spread,
-                color: color ?? solve(Color.black.alpha(0.18)),
-                inset: inset
-            ))
-        }
-        return out
+        KitCSS.boxShadows(css, colorTransform: solve)
     }
 
     // MARK: - Styled El Helpers
@@ -505,76 +492,9 @@ public enum OpenCodeTheme {
         k.motion.disclosure = Spring(duration: 0.3, bounce: 0.0)
 
         k.blendOver = blend
+        k.glyph = glyphs
         k.usePaletteRing = false
         k.invalidText = true
         return k
-    }
-
-    private static func splitShadowLayers(_ css: String) -> [String] {
-        var result: [String] = []
-        var current = ""
-        var depth = 0
-        for ch in css {
-            if ch == "(" { depth += 1 }
-            else if ch == ")" { depth = max(0, depth - 1) }
-            if ch == "," && depth == 0 {
-                result.append(current)
-                current = ""
-            } else {
-                current.append(ch)
-            }
-        }
-        if !current.isEmpty { result.append(current) }
-        return result
-    }
-
-    private static func tokenizeShadowLayer(_ layer: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        var depth = 0
-        for ch in layer {
-            if ch == "(" { depth += 1 }
-            else if ch == ")" { depth = max(0, depth - 1) }
-            if ch.isWhitespace && depth == 0 {
-                if !current.isEmpty {
-                    tokens.append(current)
-                    current = ""
-                }
-            } else {
-                current.append(ch)
-            }
-        }
-        if !current.isEmpty { tokens.append(current) }
-        return tokens
-    }
-
-    private static func parseCSSLength(_ token: String) -> Float? {
-        let lower = token.lowercased()
-        if lower == "0" { return 0 }
-        if lower.hasSuffix("px") {
-            return Float(lower.dropLast(2))
-        }
-        return Float(lower)
-    }
-
-    private static func parseCSSColor(_ token: String) -> Color? {
-        if token.hasPrefix("#") {
-            return Color.hex(token)
-        }
-        let lower = token.lowercased()
-        if lower.hasPrefix("rgba(") && lower.hasSuffix(")") {
-            let inner = lower.dropFirst(5).dropLast()
-            let parts = inner.split(separator: ",").map { Float($0.trimmingCharacters(in: .whitespaces)) }
-            if parts.count == 4, let r = parts[0], let g = parts[1], let b = parts[2], let a = parts[3] {
-                return Color(r: r / 255.0, g: g / 255.0, b: b / 255.0, a: a)
-            }
-        } else if lower.hasPrefix("rgb(") && lower.hasSuffix(")") {
-            let inner = lower.dropFirst(4).dropLast()
-            let parts = inner.split(separator: ",").map { Float($0.trimmingCharacters(in: .whitespaces)) }
-            if parts.count == 3, let r = parts[0], let g = parts[1], let b = parts[2] {
-                return Color(r: r / 255.0, g: g / 255.0, b: b / 255.0, a: 1.0)
-            }
-        }
-        return nil
     }
 }

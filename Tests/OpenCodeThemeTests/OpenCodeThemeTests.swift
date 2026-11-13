@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 import Rune
 import RuneKit
@@ -51,6 +52,10 @@ struct OpenCodeThemeTests {
                 #expect(linear.c.hover == authored.srgbEquivalent(over: linear.c.bgBase))
                 #expect(linear.c.hover.a != authored.a)
             }
+            if !dark {
+                let alphas = srgb.elevation.floating.prefix(3).map { UInt8(($0.color.a * 255.0).rounded()) }
+                #expect(alphas == [0x0A, 0x14, 0x1F])
+            }
         }
     }
 
@@ -90,5 +95,42 @@ struct OpenCodeThemeTests {
         #expect(badge.children.count == 1)
         #expect(div.role == .separator)
         #expect(mark.background == OpenCodeTheme.brand(dark: true))
+    }
+
+    @Test func bundledThemeJSONFontsAndKitGlyphsMatchUpstream() throws {
+        let jsonData = try #require(OpenCodeTheme.themeJSON.data(using: .utf8))
+        let parsed = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
+        #expect(parsed?["light"] != nil)
+        #expect(parsed?["dark"] != nil)
+        #expect(parsed?["numbers"] != nil)
+
+        #expect(OpenCodeTheme.fonts.count == 3)
+        #expect(OpenCodeTheme.fonts.map(\.count) == [874_708, 155_940, 156_996])
+        for font in OpenCodeTheme.fonts {
+            #expect(font.prefix(4) == Data([0x00, 0x01, 0x00, 0x00]))
+        }
+
+        for dark in [false, true] {
+            let k = OpenCodeTheme.kit(dark: dark)
+            #expect(k.glyph == OpenCodeTheme.glyphs)
+            #expect(k.glyph.copy == OpenCodeIcons.copy)
+            #expect(k.glyph.search == OpenCodeIcons.magnifyingGlass)
+            #expect(k.glyph.circleX == OpenCodeIcons.circleX)
+            #expect(k.glyph.triangleDown == OpenCodeIcons.fillTriangleDown)
+            #expect(k.glyph.clear == OpenCodeIcons.xmarkSmall)
+            #expect(k.glyph.close == OpenCodeIcons.close)
+        }
+    }
+
+    @Test func emberAndScaleRejectInvalidInputs() async {
+        await #expect(processExitsWith: .failure) {
+            _ = OpenCodeTheme.ember(dark: true, step: 0)
+        }
+        await #expect(processExitsWith: .failure) {
+            _ = OpenCodeTheme.ember(dark: false, step: 13)
+        }
+        await #expect(processExitsWith: .failure) {
+            _ = OpenCodeTheme.scale("unknown", dark: true, step: 5)
+        }
     }
 }
