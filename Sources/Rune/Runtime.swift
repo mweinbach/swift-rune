@@ -6212,6 +6212,18 @@ public final class Runtime<State> {
         _ = refreshHover(at: now, isPointerEvent: true)
     }
 
+    private func hasHoverVisualInChain(_ path: String?) -> Bool {
+        var idxOpt = path.flatMap { nodeByPath[$0] }
+        while let idx = idxOpt {
+            let el = flatNodes[idx].el
+            if el.hoverBg != nil || el.isHoverGroup || el.isHoverAlone || el.hoverGroupShare != nil {
+                return true
+            }
+            idxOpt = flatNodes[idx].parentIndex
+        }
+        return false
+    }
+
     @discardableResult
     private func refreshHover(at now: Double, isPointerEvent: Bool) -> Bool {
         let pos = pointerPosition
@@ -6274,7 +6286,7 @@ public final class Runtime<State> {
                         dirtyCommit(at: now)
                         changed = true
                     }
-                } else {
+                } else if linkChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
                     dirtyCommit(at: now)
                     changed = true
                 }
@@ -7675,6 +7687,7 @@ public final class Runtime<State> {
         }
         if let srgb = tx.srgbBlendRequest, srgb != srgbBlend {
             srgbBlend = srgb
+            pendingColorMotionSpring = pendingColorMotionSpring ?? Spring.none
             dirtyCommit(at: now)
         }
         if let smoothing = tx.fontSmoothingRequest, smoothing != fontSmoothing {
@@ -8035,6 +8048,7 @@ public final class Runtime<State> {
     public func setSrgbBlend(_ enabled: Bool, at now: Double? = nil) {
         guard srgbBlend != enabled else { return }
         srgbBlend = enabled
+        pendingColorMotionSpring = pendingColorMotionSpring ?? Spring.none
         dirtyCommit(at: now ?? currentTime)
     }
 
