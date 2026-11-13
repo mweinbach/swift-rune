@@ -110,31 +110,57 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
         self.key = ChordTable.key(from: chordKey, hasPrimary: hasPrimary)
     }
 
-    /// Strictly parses a chord string (`"mod+shift+t"`, `"cmd+s"`, `"super+space"`), throwing `ChordError` on invalid input.
+    /// Strictly parses a chord string (`"mod+shift+t"`, `"cmd+s"`, `"mod++"`, `"super+space"`), throwing `ChordError` on invalid input.
     public static func parse(_ spec: String) throws -> Chord {
         let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw ChordError.empty }
-        if trimmed.hasSuffix("+") { throw ChordError.trailingPlus }
-        let parts = trimmed.split(separator: "+", omittingEmptySubsequences: false).map {
-            String($0).trimmingCharacters(in: .whitespaces)
+
+        let modifierTokens: [String]
+        let keyToken: String
+        if trimmed == "+" {
+            modifierTokens = []
+            keyToken = "+"
+        } else if trimmed.hasSuffix("+") {
+            let beforeFinalPlus = trimmed.dropLast().trimmingCharacters(in: .whitespaces)
+            guard beforeFinalPlus.hasSuffix("+") else {
+                throw ChordError.trailingPlus
+            }
+            let modsPart = String(beforeFinalPlus.dropLast())
+            if modsPart.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw ChordError.unknownModifier("")
+            }
+            modifierTokens = modsPart.split(separator: "+", omittingEmptySubsequences: false).map {
+                String($0).trimmingCharacters(in: .whitespaces)
+            }
+            keyToken = "+"
+        } else {
+            let parts = trimmed.split(separator: "+", omittingEmptySubsequences: false).map {
+                String($0).trimmingCharacters(in: .whitespaces)
+            }
+            guard let last = parts.last, !last.isEmpty else { throw ChordError.noKey }
+            modifierTokens = Array(parts.dropLast())
+            keyToken = last
         }
-        guard let last = parts.last, !last.isEmpty else { throw ChordError.noKey }
 
         var bits: UInt8 = 0
-        for p in parts.dropLast() {
+        for p in modifierTokens {
             guard !p.isEmpty else { throw ChordError.unknownModifier("") }
             guard let cm = ChordTable.modifierNamed(p) else {
                 throw ChordError.unknownModifier(p)
             }
+            guard (bits & cm.bit) == 0 else {
+                throw ChordError.duplicateModifier(p)
+            }
             bits |= cm.bit
         }
 
-        guard var parsedChordKey = ChordTable.chordKey(named: last) else {
-            throw ChordError.unknownKey(last)
+        guard var parsedChordKey = ChordTable.chordKey(named: keyToken) else {
+            throw ChordError.unknownKey(keyToken)
         }
-        if case .char(let ch) = parsedChordKey, (bits & ChordBits.shift) != 0,
-           let unshifted = ChordTable.usUnshifted(ch) {
-            parsedChordKey = .char(unshifted)
+        // Per upstream chord.rs:135-136: only '{' and '}' fold unconditionally to Shift + '[' / ']'.
+        if case .char(let ch) = parsedChordKey, ch == "{" || ch == "}" {
+            parsedChordKey = (ch == "{") ? .char("[") : .char("]")
+            bits |= ChordBits.shift
         }
 
         var modsList: [ChordMod] = []
@@ -158,9 +184,23 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
     public func matches(_ ev: KeyEvent, on platform: KeyPlatform) -> Bool {
         let want = ChordBits.fold(chordModBits, platform: platform)
         let got = ChordBits.held(ev.mods, platform: platform)
-        guard want == got else { return false }
         guard let gotKey = ChordTable.chordKey(from: ev.key) else { return false }
-        return gotKey == chordKey
+        if want == got && gotKey == chordKey {
+            return true
+        }
+        // Fallback 1 (chord.rs:214): Shift+[ / Shift+{ — event carries Shift and typed a US shifted char.
+        if want == got, ev.mods.shift, case .char(let typed) = gotKey,
+           let unshifted = ChordTable.usUnshifted(typed), .char(unshifted) == chordKey {
+            return true
+        }
+        // Fallback 2 (chord.rs:219): OS delivered Shift alongside non-alphanumeric shifted char (e.g. mod+plus vs Shift+=).
+        if (want | ChordBits.shift) == got,
+           case .char(let ch) = chordKey,
+           !ch.isLetter, !ch.isNumber,
+           gotKey == .char(ch) {
+            return true
+        }
+        return false
     }
 
     public func sameKeys(_ other: Chord, on platform: KeyPlatform = .current) -> Bool {
@@ -361,6 +401,7 @@ public struct TextEdit: Sendable, Equatable {
                 redoStack.removeAll()
                 marks.removeAll()
                 preedit = nil
+                preeditClauses.removeAll()
             }
         }
     }
@@ -368,7 +409,15 @@ public struct TextEdit: Sendable, Equatable {
     public var spellcheckEnabled: Bool = false
     public var marks: [TextMark] = []
     /// Optional open IME composition `(preeditText, cursorRangeInBytes)`.
-    public var preedit: (text: String, cursor: Range<Int>?)? = nil
+    public var preedit: (text: String, cursor: Range<Int>?)? = nil {
+        didSet {
+            if preedit == nil && !preeditClauses.isEmpty {
+                preeditClauses.removeAll()
+            }
+        }
+    }
+    /// Platform-supplied IME clauses for the open preedit composition (`rune::edit::Clause`).
+    public var preeditClauses: [ImeClause] = []
     /// Set when the last key press in `handleKey` requested blurring focus (e.g. non-composing Escape).
     public private(set) var didRequestBlur: Bool = false
 
@@ -384,7 +433,8 @@ public struct TextEdit: Sendable, Equatable {
         lhs.isRevealed == rhs.isRevealed &&
         lhs.marks == rhs.marks &&
         lhs.preedit?.text == rhs.preedit?.text &&
-        lhs.preedit?.cursor == rhs.preedit?.cursor
+        lhs.preedit?.cursor == rhs.preedit?.cursor &&
+        lhs.preeditClauses == rhs.preeditClauses
     }
 
     public init(_ initial: String = "", multiline: Bool = false) {
@@ -628,31 +678,132 @@ public struct TextEdit: Sendable, Equatable {
         anchor = next.anchor
         marks = next.marks
         preedit = nil
+        preeditClauses.removeAll()
         return true
     }
 
     // MARK: - IME Preedit
 
-    public mutating func setPreedit(_ preeditText: String, cursor cursorRange: Range<Int>? = nil) {
+    public mutating func setPreedit(
+        _ preeditText: String,
+        cursor cursorRange: Range<Int>? = nil,
+        clauses: [ImeClause] = []
+    ) {
         guard !isSecure else {
             preedit = nil
+            preeditClauses.removeAll()
             return
         }
         if preeditText.isEmpty {
             preedit = nil
+            preeditClauses.removeAll()
         } else {
-            preedit = (preeditText, cursorRange)
+            let validUTF8 = Self.utf8ScalarBoundarySet(in: preeditText)
+            let clampedCursor = cursorRange.map { r in
+                let lo = min(max(0, r.lowerBound), preeditText.utf8.count)
+                let hi = min(max(lo, r.upperBound), preeditText.utf8.count)
+                return lo..<hi
+            }
+            let fits: (ImeClause) -> Bool = { c in
+                c.utf8Range.lowerBound < c.utf8Range.upperBound &&
+                c.utf8Range.upperBound <= preeditText.utf8.count &&
+                validUTF8.contains(c.utf8Range.lowerBound) &&
+                validUTF8.contains(c.utf8Range.upperBound)
+            }
+            preedit = (preeditText, clampedCursor)
+            preeditClauses = clauses.allSatisfy(fits) ? clauses : []
         }
     }
 
     public mutating func commitPreedit(_ committed: String) {
         preedit = nil
+        preeditClauses.removeAll()
         guard !isSecure else { return }
         insert(committed)
     }
 
     public mutating func cancelPreedit() {
         preedit = nil
+        preeditClauses.removeAll()
+    }
+
+    /// Commits any open preedit text if present (`Event::Finish` in `edit/ime.rs`), returning whether committed.
+    @discardableResult
+    public mutating func finishPreedit() -> Bool {
+        guard let active = preedit, !active.text.isEmpty else {
+            preedit = nil
+            preeditClauses.removeAll()
+            return false
+        }
+        let committed = active.text
+        commitPreedit(committed)
+        return true
+    }
+
+    /// Returns effective IME clauses for the active preedit (`Composition::clauses` in `edit/ime.rs`).
+    public func effectivePreeditClauses() -> [ImeClause] {
+        guard let active = preedit, !active.text.isEmpty else { return [] }
+        if !preeditClauses.isEmpty { return preeditClauses }
+        let len = active.text.utf8.count
+        if let c = active.cursor, c.lowerBound < c.upperBound, c.upperBound <= len {
+            return [
+                ImeClause(utf8Range: 0..<c.lowerBound, isTarget: false),
+                ImeClause(utf8Range: c.lowerBound..<c.upperBound, isTarget: true),
+                ImeClause(utf8Range: c.upperBound..<len, isTarget: false),
+            ].filter { !$0.utf8Range.isEmpty }
+        }
+        return [ImeClause(utf8Range: 0..<len, isTarget: false)]
+    }
+
+    /// Publishes surrounding paragraph context (at most `maxContextBytes` per side) for IME reconversion.
+    /// Always returns `nil` when `isSecure == true`.
+    public func imeTextSnapshot(maxContextBytes: Int = 1024) -> ImeText? {
+        guard !isSecure else { return nil }
+        return ImeUTF16Bridge.imeTextSlice(
+            text: text,
+            selectionUTF8: selectedUTF8Range,
+            maxContextBytes: maxContextBytes
+        )
+    }
+
+    /// Applies an OS `ImeEvent` (`rune::edit::ime::step`).
+    @discardableResult
+    public mutating func applyIme(_ event: ImeEvent) -> EditOutcome {
+        switch event {
+        case let .preedit(str, cursorUTF8, clauses):
+            setPreedit(str, cursor: cursorUTF8, clauses: clauses)
+            return .navigation
+        case let .commit(str):
+            if isSecure {
+                preedit = nil
+                preeditClauses.removeAll()
+                insert(str)
+                return .modified
+            }
+            let prev = text
+            commitPreedit(str)
+            return text != prev ? .modified : .navigation
+        case let .select(range):
+            guard preedit == nil, !isSecure else { return .ignored }
+            let start = snapToGraphemeBoundary(range.lowerBound)
+            let end = snapToGraphemeBoundary(range.upperBound)
+            anchor = start
+            cursor = end
+            return .navigation
+        case .enabled, .disabled:
+            return .ignored
+        }
+    }
+
+    private static func utf8ScalarBoundarySet(in s: String) -> Set<Int> {
+        var set = Set<Int>()
+        var offset = 0
+        set.insert(0)
+        for scalar in s.unicodeScalars {
+            offset += scalar.utf8.count
+            set.insert(offset)
+        }
+        return set
     }
 
     public enum EditOutcome: Sendable, Equatable {

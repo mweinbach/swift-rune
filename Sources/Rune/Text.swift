@@ -165,16 +165,33 @@ public struct TextSpan: Sendable, Hashable {
     }
 }
 
-/// Vector SVG path icon definition (`M/L/H/V/C/Q/Z` in a square `viewBox`, typically `16` or `24`).
+/// Vector SVG path icon definition (`M/L/H/V/C/Q/Z` or SVG body in a square `viewBox`, typically `16` or `24`).
 public struct SVGIcon: Sendable, Hashable {
     public var viewBox: Float
     public var paths: [String]
     public var strokeWidth: Float?
+    /// Optional raw SVG body markup (multi-color paths/shapes/gradients, `currentColor`, groups, transforms).
+    public var body: String?
 
-    public init(viewBox: Float = 24.0, paths: [String], strokeWidth: Float? = 2.0) {
+    public init(viewBox: Float = 24.0, paths: [String], strokeWidth: Float? = 2.0, body: String? = nil) {
         self.viewBox = max(1, viewBox)
         self.paths = paths
         self.strokeWidth = strokeWidth
+        self.body = body
+    }
+
+    public init(viewBox: Float = 24.0, body: String) {
+        self.viewBox = max(1, viewBox)
+        self.paths = []
+        self.strokeWidth = nil
+        self.body = body
+    }
+
+    /// True when the icon's SVG body declares its own colors (`fill="#..."`, `stroke="#..."`, `stop-color="#..."`).
+    public var isColorIcon: Bool {
+        guard let body else { return false }
+        return body.contains("fill=\"#") || body.contains("stroke=\"#") || body.contains("stop-color=\"#") ||
+            body.contains("fill='#") || body.contains("stroke='#") || body.contains("stop-color='#")
     }
 }
 
@@ -404,9 +421,22 @@ public final class GlyphAtlas: @unchecked Sendable {
                     ctx.fillPath()
                 }
             }
+            if icon.paths.isEmpty, let body = icon.body {
+                SVGIconRenderer.drawMonochromeBody(body, in: ctx)
+            }
         }
         #else
-        let bitmap = PortableSVGRasterizer.rasterize(icon, pixelSize: px)
+        let resolvedIcon: SVGIcon
+        if icon.paths.isEmpty, let body = icon.body {
+            resolvedIcon = SVGIcon(
+                viewBox: icon.viewBox,
+                paths: SVGIconRenderer.extractPathStrings(fromBody: body),
+                strokeWidth: icon.strokeWidth
+            )
+        } else {
+            resolvedIcon = icon
+        }
+        let bitmap = PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px)
         #endif
 
         lock.lock()
@@ -498,7 +528,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
 
     #if canImport(CoreGraphics)
-    private static func parseSVGPath(_ d: String) -> CGPath {
+    internal static func parseSVGPath(_ d: String) -> CGPath {
         let path = CGMutablePath()
         var tokens: [String] = []
         var cur = ""
@@ -813,6 +843,10 @@ public final class TextSystem: @unchecked Sendable {
 
     private let lock = NSLock()
     public let glyphAtlas: GlyphAtlas
+    public let colorIcons = ColorIconRasterizer()
+    private var sansFamilyOverride: String = ""
+    private var monoFamilyOverride: String = ""
+    private var lastObservedFontEpoch: UInt64 = fontEpoch()
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
@@ -820,11 +854,97 @@ public final class TextSystem: @unchecked Sendable {
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
         self.glyphAtlas = glyphAtlas
+        let (sans, mono) = FontFamiliesRegistry.currentFamilies()
+        self.sansFamilyOverride = sans
+        self.monoFamilyOverride = mono
+    }
+
+    /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
+    public var currentFontEpoch: UInt64 {
+        syncGlobalFamiliesIfNeeded()
+        return lastObservedFontEpoch
+    }
+
+    /// CSS font family lists backing `.systemUI` (`sans`) and `.monospace` (`mono`).
+    public func families() -> (sans: String, mono: String) {
+        syncGlobalFamiliesIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        return (sansFamilyOverride, monoFamilyOverride)
+    }
+
+    /// Updates `sans` and `mono` family slots (`TextSystem::set_families`). Drops cached shapes/fonts when changed.
+    @discardableResult
+    public func setFamilies(sans: String, mono: String) -> Bool {
+        lock.lock()
+        let unchanged = (sansFamilyOverride == sans && monoFamilyOverride == mono)
+        if unchanged {
+            lock.unlock()
+            return false
+        }
+        sansFamilyOverride = sans
+        monoFamilyOverride = mono
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        fontCache.removeAll(keepingCapacity: true)
+        #endif
+        measureCache.removeAll(keepingCapacity: true)
+        lock.unlock()
+        FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
+        lastObservedFontEpoch = fontEpoch()
+        return true
+    }
+
+    private func syncGlobalFamiliesIfNeeded() {
+        let globalEpoch = fontEpoch()
+        lock.lock()
+        if lastObservedFontEpoch != globalEpoch {
+            let (sans, mono) = FontFamiliesRegistry.currentFamilies()
+            sansFamilyOverride = sans
+            monoFamilyOverride = mono
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            fontCache.removeAll(keepingCapacity: true)
+            #endif
+            measureCache.removeAll(keepingCapacity: true)
+            lastObservedFontEpoch = globalEpoch
+        }
+        lock.unlock()
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
 
+    private static func coreTextWeight(for cssWeight: Float) -> CGFloat {
+        let stops: [(Float, CGFloat)] = [
+            (100, -0.80), (200, -0.60), (300, -0.40), (400, 0.0),
+            (500, 0.23), (600, 0.30), (700, 0.40), (800, 0.56), (900, 0.62),
+        ]
+        let clamped = min(max(cssWeight, 100), 900)
+        for i in 0..<(stops.count - 1) {
+            let (w0, c0) = stops[i]
+            let (w1, c1) = stops[i + 1]
+            if clamped <= w1 {
+                let t = CGFloat((clamped - w0) / (w1 - w0))
+                return c0 + (c1 - c0) * t
+            }
+        }
+        return 0.62
+    }
+
+    private static func firstMatchingFont(in cssList: String, sizePx: CGFloat) -> CTFont? {
+        for raw in cssList.split(separator: ",") {
+            let name = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'")))
+            guard !name.isEmpty else { continue }
+            let font = CTFontCreateWithName(name as CFString, sizePx, nil)
+            let resolvedName = CTFontCopyFamilyName(font) as String
+            if resolvedName.caseInsensitiveCompare(name) == .orderedSame ||
+                (CTFontCopyPostScriptName(font) as String).caseInsensitiveCompare(name) == .orderedSame {
+                return font
+            }
+        }
+        return nil
+    }
+
     private func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
+        syncGlobalFamiliesIfNeeded()
         let sizePx = style.size * pixelScale
         let key = FontKey(
             family: style.family,
@@ -837,10 +957,11 @@ public final class TextSystem: @unchecked Sendable {
             lock.unlock()
             return cached
         }
+        let sansList = sansFamilyOverride
+        let monoList = monoFamilyOverride
         lock.unlock()
 
-        // Map CSS weight [100...900] to CoreText weight trait [-0.8...+0.6]
-        let ctWeight: CGFloat = CGFloat((style.weight - 400.0) / 500.0 * 0.6)
+        let ctWeight = Self.coreTextWeight(for: style.weight)
         var traits: [CFString: Any] = [
             kCTFontWeightTrait: ctWeight,
         ]
@@ -851,10 +972,12 @@ public final class TextSystem: @unchecked Sendable {
         let baseFont: CTFont
         switch style.family {
         case .systemUI:
-            baseFont = CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
+            baseFont = (!sansList.isEmpty ? Self.firstMatchingFont(in: sansList, sizePx: CGFloat(sizePx)) : nil)
+                ?? CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("SFProText-Regular" as CFString, CGFloat(sizePx), nil)
         case .monospace:
-            baseFont = CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
+            baseFont = (!monoList.isEmpty ? Self.firstMatchingFont(in: monoList, sizePx: CGFloat(sizePx)) : nil)
+                ?? CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("Menlo-Regular" as CFString, CGFloat(sizePx), nil)
         case .custom(let name):
             baseFont = CTFontCreateWithName(name as CFString, CGFloat(sizePx), nil)

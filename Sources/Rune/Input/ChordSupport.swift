@@ -99,6 +99,7 @@ public enum ChordError: Error, Sendable, Equatable {
     case empty
     case trailingPlus
     case noKey
+    case duplicateModifier(String)
     case unknownModifier(String)
     case unknownKey(String)
 }

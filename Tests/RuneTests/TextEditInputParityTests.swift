@@ -203,4 +203,32 @@ struct TextEditInputParityTests {
         #expect(entry.uv.z > entry.uv.x)
         #expect(entry.uv.w > entry.uv.y)
     }
+
+    @Test("Chord parses trailing +, rejects duplicates, folds braces, and matches shifted punctuation fallbacks")
+    func chordEdgeCasesAndFallbacks() throws {
+        // Trailing '+' literal key forms
+        #expect(try Chord.parse("+").chordKey == .char("+"))
+        #expect(try Chord.parse("mod++").matches(KeyEvent(key: .text("+"), mods: Mods(cmd: true)), on: .mac))
+        #expect(try Chord.parse("mod + +").matches(KeyEvent(key: .text("+"), mods: Mods(ctrl: true)), on: .linux))
+        #expect(throws: ChordError.trailingPlus) {
+            _ = try Chord.parse("mod+")
+        }
+
+        // Duplicate modifiers rejected
+        #expect(throws: ChordError.duplicateModifier("shift")) {
+            _ = try Chord.parse("shift+shift+a")
+        }
+
+        // Only '{' and '}' fold unconditionally; '!' stays '!'
+        let brace = try Chord.parse("mod+{")
+        #expect(brace.chordKey == .char("["))
+        #expect(brace.chordModBits == (ChordMod.primary.bit | ChordMod.shift.bit))
+        #expect(try Chord.parse("mod+!").chordKey == .char("!"))
+
+        // Fallbacks: "mod+shift+[" matches Shift+'{', and "mod+plus" matches Shift+'=' typing '+'
+        let shiftBracket = try Chord.parse("mod+shift+[")
+        #expect(shiftBracket.matches(KeyEvent(key: .text("{"), mods: Mods(shift: true, cmd: true, logo: true)), on: .mac))
+        let modPlus = try Chord.parse("mod+plus")
+        #expect(modPlus.matches(KeyEvent(key: .text("+"), mods: Mods(shift: true, cmd: true, logo: true)), on: .mac))
+    }
 }

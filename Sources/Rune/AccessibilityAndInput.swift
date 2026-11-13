@@ -831,6 +831,8 @@ public enum ShortcutError: Error, Sendable, Equatable {
     case invalidAccelerator(String)
     case unknownId(String)
     case unmodifiedDisallowed
+    case alreadyInUse(owner: String?)
+    case rejectedByOS(String)
 }
 
 /// Outcome of dispatching a `KeyEvent` through `ShortcutRegistry`.
@@ -852,7 +854,7 @@ public final class ShortcutRegistry: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [Entry] = []
-    private var pendingChords: [Chord] = []
+    private var pendingEvents: [KeyEvent] = []
     public var allowUnmodifiedGlobal: Bool = false
 
     public init() {}
@@ -916,7 +918,7 @@ public final class ShortcutRegistry: @unchecked Sendable {
     public func resetPendingSequence() {
         lock.lock()
         defer { lock.unlock() }
-        pendingChords.removeAll()
+        pendingEvents.removeAll()
     }
 
     /// Dispatches `event` against active scopes (in priority order), advancing or completing multi-chord sequences.
@@ -924,8 +926,13 @@ public final class ShortcutRegistry: @unchecked Sendable {
         _ event: KeyEvent,
         activeScopes: [ShortcutScope] = [.global]
     ) -> ShortcutDispatchResult {
+        // Standalone modifier key press/release never advances or cancels a multi-chord sequence.
+        if case .modifier = event.key {
+            return .unhandled
+        }
+
         lock.lock()
-        let candidateChords = pendingChords + [Chord(mods: event.mods, key: event.key)]
+        let candidateEvents = pendingEvents + [event]
 
         var matchedEntry: Entry? = nil
         var hasPrefixMatch = false
@@ -933,13 +940,13 @@ public final class ShortcutRegistry: @unchecked Sendable {
         for scope in activeScopes {
             for entry in entries where entry.scope == scope {
                 let target = entry.sequence.chords
-                if target.count == candidateChords.count &&
-                    zip(target, candidateChords).allSatisfy({ $0.matches(KeyEvent(key: $1.key, mods: $1.mods)) }) {
+                if target.count == candidateEvents.count &&
+                    zip(target, candidateEvents).allSatisfy({ $0.matches($1) }) {
                     matchedEntry = entry
                     break
                 }
-                if target.count > candidateChords.count &&
-                    zip(target.prefix(candidateChords.count), candidateChords).allSatisfy({ $0.matches(KeyEvent(key: $1.key, mods: $1.mods)) }) {
+                if target.count > candidateEvents.count &&
+                    zip(target.prefix(candidateEvents.count), candidateEvents).allSatisfy({ $0.matches($1) }) {
                     hasPrefixMatch = true
                 }
             }
@@ -947,19 +954,19 @@ public final class ShortcutRegistry: @unchecked Sendable {
         }
 
         if let matched = matchedEntry {
-            pendingChords.removeAll()
+            pendingEvents.removeAll()
             lock.unlock()
             matched.handler()
             return .handled(id: matched.id)
         }
 
         if hasPrefixMatch {
-            pendingChords = candidateChords
+            pendingEvents = candidateEvents
             lock.unlock()
             return .pendingChord
         }
 
-        pendingChords.removeAll()
+        pendingEvents.removeAll()
         lock.unlock()
         return .unhandled
     }
