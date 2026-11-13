@@ -1221,6 +1221,7 @@ public final class Runtime<State> {
         var reads: [LayoutReadEntry]
         var virtualExpansion: VirtualExpansionContext
         var rootBackground: Color?
+        var rootHeight: Float
         var helpLook: HelpLook?
     }
 
@@ -1276,19 +1277,15 @@ public final class Runtime<State> {
         return (rotatedBoundsArray(scaledRect, turn: el.rotate), childInh)
     }
 
-    private func measurePass(
+    @inline(never)
+    private func runViewPass(
         at now: Double,
-        cut: Bool,
-        commitKind: TxCommit,
-        commitMotion: MotionSource?,
-        commitColorSpring: Spring?,
-        commitCut: Bool,
         focusedCaret: (keyPath: String, rect: [Float])?,
         allowZoomSettle: Bool,
-        memoNodes: [FlatNode]? = nil
-    ) -> MeasurePassResult? {
+        memoNodes: [FlatNode]?,
+        collector: LayoutReadCollector
+    ) -> (rootEl: El<State>, helpLook: HelpLook?)? {
         viewCallCount += 1
-        let collector = LayoutReadCollector(rects: layoutSeen.rects)
         var cx = Cx<State>(
             viewport: viewport,
             pixelScale: pixelScale,
@@ -1386,6 +1383,58 @@ public final class Runtime<State> {
                 return nil
             }
         }
+        return (rootEl, passHelpLook)
+    }
+
+    private func measurePass(
+        at now: Double,
+        cut: Bool,
+        commitKind: TxCommit,
+        commitMotion: MotionSource?,
+        commitColorSpring: Spring?,
+        commitCut: Bool,
+        prevMountedIds: Set<NodeId>,
+        focusedCaret: (keyPath: String, rect: [Float])?,
+        allowZoomSettle: Bool,
+        memoNodes: [FlatNode]? = nil
+    ) -> MeasurePassResult? {
+        let collector = LayoutReadCollector(rects: layoutSeen.rects)
+        guard let viewPass = runViewPass(
+            at: now,
+            focusedCaret: focusedCaret,
+            allowZoomSettle: allowZoomSettle,
+            memoNodes: memoNodes,
+            collector: collector
+        ) else {
+            return nil
+        }
+        return buildMeasureResult(
+            rootEl: viewPass.rootEl,
+            passHelpLook: viewPass.helpLook,
+            collector: collector,
+            at: now,
+            cut: cut,
+            commitKind: commitKind,
+            commitMotion: commitMotion,
+            commitColorSpring: commitColorSpring,
+            commitCut: commitCut,
+            prevMountedIds: prevMountedIds
+        )
+    }
+
+    @inline(never)
+    private func buildMeasureResult(
+        rootEl: El<State>,
+        passHelpLook: HelpLook?,
+        collector: LayoutReadCollector,
+        at now: Double,
+        cut: Bool,
+        commitKind: TxCommit,
+        commitMotion: MotionSource?,
+        commitColorSpring: Spring?,
+        commitCut: Bool,
+        prevMountedIds: Set<NodeId>
+    ) -> MeasurePassResult {
         let rootBg: Color? = rootEl.background.a >= 0.999 ? rootEl.background : nil
 
         let (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
@@ -1816,6 +1865,7 @@ public final class Runtime<State> {
             reads: collector.reads,
             virtualExpansion: virtualExpansion,
             rootBackground: rootBg,
+            rootHeight: solvedRoot.layout.localRect.height,
             helpLook: passHelpLook
         )
     }
@@ -1922,6 +1972,7 @@ public final class Runtime<State> {
             commitMotion: commitMotion,
             commitColorSpring: commitColorSpring,
             commitCut: commitCut,
+            prevMountedIds: prevMountedIds,
             focusedCaret: focusedCaret,
             allowZoomSettle: settlePass == 0
         ) else {
@@ -1946,6 +1997,7 @@ public final class Runtime<State> {
                     commitMotion: commitMotion,
                     commitColorSpring: commitColorSpring,
                     commitCut: commitCut,
+                    prevMountedIds: prevMountedIds,
                     focusedCaret: focusedCaret,
                     allowZoomSettle: false,
                     memoNodes: pass.nodes
@@ -1959,6 +2011,33 @@ public final class Runtime<State> {
             }
         }
 
+        applyMeasurePass(
+            &pass,
+            at: now,
+            cut: cut,
+            settlePass: settlePass,
+            commitKind: commitKind,
+            commitMotion: commitMotion,
+            commitColorSpring: commitColorSpring,
+            commitFollowEdge: commitFollowEdge,
+            commitCut: commitCut,
+            prevMountedIds: prevMountedIds
+        )
+    }
+
+    @inline(never)
+    private func applyMeasurePass(
+        _ pass: inout MeasurePassResult,
+        at now: Double,
+        cut: Bool,
+        settlePass: Int,
+        commitKind: TxCommit,
+        commitMotion: MotionSource?,
+        commitColorSpring: Spring?,
+        commitFollowEdge: Bool,
+        commitCut: Bool,
+        prevMountedIds: Set<NodeId>
+    ) {
         // Keep seen layout rects aligned with final pass keys
         var finalSeen: [String: [Float]?] = [:]
         if !pass.reads.isEmpty {
@@ -2298,7 +2377,7 @@ public final class Runtime<State> {
         syncRideTrailingFlags(pass.nodes, on: &scene)
         finalizeSelectionAfterCommit(at: now)
         if fitHeight {
-            let natH = max(1.0, ceil(solvedRoot.layout.localRect.height * cxSettings.zoomState.k * pixelScale) / pixelScale)
+            let natH = max(1.0, ceil(pass.rootHeight * cxSettings.zoomState.k * pixelScale) / pixelScale)
             if fitWindowState.ask(height: natH, current: viewport.y) {
                 let jump = cut || (viewCommitCount <= 1) || reducedMotion
                 if !jump && windowResting {
@@ -3256,12 +3335,12 @@ public final class Runtime<State> {
                 : nil
             let ownRaw = rawRectById[p.id] ?? p.rect
             let appliedDelta = (el.layoutAnim?.travel == .screen) ? inh.offsetDelta : inh.fullDelta
-            var rawRect = ownRaw.offsetBy(appliedDelta)
+            let rawRect = ownRaw.offsetBy(appliedDelta)
             var trailingMoved = false
             if el.isRideTrailing, let dw = inh.parentDrawnWidth, let tw = inh.parentTargetWidth {
                 let shift = dw - tw
                 if abs(shift) * pxScale > 1.0 / 32.0 {
-                    rawRect = rawRect.offsetBy(Vec2(shift, 0))
+                    // `SceneTrailing.swift` already applies the parent width delta to `p.rect`.
                     trailingMoved = inh.parentMoving
                 }
             }
