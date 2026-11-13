@@ -1090,11 +1090,13 @@ public struct SplitView<State> {
             .build(k)
             if sidebarPeekValue.isEnabled && cfg.state.isCollapsed {
                 let sbKp = cfg.keyPath
-                toggleBtn = toggleBtn.onHover { s, hovering, _ in
-                    if hovering {
-                        s[keyPath: sbKp].peek()
+                toggleBtn = toggleBtn
+                    .hoverDelays(sidebarPeekValue.toggleDelaySeconds, 0)
+                    .onHover { s, hovering, _ in
+                        if hovering {
+                            s[keyPath: sbKp].peek()
+                        }
                     }
-                }
             }
             return toggleBtn
         }
@@ -1181,18 +1183,41 @@ public struct SplitView<State> {
                 )
             } else if sidebarPeekValue.isEnabled {
                 let sbKeyPath = sidebarCfg.keyPath
-                let edgeTrigger: El<State> = el()
-                    .key("\(keyId)-peek-edge")
-                    .a11yHidden()
-                    .pin(top: sidebarPeekValue.belowY ?? titlebarInsetValue.top, bottom: 0, left: 0)
-                    .w(sidebarPeekValue.edgeWidth)
-                    .z(34)
-                    .onHover { s, hovering, _ in
-                        if hovering {
-                            s[keyPath: sbKeyPath].peek()
+                let edgeTop = sidebarPeekValue.belowY ?? max(titlebarInsetValue.top, frameInsetValue + Toolbar<State>.height)
+                if !pane.isPeeking {
+                    let edgeTrigger: El<State> = el()
+                        .key("\(keyId)-peek-edge")
+                        .a11yHidden()
+                        .pin(top: edgeTop, bottom: 0, left: 0)
+                        .w(sidebarPeekValue.edgeWidth)
+                        .z(34)
+                        .hoverDelays(sidebarPeekValue.edgeDelaySeconds, 0)
+                        .onHover { s, hovering, _ in
+                            if hovering {
+                                s[keyPath: sbKeyPath].peek()
+                            }
                         }
-                    }
-                rootRow = rootRow.child(edgeTrigger)
+                    rootRow = rootRow.child(edgeTrigger)
+                } else {
+                    let holdZone: El<State> = el()
+                        .key("\(keyId)-peek-hold")
+                        .a11yHidden()
+                        .pin(top: 0, bottom: 0, left: 0)
+                        .w(pane.width + sidebarPeekValue.holdMargin)
+                        .z(34)
+                        .hoverDelays(0, sidebarPeekValue.holdGraceSeconds)
+                        .onHover { s, hovering, _ in
+                            if !hovering {
+                                s[keyPath: sbKeyPath].endPeek()
+                            }
+                        }
+                        .onWindowFocus { s, focused, _ in
+                            if !focused {
+                                s[keyPath: sbKeyPath].endPeek()
+                            }
+                        }
+                    rootRow = rootRow.child(holdZone)
+                }
                 if pane.isPeeking {
                     let peekSurface: El<State> = el()
                         .key("\(keyId)-pane-surface")
@@ -1211,11 +1236,6 @@ public struct SplitView<State> {
                         .shadows(k.shadowLayers(k.elevation.overlay))
                         .z(35)
                         .clip(true)
-                        .onHover { s, hovering, _ in
-                            if !hovering {
-                                s[keyPath: sbKeyPath].endPeek()
-                            }
-                        }
                         .onKey { s, ev, _ in
                             if ev.key == .escape {
                                 s[keyPath: sbKeyPath].endPeek()

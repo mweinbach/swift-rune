@@ -553,7 +553,7 @@ extension Runtime {
         let h = node.el.handlers
         return node.el.hoverBg != nil || node.el.pressBg != nil ||
                node.el.isHoverGroup || node.el.isHoverAlone ||
-               h.onHover != nil || h.onClick != nil || h.onClickPress != nil ||
+               (!node.el.hasKitHoverDelays && h.onHover != nil) || h.onClick != nil || h.onClickPress != nil ||
                h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil ||
                (!node.el.textLinks.isEmpty && !node.el.isSecure && h.editLens == nil)
     }
@@ -681,7 +681,8 @@ extension Runtime {
             if let cur = hoveredPath, hoverLive(cur) == nil {
                 hoveredPath = nil
                 hoveredKey = nil
-                if let oldIdx = nodeByPath[cur], let cb = flatNodes[oldIdx].el.handlers.onHover {
+                if let oldIdx = nodeByPath[cur], !flatNodes[oldIdx].el.hasKitHoverDelays,
+                   let cb = flatNodes[oldIdx].el.handlers.onHover {
                     isDispatchingHover = true
                     var tx = makeTx(at: currentTime)
                     cb(&state, false, &tx)
@@ -706,12 +707,16 @@ extension Runtime {
                 hoveredPath = candidatePath
                 hoveredKey = candidateHit?.node.key
                 isDispatchingHover = true
-                if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
+                if let old = oldPath, let oldIdx = nodeByPath[old],
+                   !flatNodes[oldIdx].el.hasKitHoverDelays,
+                   let cb = flatNodes[oldIdx].el.handlers.onHover {
                     var tx = makeTx(at: currentTime)
                     cb(&state, false, &tx)
                     applyTx(tx, at: currentTime)
                 }
-                if let np = candidatePath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
+                if let np = candidatePath, let newIdx = nodeByPath[np],
+                   !flatNodes[newIdx].el.hasKitHoverDelays,
+                   let cb = flatNodes[newIdx].el.handlers.onHover {
                     var tx = makeTx(at: currentTime)
                     cb(&state, true, &tx)
                     applyTx(tx, at: currentTime)

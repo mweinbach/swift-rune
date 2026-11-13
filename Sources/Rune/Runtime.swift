@@ -193,7 +193,7 @@ public final class Runtime<State> {
         var nearestGroupHoverFrac: Float
     }
 
-    private struct DragSession {
+    internal struct DragSession {
         var path: String
         var key: String?
         var startWindow: Vec2
@@ -462,7 +462,7 @@ public final class Runtime<State> {
     private var lastClickTime: Double = -10.0
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
     internal var clickCount: Int = 0
-    private var activeDrag: DragSession? = nil
+    internal var activeDrag: DragSession? = nil
     internal var hasActivePointerDrag: Bool { activeDrag != nil || armedDragOut != nil }
 
     // Scroll state keyed by element path
@@ -569,6 +569,7 @@ public final class Runtime<State> {
     private var syncedEditFocusedPaths: Set<String> = []
     private var pendingTxFocusKey: String? = nil
     private var pendingTxBlurRequested: Bool = false
+    internal var kitHooks = KitRuntimeHooksState()
     internal var modalMemberPaths: Set<String> = []
     internal var activeModalPath: String? = nil
     private var viewHelpLook: HelpLook? = nil
@@ -922,6 +923,9 @@ public final class Runtime<State> {
         if let explicit = self.nextWakeDeadline, explicit >= now {
             best = best.map { min($0, explicit) } ?? explicit
         }
+        if let kitDue = kitNextWakeDeadline(after: now) {
+            best = best.map { min($0, kitDue) } ?? kitDue
+        }
         return best
     }
 
@@ -1001,6 +1005,8 @@ public final class Runtime<State> {
                 needsCommit = true
             }
         }
+        stepKitDragRepeatOnFrame(at: now)
+        stepKitHoverDelaysOnFrame(at: now)
         let growthMoving = advanceGrowthRows(at: now)
 
         // Release any `enterDelay` elements whose wait window has elapsed
@@ -1280,7 +1286,6 @@ public final class Runtime<State> {
         flatNodes.contains {
             $0.el.handlers.onAtBottom != nil
                 || $0.el.handlers.onFarFromBottom != nil
-                || $0.el.handlers.onScrollOffset != nil
         }
     }
 
@@ -2375,6 +2380,7 @@ public final class Runtime<State> {
             livePendingDirty = false
         }
 
+        let prevFlatNodesSnapshot = flatNodes
         flatNodes = pass.nodes
         nodeByPath = pass.byPath
         nodeById = pass.byId
@@ -2407,6 +2413,11 @@ public final class Runtime<State> {
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible
         )
+        if let prevPath = prevFocusedPath, prevPath != focusedPath {
+            let prevNode = prevFlatNodesSnapshot.first(where: { $0.path == prevPath })
+            handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now)
+        }
+        settleKitHoverDelays(at: pointerPosition, now: now)
         reconcilePlaygroundAfterCommit(at: now)
         lastCommitClock = now
         #if DEBUG
@@ -2794,6 +2805,7 @@ public final class Runtime<State> {
                 )
                 scrollOffsets[flatNodes[i].path] = clamped
                 flatNodes[i].scrollShift = clamped
+                dispatchScrollOffsetObserverIfChanged(for: flatNodes[i])
                 if flatNodes[i].el.scrollEdgeFadeWidth > 0 || flatNodes[i].el.scrollFadeStyle.end != nil {
                     scrollFadeInfo = computeScrollFadeSpec(for: flatNodes[i])
                 }
@@ -3188,6 +3200,12 @@ public final class Runtime<State> {
             nextIdx = tabOrderIndices().first
         }
 
+        if let pendingVis = kitHooks.pendingTxFocusVisible {
+            kitHooks.pendingTxFocusVisible = nil
+            if txFocusKey != nil {
+                focusVisible = pendingVis
+            }
+        }
         focusedPath = nextIdx.map { flatNodes[$0].path }
         focusedKey = nextIdx.flatMap { flatNodes[$0].key }
         if prevFocusedPath != focusedPath {
@@ -5442,7 +5460,8 @@ public final class Runtime<State> {
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
-            if let idx = nodeByPath[old], let cb = flatNodes[idx].el.handlers.onHover {
+            if let idx = nodeByPath[old], !flatNodes[idx].el.hasKitHoverDelays,
+               let cb = flatNodes[idx].el.handlers.onHover {
                 var tx = makeTx(at: now)
                 cb(&state, false, &tx)
                 applyTx(tx, at: now)
@@ -5492,13 +5511,15 @@ public final class Runtime<State> {
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
-            if let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
+            if let oldIdx = nodeByPath[old], !flatNodes[oldIdx].el.hasKitHoverDelays,
+               let cb = flatNodes[oldIdx].el.handlers.onHover {
                 var tx = makeTx(at: now)
                 cb(&state, false, &tx)
                 applyTx(tx, at: now)
             }
             dirtyCommit(at: now)
         }
+        settleKitHoverDelays(at: pointerPosition, now: now)
         syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
     }
 
@@ -5506,6 +5527,7 @@ public final class Runtime<State> {
         let moved = pos != pointerPosition
         if moved {
             releaseHoverHold()
+            resetKitHoverHoldOnPointerMove()
         }
         pointerPosition = pos
 
@@ -5566,7 +5588,8 @@ public final class Runtime<State> {
                     var tx = makeTx(at: now, button: drag.button)
                     onDrag(&state, d, &tx)
                     if !tx.askedMotion && !tx.liveOnlyRequested { tx.instant() }
-                    applyTx(tx, at: now, liveOnlyLabel: "onDrag")
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onDrag")
+                    armKitDragRepeatIfRequested(path: drag.path, windowPos: pos, mods: mods, button: drag.button, now: now)
                 }
             }
             return
@@ -5597,21 +5620,30 @@ public final class Runtime<State> {
                 hoveredPath = newPath
                 hoveredKey = newKey
                 isDispatchingHover = true
-                var hoverRequestedCommit = false
-                if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
+                var ranAnyHover = false
+                var hoverAllLiveOnly = true
+                if let old = oldPath, let oldIdx = nodeByPath[old],
+                   !flatNodes[oldIdx].el.hasKitHoverDelays,
+                   let cb = flatNodes[oldIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, false, &tx)
-                    if !tx.liveOnlyRequested { hoverRequestedCommit = true }
-                    applyTx(tx, at: now, liveOnlyLabel: "onHover")
+                    ranAnyHover = true
+                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                 }
-                if let np = newPath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
+                if let np = newPath, let newIdx = nodeByPath[np],
+                   !flatNodes[newIdx].el.hasKitHoverDelays,
+                   let cb = flatNodes[newIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, true, &tx)
-                    if !tx.liveOnlyRequested { hoverRequestedCommit = true }
-                    applyTx(tx, at: now, liveOnlyLabel: "onHover")
+                    ranAnyHover = true
+                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                 }
                 isDispatchingHover = false
-                if !(moveDispatched && moveAllLiveOnly && !hoverRequestedCommit) || linkChanged || helpTargetChanges(at: pos) {
+                let skipHoverCommit = ((ranAnyHover && hoverAllLiveOnly) || (moveDispatched && moveAllLiveOnly && !ranAnyHover))
+                    && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)
+                if !skipHoverCommit || linkChanged || helpTargetChanges(at: pos) {
                     suppressRevealFromHoverCommit = true
                     dirtyCommit(at: now)
                 }
@@ -5622,10 +5654,13 @@ public final class Runtime<State> {
         } else if helpTargetChanges(at: pos) {
             dirtyCommit(at: now)
         }
+        settleKitHoverDelays(at: pos, now: now)
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         releaseHoverHold()
+        cancelKitHoverAndRepeatOnPress()
+        kitHooks.dragRepeat = nil
         suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
@@ -5709,11 +5744,14 @@ public final class Runtime<State> {
         }
 
         guard let (node, rect, rawLocal) = interactiveHit else {
+            recordBareTitlebarPressIfNeeded(at: pos, button: button, now: now)
             if cxSettings.viewDefaults.webFocus, let bgHit = hitTest(at: pos, predicate: { _ in true }) {
                 webFocusTabStartPath = bgHit.node.path
             }
             handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: nil, at: now)
-            if focusedPath != nil {
+            if let prevFp = focusedPath {
+                let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
+                handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
                 focusedPath = nil
                 focusedKey = nil
                 imeReset = true
@@ -5721,6 +5759,7 @@ public final class Runtime<State> {
             }
             return
         }
+        kitHooks.lastBareTitlebarPress = nil
 
         if hasActiveTextLinks(node.el), let linkIdx = linkIndex(atPath: node.path, at: pos) {
             handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
@@ -5734,9 +5773,6 @@ public final class Runtime<State> {
         let inEditSubtree = isInsideEditLensSubtree(node)
         let onLink = hasActiveTextLinks(node.el)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
-        let prevPressedPath = pressedPath
-        let prevFocusedPath = focusedPath
-        let prevImeReset = imeReset
         pressedPath = node.path
         pressedKey = node.key
         if cxSettings.viewDefaults.webFocus && !preservesSel && !preservesFocus {
@@ -5744,9 +5780,13 @@ public final class Runtime<State> {
         }
         let isTextBox = node.el.handlers.editLens != nil
         let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
+        var downFocusChanged = false
         if !preservesSel && !onLink && shouldFocusNode {
             if focusedPath != node.path {
+                let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
+                handleKitFocusTransition(prevNode: prevNode, newPath: node.path, at: now)
                 imeReset = true
+                downFocusChanged = true
             }
             focusedPath = node.path
             focusedKey = node.key
@@ -5755,12 +5795,8 @@ public final class Runtime<State> {
                 focusedPath = nil
                 focusedKey = nil
                 imeReset = true
+                downFocusChanged = true
             }
-        }
-        let pressVisualChanged = pressedPath != prevPressedPath && (node.el.pressBg != nil || node.el.pressScaleFactor != nil)
-        let focusChanged = focusedPath != prevFocusedPath || imeReset != prevImeReset
-        if pressVisualChanged || focusChanged {
-            dirtyCommit(at: now)
         }
 
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
@@ -5776,10 +5812,15 @@ public final class Runtime<State> {
             clicks: clickCount
         )
 
+        var downRanHandler = false
+        var downAllLiveOnly = true
+
         if let onDown = node.el.handlers.onPointerDown {
             var tx = makeTx(at: now, button: button)
             onDown(&state, press, &tx)
-            applyTx(tx, at: now)
+            downRanHandler = true
+            downAllLiveOnly = downAllLiveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
         }
 
         // TextInput caret placement / double-click word selection / drag selection
@@ -5850,23 +5891,29 @@ public final class Runtime<State> {
                 ),
                 &tx
             )
-            applyTx(tx, at: now)
+            downRanHandler = true
+            downAllLiveOnly = downAllLiveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            armKitDragRepeatIfRequested(path: node.path, windowPos: pos, mods: mods, button: button, now: now)
+        }
+
+        let needsPressVisual = downFocusChanged || nodeHasPressVisuals(node) || !downRanHandler || !downAllLiveOnly
+        if needsPressVisual {
+            dirtyCommit(at: now)
         }
     }
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         pointerPosition = pos
         armedDragOut = nil
+        kitHooks.dragRepeat = nil
         let releasedPath = pressedPath
         pressedPath = nil
         pressedKey = nil
         let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
-        if let rPath = releasedPath, let rIdx = nodeByPath[rPath] {
-            let rEl = flatNodes[rIdx].el
-            if rEl.pressBg != nil || rEl.pressScaleFactor != nil {
-                dirtyCommit(at: now)
-            }
-        }
+        let hadPressVisual = releasedPath.flatMap { nodeByPath[$0] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false
+        var upRanHandler = false
+        var upAllLiveOnly = true
 
         var draggedPastThreshold = suppressedClickFromSelDrag
         if let drag = activeDrag {
@@ -5876,15 +5923,23 @@ public final class Runtime<State> {
             if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
                 var tx = makeTx(at: now, button: drag.button)
                 onEnd(&state, false, &tx)
-                applyTx(tx, at: now)
+                upRanHandler = true
+                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
             }
         }
 
         if dispatchLinkUp(at: pos, button: button, suppressed: suppressedClickFromSelDrag, at: now) {
+            dirtyCommit(at: now)
             return
         }
 
-        guard let rPath = releasedPath, let idx = nodeByPath[rPath] else { return }
+        guard let rPath = releasedPath, let idx = nodeByPath[rPath] else {
+            if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
+                dirtyCommit(at: now)
+            }
+            return
+        }
         let node = flatNodes[idx]
         let rect = presentedRectByPath[rPath] ?? node.targetRect
         let unturnedLocal = hitGeometryByPath[rPath]?.turn?.unturn(pos) ?? pos
@@ -5900,7 +5955,9 @@ public final class Runtime<State> {
         if let onUp = node.el.handlers.onPointerUp {
             var tx = makeTx(at: now, button: button)
             onUp(&state, press, &tx)
-            applyTx(tx, at: now)
+            upRanHandler = true
+            upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
         }
 
         // Fire click / double-click only if pointer released inside the pressed element and not dragged!
@@ -5910,19 +5967,29 @@ public final class Runtime<State> {
             if button == .primary && clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
                 var tx = makeTx(at: now, button: button)
                 onDbl(&state, &tx)
-                applyTx(tx, at: now)
+                upRanHandler = true
+                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
             } else {
                 if let onClick = node.el.handlers.onClick {
                     var tx = makeTx(at: now, button: button)
                     onClick(&state, &tx)
-                    applyTx(tx, at: now)
+                    upRanHandler = true
+                    upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
                 }
                 if let onClickP = node.el.handlers.onClickPress {
                     var tx = makeTx(at: now, button: button)
                     onClickP(&state, press, &tx)
-                    applyTx(tx, at: now)
+                    upRanHandler = true
+                    upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
                 }
             }
+        }
+
+        if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
+            dirtyCommit(at: now)
         }
     }
 
@@ -6104,6 +6171,9 @@ public final class Runtime<State> {
 
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        let prevByKeys = kitHooks.isDispatchingByKeys
+        kitHooks.isDispatchingByKeys = true
+        defer { kitHooks.isDispatchingByKeys = prevByKeys }
         suppressRevealFromHoverCommit = false
         dismissHelp(at: now)
         // 1. Escape cancels an in-progress drag and restores pre-drag state!
@@ -6379,20 +6449,18 @@ public final class Runtime<State> {
             }
         }
 
-        // 4. Root / global `onKey` handler (only when no active modal blocks background shortcuts)
-        if activeModalPath == nil {
-            if let live = playgroundLive {
-                if !live.typing(appState: state), let handled = playgroundAppKey(ev, at: now), handled {
-                    return true
-                }
-            } else if let globalOnKey {
-                var tx = makeTx(at: now)
-                let taken = globalOnKey(&state, ev, &tx)
-                Tx.took(taken, &tx)
-                if taken {
-                    applyTx(tx, at: now)
-                    return true
-                }
+        // 4. Root / global `onKey` handler (unhandled keys bubble to `globalOnKey`; ShortcutRegistry stays gated under modal)
+        if activeModalPath == nil, let live = playgroundLive {
+            if !live.typing(appState: state), let handled = playgroundAppKey(ev, at: now), handled {
+                return true
+            }
+        } else if playgroundLive == nil, let globalOnKey {
+            var tx = makeTx(at: now)
+            let taken = globalOnKey(&state, ev, &tx)
+            Tx.took(taken, &tx)
+            if taken {
+                applyTx(tx, at: now)
+                return true
             }
         }
 
@@ -6756,17 +6824,32 @@ public final class Runtime<State> {
             relaunchRequested = true
             quitRequested = true
         }
+        if let dragRepeatDelay = tx.runtimeActions["dragRepeatAfter"] as? Double {
+            kitHooks.requestedDragRepeatDelay = dragRepeatDelay
+        }
         if tx.blurFocusRequested {
+            if let prevFp = focusedPath {
+                let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
+                handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+            }
             pendingTxBlurRequested = true
             pendingTxFocusKey = nil
+            kitHooks.pendingTxFocusVisible = nil
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
         } else if let fk = tx.requestedFocusKey {
+            let matchedNode = flatNodes.first(where: { $0.key == fk })
+            if let prevFp = focusedPath, matchedNode?.path != prevFp {
+                let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
+                handleKitFocusTransition(prevNode: prevNode, newPath: matchedNode?.path, at: now)
+            }
             pendingTxBlurRequested = false
             pendingTxFocusKey = fk
+            kitHooks.pendingTxFocusVisible = tx.requestedFocusVisible
+            focusVisible = tx.requestedFocusVisible
             focusedKey = fk
-            if let match = flatNodes.first(where: { $0.key == fk }) {
+            if let match = matchedNode {
                 focusedPath = match.path
             }
         }

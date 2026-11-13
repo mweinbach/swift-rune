@@ -131,6 +131,7 @@ struct ScrollBarRuntimeParityTests {
             }
             rt.setSystemScrollBars(.always)
             rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
             var now = 0.0
             _ = rt.frame(at: now)
             frames(rt, 2, now: &now)
@@ -150,13 +151,10 @@ struct ScrollBarRuntimeParityTests {
         #expect(try press(jumps: true, option: true, hold: 1, settleFrames: 42) == -90.0)
     }
 
-    // 3b. crates/rune-kit/src/scroll_bar/tests.rs:108 (blocked parts: live-only pointer, dragRepeat, 30-frame GLIDE settle)
-    @Test(
-        "Track press repeats while held, settles 30-frame GLIDE, and never runs view (scroll_bar/tests.rs:108)",
-        .disabled("Blocked on @el/@motion: Runtime.pointerMove/pointerDown/pointerUp call dirtyCommit unconditionally (Runtime.swift:5419,5548,5648), El/Runtime lacks tx.dragRepeatAfter(delay:interval:) for held paging, and MotionTokens.GLIDE (0.32s) needs >31 frames to settle exact equality")
-    )
-    func trackPressRepeatAndLiveOnlyBlockedOnEl() throws {
-        func press(jumps: Bool, option: Bool, hold: Int) throws -> Float {
+    // 3b. crates/rune-kit/src/scroll_bar/tests.rs:108 (unblocked held track repeat & live-only no-view-run)
+    @Test("Track press repeats while held and never runs view (scroll_bar/tests.rs:108)")
+    func trackPressRepeatsWhileHeldAndNeverRunsView() throws {
+        func press(jumps: Bool, option: Bool, hold: Int, settleFrames: Int = 42) throws -> Float {
             final class Runs: @unchecked Sendable { var count = 0 }
             let runs = Runs()
             let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
@@ -165,6 +163,7 @@ struct ScrollBarRuntimeParityTests {
             }
             rt.setSystemScrollBars(.always)
             rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
             var now = 0.0
             _ = rt.frame(at: now)
             frames(rt, 2, now: &now)
@@ -175,7 +174,7 @@ struct ScrollBarRuntimeParityTests {
             rt.pointerDown(at: Vec2(195.0, 95.0), mods: mods, at: now)
             frames(rt, hold, now: &now)
             rt.pointerUp(at: Vec2(195.0, 95.0), mods: mods, at: now)
-            frames(rt, 30, now: &now)
+            frames(rt, settleFrames, now: &now)
             #expect(runs.count == baseRuns && rt.viewCommitCount == baseCommits)
             return try top(rt)
         }
@@ -199,6 +198,34 @@ struct ScrollBarRuntimeParityTests {
         let thumbRect = try rect(rt, "thumb")
         #expect(thumbRect[1] <= 40.0 && 40.0 <= thumbRect[1] + thumbRect[3])
         rt.pointerUp(at: Vec2(195.0, 40.0), at: now)
+    }
+
+    // 3c. crates/rune-kit/src/scroll_bar/tests.rs:108 (blocked part: 30-frame GLIDE settle exact equality)
+    @Test(
+        "Track press settles 30-frame GLIDE exact equality (scroll_bar/tests.rs:108)",
+        .disabled("Blocked on @motion: MotionTokens.GLIDE (0.32s) needs >31 frames to settle exact equality")
+    )
+    func trackPressSettlesThirtyFrameGlideBlockedOnMotion() throws {
+        func press(jumps: Bool, option: Bool, hold: Int) throws -> Float {
+            let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+                makeView(rows)
+            }
+            rt.setSystemScrollBars(.always)
+            rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
+            var now = 0.0
+            _ = rt.frame(at: now)
+            frames(rt, 2, now: &now)
+            let mods = Mods(alt: option)
+            rt.pointerMove(to: Vec2(195.0, 95.0), mods: mods, at: now)
+            rt.pointerDown(at: Vec2(195.0, 95.0), mods: mods, at: now)
+            frames(rt, hold, now: &now)
+            rt.pointerUp(at: Vec2(195.0, 95.0), mods: mods, at: now)
+            frames(rt, 30, now: &now)
+            return try top(rt)
+        }
+        #expect(try press(jumps: false, option: false, hold: 1) == -90.0)
+        #expect(try press(jumps: true, option: true, hold: 1) == -90.0)
     }
 
     // 4. crates/rune-kit/src/scroll_bar/tests.rs:153
@@ -283,11 +310,8 @@ struct ScrollBarRuntimeParityTests {
     }
 
     // 5b. crates/rune-kit/src/scroll_bar/tests.rs:320 (blocked no-view-run check)
-    @Test(
-        "Thumb widens under pointer without a view run (scroll_bar/tests.rs:320)",
-        .disabled("Blocked on @el: Runtime.pointerMove/pointerDown/pointerUp call dirtyCommit unconditionally even when tx.liveOnly() is set (Runtime.swift:5419,5548,5648)")
-    )
-    func thumbWidensWithoutViewRunBlockedOnEl() throws {
+    @Test("Thumb widens under pointer without a view run (scroll_bar/tests.rs:320)")
+    func thumbWidensWithoutViewRun() throws {
         final class Runs: @unchecked Sendable { var count = 0 }
         let runs = Runs()
         let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
@@ -295,6 +319,7 @@ struct ScrollBarRuntimeParityTests {
             return makeView(rows)
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)
@@ -307,12 +332,15 @@ struct ScrollBarRuntimeParityTests {
         #expect(runs.count == baseRuns && rt.viewCommitCount == baseCommits)
     }
 
-    // 6a. crates/rune-kit/src/scroll_bar/tests.rs:390 (strip width, rest/hover widths and OKLab-decoded colors)
-    @Test("Styled thumb takes its colours and widths at rest and under pointer (scroll_bar/tests.rs:390)")
+    // 6a. crates/rune-kit/src/scroll_bar/tests.rs:390 (strip width, rest/hover widths, OKLab-decoded colors, and no-view-run hover)
+    @Test("Styled thumb takes its colours and widths at rest and under pointer without a view run (scroll_bar/tests.rs:390)")
     func styledThumbTakesColoursAndWidthsAtRestAndUnderPointer() throws {
+        final class Runs: @unchecked Sendable { var count = 0 }
+        let runs = Runs()
         let red = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
         let blue = Color(r: 0.0, g: 0.0, b: 1.0, a: 1.0)
         let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            runs.count += 1
             let style = KitScrollBarStyle.neutral(dark: true)
                 .thumb(red)
                 .thumbHover(blue)
@@ -329,9 +357,11 @@ struct ScrollBarRuntimeParityTests {
             )
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)
+        let baseRuns = runs.count
         let rest = try info(rt, "thumb")
         #expect(rest.rect[0] == 194.0 && rest.rect[2] == 4.0 && colorApproxEqual(rest.fill, red))
         #expect(try rect(rt, "scroll-bar")[2] == 16.0)
@@ -343,14 +373,15 @@ struct ScrollBarRuntimeParityTests {
         rt.pointerMove(to: Vec2(150.0, 10.0), at: now)
         frames(rt, 30, now: &now)
         #expect(colorApproxEqual(try info(rt, "thumb").fill, red))
+        #expect(runs.count == baseRuns)
     }
 
-    // 6b. crates/rune-kit/src/scroll_bar/tests.rs:390 (blocked exact bitwise Color == after OKLab liveFill & no-view-run hover)
+    // 6b. crates/rune-kit/src/scroll_bar/tests.rs:390 (blocked exact bitwise Color == after OKLab liveFill)
     @Test(
-        "Styled thumb exact fill equality and no-view-run hover (scroll_bar/tests.rs:390)",
-        .disabled("Blocked on @el/@motion: MotionColor OKLab encode/decode introduces ~1e-6 float rounding in Runtime.swift:3644 Color(mc) for Props.FILL, and Runtime.pointerMove calls dirtyCommit unconditionally (Runtime.swift:5419)")
+        "Styled thumb exact fill equality (scroll_bar/tests.rs:390)",
+        .disabled("Blocked on @motion: MotionColor OKLab encode/decode introduces ~1e-6 float rounding in Runtime.swift:3644 Color(mc) for Props.FILL")
     )
-    func styledThumbExactFillAndNoViewRunBlockedOnEl() throws {
+    func styledThumbExactFillBlockedOnMotion() throws {
         final class Runs: @unchecked Sendable { var count = 0 }
         let runs = Runs()
         let red = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
