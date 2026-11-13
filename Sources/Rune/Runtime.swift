@@ -255,6 +255,7 @@ public final class Runtime<State> {
     private var presentedRectByPath: [String: MotionRect] = [:]
     private var presentedScaleByPath: [String: Vec2] = [:]
     private var imagePacker = ImageAtlasPacker()
+    private var retainedLayout = RetainedLayoutCoordinator()
     private var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true
     private var pendingEventTime: Double? = nil
@@ -409,39 +410,13 @@ public final class Runtime<State> {
             clearColor = rootEl.background
         }
 
-        // Build LayoutInputNode hierarchy with CoreText intrinsic measurement callbacks
-        let scale = pixelScale
-        let ts = textSystem
-        func makeLayoutInput(_ el: El<State>) -> LayoutInputNode {
-            let children = el.children.map(makeLayoutInput)
-            var measureFn: ((Float?) -> Vec2)? = nil
-            if el.children.isEmpty {
-                if let editLens = el.handlers.editLens {
-                    let edit = editLens.get(state)
-                    let str = edit.displayString.isEmpty ? (el.placeholder ?? " ") : edit.displayString
-                    let style = el.textStyle
-                    measureFn = { maxW in
-                        let m = ts.measure(str, style: style, maxWidth: edit.multiline ? maxW : nil, pixelScale: scale)
-                        return Vec2(max(m.x + 2, 4), max(m.y, style.resolvedLineHeight))
-                    }
-                } else if let spans = el.richSpans {
-                    let style = el.textStyle
-                    measureFn = { maxW in
-                        ts.shape(text: "", spans: spans, style: style, maxWidth: maxW, pixelScale: scale, emitGlyphs: false).size
-                    }
-                } else if let txt = el.liveText?.get() ?? el.plainText {
-                    let style = el.textStyle
-                    measureFn = { maxW in
-                        ts.measure(txt, style: style, maxWidth: maxW, pixelScale: scale)
-                    }
-                } else if let (_, iconSize) = el.iconPayload {
-                    measureFn = { _ in Vec2(iconSize, iconSize) }
-                }
-            }
-            return LayoutInputNode(style: el.layout, children: children, measure: measureFn)
-        }
-
-        let solvedRoot = LayoutEngine.compute(root: makeLayoutInput(rootEl), viewport: viewport)
+        let solvedRoot = retainedLayout.compute(
+            root: rootEl,
+            state: state,
+            viewport: viewport,
+            pixelScale: pixelScale,
+            textSystem: textSystem
+        )
 
         // Flatten tree, assign unique structural/keyed paths, clamp scroll offsets, and collect NodeSpecs
         var newFlat: [FlatNode] = []
