@@ -817,6 +817,7 @@ public enum HTMLCSSExporter {
         case .leading: break
         case .center: d.append(Decl("text-align", "center"))
         case .trailing: d.append(Decl("text-align", "right"))
+        case .justified: d.append(Decl("text-align", "justify"))
         }
         if (el.runtimeExtras["htmlTextJustify"] as? Bool) == true {
             d.append(Decl("text-align", "justify"))

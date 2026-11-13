@@ -3126,6 +3126,7 @@ public final class Runtime<State> {
                     let shaped = textSystem.shape(
                         text: paintedLabelValue ?? "",
                         spans: el.richSpans,
+                        pills: el.pillChips,
                         style: el.textStyle,
                         maxWidth: wrapWidth,
                         pixelScale: pxScale,
@@ -3136,7 +3137,8 @@ public final class Runtime<State> {
                             paintedLabelValue ?? "",
                             style: el.textStyle,
                             maxWidth: nil,
-                            pixelScale: pxScale
+                            pixelScale: pxScale,
+                            pills: el.pillChips
                         )
                         if naturalSize.x > wrapWidth + 0.5 || naturalSize.y > rect.height + 0.5 {
                             textTruncated = true
@@ -3146,6 +3148,20 @@ public final class Runtime<State> {
                         snap: snap, el: el, isExiting: p.isExiting, activeSelectionRanges: activeSelectionRanges,
                         textOriginX: textOriginX, textOriginY: textOriginY, scaleVec: scaleVec, pxScale: pxScale,
                         localAlpha: localAlpha, shaped: shaped, devClip: devClip, useLayer: useLayer, effRotate: effRotate,
+                        into: &primitives
+                    )
+                    textSystem.emitTextDecorationsAndPills(
+                        shaped: shaped,
+                        textOriginX: textOriginX,
+                        textOriginY: textOriginY,
+                        scaleVec: scaleVec,
+                        pxScale: pxScale,
+                        defaultTextColor: defaultTextColor,
+                        localAlpha: localAlpha,
+                        srgbBlend: srgbBlend,
+                        devClip: devClip,
+                        rot: useLayer ? 0 : effRotate,
+                        insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha

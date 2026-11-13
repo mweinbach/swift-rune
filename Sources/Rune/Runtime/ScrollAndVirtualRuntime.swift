@@ -207,7 +207,7 @@ extension Runtime {
             pinned.insert(fi)
         }
         for req in pendingScrollReveals where req.scope == nil || req.scope == nextScrollPath || req.scope == path {
-            if let ri = keys.firstIndex(of: req.key) {
+            if let ri = keys.firstIndex(where: { $0 == req.key || selectsElementSelector(req.key, path: path + "/" + $0, key: $0) }) {
                 pinned.insert(ri)
             }
         }
@@ -917,6 +917,11 @@ extension Runtime {
             }) {
                 return idx
             }
+            if let targetIdx = flatNodes.firstIndex(where: {
+                selectsElementSelector(selector, path: $0.path, key: $0.key)
+            }) {
+                return findScrollViewportIndex(forNode: targetIdx, scopeKey: nil)
+            }
             return nil
         }
 
@@ -971,17 +976,56 @@ extension Runtime {
         }
 
         for req in reveals {
-            guard let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(req.key, path: $0.path, key: $0.key) }),
-                  let vIdx = findScrollViewportIndex(forNode: tIdx, scopeKey: req.scope) else {
-                continue
+            let vIdx: Int
+            let vPath: String
+            let cur: Vec2
+            let vpH: Double
+            let itemH: Double
+            let itemTop: Double
+
+            if let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(req.key, path: $0.path, key: $0.key) }),
+               let foundVIdx = findScrollViewportIndex(forNode: tIdx, scopeKey: req.scope) {
+                vIdx = foundVIdx
+                vPath = flatNodes[vIdx].path
+                let vpRect = flatNodes[vIdx].targetRect
+                let tRect = flatNodes[tIdx].targetRect
+                cur = scrollOffsets[vPath] ?? .zero
+                vpH = Double(vpRect.height)
+                itemH = Double(tRect.height)
+                itemTop = Double(tRect.y - vpRect.y) + Double(cur.y)
+            } else {
+                var resolved: (vIdx: Int, itemTop: Double, itemH: Double, cur: Vec2)? = nil
+                for (listIdx, node) in flatNodes.enumerated() {
+                    guard let vState = virtualLists[node.path],
+                          let rowIdx = vState.lastKeys.firstIndex(where: {
+                              $0 == req.key || selectsElementSelector(req.key, path: "\(node.path)/\($0)", key: $0)
+                          }) else { continue }
+                    let candidateVIdx: Int?
+                    if !node.el.layout.scrollAxes.isEmpty && (req.scope == nil || selectsElementSelector(req.scope!, path: node.path, key: node.key)) {
+                        candidateVIdx = listIdx
+                    } else {
+                        candidateVIdx = findScrollViewportIndex(forNode: listIdx, scopeKey: req.scope)
+                    }
+                    guard let foundVIdx = candidateVIdx else { continue }
+                    let est = Float(node.el.virtualEstimate ?? 40)
+                    let prefixY: Float = (0..<rowIdx).reduce(0) { sum, idx in
+                        sum + vState.rowHeight(forKey: vState.lastKeys[idx], estimated: est)
+                    }
+                    let rowH = vState.rowHeight(forKey: vState.lastKeys[rowIdx], estimated: est)
+                    let vpNode = flatNodes[foundVIdx]
+                    let c = scrollOffsets[vpNode.path] ?? .zero
+                    let top = Double(node.targetRect.top + prefixY - vpNode.targetRect.y) + Double(c.y)
+                    resolved = (foundVIdx, top, Double(rowH), c)
+                    break
+                }
+                guard let hit = resolved else { continue }
+                vIdx = hit.vIdx
+                vPath = flatNodes[vIdx].path
+                cur = hit.cur
+                vpH = Double(flatNodes[vIdx].targetRect.height)
+                itemH = hit.itemH
+                itemTop = hit.itemTop
             }
-            let vPath = flatNodes[vIdx].path
-            let vpRect = flatNodes[vIdx].targetRect
-            let tRect = flatNodes[tIdx].targetRect
-            let cur = scrollOffsets[vPath] ?? .zero
-            let vpH = Double(vpRect.height)
-            let itemH = Double(tRect.height)
-            let itemTop = Double(tRect.y - vpRect.y) + Double(cur.y)
 
             let destY: Double
             if req.center {
