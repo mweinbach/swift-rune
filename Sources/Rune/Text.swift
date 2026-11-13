@@ -773,19 +773,8 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
     #endif
 
-    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int) -> Entry {
-        let px = max(4, pixelSize)
-        let key = IconKey(icon: icon, pixelSize: px)
-        lock.lock()
-        if var cached = iconCache[key] {
-            accessCounter &+= 1
-            cached.lastUsed = accessCounter
-            iconCache[key] = cached
-            lock.unlock()
-            return cached.entry
-        }
-        lock.unlock()
-
+    public static func rasterizeIconBitmap(_ icon: SVGIcon, pixelSize: Int) -> [UInt8] {
+        let px = max(1, pixelSize)
         #if canImport(CoreGraphics)
         var bitmap = Array<UInt8>(repeating: 0, count: px * px)
         let graySpace = CGColorSpaceCreateDeviceGray()
@@ -823,6 +812,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 SVGIconRenderer.drawMonochromeBody(body, in: ctx)
             }
         }
+        return bitmap
         #else
         let resolvedIcon: SVGIcon
         if icon.paths.isEmpty, let body = icon.body {
@@ -834,8 +824,24 @@ public final class GlyphAtlas: @unchecked Sendable {
         } else {
             resolvedIcon = icon
         }
-        let bitmap = PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px)
+        return PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px)
         #endif
+    }
+
+    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int) -> Entry {
+        let px = max(4, pixelSize)
+        let key = IconKey(icon: icon, pixelSize: px)
+        lock.lock()
+        if var cached = iconCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            iconCache[key] = cached
+            lock.unlock()
+            return cached.entry
+        }
+        lock.unlock()
+
+        let bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px)
 
         lock.lock()
         guard let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
@@ -1365,7 +1371,9 @@ public final class TextSystem: @unchecked Sendable {
     public let colorIcons = ColorIconRasterizer()
     private var sansFamilyOverride: String = ""
     private var monoFamilyOverride: String = ""
+    private var languageTagOverride: String?
     private var lastObservedFontEpoch: UInt64 = fontEpoch()
+    private var lastObservedLanguageEpoch: UInt64 = TextLanguageRegistry.currentEpoch()
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
@@ -1376,6 +1384,31 @@ public final class TextSystem: @unchecked Sendable {
         let (sans, mono) = FontFamiliesRegistry.currentFamilies()
         self.sansFamilyOverride = sans
         self.monoFamilyOverride = mono
+        self.languageTagOverride = TextLanguageRegistry.currentLanguageTag()
+    }
+
+    /// Preferred BCP-47 language tag used for CJK fallback and `kCTLanguageAttributeName` (`TextSystem::language`).
+    public var language: String? {
+        syncGlobalFamiliesIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        return languageTagOverride
+    }
+
+    /// Locks this `TextSystem`'s language preference once (if not yet set) and clears cached measurements (`TextSystem::set_language`).
+    @discardableResult
+    public func setLanguage(_ tag: String) -> Bool {
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let normalized = TextLanguageRegistry.parseWriting(from: trimmed)?.tag ?? trimmed
+        lock.lock()
+        defer { lock.unlock() }
+        if languageTagOverride != nil {
+            return false
+        }
+        languageTagOverride = normalized
+        measureCache.removeAll(keepingCapacity: true)
+        return true
     }
 
     /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
@@ -1426,6 +1459,7 @@ public final class TextSystem: @unchecked Sendable {
 
     private func syncGlobalFamiliesIfNeeded() {
         let globalEpoch = fontEpoch()
+        let langEpoch = TextLanguageRegistry.currentEpoch()
         lock.lock()
         if lastObservedFontEpoch != globalEpoch {
             let (sans, mono) = FontFamiliesRegistry.currentFamilies()
@@ -1436,6 +1470,13 @@ public final class TextSystem: @unchecked Sendable {
             #endif
             measureCache.removeAll(keepingCapacity: true)
             lastObservedFontEpoch = globalEpoch
+        }
+        if lastObservedLanguageEpoch != langEpoch {
+            if languageTagOverride == nil {
+                languageTagOverride = TextLanguageRegistry.currentLanguageTag()
+                measureCache.removeAll(keepingCapacity: true)
+            }
+            lastObservedLanguageEpoch = langEpoch
         }
         lock.unlock()
     }
@@ -1603,6 +1644,9 @@ public final class TextSystem: @unchecked Sendable {
         CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), fullText as CFString)
         let fullLen = CFAttributedStringGetLength(attrStr)
         CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
+        if let langTag = language ?? TextLanguageRegistry.writingOfText(fullText)?.bcp47Tag {
+            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
+        }
         if style.letterSpacing != 0 {
             let kern = CGFloat(style.letterSpacing * scale) as CFNumber
             CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)

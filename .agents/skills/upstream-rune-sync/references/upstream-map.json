@@ -14,77 +14,84 @@
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/dump.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/Accessibility/A11yTreeAndDump.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/macos.rs",
           "swift": [
+            "Sources/Rune/A11y/MacOSAccessibility.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Bridge complete in MacOSAccessibility.swift; blocked on @platform MacOSApp.swift NSView wiring"
         },
         {
           "upstream": "src/a11y/mod.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Accessibility/A11yTreeAndDump.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Tree/node/announcement/service ported; blocked on @platform host integration"
         },
         {
           "upstream": "src/a11y/node.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/roles.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/El.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "partial",
+          "note": "Core tree/update/dump/secure-redaction tests ported; host announcement tests blocked on @platform"
         },
         {
           "upstream": "src/a11y/text.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/A11y/MacOSAccessibility.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/tree.rs",
           "swift": [
+            "Sources/Rune/Accessibility/A11yTreeAndDump.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/a11y/unix.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux/AT-SPI platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/a11y/windows.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
+          "swift": [],
           "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "note": "Windows UIA platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/app.rs",
@@ -145,71 +152,75 @@
         {
           "upstream": "src/clipboard.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/content.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/hold_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextClipboardImageParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/html.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/Edit/ClipboardSanitizer.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/macos.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/native.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/secret.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/secret_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextClipboardImageParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/tx.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/clipboard/web.rs",
-          "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
-          ],
+          "swift": [],
           "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "note": "Web clipboard target excluded on Apple platforms"
         },
         {
           "upstream": "src/cold.rs",
@@ -270,123 +281,140 @@
         {
           "upstream": "src/edit.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/caret_motion.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/direction_keys.rs",
           "swift": [
             "Sources/Rune/Edit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/display.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/history.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/history_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/RichTextEditTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/edit/html.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit/RichTextEdit.swift",
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/ime.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Text/MacOSTextInput.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Model + MacOSTextInput NSTextInputClient bridge complete; blocked on @platform MacOSApp.swift NSView forwarding"
         },
         {
           "upstream": "src/edit/input.rs",
           "swift": [
             "Sources/Rune/Edit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/keys.rs",
           "swift": [
             "Sources/Rune/Edit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/marks.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/model.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/rich_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/RichTextEditTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/edit/secure.rs",
           "swift": [
             "Sources/Rune/Edit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/secure_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/edit/tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/edit/typing.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Edit/RichTextEdit.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/edit/typing_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/el.rs",
@@ -1011,56 +1039,67 @@
         {
           "upstream": "src/image.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Image/LinearMipGenerator.swift",
+            "Sources/Rune/Image/PixelsAtlas.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/image/animated.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Image/PixelsAtlas.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/image/avif.rs",
           "swift": [
             "Sources/Rune/MediaPipeline.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Uses Apple ImageIO decoder instead of software AV1 crate"
         },
         {
           "upstream": "src/image/from_url.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Image/PixelsAtlas.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "ImageURLSet & ImagePool ported; network image caching complete in MediaPipeline.swift"
         },
         {
           "upstream": "src/image/from_url_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "partial",
+          "note": "ImageURLSet.select tests ported; async HTTP fixture tests depend on URLProtocol mocking"
         },
         {
           "upstream": "src/image/mip_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextClipboardImageParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/image/mips.rs",
           "swift": [
+            "Sources/Rune/Image/LinearMipGenerator.swift",
             "Sources/Rune/MediaPipeline.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/image/pixels.rs",
           "swift": [
+            "Sources/Rune/Image/PixelsAtlas.swift",
             "Sources/Rune/MediaPipeline.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input.rs",
@@ -1079,43 +1118,49 @@
         {
           "upstream": "src/input/chord.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Input/ChordSupport.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/chord_label.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/ChordSupport.swift",
+            "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/cursor.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/Cursor.swift",
+            "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Cursor enum & NSCursor mapping ported in Cursor.swift; blocked on @platform MacOSApp.swift cursor push"
         },
         {
           "upstream": "src/input/cursor/image.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/Cursor.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/cursor/image_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/input/cursor/os.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/Cursor.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "macOS NSCursor bridge in Cursor.swift; blocked on @platform MacOSApp.swift hook"
         },
         {
           "upstream": "src/input/cursor/web.rs",
@@ -1135,23 +1180,26 @@
         {
           "upstream": "src/input/fn_key.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/ChordSupport.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/key_diagnostics.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift",
+            "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Key diagnostics formatting ported; MacOSApp keyboard hook owned by @platform"
         },
         {
           "upstream": "src/input/keycaps.rs",
           "swift": [
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/physical_input.rs",
@@ -1170,22 +1218,24 @@
         {
           "upstream": "src/input/secure_input.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "SecureInputClaim ported; Carbon EnableSecureEventInput hook owned by @platform"
         },
         {
           "upstream": "src/input/time.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/input/time_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/jump_list.rs",
@@ -4380,131 +4430,141 @@
         {
           "upstream": "src/shortcuts/keys.rs",
           "swift": [
+            "Sources/Rune/Input/ChordSupport.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/layout_macos.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/macos.rs",
           "swift": [
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/mod.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Registry & Carbon global hotkeys ported; per-window NSView dispatch blocked on @platform MacOSApp.swift"
         },
         {
           "upstream": "src/shortcuts/parse.rs",
           "swift": [
+            "Sources/Rune/Input/ChordSupport.swift",
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "ShortcutRegistry & host handler hook ported; blocked on @platform MacOSApp.swift wiring"
         },
         {
           "upstream": "src/shortcuts/service/host_handler_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift",
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/lifecycle_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/machine.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/machine_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/routing_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/service/teardown_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextEditInputParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/shortcuts/wayland.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux Wayland global shortcut backend excluded on Apple platforms"
         },
         {
           "upstream": "src/shortcuts/windows.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
+          "swift": [],
           "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "note": "Windows RegisterHotKey backend excluded on Apple platforms"
         },
         {
           "upstream": "src/shortcuts/x11.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux X11 global shortcut backend excluded on Apple platforms"
         },
         {
           "upstream": "src/shortcuts/x11_repeat.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux X11 auto-repeat filter excluded on Apple platforms"
         },
         {
           "upstream": "src/spell.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/Edit/SpellPause.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "SpellChecker & SpellPause ported; blocked on @platform MacOSApp.swift host wiring"
         },
         {
           "upstream": "src/spell/macos.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/spell/pause.rs",
           "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/Edit/SpellPause.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/spell/web.rs",
@@ -4514,11 +4574,9 @@
         },
         {
           "upstream": "src/spell/windows.rs",
-          "swift": [
-            "Sources/Rune/AccessibilityAndInput.swift"
-          ],
+          "swift": [],
           "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "note": "Windows ISpellChecker platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/states.rs",
@@ -4572,521 +4630,555 @@
         {
           "upstream": "src/text.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/atlas.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/atlas_fill.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/case.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/collate.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/color_icon.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/colr.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/core_text_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutParityTests.swift",
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/coretext_match.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/coretext_match_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/cursor.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/TextCursorParity.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/decorations.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/default_fonts.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/default_fonts_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/fallback.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/families.rs",
           "swift": [
+            "Sources/Rune/Text/RichTextAndColorIcons.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/fill_bench.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "FillBenchConfig & deterministic path benchmark helpers ported; criterion runner excluded"
         },
         {
           "upstream": "src/text/full_faces.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "CoreText system/bundled face resolution covers font metrics cleanly; font-file raw face registry not duplicated"
         },
         {
           "upstream": "src/text/full_faces_tests.rs",
           "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "status": "n/a",
+          "note": "HarfBuzz/ttf-parser internal full-face registry tests N/A on CoreText backend"
         },
         {
           "upstream": "src/text/glyph_cache.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/glyph_cache_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/glyph_emit.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/hairline.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/hash.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/hidden_axes.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/icon.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/Text/TextParityHelpers.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/icon_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/RichTextAndIconTests.swift",
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/inline_fit.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/language.rs",
           "swift": [
+            "Sources/Rune/Text/TextLanguage.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/layout_cache.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/line_break.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/line_metrics.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/ltr_units.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/TextParityHelpers.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/macos.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/Text/OutlineRaster.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/macos/flatten.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineRaster.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/macos/hint.rs",
           "swift": [
+            "Sources/Rune/Text/OutlineRaster.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/macos/smoothing.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/macos/smoothing_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/mask_cache.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/MaskCache.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/measure.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/measure/ink.rs",
           "swift": [
+            "Sources/Rune/Text/TextInk.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/measure/ink_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineRaster.swift",
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/build.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineRaster.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/cover.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/fill.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/lanes.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineFill.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/path.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineRaster.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/outline/store.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/OutlineRaster.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/paragraphs.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/pill_chips.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/pixel_compare.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/PixelCompare.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/pixel_compare_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextCloseoutParityTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/platform_face.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Added in c7e214b3"
+          "swift": [
+            "Sources/Rune/Text.swift"
+          ],
+          "status": "n/a",
+          "note": "Apple uses CTFontRef natively without platform_face HarfBuzz bridge"
         },
         {
           "upstream": "src/text/quality_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "partial",
+          "note": "TextSystem measurement/line-height quality checks ported; HarfBuzz font rasterizer harness N/A"
         },
         {
           "upstream": "src/text/rewrap_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextP0WiringTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/rich_layout.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/RichTextAndColorIcons.swift",
+            "Sources/Rune/Text/TextParityHelpers.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/rich_layout_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/RichTextAndIconTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/run.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/TextParityHelpers.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/span.rs",
           "swift": [
+            "Sources/Rune/Text/RichTextAndColorIcons.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/support.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/TextParityHelpers.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/svg_path.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/synthetic_bold.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/system_fonts.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/PortableText.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/system_fonts/core_text.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/system_fonts/direct_write.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows DirectWrite platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/text/system_fonts/fontconfig.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Linux Fontconfig platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/text/system_weight.rs",
           "swift": [
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Tests/RuneTests/TextP0WiringTests.swift",
+            "Tests/RuneTests/TextCloseoutParityTests.swift",
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+          ],
+          "status": "ported"
         },
         {
           "upstream": "src/text/trak.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text/TrakParser.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/underline.rs",
           "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/text/windfoil.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows windfoil platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/text/windows.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
+          "swift": [],
           "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "note": "Windows text platform target excluded on Apple platforms"
         },
         {
           "upstream": "src/text/windows/direct_write.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows DirectWrite text backend excluded on Apple platforms"
         },
         {
           "upstream": "src/text/windows/owner.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows text owner excluded on Apple platforms"
         },
         {
           "upstream": "src/text/windows/skia_gamma.rs",
-          "swift": [
-            "Sources/Rune/Text.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "n/a",
+          "note": "Windows Skia gamma LUT excluded on Apple platforms"
         },
         {
           "upstream": "src/theme.rs",

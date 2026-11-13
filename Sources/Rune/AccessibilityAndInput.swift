@@ -682,7 +682,11 @@ public final class SpellChecker: @unchecked Sendable {
     private let lock = NSLock()
     private var backend: any SpellCheckBackend
     private var chosenLanguages: [String] = []
+    private var availableList: [String] = ["en-US", "en-GB", "de-DE", "fr-FR", "es-ES", "ja-JP", "zh-Hans"]
+    private var wordCache: [String: Bool] = [:]
     private var generation: UInt64 = 0
+
+    public static let maxSuggestions = 5
 
     public init(backend: any SpellCheckBackend) {
         self.backend = backend
@@ -692,6 +696,7 @@ public final class SpellChecker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         self.backend = backend
+        self.wordCache.removeAll(keepingCapacity: true)
         self.generation &+= 1
     }
 
@@ -700,14 +705,53 @@ public final class SpellChecker: @unchecked Sendable {
         defer { lock.unlock() }
         if chosenLanguages != tags {
             chosenLanguages = tags
+            wordCache.removeAll(keepingCapacity: true)
             generation &+= 1
         }
     }
 
-    public func languages() -> [String] {
+    public func setAvailableLanguages(_ tags: [String]) {
         lock.lock()
         defer { lock.unlock() }
-        return chosenLanguages
+        availableList = tags
+        wordCache.removeAll(keepingCapacity: true)
+        generation &+= 1
+    }
+
+    /// Available system spellcheck language tags (`rune::spell::available_languages`).
+    public func availableLanguages() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return availableList
+    }
+
+    /// Active spellcheck languages (`chosen ∩ available`, else locale defaults + `en-US`) (`rune::spell::languages`).
+    public func languages() -> [String] {
+        lock.lock()
+        let chosen = chosenLanguages
+        let available = availableList
+        lock.unlock()
+        if !chosen.isEmpty {
+            let intersection = chosen.filter { c in
+                available.contains { $0.caseInsensitiveCompare(c) == .orderedSame }
+            }
+            if !intersection.isEmpty {
+                return intersection
+            }
+        }
+        var defaults: [String] = []
+        for pref in Locale.preferredLanguages {
+            if let match = available.first(where: { $0.caseInsensitiveCompare(pref) == .orderedSame })
+                ?? available.first(where: { $0.lowercased().split(separator: "-").first == pref.lowercased().split(separator: "-").first }) {
+                if !defaults.contains(match) {
+                    defaults.append(match)
+                }
+            }
+        }
+        if !defaults.contains(where: { $0.lowercased().hasPrefix("en") }) {
+            defaults.append("en-US")
+        }
+        return defaults
     }
 
     public func languageName(for tag: String) -> String {
