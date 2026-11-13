@@ -74,20 +74,23 @@ public struct SurfacePlace: Sendable, Equatable, Hashable {
 
         let outW: Float
         let outH: Float
+        let scale: Float
         if unscaled {
+            scale = 1.0
             outW = iw
             outH = ih
         } else {
             switch fit {
             case .fit:
-                let s = min(nw / iw, nh / ih)
-                outW = iw * s
-                outH = ih * s
+                scale = min(nw / iw, nh / ih)
+                outW = iw * scale
+                outH = ih * scale
             case .fill:
-                let s = max(nw / iw, nh / ih)
-                outW = iw * s
-                outH = ih * s
+                scale = max(nw / iw, nh / ih)
+                outW = iw * scale
+                outH = ih * scale
             case .stretch:
+                scale = 0.0
                 outW = nw
                 outH = nh
             }
@@ -96,6 +99,9 @@ public struct SurfacePlace: Sendable, Equatable, Hashable {
         let (ax, ay) = share
         let ox = node.x + (nw - outW) * ax
         let oy = node.y + (nh - outH) * ay
+        if abs(scale - 1.0) < 1e-6 {
+            return SIMD4<Float>(ox.rounded(), oy.rounded(), outW, outH)
+        }
         return SIMD4<Float>(ox, oy, outW, outH)
     }
 }
@@ -129,35 +135,25 @@ public struct Orient: Sendable, Equatable, Hashable {
         swaps ? (height, width) : (width, height)
     }
 
-    /// Rounds the linear part `(a, b, c, d)` of an affine display transform into an orthonormal axis-aligned `Orient`.
+    /// Rounds an affine linear part `(a, b, c, d)` mapping stored buffer coordinates into upright display coordinates
+    /// (`x' = a*x + c*y`, `y' = b*x + d*y`) into an axis-aligned quarter-turn/flip `Orient` (`Orient::from_transform`).
     ///
-    /// Matches upstream `Orient::from_transform` where `CGAffineTransform` maps from upright container space
-    /// to stored buffer space (or preferred transform normalized to unit integer entries).
+    /// Because orthogonal matrices invert by transpose, the upright->buffer matrix is `[a, b; c, d]`.
     public static func fromMatrix(a: Double, b: Double, c: Double, d: Double) -> Orient {
-        let lenX = hypot(a, b)
-        let lenY = hypot(c, d)
-        if lenX < 1e-6 || lenY < 1e-6 {
-            return .up
+        let raw = [a, b, c, d]
+        let m = raw.map { $0.rounded() }
+        let unit = m.allSatisfy { abs($0) <= 1.0 } && zip(m, raw).allSatisfy { abs($0.0 - $0.1) < 1e-3 }
+        let quarter = (m[0] != 0.0 && m[3] != 0.0 && m[1] == 0.0 && m[2] == 0.0)
+            || (m[0] == 0.0 && m[3] == 0.0 && m[1] != 0.0 && m[2] != 0.0)
+        if unit && quarter {
+            return Orient(m00: Float(m[0]), m01: Float(m[1]), m10: Float(m[2]), m11: Float(m[3]))
         }
-        // Orthonormalize and snap small tilts/exact 90° multiples to {-1, 0, 1}
-        let na = Float((a / lenX).rounded())
-        let nb = Float((b / lenX).rounded())
-        let nc = Float((c / lenY).rounded())
-        let nd = Float((d / lenY).rounded())
-        if abs(na * nd - nb * nc) < 0.5 {
-            return .up
-        }
-        return Orient(m00: na, m01: nb, m10: nc, m11: nd)
+        return .up
     }
 
     #if canImport(CoreGraphics)
     public static func fromTransform(_ t: CGAffineTransform) -> Orient {
-        // AVAssetTrack.preferredTransform converts stored buffer coords -> upright display coords.
-        // Invert to map upright display delta -> stored buffer delta, preserving flips/90° rotations.
-        let det = Double(t.a * t.d - t.b * t.c)
-        if abs(det) < 1e-9 { return .up }
-        let inv = t.inverted()
-        return fromMatrix(a: Double(inv.a), b: Double(inv.b), c: Double(inv.c), d: Double(inv.d))
+        fromMatrix(a: Double(t.a), b: Double(t.b), c: Double(t.c), d: Double(t.d))
     }
     #endif
 }
@@ -813,6 +809,8 @@ public struct SurfaceDraw: @unchecked Sendable {
     /// Feather / linear fade parameters matching `Primitive.fade`.
     public var fade: SIMD4<Float>
     public var fadeOrigin: SIMD2<Float>
+    /// Packed `clip.wgsl` round/soft/linear fade mask (`RenderInstance.fade`).
+    public var clipFade: SIMD4<UInt32>
     public var opacity: Float
 
     public init(
@@ -824,6 +822,7 @@ public struct SurfaceDraw: @unchecked Sendable {
         clip: SIMD4<Float>,
         fade: SIMD4<Float> = .zero,
         fadeOrigin: SIMD2<Float> = .zero,
+        clipFade: SIMD4<UInt32> = .zero,
         opacity: Float = 1.0
     ) {
         self.surface = surface
@@ -834,6 +833,7 @@ public struct SurfaceDraw: @unchecked Sendable {
         self.clip = clip
         self.fade = fade
         self.fadeOrigin = fadeOrigin
+        self.clipFade = clipFade
         self.opacity = opacity
     }
 }

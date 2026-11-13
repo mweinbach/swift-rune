@@ -15,11 +15,22 @@ public enum MediaSource: Sendable, Hashable {
         if case .file = self { return true }
         return locationURL.isFileURL
     }
+
+    public static func parse(_ pathOrUrl: String) -> MediaSource {
+        let lower = pathOrUrl.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file://"),
+           let u = URL(string: pathOrUrl) {
+            return .url(u)
+        }
+        return .file(URL(fileURLWithPath: pathOrUrl))
+    }
 }
 
-/// Snapshot of desired playback controls (`rune::video::MediaRequest`).
+/// Snapshot of desired playback controls & URL request headers (`rune::video::MediaRequest`).
 public struct MediaRequest: Sendable, Equatable {
     public var source: MediaSource
+    public var kind: MediaKind
+    public var headers: [(name: String, value: String)]
     public var playing: Bool
     public var looping: Bool
     public var muted: Bool
@@ -29,24 +40,52 @@ public struct MediaRequest: Sendable, Equatable {
 
     public init(
         source: MediaSource,
+        kind: MediaKind = .video,
+        headers: [(name: String, value: String)] = [],
         playing: Bool = false,
         looping: Bool = false,
-        muted: Bool = false,
+        muted: Bool? = nil,
         volume: Float = 1.0,
         rate: Float = 1.0,
         seek: (time: Double, generation: UInt64)? = nil
     ) {
         self.source = source
+        self.kind = kind
+        self.headers = headers
         self.playing = playing
         self.looping = looping
-        self.muted = muted
+        self.muted = muted ?? (kind == .video)
         self.volume = volume
         self.rate = rate
         self.seek = seek
     }
 
+    public func header(_ name: String, _ value: String) -> MediaRequest {
+        var copy = self
+        copy.headers.removeAll { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+        copy.headers.append((name, value))
+        return copy
+    }
+
+    public func audio() -> Player {
+        var copy = self
+        copy.kind = .audio
+        copy.muted = false
+        return Player(copy)
+    }
+
+    public func video() -> Player {
+        var copy = self
+        copy.kind = .video
+        copy.muted = true
+        return Player(copy)
+    }
+
     public static func == (lhs: MediaRequest, rhs: MediaRequest) -> Bool {
         lhs.source == rhs.source &&
+        lhs.kind == rhs.kind &&
+        lhs.headers.count == rhs.headers.count &&
+        zip(lhs.headers, rhs.headers).allSatisfy { $0.name == $1.name && $0.value == $1.value } &&
         lhs.playing == rhs.playing &&
         lhs.looping == rhs.looping &&
         lhs.muted == rhs.muted &&
@@ -82,18 +121,21 @@ public struct VideoMeta: Sendable, Equatable {
     public var kind: MediaKind
     public var duration: Double?
     public var size: (UInt32, UInt32)?
+    public var hasSound: Bool
 
-    public init(kind: MediaKind = .video, duration: Double? = nil, size: (UInt32, UInt32)? = nil) {
+    public init(kind: MediaKind = .video, duration: Double? = nil, size: (UInt32, UInt32)? = nil, hasSound: Bool = false) {
         self.kind = kind
         self.duration = duration
         self.size = size
+        self.hasSound = hasSound
     }
 
     public static func == (lhs: VideoMeta, rhs: VideoMeta) -> Bool {
         lhs.kind == rhs.kind &&
         lhs.duration == rhs.duration &&
         lhs.size?.0 == rhs.size?.0 &&
-        lhs.size?.1 == rhs.size?.1
+        lhs.size?.1 == rhs.size?.1 &&
+        lhs.hasSound == rhs.hasSound
     }
 }
 

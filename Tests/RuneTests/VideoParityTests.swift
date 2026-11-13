@@ -16,6 +16,10 @@ struct VideoParityTests {
     @Test("missing file, .ogv, and unsupported .ogg/.webm fail cleanly without resurrection")
     func unsupportedAndMissingFilesFailCleanly() {
         let missing = Player.file("/nonexistent/path/not-a-file.mp4")
+        let deadline = Date().addingTimeInterval(0.5)
+        while !missing.state.isFailed && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         #expect(missing.state.isFailed)
         missing.play()
         #expect(missing.state.isFailed)
@@ -167,5 +171,103 @@ struct VideoParityTests {
         #expect(loopStep.active == true)
         #expect(m.time == 0.0)
         #expect(loopStep.effects.contains(.restart(1.0)))
+    }
+
+    // MARK: - Ported Upstream `video/tests.rs:8-220` Parity Tests
+
+    @Test("new_videos_are_muted_paused_and_loading")
+    func newVideosAreMutedPausedAndLoading() {
+        let v = Player.file("missing.mp4")
+        #expect(v.isMuted == true)
+        #expect(v.isLooping == false)
+        #expect(v.isPlaying == false)
+        #expect(v.rate == 1.0)
+        #expect(v.time == 0.0)
+        #expect(v.duration == nil)
+        #expect(v.size == nil)
+        #expect(v.hasSound == nil)
+        #expect(v.isAudio == false)
+        #expect(v.state == .loading)
+
+        v.setRate(0.0)
+        v.setRate(-2.0)
+        v.setRate(.nan)
+        #expect(v.rate == 1.0)
+        v.setRate(1.5)
+        #expect(v.rate == 1.5)
+    }
+
+    @Test("audio_starts_unmuted_with_no_size")
+    func audioStartsUnmutedWithNoSize() {
+        let a = Player.audio("missing.m4a")
+        #expect(a.isAudio == true)
+        #expect(a.isMuted == false)
+        #expect(a.size == nil)
+
+        let reqAudio = Player.request("https://example.com/audio.m4a").header("Authorization", "Bearer tok").audio()
+        #expect(reqAudio.isAudio == true)
+        #expect(reqAudio.isMuted == false)
+    }
+
+    @Test("extensions_come_from_the_last_path_segment")
+    func extensionsFromLastPathSegmentOnly() {
+        let ext: (String) -> String? = { Player.extensionFromLastSegment(of: MediaSource.parse($0)) }
+        #expect(ext("https://example.com/media/clip") == nil)
+        #expect(ext("https://host.ogg/clip") == nil)
+        #expect(ext("https://host.ogg") == nil)
+        #expect(ext("https://example.com/a.b/clip?x=1.ogg#t=2.webm") == nil)
+        #expect(ext("https://example.com/media/clip.OGG?v=2#t") == "ogg")
+        #expect(ext("file:///tmp/a.b/clip.opus") == "opus")
+        #expect(ext("sounds.d/clip") == nil)
+        #expect(ext("sounds/clip.webm") == "webm")
+        #expect(ext("sounds/clip.") == nil)
+    }
+
+    @Test("the_waker_hears_each_state_change_once")
+    func wakerHearsEachStateChangeOnce() {
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock()
+            var count = 0
+            func inc() { lock.lock(); count += 1; lock.unlock() }
+            func get() -> Int { lock.lock(); defer { lock.unlock() }; return count }
+        }
+        let p = Player.audio("missing-waker.m4a")
+        let calls = Counter()
+        p.setWaker { calls.inc() }
+        #expect(calls.get() == 0)
+
+        p.openMetadataForTest(VideoMeta(kind: .audio, duration: 2.0, size: nil, hasSound: true))
+        #expect(calls.get() == 1)
+        // Re-settling without state transition must not double-wake
+        p.settleStateWaker()
+        #expect(calls.get() == 1)
+
+        p.failForTest("gone")
+        #expect(calls.get() == 2)
+    }
+
+    @Test("a_seek_before_the_clip_opens_is_clamped_when_it_does")
+    func seekBeforeOpenIsClampedWhenOpened() {
+        let v = Player.file("missing-seek-clamp.mp4")
+        v.seek(to: 30.0)
+        #expect(v.time == 30.0)
+        v.openMetadataForTest(VideoMeta(kind: .video, duration: 1.0, size: (64, 36), hasSound: false))
+        #expect(v.time == 1.0)
+    }
+
+    @Test("parking_never_releases_a_playing_clip")
+    func parkingNeverReleasesPlayingClip() {
+        let url = Self.fixtureURL("rgbw.mp4")
+        let clips = (0..<6).map { _ in Player(source: .url(url)) }
+        _ = Player.parkedWithForTest(clips[0])
+        clips[0].openMetadataForTest(VideoMeta(kind: .video, duration: 1.0, size: (64, 36), hasSound: false))
+        clips[0].play()
+        var evicted: [Player] = []
+        for clip in clips.dropFirst() {
+            evicted.append(contentsOf: Player.parkedWithForTest(clip))
+        }
+        #expect(!evicted.contains(where: { $0 === clips[0] }))
+        #expect(evicted.count == 1)
+        #expect(evicted.first === clips[1])
     }
 }

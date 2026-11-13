@@ -25,6 +25,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         public var color: SIMD4<Float>      // (format, matrix, transfer, alphaMult)
         public var sampling: SIMD4<Float>   // (oneToOne, srcW, srcH, mirrored)
         public var orient: SIMD4<Float>     // (m00, m01, m10, m11)
+        public var clipFade: SIMD4<UInt32>  // packed clip.wgsl fade/round-clip
     }
 
     private struct ImportedFrame {
@@ -232,7 +233,8 @@ public final class SurfaceRenderer: @unchecked Sendable {
                 fadeOrigin: SIMD4<Float>(d.fadeOrigin.x, d.fadeOrigin.y, d.opacity, 0),
                 color: SIMD4<Float>(fmtCode, matrixCode, transferCode, d.opacity),
                 sampling: SIMD4<Float>(exact ? 1.0 : 0.0, Float(imported.size.0), Float(imported.size.1), mirrored ? 1.0 : 0.0),
-                orient: SIMD4<Float>(imported.orient.m00, imported.orient.m01, imported.orient.m10, imported.orient.m11)
+                orient: SIMD4<Float>(imported.orient.m00, imported.orient.m01, imported.orient.m10, imported.orient.m11),
+                clipFade: d.clipFade
             )
 
             guard let uBuf = device.makeBuffer(
@@ -442,6 +444,8 @@ public final class SurfaceRenderer: @unchecked Sendable {
     #include <metal_stdlib>
     using namespace metal;
 
+    \(RenderShaders.clipMSL)
+
     struct VideoUniforms {
         float4 viewport;
         float4 node;
@@ -453,6 +457,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         float4 color;      // (format, matrix, transfer, opacity)
         float4 sampling;   // (oneToOne, srcW, srcH, mirrored)
         float4 orient;     // (m00, m01, m10, m11)
+        uint4 clipFade;
     };
 
     struct VideoOut {
@@ -589,17 +594,22 @@ public final class SurfaceRenderer: @unchecked Sendable {
         sampler sampNearest [[sampler(1)]]
     ) {
         float2 frag = in.pos.xy;
-        if (u.clip.z <= 0.0 || u.clip.w <= 0.0) return float4(0.0);
-
-        float clipX = saturate(min(frag.x - u.clip.x + 0.5, (u.clip.x + u.clip.z) - frag.x + 0.5));
-        float clipY = saturate(min(frag.y - u.clip.y + 0.5, (u.clip.y + u.clip.w) - frag.y + 0.5));
-        float cov = clipX * clipY;
-        if (cov <= 0.0) return float4(0.0);
-
-        if (u.fade.z != 0.0) {
-            float d = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
-            cov *= u.fade.w + (1.0 - u.fade.w) * saturate(d);
+        float cov = 1.0;
+        if (any(u.clipFade != uint4(0u))) {
+            cov = clip_alpha(frag, u.clip, u.clipFade);
             if (cov <= 0.0) return float4(0.0);
+        } else {
+            if (u.clip.z <= 0.0 || u.clip.w <= 0.0) return float4(0.0);
+            float clipX = saturate(min(frag.x - u.clip.x + 0.5, (u.clip.x + u.clip.z) - frag.x + 0.5));
+            float clipY = saturate(min(frag.y - u.clip.y + 0.5, (u.clip.y + u.clip.w) - frag.y + 0.5));
+            cov = clipX * clipY;
+            if (cov <= 0.0) return float4(0.0);
+
+            if (u.fade.z != 0.0) {
+                float d = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
+                cov *= u.fade.w + (1.0 - u.fade.w) * saturate(d);
+                if (cov <= 0.0) return float4(0.0);
+            }
         }
 
         float2 nodeCenter = u.node.xy + u.node.zw * 0.5;

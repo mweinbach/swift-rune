@@ -912,21 +912,30 @@ public enum HeadlessRunner {
 
         #if canImport(Metal)
         let metalRenderer: MetalRenderer? = args.forceCPU ? nil : (try? MetalRenderer())
-        func renderScene(_ refScene: RefScene) throws -> Frame {
-            if let gpu = metalRenderer {
-                return try gpu.renderOffscreen(refScene, surfaces: runtime.surfaces)
+        func captureFrame(at now: Double) -> (refScene: RefScene?, renderFrame: RenderFrame?) {
+            if metalRenderer != nil {
+                return (nil, runtime.renderFrame(at: now))
             }
-            return try RuneRef.render(refScene)
+            return (runtime.frame(at: now), nil)
+        }
+        func renderCaptured(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?)) throws -> Frame {
+            if let gpu = metalRenderer, let rf = cap.renderFrame {
+                return try gpu.renderOffscreen(rf)
+            }
+            return try RuneRef.render(cap.refScene ?? runtime.frame(at: runtime.currentTime))
         }
         let devKey = metalRenderer.map { DeviceKey(rawValue: $0.device.registryID) } ?? DeviceKey(rawValue: 0)
         #else
-        func renderScene(_ refScene: RefScene) throws -> Frame {
-            return try RuneRef.render(refScene)
+        func captureFrame(at now: Double) -> (refScene: RefScene?, renderFrame: RenderFrame?) {
+            (runtime.frame(at: now), nil)
+        }
+        func renderCaptured(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?)) throws -> Frame {
+            return try RuneRef.render(cap.refScene!)
         }
         let devKey = DeviceKey(rawValue: 0)
         #endif
 
-        func renderAndReport(_ refScene: RefScene, at now: Double) throws -> Frame {
+        func renderAndReport(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?), at now: Double) throws -> Frame {
             let commitsBefore = runtime.viewCommitCount
             var rendered: Frame? = nil
             var drawCount = 0
@@ -940,7 +949,7 @@ public enum HeadlessRunner {
                     runtime: runtime,
                     drawUI: {
                         drawCount += 1
-                        rendered = try? renderScene(refScene)
+                        rendered = try? renderCaptured(cap)
                     }
                 )
                 comp.render(frame: compFrame)
@@ -950,17 +959,26 @@ public enum HeadlessRunner {
             }
             let outFrame = try rendered ?? {
                 drawCount = 1
-                return try renderScene(refScene)
+                return try renderCaptured(cap)
             }()
             if let reports {
+                let primCount = cap.renderFrame?.instances.count ?? cap.refScene?.primitives.count ?? 0
+                let glyphCount: Int
+                if let rf = cap.renderFrame {
+                    glyphCount = rf.instances.count(where: { $0.params.y == KIND_GLYPH })
+                } else if let rs = cap.refScene {
+                    glyphCount = rs.primitives.count(where: { $0.kind == .glyph })
+                } else {
+                    glyphCount = 0
+                }
                 let encoded = FrameEncoded(
                     outcome: .drawn,
                     frameMs: 0.0,
                     updateMs: 0.0,
                     encodeMs: 0.0,
                     committed: runtime.viewCommitCount != commitsBefore,
-                    primitives: refScene.primitives.count,
-                    glyphs: refScene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) },
+                    primitives: primCount,
+                    glyphs: glyphCount,
                     animating: runtime.isAnimating,
                     compositorAnimating: compositor?.isAnimating ?? false,
                     drawCount: drawCount,
@@ -1049,7 +1067,7 @@ public enum HeadlessRunner {
 
         // Initial settled frame at t = 0 (or `--at` if specified)
         let initialT = (resolvedAtTime ?? 0.0) * args.timeScale
-        var lastRefScene = runtime.frame(at: initialT)
+        var lastCaptured = captureFrame(at: initialT)
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
         var didFireReady = false
@@ -1184,7 +1202,7 @@ public enum HeadlessRunner {
 
                 let animNow = simTime * args.timeScale
                 let frameClockStart = Date()
-                lastRefScene = runtime.frame(at: animNow)
+                lastCaptured = captureFrame(at: animNow)
                 let frameCpuMs = Date().timeIntervalSince(frameClockStart) * 1000.0
                 traceWriter?.recordFrame(runtime: runtime, tMs: simTime * 1000.0, cpuMs: frameCpuMs)
 
@@ -1202,7 +1220,7 @@ public enum HeadlessRunner {
                     let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
                     let needRender = needDump || needVideo || needStrip
                     if needRender {
-                        let baseFrame = applyChromeOverlay(try renderScene(lastRefScene))
+                        let baseFrame = applyChromeOverlay(try renderCaptured(lastCaptured))
                         if needVideo {
                             try videoEncoder?.writeFrame(baseFrame)
                         }
@@ -1245,7 +1263,7 @@ public enum HeadlessRunner {
             onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = applyChromeOverlay(try renderAndReport(lastRefScene, at: runtime.currentTime))
+        var finalFrame = applyChromeOverlay(try renderAndReport(lastCaptured, at: runtime.currentTime))
         if !args.cropRects.isEmpty {
             finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
         } else if let cropKey = args.cropKey, let elInfo = runtime.element(byKey: cropKey) {

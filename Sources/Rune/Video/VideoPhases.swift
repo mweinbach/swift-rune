@@ -190,7 +190,8 @@ public enum VideoPhases {
             case .setVolume(let v):
                 volume = min(max(0.0, v), 1.0)
             case .setRate(let r):
-                rate = max(0.0, r)
+                guard r.isFinite && r > 0 else { return [] }
+                rate = r
                 if playing, case .ready = run, hasPlayer {
                     effects.append(.setRate(rate))
                 }
@@ -303,12 +304,7 @@ public enum VideoPhases {
             settle.expire(now: now)
 
             let stopped = playing && !settle.isWaiting && (item.playerRate == 0.0)
-            let atEnd: Bool
-            if isAudio {
-                atEnd = !settle.isWaiting && ((duration.map { item.currentTime >= $0 - 1e-3 } ?? false) || stopped)
-            } else {
-                atEnd = !settle.isWaiting && ((duration.map { item.currentTime >= $0 - 1e-3 } ?? false) || stopped)
-            }
+            let atEnd = !settle.isWaiting && ((duration.map { item.currentTime >= $0 - 1e-3 } ?? false) || stopped)
 
             let observed = settle.isWaiting ? time : (playing && !atEnd ? (item.frameTime ?? item.currentTime) : item.currentTime)
             if observe(time: observed, atEnd: atEnd) {

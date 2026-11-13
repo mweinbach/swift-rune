@@ -475,7 +475,8 @@ let package = Package(
         .testTarget(
             name: "RuneTests",
             dependencies: ["Rune", "RuneMotion", "RuneRef"],
-            path: "Tests/RuneTests"
+            path: "Tests/RuneTests",
+            exclude: ["Fixtures"]
         ),
         .testTarget(
             name: "RuneKitTests",

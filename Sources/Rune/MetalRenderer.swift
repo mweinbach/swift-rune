@@ -39,44 +39,8 @@ public final class MetalRenderer {
         return true
     }
 
-    public struct GPUSpringTrack: Sendable, Equatable {
-        public var abcd: SIMD4<Float>
-        public var rates: SIMD2<Float>
-        public var goal: Float
-        public var kind: UInt32
-        public var start: SIMD2<Float>
-        public var duration: Float
-        public var pad: Float
-
-        public init(
-            abcd: SIMD4<Float> = .zero,
-            rates: SIMD2<Float> = .zero,
-            goal: Float = 0,
-            kind: UInt32 = 0,
-            start: SIMD2<Float> = .zero,
-            duration: Float = 0
-        ) {
-            self.abcd = abcd
-            self.rates = rates
-            self.goal = goal
-            self.kind = kind
-            self.start = start
-            self.duration = duration
-            self.pad = 0
-        }
-    }
-
-    public struct GPUSpringNode: Sendable, Equatable {
-        public var x: GPUSpringTrack
-        public var y: GPUSpringTrack
-        public var opacity: GPUSpringTrack
-
-        public init(x: GPUSpringTrack = GPUSpringTrack(), y: GPUSpringTrack = GPUSpringTrack(), opacity: GPUSpringTrack = GPUSpringTrack(goal: 1)) {
-            self.x = x
-            self.y = y
-            self.opacity = opacity
-        }
-    }
+    public typealias GPUSpringTrack = Rune.GPUSpringTrack
+    public typealias GPUSpringNode = Rune.GPUSpringNode
 
     private struct BlurUniforms {
         var bounds: SIMD4<Float>
@@ -96,8 +60,16 @@ public final class MetalRenderer {
     private var imageTexture: MTLTexture?
     private var imageTexSize: SIMD2<Int> = .zero
     private var surfaceRenderer: SurfaceRenderer?
+    internal let renderEngine: RenderFrameEngine
 
     public var activeSurfaceRenderer: SurfaceRenderer? { surfaceRenderer }
+
+    internal func acquireSurfaceRenderer(pixelFormat: MTLPixelFormat) -> SurfaceRenderer? {
+        if surfaceRenderer == nil {
+            surfaceRenderer = try? SurfaceRenderer(device: device, pixelFormat: pixelFormat)
+        }
+        return surfaceRenderer
+    }
 
     public enum RendererError: Error, CustomStringConvertible {
         case metalUnavailable
@@ -189,6 +161,7 @@ public final class MetalRenderer {
         sampDesc.sAddressMode = .clampToEdge
         sampDesc.tAddressMode = .clampToEdge
         self.samplerLinear = dev.makeSamplerState(descriptor: sampDesc)!
+        self.renderEngine = try RenderFrameEngine(device: dev)
     }
 
     /// Evaluates an array of `GPUSpringNode` tracks on the Metal GPU at `timeSeconds`.

@@ -404,6 +404,8 @@ private final class RuneMetalHostView<State>: NSView {
     private let popupPresenter = MacOSPopupMenuPresenter()
     private let fileDialogPresenter = MacOSFileDialogPresenter()
     private let dragOutCoordinator = MacOSDragOutCoordinator()
+    private var materialHost: RuneMaterialHost?
+    private var restingGiveBackDone: Bool = false
 
     init(
         frame: NSRect,
@@ -524,8 +526,18 @@ private final class RuneMetalHostView<State>: NSView {
 
         let commitsBefore = runtime.viewCommitCount
         let updateStart = CACurrentMediaTime()
-        let refScene = runtime.frame(at: t)
+        let renderFrame = runtime.renderFrame(at: t)
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+
+        if let w = window {
+            if materialHost == nil {
+                let mh = RuneMaterialHost(frame: bounds)
+                mh.attach(to: w, below: self)
+                materialHost = mh
+            }
+            materialHost?.setLiveResizing(inLiveResize)
+            materialHost?.apply(renderFrame.materials)
+        }
 
         if let title = runtime.windowTitle, window?.title != title {
             window?.title = title
@@ -547,6 +559,13 @@ private final class RuneMetalHostView<State>: NSView {
         }
 
         let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false)
+        if isAnim {
+            restingGiveBackDone = false
+        } else if !restingGiveBackDone {
+            restingGiveBackDone = true
+            let hidden = window?.occlusionState.contains(.visible) == false
+            renderer.giveBack(all: hidden, residentCaches: false)
+        }
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
         _ = surfaceMeter?.redraw(paced: animTimer != nil)
 
@@ -566,9 +585,9 @@ private final class RuneMetalHostView<State>: NSView {
                     targetTexture: drawable.texture,
                     pixelFormat: desiredFmt,
                     renderer: renderer,
-                    drawUI: { [renderer, surfaces = runtime.surfaces] in
+                    drawUI: { [renderer, renderFrame] in
                         drawCount += 1
-                        renderer.renderScene(refScene, surfaces: surfaces, into: drawable.texture, commandBuffer: cmdBuf)
+                        renderer.drawRange(frame: renderFrame, into: drawable.texture, commandBuffer: cmdBuf)
                     }
                 )
                 comp.render(frame: compFrame)
@@ -579,7 +598,7 @@ private final class RuneMetalHostView<State>: NSView {
                 cmdBuf.commit()
             } else {
                 drawCount = 1
-                renderer.render(scene: refScene, surfaces: runtime.surfaces, to: drawable)
+                renderer.draw(frame: renderFrame, to: drawable)
             }
             _ = surfaceMeter?.presented()
             if !didFireReady {
@@ -596,8 +615,8 @@ private final class RuneMetalHostView<State>: NSView {
                     updateMs: updateMs,
                     encodeMs: 0.0,
                     committed: runtime.viewCommitCount != commitsBefore,
-                    primitives: refScene.primitives.count,
-                    glyphs: refScene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) },
+                    primitives: renderFrame.instances.count,
+                    glyphs: renderFrame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) },
                     animating: runtime.isAnimating,
                     compositorAnimating: compositor?.isAnimating ?? false,
                     drawCount: drawCount,

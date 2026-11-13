@@ -393,5 +393,165 @@ struct NativeSurfaceParityTests {
         let vOff = (12 * 20 + 12) * 4
         #expect(frame.rgba[vOff + 0] > 220 && frame.rgba[vOff + 2] < 30)
     }
+
+    // MARK: - Orient quarter-turn & rotated quadrant parity (`native_surface/tests.rs:749-824`)
+
+    @Test("orientations_come_from_quarter_turn_transforms_only")
+    func orientationsFromQuarterTurnTransformsOnly() {
+        #expect(Orient.fromMatrix(a: 0, b: 1, c: -1, d: 0) == Orient(m00: 0, m01: 1, m10: -1, m11: 0))
+        #expect(Orient.fromMatrix(a: 1, b: 0, c: 0, d: 1) == .up)
+        #expect(Orient.fromMatrix(a: -1, b: 0, c: 0, d: -1) == Orient(m00: -1, m01: 0, m10: 0, m11: -1))
+        #expect(Orient.fromMatrix(a: 0.7071, b: 0.7071, c: -0.7071, d: 0.7071) == .up)
+        #expect(Orient.fromMatrix(a: 2, b: 0, c: 0, d: 2) == .up)
+        #expect(Orient(m00: 0, m01: 1, m10: -1, m11: 0).swaps == true)
+        #expect(Orient(m00: 0, m01: 1, m10: -1, m11: 0).upright(width: 64, height: 32) == (32, 64))
+
+        // CGAffineTransform matching AVAssetTrack 90-degree portrait clip: [0, 1, -1, 0]
+        let t = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 32, ty: 0)
+        #expect(Orient.fromTransform(t) == Orient(m00: 0, m01: 1, m10: -1, m11: 0))
+    }
+
+    private static func cpuTurnedBGRA(_ frame: ByteFrame, orient o: Orient) throws -> ByteFrame {
+        let (sw, sh) = (Int(frame.width), Int(frame.height))
+        let (uw, uh) = o.upright(width: frame.width, height: frame.height)
+        let (w, h) = (Int(uw), Int(uh))
+        let src = frame.planes[0]
+        var dst = Data(count: w * h * 4)
+        src.withUnsafeBytes { sRaw in
+            dst.withUnsafeMutableBytes { dRaw in
+                let sp = sRaw.bindMemory(to: UInt8.self)
+                let dp = dRaw.bindMemory(to: UInt8.self)
+                for y in 0..<h {
+                    for x in 0..<w {
+                        // centred upright coords mapped to centred buffer coords
+                        let ux = Float(x) + 0.5 - Float(w) * 0.5
+                        let uy = Float(y) + 0.5 - Float(h) * 0.5
+                        let bx = o.m00 * ux + o.m01 * uy + Float(sw) * 0.5 - 0.5
+                        let by = o.m10 * ux + o.m11 * uy + Float(sh) * 0.5 - 0.5
+                        let ix = max(0, min(sw - 1, Int(bx.rounded())))
+                        let iy = max(0, min(sh - 1, Int(by.rounded())))
+                        let sOff = (iy * sw + ix) * 4
+                        let dOff = (y * w + x) * 4
+                        dp[dOff + 0] = sp[sOff + 0]
+                        dp[dOff + 1] = sp[sOff + 1]
+                        dp[dOff + 2] = sp[sOff + 2]
+                        dp[dOff + 3] = sp[sOff + 3]
+                    }
+                }
+            }
+        }
+        return try ByteFrame(width: uw, height: uh, format: .bgra, color: frame.color, planes: [dst])
+    }
+
+    @Test("oriented_frames_draw_like_frames_turned_upright_on")
+    func orientedFramesDrawLikeFramesTurnedUpright() throws {
+        let dev = MTLCreateSystemDefaultDevice()!
+        let sr = try SurfaceRenderer(device: dev, pixelFormat: .bgra8Unorm_srgb)
+        let allOrients: [Orient] = [
+            Orient(m00: 1, m01: 0, m10: 0, m11: 1),
+            Orient(m00: 0, m01: 1, m10: -1, m11: 0),
+            Orient(m00: -1, m01: 0, m10: 0, m11: -1),
+            Orient(m00: 0, m01: -1, m10: 1, m11: 0),
+            Orient(m00: -1, m01: 0, m10: 0, m11: 1),
+            Orient(m00: 1, m01: 0, m10: 0, m11: -1),
+            Orient(m00: 0, m01: 1, m10: 1, m11: 0),
+            Orient(m00: 0, m01: -1, m10: -1, m11: 0),
+        ]
+
+        // 16x8 asymmetric BGRA ramp with distinct quadrants
+        let sw = 16, sh = 8
+        var ramp = Data(count: sw * sh * 4)
+        ramp.withUnsafeMutableBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self)
+            for y in 0..<sh {
+                for x in 0..<sw {
+                    let off = (y * sw + x) * 4
+                    ptr[off + 0] = UInt8((x * 16 + y * 8) & 0xFF) // B
+                    ptr[off + 1] = UInt8(y * 32)                  // G
+                    ptr[off + 2] = UInt8(x * 16)                  // R
+                    ptr[off + 3] = 255
+                }
+            }
+        }
+        let base = try ByteFrame(width: UInt32(sw), height: UInt32(sh), format: .bgra, color: .srgb, planes: [ramp])
+
+        var id: UInt64 = 0
+        for native in [false, true] {
+            for o in allOrients {
+                let upright = try Self.cpuTurnedBGRA(base, orient: o)
+                let (uw, uh) = (Int(upright.width), Int(upright.height))
+                let oriented = NativeSurface()
+                let reference = NativeSurface()
+                id += 1
+                if native {
+                    try oriented.pushOriented(try CoreVideoPixelBuffer.fromBytes(base), orient: o, frameId: id)
+                    try reference.push(try CoreVideoPixelBuffer.fromBytes(upright), frameId: id)
+                } else {
+                    try oriented.pushBytesOriented(base, orient: o, frameId: id)
+                    try reference.pushBytes(upright, frameId: id)
+                }
+                for (w, h) in [(uw, uh), (uw * 2, uh * 2), (uw / 2, uh / 2)] {
+                    let rect = SIMD4<Float>(0, 0, Float(w), Float(h))
+                    let d1 = SurfaceDraw(surface: oriented, fit: .fill, beforeInstance: 0, rect: rect, clip: rect)
+                    let d2 = SurfaceDraw(surface: reference, fit: .fill, beforeInstance: 0, rect: rect, clip: rect)
+                    let (got, _) = try renderSingleSurface(d1, size: (UInt32(w), UInt32(h)), renderer: sr)
+                    let (want, _) = try renderSingleSurface(d2, size: (UInt32(w), UInt32(h)), renderer: sr)
+                    for i in 0..<got.count {
+                        #expect(abs(Int(got[i]) - Int(want[i])) <= 2)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("rotated_clip_buffers_draw_upright_like_its_poster_on")
+    func rotatedClipBuffersDrawUprightLikePoster() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("quadrants-rot90.mp4")
+        let player = Player(source: .url(fixture))
+        guard let tf = player.testFramesForTest(at: 0.125) else {
+            Issue.record("expected testFramesForTest for quadrants-rot90.mp4")
+            return
+        }
+        #expect(tf.raw.width == 64 && tf.raw.height == 32)
+        #expect(tf.upright.width == 32 && tf.upright.height == 64)
+        #expect(tf.orient.swaps == true)
+
+        let dev = MTLCreateSystemDefaultDevice()!
+        let sr = try SurfaceRenderer(device: dev, pixelFormat: .bgra8Unorm_srgb)
+        for native in [false, true] {
+            let oriented = NativeSurface()
+            let poster = NativeSurface()
+            if native {
+                try oriented.pushOriented(try CoreVideoPixelBuffer.fromBytes(tf.raw), orient: tf.orient, frameId: 1)
+                try poster.push(try CoreVideoPixelBuffer.fromBytes(tf.upright), frameId: 1)
+            } else {
+                try oriented.pushBytesOriented(tf.raw, orient: tf.orient, frameId: 1)
+                try poster.pushBytes(tf.upright, frameId: 1)
+            }
+            for scale in [1, 2] {
+                let w = 32 / scale
+                let h = 64 / scale
+                let rect = SIMD4<Float>(0, 0, Float(w), Float(h))
+                let (got, _) = try renderSingleSurface(SurfaceDraw(surface: oriented, fit: .fill, beforeInstance: 0, rect: rect, clip: rect), size: (UInt32(w), UInt32(h)), renderer: sr)
+                let (want, _) = try renderSingleSurface(SurfaceDraw(surface: poster, fit: .fill, beforeInstance: 0, rect: rect, clip: rect), size: (UInt32(w), UInt32(h)), renderer: sr)
+                var colors: [[UInt8]] = []
+                for (qx, qy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let x = (qx * 16 + 8) / scale
+                    let y = (qy * 32 + 16) / scale
+                    let g = rgbaAt(got, width: UInt32(w), x: x, y: y)
+                    let r = rgbaAt(want, width: UInt32(w), x: x, y: y)
+                    for c in 0..<4 {
+                        #expect(abs(Int(g[c]) - Int(r[c])) <= 8)
+                    }
+                    colors.append(r)
+                }
+                let unique = Set(colors.map { "\($0[0]),\($0[1]),\($0[2])" })
+                #expect(unique.count == 4)
+            }
+        }
+    }
     #endif
 }

@@ -70,7 +70,7 @@ public final class Runtime<State> {
     public typealias ViewFn = (State, inout Cx<State>) -> El<State>
     public typealias KeyHandlerFn = (inout State, KeyEvent, inout Tx) -> Bool
 
-    private struct FlatNode {
+    internal struct FlatNode {
         var index: Int
         var parentIndex: Int?
         var path: String
@@ -141,7 +141,7 @@ public final class Runtime<State> {
         case exit(EmitNodeExit)
     }
 
-    private struct ImageAtlasPacker {
+    internal struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
         var shelfX: Int = 1
         var shelfY: Int = 1
@@ -257,11 +257,11 @@ public final class Runtime<State> {
     public let waker: Waker
     public private(set) var scene: Scene
     private var scrollStore: AnimationStore
-    private var liveStore: AnimationStore
+    internal var liveStore: AnimationStore
 
     public internal(set) var currentTime: Double = 0.0
     public private(set) var isAnimating: Bool = false
-    public private(set) var surfaces: [SurfaceDraw] = []
+    public internal(set) var surfaces: [SurfaceDraw] = []
     private var videoSignature: UInt64 = 0
     private var lastVideoSnapshots: [String: VideoSnapshot] = [:]
     public private(set) var viewCommitCount: Int = 0
@@ -340,7 +340,7 @@ public final class Runtime<State> {
     private var activeDrag: DragSession? = nil
 
     // Scroll state keyed by element path
-    private var scrollOffsets: [String: Vec2] = [:]
+    internal var scrollOffsets: [String: Vec2] = [:]
     private var scrollMaxExtents: [String: Vec2] = [:]
     private var scrollViewportSizes: [String: Vec2] = [:]
     private var scrollContentSizes: [String: Vec2] = [:]
@@ -385,16 +385,16 @@ public final class Runtime<State> {
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
 
-    private var flatNodes: [FlatNode] = []
+    internal var flatNodes: [FlatNode] = []
     private var nodeByPath: [String: Int] = [:]
-    private var nodeById: [NodeId: FlatNode] = [:]
-    private var exitingSnapshots: [NodeId: FlatNode] = [:]
-    private var lastElements: [ElementInfo] = []
-    private var presentedRectByPath: [String: MotionRect] = [:]
-    private var presentedScaleByPath: [String: Vec2] = [:]
+    internal var nodeById: [NodeId: FlatNode] = [:]
+    internal var exitingSnapshots: [NodeId: FlatNode] = [:]
+    internal var lastElements: [ElementInfo] = []
+    internal var presentedRectByPath: [String: MotionRect] = [:]
+    internal var presentedScaleByPath: [String: Vec2] = [:]
     private var hitGeometryByPath: [String: HitGeometry] = [:]
     private var paintOrderPaths: [String] = []
-    private var imagePacker = ImageAtlasPacker()
+    internal var imagePacker = ImageAtlasPacker()
     private var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true
@@ -609,6 +609,27 @@ public final class Runtime<State> {
     }
 
     private func frameWithBlendScope(at now: Double) -> RefScene {
+        let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
+        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            needsCommit = true
+        }
+        if cxSettings.caretReadByView,
+           let nextCaret = currentFocusedCaret(),
+           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
+            needsCommit = true
+        }
+        if rewindRecorder != nil {
+            captureRewindFrame(at: now)
+        }
+        return sceneOut
+    }
+
+    internal func stepToFrameOutput(at now: Double) -> FrameOutput {
+        stepToFrameOutputScaled(at: now).frameOut
+    }
+
+    private func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
@@ -705,19 +726,7 @@ public final class Runtime<State> {
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
-        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
-        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
-            needsCommit = true
-        }
-        if cxSettings.caretReadByView,
-           let nextCaret = currentFocusedCaret(),
-           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
-            needsCommit = true
-        }
-        if rewindRecorder != nil {
-            captureRewindFrame(at: now)
-        }
-        return sceneOut
+        return (frameOut, animNow)
     }
 
     // MARK: - View Commit, Reconciliation & Layout
@@ -4404,7 +4413,7 @@ public final class Runtime<State> {
 }
 
 @inline(__always)
-private func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
+internal func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
     let l = max(a.left, b.left)
     let t = max(a.top, b.top)
     let r = max(l, min(a.right, b.right))
@@ -4413,14 +4422,14 @@ private func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
 }
 
 @inline(__always)
-private func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
+internal func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
     if widthPt <= 0 { return 0 }
     let raw = widthPt * scale
     return raw < 1.0 ? 1.0 : raw.rounded()
 }
 
 @inline(__always)
-private func blendColorOver(bottom: Color, top: Color) -> Color {
+internal func blendColorOver(bottom: Color, top: Color) -> Color {
     let ta = top.a.clamped(to: 0...1)
     let ba = bottom.a.clamped(to: 0...1)
     let outA = ta + ba * (1.0 - ta)
