@@ -289,9 +289,16 @@ struct MotionBentoAndSmallTests {
         #expect(rt.state.strokes[0].count >= 2)
     }
 
-    @Test(
-        "sketch::the_paper_shows_the_pencil_cursor",
-        .disabled("Blocked on @text/@platform: Cursor.Image and Runtime.cursor() tracking not yet merged on main")
-    )
-    func sketchShowsPencilCursor() {}
+    @Test("sketch::the_paper_shows_the_pencil_cursor")
+    func sketchShowsPencilCursor() {
+        let rt = Runtime(state: SketchState(), viewport: Vec2(560, 420), pixelScale: 2.0, systemDark: false, view: sketchView)
+        rt.frame(at: 0.0)
+        let info = rt.element(byKey: "paper")
+        #expect(info != nil)
+        guard let info else { return }
+        let pos = Vec2(info.rect[0] + info.rect[2] * 0.5, info.rect[1] + info.rect[3] * 0.5)
+        rt.pointerMove(to: pos, at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.currentCursor() == .image(pencilCursorImage))
+    }
 }

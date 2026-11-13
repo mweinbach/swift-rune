@@ -41,7 +41,7 @@ public func dragOutTile(
     return container
         .key(key)
         .role(.button)
-        // Re-add .cursor(.grab) once gap/platform Increment 7 (#440) lands on main.
+        .cursor(.grab)
         .size(150, 92)
         .p(12)
         .gap(4)
