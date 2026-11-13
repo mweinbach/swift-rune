@@ -588,10 +588,14 @@ extension Runtime {
     /// Evaluates view + layout + motion and builds an upstream-parity 128-byte `RenderFrame` (`render::Instance` + `Clip` + `Effect` + `SystemMaterial`).
     @discardableResult
     public func renderFrame(at now: Double) -> RenderFrame {
-        let frameOut = stepToFrameOutput(at: now)
-        let rf = buildRenderFrame(frameOut: frameOut, now: now)
-        updatePostFrameLayoutWatches(at: now)
-        return rf
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            Theme.withBlend(srgbBlend) {
+                let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+                let rf = buildRenderFrame(frameOut: frameOut, now: animNow)
+                finishPostFrameHooks(at: now)
+                return rf
+            }
+        }
     }
 
     internal func buildRenderFrame(frameOut: FrameOutput, now: Double) -> RenderFrame {
@@ -659,6 +663,8 @@ extension Runtime {
         var newElements: [ElementInfo] = []
         var newPresentedRects: [String: MotionRect] = [:]
         var newPresentedScales: [String: Vec2] = [:]
+        var newDrawnRectByPath: [String: MotionRect] = [:]
+        var newRectSpringingById: [NodeId: Bool] = [:]
         var instances: [RenderInstance] = []
         var marks: [UInt32] = []
         var newSurfaces: [SurfaceDraw] = []
@@ -884,6 +890,23 @@ extension Runtime {
             newPresentedScales[node.path] = sc
 
             let isExiting = exitingIds.contains(nid)
+            let parentSpringing = node.parentIndex.flatMap {
+                flatNodes.indices.contains($0) ? newRectSpringingById[flatNodes[$0].nodeId] : nil
+            } ?? false
+            let ownSpatialMoving =
+                scene.store.isMoving(nid, Props.FRAME) ||
+                scene.store.isMoving(nid, Props.TRAVEL) ||
+                scene.store.isMoving(nid, Props.SCALE) ||
+                scene.store.isMoving(nid, Props.UNIFORM_SCALE) ||
+                scene.store.isMoving(nid, Props.OFFSET) ||
+                scene.store.isMoving(nid, Props.ROTATE) ||
+                scene.store.isMoving(nid, Props.PRESENCE) ||
+                (!el.layout.scrollAxes.isEmpty && scrollStore.isMoving(NodeId.hash("scroll:" + node.path), Props.SCROLL))
+            if !isExiting {
+                let drawnArr = Self.rotatedBoundsArray(effRect, turn: el.rotate)
+                newDrawnRectByPath[node.path] = MotionRect.fromXYWH(drawnArr[0], drawnArr[1], drawnArr[2], drawnArr[3])
+                newRectSpringingById[nid] = parentSpringing || ownSpatialMoving
+            }
             let hoverFrac = isExiting ? 0.0 : (nodeHoverFracById[nid] ?? 0.0)
             let hovered = !isExiting && (hoverFrac > 0.0005 || (!effInert && node.key != nil && hoveredKey == node.key))
             let pressed = !effInert && (pressedPath == node.path || (node.key != nil && pressedKey == node.key))
@@ -1674,40 +1697,260 @@ extension Runtime {
             // 10. Icon (`SVGIcon`)
             if let (svg, iconSizePt) = el.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
-                let placed = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: iconPx)
-                let col = premulSIMD4(el.textColor ?? (systemDark ? Color.white : Color.black), opacity: localOpacity, srgb: srgbBlend)
-                let pw = Float(placed.pixelSize.x)
-                let ph = Float(placed.pixelSize.y)
-                let ix = rectPx.x + (rectPx.z - pw) * 0.5
-                let iy = rectPx.y + (rectPx.w - ph) * 0.5
-                let idx = instances.count
-                instances.append(RenderInstance(
-                    rect: SIMD4<Float>(ix, iy, pw, ph),
-                    radii: .zero,
-                    fill: col,
-                    border: .zero,
-                    params: SIMD4<Float>(0, KIND_GLYPH, 0, 1.0),
-                    uv: placed.uv,
-                    clip: activeClip,
-                    fade: activeFade
-                ))
-                marks.append(0)
-                glyphFixups.append((idx, placed.uv, pw, ph, placed.page))
+                let iconColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                if let colorDecoded = textSystem.colorIcons.rasterize(
+                    svg,
+                    pixelSize: iconPx,
+                    currentColor: iconColor,
+                    oneColor: el.isIconOneColor ? iconColor : nil,
+                    mirrored: node.mirroredInRtl
+                ), let baseMip = colorDecoded.mips.first {
+                    let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
+                    let normUV = imagePacker.insert(atlas)
+                    let pw = Float(baseMip.width)
+                    let ph = Float(baseMip.height)
+                    let ix = rectPx.x + (rectPx.z - pw) * 0.5
+                    let iy = rectPx.y + (rectPx.w - ph) * 0.5
+                    let idx = instances.count
+                    instances.append(RenderInstance(
+                        rect: SIMD4<Float>(ix, iy, pw, ph),
+                        radii: .zero,
+                        fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
+                        border: .zero,
+                        params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
+                        uv: normUV,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                    imageFixups.append((idx, normUV, pw, ph))
+                } else {
+                    let placed = textSystem.glyphAtlas.rasterizeIcon(
+                        svg,
+                        pixelSize: iconPx,
+                        mirrored: node.mirroredInRtl
+                    )
+                    let col = premulSIMD4(iconColor, opacity: localOpacity, srgb: srgbBlend)
+                    let pw = Float(placed.pixelSize.x)
+                    let ph = Float(placed.pixelSize.y)
+                    let ix = rectPx.x + (rectPx.z - pw) * 0.5
+                    let iy = rectPx.y + (rectPx.w - ph) * 0.5
+                    let idx = instances.count
+                    instances.append(RenderInstance(
+                        rect: SIMD4<Float>(ix, iy, pw, ph),
+                        radii: .zero,
+                        fill: col,
+                        border: .zero,
+                        params: SIMD4<Float>(0, KIND_GLYPH, 0, 1.0),
+                        uv: placed.uv,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                    glyphFixups.append((idx, placed.uv, pw, ph, placed.page))
+                }
             }
 
-            // 11. Text (`plainText` / `richSpans`)
-            if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) {
-                let txt = el.plainText ?? ""
+            // 10.5 TerminalGrid (`TerminalGrid`)
+            if let grid = el.terminalGridPayload {
+                let baseX = effRect.x + el.layout.padding.left
+                let baseY = effRect.y + el.layout.padding.top
+                let cellW = grid.cellSize.x
+                let cellH = grid.cellSize.y
+                let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                for (rowIdx, row) in grid.rows.enumerated() {
+                    let rowY = baseY + Float(rowIdx) * cellH
+                    for fill in row.fills {
+                        let fw = Float(max(0, fill.endColumn - fill.startColumn)) * cellW
+                        guard fw > 0 else { continue }
+                        let fx = baseX + Float(fill.startColumn) * cellW
+                        instances.append(RenderInstance(
+                            rect: SIMD4<Float>(fx * scale, rowY * scale, fw * scale, cellH * scale),
+                            radii: .zero,
+                            fill: premulSIMD4(fill.color, opacity: localOpacity, srgb: srgbBlend),
+                            border: .zero,
+                            params: .zero,
+                            uv: .zero,
+                            clip: activeClip,
+                            fade: activeFade
+                        ))
+                        marks.append(0)
+                    }
+                    if !row.text.isEmpty || !row.spans.isEmpty {
+                        let shaped = textSystem.shape(
+                            text: row.text,
+                            spans: row.spans.isEmpty ? nil : row.spans,
+                            style: row.style,
+                            maxWidth: nil,
+                            pixelScale: scale
+                        )
+                        for gq in shaped.glyphs {
+                            let gx = (baseX + gq.rect.x) * scale
+                            let gy = (rowY + gq.rect.y) * scale
+                            let gw = max(1.0, gq.rect.z * scale)
+                            let gh = max(1.0, gq.rect.w * scale)
+                            let gCol = premulSIMD4(gq.color ?? defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
+                            let idx = instances.count
+                            instances.append(RenderInstance(
+                                rect: SIMD4<Float>(gx, gy, gw, gh),
+                                radii: .zero,
+                                fill: gCol,
+                                border: .zero,
+                                params: SIMD4<Float>(0, KIND_GLYPH, systemDark ? 0.88 : 1.05, 0),
+                                uv: gq.uv,
+                                clip: activeClip,
+                                fade: activeFade
+                            ))
+                            marks.append(0)
+                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
+                        }
+                    }
+                    for cell in row.cells where !cell.text.isEmpty {
+                        let shaped = textSystem.shape(
+                            text: cell.text,
+                            spans: nil,
+                            style: cell.style,
+                            maxWidth: nil,
+                            pixelScale: scale
+                        )
+                        let cx = baseX + Float(cell.column) * cellW
+                        for gq in shaped.glyphs {
+                            let gx = (cx + gq.rect.x) * scale
+                            let gy = (rowY + gq.rect.y) * scale
+                            let gw = max(1.0, gq.rect.z * scale)
+                            let gh = max(1.0, gq.rect.w * scale)
+                            let gCol = premulSIMD4(cell.color, opacity: localOpacity, srgb: srgbBlend)
+                            let idx = instances.count
+                            instances.append(RenderInstance(
+                                rect: SIMD4<Float>(gx, gy, gw, gh),
+                                radii: .zero,
+                                fill: gCol,
+                                border: .zero,
+                                params: SIMD4<Float>(0, KIND_GLYPH, systemDark ? 0.88 : 1.05, 0),
+                                uv: gq.uv,
+                                clip: activeClip,
+                                fade: activeFade
+                            ))
+                            marks.append(0)
+                            glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
+                        }
+                    }
+                    if let overlay = row.overlayShape {
+                        for op in overlay.ops {
+                            switch op {
+                            case .fill(let pts, let col):
+                                let c4 = premulSIMD4(col, opacity: localOpacity, srgb: srgbBlend)
+                                for (indices, aaMask) in Shape.triangulate(pts) {
+                                    let p0 = pts[indices[0]], p1 = pts[indices[1]], p2 = pts[indices[2]]
+                                    let v0 = SIMD2<Float>((baseX + p0.x) * scale, (rowY + p0.y) * scale)
+                                    let v1 = SIMD2<Float>((baseX + p1.x) * scale, (rowY + p1.y) * scale)
+                                    let v2 = SIMD2<Float>((baseX + p2.x) * scale, (rowY + p2.y) * scale)
+                                    let minX = min(v0.x, min(v1.x, v2.x)) - 1.5
+                                    let minY = min(v0.y, min(v1.y, v2.y)) - 1.5
+                                    let maxX = max(v0.x, max(v1.x, v2.x)) + 1.5
+                                    let maxY = max(v0.y, max(v1.y, v2.y)) + 1.5
+                                    instances.append(RenderInstance(
+                                        rect: SIMD4<Float>(minX, minY, maxX - minX, maxY - minY),
+                                        radii: SIMD4<Float>(v0.x, v0.y, v1.x, v1.y),
+                                        fill: c4,
+                                        border: .zero,
+                                        params: SIMD4<Float>(Float(aaMask), KIND_TRIANGLE, 0, 1.0),
+                                        uv: SIMD4<Float>(v2.x, v2.y, 0, 0),
+                                        clip: activeClip,
+                                        fade: activeFade
+                                    ))
+                                    marks.append(0)
+                                }
+                            case .stroke(let pts, let closed, let width, let cap, let col):
+                                let c4 = premulSIMD4(col, opacity: localOpacity, srgb: srgbBlend)
+                                let hw = width * scale * 0.5
+                                let pad = hw + 1.5
+                                let capFlag: Float = cap == .round ? 1.0 : 0.0
+                                let n = pts.count
+                                let count = closed ? n : max(0, n - 1)
+                                for k in 0..<count {
+                                    let a = pts[k], b = pts[(k + 1) % n]
+                                    let ax = (baseX + a.x) * scale, ay = (rowY + a.y) * scale
+                                    let bx = (baseX + b.x) * scale, by = (rowY + b.y) * scale
+                                    instances.append(RenderInstance(
+                                        rect: SIMD4<Float>(min(ax, bx) - pad, min(ay, by) - pad, abs(bx - ax) + pad * 2, abs(by - ay) + pad * 2),
+                                        radii: SIMD4<Float>(ax, ay, bx, by),
+                                        fill: c4,
+                                        border: .zero,
+                                        params: SIMD4<Float>(hw, KIND_SEGMENT, capFlag, 1.0),
+                                        uv: .zero,
+                                        clip: activeClip,
+                                        fade: activeFade
+                                    ))
+                                    marks.append(0)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 11. Text (`plainText` / `richSpans` / `advanceIn`)
+            if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.advanceInRun != nil {
+                let resolvedText = ElDisplayResolver.resolveText(
+                    el: el,
+                    rawText: el.liveText?.get() ?? el.plainText,
+                    isSecure: el.isSecure
+                )
                 let textLeft = effRect.x + el.layout.padding.left
                 let textTop = effRect.y + el.layout.padding.top
                 let availW = max(1, effRect.width - el.layout.padding.left - el.layout.padding.right)
-                let shaped = textSystem.shape(
-                    text: txt,
-                    spans: el.richSpans,
-                    style: el.textStyle,
+                let innerH = max(0, effRect.height - el.layout.padding.top - el.layout.padding.bottom)
+                let shaped = resolvedText.shape(
+                    using: textSystem,
                     maxWidth: availW,
-                    pixelScale: scale
+                    pixelScale: scale,
+                    emitGlyphs: true
                 )
+                var glyphClipEdges = activeClip
+                var glyphFade = activeFade
+                if resolvedText.truncateFade {
+                    let baseClipRect = SIMD4<Float>(activeClip.x, activeClip.y, max(0, activeClip.z - activeClip.x), max(0, activeClip.w - activeClip.y))
+                    let fadeRes = ElDisplayResolver.truncateFadeParams(
+                        el: el,
+                        shaped: shaped,
+                        innerW: availW,
+                        innerH: innerH,
+                        scaleVec: Vec2(1, 1),
+                        pxScale: scale,
+                        textOriginX: textLeft,
+                        textOriginY: textTop,
+                        baseClipPx: baseClipRect
+                    )
+                    if fadeRes.isTruncated {
+                        glyphClipEdges = SIMD4<Float>(
+                            fadeRes.glyphClip.x,
+                            fadeRes.glyphClip.y,
+                            fadeRes.glyphClip.x + fadeRes.glyphClip.z,
+                            fadeRes.glyphClip.y + fadeRes.glyphClip.w
+                        )
+                        let (pw, po) = unpackFade(activeFade)
+                        var widths = pw
+                        var origins = SIMD4<Float>(
+                            activeClip.x - po.x * abs(pw.x),
+                            activeClip.y - po.y * abs(pw.y),
+                            activeClip.z + po.z * abs(pw.z),
+                            activeClip.w + po.w * abs(pw.w)
+                        )
+                        let bounds = fadeRes.boxBoundsPx
+                        let own = fadeRes.glyphFadeLTRB
+                        for edge in 0..<4 {
+                            let inset = edge < 2 ? (bounds[edge] - origins[edge]) : (origins[edge] - bounds[edge])
+                            let o = abs(own[edge])
+                            let w = abs(widths[edge])
+                            if o > 0 && (w == 0 || o >= w || inset >= w) {
+                                widths[edge] = own[edge]
+                                origins[edge] = bounds[edge]
+                            }
+                        }
+                        glyphFade = packFade(width: widths, origin: origins, clip: glyphClipEdges)
+                    }
+                }
                 let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
                 for gq in shaped.glyphs {
                     let gx = (textLeft + gq.rect.x) * scale
@@ -1723,8 +1966,8 @@ extension Runtime {
                         border: .zero,
                         params: SIMD4<Float>(0, KIND_GLYPH, 0, 1.0),
                         uv: gq.uv,
-                        clip: activeClip,
-                        fade: activeFade
+                        clip: glyphClipEdges,
+                        fade: glyphFade
                     ))
                     marks.append(0)
                     glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
@@ -1894,6 +2137,8 @@ extension Runtime {
         self.lastElements = newElements
         self.presentedRectByPath = newPresentedRects
         self.presentedScaleByPath = newPresentedScales
+        self.drawnRectByPath = newDrawnRectByPath
+        self.rectSpringingById = newRectSpringingById
         self.surfaces = newSurfaces
 
         let clear = clearColor.simd4(srgb: srgbBlend)

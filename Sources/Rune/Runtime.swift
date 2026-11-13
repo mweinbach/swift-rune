@@ -173,6 +173,8 @@ public final class Runtime<State> {
         var enclosingScrollIndex: Int? = nil
         var enclosingVScrollIndex: Int? = nil
         var enclosingHScrollIndex: Int? = nil
+        var flow: Flow = .ltr
+        var mirroredInRtl: Bool = false
         var isSticky: Bool { el.stickyConfig?.edge != nil }
     }
 
@@ -207,6 +209,8 @@ public final class Runtime<State> {
         var parentHasGrowth: Bool = false
         var parentNewlyMounted: Bool = false
         var inheritedStyleSpring: Spring? = nil
+        var parentFlow: Flow = .ltr
+        var parentDirected: Bool = false
     }
 
     private struct PaintInh {
@@ -230,6 +234,8 @@ public final class Runtime<State> {
     private struct LiftedFlightSubtree {
         var node: Presented
         var inh: PaintInh
+        var isFlight: Bool
+        var treeInfoOffset: Int?
         var ancestorOpacity: Float
         var ancestorTurn: Turn?
         var outerTurnClip: MotionRect?
@@ -263,12 +269,14 @@ public final class Runtime<State> {
         var path: String
         var key: String?
         var startWindow: Vec2
+        var lastWindow: Vec2
         var startLocal: Vec2
         var startElementOrigin: Vec2
         var startScale: Vec2
         var elementSize: Vec2
         var clicks: Int
         var button: PointerButton
+        var mods: Mods
         var isTextSelectionDrag: Bool
         var movedBeyondSlop: Bool = false
         var stateSnapshotBeforeDrag: State
@@ -568,6 +576,7 @@ public final class Runtime<State> {
     public internal(set) var hoveredKey: String? = nil
     public internal(set) var pressedPath: String? = nil
     public internal(set) var pressedKey: String? = nil
+    private var pressedPointerInside: Bool = false
     public internal(set) var focusedPath: String? = nil
     public internal(set) var focusedKey: String? = nil
     public internal(set) var focusVisible: Bool = false
@@ -611,6 +620,7 @@ public final class Runtime<State> {
     internal var virtualLists: [String: RuntimeVirtualListState] = [:]
     internal var activeVirtualPaths: Set<String> = []
     internal var virtualFill = VirtualFillStateMachine()
+    internal var virtualFillWantsDraw: Bool = false
     internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]
     private var lastHoverScrollOffsets: [String: Vec2] = [:]
     internal struct RuntimeGrowthEntry: Sendable {
@@ -638,6 +648,21 @@ public final class Runtime<State> {
     internal var loopRuntime = LoopRuntime()
     internal var loopClock = LoopClock()
     internal var selectionState = RuntimeSelectionState()
+    public var assistiveTechnology: Bool = false
+    public var isTracing: Bool = false {
+        didSet {
+            if isTracing && traceChannels == nil {
+                traceChannels = [:]
+            }
+        }
+    }
+    public internal(set) var lastAnnouncement: (text: String, politeness: LiveRegionPoliteness)? = nil
+    public internal(set) var toggleMaximizedRequested: Bool = false
+    public internal(set) var toggleFullScreenRequested: Bool = false
+    public internal(set) var imeCursorArea: [Float]? = nil
+    public internal(set) var noWindowDragRects: [MotionRect] = []
+    internal var activeByKeys: Bool = false
+    internal var pendingSentKeys: [KeyEvent] = []
     private var enterDelays: [NodeId: Double] = [:]
     private var releasedEnterDelays: Set<NodeId> = []
     private struct MatchedSeenSnapshot {
@@ -690,6 +715,7 @@ public final class Runtime<State> {
     private var focusReturnStack: [FocusReturnEntry] = []
     private var syncedEditFocusedPaths: Set<String> = []
     private var pendingTxFocusKey: String? = nil
+    private var pendingTxFocusVisible: Bool? = nil
     private var pendingTxBlurRequested: Bool = false
     internal var kitHooks = KitRuntimeHooksState()
     internal var modalMemberPaths: Set<String> = []
@@ -698,8 +724,6 @@ public final class Runtime<State> {
     private var helpState = HelpRuntimeState()
     internal var boundClipboard: Clipboard? = nil
     internal var pendingPasteRequests: Int = 0
-    internal var drawnLayoutCache: [UInt64: (drawn: MotionRect, laid: MotionRect)] = [:]
-    internal var visibleWatchState: [UInt64: Bool] = [:]
     internal var inheritedHoverCurvesByPath: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var anchorHoverWithinByKey: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var unseenPresence = UnseenPresenceState()
@@ -714,6 +738,9 @@ public final class Runtime<State> {
         case released
     }
     internal var hoverHoldState: HoverHoldState = .free
+    internal var hoverWithinPaths: [String] = []
+    internal var hoverDelays = HoverDelays()
+    internal var hoverPaused: Bool = false
 
     // Live property tracking `(path, target) -> lastSeenSequence`
     private struct LiveKey: Hashable {
@@ -785,8 +812,8 @@ public final class Runtime<State> {
     private var screenFired: [NodeId: [Float]] = [:]
     private var drawnFired: [NodeId: (drawn: [Float], laid: [Float])] = [:]
     private var visibleFired: [NodeId: Bool] = [:]
-    private var drawnRectByPath: [String: MotionRect] = [:]
-    private var rectSpringingById: [NodeId: Bool] = [:]
+    internal var drawnRectByPath: [String: MotionRect] = [:]
+    internal var rectSpringingById: [NodeId: Bool] = [:]
     private var lastCommittedSpecs: [NodeSpec] = []
     public internal(set) var liveOnlyEvents: UInt64 = 0
     public internal(set) var liveOnlyWarnings: [String] = []
@@ -1029,6 +1056,9 @@ public final class Runtime<State> {
                 best = best.map { min($0, due) } ?? due
             }
         }
+        if let hoverDue = hoverDelays.nextDue(), hoverDue > now {
+            best = best.map { min($0, hoverDue) } ?? hoverDue
+        }
         if let loopWake = nextLoopWakeDeadline(after: now) {
             best = best.map { min($0, loopWake) } ?? loopWake
         }
@@ -1089,6 +1119,28 @@ public final class Runtime<State> {
         let sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
         }
+        finishPostFrameHooks(at: now)
+        if rewindRecorder != nil {
+            captureRewindFrame(at: now)
+        }
+        let wasScrolling = frameHadScrollSinceLastFrame || scrollMovedSinceLastFrame || scrollStore.isAnimating
+        frameHadScrollSinceLastFrame = false
+        perfWatch.meter.frameEnds(scrolling: wasScrolling, committed: frameHadCommitted, instantKey: frameInstantScrollKey)
+        if PerfWarn.isEnabled {
+            perfWatch.idle.ends(
+                clock: now,
+                animating: isAnimating,
+                drawn: makeIdleDrawnSnapshot(sceneOut),
+                windowName: windowTitle
+            )
+        }
+        if InteractionGate.isOn {
+            interactionBuilt(sceneOut: sceneOut)
+        }
+        return sceneOut
+    }
+
+    internal func finishPostFrameHooks(at now: Double) {
         let wroteDrawn = writeDrawnRects()
         _ = reportLayoutAndScreen(reportLocal: true, reportScreen: true)
         _ = reportDrawn()
@@ -1113,24 +1165,6 @@ public final class Runtime<State> {
             needsCommit = true
             resizeReadMovedFlag = true
         }
-        if rewindRecorder != nil {
-            captureRewindFrame(at: now)
-        }
-        let wasScrolling = frameHadScrollSinceLastFrame || scrollMovedSinceLastFrame || scrollStore.isAnimating
-        frameHadScrollSinceLastFrame = false
-        perfWatch.meter.frameEnds(scrolling: wasScrolling, committed: frameHadCommitted, instantKey: frameInstantScrollKey)
-        if PerfWarn.isEnabled {
-            perfWatch.idle.ends(
-                clock: now,
-                animating: isAnimating,
-                drawn: makeIdleDrawnSnapshot(sceneOut),
-                windowName: windowTitle
-            )
-        }
-        if InteractionGate.isOn {
-            interactionBuilt(sceneOut: sceneOut)
-        }
-        return sceneOut
     }
 
     private func makeIdleDrawnSnapshot(_ scene: RefScene) -> IdleMeter.DrawnSnapshot {
@@ -1276,6 +1310,8 @@ public final class Runtime<State> {
         stepKitDragRepeatOnFrame(at: now)
         stepKitHoverDelaysOnFrame(at: now)
         let growthMoving = advanceGrowthRows(at: now)
+        fireHoverDelays(at: now)
+        flushPendingSentKeys(at: now)
 
         // Release any `enterDelay` elements whose wait window has elapsed
         var releasedAny = false
@@ -1349,8 +1385,9 @@ public final class Runtime<State> {
                 popupNeedsLayout = false
             }
         }
-        if virtualFillNeedsCommit {
+        if virtualFillNeedsCommit || virtualFillWantsDraw {
             virtualFillNeedsCommit = false
+            virtualFillWantsDraw = false
             needsCommit = true
         }
 
@@ -1446,11 +1483,11 @@ public final class Runtime<State> {
         return (animNow, growthMoving)
     }
 
-    private func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
+    internal func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
         let (animNow, growthMoving) = prepareAndCommitFrame(at: now)
 
         // Sample Scene & Live property bindings using scaled animation clock
-        refreshHoverAndSyncTracks(at: animNow, cut: false)
+        refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
         let frameOut = scene.frame(at: animNow)
         let liveActive: Bool
         if liveVisible {
@@ -1570,12 +1607,14 @@ public final class Runtime<State> {
             pendingFollowEdge = false
             let commitCut = cut || explicitSettle
 
-            if commitCut {
+            if commitCut || commitKind.lands {
                 enterDelays.removeAll()
                 releasedEnterDelays.removeAll()
-                activeFlightIds.removeAll()
-                launchedFlightIds.removeAll()
-                unclippedMatchedFlightIds.removeAll()
+                if commitCut {
+                    activeFlightIds.removeAll()
+                    launchedFlightIds.removeAll()
+                    unclippedMatchedFlightIds.removeAll()
+                }
             }
             let sincePass = memo.nextPass()
             let liveCheck = pendingLiveOnlyCheck
@@ -1681,7 +1720,7 @@ public final class Runtime<State> {
     }
 
     @inline(__always)
-    private static func rotatedBoundsArray(_ rect: MotionRect, turn: Float) -> [Float] {
+    internal static func rotatedBoundsArray(_ rect: MotionRect, turn: Float) -> [Float] {
         guard abs(turn) >= 1e-6 else {
             return [rect.left, rect.top, rect.width, rect.height]
         }
@@ -2006,12 +2045,28 @@ public final class Runtime<State> {
                 enclosingScrollIndex: nil,
                 enclosingVScrollIndex: nil,
                 enclosingHScrollIndex: nil,
-                staticInh: StaticInh()
+                staticInh: StaticInh(),
+                parentFlow: .ltr,
+                parentDirected: false
             )
         ]
 
         while let item = walkStack.popLast() {
-            let el = item.el
+            let rawEl = item.el
+            let effectiveParentFlow: Flow = rawEl.isUnmirrored ? .ltr : item.parentFlow
+            let (nodeFlow, mirrorDir) = stepDirection(
+                parent: effectiveParentFlow,
+                event: DirEvent.of(rawEl, state: state),
+                state: state
+            )
+            let nodeDirected = (rawEl.explicitDir != nil) || rawEl.isUnmirrored || item.parentDirected
+            var el = rawEl
+            if mirrorDir {
+                mirrorElVisual(&el)
+            }
+            if nodeDirected && !el.textDirByParagraph {
+                el.textStyle.direction = nodeFlow.textFlow
+            }
             let solved = item.solved
             let resolvedKey = item.resolvedKey
             let path = item.path
@@ -2045,21 +2100,24 @@ public final class Runtime<State> {
             var anchorScaleFactor: Float = 1.0
             var anchorAttachNorm: Vec2? = nil
 
-            if let a = el.anchor,
-               let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
-                let placement = AnchorLayoutHelper.zoomedPlacement(
-                    anchor: a,
-                    triggerZoomed: anchorFlat.zoomedTargetRect,
-                    anchorScale: anchorFlat.inheritedScale,
-                    localSize: Vec2(localRect.width, localRect.height),
-                    overlayOwnScale: el.scale,
-                    viewport: viewport
-                )
-                worldX = placement.unscaledOrigin.x
-                worldY = placement.unscaledOrigin.y
-                anchorScaleFactor = placement.zoom
-                if abs(placement.zoom - 1.0) > 1e-5 {
-                    anchorAttachNorm = placement.attachNorm
+            if let rawAnchor = el.anchor {
+                let a = mirrorDir ? mirrorAnchor(rawAnchor) : rawAnchor
+                el.anchor = a
+                if let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
+                    let placement = AnchorLayoutHelper.zoomedPlacement(
+                        anchor: a,
+                        triggerZoomed: anchorFlat.zoomedTargetRect,
+                        anchorScale: anchorFlat.inheritedScale,
+                        localSize: Vec2(localRect.width, localRect.height),
+                        overlayOwnScale: el.scale,
+                        viewport: viewport
+                    )
+                    worldX = placement.unscaledOrigin.x
+                    worldY = placement.unscaledOrigin.y
+                    anchorScaleFactor = placement.zoom
+                    if abs(placement.zoom - 1.0) > 1e-5 {
+                        anchorAttachNorm = placement.attachNorm
+                    }
                 }
             }
             // Sticky push-out is evaluated at paint time in `buildRefScene` using presented rects.
@@ -2107,7 +2165,7 @@ public final class Runtime<State> {
                     curScroll.y.clamped(to: 0...maxSY)
                 )
                 scrollOffsets[path] = curScroll
-                ownScroll = curScroll
+                ownScroll = Vec2(nodeFlow == .rtl ? -curScroll.x : curScroll.x, curScroll.y)
 
                 if el.scrollEdgeFadeWidth > 0 || el.scrollFadeStyle.end != nil {
                     let dummyNode = FlatNode(
@@ -2126,7 +2184,8 @@ public final class Runtime<State> {
                         clipRect: inheritedClip,
                         scrollShift: curScroll,
                         effectiveInert: false,
-                        zOrder: 0
+                        zOrder: 0,
+                        flow: nodeFlow
                     )
                     scrollFadeInfo = computeScrollFadeSpec(for: dummyNode)
                 }
@@ -2187,7 +2246,9 @@ public final class Runtime<State> {
                 ownClipFade: ownClipFadeSpec,
                 enclosingScrollIndex: item.enclosingScrollIndex,
                 enclosingVScrollIndex: item.enclosingVScrollIndex,
-                enclosingHScrollIndex: item.enclosingHScrollIndex
+                enclosingHScrollIndex: item.enclosingHScrollIndex,
+                flow: nodeFlow,
+                mirroredInRtl: mirrorDir && el.mirrorInRtl
             )
             newFlat.append(flat)
             newByPath[path] = myIndex
@@ -2209,12 +2270,15 @@ public final class Runtime<State> {
             let ancestorInstant = inInstantSubtree && !el.hasAnimatedChanges
             let childInstant = ancestorInstant || el.hasInstantChanges
             let selfInstantLayoutOrStyle = childInstant || commitKind.snaps || commitCut || reducedMotion
+            let selfInstantStyle = childInstant || commitKind.snaps || commitCut
 
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
             let nodeStyleSpring = el.styleSpring ?? item.inheritedStyleSpring
-            // Provide a subtle default interactive spring when pressScale / press is used
+            // Provide a subtle default interactive spring when pressScale / press is used;
+            // keep animated style curves active under `reducedMotion` so `AnimationStore`
+            // maps `.color`/`.opacity` to `REDUCED_FADE` while cutting `.shape`/`.blur`/`.scale`.
             var styleSp: Spring?
-            if selfInstantLayoutOrStyle {
+            if selfInstantStyle {
                 styleSp = el.pressBg != nil && !commitKind.snaps && !commitCut && !reducedMotion
                     ? MotionTokens.INSTANT
                     : nil
@@ -2224,9 +2288,12 @@ public final class Runtime<State> {
                     ?? commitMotion?.spring
                     ?? ((el.pressScaleFactor != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
             }
-            var colorSp: Spring? = (childInstant || commitKind.snaps || commitCut)
+            var paintSp: Spring? = (selfInstantStyle || reducedMotion)
                 ? nil
-                : (nodeStyleSpring ?? commitColorSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
+                : (nodeStyleSpring ?? commitColorSpring ?? commitMotion?.spring)
+            var colorSp: Spring? = selfInstantStyle
+                ? nil
+                : (paintSp ?? commitColorSpring ?? nodeStyleSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
             let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
                 guard self.scene.hasNode(nid),
@@ -2287,14 +2354,23 @@ public final class Runtime<State> {
             if layoutAnimSpec == nil && !commitCut && !reducedMotion && !commitKind.lands && isRunningFlight {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
-            var specTransition = (ancestorInstant || reducedMotion) ? nil : el.transition
+            if el.isWidthLeads && !selfInstantLayoutOrStyle {
+                if let la = layoutAnimSpec {
+                    layoutAnimSpec = la.widthLeads()
+                } else {
+                    layoutAnimSpec = .widthLeads(styleSp ?? MotionTokens.SETTLE)
+                }
+            }
+            let entersAtOnce = commitCut || commitKind.snaps || reducedMotion || (ancestorInstant && childInstant)
+            let specTransition: Transition? = ancestorInstant ? nil : el.transition
+            var specSnapMount: Bool = entersAtOnce
             var specRect = targetRect
             var specOpacity = el.opacity
             var specScale = effectiveScale
             var specBlur = el.blur
 
             let isFreshMount = !prevMountedIds.contains(nid)
-            if el.enterDelay > 0 && viewCommitCount > 1 && !cut && !ancestorInstant && isFreshMount && !releasedEnterDelays.contains(nid) && enterDelays[nid] == nil {
+            if el.enterDelay > 0 && viewCommitCount > 1 && !cut && !commitKind.snaps && !commitKind.lands && !ancestorInstant && isFreshMount && !releasedEnterDelays.contains(nid) && enterDelays[nid] == nil {
                 enterDelays[nid] = now + Double(el.enterDelay)
             }
             if let readyAt = enterDelays[nid], now < readyAt {
@@ -2305,13 +2381,15 @@ public final class Runtime<State> {
                 let dy = eff.pointOffset.y + eff.relativeOffset.y * targetRect.height
                 specRect = targetRect.offsetBy(Vec2(dx, dy))
                 specBlur = max(specBlur, eff.zeroBlur)
-                specTransition = nil
+                specSnapMount = true
                 layoutAnimSpec = nil
                 styleSp = nil
+                paintSp = nil
                 colorSp = nil
             } else if releasedEnterDelays.remove(nid) != nil {
                 let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
                 styleSp = enterSp
+                paintSp = enterSp
                 colorSp = enterSp
                 layoutAnimSpec = el.layoutAnim ?? LayoutAnim(spring: enterSp)
             }
@@ -2337,7 +2415,14 @@ public final class Runtime<State> {
                 styleSpring: styleSp,
                 colorSpring: colorSp,
                 animateOffset: (el.styleSpring != nil || commitMotion != nil || el.layoutAnim != nil),
-                transition: specTransition
+                paintSpring: paintSp,
+                offsetAnim: selfInstantLayoutOrStyle ? nil : el.offsetMotionAnim,
+                opacityAnim: selfInstantStyle ? nil : el.opacityMotionAnim,
+                scaleAnim: selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim,
+                rotateAnim: selfInstantLayoutOrStyle ? nil : el.rotateMotionAnim,
+                iconTurn: el.iconRotation,
+                transition: specTransition,
+                snapMount: specSnapMount
             ))
 
             let growthSlideY: Float = {
@@ -2398,7 +2483,9 @@ public final class Runtime<State> {
                     rowLayout: childInRow,
                     parentHasGrowth: el.growthSpec != nil,
                     parentNewlyMounted: isFreshMount,
-                    inheritedStyleSpring: nodeStyleSpring
+                    inheritedStyleSpring: nodeStyleSpring,
+                    parentFlow: nodeFlow,
+                    parentDirected: nodeDirected
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -2892,7 +2979,8 @@ public final class Runtime<State> {
             }
         }
 
-        let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
+        let preCommitNodes = flatNodes
+        let childExitOverrides = collectChildExitOverrides(prevNodes: preCommitNodes, newById: pass.byId, cut: cut)
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut)
 
         for s in liveSubscriptions {
@@ -2944,6 +3032,7 @@ public final class Runtime<State> {
         }
 
         virtualInputs = pass.virtualExpansion.virtualInputs
+        reconcilePrunedHoverWithin(prevNodes: preCommitNodes, newByPath: pass.byPath, cut: cut, at: now)
 
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
         reconcileFocusAfterCommit(
@@ -3170,6 +3259,41 @@ public final class Runtime<State> {
             let target = (bGrad?.bottom ?? node.el.borderColor).motionColor
             pendingBorderBottoms.append((id: nid, seed: seed, target: target, spring: csp))
         }
+        if !commitCut && !commitKind.snaps && !reducedMotion {
+            for i in pass.nodes.indices {
+                let n = pass.nodes[i]
+                guard n.el.holdLandingWidthEnabled, scene.hasNode(n.nodeId),
+                      let drawn = scene.get(n.nodeId, Props.FRAME) else { continue }
+                let was = scene.store.target(n.nodeId, Props.FRAME) ?? drawn
+                guard abs(was.width - n.localRect.width) >= 0.5 else { continue }
+                var end = i + 1
+                while end < pass.nodes.count {
+                    let pIdx = pass.nodes[end].parentIndex ?? -1
+                    if pIdx < i { break }
+                    end += 1
+                }
+                var anchorIdx: Int? = nil
+                for c in (i + 1)..<end where pass.nodes[c].parentIndex == i {
+                    let cId = pass.nodes[c].nodeId
+                    if scene.hasNode(cId) && !scene.isExiting(cId) {
+                        anchorIdx = c
+                        break
+                    }
+                }
+                let jump = anchorIdx.flatMap { c in
+                    scene.get(pass.nodes[c].nodeId, Props.FRAME).map { $0.x - pass.nodes[c].localRect.x }
+                } ?? 0.0
+                let layoutSpringX: Spring? = if case .spring(let sp) = specs[i].layoutAnim?.x.curve { sp } else { nil }
+                let glideSp = layoutSpringX ?? specs[i].styleSpring ?? commitMotion?.spring ?? MotionTokens.SETTLE
+                for j in i..<end {
+                    specs[j].layoutAnim = .instant
+                }
+                scene.set(n.nodeId, Props.OFFSET, Vec2((drawn.x - n.localRect.x) + jump, specs[i].offset.y))
+                if specs[i].offsetAnim == nil && specs[i].styleSpring == nil {
+                    specs[i].styleSpring = glideSp
+                }
+            }
+        }
         measureFramePhase(.apply) {
             scene.commit(
                 specs,
@@ -3177,7 +3301,10 @@ public final class Runtime<State> {
                 initialCut: commitCut,
                 snapMounts: commitKind.snaps,
                 snapOmittedNonExiting: activeExplicitSnap,
-                matchedStarts: matchedStarts
+                matchedStarts: matchedStarts,
+                unmountNewOmissions: activeExplicitSnap || commitCut,
+                landWaitingNodes: commitKind.lands,
+                snapNewMounts: commitKind.snaps || commitCut
             )
         }
         if scene.isTracing {
@@ -3388,7 +3515,7 @@ public final class Runtime<State> {
                     rawScroll.y.clamped(to: 0...maxExt.y)
                 )
                 scrollOffsets[flatNodes[i].path] = clamped
-                flatNodes[i].scrollShift = clamped
+                flatNodes[i].scrollShift = Vec2(flatNodes[i].flow == .rtl ? -clamped.x : clamped.x, clamped.y)
                 dispatchScrollOffsetObserverIfChanged(for: flatNodes[i], at: now)
                 if flatNodes[i].el.scrollEdgeFadeWidth > 0 || flatNodes[i].el.scrollFadeStyle.end != nil {
                     scrollFadeInfo = computeScrollFadeSpec(for: flatNodes[i])
@@ -3685,8 +3812,10 @@ public final class Runtime<State> {
     ) {
         let txBlur = pendingTxBlurRequested
         let txFocusKey = pendingTxFocusKey
+        let txFocusVisible = pendingTxFocusVisible
         pendingTxBlurRequested = false
         pendingTxFocusKey = nil
+        pendingTxFocusVisible = nil
 
         // Detect newly requested `.focused(true)` on non-inert mounted focusable nodes.
         var requestedFocusIdx: Int? = nil
@@ -3730,6 +3859,9 @@ public final class Runtime<State> {
         } else if let fk = txFocusKey,
                   let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
             nextIdx = idx
+            if let vis = txFocusVisible {
+                focusVisible = vis
+            }
         } else if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
             nextIdx = rIdx
             focusVisible = false
@@ -3889,6 +4021,8 @@ public final class Runtime<State> {
             let c = Color.decodeLiveLanes(lanes)
             liveFillTargets[nid] = c
             liveStore.snap(nid, Props.FILL, to: c.motionColor)
+        case .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
+            liveStore.snap(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor)
         case .rect: liveStore.snap(nid, Props.RECT, to: MotionRect.fromLanes(lanes))
         }
     }
@@ -3903,6 +4037,8 @@ public final class Runtime<State> {
             let c = Color.decodeLiveLanes(lanes)
             liveFillTargets[nid] = c
             liveStore.set(nid, Props.FILL, to: c.motionColor, anim: .spring(spring), at: now)
+        case .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
+            liveStore.set(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor, anim: .spring(spring), at: now)
         case .rect: liveStore.set(nid, Props.RECT, to: MotionRect.fromLanes(lanes), anim: .spring(spring), at: now)
         }
     }
@@ -4078,7 +4214,7 @@ public final class Runtime<State> {
                             hasLiveSpatialSpring = true
                         }
                     }
-                case .blur, .fill, .trim:
+                case .blur, .fill, .trim, .textColor, .borderColor, .shadowColor, .gradientTop, .gradientBottom:
                     break
                 }
             }
@@ -4162,6 +4298,8 @@ public final class Runtime<State> {
         var newPaintOrder: [String] = []
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
+        var nextImeCursorArea: [Float]? = nil
+        var nextNoWindowDragRects: [MotionRect] = []
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
         var newLinkBoxes: [String: [TextLinkBox]] = [:]
         var builtSurfaces: [SurfaceDraw] = []
@@ -4204,10 +4342,14 @@ public final class Runtime<State> {
             let emitLiftedNow = input.emitLiftedNow
             let emptyExit = EmitNodeExit(layerEndCount: 0, devClip: .zero)
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return ([], emptyExit) }
-            if !emitLiftedNow && flyingRootIds.contains(p.id) {
+            let el = snap.el
+            let isFlight = flyingRootIds.contains(p.id)
+            if !emitLiftedNow && (isFlight || el.isRaised) {
                 liftedFlights.append(LiftedFlightSubtree(
                     node: p,
                     inh: inh,
+                    isFlight: isFlight,
+                    treeInfoOffset: isFlight ? nil : infos.count,
                     ancestorOpacity: ancestorOpacity,
                     ancestorTurn: ancestorTurn,
                     outerTurnClip: outerTurnClip,
@@ -4218,7 +4360,6 @@ public final class Runtime<State> {
                 ))
                 return ([], emptyExit)
             }
-            let el = snap.el
             let textFlightTarget = activeTextFlights.first(where: { $0.targetNodeId == p.id })
             let textFlightSource = textFlightTarget == nil
                 ? activeTextFlights.first(where: { FlightSelector.selects($0.state.sourceKey, path: snap.path, key: snap.key) })
@@ -4416,6 +4557,21 @@ public final class Runtime<State> {
             } else {
                 fillColor = el.background
             }
+            var borderColor: Color
+            if let pb = p.border {
+                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER) && !scene.store.isMoving(p.id, Props.BORDER_BOTTOM)
+                    && abs(pb.r - el.borderColor.r) < 1e-3
+                    && abs(pb.g - el.borderColor.g) < 1e-3
+                    && abs(pb.b - el.borderColor.b) < 1e-3
+                    && abs(pb.a - el.borderColor.a) < 1e-3
+                borderColor = (settledBorder || pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
+            } else {
+                borderColor = el.borderColor
+            }
+            var liveTextColor: Color? = nil
+            var liveShadowColor: Color? = nil
+            var liveGradientTop: Color? = nil
+            var liveGradientBottom: Color? = nil
             var blurPt = p.blur
             var liveTrim: Vec2? = nil
             for b in el.liveBindings {
@@ -4426,22 +4582,21 @@ public final class Runtime<State> {
                     } else if let mc = liveStore.get(lnid, Props.FILL) {
                         fillColor = Color(mc)
                     }
+                } else if b.target == .textColor, let mc = liveStore.get(lnid, Props.FILL) {
+                    liveTextColor = Color(mc)
+                } else if b.target == .borderColor, let mc = liveStore.get(lnid, Props.FILL) {
+                    borderColor = Color(mc)
+                } else if b.target == .shadowColor, let mc = liveStore.get(lnid, Props.FILL) {
+                    liveShadowColor = Color(mc)
+                } else if b.target == .gradientTop, let mc = liveStore.get(lnid, Props.FILL) {
+                    liveGradientTop = Color(mc)
+                } else if b.target == .gradientBottom, let mc = liveStore.get(lnid, Props.FILL) {
+                    liveGradientBottom = Color(mc)
                 } else if b.target == .blur, let bl = liveStore.get(lnid, Props.BLUR) {
                     blurPt = bl.radius
                 } else if b.target == .trim, let tr = liveStore.get(lnid, Props.OFFSET) {
                     liveTrim = tr
                 }
-            }
-            let borderColor: Color
-            if let pb = p.border {
-                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER) && !scene.store.isMoving(p.id, Props.BORDER_BOTTOM)
-                    && abs(pb.r - el.borderColor.r) < 1e-3
-                    && abs(pb.g - el.borderColor.g) < 1e-3
-                    && abs(pb.b - el.borderColor.b) < 1e-3
-                    && abs(pb.a - el.borderColor.a) < 1e-3
-                borderColor = (settledBorder || pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
-            } else {
-                borderColor = el.borderColor
             }
 
             var visClip = flightClipOverride ?? (inh.clip.map { intersectRects(snap.clipRect, $0) } ?? snap.clipRect)
@@ -4726,8 +4881,10 @@ public final class Runtime<State> {
 
                 // 1. Outer drop shadows
                 let stuckShadowFactor = (el.stickyConfig != nil) ? StickyMath.stuckShadowFactor(shift: stickyMag) : 0.0
-                for sh in el.shadows where !sh.inset && sh.color.a > 0.001 {
-                    let sc = sh.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                for sh in el.shadows where !sh.inset {
+                    let shColor = liveShadowColor ?? sh.color
+                    guard shColor.a > 0.001 else { continue }
+                    let sc = shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     primitives.append(.dropShadow(
                         rect: devRect,
                         radii: devRadii,
@@ -4756,7 +4913,8 @@ public final class Runtime<State> {
                 }
 
                 // 2. Box background / gradient / solid border
-                let hasFill = fillColor.a > 0.0005
+                let activeFocusFill = (isFocused && focusVisible) ? (el.focusFillColor ?? el.focusHighlightColor) : nil
+                let hasFill = fillColor.a > 0.0005 || (activeFocusFill != nil)
                 let hasSolidBorder = el.dashedBorder == nil && borderColor.a > 0.0005 && (el.borderWidth > 0 || el.borderSides != nil)
 
                 if let grad = el.gradient {
@@ -4765,8 +4923,8 @@ public final class Runtime<State> {
                         primitives.append(.linearGradient(
                             rect: devRect,
                             radii: devRadii,
-                            topColor: topC.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                            bottomColor: botC.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            topColor: (liveGradientTop ?? topC).scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            bottomColor: (liveGradientBottom ?? botC).scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
                             angleRadians: angle,
                             clip: devClip,
                             turn: useLayer ? 0 : p.rotate
@@ -4775,14 +4933,14 @@ public final class Runtime<State> {
                         primitives.append(.radialGradient(
                             rect: devRect,
                             radii: devRadii,
-                            innerColor: inC.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                            outerColor: outC.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            innerColor: (liveGradientTop ?? inC).scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            outerColor: (liveGradientBottom ?? outC).scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
                             clip: devClip
                         ))
                     }
                 }
 
-                let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                let effectiveBoxFill = activeFocusFill ?? fillColor
                 if let (surf, fit) = el.surfacePayload, surfaceVisible {
                     if hasFill && el.gradient == nil {
                         primitives.append(attachFade(.roundedRect(
@@ -4859,7 +5017,7 @@ public final class Runtime<State> {
                         clip: devClip,
                         turn: useLayer ? 0 : effRotate
                     )))
-                } else if isFocused && focusVisible, let hl = el.focusHighlightColor {
+                } else if let hl = activeFocusFill {
                     primitives.append(attachFade(.roundedRect(
                         rect: devRect,
                         radii: devRadii,
@@ -4887,11 +5045,13 @@ public final class Runtime<State> {
                 }
 
                 // 4. Inset shadows
-                for sh in el.shadows where sh.inset && sh.color.a > 0.001 {
+                for sh in el.shadows where sh.inset {
+                    let shColor = liveShadowColor ?? sh.color
+                    guard shColor.a > 0.001 else { continue }
                     primitives.append(.insetShadow(
                         rect: devRect,
                         radii: devRadii,
-                        color: sh.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                        color: shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
                         blur: sh.blur * pxScale,
                         spread: sh.spread * pxScale,
                         offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
@@ -4962,19 +5122,52 @@ public final class Runtime<State> {
 
                 // 6. SVG Icon payload
                 if let (svg, _) = el.iconPayload {
-                    let effGlyphTurn = useLayer ? 0 : effRotate
+                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
+                    let animIconTurn = scene.get(p.id, Props.ICON_TURN) ?? el.iconRotation
+                    let effGlyphTurn = (useLayer ? 0 : effRotate) + animIconTurn
+                    let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    let tk = (flightCover != nil) ? Float(1.0) : avgScale
+                    let raster = (flightCover != nil) ? Float(1.0) : nodeScaleMotion.raster(sc: avgScale, rest: inh.stillScale)
+                    let zoom = tk / max(1e-4, raster)
+                    let rawSide = max(0, min(rawRect.width, rawRect.height)) * pxScale
+                    let snapU: Float = (flightCover == nil && abs(rawSide - rawSide.rounded()) < 1.0 / 512.0)
+                        ? max(0, min(1, 1.0 - abs(avgScale - 1.0) * 32.0))
+                        : 0.0
+                    let drawn = exactSide + (min(devRect.z, devRect.w) - exactSide) * snapU
+                    let px: Int = (flightCover == nil && nodeScaleMotion != .still)
+                        ? max(1, Int((rawSide * raster).rounded()))
+                        : max(1, Int((drawn / max(1e-4, zoom)).rounded()))
+                    let posX = devRect.x + (devRect.z - drawn) * 0.5
+                    let posY = devRect.y + (devRect.w - drawn) * 0.5
                     let iconResting = (flightCover == nil)
                         && (nodeScaleMotion == .still)
                         && !boxGliding
                         && abs(effGlyphTurn) <= 1e-6
                         && abs(avgScale - 1.0) < 1e-5
-                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
-                    let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    if iconResting && exactSide > 1e-4 {
+                    if drawn > 1e-4,
+                       let colorDecoded = textSystem.colorIcons.rasterize(
+                           svg,
+                           pixelSize: px,
+                           currentColor: resolvedColor,
+                           oneColor: el.isIconOneColor ? resolvedColor : nil,
+                           mirrored: snap.mirroredInRtl
+                       ),
+                       let baseMip = colorDecoded.mips.first {
+                        let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
+                        let normUV = imagePacker.insert(atlas)
+                        primitives.append(attachFade(.image(
+                            rect: SIMD4<Float>(posX, posY, drawn, drawn),
+                            radii: .zero,
+                            uv: normUV,
+                            tint: Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            clip: devClip,
+                            turn: effGlyphTurn
+                        )))
+                    } else if iconResting && exactSide > 1e-4 {
                         let canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
                         let atX = floor(rExact[0] + (wExact - exactSide) * 0.5 + 0.5)
                         let atY = floor(rExact[1] + (hExact - exactSide) * 0.5 + 0.5)
-                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide)
+                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide, mirrored: snap.mirroredInRtl)
                         let primIdx = primitives.count
                         primitives.append(attachFade(.glyph(
                             rect: SIMD4<Float>(atX, atY, Float(canvas), Float(canvas)),
@@ -4982,52 +5175,37 @@ public final class Runtime<State> {
                             color: tint,
                             gamma: 1.0,
                             clip: devClip,
-                            turn: 0
+                            turn: effGlyphTurn
                         )))
                         glyphPageEntries.append((primIdx, entry.page))
                         usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
-                    } else if exactSide > 1e-4 {
-                        let tk = (flightCover != nil) ? Float(1.0) : avgScale
-                        let raster = (flightCover != nil) ? Float(1.0) : nodeScaleMotion.raster(sc: avgScale, rest: inh.stillScale)
-                        let zoom = tk / max(1e-4, raster)
-                        let rawSide = max(0, min(rawRect.width, rawRect.height)) * pxScale
-                        let snapU: Float = (flightCover == nil && abs(rawSide - rawSide.rounded()) < 1.0 / 512.0)
-                            ? max(0, min(1, 1.0 - abs(avgScale - 1.0) * 32.0))
-                            : 0.0
-                        let drawn = exactSide + (min(devRect.z, devRect.w) - exactSide) * snapU
-                        if drawn > 1e-4 {
-                            let px: Int = (flightCover == nil && nodeScaleMotion != .still)
-                                ? max(1, Int((rawSide * raster).rounded()))
-                                : max(1, Int((drawn / max(1e-4, zoom)).rounded()))
-                            let posX = devRect.x + (devRect.z - drawn) * 0.5
-                            let posY = devRect.y + (devRect.w - drawn) * 0.5
-                            let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: px)
-                            let pxF = Float(max(1, entry.pixelSize.x))
-                            let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
-                            let quadRect: SIMD4<Float>
-                            let quadUV: SIMD4<Float>
-                            if abs(effGlyphTurn) <= 1e-6 && nearWhole(posX) && nearWhole(posY) && abs(drawn - pxF) < 1.0 / 512.0 {
-                                quadRect = SIMD4<Float>(posX.rounded(), posY.rounded(), pxF, pxF)
-                                quadUV = entry.uv
-                            } else {
-                                let t = drawn / pxF
-                                let du = (entry.uv.z - entry.uv.x) / pxF
-                                let dv = (entry.uv.w - entry.uv.y) / pxF
-                                quadRect = SIMD4<Float>(posX - t, posY - t, drawn + 2.0 * t, drawn + 2.0 * t)
-                                quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
-                            }
-                            let primIdx = primitives.count
-                            primitives.append(attachFade(.glyph(
-                                rect: quadRect,
-                                uv: quadUV,
-                                color: tint,
-                                gamma: 1.0,
-                                clip: devClip,
-                                turn: effGlyphTurn
-                            )))
-                            glyphPageEntries.append((primIdx, entry.page))
-                            usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
+                    } else if drawn > 1e-4 {
+                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: px, mirrored: snap.mirroredInRtl)
+                        let pxF = Float(max(1, entry.pixelSize.x))
+                        let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
+                        let quadRect: SIMD4<Float>
+                        let quadUV: SIMD4<Float>
+                        if abs(effGlyphTurn) <= 1e-6 && nearWhole(posX) && nearWhole(posY) && abs(drawn - pxF) < 1.0 / 512.0 {
+                            quadRect = SIMD4<Float>(posX.rounded(), posY.rounded(), pxF, pxF)
+                            quadUV = entry.uv
+                        } else {
+                            let t = drawn / pxF
+                            let du = (entry.uv.z - entry.uv.x) / pxF
+                            let dv = (entry.uv.w - entry.uv.y) / pxF
+                            quadRect = SIMD4<Float>(posX - t, posY - t, drawn + 2.0 * t, drawn + 2.0 * t)
+                            quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
                         }
+                        let primIdx = primitives.count
+                        primitives.append(attachFade(.glyph(
+                            rect: quadRect,
+                            uv: quadUV,
+                            color: tint,
+                            gamma: 1.0,
+                            clip: devClip,
+                            turn: effGlyphTurn
+                        )))
+                        glyphPageEntries.append((primIdx, entry.page))
+                        usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
                     }
                 }
 
@@ -5089,6 +5267,125 @@ public final class Runtime<State> {
                     }
                 }
 
+                // 7b. TerminalGrid (`terminalGridPayload`)
+                if let grid = el.terminalGridPayload {
+                    let gPadL = el.layout.padding.left * scaleVec.x
+                    let gPadT = el.layout.padding.top * scaleVec.y
+                    let baseX = rect.x + gPadL
+                    let baseY = rect.y + gPadT
+                    let cellW = grid.cellSize.x * scaleVec.x
+                    let cellH = grid.cellSize.y * scaleVec.y
+                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                    for (rowIdx, row) in grid.rows.enumerated() {
+                        let rowY = baseY + Float(rowIdx) * cellH
+                        for fill in row.fills {
+                            let fw = Float(max(0, fill.endColumn - fill.startColumn)) * cellW
+                            guard fw > 0 else { continue }
+                            let fx = baseX + Float(fill.startColumn) * cellW
+                            primitives.append(.roundedRect(
+                                rect: SIMD4<Float>(fx * pxScale, rowY * pxScale, fw * pxScale, cellH * pxScale),
+                                fill: fill.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                clip: devClip
+                            ))
+                        }
+                        if !row.text.isEmpty || !row.spans.isEmpty {
+                            let shaped = textSystem.shape(
+                                text: row.text,
+                                spans: row.spans.isEmpty ? nil : row.spans,
+                                style: row.style,
+                                maxWidth: nil,
+                                pixelScale: pxScale,
+                                emitGlyphs: true
+                            )
+                            for g in shaped.glyphs {
+                                let gc = (g.color ?? defaultGridColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                let primIdx = primitives.count
+                                primitives.append(.glyph(
+                                    rect: SIMD4<Float>(
+                                        (baseX + g.rect.x * scaleVec.x) * pxScale,
+                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                        g.rect.z * scaleVec.x * pxScale,
+                                        g.rect.w * scaleVec.y * pxScale
+                                    ),
+                                    uv: g.uv,
+                                    color: gc,
+                                    gamma: systemDark ? 0.88 : 1.05,
+                                    clip: devClip
+                                ))
+                                glyphPageEntries.append((primIdx, g.atlasPage))
+                                usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                            }
+                        }
+                        for cell in row.cells where !cell.text.isEmpty {
+                            let shaped = textSystem.shape(
+                                text: cell.text,
+                                spans: nil,
+                                style: cell.style,
+                                maxWidth: nil,
+                                pixelScale: pxScale,
+                                emitGlyphs: true
+                            )
+                            let cx = baseX + Float(cell.column) * cellW
+                            for g in shaped.glyphs {
+                                let gc = cell.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                let primIdx = primitives.count
+                                primitives.append(.glyph(
+                                    rect: SIMD4<Float>(
+                                        (cx + g.rect.x * scaleVec.x) * pxScale,
+                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                        g.rect.z * scaleVec.x * pxScale,
+                                        g.rect.w * scaleVec.y * pxScale
+                                    ),
+                                    uv: g.uv,
+                                    color: gc,
+                                    gamma: systemDark ? 0.88 : 1.05,
+                                    clip: devClip
+                                ))
+                                glyphPageEntries.append((primIdx, g.atlasPage))
+                                usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                            }
+                        }
+                        if let overlay = row.overlayShape {
+                            for op in overlay.ops {
+                                switch op {
+                                case let .fill(points, col):
+                                    let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                    if c4.w <= 0.0005 { continue }
+                                    for (indices, aaMask) in Shape.triangulate(points) {
+                                        let p0 = points[indices[0]], p1 = points[indices[1]], p2 = points[indices[2]]
+                                        primitives.append(.triangle(
+                                            v0: SIMD2<Float>((baseX + p0.x * scaleVec.x) * pxScale, (rowY + p0.y * scaleVec.y) * pxScale),
+                                            v1: SIMD2<Float>((baseX + p1.x * scaleVec.x) * pxScale, (rowY + p1.y * scaleVec.y) * pxScale),
+                                            v2: SIMD2<Float>((baseX + p2.x * scaleVec.x) * pxScale, (rowY + p2.y * scaleVec.y) * pxScale),
+                                            aaMask: aaMask,
+                                            color: c4,
+                                            clip: devClip
+                                        ))
+                                    }
+                                case let .stroke(points, closed, width, cap, col):
+                                    let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                    if c4.w <= 0.0005 { continue }
+                                    let strokeW = width * min(scaleVec.x, scaleVec.y) * pxScale
+                                    let roundCap = (cap == .round)
+                                    let n = points.count
+                                    let count = closed ? n : max(0, n - 1)
+                                    for idx in 0..<count {
+                                        let a = points[idx], b = points[(idx + 1) % n]
+                                        primitives.append(.segment(
+                                            from: SIMD2<Float>((baseX + a.x * scaleVec.x) * pxScale, (rowY + a.y * scaleVec.y) * pxScale),
+                                            to: SIMD2<Float>((baseX + b.x * scaleVec.x) * pxScale, (rowY + b.y * scaleVec.y) * pxScale),
+                                            width: strokeW,
+                                            color: c4,
+                                            roundCap: roundCap,
+                                            clip: devClip
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 8. Text / Rich Text / TextInput
                 let snappedOriginX = snappedEdgesPx[0] / pxScale
                 let snappedOriginY = snappedEdgesPx[1] / pxScale
@@ -5110,27 +5407,39 @@ public final class Runtime<State> {
                     : .zero
                 let restOriginX = textOriginX - glideOffPx.x / pxScale
                 let restOriginY = textOriginY - glideOffPx.y / pxScale
-                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
-                    let displayStr = edit.displayString
-                    let showingPlaceholder = displayStr.isEmpty && (edit.preedit?.text.isEmpty ?? true)
-                    let renderedStr = showingPlaceholder ? (el.placeholder ?? "") : displayStr
+                    let resolvedInput = ElDisplayResolver.resolveInput(
+                        el: el,
+                        edit: edit,
+                        innerWidth: innerW / max(1e-4, scaleVec.x)
+                    )
+                    let showingPlaceholder = resolvedInput.showingPlaceholder
+                    let renderedStr = resolvedInput.renderedString
                     let textCol = showingPlaceholder
                         ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
                         : defaultTextColor
-                    var inputStyle = el.textStyle
-                    if edit.multiline { inputStyle.wrap = .wrap }
-                    if let fDir = edit.forcedDir { inputStyle.direction = fDir }
 
                     let shaped = textSystem.shape(
                         text: renderedStr,
-                        style: inputStyle,
-                        maxWidth: edit.multiline ? innerW : nil,
+                        spans: resolvedInput.spans,
+                        pills: resolvedInput.pills,
+                        style: resolvedInput.style,
+                        maxWidth: resolvedInput.maxWidthForShape,
                         pixelScale: pxScale,
                         emitGlyphs: !renderedStr.isEmpty,
                         glidePx: glidePx
                     )
+                    var singleLineShiftX: Float = 0
+                    if resolvedInput.isSingleLine && isFocused && !showingPlaceholder && shaped.size.x > innerW {
+                        let cRect = textSystem.caretRect(in: shaped, utf8Offset: edit.cursor, pixelScale: pxScale)
+                        if cRect.x > max(0, innerW - 2.0) {
+                            singleLineShiftX = cRect.x - max(0, innerW - 2.0)
+                        }
+                    }
+                    let inputRestOriginX = restOriginX - singleLineShiftX * scaleVec.x
+                    let inputOriginX = textOriginX - singleLineShiftX * scaleVec.x
 
                     let inputClip = intersectRects(visClip, rect)
                     let devInputClip = SIMD4<Float>(
@@ -5142,17 +5451,41 @@ public final class Runtime<State> {
 
                     // Selection highlight
                     if isFocused && edit.hasSelection && !showingPlaceholder {
-                        let selRange = edit.selectedUTF8Range
-                        let cStart = textSystem.caretRect(in: shaped, utf8Offset: selRange.lowerBound, pixelScale: pxScale)
-                        let cEnd = textSystem.caretRect(in: shaped, utf8Offset: selRange.upperBound, pixelScale: pxScale)
-                        let selCol = (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
-                            .scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        if abs(cStart.y - cEnd.y) < 1.0 {
+                        let rawRange = edit.selectedUTF8Range
+                        let displayRange: Range<Int>
+                        if resolvedInput.isSecure && !edit.isRevealed {
+                            if edit.multiline {
+                                displayRange = 0..<renderedStr.utf8.count
+                            } else {
+                                let utf8Count = edit.text.utf8.count
+                                let lo = max(0, min(rawRange.lowerBound, utf8Count))
+                                let hi = max(lo, min(rawRange.upperBound, utf8Count))
+                                let loIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: lo)
+                                let hiIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: hi)
+                                let loScalars = edit.text[..<loIdx].unicodeScalars.count
+                                let hiScalars = edit.text[..<hiIdx].unicodeScalars.count
+                                let bulletBytes = "•".utf8.count
+                                displayRange = (loScalars * bulletBytes)..<(hiScalars * bulletBytes)
+                            }
+                        } else {
+                            displayRange = rawRange
+                        }
+                        let baseSelCol = el.resolvedSelectionStyle?.pick(active: windowFocused).highlight
+                            ?? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+                        let selCol = baseSelCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let lineRects = textSystem.selectionRects(
+                            in: shaped,
+                            utf8Range: displayRange,
+                            pixelScale: pxScale
+                        )
+                        if lineRects.isEmpty {
+                            let cStart = textSystem.caretRect(in: shaped, utf8Offset: displayRange.lowerBound, pixelScale: pxScale)
+                            let cEnd = textSystem.caretRect(in: shaped, utf8Offset: displayRange.upperBound, pixelScale: pxScale)
                             let sx = min(cStart.x, cEnd.x)
                             let sw = max(2.0, abs(cEnd.x - cStart.x))
                             primitives.append(.roundedRect(
                                 rect: SIMD4<Float>(
-                                    (restOriginX + sx) * pxScale,
+                                    (inputRestOriginX + sx) * pxScale,
                                     (restOriginY + cStart.y) * pxScale,
                                     sw * pxScale,
                                     cStart.w * pxScale
@@ -5162,28 +5495,37 @@ public final class Runtime<State> {
                                 clip: devInputClip
                             ))
                         } else {
-                            // Multi-line selection highlight: first line to right edge + last line from left edge
-                            primitives.append(.roundedRect(
-                                rect: SIMD4<Float>(
-                                    (restOriginX + cStart.x) * pxScale,
-                                    (restOriginY + cStart.y) * pxScale,
-                                    max(4, innerW - cStart.x) * pxScale,
-                                    cStart.w * pxScale
-                                ),
-                                fill: selCol,
-                                clip: devInputClip
-                            ))
-                            primitives.append(.roundedRect(
-                                rect: SIMD4<Float>(
-                                    restOriginX * pxScale,
-                                    (restOriginY + cEnd.y) * pxScale,
-                                    max(4, cEnd.x) * pxScale,
-                                    cEnd.w * pxScale
-                                ),
-                                fill: selCol,
-                                clip: devInputClip
-                            ))
+                            for r in lineRects {
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(
+                                        (inputRestOriginX + r.x) * pxScale,
+                                        (restOriginY + r.y) * pxScale,
+                                        max(2.0, r.z) * pxScale,
+                                        r.w * pxScale
+                                    ),
+                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                    fill: selCol,
+                                    clip: devInputClip
+                                ))
+                            }
                         }
+                    }
+
+                    if resolvedInput.isRich {
+                        textSystem.emitTextDecorationsAndPills(
+                            shaped: shaped,
+                            textOriginX: inputRestOriginX,
+                            textOriginY: restOriginY,
+                            scaleVec: scaleVec,
+                            pxScale: pxScale,
+                            defaultTextColor: textCol,
+                            localAlpha: localAlpha,
+                            srgbBlend: srgbBlend,
+                            devClip: devInputClip,
+                            rot: useLayer ? 0 : effRotate,
+                            insertImage: { imagePacker.insert($0) },
+                            into: &primitives
+                        )
                     }
 
                     // Text glyphs
@@ -5192,7 +5534,7 @@ public final class Runtime<State> {
                         let primIdx = primitives.count
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
-                                (restOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                (inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
                                 (restOriginY + g.rect.y * scaleVec.y) * pxScale,
                                 g.rect.z * scaleVec.x * pxScale,
                                 g.rect.w * scaleVec.y * pxScale
@@ -5212,10 +5554,10 @@ public final class Runtime<State> {
                         let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
                         let caretXPt: Float
                         if isGliding {
-                            let cxPx = (textOriginX + cRect.x) * pxScale
+                            let cxPx = (inputOriginX + cRect.x) * pxScale
                             caretXPt = ((cxPx - glidePx.x).rounded(.toNearestOrAwayFromZero) + glidePx.x) / pxScale
                         } else {
-                            caretXPt = textOriginX + cRect.x
+                            caretXPt = inputOriginX + cRect.x
                         }
                         let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
                         caretOut = worldCaret
@@ -5235,28 +5577,42 @@ public final class Runtime<State> {
                             ))
                         }
                     }
-                } else if el.richSpans != nil || paintedLabelValue != nil {
+                } else if el.richSpans != nil || paintedLabelValue != nil || el.advanceInRun != nil {
+                    let resolvedText = ElDisplayResolver.resolveText(
+                        el: el,
+                        rawText: paintedLabelValue,
+                        isSecure: nodeIsSecure
+                    )
                     let wrapWidth = (innerW / max(1e-4, scaleVec.x)) + 0.5
-                    let shaped = textSystem.shape(
-                        text: paintedLabelValue ?? "",
-                        spans: el.richSpans,
-                        pills: el.pillChips,
-                        style: el.textStyle,
+                    let shaped = resolvedText.shape(
+                        using: textSystem,
                         maxWidth: wrapWidth,
                         pixelScale: pxScale,
                         emitGlyphs: true,
                         glidePx: glidePx
                     )
-                    if el.isHelpWhenTruncated {
-                        let naturalSize = textSystem.measure(
-                            paintedLabelValue ?? "",
-                            style: el.textStyle,
-                            maxWidth: nil,
-                            pixelScale: pxScale,
-                            pills: el.pillChips
+                    let innerH = max(0, (snappedEdgesPx[3] - snappedEdgesPx[1]) / pxScale - (el.layout.padding.top + el.layout.padding.bottom) * scaleVec.y)
+                    let fadeRes = resolvedText.truncateFade
+                        ? ElDisplayResolver.truncateFadeParams(
+                            el: el,
+                            shaped: shaped,
+                            innerW: innerW,
+                            innerH: innerH,
+                            scaleVec: scaleVec,
+                            pxScale: pxScale,
+                            textOriginX: textOriginX,
+                            textOriginY: textOriginY,
+                            baseClipPx: devClip
                         )
-                        if naturalSize.x > wrapWidth + 0.5 || naturalSize.y > rect.height + 0.5 {
+                        : nil
+                    if el.isHelpWhenTruncated {
+                        if shaped.wasTruncated || fadeRes?.isTruncated == true {
                             textTruncated = true
+                        } else {
+                            let naturalSize = resolvedText.measure(using: textSystem, maxWidth: nil, pixelScale: pxScale)
+                            if naturalSize.x > wrapWidth + 0.5 || naturalSize.y > rect.height + 0.5 {
+                                textTruncated = true
+                            }
                         }
                     }
                     let selPaintInk = emitSelectableHighlightIfNeeded(
@@ -5268,7 +5624,7 @@ public final class Runtime<State> {
                     let linkInks = recordAndEmitTextLinks(
                         snap: snap,
                         el: el,
-                        text: paintedLabelValue ?? "",
+                        text: resolvedText.displayedText,
                         shaped: shaped,
                         textOriginX: textOriginX,
                         textOriginY: textOriginY,
@@ -5305,9 +5661,14 @@ public final class Runtime<State> {
                         into: &primitives
                     )
                     var highlightInks: [TextLinkInkRange] = []
-                    if let hls = el.textHighlights, !hls.isEmpty, let txt = paintedLabelValue, !txt.isEmpty {
-                        let txtLen = txt.utf8.count
-                        for h in hls {
+                    var combinedHighlights = el.textHighlights ?? []
+                    let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
+                    if !ringHls.isEmpty {
+                        combinedHighlights.append(contentsOf: ringHls)
+                    }
+                    if !combinedHighlights.isEmpty && !resolvedText.displayedText.isEmpty {
+                        let txtLen = resolvedText.displayedText.utf8.count
+                        for h in combinedHighlights {
                             guard let fg = h.fg else { continue }
                             let a = min(h.byteRange.lowerBound, txtLen)
                             let b = min(h.byteRange.upperBound, txtLen)
@@ -5318,8 +5679,8 @@ public final class Runtime<State> {
                             }
                         }
                         let quads = TextHighlightPainter.quads(
-                            highlights: hls,
-                            in: txt,
+                            highlights: combinedHighlights,
+                            in: resolvedText.displayedText,
                             shaped: shaped,
                             textSystem: textSystem,
                             pixelScale: pxScale,
@@ -5359,11 +5720,23 @@ public final class Runtime<State> {
                         }
                     }
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha
+                    let glyphClip = fadeRes?.glyphClip ?? devClip
                     if glyphAlpha > 0.0005 {
+                        let wrapTruncateLayer = (fadeRes?.isTruncated == true && fadeRes?.refFade != .zero && !activeFadeEdges.isEmpty)
+                        if wrapTruncateLayer, let fRes = fadeRes {
+                            primitives.append(.layerBegin(
+                                rect: glyphClip,
+                                opacity: 1.0,
+                                clip: glyphClip,
+                                fade: fRes.refFade,
+                                fadeOrigin: fRes.refFadeOrigin,
+                                turn: useLayer ? 0 : effRotate
+                            ))
+                        }
                         for g in shaped.glyphs {
                             let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
-                            primitives.append(attachFade(.glyph(
+                            var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
                                     (restOriginX + g.rect.x * scaleVec.x) * pxScale,
                                     (restOriginY + g.rect.y * scaleVec.y) * pxScale,
@@ -5373,11 +5746,19 @@ public final class Runtime<State> {
                                 uv: g.uv,
                                 color: gc,
                                 gamma: systemDark ? 0.88 : 1.05,
-                                clip: devClip,
+                                clip: glyphClip,
                                 turn: useLayer ? 0 : effRotate
-                            )))
+                            ))
+                            if let fRes = fadeRes, fRes.isTruncated, fRes.refFade != .zero, activeFadeEdges.isEmpty {
+                                prim.fade = fRes.refFade
+                                prim.fadeOrigin = fRes.refFadeOrigin
+                            }
+                            primitives.append(prim)
                             glyphPageEntries.append((primIdx, g.atlasPage))
                             usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                        }
+                        if wrapTruncateLayer {
+                            primitives.append(.layerEnd(clip: glyphClip))
                         }
                     }
                 }
@@ -5480,7 +5861,7 @@ public final class Runtime<State> {
                 blur: blurPt,
                 radius: p.corners.maxMagnitude,
                 fill: fillColor,
-                textColor: el.textColor ?? (elementTextValue != nil ? cxSettings.viewDefaults.foreground : nil),
+                textColor: liveTextColor ?? el.textColor ?? (elementTextValue != nil ? cxSettings.viewDefaults.foreground : nil),
                 text: elementTextValue,
                 label: el.a11yLabel,
                 help: resolvedRawHelp.map(runeHelpWords),
@@ -5523,6 +5904,14 @@ public final class Runtime<State> {
                 virtualExtent: false,
                 editRange: nodeEditRange
             ))
+            if shouldEmit && !p.isExiting && !snap.effectiveInert {
+                if el.isImeCursor && !hasFocusedTextInput && nextImeCursorArea == nil {
+                    nextImeCursorArea = rect.xywh
+                }
+                if el.noWindowDrag {
+                    nextNoWindowDragRects.append(visibleRect)
+                }
+            }
             if let hls = el.textHighlights, !hls.isEmpty,
                let txt = elementTextValue, !txt.isEmpty,
                snap.index < flatNodes.count {
@@ -5809,13 +6198,17 @@ public final class Runtime<State> {
                 nearestGroupHoverFrac: 0.0
             )
         }
+        var raisedInfoPatches: [(offset: Int, items: [ElementInfo])] = []
         for lifted in liftedFlights {
-            let isUnclippedFlight = launchedFlightIds.contains(lifted.node.id)
-                || unclippedMatchedFlightIds.contains(lifted.node.id)
+            let isUnclippedFlight = lifted.isFlight && (
+                launchedFlightIds.contains(lifted.node.id)
+                    || unclippedMatchedFlightIds.contains(lifted.node.id)
+            )
             var liftedInh = lifted.inh
             if isUnclippedFlight {
                 liftedInh.clip = nil
             }
+            let infoStart = infos.count
             emitSubtree(
                 lifted.node,
                 inh: liftedInh,
@@ -5830,6 +6223,29 @@ public final class Runtime<State> {
                 flightClipOverride: isUnclippedFlight ? windowRect : nil,
                 emitLiftedNow: true
             )
+            if let insertAt = lifted.treeInfoOffset, infos.count > infoStart {
+                let raisedItems = Array(infos[infoStart...])
+                infos.removeSubrange(infoStart...)
+                raisedInfoPatches.append((offset: insertAt, items: raisedItems))
+            }
+        }
+        if !raisedInfoPatches.isEmpty {
+            // Splice lifted `raise()` ElementInfo subtrees back at their authored DFS offsets.
+            var merged: [ElementInfo] = []
+            merged.reserveCapacity(infos.count + raisedInfoPatches.reduce(0) { $0 + $1.items.count })
+            var cursor = 0
+            for patch in raisedInfoPatches {
+                let clamped = min(max(cursor, patch.offset), infos.count)
+                if clamped > cursor {
+                    merged.append(contentsOf: infos[cursor..<clamped])
+                    cursor = clamped
+                }
+                merged.append(contentsOf: patch.items)
+            }
+            if cursor < infos.count {
+                merged.append(contentsOf: infos[cursor...])
+            }
+            infos = merged
         }
         seenMatchedByFlightId = newSeenMatched
 
@@ -5930,6 +6346,8 @@ public final class Runtime<State> {
         appendLinkElements(to: &infos)
         lastElements = infos
         landUnseenEntrances(frameNodes: frameOut.nodes, on: &scene)
+        imeCursorArea = nextImeCursorArea
+        noWindowDragRects = nextNoWindowDragRects
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
         hitGeometryByPath = newHitGeometries
@@ -6061,7 +6479,7 @@ public final class Runtime<State> {
         return nil
     }
 
-    private func hitTestAll(
+    internal func hitTestAll(
         at point: Vec2,
         predicate: (FlatNode) -> Bool
     ) -> [(node: FlatNode, rect: MotionRect, localPoint: Vec2)] {
@@ -6257,15 +6675,21 @@ public final class Runtime<State> {
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
+        applyHoverWithin([], held: false, at: now)
     }
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
         let moved = pos != pointerPosition
         if moved {
+            hoverPaused = false
             releaseHoverHold()
             resetKitHoverHoldOnPointerMove()
         }
         pointerPosition = pos
+        if moved, let pPath = pressedPath, let pIdx = nodeByPath[pPath] {
+            let pRect = presentedRectByPath[pPath] ?? flatNodes[pIdx].targetRect
+            pressedPointerInside = hitGeometryByPath[pPath]?.contains(pos) ?? halfOpenContains(pRect, pos)
+        }
 
         let moveHits = hitTestAll(at: pos, predicate: { $0.el.handlers.onPointerMove != nil })
         var moveDispatched = false
@@ -6299,11 +6723,14 @@ public final class Runtime<State> {
         }
 
         // Active drag capture takes priority over hover
-        if let drag = activeDrag {
+        if var drag = activeDrag {
             if !drag.movedBeyondSlop,
                hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0 {
-                activeDrag?.movedBeyondSlop = true
+                drag.movedBeyondSlop = true
             }
+            drag.lastWindow = pos
+            drag.mods = mods
+            activeDrag = drag
             if let idx = nodeByPath[drag.path] {
                 let node = flatNodes[idx]
                 if drag.isTextSelectionDrag, let editLens = node.el.handlers.editLens {
@@ -6434,8 +6861,13 @@ public final class Runtime<State> {
                 changed = true
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
+            if let within = computeHoverWithin() {
+                applyHoverWithin(within.inside, held: false, at: now)
+            }
             settleKitHoverDelays(at: pos, now: now)
             return changed
+        } else if helpTargetChanges(at: pos) {
+            dirtyCommit(at: now)
         }
         settleKitHoverDelays(at: pos, now: now)
         return false
@@ -6446,6 +6878,8 @@ public final class Runtime<State> {
         releaseHoverHold()
         cancelKitHoverAndRepeatOnPress()
         kitHooks.dragRepeat = nil
+        pressHoverDelays()
+        hoverPaused = true
         suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
@@ -6519,13 +6953,13 @@ public final class Runtime<State> {
             let h = node.el.handlers
             if button != .primary {
                 guard h.pointerButtons?.contains(button) == true else { return false }
-                return h.onClick != nil || h.onClickPress != nil || h.onPointerDown != nil || h.onDrag != nil
+                return h.onClick != nil || h.onClickPress != nil || h.onBackgroundPress != nil || h.onPointerDown != nil || h.onDrag != nil
             }
-            return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
+            return h.onClick != nil || h.onClickPress != nil || h.onBackgroundPress != nil || h.onDoubleClick != nil ||
                    h.onPointerDown != nil || h.onDrag != nil || h.dragOut != nil ||
                    node.el.attachedDragOutItem != nil || h.editLens != nil ||
                    self.nodeTakesFocus(node.el) || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
-                   node.el.isModal || (node.el.role == .button && node.el.explicitHit)
+                   node.el.isModal || node.el.pressFocusesBelow || (node.el.role == .button && node.el.explicitHit)
         }
 
         guard let (node, rect, rawLocal) = interactiveHit else {
@@ -6554,33 +6988,56 @@ public final class Runtime<State> {
         }
 
         let preservesSel = preservesTextSelectionInChain(node)
-        let preservesFocus = preservesFocusOnPressInChain(node)
+        let preservesFocus = preservesFocusOnPressInChain(node) || node.el.preservesFocusOnPress
         let inEditSubtree = isInsideEditLensSubtree(node)
         let onLink = hasActiveTextLinks(node.el)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         pressedPath = node.path
         pressedKey = node.key
+        pressedPointerInside = true
         if cxSettings.viewDefaults.webFocus && !preservesSel && !preservesFocus {
             webFocusTabStartPath = node.path
         }
-        let isTextBox = node.el.handlers.editLens != nil
-        let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
         var downFocusChanged = false
-        if !preservesSel && !onLink && shouldFocusNode {
-            if focusedPath != node.path {
-                let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
-                handleKitFocusTransition(prevNode: prevNode, newPath: node.path, at: now)
-                imeReset = true
-                downFocusChanged = true
-            }
-            focusedPath = node.path
-            focusedKey = node.key
-        } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
-            if focusedPath != nil {
+        if node.el.pressFocusesBelow {
+            if let belowNode = scrollRegionBelow(node: node, at: pos) {
+                if focusedPath != belowNode.path {
+                    let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
+                    handleKitFocusTransition(prevNode: prevNode, newPath: belowNode.path, at: now)
+                    imeReset = true
+                    downFocusChanged = true
+                }
+                focusedPath = belowNode.path
+                focusedKey = belowNode.key
+            } else if let prevFp = focusedPath {
+                let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
+                handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
                 focusedPath = nil
                 focusedKey = nil
                 imeReset = true
                 downFocusChanged = true
+            }
+        } else {
+            let isTextBox = node.el.handlers.editLens != nil
+            let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
+            if !preservesSel && !onLink && shouldFocusNode {
+                if focusedPath != node.path {
+                    let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
+                    handleKitFocusTransition(prevNode: prevNode, newPath: node.path, at: now)
+                    imeReset = true
+                    downFocusChanged = true
+                }
+                focusedPath = node.path
+                focusedKey = node.key
+            } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
+                if let prevFp = focusedPath {
+                    let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
+                    handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                    focusedPath = nil
+                    focusedKey = nil
+                    imeReset = true
+                    downFocusChanged = true
+                }
             }
         }
 
@@ -6625,12 +7082,14 @@ public final class Runtime<State> {
                 path: node.path,
                 key: node.key,
                 startWindow: pos,
+                lastWindow: pos,
                 startLocal: local,
                 startElementOrigin: Vec2(rect.x, rect.y),
                 startScale: safeSc,
                 elementSize: elemSize,
                 clicks: clickCount,
                 button: button,
+                mods: mods,
                 isTextSelectionDrag: true,
                 stateSnapshotBeforeDrag: snapshot
             )
@@ -6652,12 +7111,14 @@ public final class Runtime<State> {
                 path: node.path,
                 key: node.key,
                 startWindow: pos,
+                lastWindow: pos,
                 startLocal: local,
                 startElementOrigin: Vec2(rect.x, rect.y),
                 startScale: safeSc,
                 elementSize: elemSize,
                 clicks: clickCount,
                 button: button,
+                mods: mods,
                 isTextSelectionDrag: false,
                 stateSnapshotBeforeDrag: snapshot
             )
@@ -6690,14 +7151,20 @@ public final class Runtime<State> {
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         frameHadInputSinceLastFrame = true
+        let pointerMovedAtUp = (pos != pointerPosition)
         pointerPosition = pos
         armedDragOut = nil
         kitHooks.dragRepeat = nil
         let releasedPath = pressedPath
         let notePath = releasedPath
         let startedNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
+        let wasPressedInside = pressedPointerInside
         pressedPath = nil
         pressedKey = nil
+        pressedPointerInside = false
+        if let within = computeHoverWithin() {
+            applyHoverWithin(within.inside, held: false, at: now)
+        }
         let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
         let hadPressVisual = releasedPath.flatMap { nodeByPath[$0] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false
         var upRanHandler = false
@@ -6752,8 +7219,9 @@ public final class Runtime<State> {
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
         }
 
-        // Fire click / double-click only if pointer released inside the pressed element and not dragged!
-        let inside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
+        // Fire click / double-click only if pointer released inside the pressed element (or didn't move when element moved out from under it) and not dragged!
+        let insideNow = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
+        let inside = pointerMovedAtUp ? insideNow : wasPressedInside
         let allowsButton = button == .primary || (button != .secondary && (node.el.handlers.pointerButtons?.contains(button) ?? false))
         if inside && allowsButton && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
             if button == .primary && clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
@@ -6776,6 +7244,11 @@ public final class Runtime<State> {
                     upRanHandler = true
                     upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                }
+                if let onBg = node.el.handlers.onBackgroundPress {
+                    var tx = makeTx(at: now, button: button)
+                    onBg(&state, press, &tx)
+                    applyTx(tx, at: now)
                 }
             }
             if InteractionGate.isOn {
@@ -6855,7 +7328,8 @@ public final class Runtime<State> {
                 let prev = scrollOffsets[path] ?? .zero
                 var cur = prev
                 if scrollNode.el.layout.scrollAxes.contains(.horizontal) {
-                    cur.x = (cur.x - event.dx).clamped(to: 0...maxExt.x)
+                    let signDx = (scrollNode.flow == .rtl) ? -event.dx : event.dx
+                    cur.x = (cur.x - signDx).clamped(to: 0...maxExt.x)
                 }
                 if scrollNode.el.layout.scrollAxes.contains(.vertical) {
                     cur.y = (cur.y - event.dy).clamped(to: 0...maxExt.y)
@@ -6953,6 +7427,13 @@ public final class Runtime<State> {
         if case .focusLost = event {
             dirChord = .idle
         }
+        let prevByKeys = activeByKeys
+        if case .key(_, _, let pressed, _) = event {
+            activeByKeys = pressed
+        }
+        defer {
+            activeByKeys = prevByKeys
+        }
 
         // Dispatch along focused -> ancestor chain (stopping at inert / modal boundary)
         if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
@@ -7044,12 +7525,15 @@ public final class Runtime<State> {
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
         frameHadInputSinceLastFrame = true
-        let prevByKeys = kitHooks.isDispatchingByKeys
-        kitHooks.isDispatchingByKeys = true
+        let prevKitByKeys = kitHooks.isDispatchingByKeys
+        let prevByKeys = activeByKeys
         let prevRepeat = currentKeyRepeat
+        kitHooks.isDispatchingByKeys = true
+        activeByKeys = true
         currentKeyRepeat = isRepeat
         defer {
-            kitHooks.isDispatchingByKeys = prevByKeys
+            kitHooks.isDispatchingByKeys = prevKitByKeys
+            activeByKeys = prevByKeys
             currentKeyRepeat = prevRepeat
         }
         suppressRevealFromHoverCommit = false
@@ -7058,6 +7542,7 @@ public final class Runtime<State> {
         if ev.key == .escape, let drag = activeDrag {
             state = drag.stateSnapshotBeforeDrag
             activeDrag = nil
+            kitHooks.dragRepeat = nil
             pressedPath = nil
             pressedKey = nil
             if let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
@@ -7143,19 +7628,20 @@ public final class Runtime<State> {
                     : nil
                 var editLayout: ShapedText? = nil
                 if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight) {
-                    var inputStyle = fNode.el.textStyle
-                    if edit.multiline { inputStyle.wrap = .wrap }
-                    if let fDir = edit.forcedDir { inputStyle.direction = fDir }
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
+                    let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW)
                     editLayout = textSystem.shape(
-                        text: edit.displayString,
-                        style: inputStyle,
-                        maxWidth: edit.multiline ? innerW : nil,
+                        text: resolvedInput.renderedString,
+                        spans: resolvedInput.spans,
+                        pills: resolvedInput.pills,
+                        style: resolvedInput.style,
+                        maxWidth: resolvedInput.maxWidthForShape,
                         pixelScale: pixelScale,
                         emitGlyphs: false
                     )
                 }
+                let prevEdit = edit
                 let outcome = edit.handleKey(ev, layout: editLayout)
                 switch outcome {
                 case .ignored:
@@ -7174,16 +7660,7 @@ public final class Runtime<State> {
                     dirtyCommit(at: now)
                     return true
                 case .modified:
-                    editLens.set(&state, edit)
-                    var tx = makeTx(at: now)
-                    if fNode.el.layoutAnim == nil {
-                        tx.instant()
-                    }
-                    if let onChange = fNode.el.handlers.onTextChange {
-                        onChange(&state, edit.text, &tx)
-                    }
-                    applyTx(tx, at: now)
-                    dirtyCommit(at: now)
+                    deliverInputEdit(el: fNode.el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                     return true
                 case .submit:
                     editLens.set(&state, edit)
@@ -7197,15 +7674,19 @@ public final class Runtime<State> {
                     }
                     // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
                 case .copy(let copied):
-                    editLens.set(&state, edit)
                     clipboard = ClipboardContent(copied, html: preCopyHTML)
                     richClipboard = RichClipboardPayload(content: clipboard)
-                    if let onChange = fNode.el.handlers.onTextChange {
-                        var tx = makeTx(at: now)
-                        onChange(&state, edit.text, &tx)
-                        applyTx(tx, at: now)
+                    if edit.text != prevEdit.text {
+                        deliverInputEdit(el: fNode.el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
+                    } else {
+                        editLens.set(&state, edit)
+                        if let onChange = fNode.el.handlers.onTextChange {
+                            var tx = makeTx(at: now)
+                            onChange(&state, edit.text, &tx)
+                            applyTx(tx, at: now)
+                        }
+                        dirtyCommit(at: now)
                     }
-                    dirtyCommit(at: now)
                     return true
                 }
             }
@@ -7262,7 +7743,15 @@ public final class Runtime<State> {
             if ev.mods == .none,
                (ev.key == .arrowRight || ev.key == .arrowDown || ev.key == .arrowLeft || ev.key == .arrowUp),
                let groupIdx = findFocusGroupAncestor(of: fIdx) {
-                let forward = (ev.key == .arrowRight || ev.key == .arrowDown)
+                let isRtl = flatNodes[groupIdx].flow == .rtl
+                let forward: Bool
+                switch ev.key {
+                case .arrowDown: forward = true
+                case .arrowUp: forward = false
+                case .arrowRight: forward = !isRtl
+                case .arrowLeft: forward = isRtl
+                default: forward = true
+                }
                 if moveFocusInGroup(groupIndex: groupIdx, forward: forward) {
                     focusVisible = true
                     dirtyCommit(at: now)
@@ -7434,10 +7923,15 @@ public final class Runtime<State> {
         case .home: targetY = 0
         default: targetY = maxY
         }
+        releaseHoverHold()
         cur.y = targetY.clamped(to: 0...maxY)
         scrollOffsets[path] = cur
         let nid = NodeId.hash("scroll:" + path)
         scrollStore.snap(nid, Props.SCROLL, to: cur)
+        scrollGlidingPaths.remove(path)
+        directScrolledPaths.insert(path)
+        scrollRequestsState.stepCancel()
+        pendingCommitKind = pendingCommitKind.instant()
         if node.el.layout.stickBottom {
             if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
         }
@@ -7879,6 +8373,7 @@ public final class Runtime<State> {
             pendingTxBlurRequested = true
             pendingTxFocusKey = nil
             kitHooks.pendingTxFocusVisible = nil
+            pendingTxFocusVisible = nil
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
@@ -7891,6 +8386,7 @@ public final class Runtime<State> {
             pendingTxBlurRequested = false
             pendingTxFocusKey = fk
             kitHooks.pendingTxFocusVisible = tx.requestedFocusVisible
+            pendingTxFocusVisible = tx.focusAskedByReturn ? tx.requestedFocusVisible : nil
             focusVisible = tx.requestedFocusVisible
             focusedKey = fk
             if let match = matchedNode {
@@ -8012,6 +8508,18 @@ public final class Runtime<State> {
         }
         if tx.pasteRequested {
             pendingPasteRequests += 1
+        }
+        if !tx.sentKeys.isEmpty {
+            pendingSentKeys.append(contentsOf: tx.sentKeys)
+        }
+        if tx.toggleMaximizedRequested {
+            toggleMaximizedRequested = true
+        }
+        if tx.toggleFullScreenRequested {
+            toggleFullScreenRequested = true
+        }
+        if let ann = tx.announcement {
+            lastAnnouncement = ann
         }
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {
@@ -8345,16 +8853,38 @@ public final class Runtime<State> {
         guard windowFocused != focused else { return }
         let t = now ?? currentTime
         let prevStale = needsCommit
+        if focused && !windowFocused {
+            hoverPaused = false
+        }
         windowFocused = focused
         if !focused {
             finishComposition(at: t)
+            endHoverDelays(at: t)
+            hoverPaused = true
         }
+        var handledFocusHook = false
         if let hook = onFocus {
             if playgroundDispatchFocus(focused, hook: hook, at: t) {
                 return
             }
             update(at: t) { s, tx in hook(&s, focused, &tx) }
-        } else {
+            handledFocusHook = true
+        }
+        for node in flatNodes where !node.effectiveInert {
+            let handlers = node.el.kitWindowFocusHandlers
+            guard !handlers.isEmpty else { continue }
+            for handler in handlers {
+                var tx = makeTx(at: t)
+                var boxedState: Any = state
+                handler(&boxedState, focused, &tx)
+                if let typed = boxedState as? State {
+                    state = typed
+                }
+                applyTx(tx, at: t)
+                handledFocusHook = true
+            }
+        }
+        if !handledFocusHook {
             needsCommit = prevStale
         }
     }
@@ -8417,16 +8947,11 @@ public final class Runtime<State> {
             _ = dispatchIme(.cancel, at: t)
             return
         }
-        var edit = editLens.get(state)
+        let prevEdit = editLens.get(state)
+        var edit = prevEdit
         if let activePreedit = edit.preedit?.text, edit.finishPreedit() {
-            editLens.set(&state, edit)
-            if let onChange = el.handlers.onTextChange {
-                var tx = Tx()
-                onChange(&state, edit.text, &tx)
-                applyTx(tx, at: t)
-            }
+            deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t)
             _ = dispatchIme(.commit(activePreedit), at: t)
-            dirtyCommit(at: t)
         }
     }
 
@@ -8441,7 +8966,8 @@ public final class Runtime<State> {
            nodeByPath[fp].map({ !flatNodes[$0].effectiveInert }) ?? true,
            let el = focusedInputElement(at: fp),
            let editLens = el.handlers.editLens {
-            var edit = editLens.get(state)
+            let prevEdit = editLens.get(state)
+            var edit = prevEdit
             if el.isSecure {
                 edit.isSecure = true
                 if el.isRevealed { edit.isRevealed = true }
@@ -8455,13 +8981,7 @@ public final class Runtime<State> {
                 dirtyCommit(at: t)
                 handledByEdit = true
             case .modified:
-                editLens.set(&state, edit)
-                if let onChange = el.handlers.onTextChange {
-                    var tx = Tx()
-                    onChange(&state, edit.text, &tx)
-                    applyTx(tx, at: t)
-                }
-                dirtyCommit(at: t)
+                deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t)
                 handledByEdit = true
             case .submit, .copy:
                 editLens.set(&state, edit)
@@ -8646,11 +9166,105 @@ public final class Runtime<State> {
         update(at: now) { s, tx in hook(&s, url, &tx) }
     }
 
+    /// Updates the window's screen origin in points (for `onScreenLayout` reporting) and drains queued screen-layout callbacks immediately.
+    public func setWindowOrigin(_ origin: Vec2, at now: Double?) {
+        if setWindowOrigin(origin) {
+            _ = drainLayoutActions(at: now ?? currentTime)
+        }
+    }
+
     public func clearShellRequests() {
         closeWindowRequested = false
         minimizeRequested = false
         relaunchRequested = false
+        toggleMaximizedRequested = false
+        toggleFullScreenRequested = false
         nextWakeDeadline = nil
+    }
+
+    internal func flushPendingSentKeys(at now: Double) {
+        guard !pendingSentKeys.isEmpty else { return }
+        let queued = pendingSentKeys
+        pendingSentKeys.removeAll()
+        for ev in queued {
+            _ = keyDown(ev, isRepeat: false, at: now)
+        }
+    }
+
+    internal func deliverInputEdit(
+        el: El<State>,
+        previousEdit: TextEdit,
+        newEdit: TextEdit,
+        editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void),
+        at now: Double
+    ) {
+        editLens.set(&state, newEdit)
+        var tx = makeTx(at: now)
+        if !el.animateEditLayoutEnabled {
+            tx.instant()
+        }
+        // Non-key callbacks (`onInputChange`) never inherit the key handler's physical key (`physical.rs:499`).
+        tx.physicalKeyValue = nil
+        tx.keyBaseValue = nil
+        tx.keyRepeatValue = false
+        if let onInputChange = el.handlers.onInputChange {
+            let rejected = onInputChange(&state, newEdit.text, &tx)
+            if rejected {
+                editLens.set(&state, previousEdit)
+                applyTx(tx, at: now)
+                dirtyCommit(at: now)
+                return
+            }
+        }
+        if let onChange = el.handlers.onTextChange {
+            let currentText = editLens.get(state).text
+            onChange(&state, currentText, &tx)
+        }
+        applyTx(tx, at: now)
+        dirtyCommit(at: now)
+    }
+
+    private func scrollRegionBelow(node overlay: FlatNode, at point: Vec2) -> FlatNode? {
+        let orderedPaths: [String]
+        if !paintOrderPaths.isEmpty {
+            orderedPaths = paintOrderPaths
+        } else {
+            orderedPaths = flatNodes.indices.sorted { a, b in
+                let za = flatNodes[a].zOrder
+                let zb = flatNodes[b].zOrder
+                if za != zb { return za < zb }
+                return a < b
+            }.map { flatNodes[$0].path }
+        }
+        var underIdx: Int? = nil
+        for path in orderedPaths.reversed() {
+            if path == overlay.path || path.hasPrefix(overlay.path + "/") { continue }
+            guard let idx = nodeByPath[path], idx < flatNodes.count else { continue }
+            let candidate = flatNodes[idx]
+            if candidate.effectiveInert { continue }
+            if let geom = hitGeometryByPath[path] {
+                if geom.isExiting || geom.opacity <= 0.001 { continue }
+                guard geom.contains(point) else { continue }
+                underIdx = idx
+                break
+            } else {
+                if candidate.el.opacity <= 0.001 { continue }
+                let infoRect = presentedRectByPath[path] ?? candidate.targetRect
+                let hitBox = intersectRects(candidate.clipRect, infoRect)
+                guard halfOpenContains(hitBox, point) else { continue }
+                underIdx = idx
+                break
+            }
+        }
+        var walkIdx = underIdx
+        while let cur = walkIdx, cur < flatNodes.count {
+            let candidate = flatNodes[cur]
+            if !candidate.el.layout.scrollAxes.isEmpty && canFocusIndex(cur) {
+                return candidate
+            }
+            walkIdx = candidate.parentIndex
+        }
+        return nil
     }
 
     private func advanceTabFocus(backward: Bool) -> Bool {
@@ -8750,12 +9364,17 @@ public final class Runtime<State> {
         let rect = presentedRectByPath[node.path] ?? node.targetRect
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
-        var hitStyle = node.el.textStyle
-        if resolvedEdit.multiline { hitStyle.wrap = .wrap }
+        let resolvedInput = ElDisplayResolver.resolveInput(
+            el: node.el,
+            edit: resolvedEdit,
+            innerWidth: innerW / max(0.01, sc.x)
+        )
         let shaped = textSystem.shape(
-            text: resolvedEdit.displayString,
-            style: hitStyle,
-            maxWidth: resolvedEdit.multiline ? innerW : nil,
+            text: resolvedInput.renderedString,
+            spans: resolvedInput.spans,
+            pills: resolvedInput.pills,
+            style: resolvedInput.style,
+            maxWidth: resolvedInput.maxWidthForShape,
             pixelScale: pixelScale,
             emitGlyphs: false
         )

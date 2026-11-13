@@ -236,7 +236,14 @@ public struct NodeSpec: Sendable, Equatable {
     public var styleSpring: Spring?
     public var colorSpring: Spring?
     public var animateOffset: Bool
+    public var paintSpring: Spring?
+    public var offsetAnim: Anim<Vec2>?
+    public var opacityAnim: Anim<Float>?
+    public var scaleAnim: Anim<Vec2>?
+    public var rotateAnim: Anim<Float>?
+    public var iconTurn: Float
     public var transition: Transition?
+    public var snapMount: Bool
 
     /// Layout frame in parent space when used with `Scene.insert` (alias for `rect`).
     public var frame: MotionRect {
@@ -261,7 +268,14 @@ public struct NodeSpec: Sendable, Equatable {
         self.styleSpring = nil
         self.colorSpring = nil
         self.animateOffset = true
+        self.paintSpring = nil
+        self.offsetAnim = nil
+        self.opacityAnim = nil
+        self.scaleAnim = nil
+        self.rotateAnim = nil
+        self.iconTurn = 0
         self.transition = .opacity
+        self.snapMount = false
     }
 
     public init(
@@ -280,7 +294,14 @@ public struct NodeSpec: Sendable, Equatable {
         styleSpring: Spring? = nil,
         colorSpring: Spring? = nil,
         animateOffset: Bool = true,
-        transition: Transition? = nil
+        paintSpring: Spring? = nil,
+        offsetAnim: Anim<Vec2>? = nil,
+        opacityAnim: Anim<Float>? = nil,
+        scaleAnim: Anim<Vec2>? = nil,
+        rotateAnim: Anim<Float>? = nil,
+        iconTurn: Float = 0,
+        transition: Transition? = nil,
+        snapMount: Bool = false
     ) {
         self.id = id
         self.parent = parent
@@ -297,7 +318,14 @@ public struct NodeSpec: Sendable, Equatable {
         self.styleSpring = styleSpring
         self.colorSpring = colorSpring
         self.animateOffset = animateOffset
+        self.paintSpring = paintSpring
+        self.offsetAnim = offsetAnim
+        self.opacityAnim = opacityAnim
+        self.scaleAnim = scaleAnim
+        self.rotateAnim = rotateAnim
+        self.iconTurn = iconTurn
         self.transition = transition
+        self.snapMount = snapMount
     }
 
     public func parent(_ parent: NodeId) -> NodeSpec {
@@ -728,6 +756,11 @@ public struct Scene: Sendable {
     public func hasNode(_ id: NodeId) -> Bool {
         guard let i = slot(id) else { return false }
         return nodes[i].alive
+    }
+
+    public func isExiting(_ id: NodeId) -> Bool {
+        guard let i = slot(id), nodes[i].alive else { return false }
+        return nodes[i].presence.isExiting
     }
 
     public func currentRect(_ id: NodeId) -> MotionRect? {
@@ -1691,7 +1724,10 @@ public struct Scene: Sendable {
         initialCut: Bool = false,
         snapMounts: Bool = false,
         snapOmittedNonExiting: Bool = false,
-        matchedStarts: [NodeId: MatchedFlightStart] = [:]
+        matchedStarts: [NodeId: MatchedFlightStart] = [:],
+        unmountNewOmissions: Bool = false,
+        landWaitingNodes: Bool = false,
+        snapNewMounts: Bool = false
     ) {
         setTime(now)
         let cut = initialCut || !hasCommittedOnce
@@ -1757,6 +1793,9 @@ public struct Scene: Sendable {
                     applyMatchedFlight(existingIdx, spec: spec, match: m)
                 } else {
                     insert(spec.id, insertSpec, cut ? .initial : .animated)
+                    if landWaitingNodes {
+                        landWaiting(spec.id)
+                    }
 
                     if let (curPos, curVel) = preWorld, let la = spec.layoutAnim, !store.reducedMotion && !cut {
                         nodes[existingIdx].frame = localFrame
@@ -1776,21 +1815,76 @@ public struct Scene: Sendable {
                 // Update visual properties smoothly or immediately
                 nodes[existingIdx].hasFill = (spec.fill != nil)
                 nodes[existingIdx].hasBorder = (spec.border != nil)
-                if !cut, let sp = spec.styleSpring {
-                    let a = Anim<Float>(curve: Curve.from(sp))
-                    animate(spec.id, Props.OPACITY, to: spec.opacity, anim: a)
-                    animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: Curve.from(sp)))
-                    animate(spec.id, Props.ROTATE, to: spec.rotate, anim: a)
-                    if spec.animateOffset {
-                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
-                    } else if let la = spec.layoutAnim {
-                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: la.x.curve))
+                let matchedExiting = wasExiting && !cut && matchedStarts[spec.id] != nil && !store.reducedMotion
+                if !matchedExiting {
+                    if !cut, let opAnim = spec.opacityAnim {
+                        let rest = store.target(spec.id, Props.OPACITY) ?? get(spec.id, Props.OPACITY)
+                        if rest != spec.opacity {
+                            animate(spec.id, Props.OPACITY, to: spec.opacity, anim: opAnim)
+                        }
+                    } else if !cut, let sp = spec.styleSpring {
+                        animate(spec.id, Props.OPACITY, to: spec.opacity, anim: Anim<Float>(curve: Curve.from(sp)))
+                    } else {
+                        set(spec.id, Props.OPACITY, spec.opacity)
+                    }
+
+                    if !cut && !store.reducedMotion, let scAnim = spec.scaleAnim {
+                        let rest = store.target(spec.id, Props.SCALE) ?? get(spec.id, Props.SCALE)
+                        if rest != spec.scale {
+                            animate(spec.id, Props.SCALE, to: spec.scale, anim: scAnim)
+                        }
+                    } else if !cut && !store.reducedMotion, let sp = spec.styleSpring {
+                        animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: Curve.from(sp)))
+                    } else {
+                        set(spec.id, Props.SCALE, spec.scale)
+                    }
+
+                    if !cut && !store.reducedMotion, let rotAnim = spec.rotateAnim {
+                        let rest = store.target(spec.id, Props.ROTATE) ?? get(spec.id, Props.ROTATE)
+                        if rest != spec.rotate {
+                            animate(spec.id, Props.ROTATE, to: spec.rotate, anim: rotAnim)
+                        }
+                    } else if !cut && !store.reducedMotion, let sp = spec.styleSpring {
+                        animate(spec.id, Props.ROTATE, to: spec.rotate, anim: Anim<Float>(curve: Curve.from(sp)))
+                    } else {
+                        set(spec.id, Props.ROTATE, spec.rotate)
+                    }
+
+                    if !cut && !store.reducedMotion, let offAnim = spec.offsetAnim {
+                        let rest = store.target(spec.id, Props.OFFSET) ?? get(spec.id, Props.OFFSET)
+                        if rest != spec.offset {
+                            animate(spec.id, Props.OFFSET, to: spec.offset, anim: offAnim)
+                        }
+                    } else if !cut && !store.reducedMotion, let sp = spec.styleSpring {
+                        if spec.animateOffset {
+                            animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                        } else if let la = spec.layoutAnim {
+                            animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: la.x.curve))
+                        } else {
+                            set(spec.id, Props.OFFSET, spec.offset)
+                        }
                     } else {
                         set(spec.id, Props.OFFSET, spec.offset)
                     }
-                    animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
-                    animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
-                } else if wasExiting && !cut && matchedStarts[spec.id] != nil && !store.reducedMotion {
+
+                    if !cut, let sp = spec.styleSpring {
+                        animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
+                        animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
+                    } else {
+                        set(spec.id, Props.CORNERS, spec.corners)
+                        set(spec.id, Props.BLUR, Blur(spec.blur))
+                    }
+                    if spec.iconTurn != 0 || store.has(spec.id, Props.ICON_TURN) {
+                        if !cut && !store.reducedMotion, let sp = spec.styleSpring ?? spec.paintSpring {
+                            if !wasExiting && !store.has(spec.id, Props.ICON_TURN) {
+                                set(spec.id, Props.ICON_TURN, 0)
+                            }
+                            animate(spec.id, Props.ICON_TURN, to: spec.iconTurn, anim: Anim<Float>(curve: Curve.from(sp)))
+                        } else {
+                            set(spec.id, Props.ICON_TURN, spec.iconTurn)
+                        }
+                    }
+                } else {
                     // Matched start animates opacity/corners/fill from the source snapshot.
                     set(spec.id, Props.SCALE, spec.scale)
                     set(spec.id, Props.ROTATE, spec.rotate)
@@ -1802,28 +1896,29 @@ public struct Scene: Sendable {
                     if matchedStarts[spec.id]?.startOpacity == nil {
                         set(spec.id, Props.OPACITY, spec.opacity)
                     }
-                } else {
-                    set(spec.id, Props.OPACITY, spec.opacity)
-                    set(spec.id, Props.SCALE, spec.scale)
-                    set(spec.id, Props.ROTATE, spec.rotate)
-                    set(spec.id, Props.OFFSET, spec.offset)
-                    set(spec.id, Props.CORNERS, spec.corners)
-                    set(spec.id, Props.BLUR, Blur(spec.blur))
-                }
-                let skipFillForMatch = wasExiting && !cut && matchedStarts[spec.id]?.startFill != nil && !store.reducedMotion
-                let resolvedColorSpring = !cut ? (spec.colorSpring ?? spec.styleSpring) : nil
-                if !skipFillForMatch, let fill = spec.fill {
-                    if let csp = resolvedColorSpring {
-                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: Curve.from(csp)))
-                    } else {
+                    if matchedStarts[spec.id]?.startFill == nil, let fill = spec.fill {
                         set(spec.id, Props.FILL, fill)
                     }
-                }
-                if let border = spec.border {
-                    if let csp = resolvedColorSpring {
-                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: Curve.from(csp)))
-                    } else {
+                    if let border = spec.border {
                         set(spec.id, Props.BORDER, border)
+                    }
+                }
+                if !matchedExiting {
+                    let fillSpring = !cut ? (spec.paintSpring ?? spec.colorSpring ?? spec.styleSpring) : nil
+                    let borderSpring = !cut ? (spec.paintSpring ?? spec.colorSpring ?? spec.styleSpring) : nil
+                    if let fill = spec.fill {
+                        if let psp = fillSpring {
+                            animate(spec.id, Props.FILL, to: fill, anim: Anim<MotionColor>(curve: Curve.from(psp)))
+                        } else {
+                            set(spec.id, Props.FILL, fill)
+                        }
+                    }
+                    if let border = spec.border {
+                        if let bsp = borderSpring {
+                            animate(spec.id, Props.BORDER, to: border, anim: Anim<MotionColor>(curve: Curve.from(bsp)))
+                        } else {
+                            set(spec.id, Props.BORDER, border)
+                        }
                     }
                 }
                 nodes[existingIdx].dirty = true
@@ -1835,11 +1930,12 @@ public struct Scene: Sendable {
                     if spec.rotate != 0 { nodes[i].baseRotate = spec.rotate }
                     if spec.offset != .zero { nodes[i].baseOffset = spec.offset }
                     if spec.blur != 0 { nodes[i].baseBlur = spec.blur }
+                    if spec.iconTurn != 0 { set(spec.id, Props.ICON_TURN, spec.iconTurn) }
                     if let border = spec.border { nodes[i].border = border; nodes[i].hasBorder = true }
                     applyMatchedFlight(i, spec: spec, match: m)
                 }
             } else {
-                let mount: Mount = (cut || snapMounts || spec.transition == nil) ? .initial : .animated
+                let mount: Mount = (cut || snapMounts || snapNewMounts || spec.snapMount || spec.transition == nil) ? .initial : .animated
                 insert(spec.id, localSpec, mount)
                 if let i = slot(spec.id) {
                     nodes[i].compatHadTransition = (spec.transition != nil)
@@ -1847,6 +1943,7 @@ public struct Scene: Sendable {
                     if spec.rotate != 0 { nodes[i].baseRotate = spec.rotate }
                     if spec.offset != .zero { nodes[i].baseOffset = spec.offset }
                     if spec.blur != 0 { nodes[i].baseBlur = spec.blur }
+                    if spec.iconTurn != 0 { set(spec.id, Props.ICON_TURN, spec.iconTurn) }
                     if let border = spec.border { nodes[i].border = border; nodes[i].hasBorder = true }
                 }
             }
@@ -1871,7 +1968,7 @@ public struct Scene: Sendable {
             let nid = NodeId(rawId)
             if seen.contains(nid) { continue }
             guard let i = slot(nid), nodes[i].alive else { continue }
-            if cut || matchedRemovedIds.contains(nid) {
+            if cut || landWaitingNodes || matchedRemovedIds.contains(nid) {
                 unmount(nid)
                 continue
             }
@@ -1879,7 +1976,7 @@ public struct Scene: Sendable {
             let pIdx = nodes[i].parent
             let parentRemainedPresent = (pIdx == Self.noneIdx) || seen.contains(nodes[Int(pIdx)].id)
             guard parentRemainedPresent else { continue }
-            if !nodes[i].compatHadTransition || (snapOmittedNonExiting && !nodes[i].presence.isExiting) {
+            if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !nodes[i].presence.isExiting) {
                 unmount(nid)
             } else if !nodes[i].presence.isExiting {
                 remove(nid)

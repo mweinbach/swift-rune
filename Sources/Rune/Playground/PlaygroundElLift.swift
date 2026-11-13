@@ -70,6 +70,10 @@ extension El {
         if let growthSpec { out.growthSpec = growthSpec }
         if isStreaming { out.isStreaming = true }
         if isArrivesWhole { out.isArrivesWhole = true }
+        if let explicitDir { out.explicitDir = explicitDir }
+        if isUnmirrored { out.isUnmirrored = true }
+        if mirrorInRtl { out.mirrorInRtl = true }
+        if textDirByParagraph { out.textDirByParagraph = true }
         if let foldGlideSpec { out.foldGlideSpec = foldGlideSpec }
         if let virtualEstimate { out.virtualEstimate = virtualEstimate }
         if let src = virtualRowsSource {
@@ -148,7 +152,13 @@ extension El {
         if isMatchedCrop { out.isMatchedCrop = true }
         if let flightSpring { out.flightSpring = flightSpring }
         if let terminalGridPayload { out.terminalGridPayload = terminalGridPayload }
-        if spellcheck { out.spellcheck = true }
+        if let focusFillColor { out.focusFillColor = focusFillColor }
+        if pressFocusesBelow { out.pressFocusesBelow = true }
+        if noWindowDrag { out.noWindowDrag = true }
+        if isImeCursor { out.isImeCursor = true }
+        if let traceNameValue { out.traceNameValue = traceNameValue }
+        if let traceNamespaceValue { out.traceNamespaceValue = traceNamespaceValue }
+        if isSpellcheck { out.isSpellcheck = true }
         if !liveBindings.isEmpty { out.liveBindings = liveBindings }
 
         if !runtimeExtras.isEmpty {
@@ -219,6 +229,8 @@ extension El {
         lifted.onPointerUp = wrap1(h.onPointerUp)
         lifted.onPointerMove = wrap1(h.onPointerMove)
         lifted.onHover = wrap1(h.onHover)
+        lifted.onHoverChange = wrap1(h.onHoverChange)
+        lifted.hoverDelay = h.hoverDelay
         lifted.onDrag = wrap1(h.onDrag)
         lifted.onDragEnd = wrap1(h.onDragEnd)
         if let drop = h.drop {
@@ -263,10 +275,15 @@ extension El {
             )
         }
         lifted.onInputKey = wrapBool1(h.onInputKey)
+        lifted.onInputChange = wrapBool1(h.onInputChange)
         lifted.onTextChange = wrap1(h.onTextChange)
         lifted.onTextSubmit = wrap1(h.onTextSubmit)
         lifted.onLink = wrap1(h.onLink)
         lifted.onLinkSecondary = wrap2(h.onLinkSecondary)
+        lifted.onBackgroundPress = wrap1(h.onBackgroundPress)
+        lifted.onScreenLayout = wrap1(h.onScreenLayout)
+        lifted.onSpellcheck = wrap1(h.onSpellcheck)
+        lifted.onSpellcheckLanguages = wrap1(h.onSpellcheckLanguages)
         lifted.modalDismiss = wrap(h.modalDismiss)
         if let onAtBottom = h.onAtBottom {
             hasHandler = true

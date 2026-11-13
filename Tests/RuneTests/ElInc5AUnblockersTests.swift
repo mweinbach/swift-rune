@@ -1048,4 +1048,106 @@ struct ElInc5AUnblockersTests {
         }
         #expect(rt.scrollOffset(forKey: "scroll").y == 90.0)
     }
+
+    @Test("#517/#619/pageScroll regressions: color crossfade, reducedMotion REDUCED_FADE, instant unmount, settle pass, pageScroll hover release")
+    func inc5BPaintGateSettleAndPageScrollRegressions() {
+        // 1. tx.colorMotion animates color cross-fade smoothly; reducedMotion cross-fades colors via REDUCED_FADE while snapping motion(.none)
+        struct PaintState { var lit = false }
+        let rtPaint = Runtime<PaintState>(state: PaintState(), viewport: Vec2(120, 80)) { s, _ in
+            el().key("swatch").size(60, 40).bg(s.lit ? Color(r: 1, g: 0, b: 0, a: 1) : Color(r: 0, g: 0, b: 1, a: 1))
+        }
+        _ = rtPaint.frame(at: 0.0)
+        rtPaint.update(at: 0.02) { s, tx in
+            s.lit = true
+            tx.colorMotion(MotionTokens.DEFAULT)
+        }
+        _ = rtPaint.frame(at: 0.04)
+        #expect(rtPaint.isAnimating)
+        let fMid = rtPaint.frame(at: 0.06)
+        let bgMid = fMid.primitives.first { $0.rect.z > 0 && $0.fill.w > 0 }?.fill.x ?? -1
+        #expect(bgMid > 0.05 && bgMid < 0.95)
+        _ = rtPaint.frame(at: 1.0)
+        #expect(!rtPaint.isAnimating)
+
+        let rtReduced = Runtime<PaintState>(state: PaintState(), viewport: Vec2(120, 80)) { s, _ in
+            el().key("swatch").size(60, 40)
+                .rounded(s.lit ? 16 : 4)
+                .bg(s.lit ? Color(r: 1, g: 0, b: 0, a: 1) : Color(r: 0, g: 0, b: 1, a: 1))
+        }
+        _ = rtReduced.frame(at: 0.0)
+        rtReduced.setSystemReducedMotion(true)
+        rtReduced.update(at: 0.02) { s, _ in s.lit = true }
+        _ = rtReduced.frame(at: 0.03)
+        let radRed = rtReduced.element(byKey: "swatch")?.radius ?? -1
+        #expect(abs(radRed - 16.0) < 0.1)
+        #expect(rtReduced.isAnimating) // REDUCED_FADE on bg color
+        _ = rtReduced.frame(at: 0.25)
+        #expect(!rtReduced.isAnimating)
+
+        let rtReducedNone = Runtime<PaintState>(state: PaintState(), viewport: Vec2(120, 80)) { s, _ in
+            el().key("swatch").size(60, 40)
+                .motion(.none)
+                .bg(s.lit ? Color(r: 1, g: 0, b: 0, a: 1) : Color(r: 0, g: 0, b: 1, a: 1))
+        }
+        _ = rtReducedNone.frame(at: 0.0)
+        rtReducedNone.setSystemReducedMotion(true)
+        rtReducedNone.update(at: 0.02) { s, _ in s.lit = true }
+        _ = rtReducedNone.frame(at: 0.03)
+        #expect(!rtReducedNone.isAnimating)
+
+        // 2. #619 item 3: tx.instant() immediately unmounts transitioning node instead of keeping it exiting
+        struct ExitState { var show = true }
+        let rtExit = Runtime<ExitState>(state: ExitState(), viewport: Vec2(200, 100)) { s, _ in
+            col().size(200, 100).child(
+                s.show
+                    ? el().key("panel").size(80, 40).bg(.white).transition(.opacity)
+                    : el().key("placeholder").size(80, 40)
+            )
+        }
+        _ = rtExit.frame(at: 0.0)
+        rtExit.update(at: 0.1) { s, tx in
+            s.show = false
+            tx.instant()
+        }
+        _ = rtExit.frame(at: 0.12)
+        #expect(rtExit.element(byKey: "panel") == nil)
+
+        // 3. #619 item 2: tx.settle() unmounts exiting node and lands waiting motion
+        let rtSettle = Runtime<ExitState>(state: ExitState(), viewport: Vec2(200, 100)) { s, _ in
+            col().size(200, 100).child(
+                s.show
+                    ? el().key("panel").size(80, 40).bg(.white).transition(.opacity)
+                    : el().key("placeholder").size(80, 40)
+            )
+        }
+        _ = rtSettle.frame(at: 0.0)
+        rtSettle.update(at: 0.1) { s, tx in
+            s.show = false
+            tx.animated()
+        }
+        _ = rtSettle.frame(at: 0.12)
+        #expect(rtSettle.element(byKey: "panel")?.exiting == true)
+        rtSettle.update(at: 0.15) { _, tx in tx.settle() }
+        _ = rtSettle.frame(at: 0.16)
+        #expect(rtSettle.element(byKey: "panel") == nil)
+
+        // 4. pageScroll releases held hover while scroll is gliding
+        let rtScroll = Runtime<Int>(state: 0, viewport: Vec2(200, 100)) { _, _ in
+            col().key("list").size(200, 100).scrollY().children(
+                (0..<10).map { i in el().key("row-\(i)").size(200, 40).hover(Color(r: 0.2, g: 0.4, b: 0.8, a: 1)) }
+            )
+        }
+        _ = rtScroll.frame(at: 0.0)
+        rtScroll.pointerMove(to: Vec2(20, 20), at: 0.05)
+        _ = rtScroll.frame(at: 0.05)
+        #expect((rtScroll.element(byKey: "row-0")?.hover ?? 0) > 0.9)
+        rtScroll.fling(vy: -400, at: Vec2(20, 20), now: 0.06)
+        _ = rtScroll.frame(at: 0.08)
+        rtScroll.keyDown(KeyEvent(key: .pageDown), at: 0.1)
+        _ = rtScroll.frame(at: 0.1)
+        #expect(rtScroll.scrollOffset(forKey: "list").y > 0)
+        _ = rtScroll.frame(at: 0.25)
+        _ = rtScroll.frame(at: 0.40)
+        #expect((rtScroll.element(byKey: "row-0")?.hover ?? 1) < 0.01)
+    }
 }

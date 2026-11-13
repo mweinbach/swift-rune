@@ -180,6 +180,14 @@ public struct Tx {
     public internal(set) var textFlights: [(source: String, destination: String)] = []
     public internal(set) var launches: [(source: String, destination: String)] = []
     public internal(set) var unclippedFlightsRequested: Bool = false
+    public internal(set) var focusVisibleAtEvent: Bool = false
+    public internal(set) var byKeysAtEvent: Bool = false
+    public internal(set) var assistiveTechnologyActive: Bool = false
+    public internal(set) var eventInputTime: Double? = nil
+    public internal(set) var sentKeys: [KeyEvent] = []
+    public internal(set) var toggleMaximizedRequested: Bool = false
+    public internal(set) var toggleFullScreenRequested: Bool = false
+    public internal(set) var announcement: (text: String, politeness: LiveRegionPoliteness)? = nil
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -288,6 +296,11 @@ public struct Tx {
     public mutating func traceChannel(_ name: String, kind: String, value: Float) {
         guard tracingEnabled, let parsed = TraceChannels.Kind(rawValue: kind) else { return }
         traceChannels.append((name, parsed, value))
+    }
+
+    /// Positional convenience overload for `traceChannel(_:kind:value:)`.
+    public mutating func traceChannel(_ name: String, _ kind: String, _ value: Float) {
+        traceChannel(name, kind: kind, value: value)
     }
 
     /// Requests a wake once the logical `clock` reaches `due` (`Tx::wake_at`).
@@ -429,10 +442,18 @@ public struct Tx {
         quitRequested = quitRequested || one.quitRequested
         blurFocusRequested = blurFocusRequested || one.blurFocusRequested
         if let fk = one.requestedFocusKey {
-            requestedFocusKey = fk
-            requestedFocusVisible = one.requestedFocusVisible
-            focusAskedByReturn = one.focusAskedByReturn
+            if !one.focusAskedByReturn || requestedFocusKey == nil || focusAskedByReturn {
+                requestedFocusKey = fk
+                requestedFocusVisible = one.requestedFocusVisible
+                focusAskedByReturn = one.focusAskedByReturn
+            }
         }
+        sentKeys.append(contentsOf: one.sentKeys)
+        toggleMaximizedRequested = toggleMaximizedRequested || one.toggleMaximizedRequested
+        toggleFullScreenRequested = toggleFullScreenRequested || one.toggleFullScreenRequested
+        traceEvents.append(contentsOf: one.traceEvents)
+        traceChannels.append(contentsOf: one.traceChannels)
+        if let ann = one.announcement { announcement = ann }
         if let wake = one.runtimeActions["wakeAfter"] as? Double {
             wakeAfter(wake)
         }
@@ -464,6 +485,58 @@ public struct Tx {
 
     public mutating func unclippedFlights() {
         unclippedFlightsRequested = true
+    }
+
+    /// Returns focus to `targetKey` (showing ring when `visible` is true) unless an explicit `.focus(...)` won this turn.
+    public mutating func returnFocus(_ targetKey: String, visible: Bool = true) {
+        if requestedFocusKey == nil || focusAskedByReturn {
+            requestedFocusKey = targetKey
+            requestedFocusVisible = visible
+            focusAskedByReturn = true
+            blurFocusRequested = false
+        }
+    }
+
+    /// Whether keyboard focus was showing its ring (`:focus-visible`) when this event arrived.
+    public func focusVisible() -> Bool { focusVisibleAtEvent }
+
+    /// Whether assistive technology (e.g. VoiceOver) is active (`Tx::assistive_technology`).
+    public func assistiveTechnology() -> Bool { assistiveTechnologyActive }
+
+    /// Event input timestamp in seconds (`Tx::input_time`).
+    public func inputTime() -> Double? { eventInputTime }
+
+    /// Whether this drag callback is a scheduled `dragRepeatAfter` tick (`Tx::drag_repeat`).
+    public func dragRepeat() -> Bool { isDragRepeat }
+
+    /// Dispatches a synthetic `KeyEvent` after the current handler completes (`Tx::send_key`).
+    public mutating func sendKey(_ ev: KeyEvent) {
+        sentKeys.append(ev)
+    }
+
+    /// Requests toggling the window's maximized/zoomed state (`Tx::toggle_maximized`).
+    public mutating func toggleMaximized() {
+        toggleMaximizedRequested = true
+    }
+
+    /// Requests toggling the window's native full-screen state (`Tx::toggle_full_screen`).
+    public mutating func toggleFullScreen() {
+        toggleFullScreenRequested = true
+    }
+
+    /// Posts an accessibility live-region announcement (`Tx::announce`).
+    public mutating func announce(_ text: String, _ politeness: LiveRegionPoliteness = .polite) {
+        announcement = (text, politeness)
+    }
+
+    /// Requests opening `url` in the system browser (`Tx::open_url` Swift-case alias).
+    public mutating func openURL(_ url: String) throws {
+        try openUrl(url, sameTab: false)
+    }
+
+    /// Requests opening `url` in the same web tab (`Tx::open_url_same_tab` Swift-case alias).
+    public mutating func openURLSameTab(_ url: String) throws {
+        try openUrlSameTab(url)
     }
 }
 
@@ -667,6 +740,11 @@ struct BoundLiveProperty: Sendable {
         case fill
         case rect
         case trim
+        case textColor
+        case borderColor
+        case shadowColor
+        case gradientTop
+        case gradientBottom
     }
 
     var target: Target
@@ -685,6 +763,8 @@ public struct ElementHandlers<State> {
     public var onPointerUp: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerMove: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onHover: ((inout State, Bool, inout Tx) -> Void)?
+    public var onHoverChange: ((inout State, Bool, inout Tx) -> Void)?
+    public var hoverDelay: (enter: Float, leave: Float) = (0, 0)
     public var onDrag: ((inout State, Drag, inout Tx) -> Void)?
     public var onDragEnd: ((inout State, Bool, inout Tx) -> Void)?
     public var drop: DropSpec<State>?
@@ -725,11 +805,15 @@ public struct ElementHandlers<State> {
     public var onLayout: ((inout State, [Float], inout Tx) -> Void)?
     public var onScreenLayout: ((inout State, [Float], inout Tx) -> Void)?
     public var drawnRectUpdate: ((MotionRect) -> Bool)?
+    public var onBackgroundPress: ((inout State, PointerPress, inout Tx) -> Void)?
+    public var onInputChange: ((inout State, String, inout Tx) -> Bool)?
+    public var onSpellcheck: ((inout State, Bool, inout Tx) -> Void)?
+    public var onSpellcheckLanguages: ((inout State, [String], inout Tx) -> Void)?
 
     public init() {}
 }
 
-struct ElColdData<State> {
+final class ElColdData<State> {
     var pixelSnapEnabled: Bool = true
     var clipRadius: Float? = nil
     var clipCorners: Corners? = nil
@@ -831,10 +915,172 @@ struct ElColdData<State> {
     var flightCrop: Bool = false
     var flightSpring: Spring? = nil
     var terminalGridPayload: TerminalGrid? = nil
+    var explicitDir: Direction? = nil
+    var isUnmirrored: Bool = false
+    var mirrorInRtl: Bool = false
+    var textDirByParagraph: Bool = false
+    var focusFillColor: Color? = nil
+    var pressFocusesBelow: Bool = false
+    var noWindowDrag: Bool = false
+    var isImeCursor: Bool = false
     var spellcheck: Bool = false
+    var richStyle: RichStyle? = nil
+    var pillColors: (bg: Color, fg: Color?)? = nil
+    var pillIconLookup: ((String) -> SVGIcon?)? = nil
+    var pillStyleLookup: ((String) -> PillStyle)? = nil
+    var isSingleLineInput: Bool = false
+    var animateEditLayoutEnabled: Bool = false
+    var isIconOneColor: Bool = false
+    var iconRotation: Float = 0.0
+    var isWidthLeads: Bool = false
+    var holdLandingWidthEnabled: Bool = false
+    var isRaised: Bool = false
+    var offsetMotionAnim: Anim<Vec2>? = nil
+    var opacityMotionAnim: Anim<Float>? = nil
+    var scaleMotionAnim: Anim<Vec2>? = nil
+    var rotateMotionAnim: Anim<Float>? = nil
+    var textCaseValue: TextCase? = nil
+    var spanRings: [(range: Range<Int>, color: Color, width: Float)] = []
+    var advanceInRun: (run: TextRun, byteOffset: Int)? = nil
+    var isTruncateFadeEnabled: Bool = false
+    var truncateFadeEm: Float = 1.5
     var liveBindings: [BoundLiveProperty] = []
     var handlersBox: ElHandlersBox<State>? = nil
     var runtimeExtras: [String: Any] = [:]
+
+    func clone() -> ElColdData<State> {
+        let c = ElColdData<State>()
+        c.pixelSnapEnabled = pixelSnapEnabled
+        c.clipRadius = clipRadius
+        c.clipCorners = clipCorners
+        c.clipFade = clipFade
+        c.scrollEdgeFadeWidth = scrollEdgeFadeWidth
+        c.scrollFadeStyle = scrollFadeStyle
+        c.scrollMarginPts = scrollMarginPts
+        c.scrollAnchorEnabled = scrollAnchorEnabled
+        c.stickyConfig = stickyConfig
+        c.growthSpec = growthSpec
+        c.isStreaming = isStreaming
+        c.isArrivesWhole = isArrivesWhole
+        c.foldGlideSpec = foldGlideSpec
+        c.virtualEstimate = virtualEstimate
+        c.virtualRowsSource = virtualRowsSource
+        c.virtualRowsVersion = virtualRowsVersion
+        c.focusSelected = focusSelected
+        c.revealSelected = revealSelected
+        c.hoverBg = hoverBg
+        c.pressBg = pressBg
+        c.pressScaleFactor = pressScaleFactor
+        c.isHoverGroup = isHoverGroup
+        c.hoverGroupShare = hoverGroupShare
+        c.isHoverAlone = isHoverAlone
+        c.hoverMotion = hoverMotion
+        c.hoverWithin = hoverWithin
+        c.groupOpacity = groupOpacity
+        c.groupColor = groupColor
+        c.isDissolve = isDissolve
+        c.drawnRectLive = drawnRectLive
+        c.focusRingColor = focusRingColor
+        c.focusRingWidth = focusRingWidth
+        c.focusRingOffset = focusRingOffset
+        c.focusReturnKey = focusReturnKey
+        c.modalClickOutside = modalClickOutside
+        c.tabIndex = tabIndex
+        c.isDefaultButton = isDefaultButton
+        c.noFocusRing = noFocusRing
+        c.focusRequested = focusRequested
+        c.focusHighlightColor = focusHighlightColor
+        c.focusWithinRing = focusWithinRing
+        c.focusWithinFlat = focusWithinFlat
+        c.focusFollows = focusFollows
+        c.a11yLabel = a11yLabel
+        c.a11yHelp = a11yHelp
+        c.helpWhenTruncated = helpWhenTruncated
+        c.helpSide = helpSide
+        c.a11ySelected = a11ySelected
+        c.a11yExpanded = a11yExpanded
+        c.a11yLevel = a11yLevel
+        c.itemSelected = itemSelected
+        c.a11yDescription = a11yDescription
+        c.a11yValue = a11yValue
+        c.a11yRange = a11yRange
+        c.a11yChecked = a11yChecked
+        c.a11yDisabled = a11yDisabled
+        c.isA11yHidden = isA11yHidden
+        c.a11yActiveDescendant = a11yActiveDescendant
+        c.a11yLabelledBy = a11yLabelledBy
+        c.a11yDescribedBy = a11yDescribedBy
+        c.a11yBusy = a11yBusy
+        c.a11yInvalid = a11yInvalid
+        c.a11yReadOnly = a11yReadOnly
+        c.a11ySorted = a11ySorted
+        c.a11yLive = a11yLive
+        c.a11yPosInSet = a11yPosInSet
+        c.a11yShortcutHint = a11yShortcutHint
+        c.a11yHref = a11yHref
+        c.richSpans = richSpans
+        c.textHighlights = textHighlights
+        c.textLinks = textLinks
+        c.liveText = liveText
+        c.placeholder = placeholder
+        c.placeholderColor = placeholderColor
+        c.caretColor = caretColor
+        c.selectionColor = selectionColor
+        c.iconPayload = iconPayload
+        c.imagePayload = imagePayload
+        c.pixelsPayload = pixelsPayload
+        c.pixelsFitMode = pixelsFitMode
+        c.surfacePayload = surfacePayload
+        c.surfacePlace = surfacePlace
+        c.gradient = gradient
+        c.borderSides = borderSides
+        c.dashedBorder = dashedBorder
+        c.anchor = anchor
+        c.layoutAnim = layoutAnim
+        c.styleSpring = styleSpring
+        c.transition = transition
+        c.enterDelay = enterDelay
+        c.hasInstantChanges = hasInstantChanges
+        c.hasAnimatedChanges = hasAnimatedChanges
+        c.loopingSpec = loopingSpec
+        c.flightId = flightId
+        c.flightCrop = flightCrop
+        c.flightSpring = flightSpring
+        c.terminalGridPayload = terminalGridPayload
+        c.explicitDir = explicitDir
+        c.isUnmirrored = isUnmirrored
+        c.mirrorInRtl = mirrorInRtl
+        c.textDirByParagraph = textDirByParagraph
+        c.focusFillColor = focusFillColor
+        c.pressFocusesBelow = pressFocusesBelow
+        c.noWindowDrag = noWindowDrag
+        c.isImeCursor = isImeCursor
+        c.spellcheck = spellcheck
+        c.richStyle = richStyle
+        c.pillColors = pillColors
+        c.pillIconLookup = pillIconLookup
+        c.pillStyleLookup = pillStyleLookup
+        c.isSingleLineInput = isSingleLineInput
+        c.animateEditLayoutEnabled = animateEditLayoutEnabled
+        c.isIconOneColor = isIconOneColor
+        c.iconRotation = iconRotation
+        c.isWidthLeads = isWidthLeads
+        c.holdLandingWidthEnabled = holdLandingWidthEnabled
+        c.isRaised = isRaised
+        c.offsetMotionAnim = offsetMotionAnim
+        c.opacityMotionAnim = opacityMotionAnim
+        c.scaleMotionAnim = scaleMotionAnim
+        c.rotateMotionAnim = rotateMotionAnim
+        c.textCaseValue = textCaseValue
+        c.spanRings = spanRings
+        c.advanceInRun = advanceInRun
+        c.isTruncateFadeEnabled = isTruncateFadeEnabled
+        c.truncateFadeEm = truncateFadeEm
+        c.liveBindings = liveBindings
+        c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
+        c.runtimeExtras = runtimeExtras
+        return c
+    }
 }
 
 final class ElHandlersBox<State> {
@@ -845,12 +1091,9 @@ final class ElHandlersBox<State> {
 }
 
 final class ElColdBox<State> {
-    var data: ElColdData<State>
-    init() {
-        self.data = ElColdData<State>()
-    }
-    init(copying other: ElColdBox<State>) {
-        self.data = other.data
+    let data: ElColdData<State>
+    init(_ data: ElColdData<State> = ElColdData<State>()) {
+        self.data = data
     }
 }
 
@@ -859,17 +1102,14 @@ public struct El<State> {
     private var _cold: ElColdBox<State>? = nil
 
     private mutating func ensureCold() -> ElColdBox<State> {
-        if let box = _cold {
+        if let current = _cold {
             if !isKnownUniquelyReferenced(&_cold) {
-                let copy = ElColdBox(copying: box)
-                _cold = copy
-                return copy
+                _cold = ElColdBox(current.data.clone())
             }
-            return box
+        } else {
+            _cold = ElColdBox(ElColdData<State>())
         }
-        let fresh = ElColdBox<State>()
-        _cold = fresh
-        return fresh
+        return _cold!
     }
 
     public var keyId: String? = nil
@@ -940,6 +1180,15 @@ public struct El<State> {
     public var growthSpec: GrowthSpec? { get { _cold?.data.growthSpec } set { ensureCold().data.growthSpec = newValue } }
     public var isStreaming: Bool { get { _cold?.data.isStreaming ?? false } set { ensureCold().data.isStreaming = newValue } }
     public var isArrivesWhole: Bool { get { _cold?.data.isArrivesWhole ?? false } set { ensureCold().data.isArrivesWhole = newValue } }
+    public var explicitDir: Direction? { get { _cold?.data.explicitDir } set { ensureCold().data.explicitDir = newValue } }
+    public var isUnmirrored: Bool { get { _cold?.data.isUnmirrored ?? false } set { ensureCold().data.isUnmirrored = newValue } }
+    public var mirrorInRtl: Bool { get { _cold?.data.mirrorInRtl ?? false } set { ensureCold().data.mirrorInRtl = newValue } }
+    public var textDirByParagraph: Bool { get { _cold?.data.textDirByParagraph ?? false } set { ensureCold().data.textDirByParagraph = newValue } }
+    public var focusFillColor: Color? { get { _cold?.data.focusFillColor } set { ensureCold().data.focusFillColor = newValue } }
+    public var pressFocusesBelow: Bool { get { _cold?.data.pressFocusesBelow ?? false } set { ensureCold().data.pressFocusesBelow = newValue } }
+    public var noWindowDrag: Bool { get { _cold?.data.noWindowDrag ?? false } set { ensureCold().data.noWindowDrag = newValue } }
+    public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
+    public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
     internal var virtualizeSite: String? {
@@ -1026,6 +1275,26 @@ public struct El<State> {
     public var flightSpring: Spring? { get { _cold?.data.flightSpring } set { ensureCold().data.flightSpring = newValue } }
     public var terminalGridPayload: TerminalGrid? { get { _cold?.data.terminalGridPayload } set { ensureCold().data.terminalGridPayload = newValue } }
     public var spellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
+    public var richStyleSpec: RichStyle? { get { _cold?.data.richStyle } set { ensureCold().data.richStyle = newValue } }
+    public var pillColorsSpec: (bg: Color, fg: Color?)? { get { _cold?.data.pillColors } set { ensureCold().data.pillColors = newValue } }
+    public var pillIconLookup: ((String) -> SVGIcon?)? { get { _cold?.data.pillIconLookup } set { ensureCold().data.pillIconLookup = newValue } }
+    public var pillStyleLookup: ((String) -> PillStyle)? { get { _cold?.data.pillStyleLookup } set { ensureCold().data.pillStyleLookup = newValue } }
+    public var isSingleLineInput: Bool { get { _cold?.data.isSingleLineInput ?? false } set { ensureCold().data.isSingleLineInput = newValue } }
+    public var animateEditLayoutEnabled: Bool { get { _cold?.data.animateEditLayoutEnabled ?? false } set { ensureCold().data.animateEditLayoutEnabled = newValue } }
+    public var isIconOneColor: Bool { get { _cold?.data.isIconOneColor ?? false } set { ensureCold().data.isIconOneColor = newValue } }
+    public var iconRotation: Float { get { _cold?.data.iconRotation ?? 0.0 } set { ensureCold().data.iconRotation = newValue } }
+    public var isWidthLeads: Bool { get { _cold?.data.isWidthLeads ?? false } set { ensureCold().data.isWidthLeads = newValue } }
+    public var holdLandingWidthEnabled: Bool { get { _cold?.data.holdLandingWidthEnabled ?? false } set { ensureCold().data.holdLandingWidthEnabled = newValue } }
+    public var isRaised: Bool { get { _cold?.data.isRaised ?? false } set { ensureCold().data.isRaised = newValue } }
+    public var offsetMotionAnim: Anim<Vec2>? { get { _cold?.data.offsetMotionAnim } set { ensureCold().data.offsetMotionAnim = newValue } }
+    public var opacityMotionAnim: Anim<Float>? { get { _cold?.data.opacityMotionAnim } set { ensureCold().data.opacityMotionAnim = newValue } }
+    public var scaleMotionAnim: Anim<Vec2>? { get { _cold?.data.scaleMotionAnim } set { ensureCold().data.scaleMotionAnim = newValue } }
+    public var rotateMotionAnim: Anim<Float>? { get { _cold?.data.rotateMotionAnim } set { ensureCold().data.rotateMotionAnim = newValue } }
+    public var textCaseValue: TextCase? { get { _cold?.data.textCaseValue } set { ensureCold().data.textCaseValue = newValue } }
+    public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.data.spanRings ?? [] } set { ensureCold().data.spanRings = newValue } }
+    public var advanceInRun: (run: TextRun, byteOffset: Int)? { get { _cold?.data.advanceInRun } set { ensureCold().data.advanceInRun = newValue } }
+    public var isTruncateFadeEnabled: Bool { get { _cold?.data.isTruncateFadeEnabled ?? false } set { ensureCold().data.isTruncateFadeEnabled = newValue } }
+    public var truncateFadeEm: Float { get { _cold?.data.truncateFadeEm ?? 1.5 } set { ensureCold().data.truncateFadeEm = newValue } }
     var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue } }
     public var handlers: ElementHandlers<State> {
         get { _cold?.data.handlersBox?.value ?? ElementHandlers<State>() }
@@ -1827,6 +2096,87 @@ public struct El<State> {
         return c
     }
 
+    /// Sets the element's resolving writing direction (`ltr`, `rtl`, or `auto` first-strong).
+    public func dir(_ direction: Direction) -> Self {
+        var copy = self
+        copy.explicitDir = direction
+        return copy
+    }
+
+    /// Keeps child order and horizontal padding/alignment unmirrored in RTL,
+    /// resetting children back to LTR unless explicitly overridden.
+    public func unmirrored() -> Self {
+        var copy = self
+        copy.isUnmirrored = true
+        return copy
+    }
+
+    /// Mirrors this element horizontally in RTL (e.g. directional icons or rotations).
+    public func mirrorInRtl(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.mirrorInRtl = enabled
+        return copy
+    }
+
+    /// Resolves paragraph direction independently per paragraph instead of across the whole block.
+    /// Multi-paragraph static text with mixed paragraph directions splits into keyed column children.
+    public func dirByParagraph() -> Self {
+        var copy = self
+        copy.textDirByParagraph = true
+        guard !copy.isSecure,
+              copy.liveText == nil,
+              copy.handlers.editLens == nil,
+              copy.textStyle.wrap != .ellipsis else {
+            return copy
+        }
+        if let spans = copy.richSpans {
+            let paraSpans = splitRichSpansIntoParagraphs(spans)
+            let dirs = paraSpans.map { Direction.of($0.map(\.text).joined()) }
+            if paraSpans.count >= 2 && Set(dirs).count > 1 {
+                copy.role = .group
+                copy.layout.direction = .column
+                copy.plainText = nil
+                copy.richSpans = nil
+                copy.children = paraSpans.enumerated().map { idx, slice in
+                    var child = El<State>(direction: .row)
+                    child.keyId = "p\(idx)"
+                    child.role = .text
+                    child.richSpans = slice
+                    child.plainText = slice.map(\.text).joined()
+                    child.textStyle = copy.textStyle
+                    child.textColor = copy.textColor
+                    child.explicitDir = .auto
+                    return child
+                }
+            }
+            return copy
+        }
+        if let content = copy.plainText {
+            let ranges = splitParagraphUTF8Ranges(content)
+            if ranges.count >= 2 {
+                let bytes = Array(content.utf8)
+                let slices = ranges.map { String(decoding: bytes[$0], as: UTF8.self) }
+                let dirs = slices.map { Direction.of($0) }
+                if Set(dirs).count > 1 {
+                    copy.role = .group
+                    copy.layout.direction = .column
+                    copy.plainText = nil
+                    copy.children = slices.enumerated().map { idx, slice in
+                        var child = El<State>(direction: .row)
+                        child.keyId = "p\(idx)"
+                        child.role = .text
+                        child.plainText = slice
+                        child.textStyle = copy.textStyle
+                        child.textColor = copy.textColor
+                        child.explicitDir = .auto
+                        return child
+                    }
+                }
+            }
+        }
+        return copy
+    }
+
     public func color(_ c: Color) -> Self {
         var copy = self
         copy.textColor = c
@@ -1899,6 +2249,26 @@ public struct El<State> {
 
     public func liveTrim(_ binding: Binding<Vec2>) -> Self {
         bindLive(.trim, binding)
+    }
+
+    /// Binds this element's text color to a live `Color` source (`El::live_text_color`).
+    public func liveTextColor(_ binding: Binding<Color>) -> Self {
+        bindLive(.textColor, binding)
+    }
+
+    /// Binds this element's border color to a live `Color` source (`El::live_border`).
+    public func liveBorder(_ binding: Binding<Color>) -> Self {
+        bindLive(.borderColor, binding)
+    }
+
+    /// Binds this element's shadow color to a live `Color` source (`El::live_shadow`).
+    public func liveShadow(_ binding: Binding<Color>) -> Self {
+        bindLive(.shadowColor, binding)
+    }
+
+    /// Binds both stops of this element's vertical gradient to live `Color` sources (`El::live_gradient`).
+    public func liveGradient(_ top: Binding<Color>, _ bottom: Binding<Color>) -> Self {
+        bindLive(.gradientTop, top).bindLive(.gradientBottom, bottom)
     }
 
     /// Names this element explicitly in tooling traces (`El::trace_name`).
@@ -2380,6 +2750,80 @@ public struct El<State> {
         return c
     }
 
+    /// Reads the accessibility/link URL configured on this element (`El::link_url`).
+    public var linkURL: String? { a11yHref }
+
+    /// Configures a link destination URL (alias of `href(_:)` with pointer cursor).
+    public func linkURL(_ url: String) -> Self {
+        var copy = href(url)
+        if copy.attachedCursor == nil {
+            copy = copy.cursor(.pointer)
+        }
+        return copy
+    }
+
+    /// Solid fill applied while keyboard-focused (`El::focus_fill`).
+    public func focusFill(_ color: Color) -> Self {
+        var copy = self
+        copy.focusFillColor = color
+        return copy
+    }
+
+    /// Pressing this overlay forwards focus to the focusable element underneath it (`El::press_focuses_below`).
+    public func pressFocusesBelow(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.pressFocusesBelow = enabled
+        return copy
+    }
+
+    /// Marks this element as not initiating native window background drag (`El::no_window_drag`).
+    public func noWindowDrag(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.noWindowDrag = enabled
+        return copy
+    }
+
+    /// Marks a custom editor's caret element so IME activates there when no `textInput` is focused (`El::ime_cursor`).
+    public func imeCursor(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isImeCursor = enabled
+        return copy
+    }
+
+    /// Fires when pressing empty non-interactive background inside this element (`El::on_background_press`).
+    public func onBackgroundPress(_ handler: @escaping (inout State) -> Void) -> Self {
+        onBackgroundPress { state, _, _ in handler(&state) }
+    }
+
+    /// Fires with transaction access when pressing background inside this element (`El::on_background_press_tx`).
+    public func onBackgroundPressTx(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
+        onBackgroundPress { state, _, tx in handler(&state, &tx) }
+    }
+
+    /// Fires with full press coordinates when pressing background inside this element.
+    public func onBackgroundPress(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onBackgroundPress = handler
+        copy.focusable = false
+        copy.focusOptOut = true
+        return copy
+    }
+
+    /// Handles secondary (right-click) press in element-local coordinates (`El::on_secondary_press_local`).
+    public func onSecondaryPressLocal(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
+        onSecondaryClick(handler)
+    }
+
+    /// Observes pointer movement in element-local coordinates (`El::on_pointer_move_local`).
+    public func onPointerMoveLocal(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
+        onPointerMove(handler)
+    }
+
+    /// Drag callback that does not read or mutate `State` (`El::on_drag_any`).
+    public func onDragAny(_ handler: @escaping (Drag, inout Tx) -> Void) -> Self {
+        onDrag { _, drag, tx in handler(drag, &tx) }
+    }
+
     // MARK: - Event Handlers
 
     public func onClick(_ handler: @escaping (inout State) -> Void) -> Self {
@@ -2489,6 +2933,44 @@ public struct El<State> {
         var copy = self
         copy.handlers.onHover = handler
         return copy
+    }
+
+    /// Called with `true` when the pointer enters this element's visible rect and `false` when
+    /// it leaves (descendants included). Never acts as a hit blocker (`El::on_hover_change`).
+    public func onHoverChange(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onHoverChange = handler
+        return copy
+    }
+
+    /// `onHoverChange` without reading app `State` (`El::on_hover_change_any`).
+    public func onHoverChangeAny(_ handler: @escaping (Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onHoverChange = { _, inside, tx in handler(inside, &tx) }
+        return copy
+    }
+
+    /// Chains a state-agnostic `onHoverChange` handler after any existing `onHoverChange`,
+    /// staying `liveOnly` only when both handlers request `liveOnly` (`El::chain_hover_change_any`).
+    public func chainHoverChangeAny(_ handler: @escaping (Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        if let prev = copy.handlers.onHoverChange {
+            copy.handlers.onHoverChange = { state, inside, tx in
+                prev(&state, inside, &tx)
+                let prevLive = tx.liveOnlyRequested
+                tx.liveOnlyRequested = false
+                handler(inside, &tx)
+                tx.liveOnlyRequested = tx.liveOnlyRequested && prevLive
+            }
+        } else {
+            copy.handlers.onHoverChange = { _, inside, tx in handler(inside, &tx) }
+        }
+        return copy
+    }
+
+    /// Delays `onHoverChange` enter/leave callbacks by `[enter, leave]` seconds.
+    public func hoverDelays(enter: Float, leave: Float) -> Self {
+        hoverDelays(Double(enter), Double(leave))
     }
 
     public func onDrag(_ handler: @escaping (inout State, Drag, inout Tx) -> Void) -> Self {
@@ -2675,6 +3157,12 @@ public struct El<State> {
         return copy
     }
 
+    /// Called with a `Tx` when this element's screen `[x, y, width, height]` moves (`El::on_screen_layout_tx`).
+    public func onScreenLayoutTx(_ handler: @escaping (inout State, [Float], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onScreenLayout = handler
+        return copy
+    }
     /// Handles paste text at root/modal level or on an element (`El::on_paste`).
     public func onPaste(_ handler: @escaping (inout State, String, inout Tx) -> Void) -> Self {
         var copy = self
@@ -2703,10 +3191,47 @@ public struct El<State> {
         return copy
     }
 
+    /// Intercepts or observes edits to this `textInput` before/as they commit (`El::on_input_change`).
+    public func onInputChange(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onInputChange = { state, _, tx in
+            handler(&state, &tx)
+            return false
+        }
+        return copy
+    }
+
+    /// Inspects an incoming text-input edit (`newText`) and returns `true` to reject/consume it.
+    public func onInputChange(_ handler: @escaping (inout State, String, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onInputChange = handler
+        return copy
+    }
+
     public func onSubmit(_ handler: @escaping (inout State, String, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onTextSubmit = handler
         return copy
+    }
+
+    /// Configures spellcheck state and listens for spellcheck toggles (`El::on_spellcheck`).
+    public func onSpellcheck(_ enabled: Bool, _ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.isSpellcheck = enabled
+        copy.handlers.onSpellcheck = handler
+        return copy
+    }
+
+    /// Receives spellcheck dictionary language selection changes (`El::on_spellcheck_languages`).
+    public func onSpellcheckLanguages(_ handler: @escaping (inout State, [String], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onSpellcheckLanguages = handler
+        return copy
+    }
+
+    /// Wraps this `textInput` in a bounded vertical auto-growing scroll container (`el::input::auto_grow`).
+    public func autoGrow(minLines: Int = 1, maxLines: Int = 6) -> Self {
+        Rune.autoGrow(self, minLines: minLines, maxLines: maxLines)
     }
 
     // MARK: - CSS Grid, Block, Flight & Spellcheck Modifiers
@@ -3045,4 +3570,21 @@ public func textInput<State>(
         set: { state, updated in state[keyPath: keyPath] = updated }
     )
     return node
+}
+
+/// Wraps a `textInput` field in a scroll container bounded between `minLines` and `maxLines` (`el::input::auto_grow`).
+public func autoGrow<State>(_ field: El<State>, minLines: Int = 1, maxLines: Int = 6) -> El<State> {
+    let line = field.textStyle.resolvedLineHeight
+    let minL = max(1, minLines)
+    let maxL = max(minL, maxLines)
+    var adjusted = field
+    adjusted.textStyle.wrap = .wrap
+    return El<State>(direction: .column)
+        .key("scroll")
+        .wFull()
+        .shrink(1)
+        .minH(Float(minL) * line)
+        .maxH(Float(maxL) * line)
+        .scroll(stickBottom: false)
+        .child(adjusted.animateEditLayout())
 }

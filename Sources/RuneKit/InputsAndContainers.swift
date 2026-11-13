@@ -922,7 +922,7 @@ public struct TextInput<State> {
             field = field.activeDescendant(activeDescendantKey)
         }
         if animatesEditLayout {
-            field = field.animateLayout(k.motion.control)
+            field = field.animateLayout(k.motion.control).animateEditLayout()
         }
         if disabled {
             field = field.disabled(true)
@@ -1169,7 +1169,7 @@ public struct TextArea<State> {
             field = field.label(placeholderText)
         }
         if animatesEditLayout {
-            field = field.animateLayout(k.motion.control)
+            field = field.animateLayout(k.motion.control).animateEditLayout()
         }
         if disabled {
             field = field.disabled(true)
@@ -1193,7 +1193,7 @@ public struct TextArea<State> {
                 .maxH(maxBound)
                 .scrollY()
                 .animateLayout(k.motion.control)
-                .child(field.animateLayout(k.motion.control))
+                .child(field.animateLayout(k.motion.control).animateEditLayout())
             e = e.animateLayout(k.motion.control).child(viewport)
         } else if let h = maxHeightValue {
             let maxInner = max(line, h - 16.0)

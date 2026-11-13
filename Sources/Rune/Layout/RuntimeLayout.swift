@@ -20,6 +20,8 @@ final class RetainedLayoutCoordinator {
         var aspectFitRatio: Float?
         var measureFn: ((Float?) -> Vec2)?
         var childIndices: [Int] = []
+        var flow: Flow = .ltr
+        var pin: DirPin = .flowing
     }
 
     private var store = RuneTaffy.LayoutStore()
@@ -62,79 +64,98 @@ final class RetainedLayoutCoordinator {
             return hash
         }
 
-        func makeMeasure(el: El<State>) -> (fn: ((Float?) -> Vec2)?, hash: UInt64?, redacted: Bool) {
+        func makeMeasure(el: El<State>, forcedTextFlow: TextFlow?) -> (fn: ((Float?) -> Vec2)?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
             if let editLens = el.handlers.editLens {
-                var edit = editLens.get(state)
-                if el.isSecure {
-                    edit.isSecure = true
-                    if el.isRevealed { edit.isRevealed = true }
-                }
-                let str = edit.displayString.isEmpty ? (el.placeholder ?? " ") : edit.displayString
-                var textStyle = el.textStyle
-                if let fDir = edit.forcedDir {
-                    textStyle.direction = fDir
-                }
-                let isSecure = edit.isSecure
+                let rawEdit = editLens.get(state)
+                let resolved = ElDisplayResolver.resolveInput(
+                    el: el,
+                    edit: rawEdit,
+                    fallbackDirection: forcedTextFlow
+                )
+                let measureStr = resolved.renderedString.isEmpty ? " " : resolved.renderedString
                 var hasher = Hasher()
                 hasher.combine(1)
-                if !isSecure {
-                    hasher.combine(str)
+                if !resolved.isSecure {
+                    hasher.combine(measureStr)
+                    if let sp = resolved.spans { hasher.combine(sp) }
+                    for p in resolved.pills { hasher.combine(p) }
                 }
-                hasher.combine(edit.multiline)
+                hasher.combine(resolved.isSingleLine)
+                hasher.combine(rawEdit.multiline)
                 hasher.combine(scale)
-                hasher.combine(textStyle)
+                hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let fn: (Float?) -> Vec2 = { maxW in
-                    let m = textSystem.measure(str, style: textStyle, maxWidth: edit.multiline ? maxW : nil, pixelScale: scale)
-                    return Vec2(max(m.x + 2, 4), max(m.y, textStyle.resolvedLineHeight))
+                    let shapeW = resolved.measureWidth(maxW)
+                    let m: Vec2
+                    if resolved.spans != nil || !resolved.pills.isEmpty {
+                        m = textSystem.shape(
+                            text: measureStr,
+                            spans: resolved.spans,
+                            pills: resolved.pills,
+                            style: resolved.style,
+                            maxWidth: shapeW,
+                            pixelScale: scale,
+                            emitGlyphs: false
+                        ).size
+                    } else {
+                        m = textSystem.measure(measureStr, style: resolved.style, maxWidth: shapeW, pixelScale: scale)
+                    }
+                    let lineH = TextSystem.specLineHeight(
+                        lineCount: 1,
+                        lineHeightPt: resolved.style.resolvedLineHeight,
+                        scale: scale,
+                        exact: resolved.style.exactLines
+                    )
+                    return Vec2(max(m.x + 2, 4), max(m.y, lineH))
                 }
-                return (fn, isSecure ? 0 : h, isSecure)
-            } else if let spans = el.richSpans {
-                let textStyle = el.textStyle
-                let pills = el.pillChips
+                return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
+            } else if el.richSpans != nil || el.liveText != nil || el.plainText != nil || el.advanceInRun != nil {
+                let rawTxt = el.liveText?.get() ?? el.plainText
+                let resolved = ElDisplayResolver.resolveText(
+                    el: el,
+                    rawText: rawTxt,
+                    isSecure: el.isSecure,
+                    fallbackDirection: forcedTextFlow
+                )
                 var hasher = Hasher()
-                hasher.combine(2)
-                hasher.combine(spans)
-                for p in pills { hasher.combine(p) }
-                hasher.combine(scale)
-                hasher.combine(textStyle)
-                let h = UInt64(bitPattern: Int64(hasher.finalize()))
-                let fn: (Float?) -> Vec2 = { maxW in
-                    textSystem.shape(text: "", spans: spans, pills: pills, style: textStyle, maxWidth: maxW, pixelScale: scale, emitGlyphs: false).size
-                }
-                return (fn, h, false)
-            } else if let rawTxt = el.liveText?.get() ?? el.plainText {
-                let isSecure = el.isSecure
-                let txt = (isSecure && !el.isRevealed && !rawTxt.isEmpty) ? "••••••••••••" : rawTxt
-                let textStyle = el.textStyle
-                let pills = el.pillChips
-                var hasher = Hasher()
-                hasher.combine(3)
-                if !isSecure {
-                    hasher.combine(txt)
-                    for p in pills { hasher.combine(p) }
+                hasher.combine(el.richSpans != nil ? 2 : 3)
+                if !resolved.isSecure {
+                    hasher.combine(resolved.displayedText)
+                    if let sp = resolved.spans { hasher.combine(sp) }
+                    for p in resolved.pills { hasher.combine(p) }
+                    if let adv = resolved.advanceRun {
+                        hasher.combine(adv.run)
+                        hasher.combine(adv.byteOffset)
+                    }
                 }
                 hasher.combine(el.isRevealed)
+                hasher.combine(resolved.truncateFade)
                 hasher.combine(scale)
-                hasher.combine(textStyle)
+                hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let fn: (Float?) -> Vec2 = { maxW in
-                    textSystem.measure(
-                        txt,
-                        style: textStyle,
-                        maxWidth: textStyle.wrap == .noWrap ? nil : maxW,
-                        pixelScale: scale,
-                        pills: isSecure ? [] : pills
-                    )
+                    resolved.measure(using: textSystem, maxWidth: maxW, pixelScale: scale)
                 }
-                return (fn, isSecure ? 0 : h, isSecure)
+                return (fn, resolved.isSecure ? 0 : h, resolved.isSecure)
             } else if let (_, iconSize) = el.iconPayload {
                 var hasher = Hasher()
                 hasher.combine(4)
                 hasher.combine(iconSize)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 return ({ _ in Vec2(iconSize, iconSize) }, h, false)
+            } else if let grid = el.terminalGridPayload {
+                var hasher = Hasher()
+                hasher.combine(5)
+                hasher.combine(grid.columns)
+                hasher.combine(grid.cellSize.x)
+                hasher.combine(grid.cellSize.y)
+                hasher.combine(grid.rows.count)
+                let h = UInt64(bitPattern: Int64(hasher.finalize()))
+                let w = Float(grid.columns) * grid.cellSize.x
+                let rowH = Float(grid.rows.count) * grid.cellSize.y
+                return ({ _ in Vec2(w, rowH) }, h, false)
             }
             return (nil, nil, false)
         }
@@ -148,8 +169,15 @@ final class RetainedLayoutCoordinator {
             siblingKeysSeen: inout [String: Int],
             parentRow: Bool,
             parentAreas: [String: RuneTaffy.GridTemplateArea]?,
-            scrollXChild: TaffyBridge.ScrollXChild?
+            scrollXChild: TaffyBridge.ScrollXChild?,
+            parentFlow: Flow,
+            parentDirected: Bool
         ) -> (idx: Int, slot: SlotId, dirty: Bool) {
+            let pin: DirPin = (el.isUnmirrored || el.anchor != nil) ? .physical : .flowing
+            let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : parentFlow
+            let (nodeFlow, _) = stepDirection(parent: effectiveParentFlow, event: DirEvent.of(el, state: state), state: state)
+            let nodeDirected = (el.explicitDir != nil) || el.isUnmirrored || parentDirected
+            let forcedTextFlow: TextFlow? = (nodeDirected && !el.textDirByParagraph) ? nodeFlow.textFlow : nil
             let segment: String
             let resolvedKey: String?
             if let rawK = el.keyId {
@@ -234,10 +262,12 @@ final class RetainedLayoutCoordinator {
                 taffyStyle: effectiveTaffy,
                 rawTaffyStyle: rawTaffy,
                 aspectFitRatio: ratio,
-                measureFn: nil
+                measureFn: nil,
+                flow: nodeFlow,
+                pin: pin
             ))
 
-            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el)
+            let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, forcedTextFlow: forcedTextFlow)
             flat[myIndex].measureFn = measureFn
 
             let isRow = effectiveTaffy.flexDirection.isRow
@@ -257,7 +287,9 @@ final class RetainedLayoutCoordinator {
                     siblingKeysSeen: &childKeys,
                     parentRow: isRow,
                     parentAreas: areas,
-                    scrollXChild: childSX
+                    scrollXChild: childSX,
+                    parentFlow: nodeFlow,
+                    parentDirected: nodeDirected
                 )
                 childIndices.append(childRes.idx)
                 store.pushChild(childRes.slot)
@@ -294,7 +326,9 @@ final class RetainedLayoutCoordinator {
             siblingKeysSeen: &rootKeys,
             parentRow: false,
             parentAreas: nil,
-            scrollXChild: nil
+            scrollXChild: nil,
+            parentFlow: .ltr,
+            parentDirected: false
         )
 
         var rootSlot = rootRes.slot
@@ -364,9 +398,18 @@ final class RetainedLayoutCoordinator {
             childLayoutsForContent.reserveCapacity(node.childIndices.count)
 
             for cIdx in node.childIndices {
-                let childRes = extract(cIdx)
-                childResults.append(childRes)
+                var childRes = extract(cIdx)
                 let cNode = flat[cIdx]
+                if node.flow == .rtl && cNode.pin == .flowing {
+                    let lr = childRes.layout.localRect
+                    childRes.layout.localRect = MotionRect.fromXYWH(
+                        taffyLayout.size.width - lr.x - lr.width,
+                        lr.y,
+                        lr.width,
+                        lr.height
+                    )
+                }
+                childResults.append(childRes)
                 let cLayout = store.layout(cNode.slot)
                 childLayoutsForContent.append((cLayout, cNode.taffyStyle, childRes.layout.contentSize))
             }

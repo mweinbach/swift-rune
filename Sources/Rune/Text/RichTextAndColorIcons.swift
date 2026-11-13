@@ -1001,6 +1001,7 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         var icon: SVGIcon
         var px: Int
         var tintKey: String
+        var mirrored: Bool
     }
 
     private struct CacheEntry {
@@ -1033,7 +1034,8 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         _ icon: SVGIcon,
         pixelSize: Int,
         currentColor: Color = .white,
-        oneColor: Color? = nil
+        oneColor: Color? = nil,
+        mirrored: Bool = false
     ) -> DecodedImage? {
         guard icon.isColorIcon || oneColor != nil, let body = icon.body else {
             return nil
@@ -1048,7 +1050,7 @@ public final class ColorIconRasterizer: @unchecked Sendable {
             tintHex = ""
         }
 
-        let key = CacheKey(icon: icon, px: px, tintKey: tintHex)
+        let key = CacheKey(icon: icon, px: px, tintKey: tintHex, mirrored: mirrored)
         lock.lock()
         if var entry = cache[key] {
             entry.used = true
@@ -1058,8 +1060,20 @@ public final class ColorIconRasterizer: @unchecked Sendable {
         }
         lock.unlock()
 
-        guard let rgba = renderRGBA(body: body, viewBox: icon.viewBox, px: px, currentColor: currentColor, oneColor: oneColor) else {
+        guard var rgba = renderRGBA(body: body, viewBox: icon.viewBox, px: px, currentColor: currentColor, oneColor: oneColor) else {
             return nil
+        }
+        if mirrored && px > 1 && rgba.count >= px * px * 4 {
+            for row in 0..<px {
+                let rowBase = row * px * 4
+                for col in 0..<(px / 2) {
+                    let a = rowBase + col * 4
+                    let b = rowBase + (px - 1 - col) * 4
+                    for c in 0..<4 {
+                        rgba.swapAt(a + c, b + c)
+                    }
+                }
+            }
         }
 
         let mips = DecodedImage.generateMipChain(width: UInt32(px), height: UInt32(px), rgba: Data(rgba))

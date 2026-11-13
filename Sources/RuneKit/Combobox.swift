@@ -386,7 +386,7 @@ public struct Combobox<State> {
             field = field.activeDescendant("\(key)-option-\(options[active].id)")
         }
         if shouldAnimateFiltering {
-            field = field.animateLayout(k.motion.control)
+            field = field.animateLayout(k.motion.control).animateEditLayout()
         }
 
         field = field

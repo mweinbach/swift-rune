@@ -244,10 +244,13 @@ struct ThemeColorTokParityTests {
         rt.setSrgbBlend(false)
         _ = rt.frame(at: 0.0)
         let want = browser(0xff, 0x16, 0x1a)
+        var t = 0.0
         for srgb in [true, false] {
             rt.update { _, tx in tx.setSrgbBlend(srgb) }
-            _ = rt.frame(at: 1.0 / 60.0)
-            let scene = rt.frame(at: 1.0)
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+            t += 1.0
+            let scene = rt.frame(at: t)
             for side: Float in [20, 10] {
                 let got = composited(scene: scene, side: side)
                 #expect(got.allSatisfy { abs($0 - want) < 0.5 })
