@@ -341,7 +341,7 @@ public final class MacOSPopupMenuPresenter: NSObject {
                     nsItem.tag = tag
                     nsItem.target = self
                     nsItem.isEnabled = item.enabled
-                    nsItem.state = (item.checked || popupMenu.selectedId == item.id) ? .on : .off
+                    nsItem.state = item.checked ? .on : .off
                     if let sym = item.symbolName {
                         nsItem.image = NSImage(systemSymbolName: sym, accessibilityDescription: item.title)
                     }

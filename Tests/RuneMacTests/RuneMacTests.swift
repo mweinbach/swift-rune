@@ -101,4 +101,13 @@ struct RuneMacTests {
         #expect(service.post(Notification(id: "mac-1", title: "Hello")))
         #expect(mock.activeNotifications.count == 1)
     }
+
+    @Test("RuneMac resolvedHomeDirectory honors HOME environment override")
+    func runeMacHomeEnvResolution() {
+        let resolved = AppLifecycleHelpers.resolvedHomeDirectory(
+            explicit: nil,
+            environment: ["HOME": "/tmp/custom-rune-home"]
+        )
+        #expect(resolved.path == "/tmp/custom-rune-home")
+    }
 }

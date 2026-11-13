@@ -351,6 +351,17 @@ public protocol HostedWindowEntry: AnyObject {
     func fireOnCreated()
     func fireOnReady()
     func trimIdleCaches(runtimeObj: AnyObject, all: Bool)
+    func viewCommitCount(runtimeObj: AnyObject) -> Int
+    func dispatchModifiers(runtimeObj: AnyObject, mods: Mods, at: Double)
+    func hasFocusedTextInput(runtimeObj: AnyObject) -> Bool
+    func hasSecureFocus(runtimeObj: AnyObject) -> Bool
+    func consumeImeReset(runtimeObj: AnyObject) -> Bool
+    func focusedImeSnapshot(runtimeObj: AnyObject) -> ImeText?
+    func focusedCaretRect(runtimeObj: AnyObject) -> MotionRect?
+    @discardableResult func dispatchImeEvent(runtimeObj: AnyObject, event: ImeEvent, at: Double) -> Bool
+    func currentCursor(runtimeObj: AnyObject) -> Cursor
+    func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
+    @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
 }
 
@@ -428,7 +439,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func setFocused(runtimeObj: AnyObject, focused: Bool) {
         let r = rt(runtimeObj)
-        r.windowFocused = focused
+        r.dispatchFocus(focused)
         if focused {
             r.setSystemContrast(SystemPreferences.current().contrast)
         }
@@ -513,6 +524,52 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult) {
         rt(runtimeObj).answerFileDialog(id, result)
+    }
+
+    func viewCommitCount(runtimeObj: AnyObject) -> Int {
+        rt(runtimeObj).viewCommitCount
+    }
+
+    func dispatchModifiers(runtimeObj: AnyObject, mods: Mods, at time: Double) {
+        rt(runtimeObj).dispatchModifiers(mods, at: time)
+    }
+
+    func hasFocusedTextInput(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).hasFocusedTextInput
+    }
+
+    func hasSecureFocus(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).hasSecureFocus
+    }
+
+    func consumeImeReset(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).consumeImeReset()
+    }
+
+    func focusedImeSnapshot(runtimeObj: AnyObject) -> ImeText? {
+        rt(runtimeObj).focusedImeSnapshot()
+    }
+
+    func focusedCaretRect(runtimeObj: AnyObject) -> MotionRect? {
+        rt(runtimeObj).focusedCaretRect()
+    }
+
+    @discardableResult
+    func dispatchImeEvent(runtimeObj: AnyObject, event: ImeEvent, at time: Double) -> Bool {
+        rt(runtimeObj).dispatchImeEvent(event, at: time)
+    }
+
+    func currentCursor(runtimeObj: AnyObject) -> Cursor {
+        rt(runtimeObj).currentCursor()
+    }
+
+    func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode {
+        rt(runtimeObj).accessibilitySnapshot()
+    }
+
+    @discardableResult
+    func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at time: Double) -> Bool {
+        rt(runtimeObj).performAccessibilityAction(id, action: action, at: time)
     }
 
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double) {

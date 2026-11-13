@@ -957,7 +957,9 @@ public final class FileDialog: @unchecked Sendable {
         }
         let next = queue[0]
         guard next.kind == kind else {
-            throw FileDialogError("expected \(next.kind.rawValue) dialog, received \(kind.rawValue)")
+            let exp = next.kind.rawValue.prefix(1).uppercased() + next.kind.rawValue.dropFirst()
+            let got = kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
+            throw FileDialogError("expected \(exp) dialog, received \(got)")
         }
         queue.removeFirst()
         return next.urls
@@ -1307,11 +1309,14 @@ public struct PopupMenu: Sendable, Equatable {
     }
 
     public static func picker(_ choices: [PopupMenuItem], selected: String? = nil) -> PopupMenu {
-        var menu = PopupMenu(entries: choices.map { .item($0) }, selectedId: selected)
-        if let selected {
-            menu = menu.selected(selected)
+        let entries: [PopupMenuEntry] = choices.map { item in
+            var copy = item
+            if let selected, copy.id == selected {
+                copy.checked = true
+            }
+            return .item(copy)
         }
-        return menu
+        return PopupMenu(entries: entries, selectedId: selected)
     }
 
     public func item(_ item: PopupMenuItem) -> PopupMenu {
@@ -1350,22 +1355,10 @@ public struct PopupMenu: Sendable, Equatable {
         return copy
     }
 
+    /// Sets which item the menu opens over (`PopupMenu::selected`), without altering checkmarks.
     public func selected(_ id: String?) -> PopupMenu {
         var copy = self
         copy.selectedId = id
-        copy.entries = copy.entries.map { entry in
-            switch entry {
-            case .item(var it):
-                if let id, it.id == id {
-                    it.checked = true
-                }
-                return .item(it)
-            case .separator:
-                return .separator
-            case .submenu(let title, let sub, let enabled):
-                return .submenu(title: title, menu: sub.selected(id), enabled: enabled)
-            }
-        }
         return copy
     }
 
@@ -1435,7 +1428,7 @@ public struct PopupMenu: Sendable, Equatable {
                     "id": item.id,
                     "title": item.title,
                     "enabled": item.enabled,
-                    "checked": item.checked || selectedId == item.id,
+                    "checked": item.checked,
                 ]
                 if let eq = item.keyEquivalent { d["keyEquivalent"] = eq }
                 if let sym = item.symbolName { d["symbol"] = sym }
@@ -1474,7 +1467,7 @@ public struct PopupMenu: Sendable, Equatable {
                 nsItem.target = target
                 nsItem.representedObject = item.id
                 nsItem.isEnabled = item.enabled
-                nsItem.state = (item.checked || selectedId == item.id) ? .on : .off
+                nsItem.state = item.checked ? .on : .off
                 if let sym = item.symbolName {
                     nsItem.image = NSImage(systemSymbolName: sym, accessibilityDescription: item.title)
                 }
@@ -1642,6 +1635,17 @@ public struct TrayIcon: Sendable, Equatable {
         self.height = height
         self.rgba = rgba
     }
+
+    public var isValid: Bool {
+        width > 0 && height > 0 && width <= 4096 && height <= 4096 && rgba.count == Int(width) * Int(height) * 4
+    }
+
+    public func validated() throws -> TrayIcon {
+        guard isValid else {
+            throw TrayError.backend("invalid tray icon dimensions or RGBA length (\(width)x\(height), \(rgba.count) bytes)")
+        }
+        return self
+    }
 }
 
 public enum TrayItem: Sendable, Equatable {
@@ -1695,7 +1699,22 @@ public final class SystemTray: @unchecked Sendable {
     public private(set) var isVisible: Bool = false
     private var handler: (@Sendable (TrayEvent) -> Void)?
     #if os(macOS)
+    @MainActor
+    private final class TrayTarget: NSObject {
+        weak var owner: SystemTray?
+        init(owner: SystemTray) { self.owner = owner }
+        @objc func onMenuItem(_ sender: NSMenuItem) {
+            guard let id = sender.representedObject as? String else { return }
+            owner?.simulateEvent(.menu(id))
+        }
+        @objc func onActivate(_ sender: Any?) {
+            _ = sender
+            owner?.simulateEvent(.activate(token: nil))
+        }
+    }
+
     @MainActor private var statusItem: NSStatusItem?
+    @MainActor private var trayTarget: TrayTarget?
     #endif
 
     public init(spec: TraySpec, onEvent: (@Sendable (TrayEvent) -> Void)? = nil) {
@@ -1755,27 +1774,42 @@ public final class SystemTray: @unchecked Sendable {
     @MainActor
     private func syncStatusItem() {
         guard let item = statusItem else { return }
+        if trayTarget == nil {
+            trayTarget = TrayTarget(owner: self)
+        }
         lock.lock()
         let current = spec
         lock.unlock()
         item.button?.title = current.title
         item.button?.toolTip = current.tooltip
-        if !current.iconName.isEmpty {
+        if let icon = current.icon, icon.isValid, let appIcon = AppIcon(width: Int(icon.width), height: Int(icon.height), rgba: icon.rgba) {
+            item.button?.image = MacOSDockIconApplier.makeNSImage(from: appIcon)
+        } else if !current.iconName.isEmpty {
             item.button?.image = NSImage(systemSymbolName: current.iconName, accessibilityDescription: current.title)
         }
-        let menu = NSMenu()
-        for entry in current.menu {
-            switch entry {
-            case .separator:
-                menu.addItem(.separator())
-            case .action(let id, let label, let enabled):
-                let mi = NSMenuItem(title: label, action: nil, keyEquivalent: "")
-                mi.representedObject = id
-                mi.isEnabled = enabled
-                menu.addItem(mi)
+        if current.menu.isEmpty {
+            item.menu = nil
+            item.button?.target = trayTarget
+            item.button?.action = #selector(TrayTarget.onActivate(_:))
+        } else {
+            item.button?.target = nil
+            item.button?.action = nil
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for entry in current.menu {
+                switch entry {
+                case .separator:
+                    menu.addItem(.separator())
+                case .action(let id, let label, let enabled):
+                    let mi = NSMenuItem(title: label, action: #selector(TrayTarget.onMenuItem(_:)), keyEquivalent: "")
+                    mi.target = trayTarget
+                    mi.representedObject = id
+                    mi.isEnabled = enabled
+                    menu.addItem(mi)
+                }
             }
+            item.menu = menu
         }
-        item.menu = menu
     }
     #endif
 }

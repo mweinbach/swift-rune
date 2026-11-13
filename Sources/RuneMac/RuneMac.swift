@@ -58,5 +58,23 @@ public enum RuneMac {
     public static func setActivationPolicy(_ policy: ActivationPolicy) -> Bool {
         AppLifecycleHelpers.setActivationPolicy(policy)
     }
+    #else
+    @discardableResult
+    public static func rememberFrame(named name: String) -> Bool {
+        _ = name
+        return true
+    }
+
+    public static func toggleFullScreen() {}
+
+    public static var isFullScreen: Bool { false }
+
+    public static func quietLaunchIfNeeded() {}
+
+    @discardableResult
+    public static func setActivationPolicy(_ policy: ActivationPolicy) -> Bool {
+        _ = policy
+        return true
+    }
     #endif
 }
