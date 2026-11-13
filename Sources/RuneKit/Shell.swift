@@ -1,5 +1,6 @@
 import Foundation
 import Rune
+import RuneMotion
 
 /// Axis of a split pane in `SplitTree` (`rune_kit::shell::split`).
 public enum SplitAxis: Sendable, Equatable, Hashable {
@@ -198,6 +199,47 @@ public struct PaneState: Sendable, Equatable {
         public var open: Bool
     }
 
+    /// How a closed sidebar is peeking over the workspace (`rune_kit::shell::pane::PeekPhase`).
+    public enum PeekPhase: Sendable, Equatable {
+        case rest
+        case shown
+        case left
+    }
+
+    /// How `SplitView` slides a collapsible pane in and out (`rune_kit::shell::PaneMotion`).
+    public enum PaneMotion: Sendable, Equatable {
+        case slide
+        case snap
+        case instant
+
+        public func spring(reducedMotion: Bool) -> Spring? {
+            if reducedMotion { return nil }
+            switch self {
+            case .slide: return MotionTokens.SETTLE
+            case .snap: return MotionTokens.SNAP
+            case .instant: return nil
+            }
+        }
+    }
+
+    /// Hover-peek configuration for a closed sidebar (`rune_kit::shell::SidebarPeek`).
+    public enum SidebarPeek: Sendable, Equatable {
+        case off
+        case edge(width: Float = 16)
+
+        public static let hover = SidebarPeek.edge(width: 16)
+
+        public var isEnabled: Bool {
+            if case .edge(let w) = self { return w > 0 }
+            return false
+        }
+
+        public var edgeWidth: Float {
+            if case .edge(let w) = self { return max(0, w) }
+            return 0
+        }
+    }
+
     public private(set) var width: Float
     public private(set) var dock: Dock
     public private(set) var minWidth: Float
@@ -225,6 +267,10 @@ public struct PaneState: Sendable, Equatable {
         return copy
     }
 
+    public func range(_ min: Float, _ max: Float) -> PaneState {
+        range(min: min, max: max)
+    }
+
     public func collapsed() -> PaneState {
         var copy = self
         copy.dock = .closedRest
@@ -245,8 +291,23 @@ public struct PaneState: Sendable, Equatable {
         return false
     }
 
+    public var isCollapsed: Bool { !isOpen }
+
+    public var fromPeek: Bool {
+        if case .open(let p) = dock { return p }
+        return false
+    }
+
     public var isPeeking: Bool {
         dock == .closedPeekShown
+    }
+
+    public var peekPhase: PeekPhase {
+        switch dock {
+        case .closedPeekShown: return .shown
+        case .closedPeekLeft: return .left
+        case .open, .closedRest: return .rest
+        }
     }
 
     public var isResizing: Bool {
@@ -263,6 +324,7 @@ public struct PaneState: Sendable, Equatable {
 
     public mutating func setWidth(_ width: Float) {
         guard width.isFinite else { return }
+        askedWidth = width
         self.width = width.rounded().clamped(to: minWidth...maxWidth)
     }
 
@@ -295,19 +357,56 @@ public struct PaneState: Sendable, Equatable {
         }
     }
 
-    public mutating func beginResize(at point: Vec2? = nil) {
-        grip.press(GripStart(width: width, open: isOpen), at: point)
-    }
-
-    public mutating func updateResize(deltaWidth: Float, collapseThreshold: Float = 80) {
-        guard let start = grip.data else { return }
-        let proposed = start.width + deltaWidth
+    /// Applies a raw pointer delta against the currently held grip start (or a fresh start if idle).
+    public mutating func dragTo(_ delta: Float, positiveGrows: Bool = true, collapseThreshold: Float = 80) {
+        let start = grip.data ?? GripStart(width: width, open: isOpen)
+        let signedDelta = positiveGrows ? delta : -delta
+        let base = start.open ? start.width : 0
+        let proposed = base + signedDelta
         if proposed < collapseThreshold {
             setOpen(false)
         } else {
             setOpen(true)
             setWidth(proposed)
         }
+    }
+
+    public mutating func pressGrip(at point: Vec2) {
+        grip.press(GripStart(width: width, open: isOpen), at: point)
+    }
+
+    public mutating func dragGrip(
+        deltaX: Float,
+        at point: Vec2? = nil,
+        positiveGrows: Bool = true,
+        collapseThreshold: Float = 80
+    ) {
+        if let point {
+            _ = grip.moved(to: point)
+        }
+        dragTo(deltaX, positiveGrows: positiveGrows, collapseThreshold: collapseThreshold)
+    }
+
+    public mutating func releaseGrip() {
+        grip.release()
+    }
+
+    @discardableResult
+    public mutating func pointerGrip(movedTo point: Vec2) -> Bool {
+        grip.pointerMoved(to: point) != nil
+    }
+
+    public mutating func loseGrip() {
+        grip.lose()
+    }
+
+    public mutating func beginResize(at point: Vec2? = nil) {
+        grip.press(GripStart(width: width, open: isOpen), at: point)
+    }
+
+    public mutating func updateResize(deltaWidth: Float, collapseThreshold: Float = 80) {
+        guard grip.data != nil else { return }
+        dragTo(deltaWidth, positiveGrows: true, collapseThreshold: collapseThreshold)
     }
 
     public mutating func endResize() {
@@ -320,9 +419,13 @@ public struct PaneState: Sendable, Equatable {
         setOpen(start.open)
     }
 
-    public mutating func resetToDefaultWidth() {
-        setWidth(defaultWidth)
+    public mutating func resetWidth() {
+        setWidth(defaultAskedWidth)
         setOpen(true)
+    }
+
+    public mutating func resetToDefaultWidth() {
+        resetWidth()
     }
 
     private mutating func clamp() {
@@ -331,6 +434,121 @@ public struct PaneState: Sendable, Equatable {
         } else {
             width = minWidth
         }
+    }
+}
+
+public typealias PaneMotion = PaneState.PaneMotion
+public typealias SidebarPeek = PaneState.SidebarPeek
+
+/// Returns `true` when `(key, mods)` matches the standard sidebar toggle shortcut (`Cmd+B` on
+/// Apple platforms, `Ctrl+B` elsewhere).
+public func isSidebarToggle(_ key: Key, mods: Mods, macOS: Bool = true) -> Bool {
+    let primary = macOS ? (mods.cmd && !mods.ctrl) : (mods.ctrl && !mods.cmd)
+    guard primary && !mods.alt && !mods.shift && !mods.logo else { return false }
+    switch key {
+    case .text(let s): return s.lowercased() == "b"
+    case .command(let ch): return String(ch).lowercased() == "b"
+    default: return false
+    }
+}
+
+/// Drag-to-reorder state machine for vertical lists such as `SidebarRow` (`rune_kit::shell::Reorder`).
+public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
+    public static var slop: Float { 4.0 }
+
+    public struct Held: Sendable, Equatable {
+        public var id: ID
+        public var startIndex: Int
+        public var currentIndex: Int
+        public var pressY: Float
+        public var anchorY: Float
+        public var lastY: Float
+        public var crossedSlop: Bool
+    }
+
+    private var grip: Grip<Held> = .idle
+
+    public init() {}
+
+    public var isHeld: Bool { grip.isHeld }
+    public var isDragging: Bool { grip.data?.crossedSlop ?? false }
+    public var activeId: ID? { grip.data?.id }
+    public var currentIndex: Int? { grip.data?.currentIndex }
+    public var draggingId: ID? {
+        guard let h = grip.data, h.crossedSlop else { return nil }
+        return h.id
+    }
+
+    /// Y displacement for the dragged row (`0` before crossing slop or when idle).
+    public var offsetY: Float {
+        guard let h = grip.data, h.crossedSlop else { return 0 }
+        return h.lastY - h.anchorY
+    }
+
+    public func offsetY(for id: ID) -> Float {
+        guard draggingId == id else { return 0 }
+        return offsetY
+    }
+
+    public mutating func press(id: ID, index: Int, at point: Vec2) {
+        grip.press(
+            Held(
+                id: id,
+                startIndex: index,
+                currentIndex: index,
+                pressY: point.y,
+                anchorY: point.y,
+                lastY: point.y,
+                crossedSlop: false
+            ),
+            at: point
+        )
+    }
+
+    /// Advances the drag to `point`, returning a `(from, to)` swap if the midpoint of an adjacent
+    /// slot (`rowHeight`) is crossed.
+    @discardableResult
+    public mutating func drag(
+        to point: Vec2,
+        rowHeight: Float = 28.0,
+        count: Int
+    ) -> (from: Int, to: Int)? {
+        guard var held = grip.moved(to: point), count > 0, rowHeight > 0 else { return nil }
+        held.lastY = point.y
+        if !held.crossedSlop {
+            if abs(point.y - held.pressY) < Self.slop {
+                grip.hold(held)
+                return nil
+            }
+            held.crossedSlop = true
+        }
+        let deltaSlots = ((point.y - held.anchorY) / rowHeight).rounded()
+        let nextIdx = (held.currentIndex + Int(deltaSlots)).clamped(to: 0...(count - 1))
+        if nextIdx != held.currentIndex {
+            let from = held.currentIndex
+            held.anchorY += Float(nextIdx - from) * rowHeight
+            held.currentIndex = nextIdx
+            grip.hold(held)
+            return (from: from, to: nextIdx)
+        }
+        grip.hold(held)
+        return nil
+    }
+
+    @discardableResult
+    public mutating func end() -> Bool {
+        let wasDragging = isDragging
+        grip.release()
+        return wasDragging
+    }
+
+    @discardableResult
+    public mutating func pointerMoved(to point: Vec2) -> Bool {
+        grip.pointerMoved(to: point) != nil
+    }
+
+    public mutating func lose() {
+        grip.lose()
     }
 }
 
