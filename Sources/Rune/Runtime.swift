@@ -1885,6 +1885,9 @@ public final class Runtime<State> {
 
         // Sample Scene & Live property bindings using scaled animation clock
         elSliceRenderState.loopCatchUp.loopsStepped(hostNow: currentTime, animEnd: animNow)
+        if !fitWindowState.frameHolds() {
+            scene.setTime(animNow)
+        }
         syncLoopOffsetsToScene(animNow: animNow)
         refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
         endUnseenExits(on: &scene, activeFlightIds: activeFlightIds)
@@ -4018,7 +4021,7 @@ public final class Runtime<State> {
                 snapNewMounts: commitKind.snaps || commitCut
             )
         }
-        syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut || activeSettleLoops)
+        syncMotionLoops(specs: pass.loopSpecs, at: now, cut: activeSettleLoops)
         setGroupRestAfterCommit(
             nodes: pass.nodes,
             preState: preGroupSnapshot,
@@ -5180,12 +5183,10 @@ public final class Runtime<State> {
             var hasLiveTransform = false
             var hasLiveSpatialSpring = false
 
-            let loopNow = scene.store.nodeTimeScale(p.id) != 1.0 ? scene.store.nodeTime(p.id) : currentTime
+            let loopNow = scene.store.nodeTime(p.id)
             if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, at: loopNow, wallNow: currentTime) {
                 loopOp = ls.opacity
                 rot += ls.rotation
-                ownDelta.x += ls.offset.x
-                ownDelta.y += ls.offset.y
                 ownSc.x *= ls.scale
                 ownSc.y *= ls.scale
                 ownLoopOffsetById[p.id] = ls.offset
@@ -5676,7 +5677,7 @@ public final class Runtime<State> {
             }
 
             var visClip = flightClipOverride
-                ?? inh.clip.map { intersectRects(MotionRect.fromXYWH(0, 0, viewport.x, viewport.y), $0) }
+                ?? inh.clip.map { intersectRects(snap.clipRect, $0) }
                 ?? snap.clipRect
             if let rev = p.revealClip {
                 visClip = intersectRects(visClip, rev)
@@ -5808,18 +5809,26 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
             ))
             let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
-            let ownScaleSpringMoving = scene.store.isUnheldAnimating(p.id, Props.SCALE)
-                || scene.store.isUnheldAnimating(p.id, Props.UNIFORM_SCALE)
-                || scene.store.isUnheldAnimating(p.id, Props.PRESENCE)
-                || scene.store.isUnheldAnimating(p.id, Props.PRESS_SCALE)
+            let ownScaleSpringMoving = (scene.store.nodeTimeScale(p.id) > 0) && (
+                scene.store.isUnheldAnimating(p.id, Props.SCALE)
+                    || scene.store.isUnheldAnimating(p.id, Props.UNIFORM_SCALE)
+                    || scene.store.isUnheldAnimating(p.id, Props.PRESENCE)
+                    || scene.store.isUnheldAnimating(p.id, Props.PRESS_SCALE)
+            )
             let ownLiveScaleMoving = el.liveBindings.contains(where: { b in
                 b.target == .scale
                     && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
             })
+            let ownSequenceScaleMoving: Bool = {
+                guard let entry = loopRuntime.entries[p.id],
+                      case .sequence = entry.kind,
+                      let track = loopRuntime.tracks[p.id] else { return false }
+                return scene.store.nodeTimeScale(p.id) > 0 && track.isActive(at: scene.store.nodeTime(p.id))
+            }()
             let scaleSettleRes = resolveScaleSettle(
                 nodeId: p.id,
                 scale: scaleVec.x,
-                isAnimated: ownScaleSpringMoving || ownLiveScaleMoving || inh.scaleMotion == .moving,
+                isAnimated: ownScaleSpringMoving || ownLiveScaleMoving || ownSequenceScaleMoving || inh.scaleMotion == .moving,
                 animNow: now
             )
             let nodeScaleMotion: PaintScaleMotion = max(
@@ -5961,7 +5970,7 @@ public final class Runtime<State> {
                 }()
                 if loopVis {
                     let nodeScale = scene.store.nodeTimeScale(p.id)
-                    let lnow = nodeScale != 1.0 ? scene.store.nodeTime(p.id) : currentTime
+                    let lnow = scene.store.nodeTime(p.id)
                     let nodeK = Double(nodeScale)
                     let viewK = Double(max(0.0, cxSettings.viewTimeScale))
                     if let dt = track.frameInterval() {

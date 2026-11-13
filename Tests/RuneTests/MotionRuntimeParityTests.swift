@@ -899,7 +899,7 @@ struct MotionRuntimeParityTests {
                 .child(
                     col().key("group").size(100, 100)
                         .opacity(s.parentHidden ? 0.0 : 1.0)
-                        .opacityMotion(.instant)
+                        .opacityMotion(Anim<Float>.instant)
                         .children(dotKids)
                 )
                 .children(glowKids)

@@ -276,8 +276,9 @@ internal extension Runtime {
                 entry.scale = clampedScale
                 entry.since = animNow
             } else if abs(clampedScale - entry.stillScale) > 1e-4 {
-                if entry.wasAnimated && abs(clampedScale - entry.scale) <= 1e-4 {
+                if entry.wasAnimated {
                     entry.stillScale = clampedScale
+                    entry.scale = clampedScale
                     entry.moving = false
                     entry.wasAnimated = false
                 } else if abs(clampedScale - entry.scale) > 1e-4 {
