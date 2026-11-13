@@ -371,12 +371,12 @@ public struct Sides: Animatable, Hashable {
 
     @inlinable
     public func toLanes() -> MotionLanes {
-        MotionLanes(top, right, bottom, left)
+        MotionLanes(left, top, right, bottom)
     }
 
     @inlinable
     public static func fromLanes(_ lanes: MotionLanes) -> Sides {
-        Sides(top: lanes.l0, right: lanes.l1, bottom: lanes.l2, left: lanes.l3)
+        Sides(top: lanes.l1, right: lanes.l2, bottom: lanes.l3, left: lanes.l0)
     }
 }
 
@@ -444,7 +444,7 @@ public struct Transform2D: Animatable, Hashable {
     }
 }
 
-/// Linear-light sRGB color with straight alpha, interpolated in **premultiplied OKLab**
+/// An sRGB color with straight alpha, interpolated in **premultiplied OKLab**
 /// `[L*a, a*a, b*a, a]` so fading to transparent never darkens through black and hue shifts
 /// don't cross muddy grey.
 public struct MotionColor: Animatable, Hashable {
@@ -528,34 +528,18 @@ public struct MotionColor: Animatable, Hashable {
 
     @inlinable
     public func toOKLab() -> (L: Float, a: Float, b: Float) {
-        let rr = max(0, r)
-        let gg = max(0, g)
-        let bb = max(0, b)
-        let l = 0.4122214708 * rr + 0.5363325363 * gg + 0.0514459929 * bb
-        let m = 0.2119034982 * rr + 0.6806995451 * gg + 0.1073969566 * bb
-        let s = 0.0883024619 * rr + 0.2817188376 * gg + 0.6299787005 * bb
-        let l_ = cbrtf(l)
-        let m_ = cbrtf(m)
-        let s_ = cbrtf(s)
-        return (
-            L: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
-            a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
-            b: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
-        )
+        Self.linearToOKLab(r: Self.srgbDecode(r), g: Self.srgbDecode(g), b: Self.srgbDecode(b))
     }
 
     @inlinable
     public static func fromOKLab(L: Float, a: Float, b: Float, alpha: Float) -> MotionColor {
-        let l_ = L + 0.3963377774 * a + 0.2158037573 * b
-        let m_ = L - 0.1055613458 * a - 0.0638541728 * b
-        let s_ = L - 0.0894841775 * a - 1.2914855480 * b
-        let l = l_ * l_ * l_
-        let m = m_ * m_ * m_
-        let s = s_ * s_ * s_
-        let rr = (+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s).clamped(to: 0...1)
-        let gg = (-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s).clamped(to: 0...1)
-        let bb = (-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s).clamped(to: 0...1)
-        return MotionColor(r: rr, g: gg, b: bb, a: alpha.clamped(to: 0...1))
+        let lin = Self.oklabToLinear(L: L, a: a, b: b)
+        return MotionColor(
+            r: Self.srgbEncode(lin.r.clamped(to: 0...1)),
+            g: Self.srgbEncode(lin.g.clamped(to: 0...1)),
+            b: Self.srgbEncode(lin.b.clamped(to: 0...1)),
+            a: alpha.clamped(to: 0...1)
+        )
     }
 
     public func toLanes() -> MotionLanes {
@@ -566,10 +550,10 @@ public struct MotionColor: Animatable, Hashable {
 
     public static func fromLanes(_ lanes: MotionLanes) -> MotionColor {
         let alpha = lanes.l3.clamped(to: 0...1)
-        if alpha <= 1e-5 {
+        if lanes.l3 <= 1e-6 {
             return MotionColor(r: 0, g: 0, b: 0, a: 0)
         }
-        let invA = 1.0 / alpha
+        let invA = 1.0 / lanes.l3
         return fromOKLab(L: lanes.l0 * invA, a: lanes.l1 * invA, b: lanes.l2 * invA, alpha: alpha)
     }
 }

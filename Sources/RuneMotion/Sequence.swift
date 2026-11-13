@@ -107,7 +107,7 @@ public struct Cycle: Sendable, Equatable {
     }
 
     public func sample(at t: Double) -> Float {
-        guard !stops.isEmpty else { return still }
+        guard !stops.isEmpty else { return 1.0 }
         let raw = t / Double(period) - Double(phase)
         let x = Float(raw - floor(raw))
         for i in 0..<stops.count {

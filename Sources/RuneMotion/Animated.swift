@@ -10,7 +10,7 @@ public struct Animated<T: Animatable>: Sendable {
     private var posEps: Float
     private var velEps: Float
 
-    public init(_ value: T, propClass: PropClass = .spatial, pixelScale: Float = 2.0) {
+    public init(_ value: T, propClass: PropClass = .other, pixelScale: Float = 2.0) {
         self.target = value
         self.targetLanes = value.toLanes()
         self.layers = Array(repeating: nil, count: T.laneCount)

@@ -105,7 +105,7 @@ public struct VelocityTracker<T: Animatable>: Sendable {
         }
         guard variance > 1e-12 else { return T.fromLanes(out) }
 
-        let lanesCount = min(T.laneCount, 5)
+        let lanesCount = min(T.laneCount, 16)
         for lane in 0..<lanesCount {
             let meanX = idx.reduce(0.0) { $0 + Double(x[$1][lane]) } / Double(n)
             var cov = 0.0

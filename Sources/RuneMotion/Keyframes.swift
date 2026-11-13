@@ -67,7 +67,7 @@ public struct Stagger: Sendable, Hashable {
     public var start: Float
     public var ease: Easing?
 
-    public init(step: Float = 0.03, maxDelay: Float = 0.24, fromEnd: Bool = false) {
+    public init(step: Float = 0.03, maxDelay: Float = 0.0, fromEnd: Bool = false) {
         self.step = max(0, step)
         self.maxDelay = max(0, maxDelay)
         self.fromEnd = fromEnd
@@ -76,7 +76,7 @@ public struct Stagger: Sendable, Hashable {
         self.ease = nil
     }
 
-    public init(step: Float = 0.03, maxDelay: Float = 0.24, from: StaggerFrom) {
+    public init(step: Float = 0.03, maxDelay: Float = 0.0, from: StaggerFrom) {
         self.step = max(0, step)
         self.maxDelay = max(0, maxDelay)
         self.fromEnd = (from == .end)
@@ -115,34 +115,36 @@ public struct Stagger: Sendable, Hashable {
 
     /// Delay in seconds for item `index` out of `count`.
     public func delay(index: Int, count: Int) -> Float {
-        guard count > 1 else { return start }
-        let i = max(0, min(index, count - 1))
-        let maxDist: Float
+        let effectiveCount = max(1, count)
+        let clampedOrigin: Float
         let dist: Float
+        let maxDist: Float
         switch from {
         case .start:
-            dist = Float(i)
-            maxDist = Float(count - 1)
+            clampedOrigin = 0.0
+            dist = abs(Float(index) - clampedOrigin)
+            maxDist = Float(effectiveCount - 1)
         case .end:
-            dist = Float(count - 1 - i)
-            maxDist = Float(count - 1)
+            clampedOrigin = Float(effectiveCount - 1)
+            dist = abs(Float(index) - clampedOrigin)
+            maxDist = Float(effectiveCount - 1)
         case .center:
-            let mid = Float(count - 1) * 0.5
-            dist = abs(Float(i) - mid)
-            maxDist = mid
+            clampedOrigin = Float(effectiveCount - 1) * 0.5
+            dist = abs(Float(index) - clampedOrigin)
+            maxDist = clampedOrigin
         case .edges:
-            let mid = Float(count - 1) * 0.5
+            let mid = Float(effectiveCount - 1) * 0.5
+            let i = max(0, min(index, effectiveCount - 1))
             dist = mid - abs(Float(i) - mid)
             maxDist = mid
         case .index(let origin):
-            let clamped = max(0, min(origin, count - 1))
-            dist = Float(abs(i - clamped))
-            maxDist = Float(max(clamped, count - 1 - clamped))
+            clampedOrigin = Float(max(0, min(origin, effectiveCount - 1)))
+            dist = abs(Float(index) - clampedOrigin)
+            maxDist = Float(max(Int(clampedOrigin), effectiveCount - 1 - Int(clampedOrigin)))
         }
-        guard maxDist > 0 else { return start }
-        let shaped = ease.map { $0.sample(dist / maxDist) * maxDist } ?? dist
+        let shaped = (ease != nil && maxDist > 0) ? (ease!.sample(dist / maxDist) * maxDist) : dist
         let rawTotal = step * maxDist
-        let effectiveStep = (maxDelay > 0 && rawTotal > maxDelay) ? (maxDelay / maxDist) : step
+        let effectiveStep = (maxDelay > 0 && rawTotal > maxDelay && maxDist > 0) ? (maxDelay / maxDist) : step
         return start + shaped * effectiveStep
     }
 }

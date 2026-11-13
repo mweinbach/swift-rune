@@ -258,6 +258,31 @@ struct SceneParityTests {
         }
     }
 
+    @Test("an_initial_mount_revive_lands_motion_toward_the_same_frame_and_screen_travel")
+    func initialMountReviveLandsMotionTowardSameFrameAndScreenTravel() {
+        for screen in [false, true] {
+            var s = Scene()
+            let id = NodeId(6)
+            let target = MotionRect.fromXYWH(60, 80, 120, 40)
+            s.insert(id, spec(0, 0, 120, 40).transition(.opacity), .initial)
+            _ = s.frameAt(0.0)
+            let slow = LayoutAnim(Spring(duration: 1.0, bounce: 0.0))
+            s.setFrame(id, target, screen ? slow.screen() : slow)
+            _ = s.frameAt(0.05)
+            s.remove(id)
+            let (seen, gone) = runScene(&s, from: 0.05, until: 0.15, id: id)
+            #expect(gone == nil && seen.last!.1.rect != target)
+            let t = 0.15 + 1.0 / Self.hz
+            s.insert(id, NodeSpec(target).transition(.opacity), .initial)
+            let out = s.frameAt(t)
+            #expect(!out.animating)
+            let p = find(out.changed, id)!
+            #expect((p.opacity, p.rect, p.phase) == (1.0, target, .present))
+            let (seen2, _) = runScene(&s, from: t, until: t + 1.0, id: id)
+            #expect(seen2.allSatisfy { $0.1.opacity == 1.0 && $0.1.rect == target })
+        }
+    }
+
     @Test("Child mounted after parent visibly arrives enters on its own")
     func childMountedAfterParentVisiblyArrivesEntersOnItsOwn() {
         var s = Scene()

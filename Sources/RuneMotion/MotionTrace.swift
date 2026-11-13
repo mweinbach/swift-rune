@@ -132,7 +132,9 @@ public enum TraceIntent {
             return size | transition
         case Props.BLUR.id, Props.BLUR_SCALAR.id:
             return transition
-        case Props.CORNERS.id, Props.MASK.id, Props.SIDES.id:
+        case Props.MASK.id:
+            return reveal
+        case Props.CORNERS.id, Props.SIDES.id:
             return shape
         case Props.FILL.id, Props.BORDER.id, Props.TEXT_COLOR.id:
             return contents
@@ -371,6 +373,14 @@ public final class MotionTrace: @unchecked Sendable {
                     s[8] = clip.y
                     s[9] = max(0, clip.width)
                     s[10] = max(0, clip.height)
+                } else {
+                    let ins = p.mask.inset
+                    if ins.left > 0.25 || ins.top > 0.25 || ins.right > 0.25 || ins.bottom > 0.25 {
+                        s[7] = r.x + ins.left
+                        s[8] = r.y + ins.top
+                        s[9] = max(0, r.width - ins.left - ins.right)
+                        s[10] = max(0, r.height - ins.top - ins.bottom)
+                    }
                 }
                 let rounded = s.map { $0.isNaN ? $0 : ($0 * 100.0).rounded() / 100.0 }
                 if let old = states[id], sameState(old, rounded) {
