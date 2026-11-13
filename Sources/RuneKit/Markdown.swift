@@ -523,6 +523,7 @@ public struct MarkdownSpanMap: Sendable, Equatable, Hashable {
             return []
         }
 
+        let outBytes = Array(outText.utf8)
         var mapped: [Range<Int>] = []
         var idx = 0
         for q in qs {
@@ -533,9 +534,9 @@ public struct MarkdownSpanMap: Sendable, Equatable, Hashable {
             var j = idx
             while j < segments.count && segments[j].src.lowerBound < q.upperBound {
                 let seg = segments[j]
-                if let r = Self.mapSegment(query: q, src: seg.src, out: seg.out, outText: outText) {
+                if let r = Self.mapSegment(query: q, src: seg.src, out: seg.out, outBytes: outBytes) {
                     if let last = mapped.last,
-                       last.upperBound >= r.lowerBound || Self.isPadOnly(utf8Slice(outText, range: last.upperBound..<r.lowerBound)) {
+                       last.upperBound >= r.lowerBound || Self.isPadOnlyBytes(outBytes, range: last.upperBound..<r.lowerBound) {
                         mapped[mapped.count - 1] = last.lowerBound..<max(last.upperBound, r.upperBound)
                     } else {
                         mapped.append(r)
@@ -552,7 +553,7 @@ public struct MarkdownSpanMap: Sendable, Equatable, Hashable {
         return mapped
     }
 
-    private static func mapSegment(query: Range<Int>, src: Range<Int>, out: Range<Int>, outText: String) -> Range<Int>? {
+    private static func mapSegment(query: Range<Int>, src: Range<Int>, out: Range<Int>, outBytes: [UInt8]) -> Range<Int>? {
         let s0 = max(query.lowerBound, src.lowerBound)
         let s1 = min(query.upperBound, src.upperBound)
         guard s0 < s1, !src.isEmpty, !out.isEmpty else { return nil }
@@ -566,15 +567,30 @@ public struct MarkdownSpanMap: Sendable, Equatable, Hashable {
             raw0 = a
             raw1 = b
         }
-        let maxLen = outText.utf8.count
-        let clamped0 = floorUTF8Boundary(outText, byte: min(maxLen, max(out.lowerBound, min(out.upperBound, raw0))))
-        let clamped1 = ceilUTF8Boundary(outText, byte: min(maxLen, max(out.lowerBound, min(out.upperBound, raw1))))
+        let maxLen = outBytes.count
+        var clamped0 = min(maxLen, max(out.lowerBound, min(out.upperBound, raw0)))
+        while clamped0 > 0 && clamped0 < maxLen && (outBytes[clamped0] & 0xC0) == 0x80 {
+            clamped0 -= 1
+        }
+        var clamped1 = min(maxLen, max(out.lowerBound, min(out.upperBound, raw1)))
+        while clamped1 < maxLen && (outBytes[clamped1] & 0xC0) == 0x80 {
+            clamped1 += 1
+        }
         return clamped0 < clamped1 ? (clamped0..<clamped1) : nil
     }
 
-    private static func isPadOnly(_ slice: String?) -> Bool {
-        guard let slice, !slice.isEmpty else { return false }
-        return slice.unicodeScalars.allSatisfy { $0.value == 0x202F || $0.value == 0x2066 || $0.value == 0x2069 }
+    private static func isPadOnlyBytes(_ bytes: [UInt8], range: Range<Int>) -> Bool {
+        guard range.lowerBound >= 0, range.upperBound <= bytes.count, !range.isEmpty else { return false }
+        var i = range.lowerBound
+        while i + 2 < range.upperBound {
+            // U+202F = E2 80 AF, U+2066 = E2 81 A6, U+2069 = E2 81 A9
+            if bytes[i] == 0xE2 && ((bytes[i + 1] == 0x80 && bytes[i + 2] == 0xAF) || (bytes[i + 1] == 0x81 && (bytes[i + 2] == 0xA6 || bytes[i + 2] == 0xA9))) {
+                i += 3
+            } else {
+                return false
+            }
+        }
+        return i == range.upperBound
     }
 }
 
@@ -819,8 +835,9 @@ public enum MarkdownFind {
         caseSensitivity: MarkdownCase = .insensitive
     ) -> [[Range<Int>]] {
         guard !query.isEmpty, !src.isEmpty else { return [] }
+        let srcBytes = Array(src.utf8)
         var out: [[Range<Int>]] = []
-        findInBlocks(src: src, blocks: doc.blocks, maps: doc.maps, query: query, caseSensitivity: caseSensitivity, out: &out)
+        findInBlocks(srcBytes: srcBytes, blocks: doc.blocks, maps: doc.maps, query: query, caseSensitivity: caseSensitivity, out: &out)
         return out
     }
 
@@ -838,7 +855,7 @@ public enum MarkdownFind {
     }
 
     private static func findInBlocks(
-        src: String,
+        srcBytes: [UInt8],
         blocks: [MarkdownDocBlock],
         maps: [MarkdownBlockMap],
         query: String,
@@ -849,31 +866,31 @@ public enum MarkdownFind {
             let map = i < maps.count ? maps[i] : .none
             switch (b, map) {
             case let (.para(inl), .inline(m)), let (.heading(_, inl), .inline(m)):
-                findInText(src: src, text: inl.text, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
+                findInText(srcBytes: srcBytes, text: inl.text, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
             case let (.image(_, alt, _), .inline(m)):
-                findInText(src: src, text: alt, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
+                findInText(srcBytes: srcBytes, text: alt, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
             case let (.code(code), .code(m)), let (.diff(code), .code(m)):
-                findInText(src: src, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
+                findInText(srcBytes: srcBytes, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
             case let (.mermaid(code), .code(m)):
                 if KitMermaid.supported(code) { continue }
-                findInText(src: src, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
+                findInText(srcBytes: srcBytes, text: code, map: m, query: query, caseSensitivity: caseSensitivity, out: &out)
             case let (.table(t), .table(head, rows)):
                 for (j, cell) in t.head.enumerated() where j < head.count {
-                    findInText(src: src, text: cell.text, map: head[j], query: query, caseSensitivity: caseSensitivity, out: &out)
+                    findInText(srcBytes: srcBytes, text: cell.text, map: head[j], query: query, caseSensitivity: caseSensitivity, out: &out)
                 }
                 for (ri, row) in t.rows.enumerated() where ri < rows.count {
                     let rmaps = rows[ri]
                     for (j, cell) in row.enumerated() where j < rmaps.count {
-                        findInText(src: src, text: cell.text, map: rmaps[j], query: query, caseSensitivity: caseSensitivity, out: &out)
+                        findInText(srcBytes: srcBytes, text: cell.text, map: rmaps[j], query: query, caseSensitivity: caseSensitivity, out: &out)
                     }
                 }
             case let (.list(_, items), .list(itemMaps)):
                 for (idx, item) in items.enumerated() {
                     let imap = idx < itemMaps.count ? itemMaps[idx] : []
-                    findInBlocks(src: src, blocks: item, maps: imap, query: query, caseSensitivity: caseSensitivity, out: &out)
+                    findInBlocks(srcBytes: srcBytes, blocks: item, maps: imap, query: query, caseSensitivity: caseSensitivity, out: &out)
                 }
             case let (.quote(inner), .quote(innerMaps)):
-                findInBlocks(src: src, blocks: inner, maps: innerMaps, query: query, caseSensitivity: caseSensitivity, out: &out)
+                findInBlocks(srcBytes: srcBytes, blocks: inner, maps: innerMaps, query: query, caseSensitivity: caseSensitivity, out: &out)
             default:
                 continue
             }
@@ -881,7 +898,7 @@ public enum MarkdownFind {
     }
 
     private static func findInText(
-        src: String,
+        srcBytes: [UInt8],
         text: String,
         map: MarkdownSpanMap,
         query: String,
@@ -890,30 +907,39 @@ public enum MarkdownFind {
     ) {
         guard !text.isEmpty, !map.segments.isEmpty else { return }
 
+        let textBytes = Array(text.utf8)
         let contiguous = map.segments[0].out.lowerBound == 0 &&
-            map.segments[map.segments.count - 1].out.upperBound == text.utf8.count &&
+            map.segments[map.segments.count - 1].out.upperBound == textBytes.count &&
             zip(map.segments, map.segments.dropFirst()).allSatisfy { $0.out.upperBound == $1.out.lowerBound }
 
         var vis: String
+        var visBytes: [UInt8]
         var segs: [Seg] = []
         segs.reserveCapacity(map.segments.count)
 
         if contiguous {
             vis = text
+            visBytes = textBytes
             for s in map.segments {
-                let linear = isLinearSeg(src: src, vis: text, sSeg: s.src, oSeg: s.out)
+                let linear = isLinearSeg(srcBytes: srcBytes, visBytes: visBytes, sSeg: s.src, oSeg: s.out)
                 segs.append(Seg(src: s.src, out: s.out, linear: linear))
             }
         } else {
             vis = ""
             for s in map.segments {
-                if let slice = utf8Slice(text, range: s.out), !slice.isEmpty {
+                let o0 = max(0, min(s.out.lowerBound, textBytes.count))
+                let o1 = max(o0, min(s.out.upperBound, textBytes.count))
+                if o0 < o1 {
+                    let slice = String(decoding: textBytes[o0..<o1], as: UTF8.self)
                     let start = vis.utf8.count
                     vis.append(slice)
                     let newOut = start..<vis.utf8.count
-                    let linear = isLinearSeg(src: src, vis: vis, sSeg: s.src, oSeg: newOut)
-                    segs.append(Seg(src: s.src, out: newOut, linear: linear))
+                    segs.append(Seg(src: s.src, out: newOut, linear: false))
                 }
+            }
+            visBytes = Array(vis.utf8)
+            for idx in segs.indices {
+                segs[idx].linear = isLinearSeg(srcBytes: srcBytes, visBytes: visBytes, sSeg: segs[idx].src, oSeg: segs[idx].out)
             }
         }
         guard !vis.isEmpty else { return }
@@ -925,7 +951,7 @@ public enum MarkdownFind {
             while let r = vis.range(of: query, range: searchStart..<vis.endIndex) {
                 let b0 = vis.utf8.distance(from: vis.startIndex, to: r.lowerBound)
                 let b1 = vis.utf8.distance(from: vis.startIndex, to: r.upperBound)
-                let ranges = mapVisRange(src: src, segs: segs, segIdx: &segIdx, vRange: b0..<b1)
+                let ranges = mapVisRange(srcBytes: srcBytes, segs: segs, segIdx: &segIdx, vRange: b0..<b1)
                 if !ranges.isEmpty { out.append(ranges) }
                 searchStart = r.upperBound
             }
@@ -954,7 +980,7 @@ public enum MarkdownFind {
                 while fToV.count < folded.utf8.count { fToV.append(Int.max) }
                 curVByte += chBytes
             }
-            fToV.append(vis.utf8.count)
+            fToV.append(visBytes.count)
 
             let qBytes = Array(foldedQ.utf8)
             let fBytes = Array(folded.utf8)
@@ -965,7 +991,7 @@ public enum MarkdownFind {
                     let v0 = fToV[i]
                     let v1 = fToV[i + qBytes.count]
                     if v0 != Int.max && v1 != Int.max && v0 < v1 {
-                        let ranges = mapVisRange(src: src, segs: segs, segIdx: &segIdx, vRange: v0..<v1)
+                        let ranges = mapVisRange(srcBytes: srcBytes, segs: segs, segIdx: &segIdx, vRange: v0..<v1)
                         if !ranges.isEmpty { out.append(ranges) }
                         i += qBytes.count
                         continue
@@ -988,20 +1014,29 @@ public enum MarkdownFind {
         return out
     }
 
-    private static func isLinearSeg(src: String, vis: String, sSeg: Range<Int>, oSeg: Range<Int>) -> Bool {
-        guard sSeg.count == oSeg.count else { return false }
-        let sSlice = utf8Slice(src, range: sSeg)
-        let oSlice = utf8Slice(vis, range: oSeg)
-        return sSlice == oSlice || !(sSlice?.hasPrefix("&") ?? false)
+    private static func isLinearSeg(srcBytes: [UInt8], visBytes: [UInt8], sSeg: Range<Int>, oSeg: Range<Int>) -> Bool {
+        guard sSeg.count == oSeg.count,
+              sSeg.lowerBound >= 0, sSeg.upperBound <= srcBytes.count,
+              oSeg.lowerBound >= 0, oSeg.upperBound <= visBytes.count else {
+            return false
+        }
+        if srcBytes[sSeg].elementsEqual(visBytes[oSeg]) {
+            return true
+        }
+        return !sSeg.isEmpty && srcBytes[sSeg.lowerBound] != 0x26
     }
 
-    private static func mapVisRange(src: String, segs: [Seg], segIdx: inout Int, vRange: Range<Int>) -> [Range<Int>] {
+    private static func isUTF8BoundaryBytes(_ bytes: [UInt8], _ byte: Int) -> Bool {
+        byte <= 0 || byte >= bytes.count || (bytes[byte] & 0xC0) != 0x80
+    }
+
+    private static func mapVisRange(srcBytes: [UInt8], segs: [Seg], segIdx: inout Int, vRange: Range<Int>) -> [Range<Int>] {
         while segIdx < segs.count && segs[segIdx].out.upperBound <= vRange.lowerBound {
             segIdx += 1
         }
         var ranges: [Range<Int>] = []
         var j = segIdx
-        let srcLen = src.utf8.count
+        let srcLen = srcBytes.count
         while j < segs.count && segs[j].out.lowerBound < vRange.upperBound {
             let seg = segs[j]
             let o0 = max(vRange.lowerBound, seg.out.lowerBound)
@@ -1011,15 +1046,17 @@ public enum MarkdownFind {
                 let rel1 = o1 - seg.out.lowerBound
                 var s0: Int
                 var s1: Int
-                if seg.linear && isUTF8Boundary(src, seg.src.lowerBound + rel0) && isUTF8Boundary(src, seg.src.lowerBound + rel1) {
+                if seg.linear && isUTF8BoundaryBytes(srcBytes, seg.src.lowerBound + rel0) && isUTF8BoundaryBytes(srcBytes, seg.src.lowerBound + rel1) {
                     s0 = seg.src.lowerBound + rel0
                     s1 = seg.src.lowerBound + rel1
                 } else {
                     s0 = seg.src.lowerBound
                     s1 = seg.src.upperBound
                 }
-                s0 = floorUTF8Boundary(src, byte: min(srcLen, max(seg.src.lowerBound, min(seg.src.upperBound, s0))))
-                s1 = ceilUTF8Boundary(src, byte: min(srcLen, max(seg.src.lowerBound, min(seg.src.upperBound, s1))))
+                s0 = min(srcLen, max(seg.src.lowerBound, min(seg.src.upperBound, s0)))
+                while s0 > 0 && s0 < srcLen && (srcBytes[s0] & 0xC0) == 0x80 { s0 -= 1 }
+                s1 = min(srcLen, max(seg.src.lowerBound, min(seg.src.upperBound, s1)))
+                while s1 < srcLen && (srcBytes[s1] & 0xC0) == 0x80 { s1 += 1 }
                 if s0 < s1 {
                     if let last = ranges.last, last.upperBound == s0 {
                         ranges[ranges.count - 1] = last.lowerBound..<s1
@@ -1045,13 +1082,15 @@ public enum MarkdownPlain {
         nextTask: inout Int
     ) -> String {
         var out = ""
-        writeBlocks(blocks, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: 0, quotePrefix: false)
+        writeBlocks(blocks, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: 0, quotePrefix: false, allowQuotePrefix: false, inListItem: false)
         return out
     }
 
     public static func render(_ doc: MarkdownParsedDoc) -> String {
         var next = 0
-        return render(blocks: doc.blocks, tasks: doc.tasks, nextTask: &next)
+        var out = ""
+        writeBlocks(doc.blocks, into: &out, tasks: doc.tasks, nextTask: &next, indentCols: 0, quotePrefix: false, allowQuotePrefix: true, inListItem: false)
+        return out
     }
 
     private static func writeBlocks(
@@ -1060,10 +1099,18 @@ public enum MarkdownPlain {
         tasks: [MarkdownTaskState?],
         nextTask: inout Int,
         indentCols: Int,
-        quotePrefix: Bool
+        quotePrefix: Bool,
+        allowQuotePrefix: Bool,
+        inListItem: Bool
     ) {
         for (i, b) in blocks.enumerated() {
-            if i > 0 { out.append("\n\n") }
+            if i > 0 {
+                if inListItem, case .list = b {
+                    out.append("\n")
+                } else {
+                    out.append("\n\n")
+                }
+            }
             switch b {
             case let .para(inl), let .heading(_, inl):
                 let clean = MarkdownInline.unpadded(inl.text)
@@ -1079,7 +1126,7 @@ public enum MarkdownPlain {
             case .rule:
                 out.append("---")
             case let .quote(inner):
-                writeBlocks(inner, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: indentCols, quotePrefix: true)
+                writeBlocks(inner, into: &out, tasks: tasks, nextTask: &nextTask, indentCols: indentCols, quotePrefix: allowQuotePrefix, allowQuotePrefix: allowQuotePrefix, inListItem: false)
             case let .list(start, items):
                 for (k, item) in items.enumerated() {
                     if k > 0 { out.append("\n") }
@@ -1097,9 +1144,8 @@ public enum MarkdownPlain {
                     out.append(pad)
                     out.append(marker)
                     var itemOut = ""
-                    writeBlocks(item, into: &itemOut, tasks: tasks, nextTask: &nextTask, indentCols: indentCols + marker.count, quotePrefix: quotePrefix)
-                    // Strip extra indent on the very first line (marker already wrote it)
-                    let trimFirst = String(repeating: " ", count: indentCols + marker.count)
+                    writeBlocks(item, into: &itemOut, tasks: tasks, nextTask: &nextTask, indentCols: indentCols + 2, quotePrefix: quotePrefix, allowQuotePrefix: allowQuotePrefix, inListItem: true)
+                    let trimFirst = String(repeating: " ", count: indentCols + 2)
                     if itemOut.hasPrefix(trimFirst) {
                         out.append(String(itemOut.dropFirst(trimFirst.count)))
                     } else {
@@ -1245,11 +1291,10 @@ public struct MarkdownStream: Sendable, Equatable {
         MarkdownParser.parseDocument(stabilizedSource, autolink: autolink)
     }
 
-    /// Repairs unclosed fenced code blocks and unclosed inline delimiters at the tail of an incomplete Markdown stream.
-    public static func stabilize(_ source: String) -> String {
+    /// Returns the opening fence marker if `source` ends inside an unclosed fenced code block.
+    static func unclosedFence(in source: String) -> String? {
         let lines = source.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false)
         var openFence: String? = nil
-
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if let fence = openFence {
@@ -1264,8 +1309,12 @@ public struct MarkdownStream: Sendable, Equatable {
                 openFence = String(repeating: "~", count: n)
             }
         }
+        return openFence
+    }
 
-        if let fence = openFence {
+    /// Repairs unclosed fenced code blocks and unclosed inline delimiters at the tail of an incomplete Markdown stream.
+    public static func stabilize(_ source: String) -> String {
+        if let fence = unclosedFence(in: source) {
             var out = source
             if !out.hasSuffix("\n") {
                 out.append("\n")
@@ -1328,6 +1377,9 @@ public struct MarkdownTailStream: Sendable, Equatable {
 
     public func document(streaming: Bool = true) -> MarkdownParsedDoc {
         if !streaming {
+            return MarkdownDocCache.shared.docCached(source, autolink: autolink)
+        }
+        if MarkdownStream.unclosedFence(in: source) != nil {
             return MarkdownDocCache.shared.docCached(source, autolink: autolink)
         }
         let s = stabilizedSource
@@ -1860,16 +1912,17 @@ public enum MarkdownParser {
                         codeRanges.append(lines[j].contentRange)
                         j += 1
                     }
-                    let (codeText, codeMap) = buildCodeTextAndMap(source: source, baseOffset: baseOffset, lineRanges: codeRanges, closed: closed, hasTrailingNewline: j <= lines.count && !closed && lines.last.map { $0.lineEnd > $0.contentRange.upperBound } == true)
+                    let hasTrailing = j <= lines.count && !closed && lines.last.map { $0.lineEnd > $0.contentRange.upperBound } == true
+                    let (codeText, codeMap) = buildCodeTextAndMap(source: source, baseOffset: baseOffset, lineRanges: codeRanges, closed: closed, hasTrailingNewline: hasTrailing)
                     let langLower = fence.lang?.lowercased()
                     if langLower == "diff" || langLower == "patch" {
                         appendBlock(.diff(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
                     } else if langLower == "mermaid" {
-                        let coloured = closed ? codeText.utf8.count : lastNewlineCut(codeText)
+                        let coloured = (closed || hasTrailing) ? codeText.utf8.count : lastNewlineCut(codeText)
                         sources.append(MarkdownCodeSource(language: fence.lang, open: !closed, colouredBytes: coloured, length: codeText.utf8.count))
                         appendBlock(.mermaid(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
                     } else {
-                        let coloured = closed ? codeText.utf8.count : lastNewlineCut(codeText)
+                        let coloured = (closed || hasTrailing) ? codeText.utf8.count : lastNewlineCut(codeText)
                         sources.append(MarkdownCodeSource(language: fence.lang, open: !closed, colouredBytes: coloured, length: codeText.utf8.count))
                         appendBlock(.code(codeText), map: .code(codeMap), start: blockStartByte, to: &blocks, maps: &maps, starts: &blockStarts)
                     }
@@ -3458,8 +3511,14 @@ private func applyUTF8Highlights(
     activeFg: Color?
 ) -> [TextSpan] {
     guard !ranges.isEmpty else { return spans }
+    let indexed = ranges.enumerated()
+        .map { (offset: $0.offset, range: $0.element.range, isCurrent: $0.element.isCurrent) }
+        .sorted { ($0.range.lowerBound, $0.range.upperBound) < ($1.range.lowerBound, $1.range.upperBound) }
+
     var out: [TextSpan] = []
+    out.reserveCapacity(spans.count)
     var cursor = 0
+    var rCursor = 0
     for span in spans {
         let len = span.text.utf8.count
         let sStart = cursor
@@ -3467,29 +3526,51 @@ private func applyUTF8Highlights(
         cursor = sEnd
         guard len > 0 else { continue }
 
-        let overlapping = ranges.enumerated().filter { $0.element.range.lowerBound < sEnd && $0.element.range.upperBound > sStart }
-        if overlapping.isEmpty {
+        while rCursor < indexed.count && indexed[rCursor].range.upperBound <= sStart {
+            rCursor += 1
+        }
+        if rCursor >= indexed.count || indexed[rCursor].range.lowerBound >= sEnd {
             out.append(span)
             continue
         }
 
-        var localCuts: Set<Int> = [0, len]
-        for (_, item) in overlapping {
-            localCuts.insert(max(0, min(len, item.range.lowerBound - sStart)))
-            localCuts.insert(max(0, min(len, item.range.upperBound - sStart)))
+        var localCuts: [Int] = [0, len]
+        var overlappingEnd = rCursor
+        while overlappingEnd < indexed.count && indexed[overlappingEnd].range.lowerBound < sEnd {
+            let r = indexed[overlappingEnd].range
+            if r.upperBound > sStart {
+                localCuts.append(max(0, min(len, r.lowerBound - sStart)))
+                localCuts.append(max(0, min(len, r.upperBound - sStart)))
+            }
+            overlappingEnd += 1
         }
-        let sorted = localCuts.sorted()
-        for idx in 0..<(sorted.count - 1) {
-            let a = sorted[idx]
-            let b = sorted[idx + 1]
-            guard a < b, let sub = utf8Slice(span.text, range: a..<b) else { continue }
+        localCuts.sort()
+
+        let spanBytes = Array(span.text.utf8)
+        var hitPos = rCursor
+        var prevCut = -1
+        for idx in 0..<(localCuts.count - 1) {
+            let a = localCuts[idx]
+            let b = localCuts[idx + 1]
+            if a == b || a == prevCut { continue }
+            prevCut = a
+            let absStart = sStart + a
+            let absEnd = sStart + b
             var piece = span
-            piece.text = sub
-            let absRange = (sStart + a)..<(sStart + b)
-            if let hit = overlapping.first(where: { $0.element.range.lowerBound <= absRange.lowerBound && $0.element.range.upperBound >= absRange.upperBound }) {
-                let isCur = hit.element.isCurrent || (activeIndex == hit.offset)
-                piece.background = isCur ? activeBg : bg
-                if let c = isCur ? activeFg : fg { piece.color = c }
+            piece.text = String(decoding: spanBytes[a..<b], as: UTF8.self)
+            while hitPos < overlappingEnd && indexed[hitPos].range.upperBound <= absStart {
+                hitPos += 1
+            }
+            var scan = hitPos
+            while scan < overlappingEnd && indexed[scan].range.lowerBound <= absStart {
+                if indexed[scan].range.upperBound >= absEnd {
+                    let hit = indexed[scan]
+                    let isCur = hit.isCurrent || (activeIndex == hit.offset)
+                    piece.background = isCur ? activeBg : bg
+                    if let c = isCur ? activeFg : fg { piece.color = c }
+                    break
+                }
+                scan += 1
             }
             out.append(piece)
         }
@@ -3929,7 +4010,7 @@ public struct MarkdownStyle: Sendable, Equatable {
     public func linkIcon(_ position: MarkdownLinkIconPosition?) -> MarkdownStyle { var s = self; s.linkIcon = position; return s }
 
     // Table styles
-    public func tableOutline(_ color: Color?) -> MarkdownStyle { var s = self; s.tableOutline = color; return s }
+    public func tableOutline(_ color: Color?) -> MarkdownStyle { var s = self; s.tableOutline = color; s.tableFrame = nil; return s }
     public func tableRules(_ color: Color) -> MarkdownStyle { var s = self; s.tableRule = color; return s }
     public func tableHeader(fill: Color, text: Color) -> MarkdownStyle {
         var s = self
@@ -3947,6 +4028,7 @@ public struct MarkdownStyle: Sendable, Equatable {
     public func tableFlushLeft(_ on: Bool) -> MarkdownStyle { var s = self; s.tableFlushLeft = on; return s }
     public func tableFrame(fill: Color, ring: Color, pad: Float) -> MarkdownStyle {
         var s = self
+        s.tableOutline = nil
         s.tableFrame = MarkdownTableFrame(fill: fill, ring: ring, pad: Self.pts(pad))
         return s
     }
@@ -4544,6 +4626,7 @@ private final class MarkdownRenderer<State> {
             let imgBox: El<State> = col()
                 .role(.image)
                 .label(alt.isEmpty ? src : alt)
+                .cursor(.zoomIn)
                 .wFull()
                 .p(8)
                 .rounded(6)
@@ -4588,18 +4671,50 @@ private final class MarkdownRenderer<State> {
             cuts.insert(max(0, min(bytes.count, l.end)))
         }
         let sorted = cuts.sorted()
+        let spansByStart = inl.spans.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+        let linksByStart = inl.links.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+        var sIdx = 0
+        var lIdx = 0
+        var activeSpans: [MarkdownStyleSpan] = []
+        var activeLinks: [MarkdownLinkSpan] = []
+
         var spans: [TextSpan] = []
+        spans.reserveCapacity(max(1, sorted.count - 1))
 
         for i in 0..<(sorted.count - 1) {
             let a = sorted[i]
             let b = sorted[i + 1]
-            guard a < b, let seg = utf8Slice(inl.text, range: a..<b) else { continue }
-            let isCodePad = inl.spans.contains { $0.style == .codePad && $0.start <= a && b <= $0.end }
-            let isCode = inl.spans.contains { $0.style == .code && $0.start <= a && b <= $0.end }
-            let isStrong = inl.spans.contains { $0.style == .strong && $0.start <= a && b <= $0.end }
-            let isEm = inl.spans.contains { $0.style == .em && $0.start <= a && b <= $0.end }
-            let isStrike = inl.spans.contains { $0.style == .strike && $0.start <= a && b <= $0.end }
-            let link = inl.links.first { $0.start <= a && b <= $0.end }
+            guard a < b else { continue }
+            let seg = String(decoding: bytes[a..<b], as: UTF8.self)
+
+            while sIdx < spansByStart.count && spansByStart[sIdx].start <= a {
+                activeSpans.append(spansByStart[sIdx])
+                sIdx += 1
+            }
+            activeSpans.removeAll(where: { $0.end <= a })
+
+            while lIdx < linksByStart.count && linksByStart[lIdx].start <= a {
+                activeLinks.append(linksByStart[lIdx])
+                lIdx += 1
+            }
+            activeLinks.removeAll(where: { $0.end <= a })
+
+            var isCodePad = false
+            var isCode = false
+            var isStrong = false
+            var isEm = false
+            var isStrike = false
+            for sp in activeSpans where sp.start <= a && b <= sp.end {
+                switch sp.style {
+                case .codePad: isCodePad = true
+                case .code: isCode = true
+                case .strong: isStrong = true
+                case .em: isEm = true
+                case .strike: isStrike = true
+                case .link: break
+                }
+            }
+            let link = activeLinks.first(where: { $0.start <= a && b <= $0.end })
 
             var fg: Color = baseColor
             var bg: Color? = nil
@@ -4622,7 +4737,7 @@ private final class MarkdownRenderer<State> {
                 if let custom = view.config.linkLookFn?(link.url) {
                     fg = custom.color ?? s.accent
                     underline = custom.underline
-                    if let w = custom.weight { weight = w }
+                    if !isStrong && !isCode, let w = custom.weight { weight = w }
                 } else if !isCode {
                     fg = s.accent
                     underline = true
@@ -4836,7 +4951,8 @@ private final class MarkdownRenderer<State> {
             ? (open ? renderMermaidStreaming(lines, theme: theme, hover: hover) : renderMermaidStreamed(lines, theme: theme, hover: hover))
             : renderMermaid(lines, theme: theme, hover: hover)
         if let d = diagram {
-            let labeled = d.label(KitMermaid.kindLabel(lines)).key("card")
+            let trimmed = lines.trimmingCharacters(in: .whitespacesAndNewlines)
+            let labeled = d.label(KitMermaid.kindLabel(lines)).description(trimmed).key("card")
             let framed = view.diagramFrameHandler?(labeled, MarkdownDiagramFrameContext(index: index, source: lines, open: open)) ?? labeled
             return col().wFull().child(framed)
         }
@@ -5194,10 +5310,17 @@ private func utf8Slice(_ str: String, range: Range<Int>) -> String? {
 }
 
 private func isUTF8Boundary(_ str: String, _ byteOffset: Int) -> Bool {
+    if let isBoundary = str.utf8.withContiguousStorageIfAvailable({ buf -> Bool in
+        guard byteOffset >= 0 && byteOffset <= buf.count else { return false }
+        if byteOffset == 0 || byteOffset == buf.count { return true }
+        return (buf[byteOffset] & 0xC0) != 0x80
+    }) {
+        return isBoundary
+    }
     guard byteOffset >= 0 && byteOffset <= str.utf8.count else { return false }
     if byteOffset == 0 || byteOffset == str.utf8.count { return true }
     let idx = str.utf8.index(str.startIndex, offsetBy: byteOffset)
-    return str.unicodeScalars.indices.contains(idx) || String.Index(idx, within: str) != nil
+    return idx.samePosition(in: str.unicodeScalars) != nil
 }
 
 private func floorUTF8Boundary(_ str: String, byte: Int) -> Int {

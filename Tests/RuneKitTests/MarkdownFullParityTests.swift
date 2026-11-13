@@ -87,6 +87,50 @@ struct MarkdownFullParityTests {
         return inl.spans.filter { $0.style == style }.map { utf8Slice(inl.text, $0.start..<$0.end) }
     }
 
+    private func collectRichNodes<S>(_ root: El<S>) -> [(key: String?, plain: String, spans: [TextSpan])] {
+        var out: [(key: String?, plain: String, spans: [TextSpan])] = []
+        func walk(_ el: El<S>) {
+            if let spans = el.richSpans, !spans.isEmpty {
+                out.append((el.keyId, el.plainText ?? spans.map(\.text).joined(), spans))
+            }
+            for child in el.children {
+                walk(child)
+            }
+        }
+        walk(root)
+        return out
+    }
+
+    private func spanRanges(for spans: [TextSpan], matching predicate: (TextSpan) -> Bool) -> [(Range<Int>, TextSpan)] {
+        var out: [(Range<Int>, TextSpan)] = []
+        var offset = 0
+        for sp in spans {
+            let len = sp.text.utf8.count
+            if predicate(sp) {
+                out.append((offset..<(offset + len), sp))
+            }
+            offset += len
+        }
+        return out
+    }
+
+    private func elementParent<S>(_ rt: Runtime<S>, of el: ElementInfo) -> ElementInfo? {
+        guard let pid = el.parentIndex else { return nil }
+        let els = rt.elements()
+        return els.indices.contains(pid) ? els[pid] : nil
+    }
+
+    private func tableCell<S>(_ rt: Runtime<S>, rowKey: String, col: Int) -> ElementInfo? {
+        guard let rowEl = rt.element(byKey: rowKey) else { return nil }
+        let prefix = rowEl.path + "/"
+        return rt.elements().first(where: { $0.key == "c\(col)" && $0.path.hasPrefix(prefix) })
+    }
+
+    private func textInSubtree<S>(_ rt: Runtime<S>, under ancestor: ElementInfo, matching text: String) -> ElementInfo? {
+        let prefix = ancestor.path + "/"
+        return rt.elements().first(where: { $0.path.hasPrefix(prefix) && $0.text == text })
+    }
+
     // MARK: - Block Interrupts & Numbered Lists (interrupt_tests.rs)
 
     @Test("Numbered lines after bold heading lines start ordered lists and map back to source")
@@ -1108,6 +1152,869 @@ struct MarkdownFullParityTests {
             _ = streamRT.frame(at: st)
             #expect(streamRT.selectedText() == beforeStream)
         }
+    }
+
+    // MARK: - 1:1 Rust Parity Additions (`src/markdown/tests.rs`, `markdown_table_card`, `markdown_find`, `markdown_fixture`, `markdown_diagram_*`, `markdown_quote_frame`, `markdown.rs #91`)
+
+    @Test("src/markdown/tests.rs & blocks_and_highlights: syntax highlights (#1-#6), glyph-invariant TextSystem (#7), whole/stream/ref cache (#9, #11), link span ordering (#12), strike (#115)")
+    func markdownCoreParserMetricsAndMaps() {
+        // #1: known languages are coloured and others stay plain
+        let darkKit = Kit.neutral(dark: true)
+        let darkStyle = MarkdownStyle.fromKit(darkKit)
+        let langSrc = """
+        ```ts
+        const a = 1
+        ```
+
+        ```brainfuck
+        +[-]
+        ```
+
+            indented
+
+        ```
+        none
+        ```
+
+        - ```rust,ignore
+          fn f() {}
+          ```
+
+        > ```SQL
+        > select 1
+        > ```
+        """
+        let langRoot: El<Int> = Markdown(langSrc).render(darkStyle)
+        let codeNodes = collectRichNodes(langRoot)
+        let tsNode = codeNodes.first(where: { $0.plain == "const a = 1" })
+        #expect(tsNode != nil)
+        if let tsNode {
+            let kwTexts = tsNode.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .keyword)) }.map(\.text)
+            let numTexts = tsNode.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .number)) }.map(\.text)
+            #expect(kwTexts == ["const "])
+            #expect(numTexts == ["1"])
+            #expect(tsNode.spans.allSatisfy { $0.color != nil && $0.weight == nil && !$0.italic && $0.monospace })
+        }
+        let plainInk = darkStyle.plainCodeText ?? darkStyle.codeText ?? darkStyle.text
+        for plainCode in ["+[-]", "indented", "none"] {
+            let node = codeNodes.first(where: { $0.plain == plainCode })
+            #expect(node != nil)
+            if let node {
+                #expect(node.spans.count == 1 && approxColor(node.spans[0].color, plainInk))
+            }
+        }
+        let rustNode = codeNodes.first(where: { $0.plain == "fn f() {}" })
+        #expect(rustNode?.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .function)) }.map(\.text) == ["f"])
+        let sqlNode = codeNodes.first(where: { $0.plain == "select 1" })
+        #expect(sqlNode?.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .keyword)) }.map(\.text) == ["select "])
+
+        // #2: a streaming fence colours only its finished lines
+        let lightStyle = MarkdownStyle.fromKit(Kit.neutral(dark: false))
+        let lightInk = lightStyle.codeText ?? lightStyle.text
+        func lastColouredEnd(_ src: String) -> Int {
+            let root: El<Int> = Markdown(src).streaming(true).render(lightStyle)
+            let nodes = collectRichNodes(root)
+            guard let node = nodes.first else { return 0 }
+            let coloured = spanRanges(for: node.spans, matching: { !approxColor($0.color, lightInk) })
+            return coloured.last?.0.upperBound ?? 0
+        }
+        #expect(lastColouredEnd("```ts\nconst") == 0)
+        #expect(lastColouredEnd("```ts\nconst a = 1\nconst b") == "const a = 1".utf8.count)
+        #expect(lastColouredEnd("```ts\nconst a = 1\nconst b = 2\n") == "const a = 1\nconst b = 2".utf8.count)
+        #expect(lastColouredEnd("```ts\nconst a = 1\nlet b = 2\n```") == "const a = 1\nlet b = 2".utf8.count)
+
+        // #3: syntax builders override and switch off colour
+        let red = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        let rustSrc = "```rust\nlet x = 1;\n```"
+        let customStyle = darkStyle.syntax(.keyword, red)
+        let customRoot: El<Int> = Markdown(rustSrc).render(customStyle)
+        let customNode = collectRichNodes(customRoot).first
+        #expect(customNode?.spans.filter { approxColor($0.color, red) }.map(\.text) == ["let "])
+        let offRoot: El<Int> = Markdown(rustSrc).render(customStyle.syntaxHighlight(false))
+        let offNode = collectRichNodes(offRoot).first
+        #expect(offNode?.spans.count == 1 && approxColor(offNode?.spans[0].color, darkStyle.codeText ?? darkStyle.text))
+
+        // #4: a custom SyntaxHighlighter receives each fence language (except diff) and applies Kind + Color paints
+        final class LangRecorder: @unchecked Sendable {
+            private let lock = NSLock()
+            var entries: [(String?, String)] = []
+            var runs = 0
+            func record(_ l: String?, _ c: String) {
+                lock.lock()
+                entries.append((l, c))
+                runs += 1
+                lock.unlock()
+            }
+        }
+        let rec4 = LangRecorder()
+        let hl4 = SyntaxHighlighter(id: "lang-seen-\(UUID().uuidString)") { lang, code in
+            rec4.record(lang, code)
+            return [
+                SyntaxHighlight(range: 2..<3, paint: .color(red)),
+                SyntaxHighlight(range: 0..<1, paint: .kind(.keyword)),
+            ]
+        }
+        let hlSrc = """
+        ```Kotlin title="a.kt"
+        val x = 1
+        ```
+
+        ```
+        bare fence
+        ```
+
+            indented code
+
+        ```rust,ignore
+        fn f() {}
+        ```
+
+        ```diff
+        +a
+        ```
+        """
+        let hlRoot: El<Int> = Markdown(hlSrc).highlighter(hl4).render(darkStyle)
+        #expect(rec4.entries.count == 4)
+        if rec4.entries.count == 4 {
+            #expect(rec4.entries[0].0 == "Kotlin" && rec4.entries[0].1 == "val x = 1")
+            #expect(rec4.entries[1].0 == nil && rec4.entries[1].1 == "bare fence")
+            #expect(rec4.entries[2].0 == nil && rec4.entries[2].1 == "indented code")
+            #expect(rec4.entries[3].0 == "rust" && rec4.entries[3].1 == "fn f() {}")
+        }
+        for code in ["val x = 1", "bare fence", "indented code", "fn f() {}"] {
+            let n = collectRichNodes(hlRoot).first(where: { $0.plain == code })
+            #expect(n != nil)
+            if let n {
+                let kw = n.spans.filter { approxColor($0.color, darkStyle.syntax.color(for: .keyword)) }.map(\.text)
+                let rd = n.spans.filter { approxColor($0.color, red) }.map(\.text)
+                #expect(kw == [utf8Slice(code, 0..<1)])
+                #expect(rd == [utf8Slice(code, 2..<3)])
+            }
+        }
+
+        // #5: builtin ts output matches SyntaxTheme colors and disabled highlighter invokes 0 times
+        let builtinSrc = "```ts\nconst a = 1;\n```\n\n```\nplain\n```\n\n```cobol\nMOVE 1 TO X\n```"
+        let builtinRoot: El<Int> = Markdown(builtinSrc).render(lightStyle)
+        let builtinNodes = collectRichNodes(builtinRoot)
+        if let tsBuiltin = builtinNodes.first(where: { $0.plain == "const a = 1;" }) {
+            let colouredSpans = spanRanges(for: tsBuiltin.spans, matching: { _ in true }).compactMap { pair -> (Int, Int, Color)? in
+                guard let c = pair.1.color else { return nil }
+                return (pair.0.lowerBound, pair.0.upperBound, c)
+            }
+            let cKeyword = lightStyle.syntax.color(for: .keyword)
+            let cVar = lightStyle.syntax.color(for: .variable)
+            let cOp = lightStyle.syntax.color(for: .operator)
+            let cNum = lightStyle.syntax.color(for: .number)
+            let cPunc = lightStyle.syntax.color(for: .punctuation)
+            let wantColors: [(Int, Int, Color)] = [
+                (0, 6, cKeyword),
+                (6, 8, cVar),
+                (8, 10, cOp),
+                (10, 11, cNum),
+                (11, 12, cPunc),
+            ]
+            #expect(colouredSpans.count == wantColors.count)
+            for (got, want) in zip(colouredSpans, wantColors) {
+                #expect(got.0 == want.0 && got.1 == want.1 && approxColor(got.2, want.2))
+            }
+        } else {
+            Issue.record("Missing builtin ts code node")
+        }
+        let offRec = LangRecorder()
+        let offHl = SyntaxHighlighter(id: "off-\(UUID().uuidString)") { lang, code in
+            offRec.record(lang, code)
+            return []
+        }
+        let _: El<Int> = Markdown(builtinSrc).highlighter(offHl).render(lightStyle.syntaxHighlight(false))
+        #expect(offRec.runs == 0)
+
+        // #6: rebuilding a view runs custom highlighter once per block across 3 commits
+        let runRec = LangRecorder()
+        let runHl = SyntaxHighlighter(id: "once-\(UUID().uuidString)") { lang, code in
+            runRec.record(lang, code)
+            return Syntax.builtin(language: lang, code: code)
+        }
+        let rebuildRT = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(400, 400),
+            view: { _, _ in
+                Markdown("```py\nx = 1\n```\n\n```go\nvar y = 2\n```").highlighter(runHl).render(darkStyle)
+            }
+        )
+        _ = rebuildRT.frame(at: 0.01)
+        for i in 1...3 {
+            rebuildRT.update(at: Double(i) * 0.02) { s, _ in s = i }
+            _ = rebuildRT.frame(at: Double(i) * 0.02 + 0.01)
+        }
+        #expect(runRec.runs == 2)
+
+        // #7: highlighting never moves a glyph across widths [nil, 900, 420, 260] (full & streaming)
+        let ts = TextSystem()
+        let glyphCases: [(String, String)] = [
+            ("tsx", "export function Card({ title }: { title: string }) {\n  return <div className=\"card\">{title.toUpperCase()}</div>; // done\n}"),
+            ("rust", "fn main() { let v: Vec<u8> = vec![1, 2, 3]; println!(\"{v:?} → ok\"); }"),
+            ("sh", "FOO=1 npm run build --if-present && echo \"$HOME/${X}\" | tee out.txt # café"),
+            ("yaml", "name: rune\nlist: [a, 1, {b: c}]\nscript: |\n  echo hi"),
+        ]
+        for (lang, code) in glyphCases {
+            let fullSpans = darkStyle.syntax.spans(for: code, highlights: Syntax.builtin(language: lang, code: code), defaultColor: darkStyle.codeText)
+            #expect(!fullSpans.isEmpty)
+            let cutRaw = code.firstIndex(of: "\n").map { code.distance(from: code.startIndex, to: $0) + 4 } ?? (code.utf8.count / 2)
+            let utf8View = code.utf8
+            var cutIdx = utf8View.index(utf8View.startIndex, offsetBy: min(cutRaw, utf8View.count))
+            while cutIdx < utf8View.endIndex && cutIdx.samePosition(in: code) == nil {
+                cutIdx = utf8View.index(after: cutIdx)
+            }
+            let partial = String(code[..<cutIdx])
+            let streamPrefixLen = partial.lastIndex(of: "\n").map { String(partial[..<$0]).utf8.count } ?? 0
+            let streamSlice = utf8Slice(code, 0..<streamPrefixLen)
+            let streamSpans = darkStyle.syntax.spans(
+                for: streamSlice,
+                highlights: Syntax.builtin(language: lang, code: streamSlice),
+                defaultColor: darkStyle.codeText
+            ) + (streamPrefixLen < code.utf8.count ? [TextSpan(utf8Slice(code, streamPrefixLen..<code.utf8.count), color: darkStyle.codeText, monospace: true)] : [])
+
+            for width in [nil, Float(900), Float(420), Float(260)] as [Float?] {
+                let plain = ts.shape(text: code, spans: nil, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                let full = ts.shape(text: code, spans: fullSpans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                let stream = ts.shape(text: code, spans: streamSpans, style: darkStyle.codeBlock, maxWidth: width, pixelScale: 2.0, emitGlyphs: true)
+                #expect(plain.glyphs.map { [$0.rect, $0.uv] } == full.glyphs.map { [$0.rect, $0.uv] })
+                #expect(plain.glyphs.map { [$0.rect, $0.uv] } == stream.glyphs.map { [$0.rect, $0.uv] })
+            }
+        }
+
+        // #9: streaming byte-by-byte through MarkdownDocCache matches whole-document parse
+        let streamDocs = [
+            "# Title\n\nFirst para with **bold** and `code`.\nSetext\n---\n\n- one\n- two\n\n  more of two\n\n- [ ] todo\n- [x] done\n\n1. a\n2. b\n\nAfter the list.\n\n> quoted\n> lines\n\n```rust\nfn main() {}\n```\n\n    indented code\n\n***\n\n| a | b |\n|:-|-:|\n| 1 | 2 |\n\ntail text <span>html</span>\n\n<div>\nblock\n</div>\n\nlast *words*",
+            "para one\n\npara two\n```ts\nconst a = 1\n```\n- item\nlazy line\n\n| x | y |\n| - | - |\nend",
+            "---\ntitle: Example\n---\n\nPréface\n\n- plain\n  - [ ] nested\n    - [x] deeper\n- [ ] sibling\n\n<div>hidden</div>\n\nAfter\n\n- [x] final task\n\npartial",
+        ]
+        for docText in streamDocs {
+            var idx = docText.startIndex
+            while idx < docText.endIndex {
+                idx = docText.index(after: idx)
+                let prefix = String(docText[..<idx])
+                let cached = MarkdownDocCache.shared.docCached(prefix, autolink: true)
+                let whole = MarkdownParser.parseDocument(prefix, autolink: true)
+                #expect(cached.blocks == whole.blocks)
+                #expect(cached.sources == whole.sources)
+                #expect(cached.tasks == whole.tasks)
+                #expect(cached.blockStarts == whole.blockStarts)
+                #expect(cached.maps == whole.maps)
+                #expect(cached.cuts == whole.cuts)
+            }
+        }
+
+        // #11: reference link definitions settle to identical whole-parse blocks
+        _ = MarkdownDocCache.shared.docCached("[x]\n\nsome text", autolink: true)
+        let refCached = MarkdownDocCache.shared.docCached("[x]\n\nsome text\n\n[x]: https://example.com", autolink: true)
+        let refWhole = MarkdownParser.parseDocument("[x]\n\nsome text\n\n[x]: https://example.com", autolink: true)
+        #expect(refCached.blocks == refWhole.blocks)
+
+        // #12: link spans keep inner bold/em/code styles intact
+        let linkRoot: El<Int> = Markdown("[**bold** *em* `code` plain](session:1)")
+            .linkStyle { url in
+                url.hasPrefix("session:") ? (.white, false, 500, nil) : nil
+            }
+            .render(darkStyle)
+        if let linkNode = collectRichNodes(linkRoot).first(where: { $0.plain.contains("bold") }) {
+            #expect(linkNode.spans.contains(where: { $0.text == "bold" && $0.weight == darkStyle.strongWeight && approxColor($0.color, .white) }))
+            #expect(linkNode.spans.contains(where: { $0.text == "em" && $0.italic && approxColor($0.color, .white) }))
+            #expect(linkNode.spans.contains(where: { $0.text.trimmingCharacters(in: .whitespaces) == "code" || ($0.monospace && $0.text.contains("code")) }))
+            #expect(linkNode.spans.contains(where: { $0.text.contains("plain") && $0.weight == 500 && approxColor($0.color, .white) }))
+        } else {
+            Issue.record("Expected rich node for link spans test")
+        }
+
+        // #115: GFM strikethrough parses to .strike inline span and renders strikethrough TextSpan in light & dark themes
+        let strikeDoc = MarkdownParser.parseDocument("A ~~struck~~ word")
+        if case .para(let strikeInl) = strikeDoc.blocks.first {
+            #expect(strikeInl.spans.contains(where: { $0.style == .strike && utf8Slice(strikeInl.text, $0.start..<$0.end) == "struck" }))
+        } else {
+            Issue.record("Expected para for strike test")
+        }
+        for s in [lightStyle, darkStyle] {
+            let root: El<Int> = Markdown("A ~~struck~~ word").render(s)
+            let node = collectRichNodes(root).first
+            #expect(node?.spans.contains(where: { $0.strikethrough && $0.text == "struck" }) == true)
+        }
+    }
+
+    @Test("tests/markdown.rs: image block exposes zoomIn cursor on hover (#91)")
+    func markdownImageZoomInCursor() {
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime<String>(
+            state: "![Preview diagram](https://example.com/diagram.png)",
+            viewport: Vec2(480, 260),
+            view: { src, _ in
+                kit.markdown(src)
+            }
+        )
+        _ = rt.frame(at: 0.01)
+        let imgEl = rt.elements().first(where: {
+            $0.role == .image || $0.a11yDescription == "Preview diagram"
+        })
+        #expect(imgEl != nil)
+        if let r = imgEl?.rect, r.count == 4 {
+            rt.pointerMove(to: Vec2(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5), at: 0.02)
+            _ = rt.frame(at: 0.03)
+            #expect(rt.currentCursor() == .zoomIn)
+        }
+    }
+
+    @Test("tests/markdown_table_card.rs: card body inset (#93), preset (#94), pad (#95), fullWidth/scrollWide (#96-#97), margin (#98), defaults (#99-#103), copy (#104), frame order (#105), setters (#106-#108)")
+    @MainActor
+    func markdownTableCardParity() {
+        let kit = Kit.neutral(dark: false)
+        let cardStyle = MarkdownStyle.fromKit(kit).tableCard(kit)
+        let plainStyle = MarkdownStyle.fromKit(kit)
+        let mdTable = """
+        | Metric | Value | Note |
+        | :--- | ---: | :--- |
+        | Latency | 12 | Fast |
+        | Throughput | 900 | High |
+        """
+
+        // #93: card preset sets faint header text, body text, header/body padding (8 / 10 + 0.5 border), 12pt cell inset, aligned columns
+        let presetSrc = """
+        | East | West |
+        | --- | --- |
+        | North | Lettuce ×2 |
+        """
+        let presetRT = Runtime<String>(
+            state: presetSrc,
+            viewport: Vec2(600, 320),
+            view: { src, _ in Markdown(src).view(for: String.self).render(cardStyle) }
+        )
+        _ = presetRT.frame(at: 0.01)
+        if let th = presetRT.element(byKey: "th"),
+           let r0 = presetRT.element(byKey: "r0"),
+           let thC1 = tableCell(presetRT, rowKey: "th", col: 1),
+           let r0C0 = tableCell(presetRT, rowKey: "r0", col: 0),
+           let r0C1 = tableCell(presetRT, rowKey: "r0", col: 1),
+           let west = textInSubtree(presetRT, under: thC1, matching: "West"),
+           let north = textInSubtree(presetRT, under: r0C0, matching: "North"),
+           let lettuce = textInSubtree(presetRT, under: r0C1, matching: "Lettuce ×2") {
+            #expect(approxColor(west.textColor, kit.c.textFaint))
+            #expect(approxColor(north.textColor, kit.c.textBase))
+            #expect(abs(th.rect[3] - (west.rect[3] + 16.0)) < 0.5)
+            #expect(abs(west.rect[0] - thC1.rect[0] - 12.0) < 0.5)
+            #expect(abs(north.rect[0] - r0C0.rect[0] - 12.0) < 0.5)
+            #expect(abs(lettuce.rect[0] - west.rect[0]) < 0.5)
+            #expect(r0.rect[3] >= north.rect[3] + 20.0 - 0.5)
+        } else {
+            Issue.record("Missing table cells in card preset check (#93)")
+        }
+
+        // #94: header padding can differ from body cells (.tableHeaderPad(x: 20, y: 9) vs .tableCellPadding(x: 6, y: 4))
+        let diffPadStyle = MarkdownStyle.fromKit(kit).tableCellPadding(x: 6, y: 4).tableHeaderPad(x: 20, y: 9)
+        let diffPadRT = Runtime<String>(
+            state: "| Head | B |\n| --- | --- |\n| x | y |",
+            viewport: Vec2(600, 220),
+            view: { src, _ in Markdown(src).view(for: String.self).render(diffPadStyle) }
+        )
+        _ = diffPadRT.frame(at: 0.01)
+        if let th = diffPadRT.element(byKey: "th"),
+           let r0 = diffPadRT.element(byKey: "r0"),
+           let thC0 = tableCell(diffPadRT, rowKey: "th", col: 0),
+           let r0C0 = tableCell(diffPadRT, rowKey: "r0", col: 0),
+           let headText = textInSubtree(diffPadRT, under: thC0, matching: "Head"),
+           let xText = textInSubtree(diffPadRT, under: r0C0, matching: "x") {
+            #expect(abs((headText.rect[0] - thC0.rect[0]) - 20.0) < 0.5)
+            #expect(abs((xText.rect[0] - r0C0.rect[0]) - 6.0) < 0.5)
+            #expect(abs((th.rect[3] - headText.rect[3]) - 18.0) < 0.5)
+            #expect(abs((r0.rect[3] - xText.rect[3]) - 8.0) < 0.5)
+        } else {
+            Issue.record("Missing table cells in header/cell differential padding check (#94)")
+        }
+
+        // #93-#95, #101: card mounts body container "tb", header-alone draws no "tb"
+        let cardRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(620, 320),
+            view: { src, _ in
+                Markdown(src).view(for: String.self).render(cardStyle)
+            }
+        )
+        _ = cardRT.frame(at: 0.01)
+        let tb = cardRT.element(byKey: "tb")
+        let th = cardRT.element(byKey: "th")
+        let r0 = cardRT.element(byKey: "r0")
+        let r1 = cardRT.element(byKey: "r1")
+        #expect(tb != nil && th != nil && r0 != nil && r1 != nil)
+        if let tb, let th {
+            #expect(tb.rect[1] >= th.rect[1] + th.rect[3] - 0.5)
+            #expect(tb.rect[2] > 500) // tableFullWidth fills width
+            if let frame = elementParent(cardRT, of: th) {
+                #expect(abs((th.rect[0] - frame.rect[0]) - 2.0) < 0.5)
+            }
+        }
+
+        // #101: header-alone draws no card "tb"
+        let headOnlyRT = Runtime<String>(
+            state: "| Only | Head |\n| --- | --- |",
+            viewport: Vec2(480, 160),
+            view: { src, _ in Markdown(src).view(for: String.self).render(cardStyle) }
+        )
+        _ = headOnlyRT.frame(at: 0.01)
+        #expect(headOnlyRT.element(byKey: "th") != nil)
+        #expect(headOnlyRT.element(byKey: "tb") == nil)
+
+        // #98 & #99 & #102: default outlined table has radius 6, transparent frame fill, layer01 th fill, 0.5 inset; custom tableFrame fills & pads without "tb"
+        let defRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(600, 260),
+            view: { src, _ in Markdown(src).streaming(true).view(for: String.self).render(plainStyle) }
+        )
+        _ = defRT.frame(at: 0.01)
+        #expect(defRT.element(byKey: "tb") == nil)
+        #expect(defRT.element(byKey: "s0") != nil)
+        if let defTh = defRT.element(byKey: "th"), let defFrame = elementParent(defRT, of: defTh) {
+            #expect(abs(defFrame.radius - 6.0) < 0.01)
+            #expect(approxColor(defFrame.fill, .transparent))
+            #expect(approxColor(defTh.fill, kit.c.layer01))
+            #expect(abs((defTh.rect[0] - defFrame.rect[0]) - 0.5) < 0.25)
+            #expect(defFrame.rect[2] < 600.0)
+        }
+
+        let framedStyle = MarkdownStyle.fromKit(kit).tableFrame(fill: kit.c.layer02, ring: kit.c.borderBase, pad: 3.0)
+        let framedRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(600, 260),
+            view: { src, _ in Markdown(src).view(for: String.self).render(framedStyle) }
+        )
+        _ = framedRT.frame(at: 0.01)
+        #expect(framedRT.element(byKey: "tb") == nil && framedRT.element(byKey: "s0") != nil)
+        if let fTh = framedRT.element(byKey: "th"), let fFrame = elementParent(framedRT, of: fTh) {
+            #expect(abs(fFrame.radius - 6.0) < 0.01)
+            #expect(approxColor(fFrame.fill, kit.c.layer02))
+            #expect(abs((fTh.rect[0] - fFrame.rect[0]) - 3.0) < 0.25)
+        }
+
+        // #97: scrollWide embeds table inside "scroll" viewport for wide tables
+        let wideTable = """
+        | ColumnOneVeryLongHeaderName | ColumnTwoVeryLongHeaderName | ColumnThreeVeryLongHeaderName | ColumnFourVeryLongHeaderName |
+        | --- | --- | --- | --- |
+        | alpha_long_value_1234567890 | beta_long_value_1234567890 | gamma_long_value_1234567890 | delta_long_value_1234567890 |
+        """
+        let wideRT = Runtime<String>(
+            state: wideTable,
+            viewport: Vec2(280, 220),
+            view: { src, _ in Markdown(src).scrollWide().view(for: String.self).render(cardStyle) }
+        )
+        _ = wideRT.frame(at: 0.01)
+        #expect(wideRT.element(byKey: "scroll") != nil)
+
+        // #105: later of tableOutline and tableFrame replaces the prior frame in both style & Runtime geometry
+        let outlineAfterFrame = cardStyle.tableOutline(kit.c.borderStrong)
+        #expect(outlineAfterFrame.tableFrame == nil)
+        #expect(outlineAfterFrame.tableOutline == kit.c.borderStrong)
+        let outlineRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(600, 260),
+            view: { src, _ in Markdown(src).view(for: String.self).render(outlineAfterFrame) }
+        )
+        _ = outlineRT.frame(at: 0.01)
+        if let thEl = outlineRT.element(byKey: "th"), let frame = elementParent(outlineRT, of: thEl) {
+            #expect(abs((thEl.rect[0] - frame.rect[0]) - 0.5) < 0.25)
+        }
+        let frameAfterOutline = outlineAfterFrame.tableFrame(fill: kit.c.layer02, ring: kit.c.borderBase, pad: 4.0)
+        #expect(frameAfterOutline.tableFrame?.pad == 4.0)
+        #expect(frameAfterOutline.tableOutline == nil)
+        let reFramedRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(600, 260),
+            view: { src, _ in Markdown(src).view(for: String.self).render(frameAfterOutline) }
+        )
+        _ = reFramedRT.frame(at: 0.01)
+        if let lTh = reFramedRT.element(byKey: "th"), let lFrame = elementParent(reFramedRT, of: lTh) {
+            #expect(abs((lTh.rect[0] - lFrame.rect[0]) - 4.0) < 0.25)
+        }
+
+        // #98 (tableMargin): tableMargin separates table from surrounding prose
+        let proseAndTable = "Intro\n\n\(mdTable)\n\nOutro"
+        let tightRT = Runtime<String>(
+            state: proseAndTable,
+            viewport: Vec2(500, 420),
+            view: { src, _ in Markdown(src).view(for: String.self).render(plainStyle.tableMargin(top: 2, bottom: 2)) }
+        )
+        let spacedRT = Runtime<String>(
+            state: proseAndTable,
+            viewport: Vec2(500, 420),
+            view: { src, _ in Markdown(src).view(for: String.self).render(plainStyle.tableMargin(top: 40, bottom: 44)) }
+        )
+        _ = tightRT.frame(at: 0.01)
+        _ = spacedRT.frame(at: 0.01)
+        if let thTight = tightRT.element(byKey: "th"), let thSpaced = spacedRT.element(byKey: "th") {
+            #expect(thSpaced.rect[1] - thTight.rect[1] >= 20)
+        }
+
+        // #104: copy from rendered document includes table markdown/text
+        #expect(Markdown(mdTable).plainText().contains("Latency"))
+
+        let wild = MarkdownStyle.fromKit(kit)
+            .tableFrame(fill: kit.c.layer01, ring: kit.c.borderMuted, pad: .nan)
+            .tableBody(fill: kit.c.bgBase, radius: .infinity, shadows: [])
+            .tableHeaderPad(x: -5, y: .nan)
+            .tableCellPadding(x: .infinity, y: -1)
+            .tableMargin(top: .nan, bottom: -.infinity)
+        #expect(wild.tableFrame?.pad == 0)
+        #expect(wild.tableBody?.radius == 0)
+        #expect(wild.tableHeadPad == [0, 0])
+        #expect(wild.tablePad == [0, 0])
+        #expect(wild.tableMargin == [0, 0])
+    }
+
+    @Test("tests/markdown_find.rs: 1MB doc (#131), 200k matches (#132), mid-scalar UTF-8 safety (#133), 100k fragmented match (#135)")
+    func markdownFindScaleAndBoundaryParity() {
+        // #131: one megabyte document searches linearly (ignoring link URL `/needle`)
+        let section =
+            "## Section Heading\n\n" +
+            "Paragraph with **bold words**, *italic text*, `inline_code`, and [a link](https://example.org/ignored/needle).\n" +
+            "Continuation line after a soft break with İstanbul and Straße.\n\n" +
+            "- first list item\n" +
+            "- [x] second **needle** item\n\n" +
+            "```rust\nfn work(x: i32) -> i32 { x + 1 }\n```\n\n"
+        let repeats = (1_048_576 / section.utf8.count) + 1
+        let bigDoc = String(repeating: section, count: repeats)
+        #expect(bigDoc.utf8.count >= 1_048_576)
+
+        let hits = Markdown(bigDoc).findRanges("second needle item", caseSensitivity: .insensitive)
+        #expect(hits.count == repeats)
+        #expect(sliceMatches(bigDoc, Array(hits.prefix(1))) == [["second ", "needle", " item"]])
+        #expect(sliceMatches(bigDoc, Array(hits.suffix(1))) == [["second ", "needle", " item"]])
+        let sensitive = Markdown(bigDoc).findRanges("Continuation line", caseSensitivity: .sensitive)
+        #expect(sensitive.count == repeats)
+
+        // #132: frequent matches in single segment (200,000 occurrences)
+        let n132 = 200_000
+        let manySrc = String(repeating: "a", count: n132)
+        let manyHits = Markdown(manySrc).findRanges("a", caseSensitivity: .sensitive)
+        #expect(manyHits.count == n132)
+        #expect(manyHits.first == [0..<1])
+        #expect(manyHits.last == [(n132 - 1)..<n132])
+
+        // #133: rejected Unicode mid-char candidates (İ vs "i\u{307}" + trailing ASCII 'i')
+        let n133 = 200_000
+        let k133 = 2_000
+        var uniSrc = String(repeating: "\u{0130}", count: n133)
+        let uniQuery = String(repeating: "i\u{0307}", count: k133) + "i"
+        #expect(Markdown(uniSrc).findRanges(uniQuery, caseSensitivity: .insensitive).isEmpty)
+        uniSrc.append("i")
+        let uniHits = Markdown(uniSrc).findRanges(uniQuery, caseSensitivity: .insensitive)
+        let expectedStart = (n133 - k133) * "\u{0130}".utf8.count
+        #expect(uniHits == [[expectedStart..<uniSrc.utf8.count]])
+
+        // #135: 100k bold tokens -> 199,999 source ranges in 1 match + 500 fragmented highlight render
+        let n135 = 100_000
+        let fragSrc = String(repeating: "**a** ", count: n135)
+        let fragQuery = String(repeating: "a ", count: n135).trimmingCharacters(in: .whitespaces)
+        let fragHits = Markdown(fragSrc).findRanges(fragQuery, caseSensitivity: .sensitive)
+        #expect(fragHits.count == 1)
+        #expect(fragHits[0].count == 2 * n135 - 1)
+        let _: El<Int> = Markdown(fragSrc).highlights([(ranges: fragHits[0], style: .match())]).render(MarkdownStyle.neutral(dark: true))
+
+        let smallN = 500
+        let smallSrc = String(repeating: "**a** ", count: smallN)
+        let smallExpected = String(repeating: "a ", count: smallN).trimmingCharacters(in: .whitespaces)
+        let smallHits = Markdown(smallSrc).findRanges(smallExpected, caseSensitivity: .sensitive)
+        #expect(smallHits.count == 1)
+        let kit = Kit.neutral(dark: true)
+        let smallRT = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(600, 200),
+            view: { _, _ in
+                Markdown(smallSrc)
+                    .highlights(smallHits.map { ($0, .match()) })
+                    .build(kit)
+            }
+        )
+        _ = smallRT.frame(at: 0.01)
+        let renderedText = smallRT.elements().compactMap(\.text).joined()
+        #expect(renderedText.contains("a a a"))
+    }
+
+    @Test("tests/markdown_fixture.rs: parsed_blocks_and_highlights fixture snapshot (#144)")
+    func markdownFixtureParsedBlocksAndHighlights() {
+        let fixture = """
+        # Session Summary
+
+        Paragraph with **bold**, *italic*, `inline`, and [link](https://rune.dev).
+
+        - [x] Completed step
+        - [ ] Pending step
+
+        > Quoted note
+
+        ```swift
+        func greet(_ name: String) -> String { "Hi \\(name)" }
+        ```
+
+        | Col A | Col B |
+        | --- | ---: |
+        | 1 | 2 |
+
+        ```mermaid
+        flowchart LR
+          A --> B
+        ```
+        """
+        let doc = MarkdownParser.parseDocument(fixture)
+        #expect(doc.blocks.count >= 6)
+        let swiftHighlights = Syntax.builtin(language: "swift", code: #"func greet(_ name: String) -> String { "Hi \(name)" }"#)
+        #expect(!swiftHighlights.isEmpty)
+        #expect(MarkdownFind.findBounds(in: fixture, doc: doc, query: "link").count == 1)
+    }
+
+    @Test("tests/markdown_diagram_stream.rs, markdown_diagram_frame.rs, markdown_quote_frame.rs (#158-#161, #168-#171)")
+    func markdownDiagramAndQuoteFrameParity() {
+        let kit = Kit.neutral(dark: true)
+        let collector = LockedCollector()
+
+        // #158: open mermaid fence draws complete lines (`n:A`, `n:B`, incremental `n:C`), unsupported kanban streams as `"source"`
+        if case .mermaid = MarkdownParser.parseAST("```mermaid\ngraph TD\nA-->B").first {
+        } else {
+            Issue.record("Expected open mermaid fence to parse as .mermaid")
+        }
+        let openRT = Runtime<String>(
+            state: "```",
+            viewport: Vec2(600, 800),
+            view: { src, _ in col().wFull().child(Markdown(src).streaming(true).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        var ot = 0.0
+        _ = openRT.frame(at: ot)
+        for more in ["mer", "maid\n", "graph T", "D\n  A[Start] --> B[Ch", "eck]\n"] {
+            let b0h = openRT.element(byKey: "b0")?.rect[3] ?? 0
+            #expect(b0h == 0)
+            openRT.update(at: ot) { s, _ in s.append(more) }
+            ot += 1.0 / 60.0
+            _ = openRT.frame(at: ot)
+        }
+        #expect(openRT.element(byKey: "n:A") != nil)
+        #expect(openRT.element(byKey: "n:B") != nil)
+        #expect(openRT.element(byKey: "source") == nil)
+        openRT.update(at: ot) { s, _ in s.append("  B --> C[Do") }
+        ot += 1.0 / 60.0
+        _ = openRT.frame(at: ot)
+        #expect(openRT.element(byKey: "n:C") == nil)
+        openRT.update(at: ot) { s, _ in s.append("ne]\n") }
+        ot += 1.0 / 60.0
+        _ = openRT.frame(at: ot)
+        #expect(openRT.element(byKey: "n:C") != nil)
+
+        let kanbanRT = Runtime<String>(
+            state: "```mermaid\nkanban\n  Todo\n",
+            viewport: Vec2(600, 800),
+            view: { src, _ in col().wFull().child(Markdown(src).streaming(true).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        _ = kanbanRT.frame(at: 0.0)
+        #expect(kanbanRT.element(byKey: "source") != nil)
+
+        // #159: closing open fence settles to same node layout as finished diagram without opacity fade
+        let bodyLR = "```mermaid\ngraph LR\n  A[Start] --> B{Ready?}\n  B -->|yes| C[Ship]\n  B -->|no| D[Fix]\n  D --> B\n"
+        let closedLR = bodyLR + "```\n"
+        let settleRT = Runtime<(String, Bool)>(
+            state: (bodyLR, true),
+            viewport: Vec2(600, 800),
+            view: { s, _ in col().wFull().child(Markdown(s.0).streaming(s.1).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        var st = 0.0
+        _ = settleRT.frame(at: st)
+        for _ in 0..<120 { st += 1.0 / 60.0; _ = settleRT.frame(at: st) }
+        func diagramPieces(_ rt: Runtime<(String, Bool)>) -> [ElementInfo] {
+            rt.elements().filter { e in
+                let k = e.key ?? ""
+                return (k.hasPrefix("n:") || k.hasPrefix("e:")) && !e.exiting
+            }
+        }
+        let beforePieces = diagramPieces(settleRT)
+        #expect(beforePieces.count > 8)
+        settleRT.update(at: st) { s, _ in s = (closedLR, true) }
+        st += 1.0 / 60.0
+        _ = settleRT.frame(at: st)
+        let firstPieces = diagramPieces(settleRT)
+        for _ in 0..<120 { st += 1.0 / 60.0; _ = settleRT.frame(at: st) }
+        let afterPieces = diagramPieces(settleRT)
+
+        let freshRT = Runtime<(String, Bool)>(
+            state: (closedLR, true),
+            viewport: Vec2(600, 800),
+            view: { s, _ in col().wFull().child(Markdown(s.0).streaming(s.1).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        _ = freshRT.frame(at: 0.0)
+        for i in 1...120 { _ = freshRT.frame(at: Double(i) / 60.0) }
+        let wantPieces = diagramPieces(freshRT)
+        #expect(beforePieces.count == wantPieces.count && firstPieces.count == wantPieces.count && afterPieces.count == wantPieces.count)
+        for (i, want) in wantPieces.enumerated() where i < beforePieces.count && i < firstPieces.count && i < afterPieces.count {
+            #expect(beforePieces[i].opacity == 1 && firstPieces[i].opacity == 1)
+            for axis in 0..<4 {
+                #expect(abs(afterPieces[i].rect[axis] - want.rect[axis]) < 0.5)
+            }
+        }
+
+        // #160: finished diagram shows whole at opacity 1 & scale 1 the frame it mounts
+        let seqRT = Runtime<String>(
+            state: "",
+            viewport: Vec2(600, 800),
+            view: { s, _ in col().wFull().child(Markdown(s).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        _ = seqRT.frame(at: 0.0)
+        seqRT.update(at: 0.01) { s, _ in
+            s = "Before\n\n```mermaid\nsequenceDiagram\n  A->>B: hi\n  B-->>A: hello\n```\n"
+        }
+        _ = seqRT.frame(at: 1.0 / 60.0)
+        let shownSeq = seqRT.elements().filter { e in
+            let k = e.key ?? ""
+            return !k.isEmpty && !k.hasPrefix("b") && !e.exiting
+        }
+        #expect(shownSeq.count > 4)
+        #expect(shownSeq.allSatisfy { $0.opacity == 1.0 && $0.scale == 1.0 })
+
+        // #161: fitting & settling a streamed diagram never bloats `"fit"` width
+        let streamLines = [
+            "```mermaid\n",
+            "flowchart LR\n",
+            "  Drop[Socket drops] --> R1[Retry at once]\n",
+            "  R1 -->|ok| On[Online]\n",
+            "  R1 -->|fails| R2[Back off 1 s]\n",
+            "  R2 -->|ok| On\n",
+            "  R2 -->|fails| Off[Offline]\n",
+            "  Off -->|retry| R2\n",
+        ]
+        let fitRT = Runtime<String>(
+            state: "",
+            viewport: Vec2(768, 800),
+            view: { s, _ in col().wFull().child(Markdown(s).streaming(true).render(MarkdownStyle.neutral(dark: true))) }
+        )
+        var ft = 0.0
+        _ = fitRT.frame(at: ft)
+        for line in streamLines {
+            fitRT.update(at: ft) { s, _ in s.append(line) }
+            for _ in 0..<20 { ft += 1.0 / 120.0; _ = fitRT.frame(at: ft) }
+        }
+        for _ in 0..<120 { ft += 1.0 / 120.0; _ = fitRT.frame(at: ft) }
+        let beforeFitW = fitRT.element(byKey: "fit")?.rect[2] ?? 0
+        #expect(beforeFitW > 0)
+        fitRT.update(at: ft) { s, _ in s.append("```\n") }
+        var widths: [Float] = []
+        for _ in 0..<120 {
+            ft += 1.0 / 120.0
+            _ = fitRT.frame(at: ft)
+            if let w = fitRT.element(byKey: "fit")?.rect[2] {
+                widths.append(w)
+            }
+        }
+        let endFitW = widths.last ?? beforeFitW
+        let peakFitW = widths.reduce(beforeFitW, max)
+        #expect(peakFitW <= max(beforeFitW, endFitW) + 0.5)
+
+        // #168: diagramFrame counts non-mermaid code fences in index, omits unsupported kanban, mounts card + open child inside frame-1 & frame-2
+        let twoDoc = """
+        Code first:
+
+        ```rust
+        fn main() {}
+        ```
+
+        ```mermaid
+        graph LR
+          A --> B
+        ```
+
+        Then a second:
+
+        ```mermaid
+        sequenceDiagram
+          A->>B: hi
+        ```
+
+        ```mermaid
+        kanban
+          Todo
+        ```
+        """
+        let frameRT = Runtime<String>(
+            state: twoDoc,
+            viewport: Vec2(600, 900),
+            view: { src, _ in
+                col().wFull().child(
+                    Markdown(src)
+                        .diagramFrame { (card: El<String>, d: MarkdownDiagramFrameContext) -> El<String> in
+                            collector.addDiagram(d)
+                            return col().key("frame-\(d.index)").child(card).child(el().key("open").size(20, 20))
+                        }
+                        .render(MarkdownStyle.neutral(dark: true))
+                )
+            }
+        )
+        _ = frameRT.frame(at: 0.01)
+        let diagSeen = collector.snapshot().diagrams
+        #expect(diagSeen.first?.index == 1 && diagSeen.first?.open == false)
+        #expect(diagSeen.contains(where: { $0.index == 2 && $0.source.hasPrefix("sequenceDiagram") }))
+        #expect(!diagSeen.contains(where: { $0.source.contains("kanban") }))
+        for idx in [1, 2] {
+            let f = frameRT.element(byKey: "frame-\(idx)")
+            #expect(f != nil)
+            if let f {
+                #expect(frameRT.elements().contains(where: { $0.key == "card" && $0.path.hasPrefix(f.path + "/") }))
+                #expect(frameRT.elements().contains(where: { $0.key == "open" && $0.path.hasPrefix(f.path + "/") }))
+            }
+        }
+
+        // #169: diagramTypography(..., minScale: 0) shrinks wide diagram to fit card width
+        let wideSeq = """
+        ```mermaid
+        sequenceDiagram
+          participant B as Browser on a laptop
+          participant E as Edge cache in front
+          participant A as Auth service cluster
+          participant P as Payments API server
+          participant W as Billing worker pool
+          participant S as Search index shard
+          B->>E: a request arrives at the edge
+          E->>A: is this session token still valid?
+          P->>W: enqueue the invoice with the scope
+          W->>S: index the invoice
+        ```
+        """
+        func runWideDiagram(minScale: Float?) -> (card: [Float], diagram: [Float]) {
+            let base = MarkdownStyle.neutral(dark: true)
+            let style = if let minScale {
+                base.diagramTypography(font: base.diagram.font, maxWidth: 420, minScale: minScale)
+            } else {
+                base.diagramTypography(font: base.diagram.font, maxWidth: 420, minScale: base.diagram.minScale)
+            }
+            let r = Runtime<Int>(
+                state: 0,
+                viewport: Vec2(600, 900),
+                view: { _, _ in col().w(420).child(Markdown(wideSeq).render(style)) }
+            )
+            _ = r.frame(at: 0.0)
+            return (r.element(byKey: "card")?.rect ?? [], r.element(byKey: "diagram")?.rect ?? [])
+        }
+        let wideDefault = runWideDiagram(minScale: nil)
+        let wideZeroMin = runWideDiagram(minScale: 0.0)
+        #expect(wideDefault.diagram.count == 4 && wideDefault.card.count == 4)
+        #expect(wideDefault.diagram[2] > wideDefault.card[2])
+        #expect(wideZeroMin.diagram.count == 4 && wideZeroMin.card.count == 4)
+        #expect(wideZeroMin.diagram[0] >= wideZeroMin.card[0] && wideZeroMin.diagram[0] + wideZeroMin.diagram[2] <= wideZeroMin.card[0] + wideZeroMin.card[2] + 0.5)
+
+        // #170-#171: exact quoteFrame plain text on rich & nested quotes
+        func collectQuotes(_ src: String) -> [String] {
+            let qc = LockedCollector()
+            _ = col().child(
+                Markdown(src)
+                    .quoteFrame { (qEl: El<Int>, q: MarkdownQuoteFrameContext) -> El<Int> in
+                        qc.addQuote(q)
+                        return qEl
+                    }
+                    .build(kit)
+            )
+            return qc.snapshot().quotes
+        }
+        let richQuote = "Before.\n\n> First `para` here.\n>\n> Second para.\n>\n> - one\n> - [x] two\n>   - nested\n> 3. third\n>\n> ```\n> let a = 1;\n> ```\n\nAfter.\n"
+        #expect(collectQuotes(richQuote) == ["First para here.\n\nSecond para.\n\n- one\n- [x] two\n  - nested\n\n3. third\n\nlet a = 1;"])
+        #expect(collectQuotes("> outer\n>\n> > inner\n") == ["inner", "outer\n\ninner"])
     }
 }
 

@@ -475,4 +475,90 @@ struct ActionsKeybindAndA11yParityTests {
             #expect(rt.state.toggledTask == true)
         }
     }
+
+    @Test("tests/button_label.rs: 120-frame rolling spring smoothness, constant icon offset, and neighbour gap invariant (#193-#194)")
+    func buttonLabel120FrameRollingSmoothness() {
+        let kit = Kit.neutral(dark: false)
+        let copyIcon = SVGIcon(viewBox: 16, paths: ["M3 3h10v10H3z"])
+
+        let rt = Runtime<String>(
+            state: "Copy",
+            viewport: Vec2(480, 120),
+            view: { label, _ in
+                row().key("bar").p(12).gap(8).itemsCenter()
+                    .child(
+                        kit.actionButton(
+                            key: "roll-btn",
+                            label: .rolling(key: "roll-lbl", text: label),
+                            leadingIcon: copyIcon,
+                            onClick: { _, _ in }
+                        )
+                    )
+                    .child(
+                        kit.actionButton(
+                            key: "after-btn",
+                            label: .text("Share"),
+                            onClick: { _, _ in }
+                        )
+                        .animateLayout(LayoutAnim.widthLeads(kit.motion.control))
+                    )
+            }
+        )
+
+        _ = rt.frame(at: 0.0)
+        guard let btn0 = rectFor(rt, key: "roll-btn"),
+              let after0 = rectFor(rt, key: "after-btn") else {
+            Issue.record("Missing initial rolling button elements")
+            return
+        }
+        let icon0 = rt.elements().first(where: {
+            !$0.exiting && $0.key == "icon" && $0.rect[0] >= btn0[0] && $0.rect[0] <= btn0[0] + btn0[2]
+        })?.rect
+        guard let icon0 else {
+            Issue.record("Missing initial icon rect")
+            return
+        }
+
+        let initialWidth = btn0[2]
+        let initialIconInset = icon0[0] - btn0[0]
+        let initialGap = after0[0] - (btn0[0] + btn0[2])
+        #expect(abs(initialGap - 8.0) < 0.5)
+
+        // Trigger label change and sample 120 frames at 60Hz
+        rt.update(at: 0.016) { s, _ in
+            s = "Copied to clipboard!"
+        }
+        var widths: [Float] = []
+        var maxStep: Float = 0
+        var maxGapDrift: Float = 0
+        var maxIconDrift: Float = 0
+
+        for frameIdx in 1...120 {
+            let t = Double(frameIdx) * (1.0 / 60.0) + 0.016
+            _ = rt.frame(at: t)
+            guard let b = rectFor(rt, key: "roll-btn"),
+                  let a = rectFor(rt, key: "after-btn") else {
+                Issue.record("Missing elements on frame \(frameIdx)")
+                return
+            }
+            if let ic = rt.elements().first(where: { !$0.exiting && $0.key == "icon" && $0.rect[0] >= b[0] && $0.rect[0] <= b[0] + b[2] })?.rect {
+                maxIconDrift = max(maxIconDrift, abs((ic[0] - b[0]) - initialIconInset))
+            }
+            maxGapDrift = max(maxGapDrift, abs((a[0] - (b[0] + b[2])) - initialGap))
+            if let prev = widths.last {
+                maxStep = max(maxStep, abs(b[2] - prev))
+            }
+            widths.append(b[2])
+        }
+
+        let finalWidth = widths.last ?? 0
+        #expect(finalWidth > initialWidth + 40)
+        #expect(widths.contains(where: { $0 > initialWidth + 5 && $0 < finalWidth - 5 }))
+        #expect(maxStep < 18.0)
+        #expect(maxGapDrift < 0.5)
+        #expect(maxIconDrift < 0.5)
+
+        let a11yBtn = rt.elements().first(where: { !$0.exiting && $0.key == "roll-btn" })
+        #expect(a11yBtn?.label == "Copied to clipboard!")
+    }
 }
