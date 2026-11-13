@@ -19,6 +19,15 @@ public struct Animated<T: Animatable>: Sendable {
         self.velEps = eps.vel
     }
 
+    /// Uses `propClass`'s settle thresholds (at `pixelScale`, defaulting to `2.0`).
+    public func withClass(_ propClass: PropClass, pixelScale: Float = 2.0) -> Animated<T> {
+        var copy = self
+        let e = propClass.settleThresholds(pixelScale: pixelScale)
+        copy.posEps = e.pos
+        copy.velEps = e.vel
+        return copy
+    }
+
     /// Jumps immediately to `value` with zero velocity.
     public mutating func set(_ value: T) {
         self.target = value

@@ -298,6 +298,22 @@ public enum KnobTree {
             knobs.kbd = true
             return true
 
+        case .text(let t) where t.count == 1 && ("1"..."9").contains(t):
+            if let num = Int(t) {
+                let optIdx = num - 1
+                let node = rowList[currentIdx]
+                if case .knob(let gi, let ki) = node {
+                    let k = groups[gi].knobs[ki]
+                    if optIdx < k.labels.count {
+                        knobs.checkpoint()
+                        knobs.set(k, Float(optIdx))
+                    }
+                }
+                knobs.kbd = true
+                return true
+            }
+            return false
+
         default:
             return false
         }

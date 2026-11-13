@@ -269,3 +269,53 @@ public struct Anim<T: Animatable>: Sendable, Hashable {
 
 /// Untyped animation descriptor used internally by `AnimationStore` and `Scene`.
 public typealias RawAnim = Anim<Float>
+
+/// Builder parity with Rust `AnimExt`: lets curves, springs, and spring pairs configure
+/// `.delay`, `.blend`, `.additive`, `.merge`, `.velocity`, and `.completion` directly.
+public protocol AnimConvertible {
+    func intoAnim<T: Animatable>(_ valueType: T.Type) -> Anim<T>
+}
+
+extension AnimConvertible {
+    public func delay<T: Animatable>(_ seconds: Float, as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).delay(seconds)
+    }
+
+    public func blend<T: Animatable>(_ blend: Blend, as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).blend(blend)
+    }
+
+    public func additive<T: Animatable>(as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).additive()
+    }
+
+    public func merge<T: Animatable>(as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).merge()
+    }
+
+    public func velocity<T: Animatable>(_ rule: VelocityRule, as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).velocity(rule)
+    }
+
+    public func completion<T: Animatable>(_ token: UInt64, as valueType: T.Type = Float.self) -> Anim<T> {
+        intoAnim(valueType).completion(token)
+    }
+}
+
+extension Curve: AnimConvertible {
+    public func intoAnim<T: Animatable>(_ valueType: T.Type = Float.self) -> Anim<T> {
+        Anim(curve: self)
+    }
+}
+
+extension Spring: AnimConvertible {
+    public func intoAnim<T: Animatable>(_ valueType: T.Type = Float.self) -> Anim<T> {
+        Anim(spring: self)
+    }
+}
+
+extension SpringPair: AnimConvertible {
+    public func intoAnim<T: Animatable>(_ valueType: T.Type = Float.self) -> Anim<T> {
+        Anim(self)
+    }
+}

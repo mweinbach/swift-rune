@@ -161,10 +161,27 @@ public struct TraceHeader: Sendable, Equatable {
     }
 }
 
+/// Thread-safe shared memory trace buffer (`trace.rs::SharedBuffer`) for tests and inspection.
+public final class SharedBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = ""
+
+    public init() {}
+
+    public func write(_ chunk: String) {
+        lock.withLock { storage.append(chunk) }
+    }
+
+    public func contents() -> String {
+        lock.withLock { storage }
+    }
+}
+
 /// Writes one motion-lint JSONL line per frame (`trace.rs::MotionTrace`).
 public final class MotionTrace: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer: String
+    private var sharedBuffer: SharedBuffer?
     private var fileHandle: FileHandle?
     private var ids: [UInt64: UInt32] = [:]
     private var states: [UInt32: [Float]] = [:]
@@ -179,12 +196,14 @@ public final class MotionTrace: @unchecked Sendable {
     private var channels = TraceChannels()
     private var customEvents: [String] = []
 
-    public init(header: TraceHeader, fileHandle: FileHandle? = nil) {
+    public init(header: TraceHeader, fileHandle: FileHandle? = nil, sharedBuffer: SharedBuffer? = nil) {
         self.hz = Double(max(header.hz, 1.0))
         self.fileHandle = fileHandle
+        self.sharedBuffer = sharedBuffer
         let headerLine =
             "{\"type\":\"header\",\"launch\":\(jsonEscape(header.launch)),\"width\":\(header.width),\"height\":\(header.height),\"hz\":\(header.hz),\"scale\":\(header.scale),\"platform\":\"rune\",\"units\":\"pt\",\"clock\":\"virtual\"}\n"
         self.buffer = headerLine
+        sharedBuffer?.write(headerLine)
         if let fileHandle, let data = headerLine.data(using: .utf8) {
             fileHandle.write(data)
         }
@@ -193,6 +212,11 @@ public final class MotionTrace: @unchecked Sendable {
     /// Creates an in-memory trace for tests.
     public static func inMemory(header: TraceHeader) -> MotionTrace {
         MotionTrace(header: header, fileHandle: nil)
+    }
+
+    /// Creates a trace backed by a `SharedBuffer` (`trace.rs::SharedBuffer`).
+    public static func inMemory(header: TraceHeader, buffer: SharedBuffer) -> MotionTrace {
+        MotionTrace(header: header, fileHandle: nil, sharedBuffer: buffer)
     }
 
     /// Opens `$RUNE_MOTION_TRACE` if set.
@@ -388,6 +412,7 @@ public final class MotionTrace: @unchecked Sendable {
             line += "}\n"
 
             buffer += line
+            sharedBuffer?.write(line)
             if let fileHandle, let data = line.data(using: .utf8) {
                 fileHandle.write(data)
             }

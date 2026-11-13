@@ -106,6 +106,21 @@ public struct TransitionEffect: Sendable, Hashable {
 
     public static let identity = TransitionEffect()
 
+    /// Opacity effect starting/ending at `zeroOpacity`.
+    public static func opacity(_ zeroOpacity: Float) -> TransitionEffect {
+        TransitionEffect(zeroOpacity: zeroOpacity)
+    }
+
+    /// Uniform scale effect starting/ending at `factor` about `anchor`.
+    public static func scale(_ factor: Float, anchor: Vec2 = Vec2(0.5, 0.5)) -> TransitionEffect {
+        TransitionEffect(zeroScale: Vec2(factor, factor), anchor: anchor)
+    }
+
+    /// Gaussian blur effect peaking at `radius` when absent.
+    public static func blur(_ radius: Float) -> TransitionEffect {
+        TransitionEffect(zeroBlur: radius)
+    }
+
     public var travels: Bool {
         pointOffset != .zero || relativeOffset != .zero
     }
