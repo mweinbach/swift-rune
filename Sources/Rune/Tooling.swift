@@ -1360,6 +1360,24 @@ public enum HeadlessRunner {
             var rendered: Frame? = nil
             var drawCount = 0
             if let comp = compositor {
+                #if canImport(Metal)
+                let compFrame = CompositorFrame<State>(
+                    deviceKey: devKey,
+                    pixelSize: (surfaceW, surfaceH),
+                    dt: 1.0 / 60.0,
+                    updateMilliseconds: 0.0,
+                    srgbBlend: runtime.srgbBlend,
+                    runtime: runtime,
+                    device: metalRenderer?.device,
+                    commandQueue: metalRenderer?.commandQueue,
+                    pixelFormat: runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb,
+                    renderer: metalRenderer,
+                    drawUI: {
+                        drawCount += 1
+                        rendered = try? renderCaptured(cap)
+                    }
+                )
+                #else
                 let compFrame = CompositorFrame<State>(
                     deviceKey: devKey,
                     pixelSize: (surfaceW, surfaceH),
@@ -1372,6 +1390,7 @@ public enum HeadlessRunner {
                         rendered = try? renderCaptured(cap)
                     }
                 )
+                #endif
                 comp.render(frame: compFrame)
                 if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
                     compFrame.drawUI()
