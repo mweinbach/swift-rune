@@ -1412,6 +1412,25 @@ struct OverlayLifecycleParityTests {
         #expect(dragOverlay.applyInput())
         #expect(dragOverlay.options.input == .none)
         #expect(dragOverlay.pendingInput == nil)
+
+        // Escape drag-cancel & focus-loss cancellation clear pointerCaptured (`pointer.rs:107-153`).
+        dragOverlay.setInput(.all)
+        _ = dragOverlay.applyInput()
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .primary, mods: .none, at: 0.03)
+        dragOverlay.runtime.pointerMove(to: Vec2(40, 20), at: 0.035)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        #expect(dragOverlay.runtime.keyDown(KeyEvent(key: .escape, mods: .none), at: 0.04))
+        #expect(!dragOverlay.runtime.pointerCaptured)
+
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .primary, mods: .none, at: 0.05)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        _ = dragOverlay.runtime.cancelPointerForFocusLoss(at: 0.055)
+        #expect(!dragOverlay.runtime.pointerCaptured)
+
+        dragOverlay.runtime.pointerDown(at: Vec2(20, 20), button: .secondary, mods: .none, at: 0.06)
+        #expect(dragOverlay.runtime.pointerCaptured)
+        _ = dragOverlay.runtime.cancelPointerForFocusLoss(at: 0.065)
+        #expect(!dragOverlay.runtime.pointerCaptured)
     }
 
     @Test("overlay/more_tests.rs:792,953 - animated reveal enters from offset and Windows fade alpha steps linearly")

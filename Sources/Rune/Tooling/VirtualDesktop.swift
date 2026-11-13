@@ -1154,7 +1154,7 @@ public final class DesktopWindow<State>: DesktopMember {
     }
 
     public func runReopenHook(hasVisibleWindows: Bool) -> Bool {
-        guard let hook = onReopenHook else { return false }
+        guard !life.isFinished, let hook = onReopenHook else { return false }
         var tx = Tx()
         let handled = hook(&runtime.state, hasVisibleWindows, &tx)
         runtime.applyHookTx(tx, at: currentTime)

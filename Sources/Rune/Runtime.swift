@@ -8570,6 +8570,10 @@ public final class Runtime<State> {
         if ev.key == .escape, let drag = activeDrag {
             state = drag.stateSnapshotBeforeDrag
             activeDrag = nil
+            primaryPointerHeld = false
+            if drag.button == .secondary {
+                secondaryPointerHeld = false
+            }
             endKitPressRepeat()
             pressedPath = nil
             pressedKey = nil
@@ -9681,10 +9685,7 @@ public final class Runtime<State> {
     /// or `tx.commit()` was explicitly called.
     @discardableResult
     public func runPoll(at now: Double) -> Bool {
-        if let due = nextWakeDeadline, now > due {
-            nextWakeDeadline = nil
-        }
-        return RuntimeIdScope.$current.withValue(runtimeId) {
+        RuntimeIdScope.$current.withValue(runtimeId) {
             guard let pollFn = poll else { return false }
             var tx = makeTx(at: now)
             let changed: Bool = PerfWarn.Stall.timed("poll") {

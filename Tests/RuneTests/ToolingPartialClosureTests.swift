@@ -1698,4 +1698,25 @@ struct ToolingPartialClosureTests {
         Self.desktopLogLock.unlock()
         #expect(reopened3.count == 1 && reopened3[0].0 == "a" && !reopened3[0].1)
     }
+
+    @Test("virtual_desktop/window.rs:354 - runReopenHook skips permanently closed windows")
+    func desktopWindowRunReopenHookSkipsFinishedWindow() {
+        let app = App<Int>(title: "Finished", size: Vec2(200, 120), state: 0) { _, _ in
+            el().size(200, 120)
+        }
+        .onReopen { count, _, _ in
+            count += 1
+            return true
+        }
+        let win = DesktopWindow<Int>(key: "finished", app: app, scale: 1.0)
+        win.start(desktop: .single(scale: 1.0))
+        #expect(win.reopenCandidate().reopenable)
+        #expect(win.runReopenHook(hasVisibleWindows: false))
+        #expect(win.runtime.state == 1)
+
+        win.close()
+        #expect(!win.reopenCandidate().reopenable)
+        #expect(!win.runReopenHook(hasVisibleWindows: false))
+        #expect(win.runtime.state == 1)
+    }
 }
