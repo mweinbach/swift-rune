@@ -110,7 +110,7 @@ struct ElKitcStreamParityTests {
                 }
                 stack = stack.child(
                     col().key("reply").wFull().streaming(s.streaming)
-                        .child(text(s.text).font(TextStyle(size: 13.0, weight: 400.0)).wrap(.wrap).wFull().reveal(0.18))
+                        .child(text(s.text).wrap(.wrap).wFull().reveal(0.18))
                 )
                 return col().wFull().hFull().child(
                     col().key("scroll").wFull().grow(1).shrink().scroll(stickBottom: true).child(stack)

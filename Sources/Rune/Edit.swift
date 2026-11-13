@@ -688,22 +688,16 @@ public struct TextEdit: Sendable, Equatable {
         }
     }
 
-    /// Replaces the entire draft and discards undo/redo history while preserving secure mode (`edit.rs:470`).
+    /// Replaces the entire draft and discards undo/redo history while re-arming `isPristine` and preserving secure mode (`edit.rs:470`, `TextEdit::replace_text`).
     public mutating func replaceText(_ newText: String) {
         setText(newText, recordUndo: false)
         clearHistory()
+        editedTag = false
     }
 
     public mutating func clear() {
         setText("", recordUndo: false)
         clearHistory()
-    }
-
-    /// Programmatic app replacement that re-arms `isPristine` and clears undo history (`TextEdit::replace_text`).
-    public mutating func replaceText(_ newText: String) {
-        setText(newText, recordUndo: false)
-        clearHistory()
-        editedTag = false
     }
 
     public mutating func selectAll() {

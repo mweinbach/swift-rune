@@ -2278,12 +2278,6 @@ public final class TextSystem: @unchecked Sendable {
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
     private var measureCache: [MeasureKey: Vec2] = [:]
-    private struct DecoratedRange {
-        var u16Range: Range<Int>
-        var underline: Bool
-        var strikethrough: Bool
-        var background: Color?
-    }
 
     private struct TypesetterKey: Hashable {
         var text: String

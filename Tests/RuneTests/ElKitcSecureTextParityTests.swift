@@ -532,11 +532,13 @@ struct ElKitcSecureTextParityTests {
         let sceneMasked = rt.frame(at: 2.0 / 60.0)
         let secMaskedEl = rt.element(byKey: "secret")!
         let secGlyphs = sceneMasked.primitives.filter {
-            $0.kind == .glyph
-                && $0.rect.x >= secMaskedEl.rect[0] - 1
-                && $0.rect.x <= secMaskedEl.rect[0] + secMaskedEl.rect[2] + 1
-                && $0.rect.y >= secMaskedEl.rect[1] - 1
-                && $0.rect.y <= secMaskedEl.rect[1] + secMaskedEl.rect[3] + 1
+            let cy = $0.rect.y + $0.rect.w * 0.5
+            let cx = $0.rect.x + $0.rect.z * 0.5
+            return $0.kind == .glyph
+                && cx >= secMaskedEl.rect[0]
+                && cx <= secMaskedEl.rect[0] + secMaskedEl.rect[2]
+                && cy >= secMaskedEl.rect[1]
+                && cy <= secMaskedEl.rect[1] + secMaskedEl.rect[3]
         }
         #expect(secGlyphs.count == 12)
         #expect(sceneMasked.primitives.filter { $0.kind == .glyph }.count == 23)

@@ -991,7 +991,6 @@ public final class Runtime<State> {
 
     /// Current animation time scale for the view (`Runtime::time_scale`).
     public var timeScale: Float { cxSettings.viewTimeScale }
-    public var events: [String] = []
     private var prevRevealedSecureIds: Set<NodeId> = []
     private var lastSecureMaskInfo: [NodeId: (count: Int, multiline: Bool)] = [:]
 
@@ -3667,7 +3666,9 @@ public final class Runtime<State> {
             commitColorSpring: commitColorSpring,
             commitFollowEdge: commitFollowEdge,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds
+            prevMountedIds: prevMountedIds,
+            nowRevealedSecureIds: nowRevealedSecureIds,
+            concealedSecureIndices: concealedSecureIndices
         )
     }
 
@@ -3687,7 +3688,9 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Set<NodeId>,
+        nowRevealedSecureIds: Set<NodeId>,
+        concealedSecureIndices: [Int]
     ) {
 
         virtualInputs = pass.virtualExpansion.virtualInputs

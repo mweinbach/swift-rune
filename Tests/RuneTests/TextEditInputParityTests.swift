@@ -130,6 +130,7 @@ struct TextEditInputParityTests {
 
         var multi = TextEdit("line1\nline2", multiline: true)
         multi.isSecure = true
+        multi.markEdited()
         #expect(multi.displayString == TextEdit.multilineSecureMask)
         #expect(multi.handleKey(KeyEvent(key: .enter)) == .modified)
         #expect(multi.text == "line1\nline2\n")
