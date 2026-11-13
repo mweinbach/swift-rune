@@ -515,5 +515,12 @@ struct RuneHighlightsTests {
             #expect(pyStream.highlight(pyAcc) == Highlighter().highlight(pyAcc, language: .python))
         }
         #expect(HighlightToken.all.count == 73)
+        for (idx, tok) in HighlightToken.all.enumerated() {
+            #expect(tok.index == idx)
+        }
+        let mod = WasmHighlightsModule()
+        #expect(throws: WasmTrap.trap) {
+            _ = try mod.ld8u(-1, 0)
+        }
     }
 }

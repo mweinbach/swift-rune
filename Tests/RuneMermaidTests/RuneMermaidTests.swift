@@ -20,13 +20,13 @@ struct RuneMermaidCoreTests {
             #expect(!canRenderMermaid(src), "Should not render: \(src)")
         }
 
-        let parsed = MermaidParser.parse("---\ntitle: Hi\n---\ngraph TD\nA-->B")
+        let parsed = testScene("---\ntitle: Hi\n---\ngraph TD\nA-->B", paint: MermaidTheme.neutral(dark: true))
         #expect(parsed != nil)
         #expect(parsed?.title == "Hi")
 
-        #expect(supportedMermaid("%%{\n  init: {'theme': 'dark'}\n}%%\nflowchart LR\nA-->B"))
-        #expect(supportedMermaid("stateDiagram-v2\n[*] --> Idle\nIdle --> [*]"))
-        #expect(supportedMermaid("classDiagram\nA <|-- B"))
+        #expect(canRenderMermaid("%%{\n  init: {'theme': 'dark'}\n}%%\nflowchart LR\nA-->B"))
+        #expect(canRenderMermaid("stateDiagram-v2\n[*] --> Idle\nIdle --> [*]"))
+        #expect(canRenderMermaid("classDiagram\nA <|-- B"))
         #expect(canRenderMermaid("flowchart TD\n  A[Runtime&lt;S&gt;] --> B[a; b]; B --> C"))
     }
 
@@ -152,15 +152,34 @@ struct RuneMermaidCoreTests {
     func drawingAndRenderMermaid() {
         var roomy = MermaidTheme.neutral(dark: true)
         roomy.maxWidth = 4000.0
-        let src = "graph TD\nA[Start] --> B[End]"
-        let full = testScene(src, paint: roomy)!
-        let d: MermaidDrawing<Int> = renderMermaidDrawing(src, theme: roomy)!
+        let wideSeq = """
+        sequenceDiagram
+          autonumber
+          participant B as Browser on a laptop
+          participant E as Edge cache in front
+          participant A as Auth service cluster
+          participant P as Payments API server
+          participant W as Billing worker pool
+          participant S as Search index shard
+          participant L as Long-running audit log
+          B->>E: a request arrives at the edge
+          E->>A: is this session token still valid?
+          A-->>E: yes, here is the account scope
+          E->>P: forward the call with its scope
+          P->>W: enqueue the invoice with the scope
+          W->>S: index the invoice
+          S-->>W: ok
+          W->>L: record the change
+          W-->>P: done
+          P-->>E: the response
+        """
+        let full = testScene(wideSeq, paint: roomy)!
+        let d: MermaidDrawing<Int> = renderMermaidDrawing(wideSeq, theme: roomy)!
         #expect(d.size == full.size)
 
-        let titledSrc = "---\ntitle: Checkout\n---\n\(src)"
+        let titledSrc = "---\ntitle: Checkout\n---\n\(wideSeq)"
         let t: MermaidDrawing<Int> = renderMermaidDrawing(titledSrc, theme: roomy)!
-        #expect(t.size.y > d.size.y + 15.0)
-        #expect(t.size.x >= d.size.x)
+        #expect(t.size.y > d.size.y + 20.0 && t.size.x >= d.size.x)
 
         let el: El<Int>? = renderMermaid(titledSrc, theme: roomy, hover: (.edges, roomy.text))
         #expect(el != nil)

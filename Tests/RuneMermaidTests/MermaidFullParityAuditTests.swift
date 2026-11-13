@@ -139,20 +139,17 @@ struct MermaidFullParityAuditTests {
     @Test("5c.#7 chart axis labels never overlap")
     func chartAxisLabelsNeverOverlap() {
         var c = Canvas()
-        let font = MermaidChart.small(dark)
-        let ticks: [(Float, Measured)] = [
-            (0.0, measureText("2024-01-01", font: font)),
-            (40.0, measureText("2024-01-02", font: font)),
-            (80.0, measureText("2024-01-03", font: font)),
-            (200.0, measureText("2024-01-04", font: font)),
-        ]
+        let font = light.font
+        let ticks: [(Float, Measured)] = [0.0, 10.0, 60.0, 200.0].map {
+            ($0, measureText("2024-01-01", font: font))
+        }
         MermaidChart.axisX(
             &c,
             ticks: ticks,
             xRange: (0.0, 200.0),
             yRange: (0.0, 100.0),
             font: font,
-            paint: dark
+            paint: light
         )
         #expect(c.labels.count < 4)
         for l in c.labels {
@@ -192,12 +189,16 @@ struct MermaidFullParityAuditTests {
         #expect(MermaidDate.format(ts, fmt: "100%% %B") == "100% March")
 
         // 5c.#17 calendar_ticks_step_on_sundays_and_months
-        let w = MermaidDate.Step.weeks(1).ticks(lo: day(2024, 1, 3), hi: day(2024, 1, 22), max: 10)
+        let lo = day(2024, 1, 3) + MermaidDate.hour
+        let hi = day(2024, 4, 20)
+        let w = MermaidDate.Step.weeks(1).ticks(lo: lo, hi: hi, max: 100)
         #expect(w.first == day(2024, 1, 7))
-        #expect(MermaidDate.fields(w[0]).wd == 0)
-        let m = MermaidDate.Step.months(1).ticks(lo: day(2024, 1, 15), hi: day(2024, 4, 2), max: 10)
+        #expect(w.allSatisfy { MermaidDate.fields($0).wd == 0 })
+        let m = MermaidDate.Step.months(1).ticks(lo: lo, hi: hi, max: 100)
         #expect(m == [day(2024, 2, 1), day(2024, 3, 1), day(2024, 4, 1)])
-        #expect(MermaidDate.Step.days(1).ticks(lo: day(2024, 1, 1), hi: day(2024, 2, 1), max: 5).count == 5)
+        #expect(MermaidDate.Step.days(1).ticks(lo: lo, hi: hi, max: 5).count == 5)
+        #expect(MermaidDate.Step.parse("2week") == .weeks(2))
+        #expect(MermaidDate.Step.parse("6hour") == .ms(6.0 * MermaidDate.hour))
     }
 
     // MARK: - ER & Flowchart (5c.#18, #19, #21, #26, #32, #33)
@@ -426,7 +427,7 @@ struct MermaidFullParityAuditTests {
         #expect(!second.isEmpty && second.allSatisfy { $0.labels.isEmpty })
 
         // 5c.#49 one_edges_hover_leaves_other_edges_unlit
-        let iso = litScene("flowchart LR\n  A -->|go| B\n  C -->|stay| D")
+        let iso = litScene("flowchart TD\n  A -->|go| B\n  C -->|stay| D")
         let isoGo = labelIdx(iso, "go")
         let isoStay = labelIdx(iso, "stay")
         for key in ["hover:n:A", "hover:n:B", "hover:e:A>B."] {
@@ -1033,30 +1034,43 @@ struct MermaidFullParityAuditTests {
     func steadyStreamFullAuditParity() {
         let retries = """
         flowchart LR
-          A[Read] --> B[Parse]
-          B --> C[Check]
-          C -->|bad| A
-          C -->|good| D[Done]
+          Drop[Socket drops] --> R1[Retry at once]
+          R1 -->|ok| On[Online]
+          R1 -->|fails| R2[Back off 1 s]
+          R2 -->|ok| On
+          R2 -->|fails| Off[Offline]
+          Off -->|retry| R2
         """
         let deploy = """
-        flowchart LR
-          A[Push] --> B[Build]
-          subgraph prod[Prod]
-            B --> C[Serve]
+        flowchart TD
+          A[Push] --> B{Tests pass?}
+          B -->|no| C[Fix]
+          C --> A
+          B -->|yes| D[Build image]
+          subgraph Ship
+            D --> E[Canary]
+            E --> F[Roll out]
           end
+          E -->|errors| G[Roll back]
+          G --> C
+          F --> H([Done])
         """
         let connection = """
-        sequenceDiagram
-          participant App
-          participant DB
-          App->>DB: query
-          DB-->>App: rows
+        stateDiagram-v2
+          [*] --> Idle
+          Idle --> Connecting: open
+          Connecting --> Open: ok
+          Connecting --> Backoff: fail
+          Backoff --> Connecting: timer
+          Open --> Closing: close
+          Open --> Backoff: drop
+          Closing --> [*]
         """
 
         func centres(_ s: MermaidScene) -> [String: Vec2] {
             var map: [String: Vec2] = [:]
-            for (l, lk) in zip(s.labels, s.labelKeys) {
-                map[lk.key] = Vec2(l.at.x + l.size.x / 2.0, l.at.y + l.size.y / 2.0)
+            for p in s.pieces where p.key.hasPrefix("n:") && !p.key.contains(".") {
+                map[p.key] = Vec2(p.at.x + p.size.x / 2.0, p.at.y + p.size.y / 2.0)
             }
             return map
         }
@@ -1065,9 +1079,8 @@ struct MermaidFullParityAuditTests {
             MermaidScenes.clearCache()
             let lines = src.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             var out: [MermaidScene] = []
-            var acc = ""
-            for line in lines {
-                acc += line + "\n"
+            for k in 2...lines.count {
+                let acc = lines[..<k].joined(separator: "\n") + "\n"
                 if let built = MermaidScenes.growing(acc, theme: dark, hover: nil) {
                     out.append(built)
                 }
@@ -1076,15 +1089,27 @@ struct MermaidFullParityAuditTests {
         }
 
         func worstReversal(_ scenes: [MermaidScene]) -> Float {
+            var paths: [String: [Vec2]] = [:]
+            for s in scenes {
+                for (k, c) in centres(s) {
+                    paths[k, default: []].append(c)
+                }
+            }
             var maxRev: Float = 0.0
-            for i in 0..<max(0, scenes.count - 2) {
-                let c0 = centres(scenes[i]), c1 = centres(scenes[i + 1]), c2 = centres(scenes[i + 2])
-                for (k, p1) in c1 {
-                    guard let p0 = c0[k], let p2 = c2[k] else { continue }
-                    let dx1 = p1.x - p0.x, dx2 = p2.x - p1.x
-                    let dy1 = p1.y - p0.y, dy2 = p2.y - p1.y
-                    if dx1 * dx2 < -0.5 { maxRev = max(maxRev, min(abs(dx1), abs(dx2))) }
-                    if dy1 * dy2 < -0.5 { maxRev = max(maxRev, min(abs(dy1), abs(dy2))) }
+            for path in paths.values {
+                for axis in 0...1 {
+                    var lo = Float.greatestFiniteMagnitude
+                    var hi = -Float.greatestFiniteMagnitude
+                    var up: Float = 0.0
+                    var down: Float = 0.0
+                    for p in path {
+                        let v = axis == 0 ? p.x : p.y
+                        up = max(up, hi - v)
+                        down = max(down, v - lo)
+                        lo = min(lo, v)
+                        hi = max(hi, v)
+                    }
+                    maxRev = max(maxRev, min(up, down))
                 }
             }
             return maxRev
