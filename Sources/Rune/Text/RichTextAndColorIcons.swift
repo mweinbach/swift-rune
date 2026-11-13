@@ -566,12 +566,12 @@ public enum TextHighlightPainter {
         var out: [HighlightQuad] = []
 
         for h in highlights {
-            let a = min(h.byteRange.lowerBound, len)
-            let b = min(h.byteRange.upperBound, len)
-            guard a < b, h.bg.a > 0 || h.ring != nil else { continue }
+            let rawA = min(h.byteRange.lowerBound, len)
+            let rawB = min(h.byteRange.upperBound, len)
+            guard rawA < rawB, h.bg.a > 0 || h.ring != nil else { continue }
             let pad = h.pad * pixelScale
             let ring = h.ring.map { TextRing(color: $0.color, width: $0.width * pixelScale) }
-            let boxes = textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pixelScale)
+            let boxes = textSystem.selectionRects(in: shaped, utf8Range: rawA..<rawB, pixelScale: pixelScale)
             for r in boxes where r.z > 0 {
                 let x = origin.x * pixelScale + r.x * pixelScale - pad
                 let y = origin.y * pixelScale + r.y * pixelScale

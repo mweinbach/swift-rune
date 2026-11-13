@@ -182,7 +182,16 @@ struct MarkdownCloseoutParityTests {
             pureRT.update(at: 0.14) { s, _ in s.accent = newInk }
             _ = pureRT.frame(at: 0.15)
             #expect(renders.take() == 3)
-            #expect(pureRT.elements().contains(where: { $0.key == "b0" && $0.textColor == newInk }))
+            _ = pureRT.frame(at: 2.0)
+            #expect(pureRT.elements().contains(where: {
+                $0.key == "b0"
+                    && ($0.textColor.map {
+                        abs($0.r - newInk.r) < 1e-3
+                            && abs($0.g - newInk.g) < 1e-3
+                            && abs($0.b - newInk.b) < 1e-3
+                            && abs($0.a - newInk.a) < 1e-3
+                    } ?? false)
+            }))
         }
 
         // #14: multiple links each keep their own independent help tooltip

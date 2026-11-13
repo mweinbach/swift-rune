@@ -97,10 +97,11 @@ final class RetainedLayoutCoordinator {
                             style: resolved.style,
                             maxWidth: shapeW,
                             pixelScale: scale,
-                            emitGlyphs: false
+                            emitGlyphs: false,
+                            bypassCache: resolved.isSecure
                         ).size
                     } else {
-                        m = textSystem.measure(measureStr, style: resolved.style, maxWidth: shapeW, pixelScale: scale)
+                        m = textSystem.measure(measureStr, style: resolved.style, maxWidth: shapeW, pixelScale: scale, bypassCache: resolved.isSecure)
                     }
                     let lineH = TextSystem.specLineHeight(
                         lineCount: 1,

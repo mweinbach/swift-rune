@@ -260,6 +260,9 @@ private func premulSIMD4(_ c: Color, opacity: Float = 1.0, srgb: Bool) -> SIMD4<
 internal let radialStopProps: [Prop<MotionColor>] = (0..<16).map {
     Prop<MotionColor>.custom(UInt16(80 + $0), .color, name: "radialStop\($0)")
 }
+internal let shadowColorProps: [Prop<MotionColor>] = (0..<8).map {
+    Prop<MotionColor>.custom(UInt16(120 + $0), .color, name: "shadowColor\($0)")
+}
 
 private func resolveRadialRadii(
     _ spec: RadialRadius,
@@ -1264,7 +1267,7 @@ extension Runtime {
             let circularRadiiPx = SIMD4<Float>(abs(shapeRadiiPx.x), abs(shapeRadiiPx.y), abs(shapeRadiiPx.z), abs(shapeRadiiPx.w))
 
             if !flatFocusWithinShadows {
-                for sh in el.shadows where !sh.inset {
+                for (sIdx, sh) in el.shadows.enumerated() where !sh.inset {
                 let sp = sh.spread * scale
                 let sr = SIMD4<Float>(
                     rectPx.x + sh.x * scale - sp,
@@ -1278,7 +1281,8 @@ extension Runtime {
                     circularRadiiPx.z > 0 ? max(0, circularRadiiPx.z + sp) : 0,
                     circularRadiiPx.w > 0 ? max(0, circularRadiiPx.w + sp) : 0
                 )
-                let fill = premulSIMD4(sh.color, opacity: localOpacity, srgb: srgbBlend)
+                let shColor = (sIdx < shadowColorProps.count ? scene.store.get(nid, shadowColorProps[sIdx]).map(Color.init) : nil) ?? sh.color
+                let fill = premulSIMD4(shColor, opacity: localOpacity, srgb: srgbBlend)
                 let ring = (sh.x == 0 && sh.y == 0)
                 if sh.blur <= 0.0 && (ring || shadowHole == nil) {
                     if ring && sp <= 0.0 { continue }
@@ -1320,7 +1324,7 @@ extension Runtime {
                     instances.append(shadowInst)
                     marks.append(0)
                 }
-            }
+                }
             }
 
             // 4. Background fill, multi-stop gradients, and borders
@@ -1559,12 +1563,13 @@ extension Runtime {
 
             // 5. Inset shadows
             if !flatFocusWithinShadows {
-                for sh in el.shadows where sh.inset {
+                for (sIdx, sh) in el.shadows.enumerated() where sh.inset {
                     let sp = sh.spread * scale
+                    let shColor = (sIdx < shadowColorProps.count ? scene.store.get(nid, shadowColorProps[sIdx]).map(Color.init) : nil) ?? sh.color
                     instances.append(RenderInstance(
                         rect: rectPx,
                         radii: radiiPx,
-                        fill: premulSIMD4(sh.color, opacity: localOpacity, srgb: srgbBlend),
+                        fill: premulSIMD4(shColor, opacity: localOpacity, srgb: srgbBlend),
                         border: .zero,
                         params: SIMD4<Float>(sp, KIND_INSET, max(0, sh.blur * scale), 1.0),
                         uv: SIMD4<Float>(sh.x * scale, sh.y * scale, 0, 0),
@@ -1762,7 +1767,7 @@ extension Runtime {
             // 10. Icon (`SVGIcon`)
             if let (svg, iconSizePt) = el.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
-                let iconColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                let iconColor = scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black)
                 if let colorDecoded = textSystem.colorIcons.rasterize(
                     svg,
                     pixelSize: iconPx,
@@ -1822,7 +1827,7 @@ extension Runtime {
                 let baseY = effRect.y + el.layout.padding.top
                 let cellW = grid.cellSize.x
                 let cellH = grid.cellSize.y
-                let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                let defaultTextColor = scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black)
                 for (rowIdx, row) in grid.rows.enumerated() {
                     let rowY = baseY + Float(rowIdx) * cellH
                     for fill in row.fills {
@@ -1964,9 +1969,10 @@ extension Runtime {
                 )
                 let textLeft = effRect.x + el.layout.padding.left * sc.x
                 let textTop = effRect.y + el.layout.padding.top * sc.y
-                let scaledInnerW = max(0, effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x)
-                let scaledInnerH = max(0, effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y)
-                let availW = max(1, scaledInnerW / max(1e-4, sc.x) + 0.5)
+                let drawnInnerW = max(0, effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x)
+                let drawnInnerH = max(0, effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y)
+                let availW = max(1, drawnInnerW / max(1e-4, sc.x) + 0.5)
+                let layoutInnerW = max(0, node.targetRect.width - el.layout.padding.left - el.layout.padding.right)
                 let shaped = resolvedText.shape(
                     using: textSystem,
                     maxWidth: availW,
@@ -1983,21 +1989,23 @@ extension Runtime {
                     let fadeRes = ElDisplayResolver.truncateFadeParams(
                         el: el,
                         shaped: shaped,
-                        innerW: scaledInnerW,
-                        innerH: scaledInnerH,
+                        innerW: drawnInnerW,
+                        innerH: drawnInnerH,
+                        exactInnerWPx: drawnInnerW * scale,
+                        layoutInnerW: layoutInnerW,
                         scaleVec: sc,
                         pxScale: scale,
                         textOriginX: textLeft,
                         textOriginY: textTop,
                         baseClipPx: baseClipRect
                     )
+                    glyphClipEdges = SIMD4<Float>(
+                        fadeRes.glyphClip.x,
+                        fadeRes.glyphClip.y,
+                        fadeRes.glyphClip.x + fadeRes.glyphClip.z,
+                        fadeRes.glyphClip.y + fadeRes.glyphClip.w
+                    )
                     if fadeRes.isTruncated {
-                        glyphClipEdges = SIMD4<Float>(
-                            fadeRes.glyphClip.x,
-                            fadeRes.glyphClip.y,
-                            fadeRes.glyphClip.x + fadeRes.glyphClip.z,
-                            fadeRes.glyphClip.y + fadeRes.glyphClip.w
-                        )
                         let (pw, po) = unpackFade(activeFade)
                         var widths = pw
                         var origins = SIMD4<Float>(
@@ -2020,7 +2028,7 @@ extension Runtime {
                         glyphFade = packFade(width: widths, origin: origins, clip: glyphClipEdges)
                     }
                 }
-                let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                let defaultTextColor = scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black)
                 for (bgRect, bgColor) in shaped.backgrounds {
                     let c = premulSIMD4(bgColor, opacity: localOpacity, srgb: srgbBlend)
                     if c.w <= 0.0005 { continue }

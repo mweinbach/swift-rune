@@ -119,7 +119,6 @@ internal extension Runtime {
             let a = max(0, min(link.byteRange.lowerBound, drawnLen))
             let b = max(a, min(link.byteRange.upperBound, drawnLen))
             guard a < b else { continue }
-
             let shapeRange = (elided != nil) ? (a..<b) : (caseMap?.displayedRange(forSourceUTF8Range: a..<b) ?? (a..<b))
             let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: shapeRange, pixelScale: pxScale)
             guard !localBoxes.isEmpty else { continue }
