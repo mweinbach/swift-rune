@@ -923,7 +923,14 @@ public final class Runtime<State> {
     internal var needsCommit: Bool = true
     internal var virtualFillNeedsCommit: Bool = false
     internal var forceInitialSettle: Bool = true
+    internal var lastWasSettled: Bool = false
     internal var pendingEventTime: Double? = nil
+
+    /// Whether the most recently presented frame included a settling cut (`Runtime::settled`).
+    public var settled: Bool { lastWasSettled }
+
+    /// Current animation time scale for the view (`Runtime::time_scale`).
+    public var timeScale: Float { cxSettings.viewTimeScale }
 
     // Layout read, feedback circuit breaker, and layout/drawn/visible reporting state
     private enum LayoutQueueKind: Equatable {
@@ -1250,7 +1257,27 @@ public final class Runtime<State> {
         }
     }
 
-    private func frameWithBlendScope(at now: Double) -> RefScene {
+    internal func runFrameSplit(catchUp: Double, dt: Double, hostDelta: Double) -> Bool {
+        _ = RuntimeIdScope.$current.withValue(runtimeId) {
+            Theme.withBlend(srgbBlend) {
+                frameWithBlendScope(
+                    at: currentTime + max(0.0, hostDelta),
+                    split: (catchUp: catchUp, dt: dt, hostDelta: hostDelta)
+                )
+            }
+        }
+        return isAnimating
+    }
+
+    internal func delayStartedTracks(_ ids: inout [TrackId], by secs: Double) {
+        scene.store.delay(&ids, by: secs)
+    }
+
+    private func frameWithBlendScope(
+        at now: Double,
+        split: (catchUp: Double, dt: Double, hostDelta: Double)? = nil
+    ) -> RefScene {
+        lastWasSettled = false
         let wasQuiet = !frameHadInputSinceLastFrame && !isAnimating
         let dueTimer = nextWakeDeadline.map { now >= $0 } ?? false
         let wasLive = frameHadLiveWake
@@ -1263,7 +1290,24 @@ public final class Runtime<State> {
             interactionFrameBegins()
         }
 
-        let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+        let splitStep: (catchUpAnimNow: Double, dt: Double)?
+        if let split {
+            let scale = Double(cxSettings.viewTimeScale)
+            let catchUpAnimNow = lastScaledAnimNow + max(0.0, split.catchUp) * scale
+            if split.catchUp > 0.0 {
+                scene.setTime(catchUpAnimNow)
+                scrollStore.sample(at: catchUpAnimNow)
+                liveStore.sample(at: catchUpAnimNow)
+            }
+            cxSettings.setSplitAnchor(hostTime: now, animTime: catchUpAnimNow)
+            lastScaledAnimNow = catchUpAnimNow
+            pendingEventTime = nil
+            splitStep = (catchUpAnimNow: catchUpAnimNow, dt: split.dt)
+        } else {
+            splitStep = nil
+        }
+
+        let (frameOut, animNow) = stepToFrameOutputScaled(at: now, splitStep: splitStep)
         let sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
         }
@@ -1433,7 +1477,10 @@ public final class Runtime<State> {
     }
 
     @inline(never)
-    private func prepareAndCommitFrame(at now: Double) -> (animNow: Double, growthMoving: Bool) {
+    private func prepareAndCommitFrame(
+        at now: Double,
+        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil
+    ) -> (animNow: Double, growthMoving: Bool) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
@@ -1568,7 +1615,13 @@ public final class Runtime<State> {
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
         let prevAnimNow = lastScaledAnimNow
-        let nextAnimNow = cxSettings.advanceClock(to: now)
+        let nextAnimNow: Double
+        if let splitStep {
+            nextAnimNow = splitStep.catchUpAnimNow + max(0.0, splitStep.dt) * Double(cxSettings.viewTimeScale)
+            cxSettings.setSplitAnchor(hostTime: now, animTime: nextAnimNow)
+        } else {
+            nextAnimNow = cxSettings.advanceClock(to: now)
+        }
         let holdMotion = fitWindowState.frameHolds()
         let animNow = holdMotion ? prevAnimNow : nextAnimNow
         if !holdMotion {
@@ -1658,8 +1711,11 @@ public final class Runtime<State> {
         return (animNow, growthMoving)
     }
 
-    internal func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
-        let (animNow, growthMoving) = prepareAndCommitFrame(at: now)
+    internal func stepToFrameOutputScaled(
+        at now: Double,
+        splitStep: (catchUpAnimNow: Double, dt: Double)? = nil
+    ) -> (frameOut: FrameOutput, animNow: Double) {
+        let (animNow, growthMoving) = prepareAndCommitFrame(at: now, splitStep: splitStep)
 
         // Sample Scene & Live property bindings using scaled animation clock
         elSliceRenderState.loopCatchUp.loopsStepped(hostNow: currentTime, animEnd: animNow)
@@ -1797,6 +1853,9 @@ public final class Runtime<State> {
             let commitFollowEdge = pendingFollowEdge
             pendingFollowEdge = false
             let commitCut = cut || explicitSettle
+            if commitCut || commitKind.lands {
+                lastWasSettled = true
+            }
 
             if commitCut || commitKind.lands {
                 enterDelays.removeAll()

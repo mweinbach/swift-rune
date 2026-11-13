@@ -471,23 +471,25 @@ public struct RewindClip: Sendable, Equatable, Codable {
         // Per frame: [(id, dist, before, after)]
         var moved: [[(id: UInt32, dist: Float, before: MotionRect, after: MotionRect)]] = Array(repeating: [], count: n)
 
-        for k in 1..<n {
-            let prev = Dictionary(uniqueKeysWithValues: frames[k - 1].elements.map { ($0.key, $0) })
-            let curr = Dictionary(uniqueKeysWithValues: frames[k].elements.map { ($0.key, $0) })
-            var most: Float = 0
-            var faded = false
-            for (key, c) in curr {
-                guard let p = prev[key], let id = nameToId[key] else { continue }
-                let d = RewindChange.edgeDistance(p.rect, c.rect)
-                if d > 0 {
-                    moved[k].append((id, d, p.rect, c.rect))
-                    most = max(most, d)
+        if n > 1 {
+            for k in 1..<n {
+                let prev = Dictionary(uniqueKeysWithValues: frames[k - 1].elements.map { ($0.key, $0) })
+                let curr = Dictionary(uniqueKeysWithValues: frames[k].elements.map { ($0.key, $0) })
+                var most: Float = 0
+                var faded = false
+                for (key, c) in curr {
+                    guard let p = prev[key], let id = nameToId[key] else { continue }
+                    let d = RewindChange.edgeDistance(p.rect, c.rect)
+                    if d > 0 {
+                        moved[k].append((id, d, p.rect, c.rect))
+                        most = max(most, d)
+                    }
+                    if abs(p.opacity - c.opacity) >= 1e-4 {
+                        faded = true
+                    }
                 }
-                if abs(p.opacity - c.opacity) >= 1e-4 {
-                    faded = true
-                }
+                activity[k] = (most == 0 && faded) ? 0.25 : most
             }
-            activity[k] = (most == 0 && faded) ? 0.25 : most
         }
 
         func findMove(_ k: Int, _ id: UInt32) -> (id: UInt32, dist: Float, before: MotionRect, after: MotionRect)? {

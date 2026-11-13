@@ -544,7 +544,7 @@ public final class FrameClock {
 
     private enum Phase {
         case idle(last: Double)
-        case stepped(last: Double, startedAt: Double, hadRunning: Bool)
+        case stepped(last: Double, startedAt: Double, hadRunning: Bool, starts: [TrackId])
         case presented(last: Double)
     }
 
@@ -557,7 +557,7 @@ public final class FrameClock {
 
     public var lastTarget: Double {
         switch phase {
-        case .idle(let last), .stepped(let last, _, _), .presented(let last):
+        case .idle(let last), .stepped(let last, _, _, _), .presented(let last):
             return last
         }
     }
@@ -567,8 +567,8 @@ public final class FrameClock {
         switch phase {
         case .idle(let last):
             phase = .idle(last: max(last, target))
-        case .stepped(let last, let startedAt, let hadRunning):
-            phase = .stepped(last: max(last, target), startedAt: startedAt, hadRunning: hadRunning)
+        case .stepped(let last, let startedAt, let hadRunning, let starts):
+            phase = .stepped(last: max(last, target), startedAt: startedAt, hadRunning: hadRunning, starts: starts)
         case .presented(let last):
             phase = .presented(last: max(last, target))
         }
@@ -580,23 +580,34 @@ public final class FrameClock {
         let gap = max(0.0, target - prev)
         let step = FrameClockStep.split(gap: gap, running: running)
         lastStep = step
-        phase = .stepped(last: max(prev, target), startedAt: max(prev, target), hadRunning: running)
+        let nextTarget = max(prev, target)
+        phase = .stepped(last: nextTarget, startedAt: nextTarget, hadRunning: running, starts: [])
         return step
+    }
+
+    internal func recordStepStarts(_ starts: [TrackId]) {
+        if case .stepped(let last, let startedAt, let hadRunning, _) = phase {
+            phase = .stepped(last: last, startedAt: startedAt, hadRunning: hadRunning, starts: starts)
+        }
+    }
+
+    internal func takePresentedDelay(done: Double) -> (late: Double, starts: [TrackId]) {
+        switch phase {
+        case .stepped(let last, _, _, let starts):
+            let late = min(Self.maxGap, max(0.0, done - last))
+            phase = .presented(last: last)
+            return (late, starts)
+        case .idle(let last), .presented(let last):
+            phase = .presented(last: last)
+            return (0.0, [])
+        }
     }
 
     /// Notes when the last stepped frame actually finished presenting (`done`), delaying overrun on
     /// newly started animations while keeping already-running animations on wall time.
     @discardableResult
     public func presented(done: Double) -> Double {
-        switch phase {
-        case .stepped(let last, _, _):
-            let late = min(Self.maxGap, max(0.0, done - last))
-            phase = .presented(last: last)
-            return late
-        case .idle(let last), .presented(let last):
-            phase = .presented(last: last)
-            return 0.0
-        }
+        takePresentedDelay(done: done).late
     }
 }
 
