@@ -231,7 +231,8 @@ extension Cx {
             scrollMaxLookup: scrollMaxLookup,
             viewportSizeLookup: viewportSizeLookup,
             contentSizeLookup: contentSizeLookup,
-            layoutRectLookup: layoutRectLookup
+            layoutRectLookup: layoutRectLookup,
+            layoutCollector: layoutCollector
         )
         out.envState = envState
         out.envState.reads = CxReadsLog(copying: envState.reads)

@@ -162,7 +162,7 @@ enum TaffyBridge {
         let s = max(pixelScale, 0.5)
         func snapLine(_ w: Float) -> Float {
             guard w > 0 else { return 0 }
-            return max(1.0, (w * s).rounded()) / s
+            return PixelSnap.lineWidth(w * s) / s
         }
         return Sides(
             top: snapLine(sides.top),

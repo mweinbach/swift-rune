@@ -253,6 +253,7 @@ public enum MemoScope {
 
     static var activeCache: MemoCache? { current?.cache }
     static var activeEnvHash: UInt64 { current?.envHash ?? currentEnvironmentHash() }
+    static var isInsideMemo: Bool { !(current?.readFrames.isEmpty ?? true) }
 
     public static func environmentHash(
         systemDark: Bool,
@@ -319,6 +320,33 @@ public enum MemoScope {
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
 
+    static func peekLayoutRect(_ key: String, window: Bool) -> [Float]? {
+        let rect = window ? current?.geometry[key]?.windowRect : current?.geometry[key]?.rect
+        return rect.map { [$0.left, $0.top, $0.width, $0.height] }
+    }
+
+    static func recordLayoutRead(_ read: MemoRead) {
+        current?.record(read)
+    }
+
+    static func makeLayoutWithRead<T: Equatable>(
+        _ key: String,
+        window: Bool,
+        rect: [Float]?,
+        _ transform: @escaping ([Float]) -> T
+    ) -> (read: MemoRead, value: T?) {
+        let initial = rect.map(transform)
+        let tag = MemoReadTag.next()
+        let box = UncheckedMotionPredicateBox { nextRect in
+            let next = nextRect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
+            return next == initial
+        }
+        let read: MemoRead = window
+            ? .windowLayoutWith(key: key, tag: tag) { box.matches($0) }
+            : .layoutWith(key: key, tag: tag) { box.matches($0) }
+        return (read, initial)
+    }
+
     static func readLayoutWith<T: Equatable & Sendable>(
         _ key: String,
         _ transform: @escaping @Sendable ([Float]) -> T,
@@ -382,6 +410,18 @@ public enum MemoScope {
     }
 }
 
+private final class UncheckedMotionPredicateBox: @unchecked Sendable {
+    private let fn: (MotionRect?) -> Bool
+
+    init(_ fn: @escaping (MotionRect?) -> Bool) {
+        self.fn = fn
+    }
+
+    func matches(_ nextRect: MotionRect?) -> Bool {
+        fn(nextRect)
+    }
+}
+
 private enum MemoReadTag {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var counter: UInt64 = 1
@@ -428,43 +468,6 @@ public func caretRect(_ key: String) -> [Float]? {
 }
 
 extension Cx {
-    /// Last committed `[x, y, width, height]` of `.key(key)` in window space, recording a layout read.
-    public func layout(_ key: String) -> [Float]? {
-        let rect = MemoScope.readLayout(key)
-        envState.reads.layoutReads.append(.layout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
-        return rect
-    }
-
-    /// Reads `key`'s layout rect through `transform`, invalidating memos only when the projected value changes (`Cx::layout_with`).
-    public func layoutWith<T: Equatable & Sendable>(
-        _ key: String,
-        _ transform: @escaping @Sendable ([Float]) -> T
-    ) -> T? {
-        MemoScope.readLayoutWith(key, transform, into: &envState.reads.layoutReads)
-    }
-
-    /// Last committed `[width, height]` of `.key(key)`, invalidating memos only on size changes.
-    public func layoutSize(_ key: String) -> [Float]? {
-        let size = MemoScope.readLayoutSize(key)
-        envState.reads.layoutReads.append(.layoutSize(key: key, size: size.map { Vec2($0[0], $0[1]) }))
-        return size
-    }
-
-    /// Last committed `[x, y, width, height]` of `.key(key)` in window coordinates (0.5 pt hysteresis).
-    public func windowLayout(_ key: String) -> [Float]? {
-        let rect = MemoScope.readWindowLayout(key)
-        envState.reads.layoutReads.append(.windowLayout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
-        return rect
-    }
-
-    /// Reads `key`'s window layout rect through `transform`, invalidating memos only when the projected value changes (`Cx::window_layout_with`).
-    public func windowLayoutWith<T: Equatable & Sendable>(
-        _ key: String,
-        _ transform: @escaping @Sendable ([Float]) -> T
-    ) -> T? {
-        MemoScope.readWindowLayoutWith(key, transform, into: &envState.reads.layoutReads)
-    }
-
     /// Last rendered `[x, y, width, height]` caret rect of text field `.key(key)`.
     public func caret(_ key: String) -> [Float]? {
         envState.reads.caretRead = true

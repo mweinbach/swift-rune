@@ -79,4 +79,12 @@ extension El {
 
     /// Override parent cross-axis alignment for this child (`align-self: stretch`).
     public func selfStretch() -> Self { alignSelf(.stretch) }
+
+    var isPixelSnapEnabled: Bool {
+        pixelSnapEnabled
+    }
+
+    var scaleOrigin: Vec2 {
+        (runtimeExtras["scaleOrigin"] as? Vec2) ?? Vec2(0.5, 0.5)
+    }
 }

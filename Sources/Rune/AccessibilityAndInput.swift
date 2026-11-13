@@ -300,6 +300,7 @@ public enum AppKitAccessibilityMapper {
         case .splitter: return .splitter
         case .list: return .list
         case .menuItemCheckbox: return .menuItem
+        case .mark: return .staticText
         }
     }
 
@@ -396,7 +397,7 @@ public enum UIKitAccessibilityMapper {
         case .image, .icon: return .image
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .combobox, .option, .link: return .button
-        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main:
+        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark:
             return .staticText
         }
     }
