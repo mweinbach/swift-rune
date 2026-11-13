@@ -24,6 +24,7 @@ struct BlockDiagram: Sendable {
 
     var blocks: [Block]
     var edges: [LayeredEdge]
+    var title: String? = nil
 }
 
 enum BlockParser {

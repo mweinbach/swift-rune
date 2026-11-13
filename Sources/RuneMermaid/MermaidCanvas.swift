@@ -287,14 +287,20 @@ struct Canvas {
         return b.2 - b.0
     }
 
-    func finishFit(paint: MermaidTheme) -> MermaidScene? {
+    func drawn() -> (Float, Float, Float, Float) {
         let b = bounds()
+        let origin = SteadyLayout.origin(bounds: b, turned: turned)
+        return (origin.x, origin.y, b.2, b.3)
+    }
+
+    func finishFit(paint: MermaidTheme) -> MermaidScene? {
+        let b = drawn()
         let scale = Canvas.fitScale(width: b.2 - b.0, paint: paint)
         return finish(scale: scale, paint: paint)
     }
 
     mutating func finishFitMutating(paint: MermaidTheme) -> MermaidScene? {
-        let b = bounds()
+        let b = drawn()
         let scale = Canvas.fitScale(width: b.2 - b.0, paint: paint)
         return finish(scale: scale, paint: paint)
     }
@@ -303,7 +309,7 @@ struct Canvas {
         if ops.isEmpty && labels.isEmpty { return nil }
         var copy = self
         InkFlattener.flatten(ops: &copy.ops, traces: &copy.traces, surface: paint.surface)
-        let b = copy.bounds()
+        let b = copy.drawn()
         let pad = 1.0 / scale
         let map: (Vec2) -> Vec2 = { p in
             Vec2(p.x - b.0 + pad, p.y - b.1 + pad)
@@ -345,7 +351,7 @@ struct MermaidScene: @unchecked Sendable {
 
     func withTitle(_ title: String?) -> MermaidScene {
         var copy = self
-        if let t = title?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty {
+        if let t = title, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             copy.title = t
         }
         return copy

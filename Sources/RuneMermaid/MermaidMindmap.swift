@@ -20,6 +20,7 @@ struct MindmapNode: Sendable {
 
 struct MindmapDiagram: Sendable {
     var nodes: [MindmapNode]
+    var title: String? = nil
 }
 
 enum MindmapParser {

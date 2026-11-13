@@ -4,6 +4,7 @@ import Rune
 struct SankeyDiagram: Sendable {
     var nodes: [String] = []
     var links: [(Int, Int, Float)] = []
+    var title: String? = nil
 }
 
 enum SankeyParser {

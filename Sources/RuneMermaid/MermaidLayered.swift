@@ -64,7 +64,16 @@ enum LayeredLayout {
         var succs: [Int] = []
     }
 
+    private static let holdWeight: Float = 1000.0
+    private static let pinnedWeight: Float = 1e9
+
     static func layout(_ g: Graph, spacing sp: Spacing) -> Placed? {
+        SteadyLayout.layout(ids: g.ids) { held in
+            place(g, spacing: sp, held: held)
+        }
+    }
+
+    private static func place(_ g: Graph, spacing sp: Spacing, held: SteadyMemo?) -> (Placed, SteadyMemo)? {
         let n = g.sizes.count
         var chains: [[Int]] = []
         chains.reserveCapacity(g.clusters.count)
@@ -160,6 +169,12 @@ enum LayeredLayout {
                 rank[v] = succ[v].map { rank[ends($0).1] - span($0) }.min() ?? rank[v]
             }
         }
+        if let m = held {
+            for v in topo {
+                let floor = max(rank[v], v < m.rank.count ? m.rank[v] : 0)
+                rank[v] = pred[v].reduce(floor) { max($0, rank[ends($1).0] + span($1)) }
+            }
+        }
 
         // 3. Layered graph with dummy nodes.
         var dummies = 0
@@ -207,7 +222,10 @@ enum LayeredLayout {
         }
         let ranks = (nodes.map(\.rank).max() ?? -1) + 1
         guard ranks > 0 else {
-            return Placed(centers: [], paths: [], labels: [], clusters: Array(repeating: (0, 0, 0, 0), count: g.clusters.count))
+            return (
+                Placed(centers: [], paths: [], labels: [], clusters: Array(repeating: (0, 0, 0, 0), count: g.clusters.count)),
+                SteadyMemo(rank: rank, along: Array(repeating: nil, count: n), depth: [], ids: g.ids)
+            )
         }
 
         // 4. Order within layers: DFS start + barycenter sweeps.
@@ -259,6 +277,10 @@ enum LayeredLayout {
             }
         }
         layers = best
+        if let m = held {
+            holdOrder(&layers, memo: m, realCount: n, chains: nodeChains)
+            alignClusters(&layers, chains: nodeChains, parents: parents)
+        }
 
         // 5. Positions along layers via alternating weighted isotonic regressions.
         let seps: [[Float]] = layers.map { layer in
@@ -284,6 +306,10 @@ enum LayeredLayout {
                 x[v] = at
             }
         }
+        func floorOf(_ v: Int) -> Float? {
+            guard let m = held, v < n, v < m.along.count else { return nil }
+            return m.along[v]
+        }
         for it in 0..<24 {
             let usePreds = it % 3 != 1
             let useSuccs = it % 3 != 0
@@ -299,7 +325,10 @@ enum LayeredLayout {
                     var nb: [Int] = []
                     if usePreds { nb.append(contentsOf: node.preds) }
                     if useSuccs { nb.append(contentsOf: node.succs) }
-                    if nb.isEmpty {
+                    if let heldAt = floorOf(v) {
+                        want.append(heldAt)
+                        w.append(holdWeight)
+                    } else if nb.isEmpty {
                         want.append(x[v])
                         w.append(0.1)
                     } else {
@@ -309,7 +338,7 @@ enum LayeredLayout {
                         w.append(nodeW * Float(nb.count))
                     }
                 }
-                let placed = isotonic(want: want, weights: w, sep: seps[r])
+                let placed = isotonicAbove(want: want, weights: w, sep: seps[r], floors: layer.map(floorOf))
                 for (v, p) in zip(layer, placed) {
                     x[v] = p
                 }
@@ -364,6 +393,13 @@ enum LayeredLayout {
             }
             grown += min(max(need, 0.0), sp.rank)
             y[r] += grown
+        }
+        if let m = held {
+            let fresh = y
+            for r in 1..<ranks {
+                let was: Float = (r < m.depth.count && r - 1 < m.depth.count) ? (m.depth[r] - m.depth[r - 1]) : 0.0
+                y[r] = y[r - 1] + max(fresh[r] - fresh[r - 1], was)
+            }
         }
 
         // 7. Cluster boxes.
@@ -475,8 +511,10 @@ enum LayeredLayout {
                     let ((l, bl), (r, br)) = leftOf(a, b, ba, bb) ? ((a, ba), (b, bb)) : ((b, bb), (a, ba))
                     let d = bl.2 + sp.node * 0.5 - br.0
                     if d > 0.5 {
-                        for v in itemNodes(l) { shift[v] -= d * 0.5 }
-                        for v in itemNodes(r) { shift[v] += d * 0.5 }
+                        let back: Float = held != nil ? 0.0 : d * 0.5
+                        let forward: Float = held != nil ? d : d * 0.5
+                        for v in itemNodes(l) { shift[v] -= back }
+                        for v in itemNodes(r) { shift[v] += forward }
                         moved = true
                     }
                 }
@@ -484,6 +522,7 @@ enum LayeredLayout {
             for (c, b) in boxes.enumerated() where b.0 <= b.2 {
                 let nearLo = max(0, first[c] - 1)
                 let nearHi = last[c] + 1
+                guard nearLo <= nearHi else { continue }
                 for v in n..<nodes.count {
                     guard case let .dummy(e, _) = nodes[v].kind else { continue }
                     let (a, z) = ends(e)
@@ -507,7 +546,12 @@ enum LayeredLayout {
             for i in 0..<nodes.count { x[i] += shift[i] }
             for (layer, sep) in zip(layers, seps) {
                 let want = layer.map { x[$0] }
-                let placed = isotonic(want: want, weights: Array(repeating: 1.0, count: layer.count), sep: sep)
+                let placed = isotonicAbove(
+                    want: want,
+                    weights: Array(repeating: 1.0, count: layer.count),
+                    sep: sep,
+                    floors: layer.map(floorOf)
+                )
                 for (v, p) in zip(layer, placed) { x[v] = p }
             }
         }
@@ -525,6 +569,10 @@ enum LayeredLayout {
             loY = min(loY, b.1)
         }
         if loX == Float.greatestFiniteMagnitude {
+            loX = 0.0
+            loY = 0.0
+        }
+        if held != nil {
             loX = 0.0
             loY = 0.0
         }
@@ -551,7 +599,30 @@ enum LayeredLayout {
         let clusters = boxes.map { b in
             b.0 <= b.2 ? (b.0 - loX, b.1 - loY, b.2 - loX, b.3 - loY) : (0, 0, 0, 0)
         }
-        return Placed(centers: centers, paths: paths, labels: labels, clusters: clusters)
+        let memo = SteadyMemo(
+            rank: rank,
+            along: (0..<n).map { Optional(x[$0] - loX) },
+            depth: y.map { $0 - loY },
+            ids: g.ids
+        )
+        return (Placed(centers: centers, paths: paths, labels: labels, clusters: clusters), memo)
+    }
+
+    private static func holdOrder(_ layers: inout [[Int]], memo: SteadyMemo, realCount n: Int, chains: [[Int]]) {
+        func along(_ v: Int) -> Float? {
+            guard v < n, v < memo.along.count else { return nil }
+            return memo.along[v]
+        }
+        for r in layers.indices {
+            var layer = layers[r]
+            let slots = layer.indices.filter { along(layer[$0]) != nil }
+            let kept = slots.map { layer[$0] }.sorted { (along($0) ?? 0.0) < (along($1) ?? 0.0) }
+            for (slot, v) in zip(slots, kept) {
+                layer[slot] = v
+            }
+            let keys = (0..<layer.count).map { Float($0) }
+            layers[r] = groupedOrder(layer, keys: keys, chains: chains)
+        }
     }
 
     private static func positions(_ layers: [[Int]], count: Int) -> [Int] {
@@ -657,6 +728,41 @@ enum LayeredLayout {
             }
         }
         return total
+    }
+
+    private static func isotonicAbove(
+        want: [Float],
+        weights: [Float],
+        sep: [Float],
+        floors rawFloors: [Float?]
+    ) -> [Float] {
+        var gap: Float = 0.0
+        var lift: Float = -Float.greatestFiniteMagnitude
+        var floors: [Float?] = []
+        floors.reserveCapacity(want.count)
+        for (i, f) in rawFloors.enumerated() {
+            if i > 0 { gap += sep[i - 1] }
+            if let f {
+                lift = max(lift, f - gap)
+            }
+            floors.append(lift > -Float.greatestFiniteMagnitude ? lift + gap : nil)
+        }
+        var curWant = want
+        var curW = weights
+        while true {
+            let placed = isotonic(want: curWant, weights: curW, sep: sep)
+            var pinned = false
+            for (i, f) in floors.enumerated() {
+                if let f, placed[i] < f - 0.01, curW[i] < pinnedWeight {
+                    curWant[i] = f
+                    curW[i] = pinnedWeight
+                    pinned = true
+                }
+            }
+            if !pinned {
+                return placed
+            }
+        }
     }
 
     static func isotonic(want: [Float], weights: [Float], sep: [Float]) -> [Float] {

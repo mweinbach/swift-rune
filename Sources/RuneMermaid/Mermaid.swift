@@ -31,15 +31,15 @@ enum ParsedDiagram {
         case let .er(d): d.title
         case let .gantt(d): d.title
         case let .pie(d): d.title
-        case .mindmap: nil
+        case let .mindmap(d): d.title
         case let .timeline(d): d.title
         case let .journey(d): d.title
-        case .git: nil
+        case let .git(d): d.title
         case let .quadrant(d): d.title
         case let .xyChart(d): d.title
-        case .sankey: nil
-        case .block: nil
-        case .requirement: nil
+        case let .sankey(d): d.title
+        case let .block(d): d.title
+        case let .requirement(d): d.title
         case let .c4(d): d.title
         }
     }
@@ -54,15 +54,15 @@ enum ParsedDiagram {
         case var .er(d): d.title = ft; return .er(d)
         case var .gantt(d): d.title = ft; return .gantt(d)
         case var .pie(d): d.title = ft; return .pie(d)
-        case .mindmap: return self
+        case var .mindmap(d): d.title = ft; return .mindmap(d)
         case var .timeline(d): d.title = ft; return .timeline(d)
         case var .journey(d): d.title = ft; return .journey(d)
-        case .git: return self
+        case var .git(d): d.title = ft; return .git(d)
         case var .quadrant(d): d.title = ft; return .quadrant(d)
         case var .xyChart(d): d.title = ft; return .xyChart(d)
-        case .sankey: return self
-        case .block: return self
-        case .requirement: return self
+        case var .sankey(d): d.title = ft; return .sankey(d)
+        case var .block(d): d.title = ft; return .block(d)
+        case var .requirement(d): d.title = ft; return .requirement(d)
         case var .c4(d): d.title = ft; return .c4(d)
         }
     }
@@ -235,16 +235,22 @@ public func canRenderMermaid(_ source: String) -> Bool {
     MermaidParser.parse(source) != nil
 }
 
+func resolvedHover(_ hover: (MermaidHover, Color)?, theme: MermaidTheme) -> (MermaidHover, Color)? {
+    let pair = hover ?? (.edges, theme.text.alpha(0.9))
+    return pair.0 == .off ? nil : pair
+}
+
 /// Render a Mermaid diagram into a card `El<State>`, or `nil` if unsupported/invalid.
 public func renderMermaid<State>(
     _ source: String,
     theme: MermaidTheme = .neutral(dark: false),
     hover: (MermaidHover, Color)? = nil
 ) -> El<State>? {
-    guard let scene = MermaidScenes.built(source, theme: theme, hover: hover, prev: nil).scene else {
+    let resolved = resolvedHover(hover, theme: theme)
+    guard let scene = MermaidScenes.built(source, theme: theme, hover: resolved, prev: nil).scene else {
         return nil
     }
-    return scene.el(paint: theme)
+    return scene.el(paint: theme, streaming: false)
 }
 
 /// Render a Mermaid diagram while streaming in (`steady` layout holding).
@@ -253,10 +259,11 @@ public func renderMermaidStreaming<State>(
     theme: MermaidTheme = .neutral(dark: false),
     hover: (MermaidHover, Color)? = nil
 ) -> El<State>? {
-    guard let scene = MermaidScenes.growing(source, theme: theme, hover: hover) else {
+    let resolved = resolvedHover(hover, theme: theme)
+    guard let scene = MermaidScenes.growing(source, theme: theme, hover: resolved) else {
         return nil
     }
-    return scene.el(paint: theme)
+    return scene.el(paint: theme, streaming: true)
 }
 
 /// Render a finished streamed Mermaid diagram settled to its final layout.
@@ -265,7 +272,11 @@ public func renderMermaidStreamed<State>(
     theme: MermaidTheme = .neutral(dark: false),
     hover: (MermaidHover, Color)? = nil
 ) -> El<State>? {
-    renderMermaid(source, theme: theme, hover: hover)
+    let resolved = resolvedHover(hover, theme: theme)
+    guard let scene = MermaidScenes.built(source, theme: theme, hover: resolved, prev: nil).scene else {
+        return nil
+    }
+    return scene.el(paint: theme, streaming: true)
 }
 
 /// Render a Mermaid diagram into a frameless `MermaidDrawing<State>`, or `nil` if unsupported/invalid.
@@ -274,7 +285,8 @@ public func renderMermaidDrawing<State>(
     theme: MermaidTheme = .neutral(dark: false),
     hover: (MermaidHover, Color)? = nil
 ) -> MermaidDrawing<State>? {
-    guard let scene = MermaidScenes.built(source, theme: theme, hover: hover, prev: nil).scene else {
+    let resolved = resolvedHover(hover, theme: theme)
+    guard let scene = MermaidScenes.built(source, theme: theme, hover: resolved, prev: nil).scene else {
         return nil
     }
     let (drawingEl, sz): (El<State>, Vec2) = scene.drawing(paint: theme)
