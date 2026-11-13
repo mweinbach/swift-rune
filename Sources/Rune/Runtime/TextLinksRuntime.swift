@@ -65,6 +65,7 @@ internal extension Runtime {
         el: El<State>,
         text: String,
         shaped: ShapedText,
+        elided: TextElision? = nil,
         textOriginX: Float,
         textOriginY: Float,
         scaleVec: Vec2,
@@ -97,9 +98,16 @@ internal extension Runtime {
         var nodeBoxes: [TextLinkBox] = []
         var inkRanges: [TextLinkInkRange] = []
 
-        for (k, link) in el.textLinks.enumerated() {
-            let a = max(0, min(link.byteRange.lowerBound, len))
-            let b = max(a, min(link.byteRange.upperBound, len))
+        let drawnText = elided != nil ? shaped.drawnText : text
+        let drawnBytes = Array(drawnText.utf8)
+        let drawnLen = drawnBytes.count
+        let mappedLinks: [(origIndex: Int, link: TextLink)] = elided.map {
+            $0.mapLinks(el.textLinks, contentLength: len)
+        } ?? Array(el.textLinks.enumerated()).map { ($0.offset, $0.element) }
+
+        for (k, link) in mappedLinks {
+            let a = max(0, min(link.byteRange.lowerBound, drawnLen))
+            let b = max(a, min(link.byteRange.upperBound, drawnLen))
             guard a < b else { continue }
 
             let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pxScale)
@@ -147,7 +155,7 @@ internal extension Runtime {
             guard !winRects.isEmpty, let resolvedWinUnion = winUnion, let resolvedTgtUnion = tgtUnion else {
                 continue
             }
-            let sliceText = String(decoding: utf8Bytes[a..<b], as: UTF8.self)
+            let sliceText = String(decoding: drawnBytes[a..<b], as: UTF8.self)
             nodeBoxes.append(TextLinkBox(
                 linkIndex: k,
                 link: link,

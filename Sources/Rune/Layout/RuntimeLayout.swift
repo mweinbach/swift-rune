@@ -428,6 +428,7 @@ final class RetainedLayoutCoordinator {
                         taffyLayout.size.width,
                         taffyLayout.size.height
                     ),
+                    localSize: Vec2(taffyLayout.size.width, taffyLayout.size.height),
                     contentSize: content
                 ),
                 children: childResults

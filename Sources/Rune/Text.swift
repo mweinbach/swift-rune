@@ -66,6 +66,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var family: FontFamily
     public var align: TextAlign
     public var wrap: TextWrap
+    public var wrapAnywhere: Bool
     public var elide: TextElide
     public var maxLines: Int
     public var exactLines: Bool
@@ -84,6 +85,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
         wrap: TextWrap = .noWrap,
+        wrapAnywhere: Bool = false,
         elide: TextElide = .end,
         maxLines: Int = 0,
         exactLines: Bool = true,
@@ -101,6 +103,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.family = family
         self.align = align
         self.wrap = wrap
+        self.wrapAnywhere = wrapAnywhere
         self.elide = elide
         self.maxLines = max(0, maxLines)
         self.exactLines = exactLines
@@ -112,7 +115,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, elide, maxLines, exactLines, fontSmoothing, variations, features, opticalSize, direction
+        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, wrapAnywhere, elide, maxLines, exactLines, fontSmoothing, variations, features, opticalSize, direction
     }
 
     public init(from decoder: Decoder) throws {
@@ -126,6 +129,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
             family: try c.decode(FontFamily.self, forKey: .family),
             align: try c.decode(TextAlign.self, forKey: .align),
             wrap: try c.decode(TextWrap.self, forKey: .wrap),
+            wrapAnywhere: try c.decodeIfPresent(Bool.self, forKey: .wrapAnywhere) ?? false,
             elide: try c.decodeIfPresent(TextElide.self, forKey: .elide) ?? .end,
             maxLines: try c.decodeIfPresent(Int.self, forKey: .maxLines) ?? 0,
             exactLines: try c.decodeIfPresent(Bool.self, forKey: .exactLines) ?? true,
@@ -483,6 +487,31 @@ public struct ShapedText: @unchecked Sendable {
     internal var forcedDirection: TextFlow? = nil
     internal var primaryIsRTL: Bool = false
     public var wasTruncated: Bool = false
+    internal var lastLineAdvancePx: Float = 0
+    internal var hangingAdvancePx: Float = 0
+    public var elided: TextElision? = nil
+    internal var drawnText: String = ""
+    internal var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
+
+    internal func lineAdvancePx(at index: Int) -> Float {
+        guard index >= 0, index < lineAdvancesPx.count else { return 0 }
+        let rec = lineAdvancesPx[index]
+        return max(0, rec.widthPx - rec.trailingWsPx)
+    }
+
+    internal func lineUTF8Range(at index: Int) -> Range<Int> {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if index >= 0 && index < lineStrings.count {
+            let rec = lineStrings[index]
+            return rec.utf8Start..<(rec.utf8Start + rec.text.utf8.count)
+        }
+        #endif
+        if index >= 0 && index < portableLines.count {
+            let rec = portableLines[index]
+            return rec.utf8Start..<(rec.utf8Start + rec.text.utf8.count)
+        }
+        return 0..<0
+    }
 }
 
 internal struct PillMetrics: Sendable, Hashable {
@@ -1981,6 +2010,35 @@ public final class TextSystem: @unchecked Sendable {
         var fontEpoch: UInt64 = 1
     }
 
+    private struct ShapeKey: Hashable {
+        var text: String
+        var spans: [TextSpan]?
+        var style: TextStyle
+        var maxWidthHalfPt: Int
+        var scale100: Int
+        var pillsHash: UInt64
+        var fontEpoch: UInt64
+        var langEpoch: UInt64
+        var emitGlyphs: Bool
+    }
+
+    private struct ElisionKey: Hashable {
+        var text: String
+        var spans: [TextSpan]?
+        var style: TextStyle
+        var maxWidthHalfPt: Int
+        var scale100: Int
+        var pillsHash: UInt64
+        var fontEpoch: UInt64
+        var langEpoch: UInt64
+    }
+
+    private struct CachedElision {
+        var elision: TextElision
+        var withoutGlyphs: ShapedText?
+        var withGlyphs: ShapedText?
+    }
+
     private struct PreparedPill {
         var pillIndex: Int
         var pill: PillChip
@@ -2018,6 +2076,44 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    /// Prevents `CTTypesetterSuggestLineBreak` emergency mid-word breaks when `wrapAnywhere == false`,
+    /// keeping an overflowing unspaced token on one line to match upstream `parley` word wrapping.
+    private static func isLineBreakOpportunity(at pos: Int, in ns: NSString, start: Int, end: Int) -> Bool {
+        guard pos > start, pos < end else { return true }
+        let b = ns.character(at: pos - 1)
+        let a = ns.character(at: pos)
+        if (0xD800...0xDBFF).contains(b) && (0xDC00...0xDFFF).contains(a) { return false }
+        func isWs(_ c: unichar) -> Bool {
+            c == 0x20 || c == 0x09 || c == 0x0C || c == 0x200B || (0x2000...0x200A).contains(c) || c == 0x3000
+        }
+        func isBreakAfterPunct(_ c: unichar) -> Bool {
+            c == 0x002D || c == 0x00AD || c == 0x002F || (0x2010...0x2014).contains(c)
+        }
+        func isCJKOrObj(_ c: unichar) -> Bool {
+            (0x2E80...0x9FFF).contains(c) || (0xAC00...0xD7AF).contains(c) ||
+            (0xF900...0xFAFF).contains(c) || (0x3040...0x30FF).contains(c) ||
+            (0xD800...0xDFFF).contains(c) || c == 0xFFFC
+        }
+        return isWs(b) || isBreakAfterPunct(b) || isWs(a) || isCJKOrObj(b) || isCJKOrObj(a)
+    }
+
+    private static func keepUnbrokenWordIntact(
+        _ rawSuggested: CFIndex,
+        segStart: Int,
+        hardEnd: Int,
+        in ns: NSString
+    ) -> CFIndex {
+        let initial = min(max(1, rawSuggested), hardEnd - segStart)
+        var pos = segStart + initial
+        if pos >= hardEnd || isLineBreakOpportunity(at: pos, in: ns, start: segStart, end: hardEnd) {
+            return initial
+        }
+        while pos < hardEnd && !isLineBreakOpportunity(at: pos, in: ns, start: segStart, end: hardEnd) {
+            pos += 1
+        }
+        return pos - segStart
     }
 
     internal static func mergeContiguousBackgrounds(_ boxes: [(SIMD4<Float>, Color)]) -> [(SIMD4<Float>, Color)] {
@@ -2147,6 +2243,16 @@ public final class TextSystem: @unchecked Sendable {
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
     private var measureCache: [MeasureKey: Vec2] = [:]
+    private var shapeCache: [ShapeKey: ShapedText] = [:]
+    private var elisionCache: [ElisionKey: CachedElision] = [:]
+    internal private(set) var measureMissCount: Int = 0
+    internal private(set) var shapeMissCount: Int = 0
+
+    internal var cachedElisionCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return elisionCache.count
+    }
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
         self.glyphAtlas = glyphAtlas
@@ -2183,6 +2289,8 @@ public final class TextSystem: @unchecked Sendable {
         }
         languageTagOverride = normalized
         measureCache.removeAll(keepingCapacity: true)
+        shapeCache.removeAll(keepingCapacity: true)
+        elisionCache.removeAll(keepingCapacity: true)
         return true
     }
 
@@ -2225,6 +2333,8 @@ public final class TextSystem: @unchecked Sendable {
         fontCache.removeAll(keepingCapacity: true)
         #endif
         measureCache.removeAll(keepingCapacity: true)
+        shapeCache.removeAll(keepingCapacity: true)
+        elisionCache.removeAll(keepingCapacity: true)
         lock.unlock()
 
         FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
@@ -2248,6 +2358,8 @@ public final class TextSystem: @unchecked Sendable {
             fontCache.removeAll(keepingCapacity: true)
             #endif
             measureCache.removeAll(keepingCapacity: true)
+            shapeCache.removeAll(keepingCapacity: true)
+            elisionCache.removeAll(keepingCapacity: true)
             lastObservedFontEpoch = globalEpoch
         }
         if lastObservedLanguageEpoch != langEpoch {
@@ -2255,6 +2367,8 @@ public final class TextSystem: @unchecked Sendable {
             if languageTagOverride != globalTag {
                 languageTagOverride = globalTag
                 measureCache.removeAll(keepingCapacity: true)
+                shapeCache.removeAll(keepingCapacity: true)
+                elisionCache.removeAll(keepingCapacity: true)
             }
             lastObservedLanguageEpoch = langEpoch
         }
@@ -2503,6 +2617,7 @@ public final class TextSystem: @unchecked Sendable {
         lock.unlock()
         let shaped = shape(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        measureMissCount += 1
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
         }
@@ -2537,6 +2652,448 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     private func shapeImpl(
+        text: String,
+        spans: [TextSpan]? = nil,
+        pills: [PillChip] = [],
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true,
+        glidePx: Vec2 = .zero
+    ) -> ShapedText {
+        let authText = spans.map { $0.map(\.text).joined() } ?? text
+        let scale = max(pixelScale, 1.0)
+        if authText.isEmpty {
+            return shapeCoreImpl(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: maxWidth,
+                pixelScale: scale,
+                emitGlyphs: emitGlyphs,
+                glidePx: glidePx
+            )
+        }
+        syncGlobalFamiliesIfNeeded()
+        let pHash = Self.hashPills(pills)
+        let fEpoch = fontEpoch()
+        let lEpoch = TextLanguageRegistry.currentEpoch()
+        let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
+        let scaleKey = Int((scale * 100.0).rounded())
+        let needsElide = (style.maxLines > 0) || (style.wrap == .ellipsis && maxWidth != nil && maxWidth! > 0)
+
+        if glidePx == .zero {
+            let sKey = ShapeKey(
+                text: authText,
+                spans: spans,
+                style: style,
+                maxWidthHalfPt: maxWKey,
+                scale100: scaleKey,
+                pillsHash: pHash,
+                fontEpoch: fEpoch,
+                langEpoch: lEpoch,
+                emitGlyphs: emitGlyphs
+            )
+            lock.lock()
+            if let cached = shapeCache[sKey] {
+                lock.unlock()
+                return cached
+            }
+            lock.unlock()
+
+            let res: ShapedText
+            if needsElide {
+                res = resolveElidedShape(
+                    authText: authText,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    maxWidth: maxWidth,
+                    scale: scale,
+                    emitGlyphs: emitGlyphs,
+                    pillsHash: pHash,
+                    maxWidthHalfPt: maxWKey,
+                    scale100: scaleKey,
+                    fontEpoch: fEpoch,
+                    langEpoch: lEpoch
+                )
+            } else {
+                res = shapeCoreImpl(
+                    text: authText,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    maxWidth: maxWidth,
+                    pixelScale: scale,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx
+                )
+                lock.lock()
+                shapeMissCount += 1
+                lock.unlock()
+            }
+            lock.lock()
+            if shapeCache.count > 2048 {
+                shapeCache.removeAll(keepingCapacity: true)
+            }
+            shapeCache[sKey] = res
+            lock.unlock()
+            return res
+        }
+
+        if needsElide {
+            return resolveElidedShape(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: maxWidth,
+                scale: scale,
+                emitGlyphs: emitGlyphs,
+                pillsHash: pHash,
+                maxWidthHalfPt: maxWKey,
+                scale100: scaleKey,
+                fontEpoch: fEpoch,
+                langEpoch: lEpoch
+            )
+        }
+        return shapeCoreImpl(
+            text: authText,
+            spans: spans,
+            pills: pills,
+            style: style,
+            maxWidth: maxWidth,
+            pixelScale: scale,
+            emitGlyphs: emitGlyphs,
+            glidePx: glidePx
+        )
+    }
+
+    private func resolveElidedShape(
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        maxWidth: Float?,
+        scale: Float,
+        emitGlyphs: Bool,
+        pillsHash: UInt64,
+        maxWidthHalfPt: Int,
+        scale100: Int,
+        fontEpoch: UInt64,
+        langEpoch: UInt64
+    ) -> ShapedText {
+        let eKey: ElisionKey? = maxWidth != nil
+            ? ElisionKey(
+                text: authText,
+                spans: spans,
+                style: style,
+                maxWidthHalfPt: maxWidthHalfPt,
+                scale100: scale100,
+                pillsHash: pillsHash,
+                fontEpoch: fontEpoch,
+                langEpoch: langEpoch
+            )
+            : nil
+
+        if let eKey {
+            lock.lock()
+            let cached = elisionCache[eKey]
+            lock.unlock()
+            if let cached {
+                if emitGlyphs {
+                    if let wg = cached.withGlyphs {
+                        return wg
+                    }
+                    let rebuilt = buildCutShaped(
+                        elision: cached.elision,
+                        authText: authText,
+                        spans: spans,
+                        pills: pills,
+                        style: style,
+                        maxWidth: maxWidth,
+                        scale: scale,
+                        emitGlyphs: true
+                    )
+                    lock.lock()
+                    if var existing = elisionCache[eKey] {
+                        existing.withGlyphs = rebuilt
+                        elisionCache[eKey] = existing
+                    }
+                    lock.unlock()
+                    return rebuilt
+                } else if let wog = cached.withoutGlyphs {
+                    return wog
+                }
+            }
+        }
+
+        // First shape the uncut text without clamping/ellipsis to test if it already fits.
+        var uncutStyle = style
+        uncutStyle.maxLines = 0
+        if style.maxLines == 0 && style.wrap == .ellipsis {
+            uncutStyle.wrap = .noWrap
+        } else if style.maxLines > 0 && uncutStyle.wrap == .noWrap {
+            uncutStyle.wrap = .wrap
+        }
+        let uncutWidth: Float? = (style.maxLines == 0 && style.wrap == .ellipsis) ? nil : maxWidth
+        let full = shapeCoreImpl(
+            text: authText,
+            spans: spans,
+            pills: pills,
+            style: uncutStyle,
+            maxWidth: uncutWidth,
+            pixelScale: scale,
+            emitGlyphs: false
+        )
+
+        if style.maxLines > 0 {
+            let lines = style.maxLines
+            let maxWPx = maxWidth.map { max(1.0, $0 * scale) } ?? Float.greatestFiniteMagnitude
+            let lastShown = min(lines, full.lineCount) - 1
+            let lastW = full.lineAdvancePx(at: lastShown)
+            if full.lineCount <= lines && lastW <= maxWPx + 0.5 {
+                let res: ShapedText = emitGlyphs
+                    ? shapeCoreImpl(text: authText, spans: spans, pills: pills, style: uncutStyle, maxWidth: uncutWidth, pixelScale: scale, emitGlyphs: true)
+                    : full
+                lock.lock()
+                shapeMissCount += 1
+                lock.unlock()
+                return res
+            }
+            let (candNoGlyphs, elision) = computeClamped(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                full: full,
+                maxWidth: maxWidth,
+                scale: scale
+            )
+            let finalRes = emitGlyphs
+                ? buildCutShaped(elision: elision, authText: authText, spans: spans, pills: pills, style: style, maxWidth: maxWidth, scale: scale, emitGlyphs: true)
+                : candNoGlyphs
+            lock.lock()
+            shapeMissCount += 1
+            if let eKey {
+                if elisionCache.count > 2048 {
+                    elisionCache.removeAll(keepingCapacity: true)
+                }
+                elisionCache[eKey] = CachedElision(
+                    elision: elision,
+                    withoutGlyphs: candNoGlyphs,
+                    withGlyphs: emitGlyphs ? finalRes : nil
+                )
+            }
+            lock.unlock()
+            return finalRes
+        } else {
+            // Single-line `.ellipsis` truncation
+            let maxWPx = max(1.0, (maxWidth ?? 0) * scale)
+            if full.lineCount <= 1 && full.lastLineAdvancePx <= maxWPx + 0.5 {
+                let res: ShapedText = emitGlyphs
+                    ? shapeCoreImpl(text: authText, spans: spans, pills: pills, style: uncutStyle, maxWidth: nil, pixelScale: scale, emitGlyphs: true)
+                    : full
+                lock.lock()
+                shapeMissCount += 1
+                lock.unlock()
+                return res
+            }
+            let (candNoGlyphs, elision) = computeTruncated(
+                authText: authText,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWPx: maxWPx,
+                scale: scale
+            )
+            let finalRes = emitGlyphs
+                ? buildCutShaped(elision: elision, authText: authText, spans: spans, pills: pills, style: style, maxWidth: maxWidth, scale: scale, emitGlyphs: true)
+                : candNoGlyphs
+            lock.lock()
+            shapeMissCount += 1
+            if let eKey {
+                if elisionCache.count > 2048 {
+                    elisionCache.removeAll(keepingCapacity: true)
+                }
+                elisionCache[eKey] = CachedElision(
+                    elision: elision,
+                    withoutGlyphs: candNoGlyphs,
+                    withGlyphs: emitGlyphs ? finalRes : nil
+                )
+            }
+            lock.unlock()
+            return finalRes
+        }
+    }
+
+    private func buildCutShaped(
+        elision: TextElision,
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        maxWidth: Float?,
+        scale: Float,
+        emitGlyphs: Bool
+    ) -> ShapedText {
+        let drawn = elision.drawnString(from: authText)
+        let origLen = authText.utf8.count
+        let mappedSpans = spans.map { elision.mapSpans($0, originalLength: origLen, drawn: drawn) }
+        let mappedPills = elision.mapPills(pills)
+        var cutStyle = style
+        cutStyle.maxLines = 0
+        let cutMaxW: Float?
+        if style.maxLines > 0 {
+            cutStyle.wrap = (style.wrap == .noWrap || style.wrap == .ellipsis) ? .wrap : style.wrap
+            cutMaxW = maxWidth
+        } else {
+            cutStyle.wrap = .noWrap
+            cutMaxW = nil
+        }
+        var shaped = shapeCoreImpl(
+            text: drawn,
+            spans: mappedSpans,
+            pills: mappedPills,
+            style: cutStyle,
+            maxWidth: cutMaxW,
+            pixelScale: scale,
+            emitGlyphs: emitGlyphs
+        )
+        shaped.elided = elision
+        shaped.wasTruncated = true
+        shaped.drawnText = drawn
+        return shaped
+    }
+
+    private func computeClamped(
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        full: ShapedText,
+        maxWidth: Float?,
+        scale: Float
+    ) -> (ShapedText, TextElision) {
+        let lines = style.maxLines
+        let totalLen = authText.utf8.count
+        let maxWPx = maxWidth.map { max(1.0, $0 * scale) } ?? Float.greatestFiniteMagnitude
+        let lastIdx = min(lines, full.lineCount) - 1
+        let start = min(totalLen, full.lineUTF8Range(at: lastIdx).lowerBound)
+        let end = (lines < full.lineCount)
+            ? min(totalLen, max(start, full.lineUTF8Range(at: lines).upperBound))
+            : totalLen
+        let utf8 = authText.utf8
+        let sIdx = utf8.index(utf8.startIndex, offsetBy: start)
+        let eIdx = utf8.index(utf8.startIndex, offsetBy: end)
+        let bounds = TextElision.graphemeByteBounds(in: authText[sIdx..<eIdx], baseOffset: start)
+        let n = max(0, bounds.count - 1)
+
+        func cut(_ k: Int) -> TextElision {
+            var j = k
+            while j > 0 && TextElision.isBlankSlice(in: authText, byteRange: bounds[j - 1]..<bounds[j]) {
+                j -= 1
+            }
+            let head: Int
+            if j == 0 {
+                let pEnd = utf8.index(utf8.startIndex, offsetBy: start)
+                var prefix = String(authText[..<pEnd])
+                while let last = prefix.unicodeScalars.last, CharacterSet.whitespacesAndNewlines.contains(last) {
+                    prefix.unicodeScalars.removeLast()
+                }
+                head = prefix.utf8.count
+            } else {
+                head = bounds[j]
+            }
+            return TextElision(head: head, tail: totalLen)
+        }
+
+        func fits(_ cand: ShapedText) -> Bool {
+            let shownLast = min(lines, cand.lineCount) - 1
+            return cand.lineCount <= lines && cand.lineAdvancePx(at: shownLast) <= maxWPx + 0.5
+        }
+
+        var lo = 0
+        var hi = n
+        var best: (Int, ShapedText, TextElision)? = nil
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            let e = cut(mid)
+            let cand = buildCutShaped(elision: e, authText: authText, spans: spans, pills: pills, style: style, maxWidth: maxWidth, scale: scale, emitGlyphs: false)
+            if fits(cand) {
+                lo = mid
+                best = (mid, cand, e)
+            } else {
+                hi = mid - 1
+            }
+        }
+        if let best, best.0 == lo {
+            return (best.1, best.2)
+        }
+        let finalE = cut(lo)
+        let finalCand = buildCutShaped(elision: finalE, authText: authText, spans: spans, pills: pills, style: style, maxWidth: maxWidth, scale: scale, emitGlyphs: false)
+        return (finalCand, finalE)
+    }
+
+    private func computeTruncated(
+        authText: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        maxWPx: Float,
+        scale: Float
+    ) -> (ShapedText, TextElision) {
+        let bounds = TextElision.graphemeByteBounds(in: authText, baseOffset: 0)
+        let n = max(0, bounds.count - 1)
+
+        func cut(_ k: Int) -> TextElision {
+            var h: Int
+            var tCount: Int
+            switch style.elide {
+            case .end:
+                h = k
+                tCount = 0
+            case .middle:
+                h = k - k / 2
+                tCount = k / 2
+            case .head:
+                h = 0
+                tCount = k
+            }
+            var t = n - tCount
+            while h > 0 && TextElision.isBlankSlice(in: authText, byteRange: bounds[h - 1]..<bounds[h]) {
+                h -= 1
+            }
+            while t < n && TextElision.isBlankSlice(in: authText, byteRange: bounds[t]..<bounds[t + 1]) {
+                t += 1
+            }
+            return TextElision(head: bounds[h], tail: bounds[t])
+        }
+
+        var lo = 0
+        var hi = n
+        var best: (Int, ShapedText, TextElision)? = nil
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            let e = cut(mid)
+            let cand = buildCutShaped(elision: e, authText: authText, spans: spans, pills: pills, style: style, maxWidth: nil, scale: scale, emitGlyphs: false)
+            if cand.lastLineAdvancePx <= maxWPx + 0.5 {
+                lo = mid
+                best = (mid, cand, e)
+            } else {
+                hi = mid - 1
+            }
+        }
+        if let best, best.0 == lo {
+            return (best.1, best.2)
+        }
+        let finalE = cut(lo)
+        let finalCand = buildCutShaped(elision: finalE, authText: authText, spans: spans, pills: pills, style: style, maxWidth: nil, scale: scale, emitGlyphs: false)
+        return (finalCand, finalE)
+    }
+
+    private func shapeCoreImpl(
         text: String,
         spans: [TextSpan]? = nil,
         pills: [PillChip] = [],
@@ -2786,7 +3343,13 @@ public final class TextSystem: @unchecked Sendable {
                 while segStart < hardEnd {
                     var count: CFIndex
                     if let wrapW = effectiveWrapWidthPx {
-                        let suggested = CTTypesetterSuggestLineBreak(typesetter, segStart, Double(wrapW))
+                        let suggested: CFIndex
+                        if style.wrapAnywhere {
+                            suggested = CTTypesetterSuggestClusterBreak(typesetter, segStart, Double(wrapW))
+                        } else {
+                            let raw = CTTypesetterSuggestLineBreak(typesetter, segStart, Double(wrapW))
+                            suggested = Self.keepUnbrokenWordIntact(raw, segStart: segStart, hardEnd: hardEnd, in: shapedNS)
+                        }
                         count = min(max(1, suggested), hardEnd - segStart)
                         // Keep pill chips and bare inline icons attached to their label/word when they fit on a line.
                         let tentativeEnd = segStart + count
@@ -2889,54 +3452,6 @@ public final class TextSystem: @unchecked Sendable {
             } else {
                 u16Start = hardEnd
             }
-        }
-
-        if style.maxLines > 0 && visualLines.count > style.maxLines {
-            let keepCount = style.maxLines
-            var last = visualLines[keepCount - 1]
-            var trimmedU16End = last.u16End
-            while trimmedU16End > last.u16Start {
-                let ch = shapedNS.character(at: trimmedU16End - 1)
-                if ch == 0x20 || ch == 0x09 || ch == 0x0A || ch == 0x0D {
-                    trimmedU16End -= 1
-                } else {
-                    break
-                }
-            }
-            let ellipAttr = CFAttributedStringCreate(
-                kCFAllocatorDefault,
-                "…" as CFString,
-                [kCTFontAttributeName: baseFont] as CFDictionary
-            )!
-            let ellipToken = CTLineCreateWithAttributedString(ellipAttr)
-            let subLen = max(0, trimmedU16End - last.u16Start)
-            let nsBase = attrStr as NSAttributedString
-            let mutAttr = NSMutableAttributedString(attributedString: nsBase.attributedSubstring(from: NSRange(location: last.u16Start, length: subLen)))
-            mutAttr.append(ellipAttr as NSAttributedString)
-            let withEllipLine = CTLineCreateWithAttributedString(mutAttr)
-            let clampedCTLine: CTLine
-            if let maxW = maxWidth {
-                let maxWPx = Double(max(1.0, maxW * scale))
-                let rawW = CTLineGetTypographicBounds(withEllipLine, nil, nil, nil)
-                if rawW <= maxWPx + 0.5 {
-                    clampedCTLine = withEllipLine
-                    last.strIndexBase = last.u16Start
-                } else {
-                    let baseSubAttr = nsBase.attributedSubstring(from: NSRange(location: last.u16Start, length: subLen))
-                    let baseSubLine = CTLineCreateWithAttributedString(baseSubAttr)
-                    clampedCTLine = CTLineCreateTruncatedLine(baseSubLine, maxWPx, .end, ellipToken) ?? ellipToken
-                    last.strIndexBase = last.u16Start
-                }
-            } else {
-                clampedCTLine = withEllipLine
-                last.strIndexBase = last.u16Start
-            }
-            last.ctLine = clampedCTLine
-            last.widthPx = Float(CTLineGetTypographicBounds(clampedCTLine, nil, nil, nil))
-            last.trailingWsPx = Float(CTLineGetTrailingWhitespaceWidth(clampedCTLine))
-            last.isParaLast = true
-            visualLines = Array(visualLines.prefix(keepCount - 1)) + [last]
-            anyTruncated = true
         }
 
         let maxLineWidthPx = visualLines.reduce(Float(0)) { max($0, $1.widthPx) }
@@ -3314,7 +3829,11 @@ public final class TextSystem: @unchecked Sendable {
             markerMap: markerMap,
             forcedDirection: style.direction,
             primaryIsRTL: (style.direction == .rtl) || (style.direction == nil && (visualLines.first?.isRTL ?? false)),
-            wasTruncated: anyTruncated
+            wasTruncated: anyTruncated,
+            lastLineAdvancePx: visualLines.last?.widthPx ?? 0,
+            hangingAdvancePx: visualLines.last?.trailingWsPx ?? 0,
+            drawnText: authText,
+            lineAdvancesPx: visualLines.map { ($0.widthPx, $0.trailingWsPx) }
         )
     }
 
@@ -3693,6 +4212,7 @@ public final class TextSystem: @unchecked Sendable {
 
         let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        measureMissCount += 1
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
         }

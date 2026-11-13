@@ -502,47 +502,6 @@ private func intersectClipRects(_ a: SIMD4<Float>, _ b: SIMD4<Float>) -> SIMD4<F
     SIMD4<Float>(max(a.x, b.x), max(a.y, b.y), min(a.z, b.z), min(a.w, b.w))
 }
 
-private func pushShadowBands(
-    into instances: inout [RenderInstance],
-    marks: inout [UInt32],
-    inst: RenderInstance,
-    caster: SIMD4<Float>,
-    shapeRadii: SIMD4<Float>
-) {
-    let e = max(
-        max(cornerExtent(shapeRadii.x), cornerExtent(shapeRadii.y)),
-        max(cornerExtent(shapeRadii.z), cornerExtent(shapeRadii.w))
-    ) + 1.0
-    let x = caster.x - inst.rect.x
-    let y = caster.y - inst.rect.y
-    let hx0 = x + e
-    let hy0 = y + e
-    let hx1 = x + caster.z - e
-    let hy1 = y + caster.w - e
-    let grow = inst.params.z * 3.0 + 1.0
-    let qx0 = -grow
-    let qy0 = -grow
-    let qx1 = inst.rect.z + grow
-    let qy1 = inst.rect.w + grow
-    if (hx1 - hx0) < 96.0 || (hy1 - hy0) < 96.0 || hx0 < 1.0 || hy0 <= qy0 || hx1 >= qx1 || hy1 >= qy1 || inst.uv != .zero {
-        instances.append(inst)
-        marks.append(0)
-        return
-    }
-    let bands: [(Float, Float, Float, Float)] = [
-        (qx0, qy0, qx1, hy0),
-        (qx0, hy0, hx0, hy1),
-        (hx1, hy0, qx1, hy1),
-        (qx0, hy1, qx1, qy1),
-    ]
-    for (bx0, by0, bx1, by1) in bands {
-        var b = inst
-        b.uv = SIMD4<Float>(bx0, by0, -bx1, by1)
-        instances.append(b)
-        marks.append(0)
-    }
-}
-
 private func inheritFade(
     width: inout SIMD4<Float>,
     origin: inout SIMD4<Float>,
@@ -1282,7 +1241,7 @@ extension Runtime {
                     fade: activeFade
                 )
                 if opaqueForBands {
-                    pushShadowBands(into: &instances, marks: &marks, inst: shadowInst, caster: rectPx, shapeRadii: radiiPx)
+                    PaintBands.pushShadow(into: &instances, marks: &marks, inst: shadowInst, caster: rectPx, radii: radiiPx)
                 } else {
                     instances.append(shadowInst)
                     marks.append(0)
@@ -1468,7 +1427,7 @@ extension Runtime {
                 } else {
                     sidesVec = .zero
                 }
-                instances.append(RenderInstance(
+                let rectInst = RenderInstance(
                     rect: rectPx,
                     radii: shapeRadiiPx,
                     fill: premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend),
@@ -1477,8 +1436,13 @@ extension Runtime {
                     uv: sidesVec,
                     clip: activeClip,
                     fade: activeFade
-                ))
-                marks.append(0)
+                )
+                if !hasSolidBg && bwPx > 0 && effBorderColor.a > 0.001 && sidesVec == .zero {
+                    PaintBands.pushRing(into: &instances, marks: &marks, inst: rectInst)
+                } else {
+                    instances.append(rectInst)
+                    marks.append(0)
+                }
             } else if fillPaintedByGrad && bwPx > 0 && effBorderColor.a > 0.001 && borderBottomPremul == nil {
                 // Solid border atop multi-stop linear/radial gradient
                 instances.append(RenderInstance(

@@ -119,11 +119,14 @@ public struct LayoutStyle: Sendable, Hashable {
 public struct ComputedLayout: Sendable, Equatable {
     /// Local offset `(x, y)` relative to parent's top-left border box, plus `(width, height)`.
     public var localRect: MotionRect
+    /// Unrounded local `(width, height)` preserved directly from layout (`(y + h) - y` ULP safe).
+    public var localSize: Vec2
     /// Content extent `(width, height)` inside scrollable containers.
     public var contentSize: Vec2
 
-    public init(localRect: MotionRect = .zero, contentSize: Vec2 = .zero) {
+    public init(localRect: MotionRect = .zero, localSize: Vec2? = nil, contentSize: Vec2 = .zero) {
         self.localRect = localRect
+        self.localSize = localSize ?? Vec2(localRect.width, localRect.height)
         self.contentSize = contentSize
     }
 }

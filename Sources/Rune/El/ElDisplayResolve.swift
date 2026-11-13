@@ -138,9 +138,13 @@ internal enum ElDisplayResolver {
         let richStyle = el.richStyleSpec ?? RichStyle()
         let isSingle = el.isSingleLineInput
         var inputStyle = el.textStyle
+        inputStyle.maxLines = 0
+        if inputStyle.wrap == .ellipsis {
+            inputStyle.wrap = edit.multiline ? .wrap : .noWrap
+        }
         if isSingle {
             inputStyle.wrap = .noWrap
-        } else if edit.multiline && inputStyle.wrap != .ellipsis {
+        } else if edit.multiline {
             inputStyle.wrap = .wrap
         }
         if let fDir = edit.forcedDir {
@@ -258,6 +262,12 @@ internal enum ElDisplayResolver {
         fallbackDirection: TextFlow? = nil
     ) -> ElResolvedText {
         var style = el.textStyle
+        if (el.runtimeExtras["htmlWrapAnywhere"] as? Bool == true) || (el.runtimeExtras["shell.wrapAnywhere"] as? Bool == true) {
+            style.wrapAnywhere = true
+            if style.wrap == .noWrap {
+                style.wrap = .wrap
+            }
+        }
         if let fallbackDirection, style.direction == nil {
             style.direction = fallbackDirection
         }
