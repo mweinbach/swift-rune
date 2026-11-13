@@ -231,4 +231,38 @@ struct TextEditInputParityTests {
         let modPlus = try Chord.parse("mod+plus")
         #expect(modPlus.matches(KeyEvent(key: .text("+"), mods: Mods(shift: true, cmd: true, logo: true)), on: .mac))
     }
+
+    @Test("TextSystem.measure wraps when maxWidth is provided even if style.wrap is .noWrap, while RuntimeLayout honors .noWrap")
+    func measureWrapsWithMaxWidthAndLayoutHonorsNoWrap() {
+        let ts = TextSystem()
+        let style = TextStyle(size: 13.0, weight: 400.0).lh(18.0)
+        #expect(style.wrap == .noWrap)
+
+        let phrase = "newest turn is a result you haven't read"
+        let single = ts.measure(phrase, style: style, maxWidth: nil, pixelScale: 1.0)
+        let wrapped = ts.measure(phrase, style: style, maxWidth: 120.0, pixelScale: 1.0)
+        #expect(wrapped.x <= 125.0)
+        #expect(wrapped.x < single.x)
+        #expect(wrapped.y > single.y)
+
+        let portSingle = ts.measurePortable(phrase, style: style, maxWidth: nil, pixelScale: 1.0)
+        let portWrapped = ts.measurePortable(phrase, style: style, maxWidth: 120.0, pixelScale: 1.0)
+        #expect(portWrapped.x <= 120.0)
+        #expect(portWrapped.y > portSingle.y)
+
+        // El defaults to .noWrap in layout so narrow container does not multi-line wrap unwrapped El.text
+        let rtNoWrap = Runtime<Int>(state: 0, viewport: Vec2(100, 400), pixelScale: 1.0) { _, _ in
+            col().w(100).child(text(phrase).font(style).key("nw"))
+        }
+        _ = rtNoWrap.frame(at: 0)
+        let nwTarget = rtNoWrap.elements().first(where: { $0.key == "nw" })!.target
+        #expect(nwTarget[3] < style.resolvedLineHeight * 1.5)
+
+        let rtWrap = Runtime<Int>(state: 0, viewport: Vec2(100, 400), pixelScale: 1.0) { _, _ in
+            col().w(100).child(text(phrase).font(style.wrapped()).key("wr"))
+        }
+        _ = rtWrap.frame(at: 0)
+        let wrTarget = rtWrap.elements().first(where: { $0.key == "wr" })!.target
+        #expect(wrTarget[3] >= style.resolvedLineHeight * 2.0)
+    }
 }

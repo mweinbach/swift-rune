@@ -1442,19 +1442,24 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     /// Fast cached measurement of plain `text` constrained to `maxWidth` logical points.
+    /// When `maxWidth` is non-nil and `style.wrap == .noWrap`, wraps at `maxWidth` per upstream `text::measure`.
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
         if text.isEmpty {
             return Vec2(0, style.resolvedLineHeight)
         }
+        var effectiveStyle = style
+        if maxWidth != nil && effectiveStyle.wrap == .noWrap {
+            effectiveStyle.wrap = .wrap
+        }
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
-        let key = MeasureKey(text: text, style: style, maxWidthHalfPt: maxWKey, scale100: Int((pixelScale * 100).rounded()))
+        let key = MeasureKey(text: text, style: effectiveStyle, maxWidthHalfPt: maxWKey, scale100: Int((pixelScale * 100).rounded()))
         lock.lock()
         if let cached = measureCache[key] {
             lock.unlock()
             return cached
         }
         lock.unlock()
-        let shaped = shape(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
+        let shaped = shape(text: text, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
@@ -1960,9 +1965,13 @@ public final class TextSystem: @unchecked Sendable {
         if text.isEmpty {
             return Vec2(0, style.resolvedLineHeight)
         }
+        var effectiveStyle = style
+        if maxWidth != nil && effectiveStyle.wrap == .noWrap {
+            effectiveStyle.wrap = .wrap
+        }
         let key = MeasureKey(
             text: text,
-            style: style,
+            style: effectiveStyle,
             maxWidthHalfPt: maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1,
             scale100: Int((pixelScale * 100.0).rounded())
         )
@@ -1973,7 +1982,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         lock.unlock()
 
-        let shaped = shapePortable(text: text, spans: nil, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
+        let shaped = shapePortable(text: text, spans: nil, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
