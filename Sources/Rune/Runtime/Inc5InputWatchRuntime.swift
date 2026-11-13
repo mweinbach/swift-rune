@@ -555,7 +555,8 @@ extension Runtime {
         return node.el.hoverBg != nil || node.el.pressBg != nil ||
                node.el.isHoverGroup || node.el.isHoverAlone ||
                h.onHover != nil || h.onClick != nil || h.onClickPress != nil ||
-               h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil
+               h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil ||
+               (!node.el.textLinks.isEmpty && !node.el.isSecure && h.editLens == nil)
     }
 
     internal func layoutMoving() -> Bool {
@@ -677,6 +678,7 @@ extension Runtime {
         }
 
         if shouldHold {
+            hoveredLink = nil
             if let cur = hoveredPath, hoverLive(cur) == nil {
                 hoveredPath = nil
                 hoveredKey = nil
@@ -688,22 +690,35 @@ extension Runtime {
                     isDispatchingHover = false
                 }
             }
-        } else if ptrInWindow, candidatePath != hoveredPath {
-            let oldPath = hoveredPath
-            hoveredPath = candidatePath
-            hoveredKey = candidateHit?.node.key
-            isDispatchingHover = true
-            if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
-                var tx = makeTx(at: currentTime)
-                cb(&state, false, &tx)
-                applyTx(tx, at: currentTime)
+        } else if ptrInWindow {
+            let newHoveredLink: TextLinkTarget? = {
+                guard let hitNode = candidateHit?.node,
+                      hasActiveTextLinks(hitNode.el),
+                      let linkIdx = linkIndex(atPath: hitNode.path, at: pointerPosition) else {
+                    return nil
+                }
+                return TextLinkTarget(path: hitNode.path, key: hitNode.key, linkIndex: linkIdx)
+            }()
+            if newHoveredLink != hoveredLink {
+                hoveredLink = newHoveredLink
             }
-            if let np = candidatePath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
-                var tx = makeTx(at: currentTime)
-                cb(&state, true, &tx)
-                applyTx(tx, at: currentTime)
+            if candidatePath != hoveredPath {
+                let oldPath = hoveredPath
+                hoveredPath = candidatePath
+                hoveredKey = candidateHit?.node.key
+                isDispatchingHover = true
+                if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
+                    var tx = makeTx(at: currentTime)
+                    cb(&state, false, &tx)
+                    applyTx(tx, at: currentTime)
+                }
+                if let np = candidatePath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
+                    var tx = makeTx(at: currentTime)
+                    cb(&state, true, &tx)
+                    applyTx(tx, at: currentTime)
+                }
+                isDispatchingHover = false
             }
-            isDispatchingHover = false
         }
 
         syncHoverTracks(at: now, cut: false, held: shouldHold, groupHovered: groupHovered)

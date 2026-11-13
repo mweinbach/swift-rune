@@ -657,6 +657,8 @@ public struct ElementHandlers<State> {
     public var onInputKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var onTextChange: ((inout State, String, inout Tx) -> Void)?
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
+    public var onLink: ((inout State, String, inout Tx) -> Void)?
+    public var onLinkSecondary: ((inout State, String, PointerPress, inout Tx) -> Void)?
     public var modalDismiss: ((inout State, inout Tx) -> Void)?
     public var onStep: ((inout State, Int, inout Tx) -> Void)?
     public var onStepLimit: ((inout State, Bool, inout Tx) -> Void)?
@@ -751,6 +753,7 @@ struct ElColdData<State> {
 
     var richSpans: [TextSpan]? = nil
     var textHighlights: [TextHighlight]? = nil
+    var textLinks: [TextLink]? = nil
     var liveText: LiveText? = nil
     var placeholder: String? = nil
     var placeholderColor: Color? = nil
@@ -843,6 +846,10 @@ public struct El<State> {
     // Cold / CoW properties (keeps `El<State>` compact on worker thread stacks)
     public var richSpans: [TextSpan]? { get { _cold?.data.richSpans } set { ensureCold().data.richSpans = newValue } }
     public var textHighlights: [TextHighlight]? { get { _cold?.data.textHighlights } set { ensureCold().data.textHighlights = newValue } }
+    public var textLinks: [TextLink] {
+        get { _cold?.data.textLinks ?? [] }
+        set { ensureCold().data.textLinks = newValue.isEmpty ? nil : newValue }
+    }
     public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
     public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
     public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
@@ -2281,6 +2288,51 @@ public struct El<State> {
     public func onSecondaryClick(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onSecondaryClick = handler
+        return copy
+    }
+
+    /// Makes `link.byteRange` of this text pressable (`crates/rune/src/el/text.rs:397`).
+    /// Only the range's shaped glyph boxes take the pointer; each link is a Tab stop that Return or Space presses.
+    public func link(_ link: TextLink) -> Self {
+        var copy = self
+        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
+            return copy
+        }
+        var links = copy.textLinks
+        links.append(link)
+        copy.textLinks = links
+        copy.focusable = true
+        if copy.attachedCursor == nil {
+            copy.runtimeExtras["cursor"] = Cursor.pointer
+        }
+        return copy
+    }
+
+    /// Registers an activation handler invoked with the pressed/focused `TextLink.id` (`crates/rune/src/el/text.rs:409`).
+    public func onLink(_ handler: @escaping (inout State, String, inout Tx) -> Void) -> Self {
+        var copy = self
+        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
+            return copy
+        }
+        copy.handlers.onLink = handler
+        return copy
+    }
+
+    /// Convenience `onLink` overload when no `Tx` mutation is needed.
+    public func onLink(_ handler: @escaping (inout State, String) -> Void) -> Self {
+        onLink { state, id, _ in handler(&state, id) }
+    }
+
+    /// Registers a secondary-click handler invoked with the `TextLink.id` and press coordinates (`crates/rune/src/el/text.rs:419`).
+    public func onLinkSecondary(_ handler: @escaping (inout State, String, PointerPress, inout Tx) -> Void) -> Self {
+        var copy = self
+        guard copy.handlers.editLens == nil, !copy.isSecure else { return copy }
+        guard copy.plainText != nil || copy.richSpans != nil || copy.liveText != nil || copy.role == .text else {
+            return copy
+        }
+        copy.handlers.onLinkSecondary = handler
         return copy
     }
 
