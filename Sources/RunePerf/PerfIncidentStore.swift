@@ -102,16 +102,17 @@ public final class IncidentDetector: @unchecked Sendable {
         slowThresholdMs: Double = IncidentDetector.defaultSlowFrameMs,
         stallThresholdMs: Double = IncidentDetector.defaultStallMs
     ) -> Incident? {
-        let work = (sample.updateMs ?? 0) + (sample.renderMs ?? 0)
+        guard let work = sample.workMs else { return nil }
         let kind: IncidentKind
         if work >= stallThresholdMs {
             kind = .stall
         } else if work >= slowThresholdMs {
-            let slowCount = recent.reversed()
+            let matching = recent.reversed()
                 .prefix(while: { sample.timestampMs >= $0.timestampMs && sample.timestampMs - $0.timestampMs <= 1_000 })
-                .filter { (($0.updateMs ?? 0) + ($0.renderMs ?? 0)) >= slowThresholdMs }
-                .prefix(3)
-                .count
+                .filter { $0.window == windowId && $0.source == sourceId && ($0.workMs ?? -1.0) >= slowThresholdMs }
+            let alreadyIncluded = recent.last == sample
+            let baseCount = matching.prefix(3).count
+            let slowCount = alreadyIncluded ? baseCount : min(3, baseCount + 1)
             guard slowCount >= 3 else { return nil }
             kind = .longFrames
         } else {
@@ -128,6 +129,7 @@ public final class IncidentDetector: @unchecked Sendable {
             evidence: [
                 "work_ms": String(format: "%.3f", work),
                 "confidence": "measured work; cause unknown",
+                "next_measurement": "capture update/compositor phases for this window and source",
             ]
         )
     }
@@ -138,7 +140,7 @@ public final class IncidentDetector: @unchecked Sendable {
         defer { lock.unlock() }
 
         let minute = nowMs / 60_000
-        let footprint = usage.footprintBytes.flatMap { $0 > 0 ? $0 : nil }
+        let footprint = usage.footprintBytes
         let fds = usage.openFDs.map { UInt64($0) }
 
         if let last = floors.last, minute > last.minute + 1 {
@@ -181,8 +183,10 @@ public final class IncidentDetector: @unchecked Sendable {
                     timestampMs: nowMs,
                     message: "memory-growth: +\(delta) bytes over 5m",
                     evidence: [
+                        "minute_floors": memValues.map(String.init).joined(separator: ","),
                         "growth_bytes": "\(delta)",
                         "confidence": "suspected growth, not a proven leak",
+                        "next_measurement": "repeat view open/close cycles; check whether footprint and descriptors plateau",
                     ]
                 ))
             }
@@ -201,8 +205,10 @@ public final class IncidentDetector: @unchecked Sendable {
                     timestampMs: nowMs,
                     message: "fd-growth: +\(delta) fds over 5m",
                     evidence: [
+                        "minute_floors": fdValues.map(String.init).joined(separator: ","),
                         "growth_fds": "\(delta)",
                         "confidence": "suspected growth, not a proven leak",
+                        "next_measurement": "repeat view open/close cycles; check whether footprint and descriptors plateau",
                     ]
                 ))
             }
@@ -212,8 +218,8 @@ public final class IncidentDetector: @unchecked Sendable {
     }
 
     /// Rate-limiting and deduplication admission check.
-    /// Rejects if within 2s of any sent incident, or within 60s of the same `(kind, window, source)`
-    /// unless severity escalated by at least 1.25x.
+    /// Rejects if within 2s of any sent incident, or if EITHER within 60s of the same
+    /// `(kind, window, source)` OR severity did not escalate by at least 1.25x (`incident.rs:86-91`).
     public func admit(nowMs: UInt64, incident: Incident) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -221,14 +227,18 @@ public final class IncidentDetector: @unchecked Sendable {
         let old = sent.first {
             $0.kind == incident.kind && $0.window == incident.window && $0.source == incident.source
         }
-        if let last = lastSentMs, nowMs >= last && (nowMs - last) < Self.globalCooldownMs {
-            suppressedCount += 1
-            return false
+        if let last = lastSentMs {
+            let globalElapsed = nowMs >= last ? (nowMs - last) : 0
+            if globalElapsed < Self.globalCooldownMs {
+                suppressedCount += 1
+                return false
+            }
         }
         if let old {
-            let withinCooldown = nowMs >= old.atMs && (nowMs - old.atMs) < Self.sameKeyCooldownMs
+            let keyElapsed = nowMs >= old.atMs ? (nowMs - old.atMs) : 0
+            let withinCooldown = keyElapsed < Self.sameKeyCooldownMs
             let notEscalated = incident.severity < old.severity * Self.severityEscalationFactor
-            if withinCooldown && notEscalated {
+            if withinCooldown || notEscalated {
                 suppressedCount += 1
                 return false
             }

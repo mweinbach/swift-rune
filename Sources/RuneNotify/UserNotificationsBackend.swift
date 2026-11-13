@@ -297,7 +297,7 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
         switch notification.urgency {
         case .passive: args += ["-u", "low"]
         case .active: args += ["-u", "normal"]
-        case .timeSensitive: args += ["-u", "critical"]
+        case .timeSensitive, .critical: args += ["-u", "critical"]
         }
         args.append(notification.title)
         if !notification.body.isEmpty {
