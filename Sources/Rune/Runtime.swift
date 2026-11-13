@@ -594,6 +594,7 @@ public final class Runtime<State> {
     private var liveTweenStart: [ObjectIdentifier: Double] = [:]
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
+    internal var liveFillTargets: [NodeId: Color] = [:]
 
     internal var flatNodes: [FlatNode] = []
     internal var nodeByPath: [String: Int] = [:]
@@ -1050,7 +1051,18 @@ public final class Runtime<State> {
             var anyScrollMoved = false
             for (path, maxExt) in scrollMaxExtents {
                 let nid = NodeId.hash("scroll:" + path)
-                if let cur = scrollStore.get(nid, Props.SCROLL) {
+                if var cur = scrollStore.get(nid, Props.SCROLL) {
+                    if scrollGlidingPaths.contains(path),
+                       scrollStore.isMoving(nid, Props.SCROLL),
+                       let target = scrollStore.target(nid, Props.SCROLL),
+                       let vel = scrollStore.velocity(nid, Props.SCROLL),
+                       abs(target.x - cur.x) < 0.1 && abs(vel.x) < 4.0,
+                       abs(target.y - cur.y) < 0.1 && abs(vel.y) < 4.0 {
+                        // Upstream offset.rs:183 (`LAND = 0.1`, `|v| < 40 * LAND`) lands scroll glides at exact target.
+                        cur = target
+                        scrollStore.snap(nid, Props.SCROLL, to: target)
+                        scrollGlidingPaths.remove(path)
+                    }
                     let clamped = Vec2(
                         cur.x.clamped(to: 0...maxExt.x),
                         cur.y.clamped(to: 0...maxExt.y)
@@ -2485,7 +2497,14 @@ public final class Runtime<State> {
         applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
         syncRideTrailingFlags(pass.nodes, on: &scene)
         measureFramePhase(.apply) {
-            scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: commitCut, matchedStarts: matchedStarts)
+            scene.commit(
+                specs,
+                at: cxSettings.scaledTime(at: now),
+                initialCut: commitCut,
+                snapMounts: commitKind.snaps,
+                snapOmittedNonExiting: commitKind.snaps,
+                matchedStarts: matchedStarts
+            )
         }
         scene.keepFlights(false)
         recordVirtualMeasurementsAndCallbacks(expansion: pass.virtualExpansion, at: now)
@@ -3125,7 +3144,10 @@ public final class Runtime<State> {
         case .scale: liveStore.snap(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0))
         case .blur: liveStore.snap(nid, Props.BLUR, to: Blur(lanes.l0))
         case .offset, .trim: liveStore.snap(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1))
-        case .fill: liveStore.snap(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor)
+        case .fill:
+            let c = Color.decodeLiveLanes(lanes)
+            liveFillTargets[nid] = c
+            liveStore.snap(nid, Props.FILL, to: c.motionColor)
         case .rect: liveStore.snap(nid, Props.RECT, to: MotionRect.fromLanes(lanes))
         }
     }
@@ -3136,7 +3158,10 @@ public final class Runtime<State> {
         case .scale: liveStore.set(nid, Props.SCALE, to: Vec2(lanes.l0, lanes.l0), anim: .spring(spring), at: now)
         case .blur: liveStore.set(nid, Props.BLUR, to: Blur(lanes.l0), anim: .spring(spring), at: now)
         case .offset, .trim: liveStore.set(nid, Props.OFFSET, to: Vec2(lanes.l0, lanes.l1), anim: .spring(spring), at: now)
-        case .fill: liveStore.set(nid, Props.FILL, to: Color.decodeLiveLanes(lanes).motionColor, anim: .spring(spring), at: now)
+        case .fill:
+            let c = Color.decodeLiveLanes(lanes)
+            liveFillTargets[nid] = c
+            liveStore.set(nid, Props.FILL, to: c.motionColor, anim: .spring(spring), at: now)
         case .rect: liveStore.set(nid, Props.RECT, to: MotionRect.fromLanes(lanes), anim: .spring(spring), at: now)
         }
     }
@@ -3640,7 +3665,12 @@ public final class Runtime<State> {
             if let pf = p.fill {
                 let isPressedNode = (pressedPath == snap.path) && !snap.effectiveInert
                 let effFill = (isPressedNode ? el.pressBg.map { blendColorOver(bottom: el.background, top: $0, srgb: srgbBlend) } : nil) ?? el.background
-                fillColor = (pf == effFill.motionColor) ? effFill : Color(pf)
+                let settledMatch = !scene.store.isMoving(p.id, Props.FILL)
+                    && abs(pf.r - effFill.r) < 1e-3
+                    && abs(pf.g - effFill.g) < 1e-3
+                    && abs(pf.b - effFill.b) < 1e-3
+                    && abs(pf.a - effFill.a) < 1e-3
+                fillColor = (settledMatch || pf == effFill.motionColor) ? effFill : Color(pf)
             } else {
                 fillColor = el.background
             }
@@ -3648,8 +3678,12 @@ public final class Runtime<State> {
             var liveTrim: Vec2? = nil
             for b in el.liveBindings {
                 let lnid = NodeId.hash("live:\(snap.path):\(b.target)")
-                if b.target == .fill, let mc = liveStore.get(lnid, Props.FILL) {
-                    fillColor = Color(mc)
+                if b.target == .fill {
+                    if !liveStore.isMoving(lnid, Props.FILL), let exact = liveFillTargets[lnid] {
+                        fillColor = exact
+                    } else if let mc = liveStore.get(lnid, Props.FILL) {
+                        fillColor = Color(mc)
+                    }
                 } else if b.target == .blur, let bl = liveStore.get(lnid, Props.BLUR) {
                     blurPt = bl.radius
                 } else if b.target == .trim, let tr = liveStore.get(lnid, Props.OFFSET) {
@@ -3658,7 +3692,12 @@ public final class Runtime<State> {
             }
             let borderColor: Color
             if let pb = p.border {
-                borderColor = (pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
+                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER)
+                    && abs(pb.r - el.borderColor.r) < 1e-3
+                    && abs(pb.g - el.borderColor.g) < 1e-3
+                    && abs(pb.b - el.borderColor.b) < 1e-3
+                    && abs(pb.a - el.borderColor.a) < 1e-3
+                borderColor = (settledBorder || pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
             } else {
                 borderColor = el.borderColor
             }

@@ -955,4 +955,94 @@ struct ElInc5AUnblockersTests {
         #expect(exEl?.exiting == true)
         #expect((exEl?.hover ?? -1) == 0.0)
     }
+
+    @Test("tx.instant() unmounts omitted transition rows, snaps fresh transition rows, and keeps exiting ancestor descendants")
+    func txInstantAndExitingAncestorDescendantsParity() {
+        struct S {
+            var showPopup = true
+            var rows = ["a0", "a1", "a2"]
+        }
+        let rt = Runtime<S>(state: S(), viewport: Vec2(400, 400)) { s, _ in
+            var root: El<S> = col().w(400).h(400)
+            if s.showPopup {
+                root = root.child(
+                    col()
+                        .key("popup")
+                        .w(200)
+                        .h(200)
+                        .transition(.opacity)
+                        .children(s.rows.map { r in
+                            el().key("row-\(r)").w(200).h(30).transition(.opacity)
+                        })
+                )
+            }
+            return root
+        }
+        _ = rt.frame(at: 0.0)
+        // tx.instant() removes a0/a2 immediately and mounts b0/b1 snapped at full opacity & final y
+        rt.update(at: 0.1) { s, tx in
+            s.rows = ["a1", "b0", "b1"]
+            tx.instant()
+        }
+        _ = rt.frame(at: 0.11)
+        #expect(rt.element(byKey: "row-a0") == nil)
+        #expect(rt.element(byKey: "row-a2") == nil)
+        #expect(rt.element(byKey: "row-b0")?.opacity == 1.0)
+        #expect(abs((rt.element(byKey: "row-b1")?.rect[1] ?? -1) - 60.0) < 0.05)
+
+        // Closing popup with transition keeps transitionless / child rows mounted while popup fades
+        rt.update(at: 0.2) { s, _ in
+            s.showPopup = false
+        }
+        _ = rt.frame(at: 0.22)
+        #expect(rt.element(byKey: "popup")?.exiting == true)
+        #expect(rt.element(byKey: "row-a1") != nil)
+        #expect(rt.element(byKey: "row-b1") != nil)
+    }
+
+    @Test("scrollPage GLIDE lands within 30 frames at exact target and liveFill avoids OKLab 1e-6 rounding")
+    func scrollGlideLandingAndLiveFillExactness() {
+        let red = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        let blue = Color(r: 0.0, g: 0.0, b: 1.0, a: 1.0)
+        let liveColor = Live(red)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 100)) { _, _ in
+            col()
+                .size(200, 100)
+                .child(
+                    el()
+                        .key("swatch")
+                        .size(20, 20)
+                        .liveFill(liveColor.smooth(Spring(duration: 0.12, bounce: 0.0)))
+                )
+                .child(
+                    col()
+                        .key("scroll")
+                        .wFull()
+                        .h(100)
+                        .scrollY()
+                        .children((0..<20).map { i in el().key("r\(i)").wFull().h(20) })
+                )
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        t += 1.0 / 60.0
+        _ = rt.frame(at: t)
+        #expect(rt.element(byKey: "swatch")?.fill == red)
+
+        liveColor.set(blue)
+        for _ in 0..<30 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        #expect(rt.element(byKey: "swatch")?.fill == blue)
+
+        rt.update(at: t) { _, tx in
+            tx.scrollPage("scroll", 1)
+        }
+        for _ in 0..<30 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        #expect(rt.scrollOffset(forKey: "scroll").y == 90.0)
+    }
 }
