@@ -73,17 +73,12 @@ public func odometerView(_ s: OdometerState, _ cx: inout Cx<OdometerState>) -> E
         .p(24)
         .gap(16)
         .children([
-            text("RollingText")
-                .font(k.ty.small)
-                .color(c.textFaint),
-            row()
-                .gap(24)
-                .itemsCenter()
-                .children([count, time]),
+            buttons,
+            count,
+            time,
             odometerHeader(key: "head", s: s, k: k, trailingCost: true, leads: true),
             odometerHeader(key: "head-lead", s: s, k: k, trailingCost: false, leads: true),
             odometerHeader(key: "head-plain", s: s, k: k, trailingCost: true, leads: false),
-            buttons,
         ])
 }
 
@@ -97,33 +92,37 @@ private func odometerHeader(
     let c = k.c
     let cost = String(format: "$%.2f", Double(s.cents) / 100.0)
     let ctx = formatOdometerTokens(s.tokens)
+    let labelFont = TextStyle(size: 12, weight: 440).lh(16).features("'tnum' 1")
 
     var usage: El<OdometerState> = row()
+        .key("\(key)-usage")
         .gap(6)
         .itemsCenter()
         .children([
-            col().w(14).h(14).rounded(7).bg(c.borderStrong),
+            el().size(14, 14).rounded(7).border(2, c.borderBase),
             RollingText<OdometerState>(
                 key: "\(key)-ctx",
                 value: ctx,
                 numericValue: Double(s.tokens),
-                font: k.ty.textXsmall.mono(),
-                color: c.textFaint,
+                font: labelFont,
+                color: c.textWeak,
                 trailing: true,
                 kit: k,
                 store: s.store
             )
+            .spring(odometerUsageSpring)
             .build(),
             RollingText<OdometerState>(
                 key: "\(key)-cost",
                 value: cost,
                 numericValue: Double(s.cents),
-                font: k.ty.textXsmall.mono(),
-                color: c.textMuted,
+                font: labelFont,
+                color: c.textWeak,
                 trailing: trailingCost,
                 kit: k,
                 store: s.store
             )
+            .spring(odometerUsageSpring)
             .build(),
         ])
     usage = leads
@@ -138,24 +137,24 @@ private func odometerHeader(
         .gap(8)
         .itemsCenter()
         .bg(c.bgDeep)
-        .rounded(k.radius.md)
         .children([
-            text("Refactor the session list so pinned rows keep their place")
-                .font(k.ty.smallMedium)
-                .color(c.textBase)
+            row()
+                .key("\(key)-crumbs")
+                .itemsCenter()
                 .shrink(1)
-                .minW(0)
-                .ellipsis(),
+                .child(
+                    text("Refactor the session list so pinned rows keep their place")
+                        .font(TextStyle(size: 13, weight: 530))
+                        .ellipsis()
+                ),
             spacer(),
             usage,
         ])
 }
 
 private func formatOdometerTokens(_ n: UInt64) -> String {
-    if n >= 1_000_000 {
-        return String(format: "%.1fM", Double(n) / 1_000_000.0)
-    } else if n >= 1_000 {
-        return "\(n / 1_000)k"
+    if n >= 1_000 {
+        return String(format: "%.1fK", Double(n) / 1e3)
     } else {
         return "\(n)"
     }

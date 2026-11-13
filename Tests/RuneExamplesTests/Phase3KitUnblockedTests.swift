@@ -76,13 +76,15 @@ struct Phase3KitUnblockedTests {
         let initial = try HeadlessRunner.run(RuneOdometerApp.makeSpec(), args: ToolingArgs.parse([]))
         let parsed0 = try parseTree(initial.treeJSON)
         #expect(parsed0.keys.contains("head"))
+        #expect(parsed0.keys.contains("head-usage"))
+        #expect(parsed0.keys.contains("head-crumbs"))
         #expect(parsed0.keys.contains("head-lead"))
         #expect(parsed0.keys.contains("head-plain"))
         #expect(parsed0.keys.contains("up"))
         #expect(parsed0.keys.contains("down"))
         #expect(parsed0.keys.contains("step"))
         #expect(parsed0.keys.contains("big"))
-        #expect(parsed0.texts.contains("RollingText"))
+        #expect(!parsed0.texts.contains("RollingText"))
 
         let script = """
         [
@@ -96,11 +98,11 @@ struct Phase3KitUnblockedTests {
             args: ToolingArgs.parse(["--script", script, "--at", "1.50"])
         )
         let parsed1 = try parseTree(after.treeJSON)
-        // RollingText splits digits/chars into individual text leaves (`1`, `0`, `s`, `$`, `1`, `0`, `.`, `4`, `5`).
+        // RollingText splits digits/chars into individual text leaves (`1`, `0`, `s`, `$`, `1`, `0`, `.`, `4`, `5`, `1`, `1`, `1`, `.`, `7`, `K`).
         let joined = parsed1.texts.joined(separator: " ")
         #expect(joined.contains("1 0 s"))
         #expect(joined.contains("$ 1 0 . 4 5"))
-        #expect(joined.contains("1 1 1 k"))
+        #expect(joined.contains("1 1 1 . 7 K"))
     }
 
     @Test("kit-table: 100k artifacts initial render and column sorting")
@@ -263,10 +265,9 @@ struct Phase3KitUnblockedTests {
         #expect(notesParsed.texts.contains("Groceries"))
         #expect(notesParsed.texts.contains("⌘Space to search"))
 
-        // Trigger the registered `cmd+space` globalShortcut in the `launcher` window, filter to "li".
+        // Trigger the registered `cmd+space` globalShortcut in the `launcher` window, filter to "li" (query autofocuses on launch).
         let steps: [[String: Any]] = [
             ["t": 0.05, "shortcut": "cmd+space"],
-            ["t": 0.15, "type": "click", "key": "query"],
             ["t": 0.30, "type": "type", "text": "li", "every": 0.01],
         ]
         let scriptData = try JSONSerialization.data(withJSONObject: steps)

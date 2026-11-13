@@ -243,7 +243,11 @@ private func settingsPage(dark: Bool, inset: Float) -> El<ShellExampleState> {
     let back = k.button(key: "back", "Back", variant: .ghost, size: .regular) { (state: inout ShellExampleState, _) in
         state.page = false
     }
-    let lock = k.iconButton(key: "lock", svg: k.glyph.lock, label: "Lock", variant: .ghost) { (_: inout ShellExampleState, _) in }
+    let lock = IconButton<ShellExampleState>(key: "lock", svg: k.glyph.lock)
+        .variant(.ghostMuted)
+        .help("Lock")
+        .shortcut("⌘L")
+        .build(k)
 
     return Page<ShellExampleState>(content: body)
         .title("Settings")

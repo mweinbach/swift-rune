@@ -107,6 +107,7 @@ public func launcherPanelView(_ s: LauncherWindowState, _ cx: inout Cx<LauncherW
     let found = launcherMatches(s.query.text)
 
     let field: El<LauncherWindowState> = Rune.textInput(key: "query", \.query)
+        .autofocus()
         .font(Tok.Typography.body.lh(26.0))
         .grow(1.0)
         .color(t.text)
