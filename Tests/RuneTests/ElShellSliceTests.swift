@@ -490,13 +490,16 @@ struct ElShellSliceTests {
         #expect(outlinedNode.runtimeExtras.values.contains { ($0 as? Bool) == false })
     }
 
-    @Test("dim multiplies own/child paint alphas without opening an offscreen layer; layerOpacity opens one layer for subtrees")
+    @Test("dim applies only to existing children without paint-time propagation; layerOpacity opens one layer for subtrees")
     func dimVsLayerOpacitySemantics() throws {
-        let rt = Runtime(state: (), viewport: Vec2(240, 120), pixelScale: 1.0) { _, _ in
+        let rt = Runtime(state: (), viewport: Vec2(280, 120), pixelScale: 1.0) { _, _ in
             row().gap(10).children([
-                col().key("dimGroup").dim(0.4).children([
+                col().key("dimGroup").children([
                     col().key("dimChildA").bg(cRed).size(40, 40),
                     col().key("dimChildB").bg(cRed).size(20, 20).offset(5, -10),
+                ]).dim(0.4),
+                col().key("dimBeforeChildren").bg(cBlue).size(20, 20).dim(0.4).children([
+                    col().key("childAddedAfterDim").bg(cGreen).size(15, 15),
                 ]),
                 col().key("layerGroup").layerOpacity(0.4).children([
                     col().key("layerChildA").bg(cBlue).size(40, 40),
@@ -511,15 +514,29 @@ struct ElShellSliceTests {
         #expect(layers.count == 1)
         #expect(abs((layers.first?.params.x ?? 0) - 0.4) < 0.02)
 
+        // Children built before .dim(0.4) get 0.4 once (not 0.16 from double application).
         let redBoxes = scene.primitives.filter { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.x > 0.8 }
         #expect(redBoxes.count == 2)
         #expect(redBoxes.allSatisfy { abs($0.fill.w - 0.4) < 0.02 })
 
-        let blueBox = try #require(scene.primitives.first { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.z > 0.8 })
-        #expect(abs(blueBox.fill.w - 1.0) < 0.02)
+        // Verify both RenderFrame and Scene: blue boxes are the dimmed parent (0.4) and layered child (1.0),
+        // green boxes are the child added after .dim(0.4) (1.0, no paint-time propagation) and layered child (1.0).
+        let blueBoxes = scene.primitives.filter { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.z > 0.8 }
+        #expect(blueBoxes.count == 2)
+        #expect(blueBoxes.contains { abs($0.fill.w - 0.4) < 0.02 })
+        #expect(blueBoxes.contains { abs($0.fill.w - 1.0) < 0.02 })
 
-        let greenBox = try #require(scene.primitives.first { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.y > 0.8 })
-        #expect(abs(greenBox.fill.w - 1.0) < 0.02)
+        let greenBoxes = scene.primitives.filter { $0.params.y == Float(PrimitiveKind.roundedRect.rawValue) && $0.fill.y > 0.8 }
+        #expect(greenBoxes.count == 2)
+        #expect(greenBoxes.allSatisfy { abs($0.fill.w - 1.0) < 0.02 })
+
+        let rfRedBoxes = rf.instances.filter { $0.params.y == KIND_RECT && $0.fill.x > 0.35 && $0.fill.y < 0.05 && $0.fill.z < 0.05 }
+        #expect(rfRedBoxes.count == 2)
+        #expect(rfRedBoxes.allSatisfy { abs($0.fill.w - 0.4) < 0.02 })
+
+        let rfGreenBoxes = rf.instances.filter { $0.params.y == KIND_RECT && $0.fill.y > 0.8 && $0.fill.x < 0.05 && $0.fill.z < 0.05 }
+        #expect(rfGreenBoxes.count == 2)
+        #expect(rfGreenBoxes.allSatisfy { abs($0.fill.w - 1.0) < 0.02 })
 
         let rfLayers = rf.instances.filter { $0.params.y == KIND_LAYER }
         #expect(rfLayers.count == 1)
@@ -571,6 +588,76 @@ struct ElShellSliceTests {
         #expect(wHalf < wNorm)
         let frozenGlyphs = fLater.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) && $0.fill.w > 0.1 }
         #expect(frozenGlyphs.isEmpty)
+    }
+
+    @Test("frozen timeScale(0.0) word reveal does not request frames, mid-reveal timeScale shift preserves progress, and reducedMotion caps wordFade to 0.15s")
+    func revealFrozenShiftAndReducedMotionSemantics() throws {
+        // 1. Frozen timeScale(0.0) word reveal alone requests no frames (isAnimating == false, AnimSource.reveal == 0).
+        let frozenRt = Runtime(state: (), viewport: Vec2(240, 80), pixelScale: 1.0) { _, _ in
+            col().children([
+                text("Frozen reveal words").key("frz").color(.white).timeScale(0.0).reveal(wordFade: 0.25)
+            ])
+        }
+        _ = frozenRt.frame(at: 0.0)
+        _ = frozenRt.frame(at: 0.05)
+        #expect(!frozenRt.isAnimating)
+        #expect((frozenRt.animSources & AnimSource.reveal) == 0)
+
+        // 2. Changing El.timeScale mid-reveal onto an already-running 0.5x clock shifts active reveal timestamps instead of jumping backward.
+        struct ShiftState {
+            var show = false
+            var slowReveal = false
+        }
+        let shiftRt = Runtime(state: ShiftState(), viewport: Vec2(280, 100), pixelScale: 1.0) { s, _ in
+            var kids: [El<ShiftState>] = [
+                col().key("halfAnchor").timeScale(0.5).size(10, 10).bg(.white)
+            ]
+            if s.show {
+                let t: El<ShiftState> = text("Shift words cleanly").key("shiftText").color(.white).reveal(wordFade: 0.40)
+                kids.append(s.slowReveal ? t.timeScale(0.5) : t)
+            }
+            return col().children(kids)
+        }
+        _ = shiftRt.frame(at: 0.0)
+        _ = shiftRt.frame(at: 0.20)
+        shiftRt.update { s, _ in s.show = true }
+        let fBeforeShift = shiftRt.frame(at: 0.28) // elapsed = 0.08s at 1.0x -> ~0.488 ease-out alpha on first word
+        let beforeAlphas = fBeforeShift.primitives
+            .filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
+            .map(\.fill.w)
+        let maxBefore = try #require(beforeAlphas.max())
+        #expect(maxBefore > 0.30 && maxBefore < 0.70)
+
+        shiftRt.update { s, _ in s.slowReveal = true }
+        let fAfterShift = shiftRt.frame(at: 0.30) // 0.02s wall = +0.01s at 0.5x -> ~0.535 alpha
+        let afterAlphas = fAfterShift.primitives
+            .filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
+            .map(\.fill.w)
+        let maxAfter = try #require(afterAlphas.max())
+        #expect(maxAfter > maxBefore)
+
+        // 3. reducedMotion overrides wordFade (0.80s -> 0.15s) with zero stagger so all words finish by t + 0.16s.
+        struct RMState { var show = false }
+        let rmRt = Runtime(state: RMState(), viewport: Vec2(280, 80), pixelScale: 1.0) { s, _ in
+            let kids: [El<RMState>] = s.show ? [
+                text("Alpha beta gamma").key("rm").color(.white).reveal(wordFade: 0.80)
+            ] : []
+            return col().children(kids)
+        }
+        rmRt.reducedMotion = true
+        _ = rmRt.frame(at: 0.0)
+        _ = rmRt.frame(at: 0.10)
+        rmRt.update { s, _ in s.show = true }
+        let fMidRM = rmRt.frame(at: 0.13) // 0.03s / 0.15s = 0.20 -> ~0.488 ease-out alpha on all words
+        let midGlyphs = fMidRM.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
+        #expect(midGlyphs.count >= 12)
+        #expect(midGlyphs.allSatisfy { $0.fill.w > 0.30 && $0.fill.w < 0.65 })
+        #expect(rmRt.isAnimating)
+
+        let fDoneRM = rmRt.frame(at: 0.27) // 0.17s elapsed > 0.15s override (well under 0.80s)
+        let doneGlyphs = fDoneRM.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
+        #expect(doneGlyphs.allSatisfy { $0.fill.w > 0.98 })
+        #expect(!rmRt.isAnimating)
     }
 }
 

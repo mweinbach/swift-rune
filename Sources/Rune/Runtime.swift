@@ -1662,6 +1662,7 @@ public final class Runtime<State> {
             activeTextFlights = kept
         }
 
+        let activeWordReveals = wordRevealStore.hasActiveFades { scene.store.nodeTimeScale($0) }
         let rawAnimating = frameOut.isAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
@@ -1675,12 +1676,12 @@ public final class Runtime<State> {
             || hasActiveMotionLoops(at: now)
             || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
-            || wordRevealStore.isFading
+            || activeWordReveals
         var sources: UInt32 = 0
         if frameOut.isAnimating { sources |= AnimSource.tracks }
         if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
-        if !enterDelays.isEmpty || wordRevealStore.isFading { sources |= AnimSource.reveal }
+        if !enterDelays.isEmpty || activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
         if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }
@@ -3549,7 +3550,8 @@ public final class Runtime<State> {
         let nodeTimeScales = ShellSliceRenderHelpers.propagateTimeScales(
             nodes: pass.nodes,
             scene: &scene,
-            trackedIds: &timeScaledNodeIds
+            trackedIds: &timeScaledNodeIds,
+            wordRevealStore: &wordRevealStore
         )
         let commitScaledNow = cxSettings.scaledTime(at: now)
         let revealEntries: [WordRevealCommitEntry] = pass.nodes.indices.compactMap { i in
@@ -3573,7 +3575,7 @@ public final class Runtime<State> {
                 cut: commitCut,
                 reducedMotion: reducedMotion
             )
-            if wordRevealStore.isFading {
+            if wordRevealStore.hasActiveFades(timeScaleOf: { scene.store.nodeTimeScale($0) }) {
                 isAnimating = true
             }
         }
@@ -6448,7 +6450,7 @@ public final class Runtime<State> {
                 ))
             }
 
-            let childAncestorOp: Float = (((shouldEmit && useLayer) ? 1.0 : paintAlphaTotal) * el.elPaintAlpha).clamped(to: 0...1)
+            let childAncestorOp: Float = ((shouldEmit && useLayer) ? 1.0 : paintAlphaTotal).clamped(to: 0...1)
             let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
             let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
                 ? isGroupHovered(snap)

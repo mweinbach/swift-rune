@@ -178,10 +178,11 @@ internal enum WordRevealPhase: Equatable, Sendable {
 
         var effects: [WordRevealEffect] = []
         let contentLen = content.utf8.count
-        if contentLen > from && fade > 0 {
+        let effectiveFade: Float = (reducedMotion && fade > 0) ? 0.15 : fade
+        if contentLen > from && effectiveFade > 0 {
             let starts = Self.wordStarts(in: content, fromUTF8Byte: from)
             let own = words.last.map { max($0.startTime, now) } ?? now
-            let chainAt = chain.map { $0.start(now: now, fade: fade) } ?? now
+            let chainAt = chain.map { $0.start(now: now, fade: effectiveFade) } ?? now
             let queued = Int(max(0.0, chainAt - now) / 0.0055)
             let pending = words.filter { $0.startTime > now }.count + starts.count + queued
             let stagger: Double
@@ -204,7 +205,7 @@ internal enum WordRevealPhase: Equatable, Sendable {
         if words.isEmpty {
             self = .idle(shown: contentLen)
         } else {
-            self = .fading(shown: contentLen, words: words, fade: fade)
+            self = .fading(shown: contentLen, words: words, fade: effectiveFade)
         }
         return effects
     }
@@ -260,8 +261,10 @@ internal struct WordRevealStore: Sendable {
     private var texts: [NodeId: String] = [:]
     internal var chain = WordRevealChain()
 
-    var isFading: Bool {
-        phases.values.contains { $0.isFading }
+    func hasActiveFades(timeScaleOf: (NodeId) -> Float) -> Bool {
+        phases.contains { id, phase in
+            phase.isFading && timeScaleOf(id) > 0.0
+        }
     }
 
     mutating func reset() {

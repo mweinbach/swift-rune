@@ -142,11 +142,13 @@ internal enum ShellSliceRenderHelpers {
         return count
     }
 
-    /// Propagates cumulative `El.timeScale` down pre-order `FlatNode`s into `scene`.
+    /// Propagates cumulative `El.timeScale` down pre-order `FlatNode`s into `scene`,
+    /// shifting active word reveals onto the node's new clock domain.
     static func propagateTimeScales<State>(
         nodes: [Runtime<State>.FlatNode],
         scene: inout Scene,
-        trackedIds: inout Set<NodeId>
+        trackedIds: inout Set<NodeId>,
+        wordRevealStore: inout WordRevealStore
     ) -> [Float] {
         var scales = [Float](repeating: 1.0, count: nodes.count)
         var nextTracked: Set<NodeId> = []
@@ -156,7 +158,12 @@ internal enum ShellSliceRenderHelpers {
             let k = parentScale * node.el.elTimeScale
             scales[i] = k
             if k != 1.0 || trackedIds.contains(node.nodeId) {
+                let before = scene.store.nodeTime(node.nodeId)
                 scene.setTimeScale(node.nodeId, k)
+                let shift = scene.store.nodeTime(node.nodeId) - before
+                if shift != 0 {
+                    wordRevealStore.phases[node.nodeId]?.step(.shift(shift))
+                }
             }
             if k != 1.0 {
                 nextTracked.insert(node.nodeId)

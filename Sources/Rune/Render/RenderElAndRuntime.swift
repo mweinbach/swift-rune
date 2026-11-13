@@ -2104,7 +2104,7 @@ extension Runtime {
             let focused = (node.key != nil && focusedKey == node.key)
             let activeClip = needsLayer ? NO_CLIP : parentClip.clipPx
             let activeFade = needsLayer ? SIMD4<UInt32>.zero : parentClip.fade
-            let localOpacity = needsLayer ? 1.0 : effOpacity
+            let localOpacity = ((needsLayer ? 1.0 : effOpacity) * el.elPaintAlpha).clamped(to: 0...1)
 
             // 13. Focus ring
             if focused && focusVisible {
@@ -2186,7 +2186,7 @@ extension Runtime {
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
-            let childOpacity = ((h.needsLayer ? 1.0 : h.effOpacity) * node.el.elPaintAlpha).clamped(to: 0...1)
+            let childOpacity = (h.needsLayer ? 1.0 : h.effOpacity).clamped(to: 0...1)
             for child in childrenByParent[node.index] ?? [] {
                 if paintSubtree(child, parentClip: h.nextChildClip, inheritedInert: h.nextInert, parentOpacity: childOpacity, inheritedTransform: h.nextChildTransform, parentIsDissolve: h.isDissolveScope) {
                     subtreeDynamic = true
