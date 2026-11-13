@@ -157,7 +157,10 @@ public struct Difference: Sendable, Equatable {
 public enum RuneRef {
     private struct LayerTarget {
         var rect: SIMD4<Float>
+        var radii: SIMD4<Float>
         var clip: SIMD4<Float>
+        var fade: SIMD4<Float>
+        var fadeOrigin: SIMD2<Float>
         var opacity: Float
         var additive: Bool
         var blurRadius: Float
@@ -203,7 +206,10 @@ public enum RuneRef {
                 layerStack.append(
                     LayerTarget(
                         rect: prim.rect,
+                        radii: prim.radii,
                         clip: prim.clip,
+                        fade: prim.fade,
+                        fadeOrigin: prim.fadeOrigin,
                         opacity: RefShader.clamp01(prim.params.x),
                         additive: prim.params.z >= 0.5,
                         blurRadius: max(0, prim.params.w),
@@ -246,8 +252,25 @@ public enum RuneRef {
                     for py in minY...maxY {
                         for px in minX...maxX {
                             let frag = SIMD2<Float>(Float(px) + 0.5, Float(py) + 0.5)
-                            let clipCov = RefShader.clipCoverage(pixelCenter: frag, clip: finished.clip)
+                            var clipCov = RefShader.clipCoverage(pixelCenter: frag, clip: finished.clip)
                             if clipCov <= 0 { continue }
+                            if finished.radii.x > 0 || finished.radii.y > 0 || finished.radii.z > 0 || finished.radii.w > 0 {
+                                var relClip = frag - center
+                                if finished.turn != 0 {
+                                    let cs = cosf(-finished.turn)
+                                    let sn = sinf(-finished.turn)
+                                    relClip = SIMD2<Float>(relClip.x * cs - relClip.y * sn, relClip.x * sn + relClip.y * cs)
+                                }
+                                let halfClip = SIMD2<Float>(finished.rect.z * 0.5, finished.rect.w * 0.5)
+                                let sdClip = RefShader.sdBox(relClip, halfSize: halfClip, radii: finished.radii)
+                                clipCov *= RefShader.boxCoverage(sdClip)
+                                if clipCov <= 0 { continue }
+                            }
+                            if finished.fade.z != 0 {
+                                let d = ((frag.x - finished.fadeOrigin.x) * finished.fade.x + (frag.y - finished.fadeOrigin.y) * finished.fade.y) * finished.fade.z
+                                clipCov *= finished.fade.w + (1.0 - finished.fade.w) * RefShader.clamp01(d)
+                                if clipCov <= 0 { continue }
+                            }
                             let srcSample: SIMD4<Float>
                             if finished.turn != 0 {
                                 let rel = frag - center

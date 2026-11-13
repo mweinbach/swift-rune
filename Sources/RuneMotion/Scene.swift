@@ -452,6 +452,32 @@ public struct Presented: Sendable, Equatable {
     }
 }
 
+/// Describes the starting snapshot for a cross-parent matched-geometry (`flightId` / `matched`) transfer.
+public struct MatchedFlightStart: Sendable {
+    public var fromId: NodeId?
+    public var startRect: MotionRect
+    public var startCorners: Corners?
+    public var startFill: MotionColor?
+    public var startOpacity: Float?
+    public var spring: Spring
+
+    public init(
+        fromId: NodeId? = nil,
+        startRect: MotionRect,
+        startCorners: Corners? = nil,
+        startFill: MotionColor? = nil,
+        startOpacity: Float? = nil,
+        spring: Spring = MotionTokens.SETTLE
+    ) {
+        self.fromId = fromId
+        self.startRect = startRect
+        self.startCorners = startCorners
+        self.startFill = startFill
+        self.startOpacity = startOpacity
+        self.spring = spring
+    }
+}
+
 /// Output of one scene frame.
 public struct FrameOutput: Sendable {
     /// Nodes whose presented values changed this frame, parents before children.
@@ -681,6 +707,29 @@ public struct Scene: Sendable {
     public func world(_ id: NodeId) -> MotionRect? {
         guard let i = slot(id) else { return nil }
         return snapRect(nodes[i].world, pixelScale: store.pixelScale)
+    }
+
+    public func hasNode(_ id: NodeId) -> Bool {
+        guard let i = slot(id) else { return false }
+        return nodes[i].alive
+    }
+
+    public func currentRect(_ id: NodeId) -> MotionRect? {
+        guard let i = slot(id), nodes[i].alive else { return nil }
+        let (w, _) = exactWorld(i)
+        return MotionRect.fromEdges(w.0, w.1, w.2, w.3)
+    }
+
+    public func isEdgeAnimating(_ id: NodeId) -> Bool {
+        guard let i = slot(id), nodes[i].alive else { return false }
+        if nodes[i].path != nil { return true }
+        if let tid = nodes[i].tracks[Int(Props.FRAME.id.rawValue)], store.isActive(tid) {
+            return true
+        }
+        if let tid = nodes[i].tracks[Int(Props.TRAVEL.id.rawValue)], store.isActive(tid) {
+            return true
+        }
+        return false
     }
 
     internal func slot(_ id: NodeId) -> Int? {
@@ -1542,11 +1591,52 @@ public struct Scene: Sendable {
 
     // MARK: - Declarative Compatibility Layer (`Runtime` & `RuneMotionTests`)
 
+    private mutating func applyMatchedFlight(_ i: Int, spec: NodeSpec, match m: MatchedFlightStart) {
+        if store.reducedMotion {
+            let acts = nodes[i].phaseStep(.fadeIn(transition: spec.transition ?? .opacity))
+            applyPhaseActs(i, acts)
+            return
+        }
+        startPath(i, start: m.startRect, velocity: (0, 0, 0, 0), anim: LayoutAnim(spring: m.spring, travel: .screen))
+        if let sc = m.startCorners {
+            trackSet(i, Props.CORNERS, sc)
+            trackAnimate(i, Props.CORNERS, spec.corners, Anim<Corners>(curve: Curve.from(m.spring)))
+        }
+        if let sf = m.startFill, let tf = spec.fill {
+            trackSet(i, Props.FILL, sf)
+            trackAnimate(i, Props.FILL, tf, Anim<MotionColor>(curve: Curve.from(m.spring)))
+        }
+        if let so = m.startOpacity {
+            trackSet(i, Props.OPACITY, so)
+            trackAnimate(i, Props.OPACITY, spec.opacity, Anim<Float>(curve: Curve.from(m.spring)))
+        }
+    }
+
     /// Commits a freshly laid-out list of world-space `NodeSpec`s at `now`.
-    public mutating func commit(_ specs: [NodeSpec], at now: Double, initialCut: Bool = false) {
+    public mutating func commit(
+        _ specs: [NodeSpec],
+        at now: Double,
+        initialCut: Bool = false,
+        matchedStarts: [NodeId: MatchedFlightStart] = [:]
+    ) {
         setTime(now)
         let cut = initialCut || !hasCommittedOnce
         hasCommittedOnce = true
+
+        // Collect all nodes immediately superseded by a matched-geometry transfer (and their unmounted descendants).
+        var matchedRemovedIds = Set<NodeId>(matchedStarts.values.compactMap(\.fromId))
+        if !matchedRemovedIds.isEmpty {
+            var added = true
+            while added {
+                added = false
+                for n in nodes where n.alive && !matchedRemovedIds.contains(n.id) {
+                    if n.parent != Self.noneIdx, matchedRemovedIds.contains(nodes[Int(n.parent)].id) {
+                        matchedRemovedIds.insert(n.id)
+                        added = true
+                    }
+                }
+            }
+        }
 
         var worldOrigins: [NodeId: Vec2] = [:]
         worldOrigins.reserveCapacity(specs.count)
@@ -1568,6 +1658,7 @@ public struct Scene: Sendable {
             localSpec.rect = localFrame
 
             if let existingIdx = slot(spec.id) {
+                let wasExiting = nodes[existingIdx].presence.isExiting
                 let wasScreenChange = spec.layoutAnim?.travel == .screen
                     && (nodes[existingIdx].parent != (spec.parent.flatMap { slot($0) }.map(UInt32.init) ?? Self.noneIdx))
                 let preWorld = wasScreenChange ? exactWorld(existingIdx) : nil
@@ -1580,20 +1671,26 @@ public struct Scene: Sendable {
                     localSpec.transition = Transition.none
                 }
 
-                insert(spec.id, localSpec, cut ? .initial : .animated)
-
-                if let (curPos, curVel) = preWorld, let la = spec.layoutAnim, !store.reducedMotion && !cut {
-                    nodes[existingIdx].frame = localFrame
-                    startPath(
-                        existingIdx,
-                        start: MotionRect.fromEdges(curPos.0, curPos.1, curPos.2, curPos.3),
-                        velocity: curVel,
-                        anim: la
-                    )
-                } else if cut || spec.layoutAnim == nil {
+                if wasExiting, !cut, let m = matchedStarts[spec.id] {
+                    insert(spec.id, localSpec, .initial)
                     landFrame(spec.id, localFrame)
-                } else if let la = spec.layoutAnim {
-                    setFrame(spec.id, localFrame, la)
+                    applyMatchedFlight(existingIdx, spec: spec, match: m)
+                } else {
+                    insert(spec.id, localSpec, cut ? .initial : .animated)
+
+                    if let (curPos, curVel) = preWorld, let la = spec.layoutAnim, !store.reducedMotion && !cut {
+                        nodes[existingIdx].frame = localFrame
+                        startPath(
+                            existingIdx,
+                            start: MotionRect.fromEdges(curPos.0, curPos.1, curPos.2, curPos.3),
+                            velocity: curVel,
+                            anim: la
+                        )
+                    } else if cut || spec.layoutAnim == nil {
+                        landFrame(spec.id, localFrame)
+                    } else if let la = spec.layoutAnim {
+                        setFrame(spec.id, localFrame, la)
+                    }
                 }
 
                 // Update visual properties smoothly or immediately
@@ -1613,6 +1710,24 @@ public struct Scene: Sendable {
                     if let border = spec.border {
                         animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: Curve.from(sp)))
                     }
+                } else if wasExiting && !cut && matchedStarts[spec.id] != nil && !store.reducedMotion {
+                    // Matched start animates opacity/corners/fill from the source snapshot.
+                    set(spec.id, Props.SCALE, spec.scale)
+                    set(spec.id, Props.ROTATE, spec.rotate)
+                    set(spec.id, Props.OFFSET, spec.offset)
+                    set(spec.id, Props.BLUR, Blur(spec.blur))
+                    if matchedStarts[spec.id]?.startCorners == nil {
+                        set(spec.id, Props.CORNERS, spec.corners)
+                    }
+                    if matchedStarts[spec.id]?.startOpacity == nil {
+                        set(spec.id, Props.OPACITY, spec.opacity)
+                    }
+                    if matchedStarts[spec.id]?.startFill == nil, let fill = spec.fill {
+                        set(spec.id, Props.FILL, fill)
+                    }
+                    if let border = spec.border {
+                        set(spec.id, Props.BORDER, border)
+                    }
                 } else {
                     set(spec.id, Props.OPACITY, spec.opacity)
                     set(spec.id, Props.SCALE, spec.scale)
@@ -1628,6 +1743,17 @@ public struct Scene: Sendable {
                     }
                 }
                 nodes[existingIdx].dirty = true
+            } else if !cut, let m = matchedStarts[spec.id] {
+                insert(spec.id, localSpec, .initial)
+                if let i = slot(spec.id) {
+                    nodes[i].compatHadTransition = (spec.transition != nil)
+                    if spec.scale != Vec2(1, 1) { nodes[i].baseScale2D = spec.scale }
+                    if spec.rotate != 0 { nodes[i].baseRotate = spec.rotate }
+                    if spec.offset != .zero { nodes[i].baseOffset = spec.offset }
+                    if spec.blur != 0 { nodes[i].baseBlur = spec.blur }
+                    if let border = spec.border { nodes[i].border = border; nodes[i].hasBorder = true }
+                    applyMatchedFlight(i, spec: spec, match: m)
+                }
             } else {
                 let mount: Mount = (cut || spec.transition == nil) ? .initial : .animated
                 insert(spec.id, localSpec, mount)
@@ -1648,7 +1774,7 @@ public struct Scene: Sendable {
             let nid = NodeId(rawId)
             if seen.contains(nid) { continue }
             guard let i = slot(nid), nodes[i].alive else { continue }
-            if cut || !nodes[i].compatHadTransition {
+            if cut || !nodes[i].compatHadTransition || matchedRemovedIds.contains(nid) {
                 unmount(nid)
             } else if !nodes[i].presence.isExiting {
                 remove(nid)

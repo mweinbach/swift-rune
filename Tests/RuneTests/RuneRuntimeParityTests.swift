@@ -153,10 +153,16 @@ struct RuneRuntimeParityTests {
         _ = rt.frame(at: 0.55)
         #expect(rt.element(byKey: "outer")!.scrolled[1] == 50)
 
-        // Fling outer
-        rt.fling(vx: 0, vy: 400, at: Vec2(250, 250), now: 0.6)
+        // Fling outer: upstream pointer.rs:501-509 & motion/tracks.rs:180-186 pass -velocity so
+        // negative vy scrolls deeper into content and positive vy moves content back down (reduces scroll offset).
+        rt.fling(vx: 0, vy: -400, at: Vec2(250, 250), now: 0.6)
         _ = rt.frame(at: 0.7)
-        #expect(rt.element(byKey: "outer")!.scrolled[1] > 50)
+        let afterDown = rt.element(byKey: "outer")!.scrolled[1]
+        #expect(afterDown > 50)
+        rt.fling(vx: 0, vy: 800, at: Vec2(250, 250), now: 0.75)
+        _ = rt.frame(at: 0.85)
+        #expect(rt.element(byKey: "outer")!.scrolled[1] < afterDown)
+        #expect(rt.element(byKey: "outer")!.scrolled[1] < 50)
     }
 
     @Test("Live pulse, Tween.linear, LiveText, ToolingArgs, and JsonTheme.num")
