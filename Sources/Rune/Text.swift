@@ -48,6 +48,13 @@ public enum TextWrap: Sendable, Hashable, Codable {
     case ellipsis
 }
 
+/// Which end `TextWrap.ellipsis` trims (`El.truncate`, `El.truncateMiddle`, `El.truncateHead`).
+public enum TextElide: String, Sendable, Hashable, Codable {
+    case end
+    case middle
+    case head
+}
+
 /// Typographic styling matching `rune::TextStyle`.
 public struct TextStyle: Sendable, Hashable, Codable {
     public var size: Float
@@ -59,6 +66,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var family: FontFamily
     public var align: TextAlign
     public var wrap: TextWrap
+    public var elide: TextElide
+    public var maxLines: Int
+    public var exactLines: Bool
     public var fontSmoothing: FontSmoothing
     public var variations: String
     public var features: String
@@ -74,6 +84,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
         wrap: TextWrap = .noWrap,
+        elide: TextElide = .end,
+        maxLines: Int = 0,
+        exactLines: Bool = true,
         fontSmoothing: FontSmoothing = .systemDefault,
         variations: String = "",
         features: String = "",
@@ -88,6 +101,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.family = family
         self.align = align
         self.wrap = wrap
+        self.elide = elide
+        self.maxLines = max(0, maxLines)
+        self.exactLines = exactLines
         self.fontSmoothing = fontSmoothing
         self.variations = variations
         self.features = features
@@ -96,7 +112,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, fontSmoothing, variations, features, opticalSize, direction
+        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, elide, maxLines, exactLines, fontSmoothing, variations, features, opticalSize, direction
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +126,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
             family: try c.decode(FontFamily.self, forKey: .family),
             align: try c.decode(TextAlign.self, forKey: .align),
             wrap: try c.decode(TextWrap.self, forKey: .wrap),
+            elide: try c.decodeIfPresent(TextElide.self, forKey: .elide) ?? .end,
+            maxLines: try c.decodeIfPresent(Int.self, forKey: .maxLines) ?? 0,
+            exactLines: try c.decodeIfPresent(Bool.self, forKey: .exactLines) ?? true,
             fontSmoothing: try c.decode(FontSmoothing.self, forKey: .fontSmoothing),
             variations: try c.decodeIfPresent(String.self, forKey: .variations) ?? "",
             features: try c.decodeIfPresent(String.self, forKey: .features) ?? "",
@@ -462,6 +481,8 @@ public struct ShapedText: @unchecked Sendable {
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
     internal var forcedDirection: TextFlow? = nil
+    internal var primaryIsRTL: Bool = false
+    public var wasTruncated: Bool = false
 }
 
 internal struct PillMetrics: Sendable, Hashable {
@@ -652,6 +673,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         var icon: SVGIcon
         var pixelSize: Int
         var drawnSixtyFourths: UInt8 = 0
+        var mirrored: Bool = false
     }
 
     private let lock = NSLock()
@@ -1309,7 +1331,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         #endif
     }
 
-    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> Entry {
+    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry {
         let px = drawnSize != nil ? max(1, pixelSize) : max(4, pixelSize)
         let q: UInt8
         let rasterDrawn: Float?
@@ -1321,7 +1343,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             q = 0
             rasterDrawn = nil
         }
-        let key = IconKey(icon: icon, pixelSize: px, drawnSixtyFourths: q)
+        let key = IconKey(icon: icon, pixelSize: px, drawnSixtyFourths: q, mirrored: mirrored)
         lock.lock()
         if var cached = iconCache[key] {
             accessCounter &+= 1
@@ -1333,7 +1355,17 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
         lock.unlock()
 
-        let bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px, drawnSize: rasterDrawn)
+        var bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px, drawnSize: rasterDrawn)
+        if mirrored && px > 1 && bitmap.count >= px * px {
+            for row in 0..<px {
+                let rowBase = row * px
+                for col in 0..<(px / 2) {
+                    let a = rowBase + col
+                    let b = rowBase + (px - 1 - col)
+                    bitmap.swapAt(a, b)
+                }
+            }
+        }
 
         lock.lock()
         guard let placed = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
@@ -2430,6 +2462,13 @@ public final class TextSystem: @unchecked Sendable {
         return CTRunDelegateCreate(&callbacks, Unmanaged.passRetained(box).toOpaque())!
     }
 
+    internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool) -> Float {
+        let s = max(1.0, scale)
+        let rawPx = Float(max(1, lineCount)) * lineHeightPt * s
+        let snappedPx = exact ? ((rawPx * 64.0).rounded() / 64.0) : ceilf(rawPx)
+        return snappedPx / s
+    }
+
     /// Fast cached measurement of plain `text` constrained to `maxWidth` logical points.
     /// When `maxWidth` is non-nil and `style.wrap == .noWrap`, wraps at `maxWidth` per upstream `text::measure`.
     public func measure(
@@ -2440,7 +2479,7 @@ public final class TextSystem: @unchecked Sendable {
         pills: [PillChip] = []
     ) -> Vec2 {
         if text.isEmpty {
-            return Vec2(0, style.resolvedLineHeight)
+            return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
         var effectiveStyle = style
         if maxWidth != nil && effectiveStyle.wrap == .noWrap {
@@ -2513,8 +2552,9 @@ public final class TextSystem: @unchecked Sendable {
         let authText = spans.map { $0.map(\.text).joined() } ?? text
 
         if authText.isEmpty {
+            let emptyH = Self.specLineHeight(lineCount: 1, lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
             return ShapedText(
-                size: Vec2(0, lhPt),
+                size: Vec2(0, emptyH),
                 lineCount: 1,
                 lineHeight: lhPt,
                 glyphs: [],
@@ -2697,8 +2737,10 @@ public final class TextSystem: @unchecked Sendable {
             var trailingWsPx: Float
             var isRTL: Bool
             var isParaLast: Bool
+            var strIndexBase: Int = 0
         }
         var visualLines: [VisualLine] = []
+        var anyTruncated = false
         let typesetter = CTTypesetterCreateWithAttributedString(attrStr)
         let effectiveWrapWidthPx: CGFloat? = (style.wrap == .wrap && maxWidth != nil)
             ? CGFloat(max(1.0, maxWidth! * scale))
@@ -2766,16 +2808,24 @@ public final class TextSystem: @unchecked Sendable {
                     if style.wrap == .ellipsis, let maxW = maxWidth {
                         let maxWPx = Double(maxW * scale)
                         let rawW = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
-                        if rawW > maxWPx {
+                        if rawW > maxWPx + 0.5 {
                             let ellipAttr = CFAttributedStringCreate(
                                 kCFAllocatorDefault,
                                 "…" as CFString,
                                 [kCTFontAttributeName: baseFont] as CFDictionary
                             )!
                             let token = CTLineCreateWithAttributedString(ellipAttr)
-                            if let truncated = CTLineCreateTruncatedLine(ctLine, maxWPx, .end, token) {
-                                ctLine = truncated
+                            let truncType: CTLineTruncationType = switch style.elide {
+                            case .end: .end
+                            case .middle: .middle
+                            case .head: .start
                             }
+                            if let truncated = CTLineCreateTruncatedLine(ctLine, maxWPx, truncType, token) {
+                                ctLine = truncated
+                            } else {
+                                ctLine = token
+                            }
+                            anyTruncated = true
                         }
                     } else if style.align == .justified && !isParaLast && style.wrap == .wrap, let maxW = maxWidth {
                         var trimmed = count
@@ -2839,6 +2889,54 @@ public final class TextSystem: @unchecked Sendable {
             } else {
                 u16Start = hardEnd
             }
+        }
+
+        if style.maxLines > 0 && visualLines.count > style.maxLines {
+            let keepCount = style.maxLines
+            var last = visualLines[keepCount - 1]
+            var trimmedU16End = last.u16End
+            while trimmedU16End > last.u16Start {
+                let ch = shapedNS.character(at: trimmedU16End - 1)
+                if ch == 0x20 || ch == 0x09 || ch == 0x0A || ch == 0x0D {
+                    trimmedU16End -= 1
+                } else {
+                    break
+                }
+            }
+            let ellipAttr = CFAttributedStringCreate(
+                kCFAllocatorDefault,
+                "…" as CFString,
+                [kCTFontAttributeName: baseFont] as CFDictionary
+            )!
+            let ellipToken = CTLineCreateWithAttributedString(ellipAttr)
+            let subLen = max(0, trimmedU16End - last.u16Start)
+            let nsBase = attrStr as NSAttributedString
+            let mutAttr = NSMutableAttributedString(attributedString: nsBase.attributedSubstring(from: NSRange(location: last.u16Start, length: subLen)))
+            mutAttr.append(ellipAttr as NSAttributedString)
+            let withEllipLine = CTLineCreateWithAttributedString(mutAttr)
+            let clampedCTLine: CTLine
+            if let maxW = maxWidth {
+                let maxWPx = Double(max(1.0, maxW * scale))
+                let rawW = CTLineGetTypographicBounds(withEllipLine, nil, nil, nil)
+                if rawW <= maxWPx + 0.5 {
+                    clampedCTLine = withEllipLine
+                    last.strIndexBase = last.u16Start
+                } else {
+                    let baseSubAttr = nsBase.attributedSubstring(from: NSRange(location: last.u16Start, length: subLen))
+                    let baseSubLine = CTLineCreateWithAttributedString(baseSubAttr)
+                    clampedCTLine = CTLineCreateTruncatedLine(baseSubLine, maxWPx, .end, ellipToken) ?? ellipToken
+                    last.strIndexBase = last.u16Start
+                }
+            } else {
+                clampedCTLine = withEllipLine
+                last.strIndexBase = last.u16Start
+            }
+            last.ctLine = clampedCTLine
+            last.widthPx = Float(CTLineGetTypographicBounds(clampedCTLine, nil, nil, nil))
+            last.trailingWsPx = Float(CTLineGetTrailingWhitespaceWidth(clampedCTLine))
+            last.isParaLast = true
+            visualLines = Array(visualLines.prefix(keepCount - 1)) + [last]
+            anyTruncated = true
         }
 
         let maxLineWidthPx = visualLines.reduce(Float(0)) { max($0, $1.widthPx) }
@@ -2914,8 +3012,8 @@ public final class TextSystem: @unchecked Sendable {
                     let lo = max(item.u16Start, dec.u16Range.lowerBound)
                     let hi = min(item.u16End, dec.u16Range.upperBound)
                     guard hi > lo else { continue }
-                    let x0Px = Float(CTLineGetOffsetForStringIndex(item.ctLine, lo, nil))
-                    let x1Px = Float(CTLineGetOffsetForStringIndex(item.ctLine, hi, nil))
+                    let x0Px = Float(CTLineGetOffsetForStringIndex(item.ctLine, lo - item.strIndexBase, nil))
+                    let x1Px = Float(CTLineGetOffsetForStringIndex(item.ctLine, hi - item.strIndexBase, nil))
                     let xPt = originXPt + min(x0Px, x1Px) * invS
                     let wPt = abs(x1Px - x0Px) * invS
                     guard wPt > 0.01 else { continue }
@@ -2961,8 +3059,8 @@ public final class TextSystem: @unchecked Sendable {
                     let lo = max(item.u16Start, vp.labelShapedU16Lo)
                     let hi = min(item.u16End, vp.labelShapedU16Hi)
                     if hi > lo {
-                        let ox0 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, lo, nil))
-                        let ox1 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, hi, nil))
+                        let ox0 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, lo - item.strIndexBase, nil))
+                        let ox1 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, hi - item.strIndexBase, nil))
                         grX1 = max(ox0, ox1)
                         for run in runs {
                             let attrs = CTRunGetAttributes(run) as NSDictionary
@@ -3015,8 +3113,8 @@ public final class TextSystem: @unchecked Sendable {
                     let lo = max(item.u16Start, vp.labelShapedU16Lo)
                     let hi = min(item.u16End, vp.labelShapedU16Hi)
                     if hi > lo {
-                        let ox0 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, lo, nil))
-                        let ox1 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, hi, nil))
+                        let ox0 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, lo - item.strIndexBase, nil))
+                        let ox1 = alignOffsetPx + Float(CTLineGetOffsetForStringIndex(item.ctLine, hi - item.strIndexBase, nil))
                         grX0 = min(ox0, ox1)
                         grX1 = max(ox0, ox1)
                         for run in runs {
@@ -3200,7 +3298,7 @@ public final class TextSystem: @unchecked Sendable {
 
         markerMap.lines = lineMarkerRanges
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
-        let totalHeightPt = Float(max(1, visualLines.count)) * lhPt
+        let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
         let totalWidthPt = ceilf(maxLineWidthPx / scale * 2.0) * 0.5
         return ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
@@ -3214,7 +3312,9 @@ public final class TextSystem: @unchecked Sendable {
             inlineIcons: inlineIconsOut,
             lineStrings: lineRecords,
             markerMap: markerMap,
-            forcedDirection: style.direction
+            forcedDirection: style.direction,
+            primaryIsRTL: (style.direction == .rtl) || (style.direction == nil && (visualLines.first?.isRTL ?? false)),
+            wasTruncated: anyTruncated
         )
     }
 
@@ -3570,7 +3670,7 @@ public final class TextSystem: @unchecked Sendable {
         pills: [PillChip] = []
     ) -> Vec2 {
         if text.isEmpty {
-            return Vec2(0, style.resolvedLineHeight)
+            return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
         var effectiveStyle = style
         if maxWidth != nil && effectiveStyle.wrap == .noWrap {
@@ -3616,8 +3716,9 @@ public final class TextSystem: @unchecked Sendable {
         let fullText = spans.map { $0.map(\.text).joined() } ?? text
 
         if fullText.isEmpty {
+            let emptyH = Self.specLineHeight(lineCount: 1, lineHeightPt: lineH, scale: scale, exact: style.exactLines)
             return ShapedText(
-                size: Vec2(0, lineH),
+                size: Vec2(0, emptyH),
                 lineCount: 1,
                 lineHeight: lineH,
                 glyphs: [],
@@ -3690,6 +3791,7 @@ public final class TextSystem: @unchecked Sendable {
 
         // Split into raw lines on '\n' and wrap/ellipsis if requested.
         var lines: [(utf8Start: Int, text: String, width: Float, isRTL: Bool, isParaLast: Bool)] = []
+        var portableTruncated = false
         var cursorUTF8 = 0
         let rawParagraphs = fullText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         for (pIdx, para) in rawParagraphs.enumerated() {
@@ -3719,27 +3821,85 @@ public final class TextSystem: @unchecked Sendable {
                     lines.append((lineStart, current, curW, isRTL, true))
                 }
             } else if style.wrap == .ellipsis, let maxW = maxWidth, maxW > 0 {
-                var current = ""
-                var curW: Float = 0
-                let ellW = charAdvance("…", atUTF8: cursorUTF8)
-                var truncated = false
-                var charUTF8 = cursorUTF8
-                for ch in para {
+                let chars = Array(para)
+                var chStarts = [Int]()
+                chStarts.reserveCapacity(chars.count + 1)
+                var chWidths = [Float]()
+                chWidths.reserveCapacity(chars.count)
+                var u = cursorUTF8
+                var totalParaW: Float = 0
+                for ch in chars {
                     let chBytes = String(ch).utf8.count
-                    let chW = leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
-                    if curW + chW + ellW > maxW {
-                        truncated = true
-                        break
+                    let w = leadExtra(atUTF8: u) + charAdvance(ch, atUTF8: u) + trailExtra(endingAtUTF8: u + chBytes)
+                    chStarts.append(u)
+                    chWidths.append(w)
+                    totalParaW += w
+                    u += chBytes
+                }
+                chStarts.append(u)
+                if totalParaW <= maxW + 0.5 * invS {
+                    lines.append((cursorUTF8, para, totalParaW, isRTL, true))
+                } else {
+                    portableTruncated = true
+                    let ellW = charAdvance("…", atUTF8: cursorUTF8)
+                    let budget = max(0, maxW - ellW)
+                    var outStr = "…"
+                    var outW = ellW
+                    switch style.elide {
+                    case .end:
+                        var endIdx = 0
+                        var wSum: Float = 0
+                        while endIdx < chars.count && wSum + chWidths[endIdx] <= budget {
+                            wSum += chWidths[endIdx]
+                            endIdx += 1
+                        }
+                        while endIdx > 0 && chars[endIdx - 1].isWhitespace {
+                            endIdx -= 1
+                            wSum -= chWidths[endIdx]
+                        }
+                        outStr = String(chars[0..<endIdx]) + "…"
+                        outW = wSum + ellW
+                    case .head:
+                        var startIdx = chars.count
+                        var wSum: Float = 0
+                        while startIdx > 0 && wSum + chWidths[startIdx - 1] <= budget {
+                            startIdx -= 1
+                            wSum += chWidths[startIdx]
+                        }
+                        while startIdx < chars.count && chars[startIdx].isWhitespace {
+                            wSum -= chWidths[startIdx]
+                            startIdx += 1
+                        }
+                        outStr = "…" + String(chars[startIdx..<chars.count])
+                        outW = ellW + wSum
+                    case .middle:
+                        var bestHead = 0
+                        var bestTail = chars.count
+                        var bestW = ellW
+                        var lo = 0
+                        var hi = chars.count
+                        while lo <= hi {
+                            let mid = (lo + hi) / 2
+                            var h = mid - mid / 2
+                            var t = chars.count - mid / 2
+                            while h > 0 && chars[h - 1].isWhitespace { h -= 1 }
+                            while t < chars.count && chars[t].isWhitespace { t += 1 }
+                            let wH = chWidths[0..<h].reduce(0, +)
+                            let wT = chWidths[t..<chars.count].reduce(0, +)
+                            if wH + wT <= budget {
+                                bestHead = h
+                                bestTail = t
+                                bestW = wH + ellW + wT
+                                lo = mid + 1
+                            } else {
+                                hi = mid - 1
+                            }
+                        }
+                        outStr = String(chars[0..<bestHead]) + "…" + String(chars[bestTail..<chars.count])
+                        outW = bestW
                     }
-                    current.append(ch)
-                    curW += chW
-                    charUTF8 += chBytes
+                    lines.append((cursorUTF8, outStr, outW, isRTL, true))
                 }
-                if truncated {
-                    current.append("…")
-                    curW += ellW
-                }
-                lines.append((cursorUTF8, current, curW, isRTL, true))
             } else {
                 var w: Float = 0
                 var charUTF8 = cursorUTF8
@@ -3758,10 +3918,43 @@ public final class TextSystem: @unchecked Sendable {
         if lines.isEmpty {
             lines = [(0, "", 0, false, true)]
         }
+        if style.maxLines > 0 && lines.count > style.maxLines {
+            lines = Array(lines.prefix(style.maxLines))
+            var last = lines[style.maxLines - 1]
+            let ellW = charAdvance("…", atUTF8: last.utf8Start)
+            var trimmed = last.text
+            while let c = trimmed.last, c.isWhitespace { trimmed.removeLast() }
+            if let maxW = maxWidth, maxW > 0 {
+                var curW: Float = 0
+                var charUTF8 = last.utf8Start
+                var kept = ""
+                for ch in trimmed {
+                    let chBytes = String(ch).utf8.count
+                    let chW = leadExtra(atUTF8: charUTF8) + charAdvance(ch, atUTF8: charUTF8) + trailExtra(endingAtUTF8: charUTF8 + chBytes)
+                    if curW + chW + ellW > maxW { break }
+                    kept.append(ch)
+                    curW += chW
+                    charUTF8 += chBytes
+                }
+                while let c = kept.last, c.isWhitespace {
+                    let chW = charAdvance(c, atUTF8: last.utf8Start)
+                    kept.removeLast()
+                    curW = max(0, curW - chW)
+                }
+                last.text = kept + "…"
+                last.width = curW + ellW
+            } else {
+                last.text = trimmed + "…"
+                last.width += ellW
+            }
+            last.isParaLast = true
+            lines[style.maxLines - 1] = last
+            portableTruncated = true
+        }
 
         let maxLineW = lines.map(\.width).max() ?? 0
         let totalW = maxWidth.map { style.align == .leading ? max(maxLineW, min($0, maxLineW)) : max($0, maxLineW) } ?? maxLineW
-        let totalH = Float(lines.count) * lineH
+        let totalH = Self.specLineHeight(lineCount: max(1, lines.count), lineHeightPt: lineH, scale: scale, exact: style.exactLines)
 
         var glyphs: [PositionedGlyph] = []
         var underlines: [SIMD4<Float>] = []
@@ -3925,7 +4118,9 @@ public final class TextSystem: @unchecked Sendable {
             pillChips: pillChipsOut,
             inlineIcons: inlineIconsOut,
             portableLines: lineRecords,
-            forcedDirection: style.direction
+            forcedDirection: style.direction,
+            primaryIsRTL: (style.direction == .rtl) || (style.direction == nil && (lines.first?.isRTL ?? false)),
+            wasTruncated: portableTruncated
         )
     }
 

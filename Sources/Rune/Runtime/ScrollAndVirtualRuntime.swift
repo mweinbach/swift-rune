@@ -25,11 +25,15 @@ extension Runtime {
         }
         tx.button = button
         tx.runtimeActions["focusVisible"] = focusVisible
-        tx.runtimeActions["byKeys"] = kitHooks.isDispatchingByKeys
+        tx.runtimeActions["byKeys"] = kitHooks.isDispatchingByKeys || activeByKeys
         tx.physicalKeyValue = currentPhysicalKey
         tx.keyBaseValue = currentKeyBase
         tx.keyRepeatValue = currentKeyRepeat
-        tx.tracingEnabled = (traceChannels != nil) || scene.isTracing
+        tx.tracingEnabled = (traceChannels != nil) || scene.isTracing || isTracing
+        tx.focusVisibleAtEvent = focusVisible
+        tx.byKeysAtEvent = activeByKeys || kitHooks.isDispatchingByKeys
+        tx.assistiveTechnologyActive = assistiveTechnology
+        tx.eventInputTime = now
         return tx
     }
 
@@ -805,6 +809,7 @@ extension Runtime {
         if effect == .draw {
             virtualFillNeedsCommit = true
         }
+        virtualFillWantsDraw = (effect == .draw)
     }
 
     // MARK: - Scroll Requests, FollowEdge & Scroll Callbacks
@@ -821,8 +826,11 @@ extension Runtime {
         let (endStyle, endW) = style.edge(width: baseW, end: true)
         let hidTop = style.endOnly ? 0 : curScroll.y
         let hidBot = max(0, maxExt.y - curScroll.y)
-        let hidLeft = style.endOnly ? 0 : curScroll.x
-        let hidRight = max(0, maxExt.x - curScroll.x)
+        let rawLeft = curScroll.x
+        let rawRight = max(0, maxExt.x - curScroll.x)
+        let (rtlLeft, rtlRight) = (node.flow == .rtl) ? (rawRight, rawLeft) : (rawLeft, rawRight)
+        let hidLeft = style.endOnly ? 0 : rtlLeft
+        let hidRight = rtlRight
 
         let topRamp: (width: Float, offset: Float) = (el.layout.scrollAxes.contains(.vertical) && hidTop > 0.5 && startW > 0)
             ? ScrollEdgeMath.edgeRamp(style: startStyle, width: startW, hidden: Double(hidTop), scale: 1.0)
@@ -861,16 +869,16 @@ extension Runtime {
                 let p = flatNodes[pIdx]
                 let pEl = p.el
                 let ownDelta = deltasByScrollPath[p.path] ?? .zero
-                let pDelta = Vec2(cumulative[pIdx].x + ownDelta.x, cumulative[pIdx].y + ownDelta.y)
-                cumulative[i] = pDelta
-                if pDelta != .zero {
-                    let inv = Vec2(-pDelta.x, -pDelta.y)
+                let signedOwnX = (p.flow == .rtl) ? ownDelta.x : -ownDelta.x
+                let inv = Vec2(cumulative[pIdx].x + signedOwnX, cumulative[pIdx].y - ownDelta.y)
+                cumulative[i] = inv
+                if inv != .zero {
                     flatNodes[i].targetRect = flatNodes[i].targetRect.offsetBy(inv)
                     specs[i].rect = specs[i].rect.offsetBy(inv)
                 }
                 let parentClips = pEl.layout.clipOverflow || pEl.clipRadius != nil || pEl.clipCorners != nil || pEl.clipFade != nil
                 flatNodes[i].clipRect = parentClips ? intersectRects(p.clipRect, p.targetRect) : p.clipRect
-                if pDelta != .zero {
+                if inv != .zero {
                     if var ownSF = flatNodes[i].ownScrollFade {
                         ownSF.rect = intersectRects(flatNodes[i].clipRect, flatNodes[i].targetRect)
                         flatNodes[i].ownScrollFade = ownSF
@@ -1501,9 +1509,14 @@ extension Runtime {
                 let curScroll = scrollOffsets[pNode.path] ?? .zero
                 let contentW = max(pRect.width, scrollContentSizes[pNode.path]?.x ?? pRect.width)
                 let contentH = max(pRect.height, scrollContentSizes[pNode.path]?.y ?? pRect.height)
-                boxLeft = pRect.left - curScroll.x + pad.left + bdr.left
+                if pNode.flow == .rtl {
+                    boxLeft = pRect.right + curScroll.x - contentW + pad.left + bdr.left
+                    boxRight = pRect.right + curScroll.x - pad.right - bdr.right
+                } else {
+                    boxLeft = pRect.left - curScroll.x + pad.left + bdr.left
+                    boxRight = pRect.left - curScroll.x + contentW - pad.right - bdr.right
+                }
                 boxTop = pRect.top - curScroll.y + pad.top + bdr.top
-                boxRight = pRect.left - curScroll.x + contentW - pad.right - bdr.right
                 boxBottom = pRect.top - curScroll.y + contentH - pad.bottom - bdr.bottom
             } else {
                 boxLeft = pRect.left + pad.left + bdr.left + parentStickyShift.x

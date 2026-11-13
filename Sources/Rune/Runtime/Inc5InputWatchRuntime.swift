@@ -53,7 +53,8 @@ extension Runtime {
                 }
                 let hasHTML = content.html.map { !$0.isEmpty } ?? false
                 if !consumed && (!content.text.isEmpty || hasHTML) {
-                    var edit = editLens.get(state)
+                    let prevEdit = editLens.get(state)
+                    var edit = prevEdit
                     if fEl.isSecure {
                         edit.isSecure = true
                     }
@@ -62,16 +63,7 @@ extension Runtime {
                     } else if !content.text.isEmpty {
                         edit.paste(content.text)
                     }
-                    editLens.set(&state, edit)
-                    var tx = makeTx(at: now)
-                    if fEl.layoutAnim == nil {
-                        tx.instant()
-                    }
-                    if let onChange = fEl.handlers.onTextChange {
-                        onChange(&state, edit.text, &tx)
-                    }
-                    applyTx(tx, at: now)
-                    dirtyCommit(at: now)
+                    deliverInputEdit(el: fEl, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                 }
                 return true
             }
@@ -292,85 +284,6 @@ extension Runtime {
             let handled = handler(&state, local.x, local.y, &tx)
             return (handled, tx)
         }
-    }
-
-    // MARK: - Post-Frame Layout & Visibility Watches (`onDrawnLayout`, `drawnRectInto`, `onVisible`)
-
-    private static func rectMoved(_ a: MotionRect?, _ b: MotionRect) -> Bool {
-        guard let a else { return true }
-        return abs(a.x - b.x) > 0.5 ||
-            abs(a.y - b.y) > 0.5 ||
-            abs(a.width - b.width) > 0.5 ||
-            abs(a.height - b.height) > 0.5
-    }
-
-    internal func updatePostFrameLayoutWatches(at now: Double) {
-        let viewportArea = max(1.0, viewport.x * viewport.y)
-        let vpRect = MotionRect(left: 0, top: 0, right: viewport.x, bottom: viewport.y)
-        var nextDrawn: [UInt64: (drawn: MotionRect, laid: MotionRect)] = [:]
-        var nextVisible: [UInt64: Bool] = [:]
-
-        var exitingFlags = [Bool](repeating: false, count: flatNodes.count)
-        var springingFlags = [Bool](repeating: false, count: flatNodes.count)
-        for i in flatNodes.indices {
-            let n = flatNodes[i]
-            let pExiting = n.parentIndex.map { exitingFlags[$0] } ?? false
-            let pSpring = n.parentIndex.map { springingFlags[$0] } ?? false
-            let nodeExiting: Bool
-            if case .exiting = scene.phase(n.nodeId) {
-                nodeExiting = true
-            } else {
-                nodeExiting = false
-            }
-            exitingFlags[i] = pExiting || nodeExiting
-            springingFlags[i] = pSpring || scene.store.isAnimating(n.nodeId, Props.FRAME) || scene.store.isAnimating(n.nodeId, Props.RECT)
-        }
-
-        for (i, node) in flatNodes.enumerated() {
-            let nid = node.nodeId.rawValue
-            let exiting = exitingFlags[i]
-            let rect = presentedRectByPath[node.path] ?? node.targetRect
-            if !exiting, let liveRect = node.el.drawnRectLive,
-               let lanes = rect.encodeLiveLanes() {
-                _ = liveRect.source.publish(lanes, snap: true)
-            }
-            if !exiting, let onDrawn = node.el.handlers.onDrawnLayout {
-                if springingFlags[i] {
-                    if let old = drawnLayoutCache[nid] {
-                        nextDrawn[nid] = old
-                    }
-                } else {
-                    let prev = drawnLayoutCache[nid]
-                    if Self.rectMoved(prev?.drawn, rect) {
-                        nextDrawn[nid] = (drawn: rect, laid: node.targetRect)
-                        var tx = makeTx(at: now)
-                        onDrawn(&state, [rect.x, rect.y, rect.width, rect.height], &tx)
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-                    } else if let prev {
-                        nextDrawn[nid] = prev
-                    } else {
-                        nextDrawn[nid] = (drawn: rect, laid: node.targetRect)
-                    }
-                }
-            }
-            if !exiting, let onVis = node.el.handlers.onVisible {
-                let clip = intersectRects(vpRect, node.clipRect)
-                let inter = intersectRects(rect, clip)
-                let elArea = max(0, rect.width) * max(0, rect.height)
-                let interArea = max(0, inter.width) * max(0, inter.height)
-                let nowVisible = elArea > 0 && (interArea >= elArea * 0.5 || interArea >= viewportArea * 0.5)
-                nextVisible[nid] = nowVisible
-                let wasVisible = visibleWatchState[nid] ?? false
-                if nowVisible != wasVisible {
-                    var tx = makeTx(at: now)
-                    onVis(&state, nowVisible, &tx)
-                    applyTx(tx, at: now)
-                }
-            }
-        }
-
-        drawnLayoutCache = nextDrawn
-        visibleWatchState = nextVisible
     }
 
     internal static func fittedPixelsGeometry(
@@ -620,6 +533,7 @@ extension Runtime {
     internal func decideHoverHold(
         candidatePath: String?,
         candidateIndex: Int?,
+        within: (inside: [String], entering: [Int])? = nil,
         groupHovered: GroupHoverContext
     ) -> Bool {
         guard hoverMayHold() else { return false }
@@ -628,6 +542,16 @@ extension Runtime {
                 return true
             }
             if let old = hoveredPath, let oldIdx = hoverLive(old), layoutCarries(nodeIndex: oldIdx) {
+                return true
+            }
+        }
+        if let within {
+            if within.entering.contains(where: { layoutCarries(nodeIndex: $0) }) {
+                return true
+            }
+            if hoverWithinPaths.contains(where: { path in
+                !within.inside.contains(path) && (hoverLive(path).map { layoutCarries(nodeIndex: $0) } ?? false)
+            }) {
                 return true
             }
         }
@@ -652,9 +576,11 @@ extension Runtime {
         return false
     }
 
-    internal func refreshHoverAndSyncTracks(at now: Double, cut: Bool) {
+    internal func refreshHoverAndSyncTracks(at now: Double, wallNow: Double? = nil, cut: Bool) {
         if cut {
             hoverHoldState = .free
+            hoverWithinPaths.removeAll()
+            hoverDelays.clear()
             syncHoverTracks(at: now, cut: true, held: false)
             return
         }
@@ -665,15 +591,21 @@ extension Runtime {
         let candidateHit = ptrInWindow ? hitTest(at: pointerPosition, predicate: Self.hoverHitPredicate) : nil
         let candidatePath = candidateHit?.node.path
         let candidateIndex = candidateHit?.node.index
+        let within = computeHoverWithin()
 
         let groupHovered = makeGroupHoverPredicate()
         let shouldHold = decideHoverHold(
             candidatePath: candidatePath,
             candidateIndex: candidateIndex,
+            within: within,
             groupHovered: groupHovered
         )
         if hoverHoldState != .released {
             hoverHoldState = shouldHold ? .held : .free
+        }
+
+        if let within {
+            applyHoverWithin(within.inside, held: shouldHold, at: wallNow ?? currentTime)
         }
 
         if shouldHold {
@@ -843,6 +775,184 @@ extension Runtime {
                 return true
             }
             return false
+        }
+    }
+}
+
+// MARK: - `onHoverChange` & `HoverDelays` (`r375`)
+
+extension Runtime {
+    private static func hoverWithinHolds(outer: String, inner: String) -> Bool {
+        inner == outer || inner.hasPrefix(outer + "/")
+    }
+
+    internal func computeHoverWithin() -> (inside: [String], entering: [Int])? {
+        let hasAny = !hoverWithinPaths.isEmpty || !hoverDelays.isEmpty
+            || flatNodes.contains { $0.el.handlers.onHoverChange != nil }
+        guard hasAny else { return nil }
+
+        var inside: [String] = []
+        var entering: [Int] = []
+        if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
+            let hits = hitTestAll(at: pointerPosition) { $0.el.handlers.onHoverChange != nil }
+            for h in hits {
+                let path = h.node.path
+                if !inside.contains(path) {
+                    if !hoverWithinPaths.contains(path) {
+                        entering.append(h.node.index)
+                    }
+                    inside.append(path)
+                }
+            }
+        }
+        // A held press stays inside what holds it until it releases (`hover.rs:132-140`).
+        if let captured = pressedPath {
+            for path in hoverWithinPaths where !inside.contains(path) {
+                if Self.hoverWithinHolds(outer: path, inner: captured),
+                   hoverLive(path) != nil {
+                    inside.append(path)
+                }
+            }
+        }
+        return (inside, entering)
+    }
+
+    private func effectiveHoverDelay(for el: El<State>) -> (enter: Float, leave: Float) {
+        if let spec = el.kitHoverDelaysSpec {
+            return (Float(spec.enter), Float(spec.leave))
+        }
+        return el.handlers.hoverDelay
+    }
+
+    internal func applyHoverWithin(_ nextInside: [String], held: Bool, at now: Double) {
+        var inside = nextInside
+        if held {
+            inside = hoverWithinPaths.filter { hoverLive($0) != nil }
+        }
+        let isDelayed: (String) -> Bool = { path in
+            guard let idx = self.nodeByPath[path], self.flatNodes.indices.contains(idx) else { return false }
+            let d = self.effectiveHoverDelay(for: self.flatNodes[idx].el)
+            return d.enter > 0 || d.leave > 0
+        }
+        for path in hoverWithinPaths where !inside.contains(path) && !isDelayed(path) {
+            if let idx = nodeByPath[path], flatNodes.indices.contains(idx),
+               let cb = flatNodes[idx].el.handlers.onHoverChange {
+                dispatchHoverChange(path: path, inside: false, handler: cb, at: now)
+            }
+        }
+        for path in inside where !hoverWithinPaths.contains(path) && !isDelayed(path) {
+            if let idx = nodeByPath[path], flatNodes.indices.contains(idx),
+               let cb = flatNodes[idx].el.handlers.onHoverChange {
+                dispatchHoverChange(path: path, inside: true, handler: cb, at: now)
+            }
+        }
+        hoverWithinPaths = inside
+        settleHoverDelays(at: now)
+    }
+
+    private func dispatchHoverChange(
+        path: String,
+        inside: Bool,
+        handler: (inout State, Bool, inout Tx) -> Void,
+        at now: Double
+    ) {
+        isDispatchingHover = true
+        var tx = makeTx(at: now)
+        handler(&state, inside, &tx)
+        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+        isDispatchingHover = false
+    }
+
+    internal func stepHoverDelay(_ path: String, event: HoverDelayEvent, at now: Double) {
+        let effects = hoverDelays.step(path, event: event)
+        for effect in effects {
+            switch effect {
+            case let .report(inside):
+                if let idx = nodeByPath[path], flatNodes.indices.contains(idx),
+                   let cb = flatNodes[idx].el.handlers.onHoverChange {
+                    dispatchHoverChange(path: path, inside: inside, handler: cb, at: now)
+                }
+            case .wakeAt:
+                break // `nextWakeDeadline(after:)` reads `hoverDelays.nextDue()` directly.
+            }
+        }
+    }
+
+    internal func settleHoverDelays(at now: Double) {
+        var paths = Set(hoverDelays.paths)
+        for path in hoverWithinPaths {
+            if let idx = nodeByPath[path], flatNodes.indices.contains(idx) {
+                let d = effectiveHoverDelay(for: flatNodes[idx].el)
+                if d.enter > 0 || d.leave > 0 {
+                    paths.insert(path)
+                }
+            }
+        }
+        let mayEnter = (pressedPath == nil) && !hoverPaused
+        for path in paths.sorted() {
+            let event: HoverDelayEvent
+            if let idx = nodeByPath[path], flatNodes.indices.contains(idx),
+               flatNodes[idx].el.handlers.onHoverChange != nil,
+               !flatNodes[idx].effectiveInert {
+                let d = effectiveHoverDelay(for: flatNodes[idx].el)
+                event = .settle(
+                    inside: hoverWithinPaths.contains(path),
+                    mayEnter: mayEnter,
+                    enterDelay: d.enter,
+                    leaveDelay: d.leave,
+                    now: now
+                )
+            } else {
+                event = .ended
+            }
+            stepHoverDelay(path, event: event, at: now)
+        }
+    }
+
+    internal func fireHoverDelays(at now: Double) {
+        guard hoverDelays.waiting else { return }
+        let clockNow = now + 1e-6
+        for path in hoverDelays.paths {
+            stepHoverDelay(path, event: .due(now: clockNow), at: now)
+        }
+    }
+
+    internal func pressHoverDelays() {
+        for path in hoverDelays.paths {
+            stepHoverDelay(path, event: .pressed, at: currentTime)
+        }
+    }
+
+    internal func endHoverDelays(at now: Double) {
+        for path in hoverDelays.paths {
+            stepHoverDelay(path, event: .ended, at: now)
+        }
+    }
+
+    /// Removes pruned elements from `hoverWithinPaths`/`hoverDelays` and fires a leave callback
+    /// if the pruned element had already heard enter (`hover.rs:189-197`).
+    internal func reconcilePrunedHoverWithin(
+        prevNodes: [FlatNode],
+        newByPath: [String: Int],
+        cut: Bool,
+        at now: Double
+    ) {
+        if cut {
+            hoverWithinPaths.removeAll()
+            hoverDelays.clear()
+            return
+        }
+        for old in prevNodes where newByPath[old.path] == nil {
+            let inside = hoverWithinPaths.firstIndex(of: old.path).map { idx -> Bool in
+                hoverWithinPaths.remove(at: idx)
+                return true
+            } ?? false
+            let shown = hoverDelays.forget(old.path)
+            let d = effectiveHoverDelay(for: old.el)
+            let heard = (d.enter == 0 && d.leave == 0) ? inside : shown
+            if heard, let cb = old.el.handlers.onHoverChange {
+                dispatchHoverChange(path: old.path, inside: false, handler: cb, at: now)
+            }
         }
     }
 }

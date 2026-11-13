@@ -262,12 +262,28 @@ public final class VirtualListState: @unchecked Sendable {
     private var sumsDirty: Bool = false
 
     public var defaultEstimate: Float
-    public var gap: Float
+    public var gap: Float {
+        didSet {
+            if gap < 0 { gap = 0 }
+            lock.lock()
+            sumsDirty = true
+            lock.unlock()
+        }
+    }
     public var overscanPixels: Float
     public var overscanCount: Int
     public private(set) var focusedKey: String? = nil
     public private(set) var enteringKeys: Set<String> = []
     public private(set) var shownKeys: Set<String> = []
+    private var bornByKey: [String: UInt64] = [:]
+    private var keysFresh: Bool = false
+    private var heldKeys: Bool = false
+    private var anchorRow: (key: String, top: Float)? = nil
+    public var padTop: Float = 0
+    public var padBottom: Float = 0
+    public private(set) var lastViewportHeight: Float = 0
+    private var mountedRangeCached: Range<Int> = 0..<0
+    private var beforeHeightCached: Float = 0
 
     public init(
         defaultEstimate: Float = 44,
@@ -285,7 +301,13 @@ public final class VirtualListState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let oldShown = shownKeys
-        keys = items.map(\.key)
+        let newKeys = items.map(\.key)
+        if newKeys != keys {
+            keysFresh = true
+            let newSet = Set(newKeys)
+            heldKeys = keys.contains { newSet.contains($0) }
+        }
+        keys = newKeys
         stickyFlags = items.map(\.isStickyHeader)
         keyToIndex.removeAll(keepingCapacity: true)
         heights.removeAll(keepingCapacity: true)
@@ -294,6 +316,9 @@ public final class VirtualListState: @unchecked Sendable {
             keyToIndex[item.key] = i
             let h = measuredHeights[item.key] ?? item.estimatedHeight
             heights.append(max(1, h))
+            if bornByKey[item.key] == nil {
+                bornByKey[item.key] = 0
+            }
             if !oldShown.contains(item.key) {
                 enteringKeys.insert(item.key)
             }
@@ -304,6 +329,129 @@ public final class VirtualListState: @unchecked Sendable {
     public func setKeys(_ newKeys: [String], estimate: Float? = nil) {
         let est = estimate ?? defaultEstimate
         setItems(newKeys.map { VirtualItemSpec(key: $0, estimatedHeight: est) })
+    }
+
+    /// Replaces the row keys on `commit`, preserving prior births and returning an anchor row if one in view remains (`VirtualList::set_keys`).
+    @discardableResult
+    public func setKeys(
+        _ newKeys: [String],
+        commit: UInt64,
+        offset: Float? = nil,
+        viewportHeight: Float? = nil
+    ) -> (key: String, top: Float)? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let vp = viewportHeight { lastViewportHeight = vp }
+        let newSet = Set(newKeys)
+        let anchor: (key: String, top: Float)? = offset.flatMap { off in
+            guard let row = firstVisibleLocked(offset: off, where: { newSet.contains($0) }) else {
+                return nil
+            }
+            return (lastViewportHeight <= 0 || row.top < off + lastViewportHeight) ? row : nil
+        }
+        if newKeys != keys {
+            keysFresh = true
+            if offset != nil {
+                heldKeys = anchor != nil
+            } else {
+                heldKeys = keys.contains { newSet.contains($0) }
+            }
+        }
+        anchorRow = anchor
+        keys = newKeys
+        stickyFlags = Array(repeating: false, count: newKeys.count)
+        keyToIndex.removeAll(keepingCapacity: true)
+        heights.removeAll(keepingCapacity: true)
+        for (i, k) in newKeys.enumerated() {
+            keyToIndex[k] = i
+            if bornByKey[k] == nil {
+                bornByKey[k] = commit
+            }
+            heights.append(max(1, measuredHeights[k] ?? defaultEstimate))
+        }
+        sumsDirty = true
+        return anchor
+    }
+
+    /// Whether row `index` mounting on `commit` skips its insertion transition (`VirtualList::mounts_quietly`).
+    public func mountsQuietly(_ index: Int, commit: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard index >= 0 && index < keys.count else { return true }
+        let key = keys[index]
+        let born = bornByKey[key] ?? 0
+        let quiet = born < commit && !(keysFresh && !shownKeys.contains(key))
+        if !quiet {
+            enteringKeys.insert(key)
+        }
+        return quiet
+    }
+
+    /// Whether the keys changed and no previously visible row remained (`VirtualList::replaced_view`).
+    public func replacedView() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return keysFresh && !heldKeys
+    }
+
+    /// Marks the start of a new rendered frame (`VirtualList::frame_begins`).
+    public func frameBegins() {
+        lock.lock()
+        defer { lock.unlock() }
+        keysFresh = false
+    }
+
+    /// Returns the first row visible at `offset` accepted by `keep`, with its top offset (`VirtualList::first_visible`).
+    public func firstVisible(offset: Float, where keep: (String) -> Bool) -> (key: String, top: Float)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstVisibleLocked(offset: offset, where: keep)
+    }
+
+    private func firstVisibleLocked(offset: Float, where keep: (String) -> Bool) -> (key: String, top: Float)? {
+        rebuildPrefixSumsIfNeeded()
+        for i in 0..<keys.count {
+            let rowEnd = padTop + prefixSums[i] + heights[i]
+            if rowEnd > offset && keep(keys[i]) {
+                return (keys[i], padTop + prefixSums[i])
+            }
+        }
+        return nil
+    }
+
+    /// Maximum vertical scroll offset (`VirtualList::max_offset`).
+    public func maxOffset(viewportHeight: Float? = nil) -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        if let vp = viewportHeight { lastViewportHeight = vp }
+        rebuildPrefixSumsIfNeeded()
+        return max(0, padTop + (prefixSums.last ?? 0) + padBottom - lastViewportHeight)
+    }
+
+    /// Scroll anchor displacement since the last `setKeys` (`VirtualList::anchor_delta`).
+    public func anchorDelta() -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let anchor = anchorRow, let idx = keyToIndex[anchor.key] else { return 0 }
+        rebuildPrefixSumsIfNeeded()
+        return padTop + prefixSums[idx] - anchor.top
+    }
+
+    /// Whether the mounted window needs refreshing at `offset` (`VirtualList::needs_window`).
+    public func needsWindow(offset: Float, viewportHeight: Float? = nil, pinned: Bool = false, indexed: Bool = false) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let vp = viewportHeight { lastViewportHeight = vp }
+        guard !keys.isEmpty else { return false }
+        if pinned { return mountedRangeCached.upperBound != keys.count }
+        rebuildPrefixSumsIfNeeded()
+        let edge = lastViewportHeight * (indexed ? 1.75 : 0.5)
+        let top = padTop + beforeHeightCached
+        let endIdx = min(keys.count, mountedRangeCached.upperBound)
+        let mountedEnd = endIdx == 0 ? 0 : (prefixSums[endIdx - 1] + heights[endIdx - 1])
+        let bottom = padTop + mountedEnd
+        return (mountedRangeCached.lowerBound > 0 && offset < top + edge)
+            || (mountedRangeCached.upperBound < keys.count && offset + lastViewportHeight > bottom - edge)
     }
 
     /// Records the laid-out height of a mounted row key.
@@ -426,8 +574,11 @@ public final class VirtualListState: @unchecked Sendable {
         }
 
         let beforeH = prefixSums[mountStart]
-        let mountedBottom = prefixSums[mountEnd]
+        let mountedBottom = mountEnd == 0 ? 0 : (prefixSums[mountEnd - 1] + heights[mountEnd - 1])
         let afterH = max(0, total - mountedBottom)
+        lastViewportHeight = viewportHeight
+        mountedRangeCached = mountStart..<mountEnd
+        beforeHeightCached = beforeH
 
         // Find active sticky header at or above viewTop
         var stickyIdx: Int? = nil
