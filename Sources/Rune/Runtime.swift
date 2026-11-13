@@ -127,6 +127,7 @@ public final class Runtime<State> {
         var zoomedTargetRect: MotionRect
         var contentSize: Vec2
         var clipRect: MotionRect
+        var scrollShift: Vec2
         var effectiveInert: Bool
         var zOrder: Int
         var inheritedScale: Float = 1.0
@@ -160,6 +161,21 @@ public final class Runtime<State> {
         var enclosingHScrollIndex: Int?
     }
 
+    private struct PaintInh {
+        var opacity: Float = 1.0
+        var scale: Vec2 = Vec2(1, 1)
+        var anchor: SIMD2<Float> = .zero
+        var anchorTo: SIMD2<Float> = .zero
+        var offsetDelta: Vec2 = .zero
+        var fullDelta: Vec2 = .zero
+        var restOffset: Vec2 = .zero
+        var snap: PixelSnap.Inherit = PixelSnap.Inherit()
+        var parentDrawnWidth: Float? = nil
+        var parentTargetWidth: Float? = nil
+        var parentMoving: Bool = false
+        var clip: MotionRect? = nil
+    }
+
     private struct DragSession {
         var path: String
         var key: String?
@@ -175,6 +191,7 @@ public final class Runtime<State> {
 
     private struct EmitStepInput {
         let p: Presented
+        let inh: PaintInh
         let ancestorOpacity: Float
         let ancestorTurn: Turn?
         let outerTurnClip: MotionRect?
@@ -326,6 +343,7 @@ public final class Runtime<State> {
     public private(set) var scene: Scene
     internal var scrollStore: AnimationStore
     internal var liveStore: AnimationStore
+    private var pixelSnapGlides = PixelSnap.Glides()
 
     public internal(set) var currentTime: Double = 0.0
     public private(set) var isAnimating: Bool = false
@@ -801,6 +819,7 @@ public final class Runtime<State> {
             buildRefScene(frameOut: frameOut, now: animNow)
         }
         updatePostFrameLayoutWatches(at: now)
+        isAnimating = isAnimating || (pixelSnapGlides.isEasing && cxSettings.viewTimeScale > 0.0)
         if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
         }
@@ -1302,7 +1321,6 @@ public final class Runtime<State> {
                     anchorAttachNorm = placement.attachNorm
                 }
             }
-
             // Sticky push-out is evaluated at paint time in `buildRefScene` using presented rects.
 
             let targetRect = MotionRect.fromXYWH(worldX, worldY, localRect.width, localRect.height)
@@ -1405,6 +1423,7 @@ public final class Runtime<State> {
                 zoomedTargetRect: zoomedTargetRect,
                 contentSize: solved.layout.contentSize,
                 clipRect: inheritedClip,
+                scrollShift: ownScroll,
                 effectiveInert: effectiveInert,
                 zOrder: ownZ,
                 inheritedScale: nodeInheritedScale,
@@ -2319,8 +2338,10 @@ public final class Runtime<State> {
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         let activeSelectionRanges = computeActiveSelectionRangesByPath()
+        pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(devW), Float(devH)))
 
-        // Precompute presented rect, scale, and node lookup for every node in `frameOut.nodes`
+        // Precompute raw (unscaled) rect, own scale, opacity, and tree links for `frameOut.nodes`
+        var rawRectById: [NodeId: MotionRect] = [:]
         var presentedRectById: [NodeId: MotionRect] = [:]
         var presentedScaleById: [NodeId: Vec2] = [:]
         var nodeByFrameId: [NodeId: Presented] = [:]
@@ -2331,11 +2352,12 @@ public final class Runtime<State> {
             nodeByFrameId[p.id] = p
         }
 
-        // Compute own & inherited presented rect, opacity, scale, and rotation (applying Live & Loop tracks on top of Scene)
+        // Compute own raw presented rect, inherited presented rect, opacity, scale, and rotation (applying Live & Loop tracks on top of Scene)
         var presentedInhById: [NodeId: PresentedTransform] = [:]
         var ownOpacityById: [NodeId: Float] = [:]
         var ownScaleById: [NodeId: Vec2] = [:]
         var ownRotateById: [NodeId: Float] = [:]
+        var liveMovedById: Set<NodeId> = []
         for p in frameOut.nodes {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { continue }
             var baseRect = p.rect
@@ -2343,6 +2365,7 @@ public final class Runtime<State> {
             var ownSc = p.scale
             var rot = p.rotate
             var ownDelta = Vec2.zero
+            var hasLiveTransform = false
 
             if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: currentTime) {
                 op *= ls.opacity
@@ -2359,18 +2382,26 @@ public final class Runtime<State> {
                 case .scale:
                     if let v = liveStore.get(lnid, Props.SCALE) {
                         ownSc = Vec2(p.scale.x * max(0, v.x), p.scale.y * max(0, v.y))
+                        hasLiveTransform = true
                     }
                 case .offset:
                     if let v = liveStore.get(lnid, Props.OFFSET) {
                         ownDelta.x += v.x
                         ownDelta.y += v.y
+                        hasLiveTransform = true
                     }
                 case .rect:
-                    if let v = liveStore.get(lnid, Props.RECT) { baseRect = v }
+                    if let v = liveStore.get(lnid, Props.RECT) {
+                        baseRect = v
+                        hasLiveTransform = true
+                    }
                 case .blur, .fill, .trim:
                     break
                 }
             }
+
+            let ownRaw = baseRect.offsetBy(ownDelta)
+            rawRectById[p.id] = ownRaw
 
             let pinh: PresentedTransform = (snap.el.anchor == nil ? p.parent.flatMap { presentedInhById[$0] } : nil) ?? .identity
             let sc = Vec2(pinh.scale.x * ownSc.x, pinh.scale.y * ownSc.y)
@@ -2394,19 +2425,19 @@ public final class Runtime<State> {
             )
 
             let shifted = baseRect.offsetBy(Vec2(ownDx, ownDy))
-            let rect: MotionRect
+            let preRect: MotionRect
             if abs(sc.x - 1.0) > 1e-5 || abs(sc.y - 1.0) > 1e-5 || anchor != anchorTo {
-                rect = MotionRect(
+                preRect = MotionRect(
                     left: anchorTo.x + (shifted.left - anchor.x) * sc.x,
                     top: anchorTo.y + (shifted.top - anchor.y) * sc.y,
                     right: anchorTo.x + (shifted.right - anchor.x) * sc.x,
                     bottom: anchorTo.y + (shifted.bottom - anchor.y) * sc.y
                 )
             } else {
-                rect = shifted
+                preRect = shifted
             }
-
-            presentedRectById[p.id] = rect
+            presentedRectById[p.id] = preRect
+            if hasLiveTransform { liveMovedById.insert(p.id) }
             ownOpacityById[p.id] = op.clamped(to: 0...1)
             ownScaleById[p.id] = ownSc
             ownRotateById[p.id] = rot
@@ -2473,6 +2504,7 @@ public final class Runtime<State> {
         @inline(never)
         func emitNodeEnter(_ input: EmitStepInput) -> (children: [EmitStepInput], exit: EmitNodeExit) {
             let p = input.p
+            let inh = input.inh
             let ancestorOpacity = input.ancestorOpacity
             let ancestorTurn = input.ancestorTurn
             let outerTurnClip = input.outerTurnClip
@@ -2503,7 +2535,59 @@ public final class Runtime<State> {
             let textFlightSource = textFlightTarget == nil
                 ? activeTextFlights.first(where: { FlightSelector.selects($0.state.sourceKey, path: snap.path, key: snap.key) })
                 : nil
-            let rawRect = presentedRectById[p.id] ?? p.rect
+            let ownRaw = rawRectById[p.id] ?? p.rect
+            let appliedDelta = (el.layoutAnim?.travel == .screen) ? inh.offsetDelta : inh.fullDelta
+            var rawRect = ownRaw.offsetBy(appliedDelta)
+            var trailingMoved = false
+            if el.isRideTrailing, let dw = inh.parentDrawnWidth, let tw = inh.parentTargetWidth {
+                let shift = dw - tw
+                if abs(shift) * pxScale > 1.0 / 32.0 {
+                    rawRect = rawRect.offsetBy(Vec2(shift, 0))
+                    trailingMoved = inh.parentMoving
+                }
+            }
+
+            let ownSc = ownScaleById[p.id] ?? Vec2(1, 1)
+            let rawScaleVec = Vec2(inh.scale.x * ownSc.x, inh.scale.y * ownSc.y)
+            let origin = (el.runtimeExtras["scaleOrigin"] != nil)
+                ? el.scaleOrigin
+                : (snap.anchorAttachNorm ?? el.origin)
+            let centre = SIMD2<Float>(
+                rawRect.left + origin.x * rawRect.width,
+                rawRect.top + origin.y * rawRect.height
+            )
+            let centreTo = SIMD2<Float>(
+                inh.anchorTo.x + (centre.x - inh.anchor.x) * inh.scale.x,
+                inh.anchorTo.y + (centre.y - inh.anchor.y) * inh.scale.y
+            )
+            let hasOwnScale = abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
+            let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (inh.anchor, inh.anchorTo)
+
+            var scaledRawRect: MotionRect
+            if abs(rawScaleVec.x - 1.0) > 1e-5 || abs(rawScaleVec.y - 1.0) > 1e-5 || anchor != anchorTo {
+                scaledRawRect = MotionRect(
+                    left: anchorTo.x + (rawRect.left - anchor.x) * rawScaleVec.x,
+                    top: anchorTo.y + (rawRect.top - anchor.y) * rawScaleVec.y,
+                    right: anchorTo.x + (rawRect.right - anchor.x) * rawScaleVec.x,
+                    bottom: anchorTo.y + (rawRect.bottom - anchor.y) * rawScaleVec.y
+                )
+            } else {
+                scaledRawRect = rawRect
+            }
+
+            // Land sub-1/32 px size residuals before snapping edges (`build.rs:396`).
+            if abs(rawScaleVec.x - 1.0) <= 1e-5 {
+                let tw = PixelSnap.snapPx(snap.targetRect.width, scale: pxScale) / pxScale
+                if abs(scaledRawRect.width - tw) * pxScale < 1.0 / 32.0 {
+                    scaledRawRect = MotionRect(left: scaledRawRect.left, top: scaledRawRect.top, right: scaledRawRect.left + tw, bottom: scaledRawRect.bottom)
+                }
+            }
+            if abs(rawScaleVec.y - 1.0) <= 1e-5 {
+                let th = PixelSnap.snapPx(snap.targetRect.height, scale: pxScale) / pxScale
+                if abs(scaledRawRect.height - th) * pxScale < 1.0 / 32.0 {
+                    scaledRawRect = MotionRect(left: scaledRawRect.left, top: scaledRawRect.top, right: scaledRawRect.right, bottom: scaledRawRect.top + th)
+                }
+            }
             let ownOp = ownOpacityById[p.id] ?? p.opacity
             let groupFactor: Float = {
                 guard let (restOp, hovOp) = el.groupOpacity else { return 1.0 }
@@ -2523,19 +2607,18 @@ public final class Runtime<State> {
                 return StickyMath.stuckRevealFactor(parentShift: input.parentStickyMag, span: span)
             }()
             let alpha = (ownOp * ancestorOpacity * groupFactor * input.kidsFadeOpacity * revealFactor).clamped(to: 0...1)
-            let rawScaleVec = presentedScaleById[p.id] ?? p.scale
             var rect: MotionRect
             let scaleVec: Vec2
             if let fc = flightCover {
                 rect = MotionRect.fromXYWH(
-                    fc.presentedOrigin.x + (rawRect.x - fc.targetOrigin.x) * fc.scale,
-                    fc.presentedOrigin.y + (rawRect.y - fc.targetOrigin.y) * fc.scale,
-                    rawRect.width * fc.scale,
-                    rawRect.height * fc.scale
+                    fc.presentedOrigin.x + (scaledRawRect.x - fc.targetOrigin.x) * fc.scale,
+                    fc.presentedOrigin.y + (scaledRawRect.y - fc.targetOrigin.y) * fc.scale,
+                    scaledRawRect.width * fc.scale,
+                    scaledRawRect.height * fc.scale
                 )
                 scaleVec = Vec2(rawScaleVec.x * fc.scale, rawScaleVec.y * fc.scale)
             } else {
-                rect = rawRect
+                rect = scaledRawRect
                 scaleVec = rawScaleVec
             }
             let (stickyShift, stickyMag): (Vec2, Float) = {
@@ -2568,6 +2651,8 @@ public final class Runtime<State> {
                 )
             }
             stuckShiftsByPath[snap.path] = stickyShift
+            presentedRectById[p.id] = rect
+            presentedScaleById[p.id] = scaleVec
             let effRotate = ownRotateById[p.id] ?? p.rotate
 
             let ownHasTurn = abs(effRotate) > 1e-6
@@ -2631,7 +2716,7 @@ public final class Runtime<State> {
             }
             let borderColor = p.border.map(Color.init) ?? el.borderColor
 
-            var visClip = flightClipOverride ?? snap.clipRect
+            var visClip = flightClipOverride ?? (inh.clip.map { intersectRects(snap.clipRect, $0) } ?? snap.clipRect)
             if let rev = p.revealClip {
                 visClip = intersectRects(visClip, rev)
             }
@@ -2708,6 +2793,51 @@ public final class Runtime<State> {
                 return sum
             }()
 
+            // Compute resting rect for PixelSnap motion tracking (`build.rs:435-445`)
+            let ownRestOff = Vec2(ownRaw.left - p.rect.left, ownRaw.top - p.rect.top)
+            let nodeRestOffset = Vec2(inh.restOffset.x + el.offset.x + ownRestOff.x, inh.restOffset.y + el.offset.y + ownRestOff.y)
+            let rawRestRect = snap.targetRect.offsetBy(nodeRestOffset)
+
+            let nodeMoving = p.isMoving || inh.parentMoving || trailingMoved || liveMovedById.contains(p.id)
+            let rExact = PixelSnap.edgesPx(rect, scale: pxScale)
+            let rawEdgesPx = PixelSnap.edgesPx(rawRect, scale: pxScale)
+            let ownStickyDelta = SIMD2<Float>(stickyShift.x - input.parentStickyShift.x, stickyShift.y - input.parentStickyShift.y)
+            let rigidPt = SIMD2<Float>(inh.snap.rigid.x + ownStickyDelta.x, inh.snap.rigid.y + ownStickyDelta.y)
+            let rigidPx = rigidPt * pxScale
+            let canSnap = !inh.snap.off && el.isPixelSnapEnabled && abs(p.rotate) < 1e-6
+            let filterMargin = blurPt * pxScale * 3.0 + 2.0
+            let snaps = canSnap && (el.isolatedLayer || (
+                max(rExact[2], rExact[0]) >= max(visClip.left * pxScale, 0) - filterMargin
+                && rExact[0] <= min(visClip.right * pxScale, Float(devW)) + filterMargin
+                && max(rExact[3], rExact[1]) >= max(visClip.top * pxScale, 0) - filterMargin
+                && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
+            ))
+            let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
+            let snapLayer = (canSnap && hasOwnScale)
+                ? pixelSnapGlides.layer(id: p.id, r: rExact, unscaled: rawEdgesPx, rigid: rigidPx, cached: el.isolatedLayer)
+                : inh.snap.layer
+            let restForMotion: MotionRect? = (snaps && nodeMoving) ? rawRestRect : nil
+            let (snappedEdgesPx, snapRest): (SIMD4<Float>, PixelSnap.Parent?)
+            if !snaps {
+                (snappedEdgesPx, snapRest) = (rExact, nil)
+            } else if restForMotion == nil && unscaled {
+                (snappedEdgesPx, snapRest) = pixelSnapGlides.atRest(id: p.id, r: rExact, rigid: rigidPx, parent: inh.snap.parent)
+            } else {
+                let mot = PixelSnap.motion(rect: rawRect, rest: restForMotion, scale: pxScale, anchored: false, growthRow: false)
+                let rawArg = unscaled ? rExact : rawEdgesPx
+                let avgScale = (scaleVec.x + scaleVec.y) * 0.5
+                (snappedEdgesPx, snapRest) = pixelSnapGlides.snapped(
+                    id: p.id,
+                    motion: mot,
+                    r: rExact,
+                    unscaled: rawArg,
+                    rigid: rigidPx,
+                    layer: snapLayer,
+                    scale: avgScale,
+                    parent: inh.snap.parent
+                )
+            }
+
             var caretOut: [Float]? = nil
             var textTruncated = false
             let editValue: TextEdit? = el.handlers.editLens.map { lens in
@@ -2733,12 +2863,28 @@ public final class Runtime<State> {
             let totalShapePieces = el.shapes.reduce(0) { $0 + $1.pieceCount }
             let useLayer = (blurPt >= 0.5) || el.isolatedLayer || (alpha > 0.001 && alpha < 1.0 && totalShapePieces > 1)
             let devClip = SIMD4<Float>(
-                visClip.x * pxScale,
-                visClip.y * pxScale,
+                visClip.left * pxScale,
+                visClip.top * pxScale,
                 visClip.width * pxScale,
                 visClip.height * pxScale
             )
-            let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0
+            let paintMargin = el.shadows.reduce(filterMargin) {
+                max($0, ($1.blur * 3.0 + max($1.spread, 0) + max(abs($1.x), abs($1.y))) * pxScale + 2.0)
+            }
+            let onScreenForEmit = el.isolatedLayer || (
+                max(rExact[2], rExact[0]) >= max(visClip.left * pxScale, 0) - paintMargin
+                && rExact[0] <= min(visClip.right * pxScale, Float(devW)) + paintMargin
+                && max(rExact[3], rExact[1]) >= max(visClip.top * pxScale, 0) - paintMargin
+                && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + paintMargin
+            )
+            let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0 && onScreenForEmit
+
+            let devRect = SIMD4<Float>(
+                snappedEdgesPx[0],
+                snappedEdgesPx[1],
+                max(0, snappedEdgesPx[2] - snappedEdgesPx[0]),
+                max(0, snappedEdgesPx[3] - snappedEdgesPx[1])
+            )
 
             let activeFadeEdges: [(fade: SIMD4<Float>, origin: SIMD2<Float>)] = {
                 guard !snap.activeClipFades.isEmpty else { return [] }
@@ -2782,12 +2928,6 @@ public final class Runtime<State> {
             }
 
             if shouldEmit {
-                let devRect = SIMD4<Float>(
-                    rect.x * pxScale,
-                    rect.y * pxScale,
-                    rect.width * pxScale,
-                    rect.height * pxScale
-                )
                 let devRadii = SIMD4<Float>(
                     p.corners.topLeft * pxScale * flightScale,
                     p.corners.topRight * pxScale * flightScale,
@@ -2944,15 +3084,16 @@ public final class Runtime<State> {
                 } else if hasFill || hasSolidBorder {
                     let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
+                    let borderScale = (scaleVec.x + scaleVec.y) * 0.5
                     let sidePx = el.borderSides.map { s in
                         SIMD4<Float>(
-                            snapBorderWidthPx(s.top, scale: pxScale),
-                            snapBorderWidthPx(s.right, scale: pxScale),
-                            snapBorderWidthPx(s.bottom, scale: pxScale),
-                            snapBorderWidthPx(s.left, scale: pxScale)
+                            snapBorderWidthPx(s.top, scale: pxScale) * borderScale,
+                            snapBorderWidthPx(s.right, scale: pxScale) * borderScale,
+                            snapBorderWidthPx(s.bottom, scale: pxScale) * borderScale,
+                            snapBorderWidthPx(s.left, scale: pxScale) * borderScale
                         )
                     }
-                    let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
+                    let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) * borderScale : 0
                     primitives.append(attachFade(.roundedRect(
                         rect: devRect,
                         radii: devRadii,
@@ -2977,11 +3118,12 @@ public final class Runtime<State> {
 
                 // 3. Dashed border ring
                 if let dash = el.dashedBorder, borderColor.a > 0.0005 {
+                    let borderScale = (scaleVec.x + scaleVec.y) * 0.5
                     primitives.append(.dashedRing(
                         rect: devRect,
                         radii: devRadii,
                         color: borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                        borderWidth: snapBorderWidthPx(el.borderWidth, scale: pxScale),
+                        borderWidth: snapBorderWidthPx(el.borderWidth, scale: pxScale) * borderScale,
                         dashLength: dash.dash * pxScale,
                         gapLength: dash.gap * pxScale,
                         phase: dash.phase * pxScale,
@@ -3126,11 +3268,13 @@ public final class Runtime<State> {
                 }
 
                 // 8. Text / Rich Text / TextInput
+                let snappedOriginX = snappedEdgesPx[0] / pxScale
+                let snappedOriginY = snappedEdgesPx[1] / pxScale
                 let padL = el.layout.padding.left * scaleVec.x
                 let padT = el.layout.padding.top * scaleVec.y
-                let innerW = max(0, rect.width - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
-                let textOriginX = rect.x + padL
-                let textOriginY = rect.y + padT
+                let innerW = max(0, (snappedEdgesPx[2] - snappedEdgesPx[0]) / pxScale - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
+                let textOriginX = snappedOriginX + padL
+                let textOriginY = snappedOriginY + padT
                 let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
@@ -3500,11 +3644,52 @@ public final class Runtime<State> {
                     return 1.0
                 }()
                 let firstTreeChildId = children.first?.id
+                var childRigid = rigidPt
+                childRigid.x -= snap.scrollShift.x
+                childRigid.y -= snap.scrollShift.y
+                var childSnap = PixelSnap.Inherit()
+                childSnap.off = inh.snap.off || !el.isPixelSnapEnabled || abs(p.rotate) >= 1e-6
+                childSnap.rigid = childRigid
+                childSnap.layer = snapLayer
+                let paintsFrame = PixelSnap.frames(el, effectiveFill: fillColor, effectiveBorder: borderColor)
+                childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
+
+                let childClip: MotionRect?
+                if el.layout.clipOverflow {
+                    let snappedPt = MotionRect(
+                        left: snappedEdgesPx[0] / pxScale,
+                        top: snappedEdgesPx[1] / pxScale,
+                        right: snappedEdgesPx[2] / pxScale,
+                        bottom: snappedEdgesPx[3] / pxScale
+                    )
+                    childClip = inh.clip.map { intersectRects($0, snappedPt) } ?? snappedPt
+                } else {
+                    childClip = inh.clip
+                }
+
+                let ownLiveOff = Vec2(ownRaw.left - p.rect.left, ownRaw.top - p.rect.top)
+                let childOffsetDelta = Vec2(inh.offsetDelta.x + ownLiveOff.x, inh.offsetDelta.y + ownLiveOff.y)
+                let childFullDelta = Vec2(inh.fullDelta.x + ownLiveOff.x, inh.fullDelta.y + ownLiveOff.y)
+                let childInh = PaintInh(
+                    opacity: childAncestorOp,
+                    scale: rawScaleVec,
+                    anchor: anchor,
+                    anchorTo: anchorTo,
+                    offsetDelta: childOffsetDelta,
+                    fullDelta: childFullDelta,
+                    restOffset: nodeRestOffset,
+                    snap: childSnap,
+                    parentDrawnWidth: rect.width,
+                    parentTargetWidth: snap.targetRect.width,
+                    parentMoving: nodeMoving,
+                    clip: childClip
+                )
                 let sorted = sortByZOrder(children)
                 childSteps.reserveCapacity(sorted.count)
                 for child in sorted {
                     childSteps.append(EmitStepInput(
                         p: child,
+                        inh: childInh,
                         ancestorOpacity: childAncestorOp,
                         ancestorTurn: nodeTurn,
                         outerTurnClip: nextOuterClip,
@@ -3536,6 +3721,7 @@ public final class Runtime<State> {
 
         func emitSubtree(
             _ p: Presented,
+            inh: PaintInh,
             ancestorOpacity: Float,
             ancestorTurn: Turn?,
             outerTurnClip: MotionRect?,
@@ -3550,6 +3736,7 @@ public final class Runtime<State> {
             var workStack: [EmitWorkItem] = [
                 .enter(EmitStepInput(
                     p: p,
+                    inh: inh,
                     ancestorOpacity: ancestorOpacity,
                     ancestorTurn: ancestorTurn,
                     outerTurnClip: outerTurnClip,
@@ -3586,6 +3773,7 @@ public final class Runtime<State> {
         for root in sortByZOrder(rootNodes) {
             emitSubtree(
                 root,
+                inh: PaintInh(),
                 ancestorOpacity: 1.0,
                 ancestorTurn: nil,
                 outerTurnClip: nil,
@@ -3600,6 +3788,7 @@ public final class Runtime<State> {
                 || unclippedMatchedFlightIds.contains(lifted.node.id)
             emitSubtree(
                 lifted.node,
+                inh: PaintInh(opacity: lifted.ancestorOpacity),
                 ancestorOpacity: lifted.ancestorOpacity,
                 ancestorTurn: lifted.ancestorTurn,
                 outerTurnClip: lifted.outerTurnClip,
@@ -6030,9 +6219,7 @@ internal func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
 
 @inline(__always)
 internal func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
-    if widthPt <= 0 { return 0 }
-    let raw = widthPt * scale
-    return raw < 1.0 ? 1.0 : raw.rounded()
+    PixelSnap.lineWidth(widthPt * scale)
 }
 
 @inline(__always)
