@@ -6876,10 +6876,13 @@ public final class Runtime<State> {
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         frameHadInputSinceLastFrame = true
         releaseHoverHold()
-        cancelKitHoverAndRepeatOnPress()
-        kitHooks.dragRepeat = nil
-        pressHoverDelays()
-        hoverPaused = true
+        if button != .secondary {
+            kitHooks.titlebar.action = nil
+            cancelKitHoverAndRepeatOnPress()
+            endKitPressRepeat()
+            pressHoverDelays()
+            hoverPaused = true
+        }
         suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
@@ -6925,6 +6928,7 @@ public final class Runtime<State> {
             if let (node, rect, local) = hitTestDetailed(at: pos, predicate: {
                 $0.el.handlers.onSecondaryClick != nil || ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el) && self.linkIndex(atPath: $0.path, at: pos) != nil)
             }) {
+                recordSecondaryTitlebarDown(at: pos, captured: true)
                 if self.hasActiveTextLinks(node.el),
                    let linkIdx = self.linkIndex(atPath: node.path, at: pos),
                    dispatchLinkDown(node: node, linkIdx: linkIdx, at: pos, button: .secondary, mods: mods, at: now) {
@@ -6943,7 +6947,9 @@ public final class Runtime<State> {
                 applyTx(tx, at: now)
                 return
             } else {
+                let captured = isSecondaryTextOrInputHit(at: pos)
                 handleSelectableSecondaryClick(at: pos, at: now)
+                recordSecondaryTitlebarDown(at: pos, captured: captured)
             }
             return
         }
@@ -6963,7 +6969,7 @@ public final class Runtime<State> {
         }
 
         guard let (node, rect, rawLocal) = interactiveHit else {
-            recordBareTitlebarPressIfNeeded(at: pos, button: button, now: now)
+            recordTitlebarPressOnMiss(at: pos, button: button, now: now)
             if cxSettings.viewDefaults.webFocus, let bgHit = hitTest(at: pos, predicate: { _ in true }) {
                 webFocusTabStartPath = bgHit.node.path
             }
@@ -6978,7 +6984,6 @@ public final class Runtime<State> {
             }
             return
         }
-        kitHooks.lastBareTitlebarPress = nil
 
         if hasActiveTextLinks(node.el), let linkIdx = linkIndex(atPath: node.path, at: pos) {
             handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
@@ -7153,8 +7158,12 @@ public final class Runtime<State> {
         frameHadInputSinceLastFrame = true
         let pointerMovedAtUp = (pos != pointerPosition)
         pointerPosition = pos
-        armedDragOut = nil
-        kitHooks.dragRepeat = nil
+        if button == .secondary {
+            recordSecondaryTitlebarUp(at: pos)
+        } else {
+            armedDragOut = nil
+            endKitPressRepeat()
+        }
         let releasedPath = pressedPath
         let notePath = releasedPath
         let startedNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
@@ -7275,6 +7284,7 @@ public final class Runtime<State> {
         if let drag = activeDrag, drag.button == .primary {
             let moved = drag.movedBeyondSlop || hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0
             activeDrag = nil
+            endKitPressRepeat()
             armedDragOut = nil
             pressedPath = nil
             pressedKey = nil
@@ -7542,7 +7552,7 @@ public final class Runtime<State> {
         if ev.key == .escape, let drag = activeDrag {
             state = drag.stateSnapshotBeforeDrag
             activeDrag = nil
-            kitHooks.dragRepeat = nil
+            endKitPressRepeat()
             pressedPath = nil
             pressedKey = nil
             if let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
@@ -8853,38 +8863,47 @@ public final class Runtime<State> {
         guard windowFocused != focused else { return }
         let t = now ?? currentTime
         let prevStale = needsCommit
-        if focused && !windowFocused {
+        let wasBlurred = !windowFocused
+        if focused && wasBlurred {
             hoverPaused = false
+            kitHooks.hoverHoldAfterActionUntilMove = false
         }
         windowFocused = focused
-        if !focused {
-            finishComposition(at: t)
-            endHoverDelays(at: t)
-            hoverPaused = true
-        }
-        var handledFocusHook = false
+        kitHooks.windowFocused = focused
+        var handledFocus = false
+        var cancelOrHoverDirty = false
         if let hook = onFocus {
+            handledFocus = true
             if playgroundDispatchFocus(focused, hook: hook, at: t) {
+                if !focused {
+                    _ = cancelPointerForFocusLoss(at: t)
+                    finishComposition(at: t)
+                    endHoverDelays(at: t)
+                    _ = endKitHoverDelays(at: t)
+                    hoverPaused = true
+                    kitHooks.hoverHoldAfterActionUntilMove = true
+                }
+                _ = dispatchKitWindowFocusHandlers(focused, at: t)
                 return
             }
             update(at: t) { s, tx in hook(&s, focused, &tx) }
-            handledFocusHook = true
         }
-        for node in flatNodes where !node.effectiveInert {
-            let handlers = node.el.kitWindowFocusHandlers
-            guard !handlers.isEmpty else { continue }
-            for handler in handlers {
-                var tx = makeTx(at: t)
-                var boxedState: Any = state
-                handler(&boxedState, focused, &tx)
-                if let typed = boxedState as? State {
-                    state = typed
-                }
-                applyTx(tx, at: t)
-                handledFocusHook = true
-            }
+        if !focused {
+            if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
+            finishComposition(at: t)
+            let hadDelayedHover = !hoverDelays.isEmpty
+            endHoverDelays(at: t)
+            if hadDelayedHover { cancelOrHoverDirty = true }
+            if endKitHoverDelays(at: t) { cancelOrHoverDirty = true }
+            hoverPaused = true
+            kitHooks.hoverHoldAfterActionUntilMove = true
         }
-        if !handledFocusHook {
+        let kitFocus = dispatchKitWindowFocusHandlers(focused, at: t)
+        if kitFocus.ran {
+            handledFocus = true
+            if !kitFocus.allLiveOnly { cancelOrHoverDirty = true }
+        }
+        if !handledFocus && !cancelOrHoverDirty {
             needsCommit = prevStale
         }
     }
