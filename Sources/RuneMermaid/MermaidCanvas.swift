@@ -423,8 +423,11 @@ struct MermaidScene: @unchecked Sendable {
                 .scale(scale)
                 .key(lk.key)
                 .transition(still(enter))
-            if streaming && delay > 0.0 {
-                t = t.enterDelay(delay)
+            if streaming {
+                t = t.animate(MotionTokens.SETTLE).animateLayout()
+                if delay > 0.0 {
+                    t = t.enterDelay(delay)
+                }
             }
             body = body.child(t)
         }
@@ -455,7 +458,7 @@ struct MermaidScene: @unchecked Sendable {
             if !glowChildren.isEmpty {
                 glow = glow.children(glowChildren)
             }
-            let spot = (Rune.el() as El<State>)
+            var spot = (Rune.el() as El<State>)
                 .key(s.key)
                 .absolute(x: 0, y: 0)
                 .offset(r.0 * scale, r.1 * scale)
@@ -464,6 +467,9 @@ struct MermaidScene: @unchecked Sendable {
                 .transition(exit)
                 .child(glow)
                 .a11yHidden()
+            if streaming {
+                spot = spot.animate(MotionTokens.SETTLE).animateLayout()
+            }
             body = body.child(spot)
         }
         return (Rune.el() as El<State>)

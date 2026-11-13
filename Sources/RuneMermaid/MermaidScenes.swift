@@ -35,9 +35,20 @@ enum MermaidScenes {
             }
             map[key] = value
         }
+
+        func clear() {
+            lock.lock()
+            defer { lock.unlock() }
+            map.removeAll()
+            order.removeAll()
+        }
     }
 
     private static let cache = Cache()
+
+    static func clearCache() {
+        cache.clear()
+    }
 
     static func built(
         _ source: String,

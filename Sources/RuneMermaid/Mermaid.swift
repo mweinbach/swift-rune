@@ -199,7 +199,20 @@ enum MermaidParser {
 
         while let start = s.range(of: "%%{"),
               let end = s.range(of: "}%%", range: start.upperBound..<s.endIndex) {
-            s.removeSubrange(start.lowerBound..<end.upperBound)
+            var removeStart = start.lowerBound
+            while removeStart > s.startIndex {
+                let prev = s.index(before: removeStart)
+                if s[prev] == " " || s[prev] == "\t" {
+                    removeStart = prev
+                } else {
+                    break
+                }
+            }
+            var removeEnd = end.upperBound
+            while removeEnd < s.endIndex, s[removeEnd] == " " || s[removeEnd] == "\t" {
+                removeEnd = s.index(after: removeEnd)
+            }
+            s.removeSubrange(removeStart..<removeEnd)
         }
 
         return (s, frontTitle)

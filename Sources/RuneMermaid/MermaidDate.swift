@@ -31,7 +31,7 @@ enum MermaidDate {
         return era * 146_097 + doe - 719_468
     }
 
-    private static func civilFromDays(_ zIn: Int64) -> (Int64, Int, Int) {
+    static func civilFromDays(_ zIn: Int64) -> (Int64, Int, Int) {
         let z = zIn + 719_468
         let era = floorDiv(z, 146_097)
         let doe = z - era * 146_097
@@ -57,7 +57,7 @@ enum MermaidDate {
         }
     }
 
-    private struct Fields {
+    struct Fields {
         var y: Int64
         var mo: Int
         var d: Int
@@ -68,7 +68,7 @@ enum MermaidDate {
         var wd: Int // 0 = Sunday
     }
 
-    private static func fields(_ t: Double) -> Fields {
+    static func fields(_ t: Double) -> Fields {
         let dayNum = floor(t / day)
         let (y, mo, d) = civilFromDays(Int64(dayNum))
         let rest = UInt64(max(t - dayNum * day, 0.0))
