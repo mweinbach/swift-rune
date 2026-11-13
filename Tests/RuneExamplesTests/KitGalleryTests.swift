@@ -171,4 +171,66 @@ struct KitGalleryTests {
         }
         #expect(rt.element(byKey: "dialog") == nil)
     }
+
+    @Test("Markdown & Mermaid stories use real upstream fixtures and incremental streaming")
+    func markdownAndMermaidRealFixturesAndStreaming() throws {
+        // Verify all 19 markdown/mermaid stories build cleanly inside Runtime (not just tree-view return).
+        let markdownIDs = galleryStories.map(\.id).filter { $0.hasPrefix("rune-markdown--") }
+        #expect(markdownIDs.count == 19)
+        for id in markdownIDs {
+            var state = GalleryState()
+            applyStorySetup(&state, storyId: id)
+            let rt = Runtime(
+                state: state,
+                viewport: Vec2(720, 480),
+                pixelScale: 1,
+                systemDark: true,
+                onKey: galleryHandleKey,
+                view: galleryView
+            )
+            rt.frame(at: 0)
+            #expect(rt.element(byKey: "frame") != nil, "frame missing for \(id)")
+        }
+
+        // Streaming tail advances chunk-by-chunk across TAIL_STREAM.
+        var tailState = GalleryState()
+        applyStorySetup(&tailState, storyId: "rune-markdown--stream-tail")
+        let tailRt = Runtime(
+            state: tailState,
+            viewport: Vec2(720, 480),
+            pixelScale: 1,
+            systemDark: true,
+            onKey: galleryHandleKey,
+            view: galleryView
+        )
+        tailRt.frame(at: 0)
+        for step in 1...5 {
+            let btn = try #require(tailRt.element(byKey: "stream-more")?.rect)
+            let center = Vec2(btn[0] + btn[2] * 0.5, btn[1] + btn[3] * 0.5)
+            tailRt.pointerDown(at: center, at: Double(step) * 0.1)
+            tailRt.pointerUp(at: center, at: Double(step) * 0.1 + 0.01)
+            tailRt.frame(at: Double(step) * 0.1 + 0.02)
+            #expect(tailRt.state.pick["md-tail-stream"] == "\(step)")
+        }
+
+        // Mermaid streaming advances via nextDrawnLine across DIAGRAM_STREAM.
+        var diagramState = GalleryState()
+        applyStorySetup(&diagramState, storyId: "rune-markdown--mermaid-streaming")
+        let diagRt = Runtime(
+            state: diagramState,
+            viewport: Vec2(720, 480),
+            pixelScale: 1,
+            systemDark: true,
+            onKey: galleryHandleKey,
+            view: galleryView
+        )
+        diagRt.frame(at: 0)
+        let firstBtn = try #require(diagRt.element(byKey: "stream-more")?.rect)
+        let diagCenter = Vec2(firstBtn[0] + firstBtn[2] * 0.5, firstBtn[1] + firstBtn[3] * 0.5)
+        diagRt.pointerDown(at: diagCenter, at: 0.1)
+        diagRt.pointerUp(at: diagCenter, at: 0.11)
+        diagRt.frame(at: 0.12)
+        let pos1 = Int(diagRt.state.pick["md-diagram-stream"] ?? "0") ?? 0
+        #expect(pos1 > 0)
+    }
 }
