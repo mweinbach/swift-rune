@@ -1182,6 +1182,51 @@ fileprivate enum PhaseTestHarness {
 struct VideoPhasesPosterParityTests {
     fileprivate typealias H = PhaseTestHarness
 
+    @Test("a_poster_error_overtaken_by_a_seek_waits_for_the_new_time")
+    func aPosterErrorOvertakenByASeekWaitsForTheNewTime() {
+        var n = H.clip(audio: false, [.pull(.loading), .seek(0.3)])
+        let stale = n.fake.asked
+        n.fake.done = (stale, .err)
+        n.run(.pull(.loading))
+
+        #expect(!n.c.isFailed)
+        #expect(n.fake.log.contains(.ask(0.3)))
+        let current = n.fake.asked
+        #expect(current != stale)
+
+        n.fake.done = (current, .frame)
+        n.run(.pull(.loading))
+        #expect(H.postersShown(n) == 1)
+    }
+
+    @Test("a_poster_frame_overtaken_by_a_seek_does_not_show_before_the_new_time")
+    func aPosterFrameOvertakenByASeekDoesNotShowBeforeTheNewTime() {
+        var n = H.clip(audio: false, [.pull(.loading), .seek(0.3)])
+        let stale = n.fake.asked
+        n.fake.done = (stale, .frame)
+        n.run(.pull(.loading))
+
+        #expect(H.postersShown(n) == 0)
+        #expect(n.c.meta != nil)
+        let current = n.fake.asked
+        #expect(current != stale)
+
+        n.fake.done = (current, .frame)
+        n.run(.pull(.loading))
+        #expect(H.postersShown(n) == 1)
+    }
+
+    @Test("a_seek_past_the_end_still_shows_the_poster_its_length_clamps_to")
+    func aSeekPastTheEndStillShowsThePosterItsLengthClampsTo() {
+        var n = H.clip(audio: false, [.seek(1.0), .pull(.loading), .seek(2.0)])
+        let stale = n.fake.asked
+        n.fake.done = (stale, .frame)
+        n.run(.pull(.loading))
+
+        #expect(n.c.duration == 1.0)
+        #expect(H.postersShown(n) == 1)
+    }
+
     @Test("a_poster_after_a_failed_one_leaves_the_placeholder")
     func aPosterAfterAFailedOneLeavesThePlaceholder() {
         var n = H.clip(audio: false, [.pull(.loading), .seek(0.3), .pull(.loading), .done(.err), .pull(.loading)])
@@ -1383,6 +1428,15 @@ struct VideoPhasesParityTests {
         )
     }
 
+    @Test("a_playing_headless_clip_ends_loops_and_rewinds_like_the_old_flags")
+    func aPlayingHeadlessClipEndsLoopsAndRewindsLikeTheOldFlags() {
+        H.walk(
+            prefix: [.open, .play],
+            alphabet: [.play, .pause, .seek(0.3), .rate(2.0), .looping(true), .looping(false), .clock(0.0), .clock(0.4), .clock(2.0)],
+            depth: 6
+        )
+    }
+
     @Test("every_report_in_any_order_matches_the_old_flags")
     func everyReportInAnyOrderMatchesTheOldFlags() {
         H.walk(
@@ -1434,6 +1488,18 @@ struct VideoPhasesParityTests {
         )
     }
 
+    @Test("the_newest_seek_replaces_an_earlier_one")
+    func theNewestSeekReplacesAnEarlierOne() {
+        let now = 100.0
+        var s = VideoPhases.Settle()
+        s.seek(to: 3.0, sameFrame: false, now: now)
+        #expect(s.isWaiting)
+        s.seek(to: 0.5, sameFrame: true, now: now)
+        #expect(!s.isWaiting && s.isPending)
+        s.observe(current: 0.5, playing: false, isAudio: false)
+        #expect(s.isStill)
+    }
+
     @Test("a_seek_lands_with_a_frame_or_for_audio_at_its_position")
     func aSeekLandsWithAFrameOrForAudioAtItsPosition() {
         let now = 100.0
@@ -1461,6 +1527,20 @@ struct VideoPhasesParityTests {
         #expect(s.isHolding && !s.isWaiting && s.time == 0.5)
         s.observe(current: 0.4, playing: true, isAudio: false)
         #expect(s.isStill)
+    }
+
+    @Test("a_seek_that_never_lands_expires")
+    func aSeekThatNeverLandsExpires() {
+        let now = 100.0
+        var s = VideoPhases.Settle()
+        s.seek(to: 2.0, sameFrame: false, now: now)
+        s.expire(now: now + VideoPhases.seekPatienceSeconds)
+        #expect(s.isWaiting)
+        s.expire(now: now + VideoPhases.seekPatienceSeconds + 0.001)
+        #expect(s.isStill)
+        s.seek(to: 1.0, sameFrame: true, now: now)
+        s.expire(now: now + 60.0)
+        #expect(s.isHolding && !s.isWaiting && s.time == 1.0)
     }
 }
 

@@ -194,20 +194,29 @@ struct SystemMaterialParityTests {
     @Test("PresentSyncFlag drives presentsWithTransaction on moving, material, or live state and clears on live resize end")
     @MainActor
     func presentSyncFlagAndWatcher() {
+        // `a_window_move_never_turns_off_transactions_materials_need` (`system_material/tests.rs:146`)
         var sync = PresentSyncFlag()
         #expect(sync.isSynced == false)
         #expect(sync.setMaterials(true) == true)
-        #expect(sync.isSynced == true)
+        #expect(sync.setMoving(true) == nil)
+        #expect(sync.setMoving(false) == nil)
         #expect(sync.setMaterials(false) == false)
-        #expect(sync.isSynced == false)
         #expect(sync.setMoving(true) == true)
-        #expect(sync.isSynced == true)
+        #expect(sync.setMaterials(true) == nil)
+        #expect(sync.setMaterials(false) == nil)
         #expect(sync.setMoving(false) == false)
-        #expect(sync.isSynced == false)
-        #expect(sync.setLive(true) == true)
-        #expect(sync.isSynced == true)
-        #expect(sync.setLive(false) == false)
-        #expect(sync.isSynced == false)
+        #expect(sync.setMoving(false) == nil)
+
+        // `a_live_resize_keeps_transactions_on_until_it_ends` (`system_material/tests.rs:163`)
+        var resizeSync = PresentSyncFlag()
+        #expect(resizeSync.setLive(true) == true)
+        #expect(resizeSync.setMoving(false) == nil)
+        #expect(resizeSync.setMaterials(false) == nil)
+        #expect(resizeSync.setLive(true) == nil)
+        #expect(resizeSync.setLive(false) == false)
+        #expect(resizeSync.setMaterials(true) == true)
+        #expect(resizeSync.setLive(true) == nil)
+        #expect(resizeSync.setLive(false) == nil)
 
         let layer = CAMetalLayer()
         let window = NSWindow(
@@ -219,8 +228,11 @@ struct SystemMaterialParityTests {
         let watcher = MaterialPresentWatcher(window: window, metalLayer: layer)
         watcher.setLive(true)
         #expect(layer.presentsWithTransaction == true)
+        watcher.setMaterials(true)
         NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
         #expect(watcher.flag.live == false)
+        #expect(layer.presentsWithTransaction == true)
+        watcher.setMaterials(false)
         #expect(layer.presentsWithTransaction == false)
     }
 
@@ -285,6 +297,66 @@ struct SystemMaterialParityTests {
         let fallbackAlpha = imgOverflow.rgba[(10 * imgOverflow.width + 90) * 4 + 3]
         #expect(holeAlpha < 10)
         #expect(fallbackAlpha > 100)
+    }
+
+    @Test("srgb_blend_frost_over_a_native_material_reads_as_core_animation (system_material/tests.rs:280)")
+    func srgbBlendFrostOverNativeMaterial() throws {
+        struct S { var frost: Float = 1.0 }
+        let renderer = try MetalRenderer()
+        let readFrost: (Bool, Float, Color) throws -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8) = { srgb, frostVal, clearCol in
+            let rt = Runtime<S>(
+                state: S(frost: frostVal),
+                viewport: Vec2(200, 120),
+                pixelScale: 2.0,
+                view: { s, _ in
+                    col()
+                        .size(200, 120)
+                        .child(
+                            col()
+                                .absolute(x: 30, y: 20)
+                                .size(120, 60)
+                                .continuousRounded(18)
+                                .systemMaterial(.glass)
+                                .child(
+                                    el()
+                                        .size(120, 60)
+                                        .bg(Color.white.alpha(0.62 * s.frost))
+                                )
+                        )
+                }
+            )
+            rt.nativeMaterials = true
+            rt.srgbBlend = srgb
+            rt.clearColor = clearCol
+            let frame = rt.renderFrame(at: 0)
+            let desc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: srgb ? .bgra8Unorm : .bgra8Unorm_srgb,
+                width: frame.width,
+                height: frame.height,
+                mipmapped: false
+            )
+            desc.usage = [.renderTarget, .shaderRead]
+            desc.storageMode = .shared
+            let tex = try #require(renderer.device.makeTexture(descriptor: desc))
+            let cb = try #require(renderer.commandQueue.makeCommandBuffer())
+            renderer.drawRange(frame: frame, into: tex, commandBuffer: cb, range: 0..<frame.instances.count)
+            cb.commit()
+            cb.waitUntilCompleted()
+            var bgra = [UInt8](repeating: 0, count: frame.width * frame.height * 4)
+            tex.getBytes(&bgra, bytesPerRow: frame.width * 4, from: MTLRegionMake2D(0, 0, frame.width, frame.height), mipmapLevel: 0)
+            let off = (100 * frame.width + 180) * 4
+            return (bgra[off + 2], bgra[off + 1], bgra[off + 0], bgra[off + 3])
+        }
+
+        let black = Color(r: 0, g: 0, b: 0, a: 1)
+        let linBlack = try readFrost(false, 1.0, black)
+        let srgbBlack = try readFrost(true, 1.0, black)
+        let srgbClear = try readFrost(true, 1.0, .transparent)
+        let srgbZero = try readFrost(true, 0.0, .transparent)
+        #expect(abs(Int(linBlack.r) - 206) <= 1 && linBlack.a == 255)
+        #expect(abs(Int(srgbBlack.r) - 158) <= 1 && srgbBlack.a == 255)
+        #expect(abs(Int(srgbClear.r) - 158) <= 1 && abs(Int(srgbClear.a) - 158) <= 1)
+        #expect(srgbZero == (0, 0, 0, 0))
     }
     #endif
 }
@@ -415,6 +487,75 @@ struct RenderGPUAndShaderParityTests {
         #expect(sampleRGBA(frame, x: 100, y: 78).b > 180)
     }
 
+    @Test("border_gradient ring instance encoding, replacement semantics, and AA parity (border_gradient.rs:55,67,108)")
+    func borderGradientInstanceAndPixelsParity() throws {
+        enum Mode { case gradient, borderThenGradient, gradientThenBorder, rimGradient, rimBorder }
+        let top = Color(r: 1, g: 0, b: 0, a: 1)
+        let bottom = Color(r: 0, g: 0, b: 1, a: 1)
+        let rim = Color(r: 1, g: 1, b: 1, a: 0.15)
+        let dark = Color(r: 0.1, g: 0.1, b: 0.12, a: 1)
+
+        func makeRt(_ mode: Mode) -> Runtime<Mode> {
+            Runtime<Mode>(
+                state: mode,
+                viewport: Vec2(68, 22),
+                pixelScale: 2.0,
+                view: { m, _ in
+                    let cap: El<Mode> = el().absolute(x: 4, y: 4).size(60, 14).rounded(7)
+                    let styled: El<Mode>
+                    switch m {
+                    case .gradient: styled = cap.borderGradient(width: 0.5, top: top, bottom: bottom)
+                    case .borderThenGradient: styled = cap.border(1.0, rim).borderGradient(width: 0.5, top: top, bottom: bottom)
+                    case .gradientThenBorder: styled = cap.borderGradient(width: 0.5, top: top, bottom: bottom).border(1.0, rim)
+                    case .rimGradient: styled = cap.bg(dark).borderGradient(width: 0.5, top: rim, bottom: rim)
+                    case .rimBorder: styled = cap.bg(dark).border(0.5, rim)
+                    }
+                    return el().size(68, 22).child(styled)
+                }
+            )
+        }
+        func ring(_ rt: Runtime<Mode>) -> RenderInstance {
+            rt.renderFrame(at: 0).instances.first { $0.params.x > 0 }!
+        }
+
+        let gInst = ring(makeRt(.gradient))
+        #expect(gInst.params.y == KIND_GRADIENT)
+        #expect(gInst.params.x == 1.0)
+        #expect(gInst.rect == SIMD4<Float>(8, 8, 120, 28))
+        #expect(gInst.radii == SIMD4<Float>(repeating: 14))
+        #expect(gInst.fill == .zero)
+        #expect(abs(gInst.border.x - 1) < 1e-5 && abs(gInst.border.y) < 1e-5 && abs(gInst.border.z) < 1e-5 && abs(gInst.border.w - 1) < 1e-5)
+        #expect(abs(gInst.uv.x) < 1e-5 && abs(gInst.uv.y) < 1e-5 && abs(gInst.uv.z - 1) < 1e-5 && abs(gInst.uv.w - 1) < 1e-5)
+
+        let bgInst = ring(makeRt(.borderThenGradient))
+        #expect(bgInst.params.y == KIND_GRADIENT && bgInst.params.x == 1.0)
+        let gbInst = ring(makeRt(.gradientThenBorder))
+        #expect(gbInst.params.y == KIND_RECT && gbInst.params.x == 2.0 && gbInst.uv == .zero)
+
+        let renderer = try MetalRenderer()
+        let outG = try renderer.renderOffscreen({
+            let rt = makeRt(.gradient)
+            rt.clearColor = .transparent
+            return rt.renderFrame(at: 0)
+        }())
+        let topPx = sampleRGBA(outG, x: 68, y: 8)
+        let botPx = sampleRGBA(outG, x: 68, y: 35)
+        let midPx = sampleRGBA(outG, x: 68, y: 20)
+        #expect(topPx.r > 240 && topPx.b < 70 && topPx.a > 250)
+        #expect(botPx.b > 240 && botPx.r < 70 && botPx.a > 250)
+        #expect(midPx.a == 0)
+
+        let fRimGrad = makeRt(.rimGradient).renderFrame(at: 0)
+        let fRimBord = makeRt(.rimBorder).renderFrame(at: 0)
+        let imgA = try renderer.renderOffscreen(fRimGrad)
+        let imgB = try renderer.renderOffscreen(fRimBord)
+        var maxDiff = 0
+        for i in 0..<imgA.rgba.count {
+            maxDiff = max(maxDiff, abs(Int(imgA.rgba[i]) - Int(imgB.rgba[i])))
+        }
+        #expect(maxDiff <= 1)
+    }
+
     @Test("Effect slots deliver EffectSite data, bleed bounds, inLayer, and backdrop snapshots")
     func effectSlotsAndBackdropHook() throws {
         let renderer = try MetalRenderer()
@@ -508,8 +649,26 @@ struct RenderGPUAndShaderParityTests {
         #expect(poolStats.evictions >= 2)
     }
 
-    @Test("GPUSpringBindings + vs_springs animates vertex offset and settles cleanly")
+    @Test("GPUSpringBindings + vs_springs animates vertex offset and arbitrary retarget settle bounds hold for the tail")
     func gpuSpringsAnimation() throws {
+        #expect(MemoryLayout<GPUSpringTrack>.stride == 48)
+        #expect(MemoryLayout<GPUSpringNode>.stride == 144)
+        #expect(GPUSpringTrack.constant(1.0).settleAt() == 0.0)
+
+        // `arbitrary_retarget_settle_bounds_hold_for_the_tail` (`gpu/springs.rs:135`)
+        for bounce: Float in [-0.9, -0.2, 0.0, 0.16, 0.8] {
+            let spring = Spring(duration: 0.4, bounce: bounce)
+            for velocity: Float in [-800.0, 0.0, 900.0] {
+                let (from, vel) = spring.sample(from: -120.0, velocity: velocity, target: 40.0, at: 0.12)
+                let duration = spring.settlingDuration(from: from, velocity: vel, target: -30.0, epsilon: 0.001)
+                for i in 0..<200 {
+                    let (x, v) = spring.sample(from: from, velocity: vel, target: -30.0, at: duration + Float(i) / 120.0)
+                    #expect(abs(x + 30.0) <= 0.00101, "bounce \(bounce): x=\(x)")
+                    #expect(abs(v) <= 0.01001, "bounce \(bounce): v=\(v)")
+                }
+            }
+        }
+
         let renderer = try MetalRenderer()
         let frame = RenderFrame(
             width: 80,
@@ -558,9 +717,87 @@ struct RenderGPUAndShaderParityTests {
         #expect(sampleRGBA(img, x: 60, y: 20).r < 20)
     }
 
-    @Test("Continuous squircle corners differ from circular arcs and pill clamps radius to half short side")
+    @Test("Continuous squircle corners follow Apple's cubic curve in fills and clips and pill clamps radius")
     func continuousCornerAndCapsuleParity() throws {
         let renderer = try MetalRenderer()
+
+        // Apple's continuous corner for r = 1: three cubics from (0, K) to (K, 0) (`continuous_corner_tests.rs:6-40`)
+        let curve: [SIMD2<Float>] = [
+            SIMD2(0.0, 1.528_664_8), SIMD2(0.0, 1.088_493_2), SIMD2(0.0, 0.868_407), SIMD2(0.074_911_41, 0.631_494),
+            SIMD2(0.169_06, 0.372_824), SIMD2(0.372_824, 0.169_06), SIMD2(0.631_494, 0.074_911_41),
+            SIMD2(0.868_407, 0.0), SIMD2(1.088_493_2, 0.0), SIMD2(1.528_664_8, 0.0),
+        ]
+        func polyline(_ r: Float) -> [SIMD2<Float>] {
+            var points: [SIMD2<Float>] = []
+            for start in stride(from: 0, to: 9, by: 3) {
+                for k in 0..<64 {
+                    let t = Float(k) / 64.0
+                    let u = 1.0 - t
+                    let b0 = u * u * u
+                    let b1 = 3.0 * t * u * u
+                    let b2 = 3.0 * t * t * u
+                    let b3 = t * t * t
+                    let pt = (curve[start] * b0 + curve[start + 1] * b1 + curve[start + 2] * b2 + curve[start + 3] * b3) * r
+                    points.append(pt)
+                }
+            }
+            points.append(curve[9] * r)
+            return points
+        }
+        func oracle(_ p: SIMD2<Float>, _ line: [SIMD2<Float>]) -> Float {
+            let e = line[line.count - 1].x
+            if p.x >= e || p.y >= e { return max(-p.x, -p.y) }
+            var bestDist = Float.greatestFiniteMagnitude
+            var bestCross: Float = 0
+            for idx in 0..<(line.count - 1) {
+                let a = line[idx]
+                let b = line[idx + 1]
+                let ab = b - a
+                let ap = p - a
+                let t = min(max((ap.x * ab.x + ap.y * ab.y) / (ab.x * ab.x + ab.y * ab.y), 0.0), 1.0)
+                let delta = ap - ab * t
+                let d = hypotf(delta.x, delta.y)
+                if d < bestDist {
+                    bestDist = d
+                    bestCross = ab.x * ap.y - ab.y * ap.x
+                }
+            }
+            return bestCross > 0 ? -bestDist : bestDist
+        }
+
+        let r: Float = 14.0
+        let line = polyline(r)
+        let fill = RenderInstance(
+            rect: SIMD4<Float>(8, 8, 72, 56),
+            radii: SIMD4<Float>(repeating: -r),
+            fill: SIMD4<Float>(1, 1, 1, 1),
+            params: SIMD4<Float>(0, KIND_RECT, 0.5, 1)
+        )
+        var clipped = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 96, 80),
+            fill: SIMD4<Float>(1, 1, 1, 1),
+            params: SIMD4<Float>(0, KIND_RECT, 0.5, 1),
+            clip: SIMD4<Float>(8, 8, 80, 64)
+        )
+        clipped.roundClip(-r)
+
+        for instance in [fill, clipped] {
+            let out = try renderer.renderOffscreen(
+                RenderFrame(width: 96, height: 80, clearColor: .zero, instances: [instance])
+            )
+            var worst: Float = 0
+            for y in 0..<80 {
+                for x in 0..<96 {
+                    let c = SIMD2<Float>(Float(x) + 0.5, Float(y) + 0.5)
+                    let p = SIMD2<Float>(min(c.x - 8.0, 80.0 - c.x), min(c.y - 8.0, 64.0 - c.y))
+                    let want = min(max(0.5 - oracle(p, line), 0.0), 1.0)
+                    let got = Float(sampleRGBA(out, x: x, y: y).a) / 255.0
+                    worst = max(worst, abs(got - want))
+                }
+            }
+            #expect(worst < 0.04, "coverage off Apple's continuous curve by \(worst)")
+        }
+
         struct S {}
         let rtCircular = Runtime<S>(
             state: S(),
@@ -581,7 +818,6 @@ struct RenderGPUAndShaderParityTests {
 
         let imgCirc = try renderer.renderOffscreen(rtCircular.renderFrame(at: 0))
         let imgCont = try renderer.renderOffscreen(rtContinuous.renderFrame(at: 0))
-        // Both are solid white in center and black at extreme corner (0, 0), but differ along corner shoulder
         #expect(sampleRGBA(imgCirc, x: 40, y: 40).r > 240)
         #expect(sampleRGBA(imgCont, x: 40, y: 40).r > 240)
         #expect(sampleRGBA(imgCirc, x: 0, y: 0).r < 10)
@@ -606,19 +842,45 @@ struct RenderGPUAndShaderParityTests {
         let imgPill = try renderer.renderOffscreen(rtPill.renderFrame(at: 0))
         #expect(sampleRGBA(imgPill, x: 2, y: 15).r > 200)
         #expect(sampleRGBA(imgPill, x: 1, y: 1).r < 20)
+
+        // `continuous_corners_at_half_the_shorter_side_stay_closed` (`continuous_corner_tests.rs:75`)
+        let capInst = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 64, 32),
+            radii: SIMD4<Float>(repeating: -100),
+            fill: SIMD4<Float>(1, 1, 1, 1),
+            params: SIMD4<Float>(0, KIND_RECT, 0, 1),
+            clip: NO_CLIP
+        )
+        let capOut = try renderer.renderOffscreen(
+            RenderFrame(width: 64, height: 32, clearColor: .zero, instances: [capInst])
+        )
+        #expect(sampleRGBA(capOut, x: 32, y: 16).a == 255)
+        #expect(sampleRGBA(capOut, x: 32, y: 0).a == 255)
+        #expect(sampleRGBA(capOut, x: 0, y: 0).a == 0)
+        let capEndA = sampleRGBA(capOut, x: 0, y: 16).a
+        #expect(capEndA > 64 && capEndA < 255)
     }
 
     @Test("BackdropBlurSchedule levels continuity and GPU parity (stripes, tint, cap, edge clamp, clip, HiDPI)")
     func backdropBlurScheduleAndGPUParity() throws {
-        // Level schedule continuity & bounds
-        var prevLevel = 0
-        for s in stride(from: Float(0.5), through: 200.0, by: 2.5) {
-            let (level, blend) = BackdropBlurSchedule.levels(sigma: s)
-            #expect(level >= prevLevel && level <= BackdropBlurSchedule.mips - 1)
-            #expect(blend >= 0 && blend <= 1)
-            prevLevel = level
+        // `levels_cover_the_range_continuously` (`render/backdrop_blur_tests.rs:4`)
+        let top = BackdropBlurSchedule.sigmas.count - 1
+        #expect(BackdropBlurSchedule.levels(sigma: 0.0, top: top) == (1, 0.0))
+        #expect(BackdropBlurSchedule.levels(sigma: BackdropBlurSchedule.sigmas[top] * 4.0, top: top) == (top, 1.0))
+        var last: Float = 0.0
+        for k in 1..<400 {
+            let sigma = Float(k) * 0.5
+            let (n, share) = BackdropBlurSchedule.levels(sigma: sigma, top: top)
+            #expect(n >= 1 && n <= top)
+            #expect(share >= 0.0 && share <= 1.0)
+            let a = BackdropBlurSchedule.sigmas[n - 1]
+            let b = BackdropBlurSchedule.sigmas[n]
+            let got = sqrtf(a * a + share * (b * b - a * a))
+            let expected = min(max(sigma, BackdropBlurSchedule.sigmas[0]), BackdropBlurSchedule.sigmas[top])
+            #expect(abs(got - expected) < 1e-3, "sigma \(sigma): \(got)")
+            #expect(got >= last)
+            last = got
         }
-        #expect(BackdropBlurSchedule.levels(sigma: 0.0).count == 0)
 
         let renderer = try MetalRenderer()
         struct S {}
@@ -823,6 +1085,50 @@ struct RenderGPUAndShaderParityTests {
         // Layer center (50, 50) draws green attenuated by parent opacity(0.5) with srgbBlend enabled
         let mid = sampleRGBA(img, x: 50, y: 50)
         #expect(mid.g > 100 && mid.g < 220)
+
+        // `bleed_reaches_in_and_the_scissor_holds_the_clip` (`tests/effect_slot.rs:304`)
+        let bgGrey = Color(r: 32.0 / 255.0, g: 32.0 / 255.0, b: 32.0 / 255.0, a: 1.0)
+        let rtBleed = Runtime<S>(
+            state: S(),
+            viewport: Vec2(96, 96),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(96, 96)
+                    .bg(bgGrey)
+                    .child(
+                        col()
+                            .size(64, 64)
+                            .absolute(x: 16, y: 16)
+                            .clipFade(left: 0, top: 0, right: 0, bottom: 0)
+                            .child(el().size(8, 8).absolute(x: -12, y: 0).effect(1).effectBleed(16))
+                    )
+            }
+        )
+        var bleedFrame = rtBleed.renderFrame(at: 0)
+        bleedFrame.srgbBlend = false
+        let bleedImg = try renderer.renderOffscreen(bleedFrame, hook: { encoder, site in
+            let pso: MTLRenderPipelineState
+            if let cached = pipelines[site.pixelFormat] {
+                pso = cached
+            } else {
+                let pDesc = MTLRenderPipelineDescriptor()
+                pDesc.vertexFunction = vsFn
+                pDesc.fragmentFunction = fsFn
+                pDesc.colorAttachments[0].pixelFormat = site.pixelFormat
+                pso = try! renderer.device.makeRenderPipelineState(descriptor: pDesc)
+                pipelines[site.pixelFormat] = pso
+            }
+            encoder.setRenderPipelineState(pso)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        })
+        let bgSample = sampleRGBA(bleedImg, x: 8, y: 8)
+        let bleedIn = sampleRGBA(bleedImg, x: 20, y: 20)
+        let bleedOutsideClip = sampleRGBA(bleedImg, x: 10, y: 20)
+        let pastBleed = sampleRGBA(bleedImg, x: 20, y: 44)
+        #expect(bleedIn.g > 200 && bleedIn.r < 20)
+        #expect(bleedOutsideClip == bgSample)
+        #expect(pastBleed == bgSample)
     }
 
     @Test("Single-phase EffectHook receives site.backdrop and isolates viewport/scissor (backdrop_tests.rs:51-76)")
@@ -1058,7 +1364,10 @@ struct RenderGPUAndShaderParityTests {
         #expect(sampleRGBA(imgHit, x: 15, y: 15).g < 20)
 
         // 3. State change invalidates signature -> re-rasterizes with new blue color
-        rtCached.update(at: 0.04) { s, _ in s.color = Color(r: 0, g: 0.2, b: 0.9, a: 1) }
+        rtCached.update(at: 0.04) { s, tx in
+            s.color = Color(r: 0, g: 0.2, b: 0.9, a: 1)
+            tx.instant()
+        }
         let imgInvalidated = try renderer.renderOffscreen(rtCached.renderFrame(at: 0.04))
         #expect(sampleRGBA(imgInvalidated, x: 60, y: 30).b > 150)
         #expect(renderer.layerStats().misses > statsHit.misses)
@@ -1184,6 +1493,132 @@ struct RenderGPUAndShaderParityTests {
         // Exposed crisp shadow offset (+6, +6) at (52, 52) is pure black; untouched (58, 58) is pure white
         #expect(sampleRGBA(crispImg, x: 52, y: 52).r < 10)
         #expect(sampleRGBA(crispImg, x: 58, y: 58).r > 245)
+    }
+
+    @Test("MetalRenderer.drawRange & drawRangeWith encode explicit subranges and skip empty upper-bound slices")
+    func drawRangeSubrangeAndHookParity() throws {
+        let renderer = try MetalRenderer()
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: 40,
+            height: 20,
+            mipmapped: false
+        )
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .shared
+        let target = try #require(renderer.device.makeTexture(descriptor: desc))
+
+        let instances = [
+            RenderInstance(
+                rect: SIMD4<Float>(2, 2, 14, 16),
+                fill: SIMD4<Float>(1, 0, 0, 1),
+                params: SIMD4<Float>(0, KIND_RECT, 0.5, 1)
+            ),
+            RenderInstance(
+                rect: SIMD4<Float>(22, 2, 14, 16),
+                fill: SIMD4<Float>(0, 1, 0, 1),
+                params: SIMD4<Float>(0, KIND_RECT, 0.5, 1)
+            ),
+        ]
+        let frame = RenderFrame(
+            width: 40,
+            height: 20,
+            clearColor: SIMD4<Float>(0, 0, 0, 1),
+            instances: instances
+        )
+
+        let cb1 = try #require(renderer.commandQueue.makeCommandBuffer())
+        renderer.drawRange(frame: frame, into: target, commandBuffer: cb1, range: 0..<1)
+        cb1.commit()
+        cb1.waitUntilCompleted()
+
+        var bgra = [UInt8](repeating: 0, count: 40 * 20 * 4)
+        target.getBytes(&bgra, bytesPerRow: 40 * 4, from: MTLRegionMake2D(0, 0, 40, 20), mipmapLevel: 0)
+        // Instance 0 drawn at (8, 10) -> red
+        let p0 = (10 * 40 + 8) * 4
+        #expect(bgra[p0 + 2] > 200 && bgra[p0 + 1] < 20)
+        // Instance 1 outside range 0..<1 at (28, 10) -> stays black clear
+        let p1 = (10 * 40 + 28) * 4
+        #expect(bgra[p1 + 2] < 20 && bgra[p1 + 1] < 20)
+
+        // Empty upper-bound subrange skips drawing & hook invocations cleanly
+        let cb2 = try #require(renderer.commandQueue.makeCommandBuffer())
+        var hookCalls = 0
+        renderer.drawRangeWith(frame: frame, into: target, commandBuffer: cb2, range: 0..<0) { _, _ in
+            hookCalls += 1
+        }
+        cb2.commit()
+        cb2.waitUntilCompleted()
+        #expect(hookCalls == 0)
+    }
+
+    @Test("AtlasUploader batches break only on bound page change and rebatch only on params/length/forget")
+    func batchesBreakAndRebatchOnlyWhenNeeded() throws {
+        let renderer = try MetalRenderer()
+        func square(_ x: Float, _ y: Float) -> RenderInstance {
+            RenderInstance(rect: SIMD4<Float>(x, y, 8, 8), fill: SIMD4<Float>(1, 1, 1, 1), params: SIMD4<Float>(0, KIND_RECT, 0.5, 1))
+        }
+        func withKind(_ kind: Float, page: Float) -> RenderInstance {
+            RenderInstance(rect: SIMD4<Float>(0, 0, 8, 8), fill: SIMD4<Float>(1, 1, 1, 1), params: SIMD4<Float>(page, kind, 0, 0))
+        }
+        func glyph(_ page: Float) -> RenderInstance {
+            RenderInstance(rect: SIMD4<Float>(0, 0, 8, 8), fill: SIMD4<Float>(1, 1, 1, 1), params: SIMD4<Float>(0, KIND_GLYPH, page, 0))
+        }
+
+        // `batches_break_only_where_the_bound_page_changes` (`upload/tests.rs:305`)
+        let instances = [
+            square(0, 0), withKind(KIND_IMAGE, page: 1), square(0, 0), withKind(KIND_SHADOW, page: 0),
+            glyph(2), withKind(KIND_GRADIENT, page: 0), glyph(0), square(0, 0), withKind(KIND_IMAGE, page: 1),
+        ]
+        renderer.uploader.prepareBatches(instances: instances, glyphPageCount: 2, imagePageCount: 2)
+        let gotBatches = renderer.uploader.imageBatches
+        #expect(gotBatches.count == 5)
+        #expect(gotBatches[0].0 == 0..<1 && gotBatches[0].1 == .image(0))
+        #expect(gotBatches[1].0 == 1..<4 && gotBatches[1].1 == .image(1))
+        #expect(gotBatches[2].0 == 4..<6 && gotBatches[2].1 == .glyph(1))
+        #expect(gotBatches[3].0 == 6..<8 && gotBatches[3].1 == .image(0))
+        #expect(gotBatches[4].0 == 8..<9 && gotBatches[4].1 == .image(1))
+
+        // `only_a_changed_params_or_length_batches_again` (`upload/tests.rs:327`)
+        renderer.uploader.forgetInstances()
+        func makeFrame(x: Float, page: Float, extra: Int) -> [RenderInstance] {
+            var list = [
+                square(x, 0),
+                RenderInstance(rect: SIMD4<Float>(x, 8, 8, 8), fill: SIMD4<Float>(1, 1, 1, 1), params: SIMD4<Float>(page, KIND_IMAGE, 0, 0)),
+                RenderInstance(rect: SIMD4<Float>(x, 16, 8, 8), fill: SIMD4<Float>(1, 1, 1, 1), params: SIMD4<Float>(0, KIND_EFFECT, 0, 0)),
+            ]
+            for i in 0..<extra {
+                list.append(square(Float(i), 24))
+            }
+            return list
+        }
+        func prepareStep(_ list: [RenderInstance]) -> (deltaRuns: UInt64, batches: [(Range<Int>, Bool)], effects: [(Int, Float)]) {
+            let before = renderer.uploader.batchRuns
+            renderer.uploader.prepareBatches(instances: list, glyphPageCount: 2, imagePageCount: 2)
+            let batches = renderer.uploader.imageBatches.map { ($0.0, $0.1 == .image(1)) }
+            let effs = renderer.uploader.effects.map { ($0.0, $0.1.rect.x) }
+            return (renderer.uploader.batchRuns - before, batches, effs)
+        }
+
+        let r0 = prepareStep(makeFrame(x: 0, page: 1, extra: 0))
+        #expect(r0.deltaRuns == 1 && r0.batches.count == 2 && r0.batches[0].0 == 0..<1 && !r0.batches[0].1 && r0.batches[1].0 == 1..<3 && r0.batches[1].1)
+        #expect(r0.effects.count == 1 && r0.effects[0] == (2, 0))
+
+        let rMoved = prepareStep(makeFrame(x: 5, page: 1, extra: 0))
+        #expect(rMoved.deltaRuns == 0 && rMoved.effects.count == 1 && rMoved.effects[0] == (2, 5))
+
+        let rPageChanged = prepareStep(makeFrame(x: 5, page: 0, extra: 0))
+        #expect(rPageChanged.deltaRuns == 1 && rPageChanged.batches.count == 1 && rPageChanged.batches[0].0 == 0..<3 && !rPageChanged.batches[0].1)
+
+        let rLonger = prepareStep(makeFrame(x: 5, page: 0, extra: 2))
+        #expect(rLonger.deltaRuns == 1)
+
+        renderer.uploader.forgetInstances()
+        let rForgotten = prepareStep(makeFrame(x: 5, page: 0, extra: 2))
+        #expect(rForgotten.deltaRuns == 1)
+
+        let rEmpty = prepareStep([])
+        #expect(rEmpty.deltaRuns == 1 && rEmpty.batches.isEmpty && rEmpty.effects.isEmpty)
     }
 }
 #endif

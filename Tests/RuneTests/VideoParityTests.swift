@@ -133,6 +133,9 @@ struct VideoParityTests {
         let ph = p.surface.currentFrame()
         #expect(ph?.id == 0)
         #expect(ph?.size.0 == 2 && ph?.size.1 == 2)
+        _ = rt.frame(at: 0.1)
+        _ = rt.frame(at: 0.2)
+        #expect(rt.isAnimating == false)
     }
 
     @Test("VideoPhases state machine handles seek settle expiration, looping, and poster overtaking")
@@ -269,5 +272,74 @@ struct VideoParityTests {
         #expect(!evicted.contains(where: { $0 === clips[0] }))
         #expect(evicted.count == 1)
         #expect(evicted.first === clips[1])
+    }
+
+    @Test("sources_tell_urls_from_paths")
+    func sourcesTellUrlsFromPaths() {
+        #expect(MediaSource.parse("https://example.com/a.mp3") == .url(URL(string: "https://example.com/a.mp3")!))
+        #expect(MediaSource.parse("file:///tmp/a.wav") == .url(URL(string: "file:///tmp/a.wav")!))
+        #expect(MediaSource.parse("sounds/a.m4a") == .file(URL(fileURLWithPath: "sounds/a.m4a")))
+    }
+
+    @Test("handle_edits_are_shared_and_validated")
+    func handleEditsAreSharedAndValidated() {
+        let v = Player.url("https://example.com/clip.mp4")
+        let other = v
+        other.setRate(2.0)
+        other.setRate(-1.0)
+        other.setRate(.nan)
+        other.setLooping(true)
+        other.setMuted(false)
+        other.seek(to: -3.0)
+        #expect(v.rate == 2.0)
+        #expect(v.isLooping == true)
+        #expect(v.isMuted == false)
+        #expect(v.time == 0.0)
+        v.play()
+        #expect(other.isPlaying == true)
+        #expect(v.state == .loading)
+    }
+
+    @Test("state_follows_open_play_end_and_failure")
+    func stateFollowsOpenPlayEndAndFailure() {
+        var c = VideoPhases.PhaseControl()
+        let meta = VideoPhases.PhaseMeta(duration: 1.0, size: (64, 36), frame: 0.25, sound: false)
+        c.open(.success(meta))
+        #expect(c.state == .ready)
+        #expect(c.duration == 1.0 && c.size?.0 == 64 && c.size?.1 == 36)
+        _ = VideoPhases.phaseStep(&c, .play)
+        #expect(c.state == .playing)
+        c.advanceVirtual(at: 10.0)
+        c.advanceVirtual(at: 10.5)
+        #expect(abs(c.time - 0.5) < 1e-9)
+        let gen = c.generation
+        c.advanceVirtual(at: 11.25)
+        #expect(c.time == 1.0 && c.run == .ended)
+        #expect(c.state == .ended)
+        #expect(c.generation > gen)
+        c.fail(.custom("boom"))
+        c.fail(.custom("second"))
+        #expect(c.state == .failed("boom"))
+    }
+
+    @Test("virtual_time_loops_rates_and_seeks")
+    func virtualTimeLoopsRatesAndSeeks() {
+        var c = VideoPhases.PhaseControl()
+        c.open(.success(VideoPhases.PhaseMeta(duration: 1.0, size: (64, 36), frame: 0.25, sound: false)))
+        _ = VideoPhases.phaseStep(&c, .play)
+        c.looping = true
+        c.rate = 2.0
+        c.advanceVirtual(at: 0.0)
+        c.advanceVirtual(at: 0.6)
+        #expect(abs(c.time - 0.2) < 1e-9)
+        #expect(c.isPlaying)
+        _ = VideoPhases.phaseStep(&c, .seek(0.75))
+        c.advanceVirtual(at: 5.0)
+        #expect(c.time == 0.75)
+        c.advanceVirtual(at: 5.1)
+        #expect(abs(c.time - 0.95) < 1e-9)
+        _ = VideoPhases.phaseStep(&c, .pause)
+        c.advanceVirtual(at: 9.0)
+        #expect(abs(c.time - 0.95) < 1e-9)
     }
 }

@@ -234,7 +234,8 @@ internal final class RenderFrameEngine {
         commandBuffer: MTLCommandBuffer,
         surfaceRenderer: SurfaceRenderer?,
         hook: EffectHook?,
-        backdropHook: EffectBackdropHook?
+        backdropHook: EffectBackdropHook?,
+        range: Range<Int>? = nil
     ) {
         layersPool.beginFrame()
         layersPool.registerTracker(frame.residentTracker)
@@ -251,6 +252,15 @@ internal final class RenderFrameEngine {
         guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances) else {
             return
         }
+        uploader.prepareBatches(instances: instances)
+
+        if let r = range {
+            let clamped = r.clamped(to: 0..<instances.count)
+            if clamped.isEmpty && r.upperBound != instances.count {
+                return
+            }
+        }
+        let sliceRange = range?.clamped(to: 0..<instances.count) ?? (0..<instances.count)
 
         let springsActive: Bool
         if let bindings = springBindings, !bindings.nodes.isEmpty, bindings.ids.count >= instances.count {
@@ -298,10 +308,13 @@ internal final class RenderFrameEngine {
             )
         ]
 
-        var batchStart = 0
+        var batchStart = sliceRange.lowerBound
         var backdropBlurCount = 0
         var effectCounter: UInt32 = 0
         var surfaceCursor = 0
+        while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) < sliceRange.lowerBound {
+            surfaceCursor += 1
+        }
         var layerIsolatedStack: [Bool] = []
 
         func encodeBatch(start: Int, end: Int, scope: inout TargetScope) {
@@ -431,8 +444,8 @@ internal final class RenderFrameEngine {
             }
         }
 
-        var i = 0
-        while i < instances.count {
+        var i = sliceRange.lowerBound
+        while i < sliceRange.upperBound {
             flushSurfacesBefore(i)
 
             let inst = instances[i]
@@ -711,8 +724,8 @@ internal final class RenderFrameEngine {
         }
 
         // Flush remaining batch & trailing surfaces on the root target
-        flushPendingUpTo(instances.count)
-        flushSurfacesBefore(instances.count + 1)
+        flushPendingUpTo(sliceRange.upperBound)
+        flushSurfacesBefore(sliceRange.upperBound + 1)
         if !frame.surfaces.isEmpty {
             surfaceRenderer?.trackSubmission(commandBuffer: commandBuffer)
         }
@@ -822,7 +835,8 @@ extension MetalRenderer {
     public func drawRange(
         frame: RenderFrame,
         into target: MTLTexture,
-        commandBuffer: MTLCommandBuffer
+        commandBuffer: MTLCommandBuffer,
+        range: Range<Int>? = nil
     ) {
         let sr = acquireSurfaceRenderer(pixelFormat: target.pixelFormat)
         renderEngine.draw(
@@ -831,7 +845,8 @@ extension MetalRenderer {
             commandBuffer: commandBuffer,
             surfaceRenderer: sr,
             hook: nil,
-            backdropHook: nil
+            backdropHook: nil,
+            range: range
         )
     }
 
@@ -840,6 +855,7 @@ extension MetalRenderer {
         frame: RenderFrame,
         into target: MTLTexture,
         commandBuffer: MTLCommandBuffer,
+        range: Range<Int>? = nil,
         hook: EffectHook?
     ) {
         let sr = acquireSurfaceRenderer(pixelFormat: target.pixelFormat)
@@ -849,7 +865,8 @@ extension MetalRenderer {
             commandBuffer: commandBuffer,
             surfaceRenderer: sr,
             hook: hook,
-            backdropHook: nil
+            backdropHook: nil,
+            range: range
         )
     }
 
@@ -946,6 +963,10 @@ extension MetalRenderer {
 
     public var layersPool: LayersPool {
         renderEngine.layersPool
+    }
+
+    public var uploader: AtlasUploader {
+        renderEngine.uploader
     }
 }
 #endif

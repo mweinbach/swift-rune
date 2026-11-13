@@ -538,67 +538,40 @@ public final class SurfaceRenderer: @unchecked Sendable {
         );
     }
 
-    static inline float4 sample_plane_color(
-        float2 px,
+    static inline float4 convert_video_sample(
+        float4 a,
+        float2 uvRaw,
+        constant VideoUniforms &u
+    ) {
+        float fmt = u.color.x;
+        float3 rgb;
+        float alpha = 1.0;
+        if (fmt < 0.5) {
+            rgb = a.rgb;
+            alpha = a.a;
+        } else {
+            float y = a.r;
+            float2 c = uvRaw - float2(128.0 / 255.0);
+            if (fmt < 1.5) {
+                y = (y - (16.0 / 255.0)) * (255.0 / 219.0);
+                c *= (255.0 / 224.0);
+            }
+            rgb = clamp(yuv_to_rgb(y, c.x, c.y, u.color.y), 0.0, 1.0);
+        }
+        float3 lin = apply_transfer(rgb, u.color.z);
+        return float4(lin * alpha, alpha);
+    }
+
+    static inline float4 sample_linear_video(
+        float2 uv,
         constant VideoUniforms &u,
         texture2d<float> plane0,
         texture2d<float> plane1,
-        sampler sampLinear,
-        sampler sampNearest,
-        bool exactMode
+        sampler sampLinear
     ) {
-        float2 norm = (px - u.image.xy) / u.image.zw;
-        if (norm.x < 0.0 || norm.x >= 1.0 || norm.y < 0.0 || norm.y >= 1.0) {
-            return float4(0.0);
-        }
-        if (u.sampling.w > 0.5) {
-            norm.x = 1.0 - norm.x;
-        }
-        float2 c = norm - 0.5;
-        float2 uv = float2(
-            u.orient.x * c.x + u.orient.y * c.y,
-            u.orient.z * c.x + u.orient.w * c.y
-        ) + 0.5;
-        if (exactMode) {
-            float2 srcSz = u.sampling.yz;
-            uv = (floor(clamp(uv, 0.0, 0.999999) * srcSz) + 0.5) / srcSz;
-        }
-
-        float fmt = u.color.x;
-        float3 rgb;
-        float a = 1.0;
-        if (fmt < 0.5) {
-            float4 bgra = exactMode
-                ? plane0.sample(sampNearest, uv)
-                : plane0.sample(sampLinear, uv);
-            rgb = bgra.rgb;
-            a = bgra.a;
-        } else {
-            float yRaw = exactMode
-                ? plane0.sample(sampNearest, uv).r
-                : plane0.sample(sampLinear, uv).r;
-            float2 uvRaw = exactMode
-                ? plane1.sample(sampLinear, uv).rg
-                : plane1.sample(sampLinear, uv).rg;
-            float y;
-            float cb;
-            float cr;
-            if (fmt < 1.5) {
-                // NV12 video range [16..235] / [16..240]
-                y = (yRaw - (16.0 / 255.0)) * (255.0 / 219.0);
-                cb = (uvRaw.x - (128.0 / 255.0)) * (255.0 / 224.0);
-                cr = (uvRaw.y - (128.0 / 255.0)) * (255.0 / 224.0);
-            } else {
-                // NV12 full range
-                y = yRaw;
-                cb = uvRaw.x - (128.0 / 255.0);
-                cr = uvRaw.y - (128.0 / 255.0);
-            }
-            rgb = clamp(yuv_to_rgb(y, cb, cr, u.color.y), 0.0, 1.0);
-        }
-
-        float3 lin = apply_transfer(rgb, u.color.z);
-        return float4(lin * a, a);
+        float4 p0 = plane0.sample(sampLinear, uv, level(0.0));
+        float2 p1 = (u.color.x >= 0.5) ? plane1.sample(sampLinear, uv, level(0.0)).rg : float2(0.5);
+        return convert_video_sample(p0, p1, u);
     }
 
     fragment float4 video_fs(
@@ -610,37 +583,55 @@ public final class SurfaceRenderer: @unchecked Sendable {
         sampler sampNearest [[sampler(1)]]
     ) {
         float2 frag = in.pos.xy + u.viewport.zw;
+        float2 local = frag - u.image.xy;
+        float2 unflipped = local / max(u.image.zw, float2(1.0));
+        if (unflipped.x < 0.0 || unflipped.x >= 1.0 || unflipped.y < 0.0 || unflipped.y >= 1.0) {
+            discard_fragment();
+        }
+        if (u.sampling.w > 0.5) {
+            local.x = u.image.z - local.x;
+        }
+        float2 col0 = float2(u.orient.x, u.orient.z);
+        float2 col1 = float2(u.orient.y, u.orient.w);
+        float2 size = abs(col0) * u.image.z + abs(col1) * u.image.w;
+        float2 d = local - u.image.zw * 0.5;
+        float2 buffer = float2(u.orient.x * d.x + u.orient.y * d.y, u.orient.z * d.x + u.orient.w * d.y) + size * 0.5;
+        float2 uv = buffer / max(size, float2(1.0));
+
+        float4 texel;
+        if (u.sampling.x > 0.5) {
+            int2 maxTex = int2(max(float2(1.0), u.sampling.yz)) - 1;
+            int2 texelCoord = clamp(int2(floor(buffer)), int2(0), maxTex);
+            float4 p0 = plane0.read(uint2(texelCoord), 0);
+            float2 p1 = (u.color.x >= 0.5) ? plane1.read(uint2(texelCoord / 2), 0).rg : float2(0.5);
+            texel = convert_video_sample(p0, p1, u);
+        } else {
+            float2 ratio = u.sampling.yz / max(size, float2(1.0));
+            int2 taps = clamp(int2(ceil(ratio)), int2(1), int2(8));
+            texel = float4(0.0);
+            for (int iy = 0; iy < taps.y; ++iy) {
+                for (int ix = 0; ix < taps.x; ++ix) {
+                    float2 offset = (float2(float(ix) + 0.5, float(iy) + 0.5) / float2(taps) - 0.5) / max(size, float2(1.0));
+                    texel += sample_linear_video(uv + offset, u, plane0, plane1, sampLinear);
+                }
+            }
+            texel /= float(taps.x * taps.y);
+        }
+
         float cov = clip_alpha(frag, u.clip, u.clipFade);
         if (cov <= 0.0) return float4(0.0);
 
         if (u.fade.z != 0.0) {
-            float d = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
-            cov *= u.fade.w + (1.0 - u.fade.w) * saturate(d);
+            float fd = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
+            cov *= u.fade.w + (1.0 - u.fade.w) * saturate(fd);
             if (cov <= 0.0) return float4(0.0);
         }
 
         float2 nodeCenter = u.node.xy + u.node.zw * 0.5;
         float2 nodeHalf = u.node.zw * 0.5;
         float dBox = sd_rounded_box(frag - nodeCenter, nodeHalf, u.radii);
-        float nodeCov = saturate(0.5 - dBox);
-        cov *= nodeCov;
+        cov *= saturate(0.5 - dBox);
         if (cov <= 0.0) return float4(0.0);
-
-        float4 texel;
-        if (u.sampling.x > 0.5) {
-            texel = sample_plane_color(frag, u, plane0, plane1, sampLinear, sampNearest, true);
-        } else {
-            // 8x8 linear-light area supersampling across the output pixel footprint.
-            float4 acc = float4(0.0);
-            for (int iy = 0; iy < 8; ++iy) {
-                float oy = -0.5 + (float(iy) + 0.5) * 0.125;
-                for (int ix = 0; ix < 8; ++ix) {
-                    float ox = -0.5 + (float(ix) + 0.5) * 0.125;
-                    acc += sample_plane_color(frag + float2(ox, oy), u, plane0, plane1, sampLinear, sampNearest, false);
-                }
-            }
-            texel = acc * (1.0 / 64.0);
-        }
 
         float mask = cov * u.color.w;
         return texel * mask;

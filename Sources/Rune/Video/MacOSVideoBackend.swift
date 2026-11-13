@@ -537,8 +537,16 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomSt
     }
 
     public var isPlaying: Bool {
-        if case .playing = state { return true }
-        return false
+        inner.lock.lock()
+        defer { inner.lock.unlock() }
+        switch inner.state {
+        case .failed, .ended:
+            return false
+        case .playing:
+            return true
+        case .loading, .ready:
+            return inner.request.playing
+        }
     }
 
     public var isLooping: Bool {

@@ -68,6 +68,36 @@ struct NativeSurfaceParityTests {
         }
     }
 
+    @Test("synthetic emits NV12 BT.709 bars, neutral chroma endpoints match reference, and pushBytes rejects > 16384 dimensions")
+    func syntheticNv12EndpointsAndDimensionCap() throws {
+        let syn = ByteFrame.synthetic(width: 8, height: 8, index: 1)
+        #expect(syn.format == .nv12Video)
+        #expect(syn.color == .bt709)
+        #expect(syn.planes.count == 2)
+        #expect(syn.planes[0].count == 64)
+        #expect(syn.planes[1].count == 32)
+        #expect(syn.planes[0][0] != syn.planes[0][4])
+
+        // range_endpoints_and_neutral_chroma (`native_surface/mod.rs:478`)
+        for matrix in [SurfaceMatrix.bt601, SurfaceMatrix.bt709] {
+            for transfer in [SurfaceTransfer.srgb, SurfaceTransfer.bt709] {
+                let b16 = ByteFrame.nv12Reference(y: 16, cb: 128, cr: 128, fullRange: false, matrix: matrix, transfer: transfer)
+                #expect(SIMD3<Float>(b16.x, b16.y, b16.z) == .zero)
+                let white = ByteFrame.nv12Reference(y: 235, cb: 128, cr: 128, fullRange: false, matrix: matrix, transfer: transfer)
+                #expect(abs(white.x - 1.0) < 1e-6 && abs(white.y - 1.0) < 1e-6 && abs(white.z - 1.0) < 1e-6)
+                let b0 = ByteFrame.nv12Reference(y: 0, cb: 128, cr: 128, fullRange: true, matrix: matrix, transfer: transfer)
+                #expect(SIMD3<Float>(b0.x, b0.y, b0.z) == .zero)
+            }
+        }
+
+        // Dimensions > 16384 rejected in pushBytesOriented
+        let huge = try ByteFrame(width: 16_385, height: 2, format: .bgra, color: .srgb, planes: [Data(count: 16_385 * 2 * 4)])
+        let surface = NativeSurface()
+        #expect(throws: NativeSurfaceError.dimensionsOutOfRange(width: 16_385, height: 2)) {
+            try surface.pushBytes(huge, frameId: 1)
+        }
+    }
+
     @Test("replaced waker and observer callbacks drop outside surface lock")
     func replacedCallbackDropsOutsideLock() {
         let surface = NativeSurface()
@@ -640,6 +670,70 @@ struct NativeSurfaceParityTests {
         #expect(clippedIn[0] > 220 && clippedIn[1] < 20 && clippedIn[3] == 255)
         #expect(clippedRight[3] == 0)
         #expect(clippedBottom[3] == 0)
+    }
+
+    @Test("NativeSurface timing & counts advance on GPU draws and video.wgsl adapts taps cleanly")
+    func timingCountsAndAdaptiveTaps() throws {
+        let surface = NativeSurface()
+        #expect(surface.timing() == nil)
+        #expect(surface.counts() == (0, 0))
+
+        let syn = ByteFrame.synthetic(width: 16, height: 8, index: 2)
+        try surface.pushBytes(syn, frameId: 1)
+
+        let draw1 = SurfaceDraw(
+            surface: surface,
+            fit: .fill,
+            beforeInstance: 0,
+            rect: SIMD4<Float>(0, 0, 16, 8),
+            clip: SIMD4<Float>(0, 0, 16, 8)
+        )
+        let (_, sr) = try renderSingleSurface(draw1, size: (16, 8))
+        #expect(surface.counts() == (1, 1))
+        let t1 = try #require(surface.timing())
+        #expect(t1.frameId == 1)
+        #expect(t1.completedAt != nil)
+
+        // 16x8 vertical black/white stripes downscaled to 4x2 -> adaptive 4x4 linear-light taps (~188)
+        var data = Data(count: 16 * 8 * 4)
+        data.withUnsafeMutableBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self)
+            for y in 0..<8 {
+                for x in 0..<16 {
+                    let v: UInt8 = (x % 2 == 0) ? 255 : 0
+                    let off = (y * 16 + x) * 4
+                    ptr[off + 0] = v
+                    ptr[off + 1] = v
+                    ptr[off + 2] = v
+                    ptr[off + 3] = 255
+                }
+            }
+        }
+        try surface.pushBytes(try ByteFrame(width: 16, height: 8, format: .bgra, color: .srgb, planes: [data]), frameId: 2)
+        let draw2 = SurfaceDraw(
+            surface: surface,
+            fit: .fill,
+            beforeInstance: 0,
+            rect: SIMD4<Float>(0, 0, 4, 2),
+            clip: SIMD4<Float>(0, 0, 4, 2)
+        )
+        let (downImg, _) = try renderSingleSurface(draw2, size: (4, 2), renderer: sr)
+        let mid = rgbaAt(downImg, width: 4, x: 1, y: 0)
+        #expect(mid[0] >= 175 && mid[0] <= 198)
+        #expect(surface.counts() == (2, 2))
+        #expect(surface.timing()?.frameId == 2)
+
+        // Offset draw outside [0,1) UV discards cleanly via `if (unflipped < 0 || unflipped >= 1) discard_fragment()`
+        let draw3 = SurfaceDraw(
+            surface: surface,
+            fit: .fill,
+            beforeInstance: 0,
+            rect: SIMD4<Float>(2, 2, 4, 2),
+            clip: SIMD4<Float>(0, 0, 10, 8)
+        )
+        let (offImg, _) = try renderSingleSurface(draw3, size: (10, 8), renderer: sr)
+        #expect(rgbaAt(offImg, width: 10, x: 0, y: 0)[3] == 0)
+        #expect(rgbaAt(offImg, width: 10, x: 8, y: 6)[3] == 0)
     }
     #endif
 }

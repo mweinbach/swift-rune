@@ -323,9 +323,6 @@ public enum BackdropBlurSchedule {
     /// Maps `(sigma, top)` to the up-chain start level `n` (`1...top`, running `n + 1` down passes
     /// and `n` up passes) and the variance-linear crossfade share of level `n` (`render/backdrop_blur.rs`).
     public static func levels(sigma: Float, top: Int = mips - 1) -> (count: Int, topBlend: Float) {
-        guard sigma > 0.0, top >= 1 else {
-            return (0, 0)
-        }
         let maxTop = min(max(top, 1), sigmas.count - 1)
         let s = min(max(sigma, sigmas[0]), sigmas[maxTop])
         let n = (1...maxTop).first(where: { s <= sigmas[$0] }) ?? maxTop
@@ -1420,6 +1417,11 @@ public final class BackdropBlurPass {
 // MARK: - Reused GPU Staging & Atlas Uploader (`render/upload.rs` + `#830`)
 
 /// Reuses Metal staging/instance buffers and skips redundant atlas uploads by tracking `glyphGeneration` and `RGBA8Atlas.revision`.
+public enum RenderBatchBind: Equatable, Sendable {
+    case image(Int)
+    case glyph(Int)
+}
+
 public final class AtlasUploader {
     public private(set) var glyphTexture: MTLTexture?
     public private(set) var glyphGeneration: UInt64 = 0
@@ -1428,6 +1430,13 @@ public final class AtlasUploader {
     public private(set) var imageTexture: MTLTexture?
     public private(set) var imageRevision: UInt64 = 0
     public private(set) var imageSize: SIMD2<Int> = .zero
+
+    public private(set) var imageBatches: [(Range<Int>, RenderBatchBind)] = []
+    public private(set) var effects: [(Int, RenderInstance)] = []
+    public private(set) var batchRuns: UInt64 = 0
+    private var lastBatchCount: Int = -1
+    private var lastBatchKinds: [UInt32] = []
+    private var lastBatchPages: [Float] = []
 
     private var instanceBuffer: MTLBuffer?
     private var globalsBuffer: MTLBuffer?
@@ -1562,6 +1571,97 @@ public final class AtlasUploader {
     public func trimUploads() {
         if let buf = instanceBuffer, buf.length > 512 * 1024 {
             instanceBuffer = nil
+        }
+    }
+
+    public func forgetInstances() {
+        instanceBuffer = nil
+        lastBatchCount = -1
+        lastBatchKinds.removeAll(keepingCapacity: true)
+        lastBatchPages.removeAll(keepingCapacity: true)
+    }
+
+    /// Computes minimal page-binding batch ranges matching `render::upload::Renderer::batch_instances`.
+    /// Plain rects/shadows/gradients inherit the active batch; only `KIND_IMAGE` (`params.x`) and
+    /// `KIND_GLYPH` (`params.z`) start a new batch when the bound page changes.
+    public func prepareBatches(
+        instances: [RenderInstance],
+        glyphPageCount: Int = 1,
+        imagePageCount: Int = 1
+    ) {
+        let count = instances.count
+        var kinds: [UInt32] = []
+        var pages: [Float] = []
+        kinds.reserveCapacity(count)
+        pages.reserveCapacity(count)
+        var paramsChanged = (lastBatchCount < 0 || count != lastBatchCount)
+        var newEffects: [(Int, RenderInstance)] = []
+
+        for (idx, inst) in instances.enumerated() {
+            let k = UInt32(max(0, Int(inst.params.y.rounded())))
+            let p: Float = (k == UInt32(KIND_GLYPH)) ? inst.params.z : ((k == UInt32(KIND_IMAGE)) ? inst.params.x : 0.0)
+            kinds.append(k)
+            pages.append(p)
+            if !paramsChanged && (lastBatchKinds[idx] != k || lastBatchPages[idx] != p) {
+                paramsChanged = true
+            }
+            if k == UInt32(KIND_EFFECT) || k == UInt32(KIND_BACKDROP_BLUR) {
+                newEffects.append((idx, inst))
+            }
+        }
+        effects = newEffects
+
+        guard paramsChanged else {
+            return
+        }
+
+        batchRuns &+= 1
+        lastBatchCount = count
+        lastBatchKinds = kinds
+        lastBatchPages = pages
+
+        imageBatches.removeAll(keepingCapacity: true)
+        guard count > 0 else { return }
+
+        var curBind: RenderBatchBind = .image(0)
+        var batchStart = 0
+        for idx in 0..<count {
+            let k = kinds[idx]
+            let isBatchedKind = (k == UInt32(KIND_GLYPH) || k == UInt32(KIND_IMAGE) || k == UInt32(KIND_LAYER) || k == UInt32(KIND_EFFECT) || k == UInt32(KIND_BACKDROP_BLUR))
+            if !isBatchedKind {
+                continue
+            }
+            let wanted: RenderBatchBind?
+            if k == UInt32(KIND_IMAGE) {
+                let raw = max(0, Int(pages[idx].rounded()))
+                let clamped = imagePageCount > 0 ? min(raw, imagePageCount - 1) : raw
+                wanted = .image(clamped)
+            } else if k == UInt32(KIND_GLYPH) {
+                let g = max(0, Int(pages[idx].rounded()))
+                if g == 0 {
+                    switch curBind {
+                    case .image:
+                        wanted = nil
+                    case .glyph:
+                        wanted = .image(0)
+                    }
+                } else {
+                    let clamped = glyphPageCount > 0 ? min(g - 1, glyphPageCount - 1) : (g - 1)
+                    wanted = .glyph(clamped)
+                }
+            } else {
+                wanted = nil
+            }
+            if let wanted, wanted != curBind {
+                if idx > batchStart {
+                    imageBatches.append((batchStart..<idx, curBind))
+                }
+                curBind = wanted
+                batchStart = idx
+            }
+        }
+        if batchStart < count {
+            imageBatches.append((batchStart..<count, curBind))
         }
     }
 }
