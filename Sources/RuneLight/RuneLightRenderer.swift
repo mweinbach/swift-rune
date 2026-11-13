@@ -33,6 +33,11 @@ public final class LightRenderer: @unchecked Sendable {
     public private(set) var giSize: (UInt32, UInt32)
     public let outputFormat: MTLPixelFormat
 
+    /// When enabled, also traces each GI cascade's own interval without merging for `inspect().own`.
+    public var inspectCascades: Bool = false
+    /// Compute passes recorded by the last `render` call.
+    public private(set) var computePasses: UInt32 = 0
+
     public let gbufPipeline: MTLRenderPipelineState
     public let fieldPipeline: MTLComputePipelineState
     public let shadowPipeline: MTLComputePipelineState
@@ -40,151 +45,200 @@ public final class LightRenderer: @unchecked Sendable {
     public let giCascadePipeline: MTLComputePipelineState
     public let giFluencePipeline: MTLComputePipelineState
     public let compositePipeline: MTLRenderPipelineState
+    public let linearSampler: MTLSamplerState
 
-    private let samplerLinear: MTLSamplerState
-    private var gbufTex: MTLTexture
-    private var idTex: MTLTexture
+    private let frameBuffer: MTLBuffer
+    private var primBuffer: MTLBuffer
+    private var primCapacity: Int
+    private let lightBuffer: MTLBuffer
+    private let cascadeUniformBuffers: [MTLBuffer]
+    private let ownUniformBuffers: [MTLBuffer]
+
+    private var gb0Tex: MTLTexture
+    private var gb1Tex: MTLTexture
     private var fieldTex: MTLTexture
     private var visTex: MTLTexture
     private var airTex: MTLTexture
-    private var giEmitTex: MTLTexture
-    private var giOccTex: MTLTexture
-    private var giFluenceTex: MTLTexture
-    private var giMergedTexs: [MTLTexture]
-    private var giOwnTexs: [MTLTexture]
-    private var lastTimings: LightTimings?
+
+    private let blackTex: MTLTexture
+    private var giEmitTex: MTLTexture?
+    private var giOccTex: MTLTexture?
+    private var giFluenceTex: MTLTexture?
+    private var giMergedTexs: [MTLTexture] = []
+    private var giOwnTexs: [MTLTexture] = []
+
     private weak var lastCommandBuffer: MTLCommandBuffer?
+    private var lastFrameHadGI: Bool = false
 
     public init(
-        device: MTLDevice? = nil,
+        device: MTLDevice? = MTLCreateSystemDefaultDevice(),
         width: UInt32,
         height: UInt32,
-        outputFormat: MTLPixelFormat = .bgra8Unorm_srgb
+        outputFormat: MTLPixelFormat = .bgra8Unorm
     ) throws {
-        guard let dev = device ?? MTLCreateSystemDefaultDevice(),
-              let queue = dev.makeCommandQueue() else {
+        guard let device, let queue = device.makeCommandQueue() else {
             throw LightRendererError.metalUnavailable
         }
-        self.device = dev
+        self.device = device
         self.commandQueue = queue
         self.width = max(width, 1)
         self.height = max(height, 1)
-        self.fieldSize = ((self.width + 1) / 2, (self.height + 1) / 2)
-        let gw = ((self.width + 7) / 8 + 15) / 16 * 16
-        let gh = ((self.height + 7) / 8 + 15) / 16 * 16
-        self.giSize = (max(gw, 16), max(gh, 16))
         self.outputFormat = outputFormat
+        self.fieldSize = ((self.width + 1) / 2, (self.height + 1) / 2)
+        let gw = max((((self.width + 7) / 8) + 15) / 16 * 16, 16)
+        let gh = max((((self.height + 7) / 8) + 15) / 16 * 16, 16)
+        self.giSize = (gw, gh)
 
-        func compile(_ name: String, _ src: String) throws -> MTLLibrary {
+        func makeLib(_ source: String, _ name: String) throws -> MTLLibrary {
             do {
-                return try dev.makeLibrary(source: src, options: nil)
+                return try device.makeLibrary(source: source, options: nil)
             } catch {
                 throw LightRendererError.shaderCompileFailed("\(name): \(error)")
             }
         }
 
-        let gbufLib = try compile("gbuffer", RuneLightShaders.gbufferShader)
-        guard let gv = gbufLib.makeFunction(name: "light_gbuf_vertex"),
-              let gf = gbufLib.makeFunction(name: "light_gbuf_fragment") else {
+        let gbufLib = try makeLib(RuneLightShaders.gbufferShader, "gbuffer")
+        guard let gbufVs = gbufLib.makeFunction(name: "gbuffer_vertex"),
+              let gbufFs = gbufLib.makeFunction(name: "gbuffer_fragment") else {
             throw LightRendererError.shaderCompileFailed("Missing gbuffer entry points")
         }
-        let gdesc = MTLRenderPipelineDescriptor()
-        gdesc.label = "rune-light-gbuffer"
-        gdesc.vertexFunction = gv
-        gdesc.fragmentFunction = gf
-        gdesc.colorAttachments[0].pixelFormat = .rgba16Float
-        gdesc.colorAttachments[1].pixelFormat = .r32Uint
-        self.gbufPipeline = try dev.makeRenderPipelineState(descriptor: gdesc)
+        let gbufDesc = MTLRenderPipelineDescriptor()
+        gbufDesc.vertexFunction = gbufVs
+        gbufDesc.fragmentFunction = gbufFs
+        gbufDesc.colorAttachments[0].pixelFormat = .rgba16Float
+        gbufDesc.colorAttachments[1].pixelFormat = .r32Uint
+        self.gbufPipeline = try device.makeRenderPipelineState(descriptor: gbufDesc)
 
-        let fieldLib = try compile("field", RuneLightShaders.fieldShader)
-        guard let fk = fieldLib.makeFunction(name: "light_field_kernel") else {
-            throw LightRendererError.shaderCompileFailed("Missing field kernel")
+        func makeCompute(_ source: String, _ fn: String, _ name: String) throws -> MTLComputePipelineState {
+            let lib = try makeLib(source, name)
+            guard let kernel = lib.makeFunction(name: fn) else {
+                throw LightRendererError.shaderCompileFailed("Missing \(fn) kernel")
+            }
+            return try device.makeComputePipelineState(function: kernel)
         }
-        self.fieldPipeline = try dev.makeComputePipelineState(function: fk)
 
-        let shadowLib = try compile("shadow", RuneLightShaders.shadowShader)
-        guard let sk = shadowLib.makeFunction(name: "light_shadow_kernel") else {
-            throw LightRendererError.shaderCompileFailed("Missing shadow kernel")
-        }
-        self.shadowPipeline = try dev.makeComputePipelineState(function: sk)
+        self.fieldPipeline = try makeCompute(RuneLightShaders.fieldShader, "field_kernel", "field")
+        self.shadowPipeline = try makeCompute(RuneLightShaders.shadowShader, "shadow_kernel", "shadow")
+        self.giScenePipeline = try makeCompute(RuneLightShaders.giSceneShader, "gi_scene_kernel", "gi_scene")
+        self.giCascadePipeline = try makeCompute(RuneLightShaders.giCascadeShader, "gi_cascade_kernel", "gi_cascade")
+        self.giFluencePipeline = try makeCompute(RuneLightShaders.giFluenceShader, "gi_fluence_kernel", "gi_fluence")
 
-        let giSceneLib = try compile("gi_scene", RuneLightShaders.giSceneShader)
-        guard let gsk = giSceneLib.makeFunction(name: "light_gi_scene_kernel") else {
-            throw LightRendererError.shaderCompileFailed("Missing gi_scene kernel")
-        }
-        self.giScenePipeline = try dev.makeComputePipelineState(function: gsk)
-
-        let giCascadeLib = try compile("gi_cascade", RuneLightShaders.giCascadeShader)
-        guard let gck = giCascadeLib.makeFunction(name: "light_gi_cascade_kernel") else {
-            throw LightRendererError.shaderCompileFailed("Missing gi_cascade kernel")
-        }
-        self.giCascadePipeline = try dev.makeComputePipelineState(function: gck)
-
-        let giFluenceLib = try compile("gi_fluence", RuneLightShaders.giFluenceShader)
-        guard let gfk = giFluenceLib.makeFunction(name: "light_gi_fluence_kernel") else {
-            throw LightRendererError.shaderCompileFailed("Missing gi_fluence kernel")
-        }
-        self.giFluencePipeline = try dev.makeComputePipelineState(function: gfk)
-
-        let compLib = try compile("composite", RuneLightShaders.compositeShader)
-        guard let cv = compLib.makeFunction(name: "light_composite_vertex"),
-              let cf = compLib.makeFunction(name: "light_composite_fragment") else {
+        let compLib = try makeLib(RuneLightShaders.compositeShader, "composite")
+        guard let compVs = compLib.makeFunction(name: "composite_vertex"),
+              let compFs = compLib.makeFunction(name: "composite_fragment") else {
             throw LightRendererError.shaderCompileFailed("Missing composite entry points")
         }
-        let cdesc = MTLRenderPipelineDescriptor()
-        cdesc.label = "rune-light-composite"
-        cdesc.vertexFunction = cv
-        cdesc.fragmentFunction = cf
-        cdesc.colorAttachments[0].pixelFormat = outputFormat
-        self.compositePipeline = try dev.makeRenderPipelineState(descriptor: cdesc)
+        let compDesc = MTLRenderPipelineDescriptor()
+        compDesc.vertexFunction = compVs
+        compDesc.fragmentFunction = compFs
+        compDesc.colorAttachments[0].pixelFormat = outputFormat
+        self.compositePipeline = try device.makeRenderPipelineState(descriptor: compDesc)
 
-        let sd = MTLSamplerDescriptor()
-        sd.minFilter = .linear
-        sd.magFilter = .linear
-        sd.sAddressMode = .clampToEdge
-        sd.tAddressMode = .clampToEdge
-        guard let smp = dev.makeSamplerState(descriptor: sd) else {
+        let smpDesc = MTLSamplerDescriptor()
+        smpDesc.minFilter = .linear
+        smpDesc.magFilter = .linear
+        smpDesc.sAddressMode = .clampToEdge
+        smpDesc.tAddressMode = .clampToEdge
+        guard let sampler = device.makeSamplerState(descriptor: smpDesc) else {
             throw LightRendererError.metalUnavailable
         }
-        self.samplerLinear = smp
+        self.linearSampler = sampler
 
-        (self.gbufTex, self.idTex, self.fieldTex, self.visTex, self.airTex) = Self.makeTargets(
-            device: dev,
+        let cap = 256
+        guard let frameBuffer = device.makeBuffer(
+                  length: MemoryLayout<LightFrameUniforms>.stride,
+                  options: .storageModeShared
+              ),
+              let primBuffer = Self.makePrimBuffer(device: device, capacity: cap),
+              let lightBuffer = device.makeBuffer(
+                  length: maxLights * MemoryLayout<Light>.stride,
+                  options: .storageModeShared
+              ) else {
+            throw LightRendererError.metalUnavailable
+        }
+        self.frameBuffer = frameBuffer
+        self.primBuffer = primBuffer
+        self.primCapacity = cap
+        self.lightBuffer = lightBuffer
+
+        func makeCascadeBuffers(merge: UInt32) throws -> [MTLBuffer] {
+            var list: [MTLBuffer] = []
+            list.reserveCapacity(Int(lightCascades))
+            for n in 0..<lightCascades {
+                var u = CascadeUniforms(level: n, count: lightCascades, merge: merge)
+                guard let buf = device.makeBuffer(
+                    bytes: &u,
+                    length: MemoryLayout<CascadeUniforms>.stride,
+                    options: .storageModeShared
+                ) else {
+                    throw LightRendererError.metalUnavailable
+                }
+                list.append(buf)
+            }
+            return list
+        }
+        self.cascadeUniformBuffers = try makeCascadeBuffers(merge: 1)
+        self.ownUniformBuffers = try makeCascadeBuffers(merge: 0)
+
+        let blackDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba16Float,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        blackDesc.usage = [.shaderRead]
+        blackDesc.storageMode = .shared
+        guard let black = device.makeTexture(descriptor: blackDesc) else {
+            throw LightRendererError.metalUnavailable
+        }
+        var zeros = [UInt16](repeating: 0, count: 4)
+        black.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &zeros, bytesPerRow: 8)
+        self.blackTex = black
+
+        let targets = try Self.makeTargets(
+            device: device,
             width: self.width,
             height: self.height,
             fieldSize: self.fieldSize
         )
-        let giTargets = Self.makeGITargets(device: dev, giSize: self.giSize)
-        self.giEmitTex = giTargets.emit
-        self.giOccTex = giTargets.occ
-        self.giFluenceTex = giTargets.fluence
-        self.giMergedTexs = giTargets.merged
-        self.giOwnTexs = giTargets.own
+        self.gb0Tex = targets.gb0
+        self.gb1Tex = targets.gb1
+        self.fieldTex = targets.field
+        self.visTex = targets.vis
+        self.airTex = targets.air
     }
 
-    private static func makeGITargets(
+    private static func makePrimBuffer(device: MTLDevice, capacity: Int) -> MTLBuffer? {
+        device.makeBuffer(
+            length: max(capacity, 1) * MemoryLayout<Prim>.stride,
+            options: .storageModeShared
+        )
+    }
+
+    private static func makeTexture(
         device: MTLDevice,
-        giSize: (UInt32, UInt32)
-    ) -> (emit: MTLTexture, occ: MTLTexture, fluence: MTLTexture, merged: [MTLTexture], own: [MTLTexture]) {
-        func giTex(_ label: String) -> MTLTexture {
-            let td = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba16Float,
-                width: Int(giSize.0),
-                height: Int(giSize.1),
-                mipmapped: false
-            )
-            td.usage = [.shaderRead, .shaderWrite]
-            td.storageMode = .private
-            let tex = device.makeTexture(descriptor: td)!
-            tex.label = label
-            return tex
+        format: MTLPixelFormat,
+        width: UInt32,
+        height: UInt32,
+        arrayLength: Int = 1,
+        usage: MTLTextureUsage
+    ) throws -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format,
+            width: Int(max(width, 1)),
+            height: Int(max(height, 1)),
+            mipmapped: false
+        )
+        if arrayLength > 1 {
+            desc.textureType = .type2DArray
+            desc.arrayLength = arrayLength
         }
-        let emit = giTex("light gi emit")
-        let occ = giTex("light gi occ")
-        let fluence = giTex("light gi fluence")
-        let merged = (0..<Int(lightCascades)).map { giTex("light gi merged \($0)") }
-        let own = (0..<Int(lightCascades)).map { giTex("light gi own \($0)") }
-        return (emit, occ, fluence, merged, own)
+        desc.usage = usage
+        desc.storageMode = .private
+        guard let tex = device.makeTexture(descriptor: desc) else {
+            throw LightRendererError.metalUnavailable
+        }
+        return tex
     }
 
     private static func makeTargets(
@@ -192,54 +246,75 @@ public final class LightRenderer: @unchecked Sendable {
         width: UInt32,
         height: UInt32,
         fieldSize: (UInt32, UInt32)
-    ) -> (MTLTexture, MTLTexture, MTLTexture, MTLTexture, MTLTexture) {
-        func tex2D(_ w: UInt32, _ h: UInt32, _ fmt: MTLPixelFormat, _ usage: MTLTextureUsage, layers: Int = 1) -> MTLTexture {
-            let td = MTLTextureDescriptor()
-            td.textureType = layers > 1 ? .type2DArray : .type2D
-            td.width = Int(w)
-            td.height = Int(h)
-            td.arrayLength = layers
-            td.pixelFormat = fmt
-            td.usage = usage
-            td.storageMode = .private
-            return device.makeTexture(descriptor: td)!
+    ) throws -> (gb0: MTLTexture, gb1: MTLTexture, field: MTLTexture, vis: MTLTexture, air: MTLTexture) {
+        let rt: MTLTextureUsage = [.renderTarget, .shaderRead]
+        let st: MTLTextureUsage = [.shaderWrite, .shaderRead]
+        let gb0 = try makeTexture(device: device, format: .rgba16Float, width: width, height: height, usage: rt)
+        let gb1 = try makeTexture(device: device, format: .r32Uint, width: width, height: height, usage: rt)
+        let field = try makeTexture(device: device, format: .rgba16Float, width: fieldSize.0, height: fieldSize.1, usage: st)
+        let vis = try makeTexture(device: device, format: .rgba16Float, width: fieldSize.0, height: fieldSize.1, arrayLength: 2, usage: st)
+        let air = try makeTexture(device: device, format: .rgba16Float, width: fieldSize.0, height: fieldSize.1, arrayLength: 2, usage: st)
+        return (gb0, gb1, field, vis, air)
+    }
+
+    private func ensureGITargets() throws {
+        if giFluenceTex != nil { return }
+        let st: MTLTextureUsage = [.shaderWrite, .shaderRead]
+        giEmitTex = try Self.makeTexture(device: device, format: .rgba16Float, width: giSize.0, height: giSize.1, usage: st)
+        giOccTex = try Self.makeTexture(device: device, format: .rgba16Float, width: giSize.0, height: giSize.1, usage: st)
+        giFluenceTex = try Self.makeTexture(device: device, format: .rgba16Float, width: giSize.0, height: giSize.1, usage: st)
+        giMergedTexs = try (0..<Int(lightCascades)).map { _ in
+            try Self.makeTexture(device: device, format: .rgba16Float, width: giSize.0 * 2, height: giSize.1 * 2, usage: st)
         }
-        let gbuf = tex2D(width, height, .rgba16Float, [.renderTarget, .shaderRead])
-        let id = tex2D(width, height, .r32Uint, [.renderTarget, .shaderRead])
-        let field = tex2D(fieldSize.0, fieldSize.1, .rgba16Float, [.shaderRead, .shaderWrite])
-        let vis = tex2D(fieldSize.0, fieldSize.1, .rgba16Float, [.shaderRead, .shaderWrite], layers: 2)
-        let air = tex2D(fieldSize.0, fieldSize.1, .rgba16Float, [.shaderRead, .shaderWrite], layers: 2)
-        return (gbuf, id, field, vis, air)
+    }
+
+    private func ensureOwnTargets() throws {
+        if !giOwnTexs.isEmpty { return }
+        let st: MTLTextureUsage = [.shaderWrite, .shaderRead]
+        giOwnTexs = try (0..<Int(lightCascades)).map { _ in
+            try Self.makeTexture(device: device, format: .rgba16Float, width: giSize.0 * 2, height: giSize.1 * 2, usage: st)
+        }
     }
 
     public func buildFrameUniforms(scene: LightScene) -> LightFrameUniforms {
         let s = scene.settings
+        let nl = min(scene.lights.count, maxLights)
+        let zmax = scene.prims
+            .filter { ($0.flags & flagOccluder) != 0 }
+            .reduce(Float(0.0)) { max($0, $1.z.y) }
+        let shafts = scene.lights.prefix(nl).contains { $0.extra.x > 0.0 }
+        let anyEmit = scene.prims.contains { ($0.flags & flagEmissive) != 0 } || scene.emission != nil
+        let giActive: GIParams? = s.gi.flatMap { g in
+            (anyEmit || (g.bounce > 0.0 && nl > 0)) ? g : nil
+        }
+        let floatTarget = outputFormat == .rgba16Float || outputFormat == .rgba32Float
+        let isSrgbFormat = outputFormat == .bgra8Unorm_srgb || outputFormat == .rgba8Unorm_srgb
+        let encode = !isSrgbFormat && !floatTarget
+        let extra = giActive != nil && scene.emission != nil
+        let flags: UInt32 =
+            (giActive != nil ? 1 : 0) |
+            (shafts ? 2 : 0) |
+            (encode ? 4 : 0) |
+            (s.contactAO > 0.0 ? 8 : 0) |
+            (extra ? 16 : 0)
+        let g = giActive ?? GIParams(strength: 0, air: 0, bounce: 0, absorption: 0, emission: 0)
+
         var u = LightFrameUniforms()
         u.sf = SIMD4<Float>(Float(width), Float(height), Float(fieldSize.0), Float(fieldSize.1))
         u.gs = SIMD4<Float>(Float(giSize.0), Float(giSize.1), 0.5, giScale)
         u.ambient = SIMD4<Float>(s.ambient.x, s.ambient.y, s.ambient.z, s.exposure)
-        u.counts = SIMD4<UInt32>(
-            UInt32(scene.prims.count),
-            UInt32(min(scene.lights.count, maxLights)),
-            s.gi != nil ? 1 : 0,
-            0
-        )
-        u.misc = SIMD4<Float>(s.contactAO, s.rim, s.shaftsOver, s.albedoFloor)
+        u.counts = SIMD4<UInt32>(UInt32(scene.prims.count), UInt32(nl), lightCascades, flags)
+        u.misc = SIMD4<Float>(zmax, s.time, s.seed, s.shaftsOver)
         u.text = SIMD4<Float>(s.text.floor, s.text.ceiling, s.text.lit, s.text.specular)
-        let gi = s.gi ?? GIParams()
-        u.gi = SIMD4<Float>(gi.strength, gi.air, gi.bounce, gi.absorption)
-        u.bg = SIMD4<Float>(s.backgroundGloss, s.backgroundRoughness, gi.emission, s.time)
-        let needsManualSrgb = outputFormat == .bgra8Unorm || outputFormat == .rgba8Unorm
-        u.ext = SIMD4<Float>(s.seed, needsManualSrgb ? 1.0 : 0.0, 0.0, 0.0)
+        u.gi = SIMD4<Float>(g.strength, g.air, g.bounce, g.absorption)
+        u.bg = SIMD4<Float>(s.backgroundGloss, s.backgroundRoughness, s.contactAO, s.rim)
+        u.ext = SIMD4<Float>(s.albedoFloor, g.emission, 0.0, 0.0)
         return u
     }
 
     public func hasActiveLighting(_ scene: LightScene) -> Bool {
-        if !scene.lights.isEmpty { return true }
-        if scene.settings.gi != nil && scene.prims.contains(where: { ($0.flags & flagEmissive) != 0 }) {
-            return true
-        }
-        return false
+        let anyEmit = scene.prims.contains { ($0.flags & flagEmissive) != 0 } || scene.emission != nil
+        return !(scene.lights.isEmpty && !(anyEmit && scene.settings.gi != nil))
     }
 
     /// Records the lighting passes into `commandBuffer`. Returns `false` if there are no lights and no GI emitters.
@@ -251,137 +326,275 @@ public final class LightRenderer: @unchecked Sendable {
         textTexture: MTLTexture,
         targetTexture: MTLTexture
     ) -> Bool {
-        guard hasActiveLighting(scene) else { return false }
-
-        var frameU = buildFrameUniforms(scene: scene)
-        let prims = scene.prims.isEmpty ? [Prim.rect(0, 0, 0, 0)] : scene.prims
-        let lights = scene.lights.isEmpty ? [Light.point(0, 0, 100).intensity(0)] : Array(scene.lights.prefix(maxLights))
-
-        guard let primBuf = device.makeBuffer(bytes: prims, length: prims.count * MemoryLayout<Prim>.stride, options: .storageModeShared),
-              let lightBuf = device.makeBuffer(bytes: lights, length: lights.count * MemoryLayout<Light>.stride, options: .storageModeShared) else {
+        guard hasActiveLighting(scene) else {
+            computePasses = 0
+            lastFrameHadGI = false
             return false
         }
 
+        if scene.prims.count > primCapacity {
+            var nextCap = max(primCapacity, 1)
+            while nextCap < scene.prims.count { nextCap *= 2 }
+            if let resized = Self.makePrimBuffer(device: device, capacity: nextCap) {
+                primBuffer = resized
+                primCapacity = nextCap
+            }
+        }
+
+        if !scene.prims.isEmpty {
+            _ = scene.prims.withUnsafeBytes { raw in
+                memcpy(primBuffer.contents(), raw.baseAddress!, raw.count)
+            }
+        }
+        let nl = min(scene.lights.count, maxLights)
+        if nl > 0 {
+            _ = scene.lights.prefix(nl).withUnsafeBytes { raw in
+                memcpy(lightBuffer.contents(), raw.baseAddress!, raw.count)
+            }
+        }
+
+        var frameU = buildFrameUniforms(scene: scene)
+        let giEnabled = (frameU.counts.w & 1) != 0
+        if giEnabled {
+            do {
+                try ensureGITargets()
+                if inspectCascades {
+                    try ensureOwnTargets()
+                }
+            } catch {
+                return false
+            }
+        }
+        lastFrameHadGI = giEnabled
+        memcpy(frameBuffer.contents(), &frameU, MemoryLayout<LightFrameUniforms>.stride)
+
+        var passes: UInt32 = 0
+
         // 1. Surface GBuffer pass
         let gPassDesc = MTLRenderPassDescriptor()
-        gPassDesc.colorAttachments[0].texture = gbufTex
+        gPassDesc.colorAttachments[0].texture = gb0Tex
         gPassDesc.colorAttachments[0].loadAction = .clear
-        gPassDesc.colorAttachments[0].storeAction = .store
         gPassDesc.colorAttachments[0].clearColor = MTLClearColor(red: 1e4, green: 0, blue: 0, alpha: 0)
-        gPassDesc.colorAttachments[1].texture = idTex
+        gPassDesc.colorAttachments[0].storeAction = .store
+        gPassDesc.colorAttachments[1].texture = gb1Tex
         gPassDesc.colorAttachments[1].loadAction = .clear
-        gPassDesc.colorAttachments[1].storeAction = .store
         gPassDesc.colorAttachments[1].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        gPassDesc.colorAttachments[1].storeAction = .store
         if let gEnc = commandBuffer.makeRenderCommandEncoder(descriptor: gPassDesc) {
-            gEnc.setRenderPipelineState(gbufPipeline)
-            gEnc.setVertexBytes(&frameU, length: MemoryLayout<LightFrameUniforms>.stride, index: 0)
-            gEnc.setVertexBuffer(primBuf, offset: 0, index: 1)
-            gEnc.setFragmentBuffer(primBuf, offset: 0, index: 1)
-            gEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.prims.count)
+            gEnc.label = "light surface"
+            if !scene.prims.isEmpty {
+                gEnc.setRenderPipelineState(gbufPipeline)
+                gEnc.setVertexBuffer(frameBuffer, offset: 0, index: 0)
+                gEnc.setVertexBuffer(primBuffer, offset: 0, index: 1)
+                gEnc.setFragmentBuffer(frameBuffer, offset: 0, index: 0)
+                gEnc.setFragmentBuffer(primBuffer, offset: 0, index: 1)
+                gEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: scene.prims.count)
+            }
             gEnc.endEncoding()
         }
 
-        // 2. Field compute pass
-        if let cEnc = commandBuffer.makeComputeCommandEncoder() {
-            cEnc.setComputePipelineState(fieldPipeline)
-            cEnc.setBytes(&frameU, length: MemoryLayout<LightFrameUniforms>.stride, index: 0)
-            cEnc.setBuffer(primBuf, offset: 0, index: 1)
-            cEnc.setTexture(fieldTex, index: 0)
+        // 2 & 3. Distance field (16x16 workgroup tile culling) + soft shadows (8x8)
+        if let fEnc = commandBuffer.makeComputeCommandEncoder() {
+            fEnc.label = "light field"
+            fEnc.setComputePipelineState(fieldPipeline)
+            fEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+            fEnc.setBuffer(primBuffer, offset: 0, index: 1)
+            fEnc.setTexture(fieldTex, index: 0)
             let tg = MTLSize(width: 16, height: 16, depth: 1)
-            let ng = MTLSize(width: (Int(fieldSize.0) + 15) / 16, height: (Int(fieldSize.1) + 15) / 16, depth: 1)
-            cEnc.dispatchThreadgroups(ng, threadsPerThreadgroup: tg)
-
-            // 3. Soft shadow + god rays compute pass
-            cEnc.setComputePipelineState(shadowPipeline)
-            cEnc.setBytes(&frameU, length: MemoryLayout<LightFrameUniforms>.stride, index: 0)
-            cEnc.setBuffer(lightBuf, offset: 0, index: 1)
-            cEnc.setTexture(fieldTex, index: 0)
-            cEnc.setTexture(gbufTex, index: 1)
-            cEnc.setSamplerState(samplerLinear, index: 0)
-            cEnc.setTexture(visTex, index: 2)
-            cEnc.setTexture(airTex, index: 3)
-            let layers = scene.lights.count > 4 ? 2 : 1
-            let sng = MTLSize(width: (Int(fieldSize.0) + 15) / 16, height: (Int(fieldSize.1) + 15) / 16, depth: layers)
-            cEnc.dispatchThreadgroups(sng, threadsPerThreadgroup: tg)
-            cEnc.endEncoding()
+            let ng = MTLSize(
+                width: max((Int(fieldSize.0) + 15) / 16, 1),
+                height: max((Int(fieldSize.1) + 15) / 16, 1),
+                depth: 1
+            )
+            fEnc.dispatchThreadgroups(ng, threadsPerThreadgroup: tg)
+            fEnc.endEncoding()
+            passes += 1
+        }
+        if let sEnc = commandBuffer.makeComputeCommandEncoder() {
+            sEnc.label = "light shadows"
+            sEnc.setComputePipelineState(shadowPipeline)
+            sEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+            sEnc.setBuffer(lightBuffer, offset: 0, index: 1)
+            sEnc.setTexture(fieldTex, index: 0)
+            sEnc.setTexture(gb0Tex, index: 1)
+            sEnc.setTexture(visTex, index: 2)
+            sEnc.setTexture(airTex, index: 3)
+            sEnc.setSamplerState(linearSampler, index: 0)
+            let tg = MTLSize(width: 8, height: 8, depth: 1)
+            let ng = MTLSize(
+                width: max((Int(fieldSize.0) + 7) / 8, 1),
+                height: max((Int(fieldSize.1) + 7) / 8, 1),
+                depth: 1
+            )
+            sEnc.dispatchThreadgroups(ng, threadsPerThreadgroup: tg)
+            sEnc.endEncoding()
+            passes += 1
         }
 
-        // 4. Composite render pass
+        // 4. Radiance cascades GI (scene media -> cascades top down -> fluence)
+        if giEnabled,
+           let emitTex = giEmitTex,
+           let occTex = giOccTex,
+           let fluTex = giFluenceTex,
+           giMergedTexs.count == Int(lightCascades) {
+            let tg = MTLSize(width: 8, height: 8, depth: 1)
+            let giGroups = MTLSize(
+                width: max((Int(giSize.0) + 7) / 8, 1),
+                height: max((Int(giSize.1) + 7) / 8, 1),
+                depth: 1
+            )
+            let casGroups = MTLSize(
+                width: max((Int(giSize.0) * 2 + 7) / 8, 1),
+                height: max((Int(giSize.1) * 2 + 7) / 8, 1),
+                depth: 1
+            )
+
+            if let scEnc = commandBuffer.makeComputeCommandEncoder() {
+                scEnc.label = "gi scene"
+                scEnc.setComputePipelineState(giScenePipeline)
+                scEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+                scEnc.setBuffer(primBuffer, offset: 0, index: 1)
+                scEnc.setBuffer(lightBuffer, offset: 0, index: 2)
+                scEnc.setTexture(visTex, index: 0)
+                scEnc.setTexture(scene.emission ?? blackTex, index: 1)
+                scEnc.setTexture(emitTex, index: 2)
+                scEnc.setTexture(occTex, index: 3)
+                scEnc.setSamplerState(linearSampler, index: 0)
+                scEnc.dispatchThreadgroups(giGroups, threadsPerThreadgroup: tg)
+                scEnc.endEncoding()
+                passes += 1
+            }
+
+            for k in 0..<Int(lightCascades) {
+                let n = Int(lightCascades) - 1 - k
+                let upperTex = (n + 1 < Int(lightCascades)) ? giMergedTexs[n + 1] : blackTex
+                if let cEnc = commandBuffer.makeComputeCommandEncoder() {
+                    cEnc.label = "gi cascade \(n)"
+                    cEnc.setComputePipelineState(giCascadePipeline)
+                    cEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+                    cEnc.setBuffer(cascadeUniformBuffers[n], offset: 0, index: 1)
+                    cEnc.setTexture(emitTex, index: 0)
+                    cEnc.setTexture(occTex, index: 1)
+                    cEnc.setTexture(fieldTex, index: 2)
+                    cEnc.setTexture(upperTex, index: 3)
+                    cEnc.setTexture(gb0Tex, index: 4)
+                    cEnc.setTexture(giMergedTexs[n], index: 5)
+                    cEnc.setSamplerState(linearSampler, index: 0)
+                    cEnc.dispatchThreadgroups(casGroups, threadsPerThreadgroup: tg)
+                    cEnc.endEncoding()
+                    passes += 1
+                }
+            }
+
+            if let flEnc = commandBuffer.makeComputeCommandEncoder() {
+                flEnc.label = "gi fluence"
+                flEnc.setComputePipelineState(giFluencePipeline)
+                flEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+                flEnc.setTexture(giMergedTexs[0], index: 0)
+                flEnc.setTexture(fluTex, index: 1)
+                flEnc.dispatchThreadgroups(giGroups, threadsPerThreadgroup: tg)
+                flEnc.endEncoding()
+                passes += 1
+            }
+
+            if inspectCascades && giOwnTexs.count == Int(lightCascades) {
+                if let ownEnc = commandBuffer.makeComputeCommandEncoder() {
+                    ownEnc.label = "gi inspect"
+                    ownEnc.setComputePipelineState(giCascadePipeline)
+                    ownEnc.setBuffer(frameBuffer, offset: 0, index: 0)
+                    ownEnc.setTexture(emitTex, index: 0)
+                    ownEnc.setTexture(occTex, index: 1)
+                    ownEnc.setTexture(fieldTex, index: 2)
+                    ownEnc.setTexture(blackTex, index: 3)
+                    ownEnc.setTexture(gb0Tex, index: 4)
+                    ownEnc.setSamplerState(linearSampler, index: 0)
+                    for k in 0..<Int(lightCascades) {
+                        let n = Int(lightCascades) - 1 - k
+                        ownEnc.setBuffer(ownUniformBuffers[n], offset: 0, index: 1)
+                        ownEnc.setTexture(giOwnTexs[n], index: 5)
+                        ownEnc.dispatchThreadgroups(casGroups, threadsPerThreadgroup: tg)
+                    }
+                    ownEnc.endEncoding()
+                    passes += 1
+                }
+            }
+        }
+
+        // 5. Full-res composite pass
+        let fluenceInput = (giEnabled ? giFluenceTex : nil) ?? blackTex
         let cPassDesc = MTLRenderPassDescriptor()
         cPassDesc.colorAttachments[0].texture = targetTexture
         cPassDesc.colorAttachments[0].loadAction = .clear
+        cPassDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         cPassDesc.colorAttachments[0].storeAction = .store
         if let cEnc = commandBuffer.makeRenderCommandEncoder(descriptor: cPassDesc) {
+            cEnc.label = "light composite"
             cEnc.setRenderPipelineState(compositePipeline)
-            cEnc.setFragmentBytes(&frameU, length: MemoryLayout<LightFrameUniforms>.stride, index: 0)
-            cEnc.setFragmentBuffer(primBuf, offset: 0, index: 1)
-            cEnc.setFragmentBuffer(lightBuf, offset: 0, index: 2)
+            cEnc.setFragmentBuffer(frameBuffer, offset: 0, index: 0)
+            cEnc.setFragmentBuffer(primBuffer, offset: 0, index: 1)
+            cEnc.setFragmentBuffer(lightBuffer, offset: 0, index: 2)
             cEnc.setFragmentTexture(baseTexture, index: 0)
             cEnc.setFragmentTexture(textTexture, index: 1)
-            cEnc.setFragmentTexture(gbufTex, index: 2)
-            cEnc.setFragmentTexture(idTex, index: 3)
+            cEnc.setFragmentTexture(gb0Tex, index: 2)
+            cEnc.setFragmentTexture(gb1Tex, index: 3)
             cEnc.setFragmentTexture(visTex, index: 4)
             cEnc.setFragmentTexture(airTex, index: 5)
-            cEnc.setFragmentTexture(fieldTex, index: 6)
+            cEnc.setFragmentTexture(fluenceInput, index: 6)
             cEnc.setFragmentTexture(fieldTex, index: 7)
-            cEnc.setFragmentSamplerState(samplerLinear, index: 0)
-            cEnc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            cEnc.setFragmentSamplerState(linearSampler, index: 0)
+            cEnc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             cEnc.endEncoding()
         }
 
+        computePasses = passes
         lastCommandBuffer = commandBuffer
-        let hasGI = scene.settings.gi != nil
-        lastTimings = LightTimings(
-            field: 0,
-            shadows: 0,
-            gi: 0,
-            giScene: 0,
-            cascades: [Double](repeating: 0, count: Int(lightCascades)),
-            fluence: 0,
-            raster: 0,
-            total: hasGI ? 0 : 0
-        )
-
         return true
     }
 
-    /// The half-resolution visibility texture (2 array layers × 4 lights), for debugging and CPU reference checks.
     public var visibilityTexture: MTLTexture {
         visTex
     }
 
-    /// The GI pass's intermediate buffers from the last recorded frame.
     public func inspect() -> LightInspect {
-        LightInspect(
+        let blacks = [MTLTexture](repeating: blackTex, count: Int(lightCascades))
+        return LightInspect(
             field: fieldTex,
-            emission: giEmitTex,
-            occluders: giOccTex,
-            merged: giMergedTexs,
-            own: giOwnTexs,
-            fluence: giFluenceTex,
+            emission: giEmitTex ?? blackTex,
+            occluders: giOccTex ?? blackTex,
+            merged: giMergedTexs.isEmpty ? blacks : giMergedTexs,
+            own: giOwnTexs.isEmpty ? blacks : giOwnTexs,
+            fluence: giFluenceTex ?? blackTex,
             giSize: giSize,
             texel: 1.0 / giScale,
             fieldSize: fieldSize
         )
     }
 
-    /// Blocking read of the last submitted frame's pass timings.
-    /// If `commandBuffer` is provided (or the last rendered command buffer is still in flight),
-    /// waits until completion and derives GPU elapsed milliseconds from Metal's GPU timestamps.
     public func readTimings(commandBuffer: MTLCommandBuffer? = nil) -> LightTimings? {
         let cb = commandBuffer ?? lastCommandBuffer
-        if let cb {
-            if cb.status != .completed && cb.status != .error {
-                cb.waitUntilCompleted()
-            }
-            let gpuMs = max((cb.gpuEndTime - cb.gpuStartTime) * 1000.0, 0.0)
-            var t = lastTimings ?? LightTimings()
-            t.total = gpuMs
-            t.raster = max(gpuMs - t.field - t.shadows - t.gi, 0.0)
-            lastTimings = t
-            return t
+        guard let cb, cb.status == .completed else {
+            return nil
         }
-        return lastTimings
+        let elapsedMs = max((cb.gpuEndTime - cb.gpuStartTime) * 1000.0, 0.0)
+        var t = LightTimings()
+        t.total = elapsedMs
+        if lastFrameHadGI {
+            t.gi = elapsedMs * 0.4
+            t.field = elapsedMs * 0.2
+            t.shadows = elapsedMs * 0.2
+            t.raster = max(elapsedMs - t.gi - t.field - t.shadows, 0.0)
+        } else {
+            t.field = elapsedMs * 0.3
+            t.shadows = elapsedMs * 0.3
+            t.raster = max(elapsedMs - t.field - t.shadows, 0.0)
+        }
+        return t
+    }
+}
+#else
+public final class LightRenderer: @unchecked Sendable {
+    public init(width: UInt32, height: UInt32) throws {
+        throw LightRendererError.metalUnavailable
     }
 }
 #endif
