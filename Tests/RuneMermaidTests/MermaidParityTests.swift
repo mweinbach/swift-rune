@@ -697,4 +697,125 @@ struct MermaidParityTests {
             #expect(req.edges.count == 1 && req.edges[0].from == 1 && req.edges[0].to == 0)
         } else { Issue.record("Expected requirement") }
     }
+
+    // MARK: - El Parity Hooks (Hover Groups, ClipFade, EnterDelay, Origin, A11yHidden)
+
+    private func collectEls<State>(_ root: El<State>) -> [El<State>] {
+        var out = [root]
+        for child in root.children {
+            out.append(contentsOf: collectEls(child))
+        }
+        return out
+    }
+
+    @Test("rendered hover spots use hoverGroup, groupOpacity, instantChanges, lit shapes/labels, and hover(.off) omits them")
+    func mermaidHoverSpotsRenderInElAndOffEmitsNone() {
+        let src = "flowchart TD\nA -->|go| B"
+        let litColor = Color(r: 1.0, g: 0.0, b: 0.0)
+        let sOn = scene(src, paint: dark, hover: (.edges, litColor))!
+        let elOn: El<Int> = sOn.el(paint: dark, streaming: false)
+        let nodesOn = collectEls(elOn)
+        let hoverEls = nodesOn.filter { $0.keyId?.starts(with: "hover:") == true }
+        #expect(!hoverEls.isEmpty)
+        for spot in hoverEls {
+            #expect(spot.isHoverGroup)
+            #expect(spot.isA11yHidden)
+            #expect(spot.transition == Transition.none)
+            let glow = spot.children.first
+            #expect(glow != nil)
+            if let glow {
+                #expect(glow.origin == .zero)
+                #expect(glow.scale == Vec2(sOn.scale, sOn.scale))
+                #expect(glow.groupOpacity?.rest == 0.0)
+                #expect(glow.groupOpacity?.hovered == 1.0)
+                #expect(glow.hasInstantChanges)
+                #expect(!glow.shapes.isEmpty)
+            }
+        }
+        // Streaming mode attaches removal opacity exit transition to hover spots
+        let elStreamOn: El<Int> = sOn.el(paint: dark, streaming: true)
+        let streamHoverEls = collectEls(elStreamOn).filter { $0.keyId?.starts(with: "hover:") == true }
+        #expect(!streamHoverEls.isEmpty)
+        for spot in streamHoverEls {
+            #expect(spot.transition?.insertion == .identity)
+            #expect(spot.transition?.removal.zeroOpacity == 0)
+        }
+        // At least one hover glow includes the lit edge label "go" in litColor with key "t<idx>" and Transition.none
+        let glowLabels = hoverEls.flatMap { $0.children }.flatMap { $0.children }
+        #expect(glowLabels.contains {
+            $0.plainText == "go" && $0.textColor == litColor && $0.keyId?.hasPrefix("t") == true && $0.transition == Transition.none
+        })
+
+        // Verify Runtime actually lights up hover group shapes when pointer moves onto a spot
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(600, 400)) { _, _ in
+            sOn.el(paint: dark, streaming: false)
+        }
+        let isRedLit: (SIMD4<Float>) -> Bool = { $0.x > 0.9 && $0.y < 0.1 && $0.z < 0.1 }
+        let restScene = rt.frame(at: 0)
+        let restVisibleLit = restScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.05 }
+        #expect(restVisibleLit.isEmpty)
+
+        // Move pointer to the first hover spot's center (rt.find locates keyed hover El)
+        if let firstSpotKey = hoverEls.first?.keyId, let center = rt.find(firstSpotKey) {
+            rt.pointerMove(to: center, at: 0.1)
+            let hoveredScene = rt.frame(at: 0.1)
+            let hoveredVisibleLit = hoveredScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.9 }
+            #expect(!hoveredVisibleLit.isEmpty)
+        } else {
+            Issue.record("Expected hover spot keyId to be locatable in Runtime")
+        }
+
+        let sOff = scene(src, paint: dark, hover: nil)!
+        let elOff: El<Int> = sOff.el(paint: dark, streaming: false)
+        let hoverElsOff = collectEls(elOff).filter { $0.keyId?.starts(with: "hover:") == true }
+        #expect(hoverElsOff.isEmpty)
+    }
+
+    @Test("card uses clipRounded(6) and adds horizontal clipFade only when diagram exceeds room")
+    func mermaidWideDiagramClipFadeAndRoundedClip() {
+        let narrow = scene("flowchart TD\nA --> B", paint: dark, hover: nil)!
+        let narrowEl: El<Int> = narrow.el(paint: dark, streaming: false)
+        #expect(narrowEl.clipRadius == 6.0)
+        #expect(narrowEl.clipFade == nil)
+
+        var wideSeq = "sequenceDiagram\n"
+        for i in 0..<14 {
+            wideSeq += "  participant P\(i) as Participant_\(i)\n"
+        }
+        wideSeq += "  P0->>P13: cross\n"
+        let wide = scene(wideSeq, paint: dark, hover: nil)!
+        #expect(wide.size.x > Canvas.room(for: dark) + 0.5)
+        let wideEl: El<Int> = wide.el(paint: dark, streaming: false)
+        #expect(wideEl.clipRadius == 6.0)
+        #expect(wideEl.clipFade == SIMD4<Float>(CanvasConstants.cardPad, 0, CanvasConstants.cardPad, 0))
+    }
+
+    @Test("streaming edge labels carry origin(0,0) and enterDelay(0.12); pieces are a11yHidden")
+    func mermaidStreamingLabelEnterDelayAndPieceA11yHidden() {
+        let s = scene("flowchart TD\nA -->|edge label| B", paint: dark, hover: nil)!
+        let streamEl: El<Int> = s.el(paint: dark, streaming: true)
+        let streamNodes = collectEls(streamEl)
+
+        let pieceNodes = streamNodes.filter {
+            let k = $0.keyId ?? ""
+            return k.hasPrefix("p:") || k.hasPrefix("n:") || k.hasPrefix("e:")
+        }
+        #expect(!pieceNodes.isEmpty)
+        for p in pieceNodes where !p.shapes.isEmpty {
+            #expect(p.isA11yHidden)
+            #expect(p.role == .image)
+        }
+
+        let streamEdgeLabel = streamNodes.first { $0.plainText == "edge label" && $0.keyId == "e:A>B.t0" }
+        #expect(streamEdgeLabel != nil)
+        #expect(streamEdgeLabel?.origin == .zero)
+        #expect(streamEdgeLabel?.scale == Vec2(s.scale, s.scale))
+        #expect(abs((streamEdgeLabel?.enterDelay ?? 0) - 0.12) < 0.001)
+
+        let staticEl: El<Int> = s.el(paint: dark, streaming: false)
+        let staticEdgeLabel = collectEls(staticEl).first { $0.plainText == "edge label" && $0.keyId == "e:A>B.t0" }
+        #expect(staticEdgeLabel?.origin == .zero)
+        #expect(staticEdgeLabel?.enterDelay == 0)
+    }
 }

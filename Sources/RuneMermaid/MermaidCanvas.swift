@@ -367,9 +367,12 @@ struct MermaidScene: @unchecked Sendable {
             .rounded(6.0)
             .bg(paint.surface)
             .border(0.5, paint.surfaceBorder)
-            .clip(true)
+            .clipRounded(6.0)
             .animateLayout()
             .transition(still(.opacity))
+        if size.x > Canvas.room(for: paint) + 0.5 {
+            card = card.clipFade(left: CanvasConstants.cardPad, top: 0, right: CanvasConstants.cardPad, bottom: 0)
+        }
         if let titleEl: El<State> = makeTitleEl(paint: paint, streaming: streaming) {
             card = card.gap(CanvasConstants.titleGap).child(titleEl)
         }
@@ -403,7 +406,7 @@ struct MermaidScene: @unchecked Sendable {
         var body = Rune.el() as El<State>
         body = body.key("fit").absolute(x: 0, y: 0).size(size.x, size.y).transition(.none)
         for p in pieces {
-            body = body.child(p.el(streaming: streaming, scale: scale))
+            body = body.child(p.el(streaming: streaming, scale: scale).a11yHidden())
         }
         func makeLabel(_ l: CanvasLabel, color: Color) -> El<State> {
             var t = text(l.text) as El<State>
@@ -412,14 +415,56 @@ struct MermaidScene: @unchecked Sendable {
             return t
         }
         for (l, lk) in zip(labels, labelKeys) {
-            let (enter, _) = lk.kind?.labelEnter ?? (.opacity, 0.0)
-            let t = makeLabel(l, color: l.color)
+            let (enter, delay) = lk.kind?.labelEnter ?? (.opacity, 0.0)
+            var t = makeLabel(l, color: l.color)
                 .absolute(x: 0, y: 0)
                 .offset((l.at.x - 1.0) * scale, l.at.y * scale)
+                .origin(0.0, 0.0)
                 .scale(scale)
                 .key(lk.key)
                 .transition(still(enter))
+            if streaming && delay > 0.0 {
+                t = t.enterDelay(delay)
+            }
             body = body.child(t)
+        }
+        let exit = still(Transition(insertion: .identity, removal: TransitionEffect(zeroOpacity: 0)))
+        for s in hovers {
+            let r = s.rect
+            var glow = (Rune.el() as El<State>)
+                .absolute(x: 0, y: 0)
+                .offset(-r.0 * scale, -r.1 * scale)
+                .size(full.x, full.y)
+                .origin(0.0, 0.0)
+                .scale(scale)
+                .groupOpacity(0.0, 1.0)
+                .instantChanges()
+                .transition(.none)
+            glow.shapes = s.shapes
+            var glowChildren: [El<State>] = []
+            for i in s.labels where i >= 0 && i < labels.count {
+                let l = labels[i]
+                glowChildren.append(
+                    makeLabel(l, color: lit)
+                        .absolute(x: 0, y: 0)
+                        .offset(l.at.x - 1.0, l.at.y)
+                        .key("t\(i)")
+                        .transition(.none)
+                )
+            }
+            if !glowChildren.isEmpty {
+                glow = glow.children(glowChildren)
+            }
+            let spot = (Rune.el() as El<State>)
+                .key(s.key)
+                .absolute(x: 0, y: 0)
+                .offset(r.0 * scale, r.1 * scale)
+                .size(r.2 * scale, r.3 * scale)
+                .hoverGroup()
+                .transition(exit)
+                .child(glow)
+                .a11yHidden()
+            body = body.child(spot)
         }
         return (Rune.el() as El<State>)
             .key("diagram")
