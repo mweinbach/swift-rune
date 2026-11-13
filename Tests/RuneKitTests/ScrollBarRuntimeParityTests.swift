@@ -200,10 +200,9 @@ struct ScrollBarRuntimeParityTests {
 
     // 3c. crates/rune-kit/src/scroll_bar/tests.rs:108 (blocked part: 30-frame GLIDE settle exact equality)
     @Test(
-        "Track press settles 30-frame GLIDE exact equality (scroll_bar/tests.rs:108)",
-        .disabled("Blocked on @motion: MotionTokens.GLIDE (0.32s) needs >31 frames to settle exact equality")
+        "Track press settles 30-frame GLIDE exact equality (scroll_bar/tests.rs:108)"
     )
-    func trackPressSettlesThirtyFrameGlideBlockedOnMotion() throws {
+    func trackPressSettlesThirtyFrameGlide() throws {
         func press(jumps: Bool, option: Bool, hold: Int) throws -> Float {
             let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
                 makeView(rows)
@@ -373,10 +372,9 @@ struct ScrollBarRuntimeParityTests {
 
     // 6b. crates/rune-kit/src/scroll_bar/tests.rs:390 (blocked exact bitwise Color == after OKLab liveFill)
     @Test(
-        "Styled thumb exact fill equality (scroll_bar/tests.rs:390)",
-        .disabled("Blocked on @motion: MotionColor OKLab encode/decode introduces ~1e-6 float rounding in Runtime.swift:3644 Color(mc) for Props.FILL")
+        "Styled thumb exact fill equality (scroll_bar/tests.rs:390)"
     )
-    func styledThumbExactFillBlockedOnMotion() throws {
+    func styledThumbExactFill() throws {
         final class Runs: @unchecked Sendable { var count = 0 }
         let runs = Runs()
         let red = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
