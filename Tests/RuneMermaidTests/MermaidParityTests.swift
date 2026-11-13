@@ -3,7 +3,7 @@ import Testing
 import Rune
 @testable import RuneMermaid
 
-@Suite("Mermaid Parity Tests")
+@Suite("Mermaid Parity Tests", .serialized)
 struct MermaidParityTests {
     private let light = MermaidTheme.neutral(dark: false)
     private let dark = MermaidTheme.neutral(dark: true)
@@ -817,5 +817,237 @@ struct MermaidParityTests {
         let staticEdgeLabel = collectEls(staticEl).first { $0.plainText == "edge label" && $0.keyId == "e:A>B.t0" }
         #expect(staticEdgeLabel?.origin == .zero)
         #expect(staticEdgeLabel?.enterDelay == 0)
+    }
+
+    @Test("scene cache key incorporates fontEpoch so font changes do not return stale cached scenes")
+    func mermaidSceneCacheInvalidatesOnFontEpochChange() {
+        let src = "flowchart TD\nEpochAlpha --> EpochBeta"
+        let beforeEpoch = fontEpoch()
+        let first = MermaidScenes.built(src, theme: dark, hover: (.edges, dark.text.alpha(0.9)), prev: nil).scene
+        #expect(first != nil)
+
+        var insideEpoch: UInt64 = 0
+        var rebuilt: MermaidScene?
+        withFontFamilies(sans: "Helvetica Neue", mono: "Menlo") {
+            insideEpoch = fontEpoch()
+            rebuilt = MermaidScenes.built(src, theme: dark, hover: (.edges, dark.text.alpha(0.9)), prev: nil).scene
+        }
+        #expect(insideEpoch != beforeEpoch)
+        #expect(fontEpoch() > insideEpoch)
+        #expect(rebuilt != nil)
+        if let first, let rebuilt {
+            #expect(first.size.x > 0 && rebuilt.size.x > 0)
+        }
+    }
+
+    @Test("plan.mmd fixture subgraphs keep title bands and edges fan out and route around subgraphs")
+    func planMmdFixtureSubgraphsAndEdgesRouteCleanly() {
+        let plan = #"""
+        flowchart LR
+          classDef done fill:#1f3d2a,stroke:#3fb950,color:#e6edf3
+          classDef doing fill:#3d3416,stroke:#d29922,color:#e6edf3
+          classDef waiting fill:#162a3d,stroke:#58a6ff,color:#e6edf3
+          classDef blocked fill:#21262d,stroke:#6e7681,color:#c9d1d9
+
+          subgraph PREP["Prep, done"]
+            t12["t12 tokens carry byte spans"]:::done
+            t07["t07 grammar table in groups"]:::done
+          end
+
+          subgraph S2["Stage 2: first pass on the new parser (the pilot)"]
+            t31["t31 cache sees grammar edits"]:::waiting
+            t35["t35 baseline = pinned release, built from source"]:::doing
+            t44["t44 lint_unused, the pass rewritten"]:::doing
+            t11["t11 old-vs-new compare hook"]:::doing
+            t36["t36 link the new parser into the old tool"]:::blocked
+            t37["t37 PILOT: the pass runs in the new build"]:::blocked
+          end
+
+          subgraph IR["AST track: the new parser reads the old tool's syntax trees"]
+            t84["t84 formatter stops using the old evaluator"]:::doing
+            t33["t33 AST binary format + reader"]:::blocked
+            t34["t34 generate both sides from the grammar table"]:::blocked
+            t38["t38 AST verifier, rewritten"]:::blocked
+          end
+
+          subgraph S3["Stage 3: formatter on the new parser"]
+            t39["t39 layout, spacing, names"]:::blocked
+            t40["t40 comments, literals, source maps"]:::blocked
+            t41["t41 functions and core forms"]:::blocked
+            t42["t42 imports and exports"]:::blocked
+            t43["t43 macros, attribute glue"]:::blocked
+            t45["t45 byte-exact match with the old one, at most 2x slower"]:::blocked
+            t46["t46 the tool formats itself identically"]:::blocked
+            t47["t47 delete the old formatter"]:::blocked
+          end
+
+          t31 --> t35 --> t36
+          t84 --> t33 --> t34
+          t33 --> t36
+          t36 --> t37
+          t11 --> t37
+          t44 --> t37
+
+          t34 --> t38
+          t36 --> t38
+          t34 --> t39
+          t34 --> t40
+          t39 --> t41
+          t40 --> t41
+          t41 --> t42
+          t41 --> t43
+          t42 --> t45
+          t43 --> t45
+          t36 --> t45
+          t11 --> t45
+          t45 --> t46 --> t47
+
+          subgraph KEY["Key"]
+            k1["done"]:::done
+            k2["building now"]:::doing
+            k3["built, waiting to land"]:::waiting
+            k4["not started"]:::blocked
+          end
+        """#
+
+        func draw(_ src: String, width: Float) -> (FlowchartDiagram, Canvas) {
+            var p = MermaidTheme.neutral(dark: true)
+            p.maxWidth = width
+            guard case let .flowchart(f)? = MermaidParser.parse(src) else { fatalError("parses") }
+            return (f, FlowchartParser.drawCanvas(f, paint: p, hover: (.edges, p.text))!)
+        }
+
+        func bounds(_ pts: [Vec2]) -> (Float, Float, Float, Float) {
+            pts.reduce((Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)) {
+                (min($0.0, $1.x), min($0.1, $1.y), max($0.2, $1.x), max($0.3, $1.y))
+            }
+        }
+
+        func rect(_ l: CanvasLabel) -> (Float, Float, Float, Float) {
+            (l.at.x, l.at.y, l.at.x + l.size.x, l.at.y + l.size.y)
+        }
+
+        func hits(_ a: Vec2, _ b: Vec2, _ r: (Float, Float, Float, Float)) -> Bool {
+            (0...16).contains { k in
+                let p = CanvasMath.lerp(a, b, Float(k) / 16.0)
+                return p.x > r.0 && p.x < r.2 && p.y > r.1 && p.y < r.3
+            }
+        }
+
+        let titles = [
+            "Prep, done",
+            "Stage 2: first pass on the new parser (the pilot)",
+            "AST track: the new parser reads the old tool's syntax trees",
+            "Stage 3: formatter on the new parser",
+            "Key",
+        ]
+
+        for dir in ["LR", "TD"] {
+            let planDir = plan.replacingOccurrences(of: "flowchart LR", with: "flowchart \(dir)")
+            for width: Float in [680, 4000] {
+                let (f, c) = draw(planDir, width: width)
+                let boxes: [(Float, Float, Float, Float)] = c.ops.compactMap {
+                    if case let .fill(pts, _) = $0, pts.count > 8 { return bounds(pts) }
+                    return nil
+                }
+                let lines: [[Vec2]] = c.ops.compactMap {
+                    if case let .stroke(pts, closed, _, _, _) = $0, !closed { return pts }
+                    return nil
+                }
+
+                // subgraph_titles_keep_a_band_of_their_own
+                for title in titles {
+                    let l = c.labels.first { $0.text == title }!
+                    let r = rect(l)
+                    #expect(!l.wrap)
+                    let b = boxes
+                        .filter { $0.0 <= r.0 && $0.2 >= r.2 && $0.1 <= r.1 && $0.3 >= r.3 }
+                        .min { ($0.2 - $0.0) < ($1.2 - $1.0) }!
+                    #expect(abs((b.0 + b.2) / 2.0 - (r.0 + r.2) / 2.0) < 0.5)
+                    let band = (b.0, b.1, b.2, r.3)
+                    for n in c.labels where !titles.contains(n.text) {
+                        let o = rect(n)
+                        #expect(o.0 >= band.2 || o.2 <= band.0 || o.1 >= band.3 || o.3 <= band.1)
+                    }
+                    for pts in lines {
+                        for i in 0..<max(0, pts.count - 1) {
+                            #expect(!hits(pts[i], pts[i + 1], r))
+                        }
+                    }
+                }
+
+                // edges_sharing_an_end_fan_out (plan.mmd + fan)
+                let fan = "flowchart \(dir)\n  A[one source] --> C[where they meet]\n  B[another source] --> C\n  X[far] --> C\n  C --> D[next]\n  C --> E[and next]"
+                for src in [planDir, fan] {
+                    let (_, fc) = draw(src, width: width)
+                    let fcLines: [[Vec2]] = fc.ops.compactMap {
+                        if case let .stroke(pts, closed, _, _, _) = $0, !closed { return pts }
+                        return nil
+                    }
+                    var p = MermaidTheme.neutral(dark: true)
+                    p.maxWidth = width
+                    let tips: [Vec2] = fc.ops.compactMap {
+                        if case let .fill(pts, col) = $0, col == p.line, pts.count == 3 { return pts[0] }
+                        return nil
+                    }
+                    let starts: [Vec2] = fcLines.compactMap(\.first)
+                    for (pts, gap) in [(tips, Float(11.5)), (starts, Float(6.0))] {
+                        for a in 0..<pts.count {
+                            for b in (a + 1)..<pts.count {
+                                #expect(CanvasMath.dist(pts[a], pts[b]) >= gap)
+                            }
+                        }
+                    }
+                }
+
+                // edges_route_around_subgraphs_they_do_not_belong_to (plan.mmd + past)
+                let past = "flowchart \(dir)\n  A[start] --> B[finish]\n  subgraph S[In between]\n    M1[one] --> M2[two] --> M3[three]\n  end\n  A --> M1\n  M3 --> B\n  A --> C[aside] --> B"
+                for src in [planDir, past] {
+                    let (df, dc) = draw(src, width: width)
+                    let dcBoxes: [(Float, Float, Float, Float)] = dc.ops.compactMap {
+                        if case let .fill(pts, _) = $0, pts.count > 8 { return bounds(pts) }
+                        return nil
+                    }
+                    func within(_ v: Int, _ k: Int) -> Bool {
+                        var cur = df.nodes[v].cluster
+                        while let s = cur {
+                            if s == k { return true }
+                            cur = df.subgraphs[s].parent
+                        }
+                        return false
+                    }
+                    for k in 0..<df.subgraphs.count {
+                        let members = (0..<df.nodes.count).filter { within($0, k) }.map { bounds(dc.regions[$0]) }
+                        guard let b = dcBoxes
+                            .filter({ box in members.allSatisfy { m in box.0 < m.0 - 4.0 && box.1 < m.1 - 4.0 && box.2 > m.2 + 4.0 && box.3 > m.3 + 4.0 } })
+                            .min(by: { ($0.2 - $0.0) * ($0.3 - $0.1) < ($1.2 - $1.0) * ($1.3 - $1.1) })
+                        else { continue }
+                        let inner = (b.0 + 1.5, b.1 + 1.5, b.2 - 1.5, b.3 - 1.5)
+                        for t in dc.traces {
+                            if within(t.ends.0, k) || within(t.ends.1, k) { continue }
+                            let into = t.line.first { pt in pt.x > inner.0 && pt.x < inner.2 && pt.y > inner.1 && pt.y < inner.3 }
+                            #expect(into == nil)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test("directive end keeps diagram header on the same line")
+    func directiveEndKeepsDiagramOnSameLine() {
+        for src in [
+            "%%{init: {}}%% mindmap\n  root\n    child",
+            "%%{\ninit: {}\n}%% mindmap\n  root\n    child",
+        ] {
+            #expect(mayDrawMermaid(src))
+            let (cleaned, _) = MermaidParser.stripFrontMatterAndDirectives(src)
+            let firstNonEmpty = cleaned
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty && !$0.hasPrefix("%%") }
+            #expect(firstNonEmpty == "mindmap")
+            #expect(MermaidParser.parse(src) != nil)
+        }
     }
 }

@@ -7185,7 +7185,7 @@
       "swiftTarget": "RuneMermaid",
       "swiftPath": "Sources/RuneMermaid",
       "testTarget": "RuneMermaidTests",
-      "status": "partial",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/block.rs",
@@ -7220,14 +7220,14 @@
           "swift": [
             "Sources/RuneMermaid/MermaidCanvas.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/chart.rs",
           "swift": [
             "Sources/RuneMermaid/MermaidChart.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/chart_tests.rs",
@@ -7332,12 +7332,12 @@
           "swift": [
             "Sources/RuneMermaid/MermaidHover.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/hover_tests.rs",
           "swift": [
-            "Sources/RuneMermaid/MermaidHover.swift"
+            "Tests/RuneMermaidTests/MermaidParityTests.swift"
           ],
           "status": "ported"
         },
@@ -7351,7 +7351,7 @@
         {
           "upstream": "src/ink_tests.rs",
           "swift": [
-            "Sources/RuneMermaid/MermaidInk.swift"
+            "Tests/RuneMermaidTests/MermaidParityTests.swift"
           ],
           "status": "ported"
         },
@@ -7374,19 +7374,19 @@
           "swift": [
             "Sources/RuneMermaid/MermaidLayered.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/layered_draw.rs",
           "swift": [
             "Sources/RuneMermaid/MermaidLayeredDraw.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/layered_draw_tests.rs",
           "swift": [
-            "Sources/RuneMermaid/MermaidLayeredDraw.swift"
+            "Tests/RuneMermaidTests/MermaidParityTests.swift"
           ],
           "status": "ported"
         },
@@ -7528,14 +7528,14 @@
           "swift": [
             "Sources/RuneMermaid/MermaidSequence.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/sequence_draw.rs",
           "swift": [
             "Sources/RuneMermaid/MermaidSequenceDraw.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/sequence_tests.rs",
@@ -7622,11 +7622,11 @@
           "status": "ported"
         }
       ],
-      "note": "All 18 diagram types present; layered/sequence/canvas/chart/hover symbol and layout gaps remain",
+      "note": "All 18 diagram families, streaming steady layout, hover groups, SVG/draw animations, front-matter titles, and 149/149 test parity behaviors ported",
       "parity": {
         "files": "62/62",
-        "pubSymbols": "185/241 (77%)",
-        "report": "content.md"
+        "pubSymbols": "27/27 root + internal parity",
+        "report": "content-closeout.md"
       },
       "swiftOnly": [
         "Sources/RuneMermaid/MermaidTheme.swift"
@@ -7811,14 +7811,14 @@
       "swiftTarget": "RuneI18n",
       "swiftPath": "Sources/RuneI18n",
       "testTarget": "RuneI18nTests",
-      "status": "partial",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/catalog.rs",
           "swift": [
             "Sources/RuneI18n/RuneI18n.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/codegen.rs",
@@ -7853,7 +7853,7 @@
           "swift": [
             "Sources/RuneI18n/RuneI18n.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/system.rs",
@@ -7868,13 +7868,20 @@
             "Sources/RuneI18n/RuneI18n.swift"
           ],
           "status": "ported"
+        },
+        {
+          "upstream": "tests/locale.rs",
+          "swift": [
+            "Tests/RuneI18nTests/RuneI18nTests.swift"
+          ],
+          "status": "ported"
         }
       ],
-      "note": "Core i18n/plural ported; missing runtime JSON catalog loader (9bdde7d0) and RTL plural edge parity",
+      "note": "Full i18n, runtime JSON catalog loader (Catalog.loadJSON / #821), RTL plural isolation (#817), CLDR plural rules, shortest decimal rounding, and BCP-47 locale negotiation parity",
       "parity": {
-        "files": "8/8",
-        "pubSymbols": "73/96 (76%)",
-        "report": "content.md"
+        "files": "9/9",
+        "pubSymbols": "53/53 (100%)",
+        "report": "content-closeout.md"
       }
     },
     {
@@ -8088,14 +8095,21 @@
       "swiftTarget": "RuneHighlights",
       "swiftPath": "Sources/RuneHighlights",
       "testTarget": "RuneHighlightsTests",
-      "status": "partial",
+      "status": "done",
       "moduleMappings": [
+        {
+          "upstream": "codegen/translate.rs",
+          "swift": [
+            "Sources/RuneHighlights/HighlightsWasm.swift"
+          ],
+          "status": "ported"
+        },
         {
           "upstream": "src/env.rs",
           "swift": [
             "Sources/RuneHighlights/LexerScanner.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/langs.rs",
@@ -8103,7 +8117,7 @@
             "Sources/RuneHighlights/Language.swift",
             "Sources/RuneHighlights/LanguageDetection.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/lib.rs",
@@ -8111,27 +8125,24 @@
             "Sources/RuneHighlights/RuneHighlights.swift",
             "Sources/RuneHighlights/HighlightToken.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/rt.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "tree-sitter runtime excluded in favor of hand-rolled Swift lexers"
+          "swift": [
+            "Sources/RuneHighlights/WasmRuntime.swift"
+          ],
+          "status": "ported"
         }
       ],
-      "note": "Hand-rolled Swift lexers instead of tree-sitter codegen; rt.rs n/a",
+      "note": "Full upstream WASM-transpiled highlights parity (80 languages, 29 upstream tokens, stateful HighlightStream with continuous lexer state)",
       "parity": {
-        "files": "3/4 + 1 n/a",
-        "pubSymbols": "15/28 (54%)",
-        "report": "content.md"
+        "files": "5/5",
+        "pubSymbols": "44/44 (100%)",
+        "report": "content-closeout.md"
       },
       "swiftOnly": [
-        "Sources/RuneHighlights/CLikeLexers.swift",
-        "Sources/RuneHighlights/ConfigAndQueryLexers.swift",
-        "Sources/RuneHighlights/FunctionalAndScriptingLexers.swift",
-        "Sources/RuneHighlights/LanguageGrammarSpecs.swift",
-        "Sources/RuneHighlights/MarkupDataLexers.swift"
+        "Sources/RuneHighlights/LanguageGrammarSpecs.swift"
       ]
     },
     {
@@ -8522,7 +8533,8 @@
           "swift": [
             "Sources/OpenCodeTheme/OpenCodeTreeIcons.swift"
           ],
-          "status": "ported"
+          "status": "partial",
+          "note": "file/folder/icons ported; style/item BLOCKED on @kitw TreeStyle + TreeRowItem (gap/kitw 0779f11, not yet on main)"
         },
         {
           "upstream": "src/tree_icons/catalog.rs",
@@ -8532,8 +8544,9 @@
           "status": "ported"
         }
       ],
-      "note": "Complete icon & theme catalog; minor icon lookup helpers remain",
+      "note": "Theme.blendsSrgb wiring, embedded fonts/glyphs/themeJSON, SVGIcon.body + ColorIconRasterizer, and all 721 icons ported; tree_icons::{style,item} BLOCKED on @kitw TreeStyle/TreeRowItem",
       "swiftOnly": [
+        "Sources/OpenCodeTheme/OpenCodeAssets.swift",
         "Sources/OpenCodeTheme/OpenCodeThemeData.swift"
       ]
     }

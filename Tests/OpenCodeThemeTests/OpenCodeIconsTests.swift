@@ -1,4 +1,5 @@
 import Testing
+import Rune
 @testable import OpenCodeTheme
 
 @Suite("OpenCode Icons Parity Tests")
@@ -51,5 +52,35 @@ struct OpenCodeIconsTests {
         let swiftTreeIcon = OpenCodeTreeIcons.file("Sources/main.swift")
         #expect(!swiftTreeIcon.data.body.isEmpty)
         #expect(swiftTreeIcon.color(dark: true).a > 0)
+    }
+
+    @Test func multiColorIconsCarryBodyAndRasterizeAndNewIconResolvesByValue() {
+        let rustIcon = OpenCodeFileIcons.file("main.rs")
+        let vscodeIcon = OpenCodeAppIcons.named("vscode")
+        let ai302Icon = OpenCodeProviderIcons.named("302ai")
+
+        #expect(rustIcon.body != nil)
+        #expect(vscodeIcon?.body != nil)
+        #expect(ai302Icon?.body != nil)
+        #expect(vscodeIcon?.isColorIcon == true || ai302Icon?.isColorIcon == true)
+
+        let rasterizer = ColorIconRasterizer()
+        if let ai = ai302Icon, ai.isColorIcon {
+            let img = rasterizer.rasterize(ai, pixelSize: 32)
+            #expect(img != nil)
+            #expect(img?.width == 32 && img?.height == 32)
+            #expect((img?.mips.first?.rgba.contains(where: { $0 != 0 }) ?? false))
+        }
+        if let vs = vscodeIcon, vs.isColorIcon {
+            let img = rasterizer.rasterize(vs, pixelSize: 32)
+            #expect(img != nil)
+            #expect((img?.mips.first?.rgba.contains(where: { $0 != 0 }) ?? false))
+        }
+
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.check)?.svgIcon == OpenCodeNewIcons.check)
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeNewIcons.check)?.name == "check")
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.flask) == nil)
+        #expect(OpenCodeIcons.copy.body != nil)
+        #expect(OpenCodeTreeIcons.file("Sources/main.swift").icon.body != nil)
     }
 }

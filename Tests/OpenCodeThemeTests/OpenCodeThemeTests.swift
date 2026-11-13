@@ -133,4 +133,29 @@ struct OpenCodeThemeTests {
             _ = OpenCodeTheme.scale("unknown", dark: true, step: 5)
         }
     }
+
+    @Test func ambientThemeAndKitFollowThemeWithBlend() {
+        Theme.withBlend(true) {
+            for dark in [false, true] {
+                let k = OpenCodeTheme.kit(dark: dark)
+                let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"]
+                #expect(k.c.hover == authored)
+                #expect(OpenCodeTheme.color("v2-overlay-simple-overlay-hover", dark: dark) == authored)
+                let sh = OpenCodeTheme.shadows("v2-elevation-floating", dark: dark)
+                #expect(sh == OpenCodeTheme.shadows("v2-elevation-floating", dark: dark, srgbBlend: true))
+            }
+        }
+        Theme.withBlend(false) {
+            for dark in [false, true] {
+                let k = OpenCodeTheme.kit(dark: dark)
+                let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"]
+                if let authored {
+                    #expect(k.c.hover == authored.srgbEquivalent(over: k.c.bgBase))
+                    #expect(OpenCodeTheme.color("v2-overlay-simple-overlay-hover", dark: dark) == authored.srgbEquivalent(over: k.c.bgBase))
+                }
+                let sh = OpenCodeTheme.shadows("v2-elevation-floating", dark: dark)
+                #expect(sh == OpenCodeTheme.shadows("v2-elevation-floating", dark: dark, srgbBlend: false))
+            }
+        }
+    }
 }
