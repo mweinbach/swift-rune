@@ -228,41 +228,218 @@ public final class MemoCache: @unchecked Sendable {
         var deps: Any
         var equals: (Any) -> Bool
         var srgbBlend: Bool
+        var envHash: UInt64
+        var reads: [MemoRead]
+        var nestedIds: [String]
+        var passBuilt: UInt64
         var element: Any
     }
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
     private var generation: UInt64 = 0
+    private var passCounter: UInt64 = 1
+    private var viewReads: [MemoRead] = []
+    private var viewReadsPass: UInt64 = 0
 
     public init() {}
+
+    @discardableResult
+    public func advancePass() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        passCounter &+= 1
+        return passCounter
+    }
+
+    /// Marks cached entries so the next build re-verifies against a new pass (`memo::as_next_build`).
+    @discardableResult
+    public func asNextBuild() -> UInt64 {
+        advancePass()
+    }
+
+    /// Evicts entries not touched or built since `minPass` (`memo::keep_since`).
+    public func keepSince(_ minPass: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.filter { $0.value.passBuilt >= minPass }
+    }
 
     public func getOrBuild<State, Deps: Equatable>(
         id: String,
         deps: Deps,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
+        getOrBuildMemo(rawId: id, deps: deps, ignoreDuplicateGuard: true, build: build)
+    }
+
+    func getOrBuildMemo<State, Deps: Equatable>(
+        rawId: String,
+        deps: Deps,
+        ignoreDuplicateGuard: Bool = false,
+        build: () -> El<State>
+    ) -> (element: El<State>, hit: Bool) {
         let srgb = Theme.blendsSrgb()
+        let scope = MemoScope.current
+        let scopedId = scope?.scopedId(for: rawId) ?? rawId
+        let env = scope?.envHash ?? MemoScope.activeEnvHash
+        let curGeometry = scope?.geometry ?? [:]
+
+        // Same-pass duplicate memo IDs bypass caching (`memo.rs:1067`).
+        if !ignoreDuplicateGuard, let scope {
+            if !scope.seenScopedIds.insert(scopedId).inserted {
+                let built = build()
+                return (built, false)
+            }
+        }
+
         lock.lock()
-        if let existing = entries[id],
+        if var existing = entries[scopedId],
            existing.srgbBlend == srgb,
+           existing.envHash == env,
            existing.equals(deps),
+           existing.reads.allSatisfy({ $0.matches(curGeometry) }),
            let cached = existing.element as? El<State> {
+            let pass = scope?.pass ?? passCounter
+            existing.passBuilt = pass
+            entries[scopedId] = existing
+            markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            let recordedReads = existing.reads
             lock.unlock()
+            for r in recordedReads { scope?.record(r) }
+            scope?.recordNested(scopedId)
             return (cached, true)
         }
         lock.unlock()
 
+        scope?.prefixStack.append(rawId)
+        scope?.readFrames.append([])
+        scope?.nestedFrames.append([])
         let built = build()
+        let capturedReads = scope?.readFrames.popLast() ?? []
+        let capturedNested = scope?.nestedFrames.popLast() ?? []
+        _ = scope?.prefixStack.popLast()
+
+        let pass = scope?.pass ?? passCounter
         lock.lock()
-        entries[id] = Entry(
+        entries[scopedId] = Entry(
             deps: deps,
             equals: { other in (other as? Deps) == deps },
             srgbBlend: srgb,
+            envHash: env,
+            reads: capturedReads,
+            nestedIds: capturedNested,
+            passBuilt: pass,
             element: built
         )
         lock.unlock()
+        for r in capturedReads { scope?.record(r) }
+        scope?.recordNested(scopedId)
         return (built, false)
+    }
+
+    func getOrBuildRegion<State, Inputs: Equatable>(
+        rawId: String,
+        inputs: Inputs,
+        build: () -> El<State>
+    ) -> (element: El<State>, hit: Bool) {
+        let srgb = Theme.blendsSrgb()
+        let scope = MemoScope.current
+        let scopedId = "region:\(scope?.scopedId(for: rawId) ?? rawId)"
+        let env = scope?.envHash ?? MemoScope.activeEnvHash
+        let curGeometry = scope?.geometry ?? [:]
+
+        lock.lock()
+        if var existing = entries[scopedId],
+           existing.srgbBlend == srgb,
+           existing.envHash == env,
+           existing.equals(inputs),
+           existing.reads.allSatisfy({ $0.matches(curGeometry) }),
+           let cached = existing.element as? El<State> {
+            let pass = scope?.pass ?? passCounter
+            existing.passBuilt = pass
+            entries[scopedId] = existing
+            markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            let recordedReads = existing.reads
+            lock.unlock()
+            for r in recordedReads { scope?.record(r) }
+            scope?.recordNested(scopedId)
+            MemoRegionWarningsStore.recordIfMismatch(id: rawId, reused: cached, rebuild: build)
+            return (cached, true)
+        }
+        lock.unlock()
+
+        TrackedRecorder.lock.lock()
+        TrackedRecorder.stack.append([:])
+        TrackedRecorder.lock.unlock()
+        scope?.prefixStack.append("region:\(rawId)")
+        scope?.readFrames.append([])
+        scope?.nestedFrames.append([])
+
+        let built = build()
+
+        TrackedRecorder.lock.lock()
+        let trackedDeps = TrackedRecorder.stack.popLast() ?? [:]
+        TrackedRecorder.lock.unlock()
+        var capturedReads = scope?.readFrames.popLast() ?? []
+        let capturedNested = scope?.nestedFrames.popLast() ?? []
+        _ = scope?.prefixStack.popLast()
+
+        for (cellId, ver) in trackedDeps {
+            capturedReads.append(.tracked(cellId: cellId, version: ver))
+        }
+
+        let pass = scope?.pass ?? passCounter
+        lock.lock()
+        entries[scopedId] = Entry(
+            deps: inputs,
+            equals: { other in (other as? Inputs) == inputs },
+            srgbBlend: srgb,
+            envHash: env,
+            reads: capturedReads,
+            nestedIds: capturedNested,
+            passBuilt: pass,
+            element: built
+        )
+        lock.unlock()
+        for r in capturedReads { scope?.record(r) }
+        scope?.recordNested(scopedId)
+        return (built, false)
+    }
+
+    private func markNestedTouchedLocked(_ nestedIds: [String], pass: UInt64) {
+        var queue = nestedIds
+        var visited: Set<String> = []
+        while let nid = queue.popLast() {
+            guard visited.insert(nid).inserted, var child = entries[nid] else { continue }
+            child.passBuilt = pass
+            entries[nid] = child
+            queue.append(contentsOf: child.nestedIds)
+        }
+    }
+
+    /// Returns `true` if any cached entry from the most recent pass read layout/caret geometry that differs in `geometry`.
+    func setViewReads(_ reads: [MemoRead], pass: UInt64) {
+        lock.lock()
+        viewReads = reads
+        viewReadsPass = pass
+        lock.unlock()
+    }
+
+    public func hasInvalidatedReads(against geometry: [String: MemoElementGeometry]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if viewReadsPass == passCounter {
+            for r in viewReads where !r.matches(geometry) {
+                return true
+            }
+        }
+        for (_, entry) in entries where entry.passBuilt == passCounter {
+            for r in entry.reads where !r.matches(geometry) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Drops all cached subtrees (e.g. on hot reload or theme change).
@@ -270,13 +447,32 @@ public final class MemoCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         entries.removeAll()
+        viewReads.removeAll()
         generation &+= 1
+    }
+
+    /// Alias matching `memo::MemoCache::clear`.
+    public func clear() {
+        invalidateAll()
     }
 
     public func invalidate(id: String) {
         lock.lock()
         defer { lock.unlock() }
         entries.removeValue(forKey: id)
+    }
+
+    /// Removes all cached entries matching `prefix` or nested under `prefix/` or `region:prefix`.
+    public func evictPrefix(_ prefix: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = entries.filter { key, _ in
+            let matchesDirect = key == prefix || key.hasPrefix(prefix + "/") || key.hasPrefix(prefix)
+            let regionPref = "region:\(prefix)"
+            let matchesRegion = key == regionPref || key.hasPrefix(regionPref + "/")
+            return !(matchesDirect || matchesRegion)
+        }
+        generation &+= 1
     }
 
     public var currentGeneration: UInt64 {
@@ -292,12 +488,12 @@ public final class MemoCache: @unchecked Sendable {
         defer { lock.unlock() }
         guard let existing = entries["region:\(id)"],
               existing.srgbBlend == srgb,
-              let deps = existing.deps as? [UInt32: UInt64],
               let cached = existing.element as? El<State> else {
             return nil
         }
-        for (cellId, recordedVer) in deps {
-            if TrackedIDGenerator.version(for: cellId) != recordedVer {
+        for r in existing.reads {
+            if case .tracked(let cellId, let recordedVer) = r,
+               TrackedIDGenerator.version(for: cellId) != recordedVer {
                 return nil
             }
         }
@@ -309,10 +505,21 @@ public final class MemoCache: @unchecked Sendable {
 public func memo<State, Deps: Equatable>(
     _ id: String,
     deps: Deps,
-    cache: MemoCache = .shared,
+    cache: MemoCache? = nil,
     build: () -> El<State>
 ) -> El<State> {
-    cache.getOrBuild(id: id, deps: deps, build: build).element
+    let target = cache ?? MemoScope.activeCache ?? .shared
+    return target.getOrBuildMemo(rawId: id, deps: deps, build: build).element
+}
+
+/// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.
+public func memo<State, Deps: Equatable>(
+    _ id: String,
+    _ deps: Deps,
+    cache: MemoCache? = nil,
+    build: () -> El<State>
+) -> El<State> {
+    memo(id, deps: deps, cache: cache, build: build)
 }
 
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)
@@ -420,24 +627,22 @@ public final class Tracked<T>: @unchecked Sendable {
 /// Builds and caches a region based on the `Tracked` values read during its build (`rune::region`).
 public func region<State>(
     _ id: String,
-    cache: MemoCache = .shared,
+    cache: MemoCache? = nil,
     build: () -> El<State>
 ) -> El<State> {
-    if let cached: El<State> = cache.getRegionIfValid(id: id) {
-        return cached
-    }
+    regionWith(id, inputs: true, cache: cache, build: build)
+}
 
-    TrackedRecorder.lock.lock()
-    TrackedRecorder.stack.append([:])
-    TrackedRecorder.lock.unlock()
-
-    let built = build()
-
-    TrackedRecorder.lock.lock()
-    let deps = TrackedRecorder.stack.popLast() ?? [:]
-    TrackedRecorder.lock.unlock()
-
-    return memo("region:\(id)", deps: deps, cache: cache) { built }
+/// Builds and caches a region keyed by both explicit `inputs` and any `Tracked` reads inside `build` (`rune::memo::region_with`).
+public func regionWith<State, Inputs: Equatable>(
+    _ id: String,
+    inputs: Inputs,
+    cache: MemoCache? = nil,
+    build: () -> El<State>
+) -> El<State> {
+    MemoTrackedBridge.versionProvider = { TrackedIDGenerator.version(for: $0) }
+    let target = cache ?? MemoScope.activeCache ?? .shared
+    return target.getOrBuildRegion(rawId: id, inputs: inputs, build: build).element
 }
 
 // MARK: - Latest-Wins Background Requests (`rune::latest`)
@@ -449,13 +654,46 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
     private var pendingWorkItem: DispatchWorkItem?
     private var latestResult: T?
     private var lastKey: AnyHashable?
+    private var pending: Bool = false
     private var waker: (@Sendable () -> Void)?
     public var debounceSeconds: TimeInterval
 
     private let queue = DispatchQueue(label: "com.rune.latest", qos: .userInitiated, attributes: .concurrent)
 
-    public init(debounceSeconds: TimeInterval = 0) {
+    public init(
+        waker: (@Sendable () -> Void)? = nil,
+        debounceSeconds: TimeInterval = 0
+    ) {
+        self.waker = waker
         self.debounceSeconds = max(0, debounceSeconds)
+    }
+
+    deinit {
+        lock.lock()
+        generation &+= 1
+        pendingWorkItem?.cancel()
+        pendingWorkItem = nil
+        latestResult = nil
+        lastKey = nil
+        pending = false
+        waker = nil
+        lock.unlock()
+    }
+
+    /// Builder-style debounce configuration (`latest.rs: debounce`).
+    @discardableResult
+    public func debounce(_ seconds: TimeInterval) -> Self {
+        lock.lock()
+        debounceSeconds = max(0, seconds)
+        lock.unlock()
+        return self
+    }
+
+    /// Whether a request is waiting out debounce or actively running.
+    public var isPending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending
     }
 
     public func setWaker(_ waker: @escaping @Sendable () -> Void) {
@@ -469,28 +707,19 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
         _ input: Input,
         work: @escaping @Sendable (Input) -> T
     ) {
+        requestOpt(input) { value in
+            work(value)
+        }
+    }
+
+    /// Submits a background task that may settle with `nil` (superseding older answers without waking).
+    public func requestOpt<Input: Sendable>(
+        _ input: Input,
+        work: @escaping @Sendable (Input) -> T?
+    ) {
         lock.lock()
         lastKey = nil
-        pendingWorkItem?.cancel()
-        generation &+= 1
-        let token = generation
-        let delay = debounceSeconds
-        let currentWaker = waker
-
-        let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard self.isCurrent(token) else { return }
-            let result = work(input)
-            self.commitResult(result, for: token, waker: currentWaker)
-        }
-        pendingWorkItem = item
-        lock.unlock()
-
-        if delay > 0 {
-            queue.asyncAfter(deadline: .now() + delay, execute: item)
-        } else {
-            queue.async(execute: item)
-        }
+        enqueueLocked(input, work: work)
     }
 
     /// Submits `work` only if `key` differs from the previous request's key.
@@ -505,17 +734,27 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
             return
         }
         lastKey = wrapped
+        enqueueLocked(key) { value in
+            work(value)
+        }
+    }
+
+    private func enqueueLocked<Input: Sendable>(
+        _ input: Input,
+        work: @escaping @Sendable (Input) -> T?
+    ) {
         pendingWorkItem?.cancel()
         generation &+= 1
         let token = generation
+        latestResult = nil
+        pending = true
         let delay = debounceSeconds
-        let currentWaker = waker
 
         let item = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard self.isCurrent(token) else { return }
-            let result = work(key)
-            self.commitResult(result, for: token, waker: currentWaker)
+            let current = self?.isCurrent(token) ?? false
+            guard current else { return }
+            let result = work(input)
+            self?.commitResult(result, for: token)
         }
         pendingWorkItem = item
         lock.unlock()
@@ -533,16 +772,22 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
         return generation == token
     }
 
-    private func commitResult(_ result: T, for token: UInt64, waker: (@Sendable () -> Void)?) {
+    private func commitResult(_ result: T?, for token: UInt64) {
         lock.lock()
         let accepted = (generation == token)
+        var wake: (@Sendable () -> Void)? = nil
         if accepted {
-            latestResult = result
+            pending = false
+            pendingWorkItem = nil
+            if let value = result {
+                latestResult = value
+                wake = waker
+            } else {
+                latestResult = nil
+            }
         }
         lock.unlock()
-        if accepted {
-            waker?()
-        }
+        wake?()
     }
 
     /// Takes the latest completed result once, returning `nil` if none is ready.
@@ -563,6 +808,7 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
         pendingWorkItem = nil
         latestResult = nil
         lastKey = nil
+        pending = false
     }
 }
 

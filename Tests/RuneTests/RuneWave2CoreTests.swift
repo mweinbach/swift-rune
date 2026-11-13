@@ -199,23 +199,38 @@ struct RuneWave2CoreTests {
         }
         #expect(buildCount == 2)
 
+        clearRegionWarnings()
         let tracked = Tracked("alpha")
         var regionBuilds = 0
-        let _: El<DummyState> = region("r1", cache: cache) {
+        let r1a: El<DummyState> = region("r1", cache: cache) {
             regionBuilds += 1
             return text(tracked.value)
         }
-        let _: El<DummyState> = region("r1", cache: cache) {
+        #expect((cache.getRegionIfValid(id: "r1") as El<DummyState>?) != nil)
+        let r1b: El<DummyState> = region("r1", cache: cache) {
             regionBuilds += 1
             return text(tracked.value)
         }
+        #expect(r1a.plainText == "alpha")
+        #expect(r1b.plainText == "alpha")
+        #expect(regionWarnings().isEmpty)
+        // Upstream `region_with` (memo.rs:791-809) re-runs `build` in debug builds on a hit to detect non-`Tracked` reads.
+        #if DEBUG
+        #expect(regionBuilds == 2)
+        #else
         #expect(regionBuilds == 1)
+        #endif
         tracked.value = "beta"
+        #expect((cache.getRegionIfValid(id: "r1") as El<DummyState>?) == nil)
         let r2: El<DummyState> = region("r1", cache: cache) {
             regionBuilds += 1
             return text(tracked.value)
         }
+        #if DEBUG
+        #expect(regionBuilds == 3)
+        #else
         #expect(regionBuilds == 2)
+        #endif
         #expect(r2.plainText == "beta")
 
         // Latest-wins

@@ -284,6 +284,8 @@ public final class Runtime<State> {
     public let flightRecorder = FlightRecorder()
     public let matchedFlightRegistry = MatchedFlightRegistry()
     public var rewindRecorder: RewindRecorder? = nil
+    public let memo = MemoCache()
+    private let snapshotHistory = MemoSnapshotHistory()
 
     // Input & focus state
     public private(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
@@ -651,10 +653,38 @@ public final class Runtime<State> {
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
-        return buildRefScene(frameOut: frameOut, now: now)
+        let sceneOut = buildRefScene(frameOut: frameOut, now: now)
+        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            needsCommit = true
+        }
+        if rewindRecorder != nil {
+            captureRewindFrame(at: now)
+        }
+        return sceneOut
     }
 
     // MARK: - View Commit, Reconciliation & Layout
+
+    private func currentMemoGeometry() -> [String: MemoElementGeometry] {
+        var caretsByKey: [String: MotionRect] = [:]
+        for el in lastElements {
+            if let k = el.key, let c = el.caret, c.count >= 4 {
+                caretsByKey[k] = MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+            }
+        }
+        var out: [String: MemoElementGeometry] = [:]
+        out.reserveCapacity(flatNodes.count)
+        for node in flatNodes {
+            if let k = node.key {
+                out[k] = MemoElementGeometry(
+                    rect: node.targetRect,
+                    windowRect: node.targetRect,
+                    caretRect: caretsByKey[k]
+                )
+            }
+        }
+        return out
+    }
 
     private func commitTree(at now: Double, cut: Bool) {
         if cut {
@@ -662,6 +692,12 @@ public final class Runtime<State> {
             releasedEnterDelays.removeAll()
             activeFlightIds.removeAll()
         }
+        MemoSnapshot.enter(history: snapshotHistory) {
+            commitTreePass(at: now, cut: cut, settlePass: 0)
+        }
+    }
+
+    private func commitTreePass(at now: Double, cut: Bool, settlePass: Int) {
         viewCommitCount += 1
         var cx = Cx<State>(
             viewport: viewport,
@@ -706,7 +742,20 @@ public final class Runtime<State> {
                 return self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })?.targetRect
             }
         )
-        let rootEl = view(state, &cx)
+        let envHash = MemoScope.environmentHash(
+            systemDark: systemDark,
+            pixelScale: pixelScale,
+            reducedMotion: reducedMotion,
+            srgbBlend: srgbBlend,
+            focusColor: cx.focusColor()
+        )
+        let rootEl = MemoScope.enter(
+            cache: memo,
+            envHash: envHash,
+            geometry: currentMemoGeometry()
+        ) {
+            view(state, &cx)
+        }
         viewHelpLook = cx.helpLook
         if rootEl.background.a >= 0.999 {
             clearColor = rootEl.background
@@ -1111,6 +1160,11 @@ public final class Runtime<State> {
         nodeById = newById
         if !warnings.isEmpty {
             keyWarnings = warnings
+        }
+
+        if settlePass == 0 && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            commitTreePass(at: now, cut: cut, settlePass: 1)
+            return
         }
 
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
@@ -3293,13 +3347,26 @@ public final class Runtime<State> {
     /// Records the current keyed elements into `rewindRecorder` if attached.
     public func captureRewindFrame(at now: Double) {
         guard let rewind = rewindRecorder else { return }
-        let snapshots: [RewindElementSnapshot] = flatNodes.compactMap { node -> RewindElementSnapshot? in
-            guard let key = node.key else { return nil }
-            return RewindElementSnapshot(
-                key: key,
-                rect: node.targetRect,
-                opacity: node.el.opacity
-            )
+        rewind.setViewport(viewport)
+        let snapshots: [RewindElementSnapshot]
+        if !lastElements.isEmpty {
+            snapshots = lastElements.compactMap { el -> RewindElementSnapshot? in
+                guard let key = el.key, !key.hasPrefix("rewind"), el.rect.count >= 4 else { return nil }
+                return RewindElementSnapshot(
+                    key: key,
+                    rect: MotionRect.fromXYWH(el.rect[0], el.rect[1], el.rect[2], el.rect[3]),
+                    opacity: el.opacity
+                )
+            }
+        } else {
+            snapshots = flatNodes.compactMap { node -> RewindElementSnapshot? in
+                guard let key = node.key, !key.hasPrefix("rewind") else { return nil }
+                return RewindElementSnapshot(
+                    key: key,
+                    rect: node.targetRect,
+                    opacity: node.el.opacity
+                )
+            }
         }
         rewind.recordFrame(at: now, elements: snapshots)
     }
@@ -3325,6 +3392,9 @@ public final class Runtime<State> {
         }
         if let rewind = tx.runtimeActions["rewindRecorder"] as? RewindRecorder {
             rewindRecorder = rewind
+            rewind.setViewport(viewport)
+        } else if (tx.runtimeActions["detachRewind"] as? Bool) == true {
+            rewindRecorder = nil
         }
         if let title = tx.windowTitle {
             windowTitle = title
