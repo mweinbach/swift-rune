@@ -77,7 +77,9 @@ struct OpenCodeIconsTests {
             #expect((img?.mips.first?.rgba.contains(where: { $0 != 0 }) ?? false))
         }
 
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.check)?.svgIcon == OpenCodeNewIcons.check)
         #expect(OpenCodeNewIcons.newIcon(OpenCodeNewIcons.check)?.name == "check")
+        #expect(OpenCodeNewIcons.newIcon(OpenCodeIcons.flask) == nil)
         #expect(OpenCodeIcons.copy.body != nil)
         #expect(OpenCodeTreeIcons.file("Sources/main.swift").icon.body != nil)
     }

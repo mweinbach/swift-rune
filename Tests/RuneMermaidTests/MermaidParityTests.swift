@@ -976,42 +976,58 @@ struct MermaidParityTests {
                     }
                 }
 
-                // edges_sharing_an_end_fan_out
-                var p = MermaidTheme.neutral(dark: true)
-                p.maxWidth = width
-                let tips: [Vec2] = c.ops.compactMap {
-                    if case let .fill(pts, col) = $0, col == p.line, pts.count == 3 { return pts[0] }
-                    return nil
-                }
-                let starts: [Vec2] = lines.compactMap(\.first)
-                for (pts, gap) in [(tips, Float(11.5)), (starts, Float(6.0))] {
-                    for a in 0..<pts.count {
-                        for b in (a + 1)..<pts.count {
-                            #expect(CanvasMath.dist(pts[a], pts[b]) >= gap)
+                // edges_sharing_an_end_fan_out (plan.mmd + fan)
+                let fan = "flowchart \(dir)\n  A[one source] --> C[where they meet]\n  B[another source] --> C\n  X[far] --> C\n  C --> D[next]\n  C --> E[and next]"
+                for src in [planDir, fan] {
+                    let (_, fc) = draw(src, width: width)
+                    let fcLines: [[Vec2]] = fc.ops.compactMap {
+                        if case let .stroke(pts, closed, _, _, _) = $0, !closed { return pts }
+                        return nil
+                    }
+                    var p = MermaidTheme.neutral(dark: true)
+                    p.maxWidth = width
+                    let tips: [Vec2] = fc.ops.compactMap {
+                        if case let .fill(pts, col) = $0, col == p.line, pts.count == 3 { return pts[0] }
+                        return nil
+                    }
+                    let starts: [Vec2] = fcLines.compactMap(\.first)
+                    for (pts, gap) in [(tips, Float(11.5)), (starts, Float(6.0))] {
+                        for a in 0..<pts.count {
+                            for b in (a + 1)..<pts.count {
+                                #expect(CanvasMath.dist(pts[a], pts[b]) >= gap)
+                            }
                         }
                     }
                 }
 
-                // edges_route_around_subgraphs_they_do_not_belong_to
-                func within(_ v: Int, _ k: Int) -> Bool {
-                    var cur = f.nodes[v].cluster
-                    while let s = cur {
-                        if s == k { return true }
-                        cur = f.subgraphs[s].parent
+                // edges_route_around_subgraphs_they_do_not_belong_to (plan.mmd + past)
+                let past = "flowchart \(dir)\n  A[start] --> B[finish]\n  subgraph S[In between]\n    M1[one] --> M2[two] --> M3[three]\n  end\n  A --> M1\n  M3 --> B\n  A --> C[aside] --> B"
+                for src in [planDir, past] {
+                    let (df, dc) = draw(src, width: width)
+                    let dcBoxes: [(Float, Float, Float, Float)] = dc.ops.compactMap {
+                        if case let .fill(pts, _) = $0, pts.count > 8 { return bounds(pts) }
+                        return nil
                     }
-                    return false
-                }
-                for k in 0..<f.subgraphs.count {
-                    let members = (0..<f.nodes.count).filter { within($0, k) }.map { bounds(c.regions[$0]) }
-                    guard let b = boxes
-                        .filter({ box in members.allSatisfy { m in box.0 < m.0 - 4.0 && box.1 < m.1 - 4.0 && box.2 > m.2 + 4.0 && box.3 > m.3 + 4.0 } })
-                        .min(by: { ($0.2 - $0.0) * ($0.3 - $0.1) < ($1.2 - $1.0) * ($1.3 - $1.1) })
-                    else { continue }
-                    let inner = (b.0 + 1.5, b.1 + 1.5, b.2 - 1.5, b.3 - 1.5)
-                    for t in c.traces {
-                        if within(t.ends.0, k) || within(t.ends.1, k) { continue }
-                        let into = t.line.first { pt in pt.x > inner.0 && pt.x < inner.2 && pt.y > inner.1 && pt.y < inner.3 }
-                        #expect(into == nil)
+                    func within(_ v: Int, _ k: Int) -> Bool {
+                        var cur = df.nodes[v].cluster
+                        while let s = cur {
+                            if s == k { return true }
+                            cur = df.subgraphs[s].parent
+                        }
+                        return false
+                    }
+                    for k in 0..<df.subgraphs.count {
+                        let members = (0..<df.nodes.count).filter { within($0, k) }.map { bounds(dc.regions[$0]) }
+                        guard let b = dcBoxes
+                            .filter({ box in members.allSatisfy { m in box.0 < m.0 - 4.0 && box.1 < m.1 - 4.0 && box.2 > m.2 + 4.0 && box.3 > m.3 + 4.0 } })
+                            .min(by: { ($0.2 - $0.0) * ($0.3 - $0.1) < ($1.2 - $1.0) * ($1.3 - $1.1) })
+                        else { continue }
+                        let inner = (b.0 + 1.5, b.1 + 1.5, b.2 - 1.5, b.3 - 1.5)
+                        for t in dc.traces {
+                            if within(t.ends.0, k) || within(t.ends.1, k) { continue }
+                            let into = t.line.first { pt in pt.x > inner.0 && pt.x < inner.2 && pt.y > inner.1 && pt.y < inner.3 }
+                            #expect(into == nil)
+                        }
                     }
                 }
             }

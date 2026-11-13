@@ -234,8 +234,11 @@ public enum OpenCodeNewIcons {
         byNameMap[name]?.svgIcon
     }
 
-    /// Looks up the upstream icon payload corresponding to a catalog `SVGIcon` (`themes/opencode/src/new_icons.rs`).
+    /// Looks up the new artwork for `icon` under `OpenCodeNewIcons`, if it has any (`themes/opencode/src/new_icons.rs`).
     public static func newIcon(_ icon: SVGIcon) -> OpenCodeIconData? {
-        allData.first { $0.svgIcon == icon }
+        if let oldMatch = OpenCodeIcons.allData.first(where: { $0.svgIcon == icon && byNameMap[$0.name] != nil }) {
+            return byNameMap[oldMatch.name]
+        }
+        return allData.first { $0.svgIcon == icon }
     }
 }
