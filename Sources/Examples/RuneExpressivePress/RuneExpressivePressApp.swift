@@ -3,8 +3,7 @@ import Rune
 import RuneMotion
 
 /// Port of `crates/rune/examples/expressive_press.rs`.
-/// Keycap and ring driven by `scale`, `offset`, `rotate`, and spring-animated shadows.
-/// (`El.origin(0.5, 1.0)` will attach once transform origin lands from `gap/el`.)
+/// Keycap and ring driven by `scale`, `offset`, `origin`, `rotate`, and spring-animated shadows.
 public struct ExpressivePressState: Sendable {
     public var pressed: Bool = false
     public var grown: Bool = false
@@ -26,6 +25,7 @@ public enum RuneExpressivePressApp {
             .bg(Color(r: 0.99, g: 0.98, b: 0.96, a: 1.0))
             .border(1, Color(r: 0.0, g: 0.0, b: 0.0, a: 0.08))
             .animate(Spring(duration: 0.22, bounce: 0.0))
+            .origin(0.5, 1.0)
             .scale(pressed ? 0.96 : 1.0)
             .offset(0, pressed ? 2.0 : 0.0)
             .shadow(
@@ -52,6 +52,7 @@ public enum RuneExpressivePressApp {
             .itemsCenter()
             .p(10)
             .animate(Spring(duration: 0.50, bounce: 0.15))
+            .origin(0.5, 1.0)
             .rotate(grown ? (.pi / 4.0) : 0.0)
             .scale(grown ? 1.0 : 0.55)
             .child(el().size(14, 14).rounded(7).bg(accent))
