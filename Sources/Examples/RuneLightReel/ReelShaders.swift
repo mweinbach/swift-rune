@@ -85,10 +85,10 @@ enum ReelShaders {
         return o;
     }
 
-    static inline float sd_rrect(float2 q, float2 half, float4 radii) {
+    static inline float sd_rrect(float2 q, float2 halfSz, float4 radii) {
         float r = (q.x >= 0.0) ? ((q.y >= 0.0) ? radii.z : radii.y) : ((q.y >= 0.0) ? radii.w : radii.x);
-        float rr = clamp(r, 0.0, min(half.x, half.y));
-        float2 k = abs(q) - half + rr;
+        float rr = clamp(r, 0.0, min(halfSz.x, halfSz.y));
+        float2 k = abs(q) - halfSz + rr;
         return length(max(k, float2(0.0))) + min(max(k.x, k.y), 0.0) - rr;
     }
 
@@ -116,9 +116,9 @@ enum ReelShaders {
             float a = atlas.sample(smp, uv, level(0.0)).r;
             return u.fill * a;
         }
-        float2 half = u.rect.zw * 0.5;
-        float2 q = in.px - u.rect.xy - half;
-        float d = sd_rrect(q, half, u.radii);
+        float2 halfSz = u.rect.zw * 0.5;
+        float2 q = in.px - u.rect.xy - halfSz;
+        float d = sd_rrect(q, halfSz, u.radii);
         if (kind == 2) {
             float a = 0.5 - 0.5 * erf_approx(d / (max(u.params.z, 0.1) * 1.41421));
             return u.fill * a;
@@ -262,9 +262,9 @@ enum ReelShaders {
         float2 c = (float2(idx) + 0.5) * sp;
         float2 local = p - c;
         float gap = max(0.75, sp * 0.07);
-        float half = sp * 0.5 - gap;
+        float halfCell = sp * 0.5 - gap;
         float r = sp * 0.16;
-        float2 q = abs(local) - float2(half - r);
+        float2 q = abs(local) - float2(halfCell - r);
         float dcell = length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - r;
         float cell = 1.0 - smoothstep(-0.6, 0.6, dcell);
         float3 val = mix(m_own.read(uint2(idx), 0).rgb, m_mrg.read(uint2(idx), 0).rgb, mixk);
@@ -441,7 +441,7 @@ enum ReelShaders {
         float2 sz = float2(bsrc.get_width(), bsrc.get_height());
         float2 uv = in.pos.xy * 2.0 / sz;
         float2 t = 1.0 / sz;
-        constant float2 s[13] = {
+        const float2 s[13] = {
             float2(-2.0, -2.0), float2(0.0, -2.0), float2(2.0, -2.0),
             float2(-2.0, 0.0), float2(0.0, 0.0), float2(2.0, 0.0),
             float2(-2.0, 2.0), float2(0.0, 2.0), float2(2.0, 2.0),

@@ -88,10 +88,10 @@ vertex VOut demo_ui_vs(
     return o;
 }
 
-static inline float sd_rrect(float2 q, float2 half, float4 radii) {
+static inline float sd_rrect(float2 q, float2 halfSz, float4 radii) {
     float r = (q.x >= 0.0) ? ((q.y >= 0.0) ? radii.z : radii.y) : ((q.y >= 0.0) ? radii.w : radii.x);
-    float rr = clamp(r, 0.0, min(half.x, half.y));
-    float2 k = abs(q) - half + rr;
+    float rr = clamp(r, 0.0, min(halfSz.x, halfSz.y));
+    float2 k = abs(q) - halfSz + rr;
     return length(max(k, float2(0.0))) + min(max(k.x, k.y), 0.0) - rr;
 }
 
@@ -112,9 +112,9 @@ fragment float4 demo_ui_fs(
         float a = atlas.sample(smp, uv, level(0.0)).r;
         return u.fill * a;
     }
-    float2 half = u.rect.zw * 0.5;
-    float2 q = in.px - u.rect.xy - half;
-    float d = sd_rrect(q, half, u.radii);
+    float2 halfSz = u.rect.zw * 0.5;
+    float2 q = in.px - u.rect.xy - halfSz;
+    float d = sd_rrect(q, halfSz, u.radii);
     float cov = clamp(0.5 - d, 0.0, 1.0);
     float4 o = u.fill * cov;
     float bw = u.params.x;

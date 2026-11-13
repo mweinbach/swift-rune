@@ -255,9 +255,35 @@ private func runVerify(ctx: DemoCtx) {
     _ = ctx.lightFrame(prims: prims, lights: [light], settings: LightSettings(), read: false)
 
     let (fw, fh) = ctx.light.fieldSize
+    let stDesc = MTLTextureDescriptor.texture2DDescriptor(
+        pixelFormat: ctx.light.visibilityTexture.pixelFormat,
+        width: Int(fw),
+        height: Int(fh),
+        mipmapped: false
+    )
+    stDesc.usage = .shaderRead
+    stDesc.storageMode = .shared
+    let visStaging = ctx.device.makeTexture(descriptor: stDesc)!
+    let blitCmd = ctx.queue.makeCommandBuffer()!
+    let blit = blitCmd.makeBlitCommandEncoder()!
+    blit.copy(
+        from: ctx.light.visibilityTexture,
+        sourceSlice: 0,
+        sourceLevel: 0,
+        sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+        sourceSize: MTLSize(width: Int(fw), height: Int(fh), depth: 1),
+        to: visStaging,
+        destinationSlice: 0,
+        destinationLevel: 0,
+        destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+    )
+    blit.endEncoding()
+    blitCmd.commit()
+    blitCmd.waitUntilCompleted()
+
     var vis = [Float16](repeating: Float16(0), count: Int(fw * fh) * 4)
     vis.withUnsafeMutableBytes { raw in
-        ctx.light.visibilityTexture.getBytes(
+        visStaging.getBytes(
             raw.baseAddress!,
             bytesPerRow: Int(fw) * 8,
             from: MTLRegionMake2D(0, 0, Int(fw), Int(fh)),

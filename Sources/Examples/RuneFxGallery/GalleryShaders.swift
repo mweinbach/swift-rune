@@ -44,9 +44,9 @@ enum GalleryShaders {
         return o;
     }
 
-    static inline float sd_rrect(float2 q, float2 half, float r) {
-        float rr = clamp(r, 0.0, min(half.x, half.y));
-        float2 k = abs(q) - half + rr;
+    static inline float sd_rrect(float2 q, float2 halfSz, float r) {
+        float rr = clamp(r, 0.0, min(halfSz.x, halfSz.y));
+        float2 k = abs(q) - halfSz + rr;
         return length(max(k, float2(0.0))) + min(max(k.x, k.y), 0.0) - rr;
     }
 
@@ -64,9 +64,9 @@ enum GalleryShaders {
         sampler smp [[sampler(0)]]
     ) {
         UiInst u = us[in.id];
-        float2 half = u.rect.zw * 0.5;
-        float2 q = in.px - u.rect.xy - half;
-        float d = sd_rrect(q, half, u.p.x);
+        float2 halfSz = u.rect.zw * 0.5;
+        float2 q = in.px - u.rect.xy - halfSz;
+        float d = sd_rrect(q, halfSz, u.p.x);
         int kind = int(u.p.z + 0.5);
         if (kind == 1) {
             float2 uv = mix(u.uv.xy, u.uv.zw, (in.px - u.rect.xy) / u.rect.zw);
