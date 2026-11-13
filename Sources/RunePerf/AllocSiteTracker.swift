@@ -25,6 +25,17 @@ public struct AllocSite: Sendable, Equatable, Hashable, Codable {
     }
 }
 
+/// A custom memory section contributed beside allocation sites (`procwatch::alloc::sites::contribute`).
+public struct AllocSiteSection: Sendable, Equatable, Codable {
+    public let name: String
+    public let report: String
+
+    public init(name: String, report: String) {
+        self.name = name
+        self.report = report
+    }
+}
+
 /// Point-in-time snapshot of live allocation sites sorted by descending live bytes.
 public struct AllocSiteSnapshot: Sendable, Equatable, Codable {
     public let intervalBytes: Int
@@ -32,19 +43,22 @@ public struct AllocSiteSnapshot: Sendable, Equatable, Codable {
     public let totalLiveBytes: Int64
     public let totalLiveBlocks: Int64
     public let topSites: [AllocSite]
+    public let sections: [AllocSiteSection]
 
     public init(
         intervalBytes: Int,
         droppedCount: UInt64,
         totalLiveBytes: Int64,
         totalLiveBlocks: Int64,
-        topSites: [AllocSite]
+        topSites: [AllocSite],
+        sections: [AllocSiteSection] = []
     ) {
         self.intervalBytes = intervalBytes
         self.droppedCount = droppedCount
         self.totalLiveBytes = totalLiveBytes
         self.totalLiveBlocks = totalLiveBlocks
         self.topSites = topSites
+        self.sections = sections
     }
 
     /// Formats a human-readable top-sites summary.
@@ -72,6 +86,10 @@ public struct AllocSiteSnapshot: Sendable, Equatable, Codable {
                 )
             )
         }
+        for section in sections where !section.report.isEmpty {
+            lines.append("section \(section.name)")
+            lines.append(section.report)
+        }
         return lines.joined(separator: "\n")
     }
 }
@@ -80,9 +98,15 @@ public struct AllocSiteSnapshot: Sendable, Equatable, Codable {
 ///
 /// Mirrors upstream `procwatch::alloc::sites` (`AllocTracker`, `SiteTable`, `PtrMap`).
 public final class AllocTracker: @unchecked Sendable {
+    public static let shared = AllocTracker()
     public static let defaultInterval: Int = 32 << 10
-    public static let defaultMaxSites: Int = 4096
-    public static let defaultMaxFrames: Int = 16
+    public static let defaultMaxSites: Int = 1 << 13
+    public static let defaultMaxFrames: Int = 28
+
+    /// Registers a named memory section reporter included in every snapshot dump (`procwatch::alloc::sites::contribute`).
+    public static func contribute(_ name: String, report: @escaping @Sendable () -> String) {
+        shared.contribute(name, report: report)
+    }
 
     private struct LiveRecord {
         let siteHash: UInt64
@@ -96,6 +120,7 @@ public final class AllocTracker: @unchecked Sendable {
 
     private var sites: [UInt64: AllocSite] = [:]
     private var livePointers: [UInt64: LiveRecord] = [:]
+    private var contributedSections: [(name: String, report: @Sendable () -> String)] = []
     private var countdownBytes: Int
     private var droppedCount: UInt64 = 0
     private var totalLiveBytes: Int64 = 0
@@ -205,6 +230,13 @@ public final class AllocTracker: @unchecked Sendable {
         return true
     }
 
+    /// Registers a named memory section reporter included in snapshot dumps (`procwatch::alloc::sites::contribute`).
+    public func contribute(_ name: String, report: @escaping @Sendable () -> String) {
+        lock.lock()
+        contributedSections.append((name: name, report: report))
+        lock.unlock()
+    }
+
     /// Returns a snapshot of the top `limit` allocation sites sorted by descending live bytes (then sampled bytes).
     public func snapshot(top limit: Int = 32) -> AllocSiteSnapshot {
         lock.lock()
@@ -220,22 +252,31 @@ public final class AllocTracker: @unchecked Sendable {
                 return lhs.hash < rhs.hash
             }
         let limited = Array(activeSites.prefix(max(0, limit)))
-        let snap = AllocSiteSnapshot(
-            intervalBytes: intervalBytes,
-            droppedCount: droppedCount,
-            totalLiveBytes: totalLiveBytes,
-            totalLiveBlocks: totalLiveBlocks,
-            topSites: limited
-        )
+        let reporters = contributedSections
+        let bytes = totalLiveBytes
+        let blocks = totalLiveBlocks
+        let dropped = droppedCount
         lock.unlock()
-        return snap
+
+        let resolvedSections = reporters.map { entry in
+            AllocSiteSection(name: entry.name, report: entry.report())
+        }
+        return AllocSiteSnapshot(
+            intervalBytes: intervalBytes,
+            droppedCount: dropped,
+            totalLiveBytes: bytes,
+            totalLiveBlocks: blocks,
+            topSites: limited,
+            sections: resolvedSections
+        )
     }
 
-    /// Clears all tracked sites, live pointers, and counters.
+    /// Clears all tracked sites, live pointers, contributed sections, and counters.
     public func reset() {
         lock.lock()
         sites.removeAll()
         livePointers.removeAll()
+        contributedSections.removeAll()
         countdownBytes = intervalBytes
         droppedCount = 0
         totalLiveBytes = 0

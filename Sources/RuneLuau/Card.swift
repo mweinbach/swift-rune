@@ -44,7 +44,7 @@ internal enum LuauCard {
             .border(1.0, danger)
             .child(
                 (text("Stopped drawing: \(first)") as El<State>)
-                    .font(TextStyle(size: 13, weight: 500))
+                    .font(TextStyle(size: 13, weight: 500, wrap: .wrap))
                     .color(fg)
                     .wFull()
             )
@@ -52,7 +52,7 @@ internal enum LuauCard {
         if !rest.isEmpty {
             card = card.child(
                 (text(rest.joined(separator: "\n")) as El<State>)
-                    .font(TextStyle(size: 11, weight: 400, family: .monospace))
+                    .font(TextStyle(size: 11, weight: 400, family: .monospace, wrap: .wrap))
                     .color(weak)
                     .wFull()
             )

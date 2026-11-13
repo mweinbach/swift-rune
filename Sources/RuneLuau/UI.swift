@@ -661,19 +661,40 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
     }
 
     func viewMemo(vm: LuauVM, args: [LuauValue]) throws -> LuauValue {
-        guard args.count >= 4,
-              case .string(let keyStr) = args[1] else {
-            throw LuauRuntimeError(value: .string("view:Memo needs (key: string, version, build)"))
+        guard args.count >= 4 else {
+            throw LuauRuntimeError(value: .string("view:Memo needs (key, version, build)"))
         }
-        let ver = LuauUIBridge.mixHash(LuauUIBridge.versionHash(args[2]), env.salt)
+        let keyStr: String
+        switch args[1] {
+        case .string(let s):
+            keyStr = s
+        case .number(let n):
+            keyStr = LuauValue.number(n).displayString
+        default:
+            throw LuauRuntimeError(value: .string("view:Memo key must be a string or number, got \(args[1].typeName)"))
+        }
+        let verArg = args[2]
+        switch verArg {
+        case .nil, .bool, .number, .string:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("view:Memo version cannot be a \(verArg.typeName)"))
+        }
         let buildFn = args[3]
+        switch buildFn {
+        case .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("view:Memo build must be a function, got \(buildFn.typeName)"))
+        }
+        let ver = LuauUIBridge.mixHash(LuauUIBridge.versionHash(verArg), env.salt)
         let memoID = "\(env.prefix)\(keyStr)"
         var capturedError: Error?
         let el = Rune.memo(memoID, deps: ver) { () -> El<State> in
             do {
                 let res = try vm.call(value: buildFn, args: []).first ?? .nil
                 let built = try LuauUIBridge.unwrapEl(res, State.self)
-                return built.keyId == nil ? built.key(memoID) : built
+                return built.key(memoID)
             } catch {
                 capturedError = error
                 env.memoFailed = true

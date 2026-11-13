@@ -112,13 +112,22 @@ public struct Sources: Sendable, Equatable {
                 modules[path] = prev
                 continue
             }
-            let lexer = LuauLexer(source: source, name: path)
-            let tokens = try lexer.tokenize()
-            let parser = LuauParser(tokens: tokens, sourceName: path)
-            let stmts = try parser.parseChunk()
-            let compiler = LuauCompiler(sourceName: path)
-            let proto = try compiler.compile(stmts: stmts)
-            modules[path] = CompiledModule(proto: proto, source: source)
+            do {
+                let lexer = LuauLexer(source: source, name: path)
+                let tokens = try lexer.tokenize()
+                let parser = LuauParser(tokens: tokens, sourceName: path)
+                let stmts = try parser.parseChunk()
+                let compiler = LuauCompiler(sourceName: path)
+                let proto = try compiler.compile(stmts: stmts)
+                modules[path] = CompiledModule(proto: proto, source: source)
+            } catch let err as ScriptError {
+                let msg = err.message.hasPrefix("\(path):") ? err.message : "\(path): \(err.message)"
+                throw ScriptError(kind: err.kind, message: msg)
+            } catch {
+                let msg = "\(error)"
+                let prefixed = msg.hasPrefix("\(path):") ? msg : "\(path): \(msg)"
+                throw ScriptError(kind: .syntax, message: prefixed)
+            }
         }
 
         return CompiledSources(

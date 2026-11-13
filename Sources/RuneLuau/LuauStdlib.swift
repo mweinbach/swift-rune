@@ -430,6 +430,34 @@ internal enum LuauStdlib {
             return .values([.number((val - floor(val)) * 2.0 - 1.0)])
         }))
 
+        m.rawSet("lerp", value: .nativeFunction(LuauNativeFunction(name: "math.lerp") { _, _, args in
+            let a = args.count > 0 ? (args[0].coercedNumber ?? 0) : 0
+            let b = args.count > 1 ? (args[1].coercedNumber ?? 0) : 0
+            let t = args.count > 2 ? (args[2].coercedNumber ?? 0) : 0
+            return .values([.number(a + (b - a) * t)])
+        }))
+
+        m.rawSet("map", value: .nativeFunction(LuauNativeFunction(name: "math.map") { _, _, args in
+            let x = args.count > 0 ? (args[0].coercedNumber ?? 0) : 0
+            let inMin = args.count > 1 ? (args[1].coercedNumber ?? 0) : 0
+            let inMax = args.count > 2 ? (args[2].coercedNumber ?? 1) : 1
+            let outMin = args.count > 3 ? (args[3].coercedNumber ?? 0) : 0
+            let outMax = args.count > 4 ? (args[4].coercedNumber ?? 1) : 1
+            return .values([.number(outMin + (x - inMin) * (outMax - outMin) / (inMax - inMin))])
+        }))
+
+        m.rawSet("isnan", value: .nativeFunction(LuauNativeFunction(name: "math.isnan") { _, _, args in
+            .values([.bool(args.first?.coercedNumber?.isNaN ?? false)])
+        }))
+
+        m.rawSet("isinf", value: .nativeFunction(LuauNativeFunction(name: "math.isinf") { _, _, args in
+            .values([.bool(args.first?.coercedNumber?.isInfinite ?? false)])
+        }))
+
+        m.rawSet("isfinite", value: .nativeFunction(LuauNativeFunction(name: "math.isfinite") { _, _, args in
+            .values([.bool(args.first?.coercedNumber?.isFinite ?? false)])
+        }))
+
         g.rawSet("math", value: .table(m))
     }
 
@@ -1049,6 +1077,10 @@ internal enum LuauStdlib {
             let res = (n & ~(mask << field)) | ((v & mask) << field)
             return .values([.number(Double(res))])
         }))
+        b.rawSet("byteswap", value: .nativeFunction(LuauNativeFunction(name: "bit32.byteswap") { _, _, args in
+            let n = u32(args.first ?? .nil)
+            return .values([.number(Double(n.byteSwapped))])
+        }))
         g.rawSet("bit32", value: .table(b))
     }
 
@@ -1072,6 +1104,45 @@ internal enum LuauStdlib {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'utf8.len'"))
             }
             return .values([.number(Double(s.unicodeScalars.count))])
+        }))
+        u.rawSet("offset", value: .nativeFunction(LuauNativeFunction(name: "utf8.offset") { _, _, args in
+            guard case .string(let s) = args.first, let n = args.count > 1 ? args[1].asInt : nil else {
+                throw LuauRuntimeError(value: .string("bad arguments to 'utf8.offset'"))
+            }
+            let bytes = Array(s.utf8)
+            var pos = args.count > 2 ? (args[2].asInt ?? (n >= 0 ? 1 : bytes.count + 1)) : (n >= 0 ? 1 : bytes.count + 1)
+            if pos < 0 { pos = bytes.count + 1 + pos }
+            var idx = pos - 1
+            guard idx >= 0, idx <= bytes.count else { return .values([.nil]) }
+            if n == 0 {
+                while idx > 0 && (bytes[idx] & 0xC0) == 0x80 { idx -= 1 }
+                return .values([.number(Double(idx + 1))])
+            }
+            if n > 0 {
+                if idx < bytes.count && (bytes[idx] & 0xC0) == 0x80 {
+                    throw LuauRuntimeError(value: .string("initial position is a continuation byte"))
+                }
+                var rem = n - 1
+                while rem > 0 {
+                    guard idx < bytes.count else { return .values([.nil]) }
+                    idx += 1
+                    while idx < bytes.count && (bytes[idx] & 0xC0) == 0x80 { idx += 1 }
+                    rem -= 1
+                }
+                return .values([.number(Double(idx + 1))])
+            } else {
+                if idx < bytes.count && (bytes[idx] & 0xC0) == 0x80 {
+                    throw LuauRuntimeError(value: .string("initial position is a continuation byte"))
+                }
+                var rem = -n
+                while rem > 0 {
+                    if idx == 0 { return .values([.nil]) }
+                    idx -= 1
+                    while idx > 0 && (bytes[idx] & 0xC0) == 0x80 { idx -= 1 }
+                    rem -= 1
+                }
+                return .values([.number(Double(idx + 1))])
+            }
         }))
         u.rawSet("codepoint", value: .nativeFunction(LuauNativeFunction(name: "utf8.codepoint") { _, _, args in
             guard case .string(let s) = args.first else {

@@ -90,12 +90,14 @@ struct RunePerfParityTests {
         #expect(tracker.recordAllocation(pointer: 0xA2, size: 600, frames: framesA))
         #expect(tracker.recordAllocation(pointer: 0xB1, size: 2048, frames: framesB))
 
+        tracker.contribute("gpu-heaps") { "vram=42 MiB" }
         let snap1 = tracker.snapshot(top: 10)
         #expect(snap1.totalLiveBlocks == 2)
         #expect(snap1.totalLiveBytes == 2648)
         #expect(snap1.topSites.count == 2)
         #expect(snap1.topSites[0].frames == framesB)
-        #expect(!snap1.formattedReport().isEmpty)
+        #expect(snap1.sections == [AllocSiteSection(name: "gpu-heaps", report: "vram=42 MiB")])
+        #expect(snap1.formattedReport().contains("section gpu-heaps\nvram=42 MiB"))
 
         #expect(tracker.recordFree(pointer: 0xB1))
         #expect(!tracker.recordFree(pointer: 0xDEAD))

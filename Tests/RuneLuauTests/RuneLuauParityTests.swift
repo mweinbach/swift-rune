@@ -516,4 +516,69 @@ struct RuneLuauParityTests {
         #expect(sawReload)
         #expect(try watched.query("v").asInt64 == 2)
     }
+
+    @Test("propNames, view:Memo key/version validation & rekey, syntax path prefix, and math/bit32/utf8 additions")
+    func propNamesViewMemoAndStdlibAdditions() throws {
+        #expect(propNames().count == 75)
+        #expect(propNames().contains("fadeOut"))
+        #expect(propNames().contains("onVisibleRows"))
+
+        // Sources syntax errors include the module path prefix
+        let badSources = Sources().with("views/broken.luau", "local x = (")
+            .with("init.luau", "return {}")
+        do {
+            _ = try badSources.compile()
+            Issue.record("Expected compile syntax error")
+        } catch let err as ScriptError {
+            #expect(err.kind == .syntax)
+            #expect(err.message.contains("views/broken.luau:"))
+        }
+
+        // view:Memo accepts numeric key, re-keys root, rejects table version; plus stdlib helpers
+        let memoSources = Sources.single("""
+            local ui = require("@rune/ui")
+            return {
+                helpers = function()
+                    return {
+                        lerp = math.lerp(10, 20, 0.25),
+                        mapped = math.map(5, 0, 10, 100, 200),
+                        isNan = math.isnan(0/0),
+                        isInf = math.isinf(1/0),
+                        isFin = math.isfinite(42),
+                        swapped = bit32.byteswap(0x12345678),
+                        uoff = utf8.offset("aé", 2),
+                    }
+                end,
+                view = function(cx)
+                    local good = cx:Memo(7, 1, function()
+                        return ui.text("ok", { key = "inner" })
+                    end)
+                    return ui.col({ good })
+                end,
+                badVersion = function(cx)
+                    return cx:Memo("k", {}, function()
+                        return ui.text("nope")
+                    end)
+                end,
+            }
+            """)
+        let script = Script(name: "memo_parity", sources: memoSources)
+        let helpers = try script.query("helpers")
+        #expect(helpers.get("lerp").asDouble == 12.5)
+        #expect(helpers.get("mapped").asDouble == 150.0)
+        #expect(helpers.get("isNan").asBool == true)
+        #expect(helpers.get("isInf").asBool == true)
+        #expect(helpers.get("isFin").asBool == true)
+        #expect(helpers.get("swapped").asInt64 == 0x78563412)
+        #expect(helpers.get("uoff").asInt64 == 2)
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(400, 200))
+        let el = script.surface(cx, name: "view")
+        let memoNode = findElement(el) { $0.keyId == "\(script.memoPrefix())7" }
+        #expect(memoNode != nil)
+        #expect(memoNode?.plainText == "ok")
+
+        let badEl = script.renderUncached(name: "badVersion", dark: true, LuauTestState.self)
+        #expect(findElement(badEl) { $0.keyId == "luau-error" } != nil)
+    }
 }
