@@ -947,6 +947,7 @@ final class ElColdData<State> {
     var liveBindings: [BoundLiveProperty] = []
     var handlersBox: ElHandlersBox<State>? = nil
     var runtimeExtras: [String: Any] = [:]
+    var keyLocation: String? = nil
 
     func clone() -> ElColdData<State> {
         let c = ElColdData<State>()
@@ -1079,6 +1080,7 @@ final class ElColdData<State> {
         c.liveBindings = liveBindings
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
         c.runtimeExtras = runtimeExtras
+        c.keyLocation = keyLocation
         return c
     }
 }
@@ -1311,6 +1313,10 @@ public struct El<State> {
         get { _cold?.data.runtimeExtras ?? [:] }
         set { ensureCold().data.runtimeExtras = newValue }
     }
+    public var keyLocation: String {
+        get { _cold?.data.keyLocation ?? "" }
+        set { ensureCold().data.keyLocation = newValue.isEmpty ? nil : newValue }
+    }
 
     public init(direction: FlexDirection = .row) {
         self.layout = LayoutStyle(direction: direction)
@@ -1318,9 +1324,10 @@ public struct El<State> {
 
     // MARK: - Identity & Hierarchy
 
-    public func key(_ k: String) -> Self {
+    public func key(_ k: String, file: String = #fileID, line: UInt = #line, column: UInt = #column) -> Self {
         var copy = self
         copy.keyId = k
+        copy.keyLocation = "\(file):\(line):\(column)"
         return copy
     }
 

@@ -474,6 +474,121 @@ struct AppShellParityTests {
         #expect(reports.flush(state: &s, tx: &tx, at: 0.15) == true)
         #expect(drawnTimestamps.count == 2)
     }
+
+    @Test("AppHandle reports host-published windowError (`app.rs:1079`)")
+    func handlesReportWindowAndWindowError() {
+        let app = makeTestApp()
+        let handle = app.handle()
+        #expect(handle.isVisible == false)
+        #expect(handle.windowError == nil)
+
+        app.sharedHandle.shared.setVisible(true)
+        app.sharedHandle.shared.setWindowError("no GPU adapter")
+        #expect(handle.isVisible == true)
+        #expect(handle.windowError == "no GPU adapter")
+
+        app.sharedHandle.shared.setWindowError(nil)
+        #expect(handle.windowError == nil)
+    }
+
+    @Test("minimize reaches shell from handlers, updates, and handles with last-wins cancel rules (`app.rs:1139,1157`)")
+    func minimizeReachesShellAndFocusCancelPolicy() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in el() }
+        rt.onFocus = { _, focused, tx in
+            if !focused { tx.minimize() }
+        }
+        rt.dispatchFocus(true, at: 0.0)
+        #expect(!rt.minimizeState.latched)
+        rt.dispatchFocus(false, at: 0.01)
+        #expect(rt.minimizeState.field && !rt.quitRequested)
+        rt.ignoreMinimize("a test")
+        #expect(!rt.minimizeState.latched)
+        rt.update(at: 0.02) { _, tx in tx.minimize() }
+        #expect(rt.minimizeState.field)
+
+        let app = makeTestApp()
+        let h = app.handle()
+        func drained(_ calls: () -> Void) -> (AppWindowRequest, AppActivation) {
+            calls()
+            let r = app.sharedHandle.shared.drain()
+            return (r.window, r.activation)
+        }
+        #expect(drained { h.focus(); h.minimize() } == (.none, .minimize))
+        #expect(drained { h.minimize(); h.focus() } == (.none, .focus))
+        #expect(drained { h.show(); h.minimize() } == (.show, .minimize))
+        #expect(drained { h.minimize(); h.show() } == (.show, .minimize))
+        #expect(drained { h.minimize(); h.hide() } == (.hide, .none))
+        #expect(drained { h.minimize(); h.close() } == (.close, .none))
+        #expect(drained { h.minimize(); h.open() } == (.open, .none))
+        #expect(drained { h.focus(); h.open() } == (.open, .focus))
+        #expect(drained { h.focus(); h.hide() } == (.hide, .focus))
+        #expect(drained { h.minimize(); h.show(); h.focus() } == (.show, .focus))
+    }
+
+    @Test("hidden window drains inbox, arms timer from update without frames, and hidden timer polls without build (`app.rs:1270,1307,1324`)")
+    func hiddenWindowDrainsInboxArmsTimerAndPollsWithoutBuild() {
+        // 1. a_hidden_window_drains_its_inbox_on_wake_and_shows_it_when_reopened
+        struct LockState {
+            var pendingValue: Int?
+            var locked: Int = 0
+        }
+        let rtInbox = Runtime<LockState>(state: LockState(), viewport: Vec2(200, 200)) { s, _ in
+            row().child(el().key("box").size(Float(10 + s.locked), 10))
+        }
+        rtInbox.poll = { s, _, tx in
+            guard let v = s.pendingValue else { return false }
+            s.pendingValue = nil
+            s.locked = v
+            tx.wakeAfter(60.0)
+            return true
+        }
+        _ = rtInbox.frame(at: 0.0)
+        #expect(rtInbox.element(byKey: "box")?.rect[2] == 10.0)
+
+        rtInbox.updateIf(at: 0.0) { s, _ in s.pendingValue = 30; return false }
+        #expect(rtInbox.pollHidden(at: 0.0) == true)
+        #expect(rtInbox.pollHidden(at: 0.0) == true) // needsCommit remains latched until next frame
+        #expect(rtInbox.state.locked == 30)
+        #expect(rtInbox.element(byKey: "box")?.rect[2] == 10.0)
+        #expect(rtInbox.nextWakeDeadline != nil)
+
+        rtInbox.settleAll()
+        _ = rtInbox.frame(at: 1.0 / 60.0)
+        #expect(rtInbox.element(byKey: "box")?.rect[2] == 40.0)
+
+        // 2. an_update_arriving_without_frames_arms_its_timer
+        let rtTimer = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in el() }
+        rtTimer.poll = { polls, _, _ in polls += 1; return false }
+        _ = rtTimer.frame(at: 0.0)
+        #expect(rtTimer.nextWakeDeadline == nil)
+        rtTimer.update(at: 0.0) { _, tx in tx.wakeAfter(5.0) }
+        _ = rtTimer.pollHidden(at: 0.0)
+        let deadline = rtTimer.nextWakeDeadline
+        #expect(deadline != nil && deadline! >= 4.9 && deadline! <= 5.5)
+        _ = rtTimer.frame(at: 0.0)
+        #expect(rtTimer.nextWakeDeadline == deadline)
+
+        // 3. a_hidden_timer_polls_without_building_the_view
+        for withPoll in [true, false] {
+            let rtHidden = Runtime<Int>(state: 0, viewport: Vec2(100, 100)) { _, _ in el() }
+            if withPoll {
+                rtHidden.poll = { polls, _, _ in polls += 1; return true }
+            }
+            _ = rtHidden.frame(at: 0.0)
+            let commits = rtHidden.viewCommitCount
+            rtHidden.updateIf(at: 0.0) { _, tx in tx.wakeAfter(0.01); return false }
+            #expect(rtHidden.hiddenWake(at: 0.0) == withPoll)
+            #expect(rtHidden.nextWakeDeadline != nil)
+            #expect(rtHidden.hiddenWake(at: 1.0) == withPoll)
+            #expect(rtHidden.nextWakeDeadline == nil)
+            #expect(rtHidden.viewCommitCount == commits)
+            if withPoll {
+                #expect(rtHidden.needsCommit)
+                _ = rtHidden.frame(at: 1.0)
+                #expect(rtHidden.viewCommitCount == commits + 1)
+            }
+        }
+    }
 }
 
 private final class LockedCounter: @unchecked Sendable {

@@ -320,15 +320,25 @@ public final class MemoCache: @unchecked Sendable {
     public func getOrBuild<State, Deps: Equatable>(
         id: String,
         deps: Deps,
+        file: String = #fileID,
+        line: UInt = #line,
+        column: UInt = #column,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
-        getOrBuildMemo(rawId: id, deps: deps, ignoreDuplicateGuard: false, build: build)
+        getOrBuildMemo(
+            rawId: id,
+            deps: deps,
+            ignoreDuplicateGuard: false,
+            callerLocation: "\(file):\(line):\(column)",
+            build: build
+        )
     }
 
     func getOrBuildMemo<State, Deps: Equatable>(
         rawId: String,
         deps: Deps,
         ignoreDuplicateGuard: Bool = false,
+        callerLocation: String? = nil,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
         let srgb = Theme.blendsSrgb()
@@ -341,7 +351,10 @@ public final class MemoCache: @unchecked Sendable {
         if !ignoreDuplicateGuard, let scope, !scope.isVerificationDryRun {
             if !scope.seenScopedIds.insert(scopedId).inserted {
                 var built = build()
-                if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
+                if !rawId.hasPrefix("cached:") && built.keyId == nil {
+                    built = built.key(rawId)
+                    if let callerLocation { built.keyLocation = callerLocation }
+                }
                 return (built, false)
             }
         }
@@ -378,7 +391,10 @@ public final class MemoCache: @unchecked Sendable {
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
         var built = build()
-        if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
+        if !rawId.hasPrefix("cached:") && built.keyId == nil {
+            built = built.key(rawId)
+            if let callerLocation { built.keyLocation = callerLocation }
+        }
         TrackedRecorder.resume(savedTracked)
         let capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
@@ -610,10 +626,18 @@ public func memo<State, Deps: Equatable>(
     _ id: String,
     deps: Deps,
     cache: MemoCache? = nil,
+    file: String = #fileID,
+    line: UInt = #line,
+    column: UInt = #column,
     build: () -> El<State>
 ) -> El<State> {
     let target = cache ?? MemoScope.activeCache ?? .shared
-    return target.getOrBuildMemo(rawId: id, deps: deps, build: build).element
+    return target.getOrBuildMemo(
+        rawId: id,
+        deps: deps,
+        callerLocation: "\(file):\(line):\(column)",
+        build: build
+    ).element
 }
 
 /// Unlabelled `memo` convenience matching upstream `rune::memo("id", deps) { ... }`.
@@ -621,9 +645,12 @@ public func memo<State, Deps: Equatable>(
     _ id: String,
     _ deps: Deps,
     cache: MemoCache? = nil,
+    file: String = #fileID,
+    line: UInt = #line,
+    column: UInt = #column,
     build: () -> El<State>
 ) -> El<State> {
-    memo(id, deps: deps, cache: cache, build: build)
+    memo(id, deps: deps, cache: cache, file: file, line: line, column: column, build: build)
 }
 
 /// Memoizes a declarative `El<State>` subtree by an explicit `UInt64` version hash (`rune::memo_with_hash`).
@@ -631,9 +658,12 @@ public func memoWithHash<State>(
     _ id: String,
     _ versionHash: UInt64,
     cache: MemoCache? = nil,
+    file: String = #fileID,
+    line: UInt = #line,
+    column: UInt = #column,
     build: () -> El<State>
 ) -> El<State> {
-    memo(id, deps: versionHash, cache: cache, build: build)
+    memo(id, deps: versionHash, cache: cache, file: file, line: line, column: column, build: build)
 }
 
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)

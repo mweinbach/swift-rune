@@ -310,7 +310,7 @@ public struct GrowTrack: Sendable, Equatable {
             age += dt
         } else if whole {
             let scaled = activeSpring.withDuration(
-                activeSpring.duration * Swift.max(sqrtf(span / Growth.wholeReach), 1.0)
+                activeSpring.duration * Float.maximum(sqrtf(span / Growth.wholeReach), 1.0)
             )
             let (x, nextV) = scaled.sample(from: h, velocity: v, target: target, at: dt)
             let landed = (rem >= 0.0 && x >= target) || (rem <= 0.0 && x <= target)
