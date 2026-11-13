@@ -26,6 +26,8 @@ public struct AppSpec<State> {
     public var setup: ((Waker) -> Void)?
     public var poll: ((inout State, Double, inout Tx) -> Bool)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
+    public var onFileDrop: ((inout State, [URL], inout Tx) -> Void)?
+    public var onFileDropPhase: ((inout State, FileDropPhase, inout Tx) -> Void)?
     public var view: (State, inout Cx<State>) -> El<State>
 
     public init(
@@ -41,6 +43,8 @@ public struct AppSpec<State> {
         setup: ((Waker) -> Void)? = nil,
         poll: ((inout State, Double, inout Tx) -> Bool)? = nil,
         onKey: ((inout State, KeyEvent, inout Tx) -> Bool)? = nil,
+        onFileDrop: ((inout State, [URL], inout Tx) -> Void)? = nil,
+        onFileDropPhase: ((inout State, FileDropPhase, inout Tx) -> Void)? = nil,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
         self.title = title
@@ -55,6 +59,8 @@ public struct AppSpec<State> {
         self.setup = setup
         self.poll = poll
         self.onKey = onKey
+        self.onFileDrop = onFileDrop
+        self.onFileDropPhase = onFileDropPhase
         self.view = view
     }
 
@@ -109,6 +115,18 @@ public struct AppSpec<State> {
     public func poll(_ hook: @escaping (inout State, Double, inout Tx) -> Bool) -> Self {
         var copy = self
         copy.poll = hook
+        return copy
+    }
+
+    public func onFileDrop(_ hook: @escaping (inout State, [URL], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.onFileDrop = hook
+        return copy
+    }
+
+    public func onFileDropPhase(_ hook: @escaping (inout State, FileDropPhase, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.onFileDropPhase = hook
         return copy
     }
 }
@@ -515,6 +533,8 @@ public enum HeadlessRunner {
         runtime.windowTitle = spec.title
         runtime.srgbBlend = spec.srgbBlend
         runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
         appShared?.setWaker(waker)

@@ -340,6 +340,11 @@ public struct ElementHandlers<State> {
     public var onHover: ((inout State, Bool, inout Tx) -> Void)?
     public var onDrag: ((inout State, Drag, inout Tx) -> Void)?
     public var onDragEnd: ((inout State, Bool, inout Tx) -> Void)?
+    public var drop: DropSpec<State>?
+    public var dragOut: ((State) -> DragItem?)?
+    public var dragThreshold: Float?
+    public var onDragStart: ((inout State, inout Tx) -> Void)?
+    public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var onPhysicalInput: ((inout State, PhysicalInput, inout Tx) -> Bool)?
     public var onWheel: ((inout State, WheelEvent, inout Tx) -> Bool)?
@@ -1675,6 +1680,99 @@ public struct El<State> {
     public func onDragEnd(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onDragEnd = handler
+        return copy
+    }
+
+    // MARK: Outbound OS Drag-Out (`drag_out/mod.rs`)
+
+    /// Marks this element as an OS drag source; `provider(state)` runs only when the pointer moves past the threshold.
+    public func dragOut(_ provider: @escaping (State) -> DragItem?) -> Self {
+        var copy = self
+        copy.handlers.dragOut = provider
+        return copy
+    }
+
+    /// Distance in points the pointer must travel after press before `dragOut` starts (defaults to `DragItem.defaultThreshold`, 4pt).
+    public func dragThreshold(_ points: Float) -> Self {
+        var copy = self
+        copy.handlers.dragThreshold = max(0, points)
+        return copy
+    }
+
+    /// Called once when an outbound OS drag session begins for this element.
+    public func onDragStart(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onDragStart = handler
+        return copy
+    }
+
+    /// Called once when an outbound OS drag session ends (paired 1:1 with `onDragStart`).
+    public func onDragOutEnd(_ handler: @escaping (inout State, DragOutcome, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onDragOutEnd = handler
+        return copy
+    }
+
+    // MARK: Per-Element OS File Drop (`el/drop.rs`)
+
+    private mutating func ensureDropSpec() {
+        if handlers.drop == nil {
+            handlers.drop = DropSpec<State>()
+        }
+    }
+
+    /// Accepts OS files dropped onto this element.
+    public func onDropFiles(_ handler: @escaping (inout State, [URL], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.onDropFiles = handler
+        return copy
+    }
+
+    /// Restricts which dragged files this drop zone accepts.
+    public func acceptsFiles(_ predicate: @escaping (URL) -> Bool) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.accepts = predicate
+        return copy
+    }
+
+    /// Restricts accepted dropped files by extension (case-insensitive, leading dot optional).
+    public func acceptsExtensions(_ extensions: [String]) -> Self {
+        acceptsFiles { url in
+            DropSpec<State>.matchesExtension(extensions, url: url)
+        }
+    }
+
+    /// Notifies when matching dragged files enter (`true`) or leave (`false`) this drop zone.
+    public func onDropHover(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.onDropHover = handler
+        return copy
+    }
+
+    /// Called once per frame while matching dragged files move inside this drop zone (`tx.dropPoint` holds coordinates).
+    public func onDropMove(_ handler: @escaping (inout State, [URL], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.onDropMove = handler
+        return copy
+    }
+
+    /// Called when files rejected by `acceptsFiles`/`acceptsExtensions` are dropped on this drop zone.
+    public func onDropRejected(_ handler: @escaping (inout State, [URL], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.onDropRejected = handler
+        return copy
+    }
+
+    /// Notifies when dragged files with none matching enter (`true`) or leave (`false`) this drop zone.
+    public func onDropRejectedHover(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.ensureDropSpec()
+        copy.handlers.drop?.onDropRejectedHover = handler
         return copy
     }
 

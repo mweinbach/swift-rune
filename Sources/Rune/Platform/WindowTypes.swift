@@ -334,6 +334,15 @@ public protocol HostedWindowEntry: AnyObject {
     func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double)
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double)
+    func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool
+    func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>?
+    func resolvePopup(runtimeObj: AnyObject, picked: String?)
+    func cancelPopups(runtimeObj: AnyObject)
+    func takeFileDialog(runtimeObj: AnyObject) -> FileDialogPending?
+    func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
+    func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
+    func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
+    func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
     func runReopenHook(runtimeObj: AnyObject, hasVisibleWindows: Bool) -> Bool
@@ -461,6 +470,42 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double) {
         rt(runtimeObj).fileDrop(event, at: at)
+    }
+
+    func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool {
+        rt(runtimeObj).acceptsDrop(urls, at: at)
+    }
+
+    func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>? {
+        rt(runtimeObj).takePopup()
+    }
+
+    func resolvePopup(runtimeObj: AnyObject, picked: String?) {
+        try? rt(runtimeObj).resolvePopup(picked)
+    }
+
+    func cancelPopups(runtimeObj: AnyObject) {
+        rt(runtimeObj).cancelPopups()
+    }
+
+    func takeFileDialog(runtimeObj: AnyObject) -> FileDialogPending? {
+        rt(runtimeObj).takeFileDialog()
+    }
+
+    func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult) {
+        rt(runtimeObj).answerFileDialog(id, result)
+    }
+
+    func cancelFileDialogs(runtimeObj: AnyObject, at: Double) {
+        rt(runtimeObj).cancelFileDialogs(at: at)
+    }
+
+    func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart? {
+        rt(runtimeObj).takeDragOutStart()
+    }
+
+    func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {
+        rt(runtimeObj).finishDragOut(outcome, at: at)
     }
 
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool {

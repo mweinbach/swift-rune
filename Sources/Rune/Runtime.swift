@@ -259,7 +259,7 @@ public final class Runtime<State> {
     private var scrollStore: AnimationStore
     private var liveStore: AnimationStore
 
-    public private(set) var currentTime: Double = 0.0
+    public internal(set) var currentTime: Double = 0.0
     public private(set) var isAnimating: Bool = false
     public private(set) var viewCommitCount: Int = 0
     public private(set) var keyWarnings: [String] = []
@@ -287,12 +287,36 @@ public final class Runtime<State> {
     public var richClipboard = RichClipboardPayload()
     public let fileDropState = FileDropState()
     public var onFileDrop: ((inout State, FileDropPhase, inout Tx) -> Void)? = nil
+    public var onAppFileDrop: ((inout State, [URL], inout Tx) -> Void)? = nil
+    public var nativeOverlay: Bool = false
     public let urlOpener = UrlOpener(headless: true)
     public let flightRecorder = FlightRecorder()
     public let matchedFlightRegistry = MatchedFlightRegistry()
     public var rewindRecorder: RewindRecorder? = nil
     public let memo = MemoCache()
     internal var cxSettings = RuntimeShellSettings()
+
+    internal var popupQueue: PopupQueueState = .closed
+    internal var popupNeedsLayout: Bool = false
+    internal var runtimeFileDialogState: RuntimeFileDialogState = .closed
+    internal var nextFileDialogId: UInt64 = 1
+    internal var pendingFileDialogAnswers: [((inout Any, FileDialogResult, inout Tx) -> Void, FileDialogResult)] = []
+    internal var dropHoverPath: String? = nil
+    internal var dropHoverKey: String? = nil
+    internal var dropHoverAccepted: Bool = false
+    internal var activeDropHoverEnd: ((inout State, inout Tx) -> Void)? = nil
+    internal var draggedFiles: [URL]? = nil
+    internal var draggedFilesPoint: Vec2? = nil
+    internal var filesHeld: Bool = false
+    internal var pendingDropMovePoint: Vec2? = nil
+    internal var lastEmittedDropMovePoint: Vec2? = nil
+    internal var armedDragOut: (path: String, key: String?, startWindow: Vec2, bounds: MotionRect, threshold: Float)? = nil
+    internal var activeDragOut: (path: String, key: String?, onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?)? = nil
+    internal var pendingDragOutStart: DragOutStart? = nil
+
+    public var hasPendingInput: Bool {
+        !pendingFileDialogAnswers.isEmpty || pendingDropMovePoint != nil || !popupQueue.isEmpty
+    }
 
     // Input & focus state
     public private(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
@@ -367,7 +391,7 @@ public final class Runtime<State> {
     private var paintOrderPaths: [String] = []
     private var imagePacker = ImageAtlasPacker()
     private var retainedLayout = RetainedLayoutCoordinator()
-    private var needsCommit: Bool = true
+    internal var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true
     private var pendingEventTime: Double? = nil
 
@@ -564,7 +588,7 @@ public final class Runtime<State> {
     }
 
     @inline(__always)
-    private func dirtyCommit(at now: Double) {
+    internal func dirtyCommit(at now: Double) {
         needsCommit = true
         pendingEventTime = now
     }
@@ -587,6 +611,7 @@ public final class Runtime<State> {
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
         _ = runPoll(at: now)
+        flushPlatformFrameWork(at: now)
 
         // Release any `enterDelay` elements whose wait window has elapsed
         var releasedAny = false
@@ -615,7 +640,14 @@ public final class Runtime<State> {
             pendingEventTime = nil
             commitTree(at: commitAt, cut: forceInitialSettle)
             needsCommit = false
+            popupNeedsLayout = false
             forceInitialSettle = false
+            reconcileDropHoverAfterCommit(at: now)
+            if needsCommit {
+                commitTree(at: now, cut: false)
+                needsCommit = false
+                popupNeedsLayout = false
+            }
         }
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
@@ -2721,6 +2753,93 @@ public final class Runtime<State> {
         return nil
     }
 
+    // MARK: - Internal Platform Input Bridges
+
+    internal func dropTargetHitTest(at point: Vec2) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
+        guard let hit = hitTest(at: point, predicate: { $0.el.handlers.drop != nil }),
+              let spec = hit.node.el.handlers.drop else {
+            return nil
+        }
+        return (hit.node.path, hit.node.key, hit.rect, spec)
+    }
+
+    internal func dropTarget(byPath path: String) -> (rect: MotionRect, spec: DropSpec<State>)? {
+        guard let idx = nodeByPath[path] else { return nil }
+        let node = flatNodes[idx]
+        guard !node.effectiveInert, let spec = node.el.handlers.drop else { return nil }
+        return (presentedRectByPath[path] ?? node.targetRect, spec)
+    }
+
+    internal func dropTargetStillActive(path: String) -> Bool {
+        guard let idx = nodeByPath[path] else { return false }
+        let node = flatNodes[idx]
+        return !node.effectiveInert && node.el.handlers.drop != nil
+    }
+
+    internal func anchorRect(forKey key: String) -> MotionRect? {
+        let suffix = "/" + key
+        let node: FlatNode?
+        if key.contains("/") {
+            node = flatNodes.first(where: { $0.path == key || $0.path.hasSuffix(suffix) })
+        } else {
+            node = flatNodes.first(where: { $0.key == key })
+        }
+        guard let matched = node, !matched.effectiveInert else { return nil }
+        return presentedRectByPath[matched.path] ?? matched.targetRect
+    }
+
+    internal func releasePointerForPopup(at now: Double) {
+        armedDragOut = nil
+        activeDrag = nil
+        pressedPath = nil
+        pressedKey = nil
+        pointerExit(at: now)
+    }
+
+    internal func releasePointerForDragOut(at now: Double) {
+        activeDrag = nil
+        pressedPath = nil
+        pressedKey = nil
+        if let old = hoveredPath {
+            hoveredPath = nil
+            hoveredKey = nil
+            if let idx = nodeByPath[old], let cb = flatNodes[idx].el.handlers.onHover {
+                var tx = Tx()
+                cb(&state, false, &tx)
+                applyTx(tx, at: now)
+            }
+        }
+        dirtyCommit(at: now)
+    }
+
+    internal func dragSourceNode(byPath path: String) -> (
+        rect: MotionRect?,
+        key: String?,
+        dragOut: ((State) -> DragItem?)?,
+        attachedItem: DragItem?,
+        onStart: ((inout State, inout Tx) -> Void)?,
+        onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
+    )? {
+        guard let idx = nodeByPath[path] else { return nil }
+        let node = flatNodes[idx]
+        guard !node.effectiveInert else { return nil }
+        let h = node.el.handlers
+        guard h.dragOut != nil || node.el.attachedDragOutItem != nil else { return nil }
+        return (
+            presentedRectByPath[path] ?? node.targetRect,
+            node.key,
+            h.dragOut,
+            node.el.attachedDragOutItem,
+            h.onDragStart,
+            h.onDragOutEnd
+        )
+    }
+
+    internal func dragOutEndHandler(byPath path: String) -> ((inout State, DragOutcome, inout Tx) -> Void)? {
+        guard let idx = nodeByPath[path] else { return nil }
+        return flatNodes[idx].el.handlers.onDragOutEnd
+    }
+
     public func pointerExit(at now: Double) {
         pointerPosition = Vec2(-10000, -10000)
         if helpState.tipState != .idle {
@@ -2740,6 +2859,10 @@ public final class Runtime<State> {
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
         pointerPosition = pos
+
+        if checkArmedDragOutMove(to: pos, at: now) {
+            return
+        }
 
         // Active drag capture takes priority over hover
         if let drag = activeDrag {
@@ -2874,7 +2997,8 @@ public final class Runtime<State> {
         let interactiveHit = hitTestDetailed(at: pos) { node in
             let h = node.el.handlers
             return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
-                   h.onPointerDown != nil || h.onDrag != nil || h.editLens != nil ||
+                   h.onPointerDown != nil || h.onDrag != nil || h.dragOut != nil ||
+                   node.el.attachedDragOutItem != nil || h.editLens != nil ||
                    self.nodeTakesFocus(node.el) || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
                    node.el.isModal || (node.el.role == .button && node.el.explicitHit)
         }
@@ -2947,7 +3071,15 @@ public final class Runtime<State> {
             return
         }
 
-        if node.el.handlers.onDrag != nil {
+        let hasDragOut = node.el.handlers.dragOut != nil || node.el.attachedDragOutItem != nil
+        if button == .primary && hasDragOut {
+            let threshold = node.el.handlers.dragThreshold ?? DragItem.defaultThreshold
+            armedDragOut = (path: node.path, key: node.key, startWindow: pos, bounds: rect, threshold: threshold)
+        } else {
+            armedDragOut = nil
+        }
+
+        if node.el.handlers.onDrag != nil && !hasDragOut {
             let snapshot = state
             activeDrag = DragSession(
                 path: node.path,
@@ -2982,6 +3114,7 @@ public final class Runtime<State> {
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         pointerPosition = pos
+        armedDragOut = nil
         let releasedPath = pressedPath
         pressedPath = nil
         pressedKey = nil
@@ -3441,7 +3574,23 @@ public final class Runtime<State> {
         if let title = windowTitle {
             out["title"] = title
         }
+        if let popup = popupJSONObject() {
+            out["popupMenu"] = popup
+        }
+        if let dialog = fileDialogJSONObject() {
+            out["fileDialog"] = dialog
+        }
         return out
+    }
+
+    /// JSON representation of the currently open or queued popup menu for `--tree`.
+    public func popupJSON() -> [String: Any]? {
+        popupJSONObject()
+    }
+
+    /// JSON representation of the currently requested or showing file dialog for `--tree`.
+    public func fileDialogJSON() -> [String: Any]? {
+        fileDialogJSONObject()
     }
 
     public func treeJSONData(pretty: Bool = true, realTime: Double? = nil) throws -> Data {
@@ -3454,6 +3603,7 @@ public final class Runtime<State> {
         currentTime = now
         fileDropState.handle(phase)
         flightRecorder.record(kind: "fileDrop", at: now)
+        routeFileDropPhase(phase, at: now)
         if let handler = onFileDrop {
             var tx = Tx()
             handler(&state, phase, &tx)
@@ -3514,6 +3664,29 @@ public final class Runtime<State> {
         }
         if let drag = tx.runtimeActions["dragOutItem"] as? DragItem {
             fileDropState.recordOutboundDrag(drag)
+            let bounds: MotionRect
+            let key: String?
+            if let path = pressedPath ?? hoveredPath, let idx = nodeByPath[path] {
+                bounds = presentedRectByPath[path] ?? flatNodes[idx].targetRect
+                key = flatNodes[idx].key
+            } else {
+                bounds = .fromXYWH(pointerPosition.x, pointerPosition.y, 1, 1)
+                key = nil
+            }
+            pendingDragOutStart = DragOutStart(item: drag, bounds: bounds, press: pointerPosition, key: key)
+        }
+        if let actions = tx.runtimeActions["erasedActions"] as? [ErasedRuntimeAction] {
+            for action in actions {
+                switch action {
+                case .popup(let req):
+                    enqueuePopupRequest(req)
+                    if !tx.liveOnlyRequested {
+                        popupNeedsLayout = true
+                    }
+                case .fileDialog(let req):
+                    requestFileDialog(req, at: now)
+                }
+            }
         }
         if let rewind = tx.runtimeActions["rewindRecorder"] as? RewindRecorder {
             rewindRecorder = rewind
