@@ -102,33 +102,35 @@ public enum RadarGrid {
                 stillOpacity: still,
                 phase: Float(round3(at)),
                 isCenter: false,
-                cycle: Cycle(period: loopDuration, phase: Float(round3(at)), stops: frames, still: still)
+                cycle: Cycle(period: loopDuration, phase: Float(round3(at)), stops: frames, still: still, fps: 60.0)
             )
         }
     }
+
+    /// Evaluates `dot`'s animated opacity at `time` seconds, or `stillOpacity` for the steady center dot.
+    public static func phaseOpacity(dot: Dot, at time: Double) -> Float {
+        dot.cycle?.sample(at: time) ?? dot.stillOpacity
+    }
 }
 
-/// Semantic tone for inline feedback banners (`rune_kit::feedback`).
-public enum FeedbackTone: Sendable, Hashable {
-    case info
-    case success
-    case warning
-    case danger
-}
+/// Soft Radar 5x5 activity spinner (`rune_kit::feedback::Spinner`).
+public struct Spinner<State> {
+    private var diameter: Float = 18
+    private var inkColor: Color?
 
-extension Kit {
-    /// Soft Radar 5x5 activity spinner (`rune_kit::feedback::Spinner`).
-    public func radarSpinner<State>(
-        key: String = "radar-spinner",
-        size: Float = 18,
-        color: Color? = nil
-    ) -> El<State> {
-        let ink = color ?? c.stdText
-        let u = size / 16.0
+    public init() {}
+
+    public func size(_ s: Float) -> Self { var c = self; c.diameter = s; return c }
+    public func color(_ color: Color) -> Self { var c = self; c.inkColor = color; return c }
+
+    public func build(_ k: Kit, key: String = "radar-spinner") -> El<State> {
+        let ink = inkColor ?? k.c.stdText
+        let u = diameter / 16.0
         var box: El<State> = el()
             .key(key)
+            .role(.progress)
             .label("Loading")
-            .size(size, size)
+            .size(diameter, diameter)
 
         for (idx, dot) in RadarGrid.dots.enumerated() {
             let side = dot.size * u
@@ -143,44 +145,90 @@ extension Kit {
         }
         return box
     }
+}
 
-    /// Circular indeterminate loader ring (`rune_kit::feedback::Loader`).
-    public func ringLoader<State>(
-        key: String = "ring-loader",
-        size: Float = 16,
-        color: Color? = nil
-    ) -> El<State> {
-        let ink = color ?? c.iconMuted
-        let ringIcon = SVGIcon(viewBox: 16, paths: ["M8 2A6 6 0 1 1 7.99 2"], strokeWidth: 2.0)
-        let arcIcon = SVGIcon(viewBox: 16, paths: ["M8 2A6 6 0 0 1 13.258 10.89"], strokeWidth: 2.0)
+private enum FeedbackAssets {
+    static let ringIcon = SVGIcon(viewBox: 16, paths: ["M8 2A6 6 0 1 0 8 14A6 6 0 1 0 8 2Z"], strokeWidth: 2.0)
+    static let arcIcon = SVGIcon(viewBox: 16, paths: ["M8 2A6 6 0 0 1 13.258 10.89"], strokeWidth: 2.0)
+    static let loaderLoopSpec = LoopSpec.rotation(period: 0.9)
+    static let indeterminateSlide = LoopSpec.slide(period: 1.4, from: Vec2(-1, 0), to: Vec2(4, 0))
+    static let quantizedArcs: [SVGIcon] = (0...50).map { step in
+        if step == 0 {
+            return SVGIcon(viewBox: 16, paths: [], strokeWidth: 2.0)
+        } else if step == 50 {
+            return ringIcon
+        }
+        let a = Double(step) / 50.0 * 2.0 * .pi - .pi * 0.5
+        let x = 8.0 + 6.0 * cos(a)
+        let y = 8.0 + 6.0 * sin(a)
+        let large = step > 25 ? 1 : 0
+        let d = String(format: "M8 2A6 6 0 %d 1 %.3f %.3f", large, x, y)
+        return SVGIcon(viewBox: 16, paths: [d], strokeWidth: 2.0)
+    }
+}
+
+/// Circular indeterminate loader ring (`rune_kit::feedback::Loader`).
+public struct Loader<State> {
+    public static var ringIcon: SVGIcon { FeedbackAssets.ringIcon }
+    public static var arcIcon: SVGIcon { FeedbackAssets.arcIcon }
+    public static var loopSpec: LoopSpec { FeedbackAssets.loaderLoopSpec }
+
+    private var diameter: Float = 16
+    private var inkColor: Color?
+
+    public init() {}
+
+    public func size(_ s: Float) -> Self { var c = self; c.diameter = s; return c }
+    public func color(_ color: Color) -> Self { var c = self; c.inkColor = color; return c }
+
+    public func build(_ k: Kit, key: String = "ring-loader") -> El<State> {
+        let ink = inkColor ?? k.c.iconMuted
         return el()
             .key(key)
+            .role(.progress)
             .label("Loading")
-            .size(size, size)
-            .child(icon(ringIcon, size: size).color(ink).absolute(x: 0, y: 0).opacity(0.2))
-            .child(icon(arcIcon, size: size).color(ink).absolute(x: 0, y: 0))
+            .size(diameter, diameter)
+            .child(icon(FeedbackAssets.ringIcon, size: diameter).key("\(key)-ring").color(ink).absolute(x: 0, y: 0).opacity(0.2))
+            .child(icon(FeedbackAssets.arcIcon, size: diameter).key("\(key)-arc").color(ink).absolute(x: 0, y: 0))
+    }
+}
+
+/// Linear progress bar (`rune_kit::feedback::Progress`).
+public struct Progress<State> {
+    public static var indeterminateSlide: LoopSpec { FeedbackAssets.indeterminateSlide }
+
+    private var value: Float?
+    private var labelText: String?
+    private var showsValue: Bool = false
+
+    /// `value` in `0...1`; `nil` is indeterminate.
+    public init(value: Float?) {
+        self.value = value
     }
 
-    /// Linear progress bar with optional label and percentage (`rune_kit::feedback::Progress`).
-    public func progressBar<State>(
-        key: String = "progress",
-        value: Float?,
-        label: String? = nil,
-        showValue: Bool = false
-    ) -> El<State> {
-        var root: El<State> = col().key(key).wFull().gap(4)
-        if let label {
-            root = root.label(label)
+    public func label(_ l: String) -> Self { var c = self; c.labelText = l; return c }
+    public func showValue(_ on: Bool = true) -> Self { var c = self; c.showsValue = on; return c }
+
+    public func build(_ k: Kit, key: String = "progress") -> El<State> {
+        let c = k.c
+        var root: El<State> = col().key(key).role(.progress).wFull().gap(4)
+        if let labelText {
+            root = root.label(labelText)
         }
-        if label != nil || showValue {
-            var header: El<State> = row().wFull().gap(8).itemsCenter()
-            if let label {
-                header = header.child(text(label).font(ty.textSmall).color(c.stdText))
+        if let v = value {
+            let clamped = v.clamped(to: 0...1)
+            let pct = Int((clamped * 100).rounded())
+            root = root.selected("\(pct)%")
+        }
+        if labelText != nil || showsValue {
+            var header: El<State> = row().key("\(key)-header").wFull().gap(8).itemsCenter()
+            if let labelText {
+                header = header.child(text(labelText).key("\(key)-label").font(k.ty.textSmall).color(c.stdText))
             }
             header = header.child(spacer())
-            if showValue, let value {
+            if showsValue, let value {
                 let pct = Int((value.clamped(to: 0...1) * 100).rounded())
-                header = header.child(text("\(pct)%").font(ty.textSmall).color(c.textWeak))
+                header = header.child(text("\(pct)%").key("\(key)-value").font(k.ty.textSmall).color(c.textWeak))
             }
             root = root.child(header)
         }
@@ -205,6 +253,87 @@ extension Kit {
 
         return root.child(track)
     }
+}
+
+/// Small circular progress indicator (`rune_kit::feedback::ProgressCircle`), quantized to 2% steps.
+public struct ProgressCircle<State> {
+    public static func arcIcon(for value: Float) -> SVGIcon {
+        let step = Int((value.clamped(to: 0...1) * 50.0).rounded())
+        return FeedbackAssets.quantizedArcs[max(0, min(50, step))]
+    }
+
+    private var value: Float
+    private var diameter: Float = 16
+    private var labelText: String?
+
+    public init(value: Float) {
+        self.value = value
+    }
+
+    public func size(_ s: Float) -> Self { var c = self; c.diameter = s; return c }
+    public func label(_ l: String) -> Self { var c = self; c.labelText = l; return c }
+
+    public func build(_ k: Kit, key: String = "progress-circle") -> El<State> {
+        let ink = k.c.iconMuted
+        let clamped = value.clamped(to: 0...1)
+        let pct = Int((clamped * 100).rounded())
+        var root: El<State> = el()
+            .key(key)
+            .role(.progress)
+            .selected("\(pct)%")
+            .size(diameter, diameter)
+            .child(icon(FeedbackAssets.ringIcon, size: diameter).key("\(key)-ring").absolute(x: 0, y: 0).color(ink).opacity(0.2))
+            .child(icon(Self.arcIcon(for: clamped), size: diameter).key("\(key)-arc").absolute(x: 0, y: 0).color(ink))
+        if let labelText {
+            root = root.label(labelText)
+        }
+        return root
+    }
+}
+
+/// Semantic tone for inline feedback banners (`rune_kit::feedback`).
+public enum FeedbackTone: Sendable, Hashable {
+    case info
+    case success
+    case warning
+    case danger
+}
+
+extension Kit {
+    /// Soft Radar 5x5 activity spinner (`rune_kit::feedback::Spinner`).
+    public func radarSpinner<State>(
+        key: String = "radar-spinner",
+        size: Float = 18,
+        color: Color? = nil
+    ) -> El<State> {
+        var spinner = Spinner<State>().size(size)
+        if let color { spinner = spinner.color(color) }
+        return spinner.build(self, key: key)
+    }
+
+    /// Circular indeterminate loader ring (`rune_kit::feedback::Loader`).
+    public func ringLoader<State>(
+        key: String = "ring-loader",
+        size: Float = 16,
+        color: Color? = nil
+    ) -> El<State> {
+        var loader = Loader<State>().size(size)
+        if let color { loader = loader.color(color) }
+        return loader.build(self, key: key)
+    }
+
+    /// Linear progress bar with optional label and percentage (`rune_kit::feedback::Progress`).
+    public func progressBar<State>(
+        key: String = "progress",
+        value: Float?,
+        label: String? = nil,
+        showValue: Bool = false
+    ) -> El<State> {
+        var p = Progress<State>(value: value)
+        if let label { p = p.label(label) }
+        if showValue { p = p.showValue(true) }
+        return p.build(self, key: key)
+    }
 
     /// Small circular progress indicator (`rune_kit::feedback::ProgressCircle`).
     public func progressCircle<State>(
@@ -213,24 +342,9 @@ extension Kit {
         size: Float = 16,
         label: String? = nil
     ) -> El<State> {
-        let clamped = value.clamped(to: 0...1)
-        let pct = Int((clamped * 100).rounded())
-        var root: El<State> = el()
-            .key(key)
-            .size(size, size)
-            .rounded(size * 0.5)
-            .border(2.0, c.borderWeak)
-            .center()
-            .child(
-                el()
-                    .size(max(2, size * 0.55 * clamped), max(2, size * 0.55 * clamped))
-                    .rounded(size * 0.5)
-                    .bg(c.borderActive)
-            )
-        if let label {
-            root = root.label("\(label) \(pct)%")
-        }
-        return root
+        var p = ProgressCircle<State>(value: value).size(size)
+        if let label { p = p.label(label) }
+        return p.build(self, key: key)
     }
 
     /// Inline status banner with tone styling, optional title, message, and dismiss/action slot.
