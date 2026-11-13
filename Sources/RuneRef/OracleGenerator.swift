@@ -111,12 +111,18 @@ public enum OracleGenerator {
         return scene(records: records)
     }
 
+    private static func satUInt32(_ x: Float) -> UInt32 {
+        if x.isNaN || x <= 0 { return 0 }
+        if x >= Float(UInt32.max) { return UInt32.max }
+        return UInt32(x)
+    }
+
     public static func dashed(seed: UInt64, count: Int = 8) -> OracleScene {
         var scene = seeded(seed: seed, count: count)
         for idx in scene.primitives.indices {
             let p = scene.primitives[idx]
             func b(_ n: Int) -> UInt32 {
-                UInt32(p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0)
+                satUInt32(p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0)
             }
             var np = p
             np.params = [
@@ -145,7 +151,7 @@ public enum OracleGenerator {
         out.reserveCapacity(scene.primitives.count * 2)
         for var p in scene.primitives {
             func b(_ n: Int) -> UInt32 {
-                UInt32(p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0)
+                satUInt32(p.radii[n % 4] * 8.0 + p.rect[n % 4] * 4.0)
             }
             let t0 = Float(b(0) % 4) * 0.1
             let t1 = min(t0 + 0.35 + Float(b(1) % 6) * 0.1, 1.0)

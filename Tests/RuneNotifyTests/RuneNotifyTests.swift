@@ -94,6 +94,10 @@ struct RuneNotifyTests {
         service.remove(ids: ["n-1"])
         #expect(mock.activeNotifications.isEmpty)
         #expect(mock.removedIds == ["n-1"])
+
+        service.clearClickHandler()
+        _ = mock.simulateClick(notificationId: "n-1")
+        #expect(receivedClicks.withLock { $0.count } == 2)
     }
 
     @Test func mockBackendUnavailableAndFocusAndBringToFront() {
@@ -208,8 +212,12 @@ struct RuneNotifyTests {
         let mock = MockNotificationBackend()
         let service = NotificationService(backend: mock)
         let identity = NotificationIdentity(id: "dev.rune.test", name: "Rune Test")
+            .icon("/tmp/rune.png")
             .activation("rune-notify")
+        #expect(identity.iconPath == "/tmp/rune.png")
 
+        service.register(identity)
+        service.adopt(identity)
         try service.registerWithResult(identity).get()
         try service.adoptWithResult(identity).get()
         #expect(mock.registeredIdentity == identity)

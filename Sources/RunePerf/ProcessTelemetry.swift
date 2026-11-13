@@ -115,6 +115,7 @@ public final class ProcessCountingAllocator: @unchecked Sendable {
         var threadTag: [UInt64: String] = [:]
         var threadAllocs: [UInt64: UInt64] = [:]
         var threadAllocatedBytes: [UInt64: UInt64] = [:]
+        var threadAllocatedBaseline: [UInt64: UInt64] = [:]
     }
 
     private let lock = PortableLock(initialState: State())
@@ -179,6 +180,21 @@ public final class ProcessCountingAllocator: @unchecked Sendable {
         return lock.withLock { state in
             guard state.installed else { return nil }
             return state.threadAllocatedBytes[tid] ?? 0
+        }
+    }
+
+    /// Bytes this thread asked the allocator for since its previous call (`rune_perf::take_allocated_bytes`).
+    /// Returns `nil` when the counting allocator is not installed (`!installed`), and on a thread's first call
+    /// (which sets the thread's baseline).
+    public func takeAllocatedBytes() -> UInt64? {
+        let tid = Self.currentThreadID()
+        return lock.withLock { state in
+            guard state.installed else { return nil }
+            let now = state.threadAllocatedBytes[tid] ?? 0
+            let last = state.threadAllocatedBaseline[tid]
+            state.threadAllocatedBaseline[tid] = now
+            guard let last else { return nil }
+            return now &- last
         }
     }
 
@@ -389,7 +405,7 @@ public enum ProcessSampler {
         }
         if rusageResult == 0 {
             footprintBytes = rusage.ri_phys_footprint
-            footprintPeakBytes = rusage.ri_lifetime_max_phys_footprint
+            footprintPeakBytes = max(rusage.ri_phys_footprint, rusage.ri_lifetime_max_phys_footprint)
             if residentBytes == 0 {
                 residentBytes = rusage.ri_resident_size
             }

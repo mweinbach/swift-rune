@@ -68,7 +68,7 @@ public final class IncidentDetector: @unchecked Sendable {
     public static let globalCooldownMs: UInt64 = 2_000
     public static let sameKeyCooldownMs: UInt64 = 60_000
     public static let severityEscalationFactor: Double = 1.25
-    public static let defaultSlowFrameMs: Double = 16.7
+    public static let defaultSlowFrameMs: Double = 1000.0 / 60.0
     public static let defaultStallMs: Double = 250.0
 
     private struct SentRecord {

@@ -169,6 +169,21 @@ struct RuneRefParityTests {
         #expect(diff.first?.x == 14 && diff.first?.y == 14)
         #expect(diff.first?.node != nil)
 
+        // Upstream provenance_and_diff_name_the_source exact check
+        var provScene = OracleGenerator.scene(records: [Array(repeating: UInt8(0), count: 32)])
+        provScene.primitives[0].rect = [2, 2, 10, 10]
+        provScene.primitives[0].fill = [1, 1, 1, 1]
+        try provScene.validate()
+        var provFrame = OracleFrame(width: provScene.width, height: provScene.height, provenance: true)
+        provFrame.render(provScene)
+        #expect(provFrame.blame(provScene, x: 5, y: 5)?.source == "generated/0")
+        #expect(provFrame.blame(provScene, x: 63, y: 63) == nil)
+        var badProv = provFrame.rgba
+        badProv[(5 * 64 + 5) * 4] = 0
+        let provDiff = Oracle.compare(scene: provScene, cpu: provFrame, gpu: badProv, tolerance: 2)
+        #expect(provDiff.outlierPixels == 1)
+        #expect(provDiff.first?.node == 1)
+
         // Dashed & radial generators + RefGenerator.radial + translate invariance
         for scene in [OracleGenerator.dashed(seed: 2, count: 6), OracleGenerator.radial(seed: 3, count: 6)] {
             try scene.validate()
@@ -343,5 +358,228 @@ struct RuneRefParityTests {
 
         let clipped = try renderGlyph(angle: Float.pi * 0.5, clip: [28.0, oracleNoClip[1], oracleNoClip[2], oracleNoClip[3]])
         #expect(isLit(clipped, 34, 21) && !isLit(clipped, 21, 34))
+    }
+
+    private func makeOracleLayer(kind: Float, blur: Float) -> OraclePrimitive {
+        OraclePrimitive(
+            node: 1,
+            source: "layer",
+            rect: kind == 9.0 ? [0, 0, 0, 0] : [0, 0, 8, 8],
+            radii: [0, 0, 0, 0],
+            fill: [0, 0, 0, kind == 9.0 ? 0.0 : 1.0],
+            border: [0, 0, 0, 0],
+            params: [0, kind, blur, 0],
+            uv: [0, 0, 0, 0],
+            clip: oracleNoClip,
+            fade: [0, 0, 0, 0],
+            fadeOrigin: nil,
+            turn: nil
+        )
+    }
+
+    @Test("OracleScene.validate rejects unbalanced, unclosed, malformed cache, turned+cache, blurred, and deep layers")
+    func validateRejectsLayersItCannotRender() throws {
+        let base = OracleGenerator.scene(records: [])
+        func sceneWith(_ primitives: [OraclePrimitive]) -> OracleScene {
+            OracleScene(width: base.width, height: base.height, clear: base.clear, primitives: primitives, atlas: base.atlas)
+        }
+
+        try sceneWith([makeOracleLayer(kind: 8, blur: 0), makeOracleLayer(kind: 9, blur: 0)]).validate()
+
+        #expect(throws: (any Error).self) {
+            try sceneWith([makeOracleLayer(kind: 9, blur: 0)]).validate()
+        }
+        #expect(throws: (any Error).self) {
+            try sceneWith([makeOracleLayer(kind: 8, blur: 0)]).validate()
+        }
+
+        var malformed = makeOracleLayer(kind: 8, blur: 0)
+        malformed.params[3] = 2.0
+        #expect(throws: (any Error).self) {
+            try sceneWith([malformed, makeOracleLayer(kind: 9, blur: 0)]).validate()
+        }
+
+        var turned = makeOracleLayer(kind: 8, blur: 0)
+        turned.turn = [0.4, 4.0, 4.0]
+        try sceneWith([turned, makeOracleLayer(kind: 9, blur: 0)]).validate()
+
+        // A turned subtree never opens a cache, so a turned cache record is malformed.
+        turned.params[3] = 1.0
+        #expect(throws: (any Error).self) {
+            try sceneWith([turned, makeOracleLayer(kind: 9, blur: 0)]).validate()
+        }
+
+        // The CPU compositor has no layer blur, so a blurred layer would render unblurred.
+        #expect(throws: (any Error).self) {
+            try sceneWith([makeOracleLayer(kind: 8, blur: 2.0), makeOracleLayer(kind: 9, blur: 0)]).validate()
+        }
+
+        // Each nested scope holds a full-frame buffer while it renders, so nesting is bounded.
+        let deep = Array(repeating: makeOracleLayer(kind: 8, blur: 0), count: 1000)
+            + Array(repeating: makeOracleLayer(kind: 9, blur: 0), count: 1000)
+        #expect(throws: (any Error).self) {
+            try sceneWith(deep).validate()
+        }
+    }
+
+    @Test("Dashed rings translate by integer pixels and never draw outside solid ring (32 seeds)")
+    func dashedRingsTranslateAndStayInsideTheirRing() throws {
+        for seed: UInt64 in 0..<32 {
+            let scene = OracleGenerator.dashed(seed: seed, count: 8)
+            try scene.validate()
+            var original = OracleFrame(width: scene.width, height: scene.height, provenance: false)
+            original.render(scene)
+
+            var shifted = scene
+            shifted.width += 4
+            shifted.height += 6
+            OracleGenerator.translate(&shifted, x: 4, y: 6)
+            try shifted.validate()
+            var actual = OracleFrame(width: shifted.width, height: shifted.height, provenance: false)
+            actual.render(shifted)
+
+            for y in 0..<64 {
+                let origSlice = original.rgba[(y * 256)..<((y + 1) * 256)]
+                let actStart = ((y + 6) * 68 + 4) * 4
+                let actEnd = ((y + 6) * 68 + 68) * 4
+                #expect(Array(origSlice) == Array(actual.rgba[actStart..<actEnd]), "seed \(seed) row \(y)")
+            }
+
+            // Dashes only ever take coverage away from the solid ring.
+            for p in scene.primitives {
+                var one = scene
+                one.primitives = [p]
+                var dashed = OracleFrame(width: one.width, height: one.height, provenance: true)
+                dashed.render(one)
+
+                one.primitives[0].params[1] = 4.0
+                one.primitives[0].uv = one.primitives[0].border
+                one.primitives[0].border = one.primitives[0].fill
+                one.primitives[0].fill = [0, 0, 0, 0]
+                var solid = OracleFrame(width: one.width, height: one.height, provenance: true)
+                solid.render(one)
+
+                let dOwners = dashed.owners ?? []
+                let sOwners = solid.owners ?? []
+                for (n, (d, s)) in zip(dOwners, sOwners).enumerated() {
+                    #expect(d == nil || s != nil, "seed \(seed): pixel \(n) dashed outside the ring")
+                }
+            }
+        }
+    }
+
+    @Test("Kind 12 effect slots across 16 seeded scenes match rgba and never appear in owners")
+    func effectSlotsAreAcceptedAndDrawNothingParity() throws {
+        for seed: UInt64 in 0..<16 {
+            let scene = OracleGenerator.seeded(seed: seed, count: 8)
+            var slotted = scene
+            for (n, p) in scene.primitives.enumerated().reversed() {
+                var slot = p
+                slot.source = "effect/\(n)"
+                slot.fill = [0, 0, 0, 1]
+                slot.border = [0, 0, 0, 0]
+                slot.params = [0, 12.0, 6.0, 1.0]
+                slot.uv = [0, 0, 0, 0]
+                if n % 3 == 0 {
+                    slot.rect[2] = 0.0
+                }
+                slotted.primitives.insert(slot, at: n)
+            }
+            try scene.validate()
+            try slotted.validate()
+            var a = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+            a.render(scene)
+            var b = OracleFrame(width: slotted.width, height: slotted.height, provenance: true)
+            b.render(slotted)
+            #expect(a.rgba == b.rgba, "seed \(seed)")
+            let owners = (b.owners ?? []).compactMap { $0 }
+            #expect(owners.allSatisfy { slotted.primitives[$0].params[1] != 12.0 }, "seed \(seed)")
+        }
+    }
+
+    @Test("Upstream regressions/glyph-texel-boundary.json replays with exact BLAKE3 hash")
+    func glyphTexelBoundaryRegressionReplay() throws {
+        let json = #"{"width":64,"height":64,"clear":[0.025,0.04,0.06,1.0],"primitives":[{"node":4,"source":"generated/3","rect":[10.5,34.25,14.0,21.0],"radii":[25.25,24.625,14.625,8.125],"fill":[0.29413307,0.018131489,0.2034756,0.5137255],"border":[0.3062207,0.45933107,0.2034756,0.5137255],"params":[0.0,2.0,7.8125,1.6686275],"uv":[1.0,1.0,0.0,0.0],"clip":[12.625,8.375,39.125,57.375],"fade":[5.5,4.0,4.5,2.5]}],"atlas":{"width":32,"height":32,"data":[0,73,146,219,36,109,182,255,72,145,218,35,108,181,254,71,144,217,34,107,180,253,70,143,216,33,106,179,252,69,142,215,51,124,197,14,87,160,233,50,123,196,13,86,159,232,49,122,195,12,85,158,231,48,121,194,11,84,157,230,47,120,193,10,102,175,248,65,138,211,28,101,174,247,64,137,210,27,100,173,246,63,136,209,26,99,172,245,62,135,208,25,98,171,244,61,153,226,43,116,189,6,79,152,225,42,115,188,5,78,151,224,41,114,187,4,77,150,223,40,113,186,3,76,149,222,39,112,204,21,94,167,240,57,130,203,20,93,166,239,56,129,202,19,92,165,238,55,128,201,18,91,164,237,54,127,200,17,90,163,255,72,145,218,35,108,181,254,71,144,217,34,107,180,253,70,143,216,33,106,179,252,69,142,215,32,105,178,251,68,141,214,50,123,196,13,86,159,232,49,122,195,12,85,158,231,48,121,194,11,84,157,230,47,120,193,10,83,156,229,46,119,192,9,101,174,247,64,137,210,27,100,173,246,63,136,209,26,99,172,245,62,135,208,25,98,171,244,61,134,207,24,97,170,243,60,152,225,42,115,188,5,78,151,224,41,114,187,4,77,150,223,40,113,186,3,76,149,222,39,112,185,2,75,148,221,38,111,203,20,93,166,239,56,129,202,19,92,165,238,55,128,201,18,91,164,237,54,127,200,17,90,163,236,53,126,199,16,89,162,254,71,144,217,34,107,180,253,70,143,216,33,106,179,252,69,142,215,32,105,178,251,68,141,214,31,104,177,250,67,140,213,49,122,195,12,85,158,231,48,121,194,11,84,157,230,47,120,193,10,83,156,229,46,119,192,9,82,155,228,45,118,191,8,100,173,246,63,136,209,26,99,172,245,62,135,208,25,98,171,244,61,134,207,24,97,170,243,60,133,206,23,96,169,242,59,151,224,41,114,187,4,77,150,223,40,113,186,3,76,149,222,39,112,185,2,75,148,221,38,111,184,1,74,147,220,37,110,202,19,92,165,238,55,128,201,18,91,164,237,54,127,200,17,90,163,236,53,126,199,16,89,162,235,52,125,198,15,88,161,253,70,143,216,33,106,179,252,69,142,215,32,105,178,251,68,141,214,31,104,177,250,67,140,213,30,103,176,249,66,139,212,48,121,194,11,84,157,230,47,120,193,10,83,156,229,46,119,192,9,82,155,228,45,118,191,8,81,154,227,44,117,190,7,99,172,245,62,135,208,25,98,171,244,61,134,207,24,97,170,243,60,133,206,23,96,169,242,59,132,205,22,95,168,241,58,150,223,40,113,186,3,76,149,222,39,112,185,2,75,148,221,38,111,184,1,74,147,220,37,110,183,0,73,146,219,36,109,201,18,91,164,237,54,127,200,17,90,163,236,53,126,199,16,89,162,235,52,125,198,15,88,161,234,51,124,197,14,87,160,252,69,142,215,32,105,178,251,68,141,214,31,104,177,250,67,140,213,30,103,176,249,66,139,212,29,102,175,248,65,138,211,47,120,193,10,83,156,229,46,119,192,9,82,155,228,45,118,191,8,81,154,227,44,117,190,7,80,153,226,43,116,189,6,98,171,244,61,134,207,24,97,170,243,60,133,206,23,96,169,242,59,132,205,22,95,168,241,58,131,204,21,94,167,240,57,149,222,39,112,185,2,75,148,221,38,111,184,1,74,147,220,37,110,183,0,73,146,219,36,109,182,255,72,145,218,35,108,200,17,90,163,236,53,126,199,16,89,162,235,52,125,198,15,88,161,234,51,124,197,14,87,160,233,50,123,196,13,86,159,251,68,141,214,31,104,177,250,67,140,213,30,103,176,249,66,139,212,29,102,175,248,65,138,211,28,101,174,247,64,137,210,46,119,192,9,82,155,228,45,118,191,8,81,154,227,44,117,190,7,80,153,226,43,116,189,6,79,152,225,42,115,188,5,97,170,243,60,133,206,23,96,169,242,59,132,205,22,95,168,241,58,131,204,21,94,167,240,57,130,203,20,93,166,239,56,148,221,38,111,184,1,74,147,220,37,110,183,0,73,146,219,36,109,182,255,72,145,218,35,108,181,254,71,144,217,34,107,199,16,89,162,235,52,125,198,15,88,161,234,51,124,197,14,87,160,233,50,123,196,13,86,159,232,49,122,195,12,85,158,250,67,140,213,30,103,176,249,66,139,212,29,102,175,248,65,138,211,28,101,174,247,64,137,210,27,100,173,246,63,136,209,45,118,191,8,81,154,227,44,117,190,7,80,153,226,43,116,189,6,79,152,225,42,115,188,5,78,151,224,41,114,187,4]}}"#
+        let scene = try JSONDecoder().decode(OracleScene.self, from: Data(json.utf8))
+        try scene.validate()
+        var frame = OracleFrame(width: scene.width, height: scene.height, provenance: false)
+        frame.render(scene)
+        #expect(frame.hash() == "5dee85cba41c7805ea3566d844fd6725ee074fea0e0336697ae4fbcb89c764b8")
+    }
+
+    @Test("OracleFrame metamorphic invariants match upstream reference.rs (translation, transparent owners, clip, disjoint)")
+    func oracleMetamorphicInvariants() throws {
+        for seed: UInt64 in 0..<16 {
+            let scene = OracleGenerator.seeded(seed: seed, count: 6)
+            try scene.validate()
+            var original = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+            original.render(scene)
+
+            var shifted = scene
+            shifted.width += 4
+            shifted.height += 6
+            OracleGenerator.translate(&shifted, x: 4, y: 6)
+            try shifted.validate()
+            var actualShift = OracleFrame(width: shifted.width, height: shifted.height, provenance: true)
+            actualShift.render(shifted)
+            let wBytes = Int(scene.width) * 4
+            for y in 0..<Int(scene.height) {
+                let a = original.rgba[(y * wBytes)..<((y + 1) * wBytes)]
+                let start = ((y + 6) * Int(shifted.width) + 4) * 4
+                #expect(Array(a) == Array(actualShift.rgba[start..<(start + wBytes)]), "seed \(seed) row \(y)")
+            }
+
+            // Transparent primitives preserve both bytes and provenance owners.
+            var transparent = scene
+            for var p in scene.primitives {
+                p.fill = [0, 0, 0, 0]
+                p.border = [0, 0, 0, 0]
+                if p.params[1] == 4.0 { p.uv = [0, 0, 0, 0] }
+                transparent.primitives.append(p)
+            }
+            try transparent.validate()
+            var actualTrans = OracleFrame(width: transparent.width, height: transparent.height, provenance: true)
+            actualTrans.render(transparent)
+            #expect(actualTrans.rgba == original.rgba, "seed \(seed)")
+            #expect(actualTrans.owners == original.owners, "seed \(seed)")
+
+            // Full viewport clip equals no clip at all pixel centers.
+            var full = scene
+            for i in full.primitives.indices {
+                full.primitives[i].clip = oracleNoClip
+                full.primitives[i].fade = [0, 0, 0, 0]
+            }
+            try full.validate()
+            var unclipped = OracleFrame(width: full.width, height: full.height, provenance: false)
+            unclipped.render(full)
+            for i in full.primitives.indices {
+                full.primitives[i].clip = [0, 0, 64, 64]
+            }
+            try full.validate()
+            var clippedFull = OracleFrame(width: full.width, height: full.height, provenance: false)
+            clippedFull.render(full)
+            #expect(unclipped.rgba == clippedFull.rgba, "seed \(seed)")
+
+            // Disjoint clipped groups commute.
+            var disjoint = scene
+            for i in disjoint.primitives.indices {
+                disjoint.primitives[i].clip = [0, 0, 31, 64]
+                disjoint.primitives[i].fade = [0, 0, 0, 0]
+            }
+            let leftCount = disjoint.primitives.count
+            for var p in scene.primitives {
+                p.rect[0] += 32.0
+                p.clip = [32, 0, 64, 64]
+                p.fade = [0, 0, 0, 0]
+                disjoint.primitives.append(p)
+            }
+            try disjoint.validate()
+            var da = OracleFrame(width: disjoint.width, height: disjoint.height, provenance: false)
+            da.render(disjoint)
+            disjoint.primitives = Array(disjoint.primitives[leftCount...] + disjoint.primitives[..<leftCount])
+            var db = OracleFrame(width: disjoint.width, height: disjoint.height, provenance: false)
+            db.render(disjoint)
+            #expect(da.rgba == db.rgba, "seed \(seed)")
+        }
     }
 }

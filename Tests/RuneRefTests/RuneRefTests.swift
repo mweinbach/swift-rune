@@ -168,13 +168,12 @@ struct RuneRefTests {
 
         let cpuFrame = try RuneRef.render(scene)
         let gpuFrame = try gpu.renderOffscreen(scene)
-        // Allow tiny sub-pixel AA rounding delta across GPU vs scalar float math on <= 1% edge pixels
         let diff = RuneRef.compare(
             scene: scene,
             expected: cpuFrame,
             actual: gpuFrame,
-            channelTolerance: 6,
-            maxFailingPixels: 25
+            channelTolerance: 2,
+            maxFailingPixels: 0
         )
         #expect(diff.passed, "GPU vs CPU mismatch: \(diff)")
     }
@@ -279,8 +278,8 @@ struct RuneRefTests {
             scene: scene,
             expected: cpuFrame,
             actual: gpuFrame,
-            channelTolerance: 6,
-            maxFailingPixels: 25
+            channelTolerance: 2,
+            maxFailingPixels: 0
         )
         #expect(diff.passed, "GPU vs CPU layer/blur/atlas mismatch: \(diff)")
     }

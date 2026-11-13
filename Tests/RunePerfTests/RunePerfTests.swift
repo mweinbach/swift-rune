@@ -10,9 +10,23 @@ struct RunePerfTests {
         #expect(usage.virtualBytes > 0)
         if let footprint = usage.footprintBytes {
             #expect(footprint > 0)
+            if let peak = usage.footprintPeakBytes {
+                #expect(peak >= footprint)
+            }
         }
         if let fds = usage.openFDs {
-            #expect(fds > 0)
+            #expect(fds >= 3)
+            let dir = FileManager.default.temporaryDirectory
+            var opened: [FileHandle] = []
+            for i in 0..<8 {
+                let p = dir.appendingPathComponent("runeperf-fd-\(UUID().uuidString)-\(i).tmp")
+                FileManager.default.createFile(atPath: p.path, contents: Data())
+                if let h = FileHandle(forReadingAtPath: p.path) { opened.append(h) }
+                try? FileManager.default.removeItem(at: p)
+            }
+            let afterFds = RunePerf.sampleUsage().openFDs ?? 0
+            #expect(afterFds >= fds + 4)
+            opened.forEach { try? $0.close() }
         }
 
         let snapshot = RunePerf.snapshot()
@@ -30,17 +44,28 @@ struct RunePerfTests {
         var lease: MemoryLease? = gauge.track(4096)
         #expect(gauge.bytes == 4096)
         #expect(registry.allValues()["video.frames"] == 4096)
+        #expect(registry.sortedValues().count == 1)
 
         gauge.add(1024)
         #expect(gauge.bytes == 5120)
+        gauge.subtract(512)
+        #expect(gauge.bytes == 4608)
 
         lease?.release()
         lease?.release() // idempotent
         lease = nil
-        #expect(gauge.bytes == 1024)
+        #expect(gauge.bytes == 512)
+
+        gauge.add(1)
+        gauge.subtract(1)
+        #expect(registry.sortedValues().filter { $0.name == "video.frames" }.count == 1)
 
         gauge.set(256)
         #expect(gauge.bytes == 256)
+        let second = MemoryGauge(name: "audio.pcm", registry: registry)
+        second.set(1024)
+        let sorted = registry.sortedValues()
+        #expect(sorted.map(\.name) == ["audio.pcm", "video.frames"])
     }
 
     @Test func recorderTracksFrameHistogramsPercentilesAndAnomalies() {
