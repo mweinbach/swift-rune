@@ -87,6 +87,10 @@ let package = Package(
         .executable(name: "rune-keep-stuck", targets: ["RuneKeepStuck"]),
         .executable(name: "rune-growth-reorder", targets: ["RuneGrowthReorder"]),
         .executable(name: "rune-window-resize", targets: ["RuneWindowResize"]),
+        .executable(name: "rune-popup-menu", targets: ["RunePopupMenu"]),
+        .executable(name: "rune-motion-bench", targets: ["RuneMotionBench"]),
+        .executable(name: "rune-interaction-cost", targets: ["RuneInteractionCost"]),
+        .executable(name: "rune-rewind-cost", targets: ["RuneRewindCost"]),
     ],
     targets: [
         .target(
@@ -490,6 +494,26 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneWindowResize"
         ),
+        .executableTarget(
+            name: "RunePopupMenu",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePopupMenu"
+        ),
+        .executableTarget(
+            name: "RuneMotionBench",
+            dependencies: ["RuneMotion"],
+            path: "Sources/Examples/RuneMotionBench"
+        ),
+        .executableTarget(
+            name: "RuneInteractionCost",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneInteractionCost"
+        ),
+        .executableTarget(
+            name: "RuneRewindCost",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneRewindCost"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -638,6 +662,10 @@ let package = Package(
                 "RuneLiveValues",
                 "RunePlayground",
                 "RuneGlassCard",
+                "RunePopupMenu",
+                "RuneMotionBench",
+                "RuneInteractionCost",
+                "RuneRewindCost",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
