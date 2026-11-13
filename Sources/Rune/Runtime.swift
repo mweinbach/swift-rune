@@ -742,7 +742,6 @@ public final class Runtime<State> {
     }
     public var traceEvents: [String] = []
     public internal(set) var animSources: UInt32 = 0
-    public private(set) var imeArea: [Float]? = nil
     internal var currentPhysicalKey: PhysicalKeyCode? = nil
     internal var currentKeyBase: Character? = nil
     internal var currentKeyRepeat: Bool = false
@@ -8524,7 +8523,7 @@ public final class Runtime<State> {
                 focusedPath = target.path
                 focusedKey = target.key
                 inputMachines.focusMachine.highlightedPath = nil
-            inputMachines.focusMachine.hoveredHighlight = false
+                inputMachines.focusMachine.hoveredHighlight = false
             } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
                 if let prevFp = focusedPath {
                     let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
@@ -8535,7 +8534,6 @@ public final class Runtime<State> {
                     focusedKey = nil
                     inputMachines.focusMachine.highlightedPath = nil
                     inputMachines.focusMachine.hoveredHighlight = false
-            inputMachines.focusMachine.hoveredHighlight = false
                     imeReset = true
                     downFocusChanged = true
                 }
