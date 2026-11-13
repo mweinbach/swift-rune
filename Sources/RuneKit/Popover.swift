@@ -236,7 +236,6 @@ public enum PopoverAnchor {
         window: Vec2? = nil,
         estimatedSize: (Float, Float) = (260.0, 200.0)
     ) -> El<State> {
-        let _ = anchorKey
         let styled = content
             .animate(k.motion.overlay)
             .z(60)
@@ -251,7 +250,8 @@ public enum PopoverAnchor {
             )
             return styled.absolute(x: rect[0], y: rect[1])
         }
-        return styled.absolute(x: 8.0, y: 36.0)
+        let (side, align) = placement.split()
+        return styled.anchoredFit(anchorKey, side: side.runeSide, align: align.runeAlign, gap: gap)
     }
 }
 

@@ -598,6 +598,7 @@ public struct ShortcutRecorder<State> {
         case .escape: keyName = "escape"
         case .backspace: keyName = "backspace"
         case .delete: keyName = "delete"
+        case .insert: keyName = "insert"
         case .enter: keyName = "return"
         case .tab: keyName = "tab"
         case .space: keyName = "space"
@@ -610,6 +611,11 @@ public struct ShortcutRecorder<State> {
         case .pageUp: keyName = "pageUp"
         case .pageDown: keyName = "pageDown"
         case .f(let n): keyName = "F\(n)"
+        case .contextMenu: keyName = "contextMenu"
+        case .printScreen: keyName = "printScreen"
+        case .scrollLock: keyName = "scrollLock"
+        case .pause: keyName = "pause"
+        case .modifier: return .modifiersChanged(mods)
         case .text(let s):
             if s.isEmpty { return nil }
             keyName = s

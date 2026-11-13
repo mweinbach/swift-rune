@@ -237,6 +237,12 @@ public final class RollingTextStore: @unchecked Sendable {
         var byteCost: Int
     }
 
+    private struct CommitSnapshotState {
+        var previous: [(glyph: String, key: String)]
+        var numericValue: Double?
+        var nextSeq: UInt64
+    }
+
     private let lock = NSLock()
     private let maxLabels: Int
     private let maxBytes: Int
@@ -292,7 +298,18 @@ public final class RollingTextStore: @unchecked Sendable {
         defer { lock.unlock() }
 
         let prevEntry = entries[key]
-        let previous = prevEntry?.slots.map { (glyph: $0.glyph, key: $0.key) } ?? []
+        let snap = Rune.snapshot(
+            "RollingTextStore::\(key)",
+            CommitSnapshotState(
+                previous: prevEntry?.slots.map { (glyph: $0.glyph, key: $0.key) } ?? [],
+                numericValue: prevEntry?.numericValue,
+                nextSeq: nextSeq
+            )
+        )
+        let previous = snap.previous
+        let prevNumeric = snap.numericValue
+        nextSeq = snap.nextSeq
+
         let slots = RollingTextDiff.transition(
             labelKey: key,
             previous: previous,
@@ -301,7 +318,6 @@ public final class RollingTextStore: @unchecked Sendable {
             nextSeq: &nextSeq
         )
 
-        let prevNumeric = prevEntry?.numericValue
         let falling: Bool
         if let old = prevNumeric, let cur = numericValue, cur.isFinite, cur < old {
             falling = true
@@ -314,7 +330,12 @@ public final class RollingTextStore: @unchecked Sendable {
         if let existing = entries[key] {
             totalBytes -= existing.byteCost
         }
-        entries[key] = Entry(value: value, numericValue: nextNumeric, slots: slots, byteCost: entryBytes)
+        entries[key] = Entry(
+            value: value,
+            numericValue: nextNumeric,
+            slots: slots,
+            byteCost: entryBytes
+        )
         totalBytes += entryBytes
         touchLRU(key)
         evictIfNeeded(keeping: key)
@@ -357,8 +378,12 @@ public final class RollingTextStore: @unchecked Sendable {
     }
 }
 
+private let rollingTextShaper = TextSystem()
+
 /// Fluent animated rolling text builder (`rune_kit::rolling_text::RollingText`).
 public struct RollingText<State> {
+    private static var shaper: TextSystem { rollingTextShaper }
+
     public var key: String
     public var value: String
     public var numericValue: Double?
@@ -437,7 +462,43 @@ public struct RollingText<State> {
             .clip(true)
             .animateLayout(spring)
 
-        for slot in slots {
+        let advances: [Float] = {
+            guard !slots.isEmpty else { return [] }
+            let resolvedStyle = font ?? TextStyle()
+            let shaped = Self.shaper.shape(
+                text: value,
+                style: resolvedStyle,
+                maxWidth: nil,
+                pixelScale: 2.0,
+                emitGlyphs: false
+            )
+            var out: [Float] = []
+            out.reserveCapacity(slots.count)
+            var idx = value.startIndex
+            var utf8Cursor = 0
+            for slotIdx in slots.indices {
+                guard idx < value.endIndex else {
+                    out.append(0)
+                    continue
+                }
+                let next = value.index(after: idx)
+                let segBytes = value[idx..<next].utf8.count
+                let endUTF8 = utf8Cursor + segBytes
+                let x0 = Self.shaper.caretRect(in: shaped, utf8Offset: utf8Cursor, pixelScale: 2.0).x
+                let x1: Float
+                if slotIdx == slots.count - 1 {
+                    x1 = max(x0, shaped.size.x)
+                } else {
+                    x1 = Self.shaper.caretRect(in: shaped, utf8Offset: endUTF8, pixelScale: 2.0).x
+                }
+                out.append(max(0, x1 - x0))
+                idx = next
+                utf8Cursor = endUTF8
+            }
+            return out
+        }()
+
+        for (slotIdx, slot) in slots.enumerated() {
             let enterSpring = slot.retained
                 ? spring
                 : Spring(duration: spring.duration + Float(slot.enterDelay), bounce: spring.bounce)
@@ -451,6 +512,9 @@ public struct RollingText<State> {
                 .a11yHidden()
                 .animate(enterSpring)
                 .transition(slotTransition)
+            if slotIdx < advances.count, advances[slotIdx] > 0 {
+                glyphEl = glyphEl.w(advances[slotIdx])
+            }
             if let font {
                 glyphEl = glyphEl.font(font)
             }

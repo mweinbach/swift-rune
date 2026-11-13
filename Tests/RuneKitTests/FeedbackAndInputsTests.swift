@@ -1,7 +1,8 @@
 import Foundation
 import Testing
-import Rune
+@testable import Rune
 @testable import RuneKit
+@testable import RuneRef
 
 @Suite("RuneKit Increment 3: ToastStack, ScrollBar, RollingText & ShortcutRecorder Tests")
 struct FeedbackAndInputsTests {
@@ -767,5 +768,146 @@ struct FeedbackAndInputsTests {
         _ = rt.physicalInput(.key(key: .backspace, mods: Mods(), pressed: false, repeat: false), at: 0.21)
         #expect(rt.state.recorder.shortcut == nil)
         #expect(rt.state.committed.last ?? ShortcutChord(key: "x", modifiers: [.command]) == nil)
+    }
+
+    @Test(
+        "ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)",
+        .disabled("Blocked on @el: El.onScrollOffset (live ScrollAxisMetrics from Runtime layout/wheel) and El.wrapScrollArea / clipToContent (forwarding wrapper clipFadeLinear to viewport child only)")
+    )
+    func scrollBarFadeOverViewportDrawsWholeThumb() throws {
+        let width: Float = 200
+        let height: Float = 100
+        for inside in [true, false] {
+            let rt = Runtime(state: inside, viewport: Vec2(width, height), pixelScale: 1.0, systemDark: true) { isInside, _ in
+                let rows: [El<Bool>] = (0..<40).map { i in
+                    el().key("row\(i)").w(100).h(20).bg(Color.white)
+                }
+                let viewport: El<Bool> = col()
+                    .key("scroll")
+                    .wFull()
+                    .h(height)
+                    .scrollY()
+                    .child(col().children(rows))
+                let style = KitScrollBarStyle.neutral(dark: true).thumb(Color.white)
+                let area: El<Bool> = if isInside {
+                    viewport.clipFadeLinear(bottom: 40).scrollBarStyled(style)
+                } else {
+                    viewport.scrollBarStyled(style).clipFadeLinear(bottom: 40)
+                }
+                return col().size(width, height).child(area)
+            }
+            rt.setSystemScrollBars(.always)
+            _ = rt.frame(at: 0.0)
+            rt.wheel(WheelEvent(dx: 0, dy: -10_000), at: Vec2(100, 50), now: 0.01)
+            var t = 0.02
+            var scene = rt.frame(at: t)
+            for _ in 0..<120 {
+                t += 1.0 / 60.0
+                scene = rt.frame(at: t)
+            }
+            let thumb = try #require(rt.elements().first { $0.key == "thumb" }).rect
+            #expect(thumb[1] + thumb[3] > height - 10.0)
+
+            let frame = try RuneRef.render(scene)
+            let bottomRowPixel = frame.pixel(x: 50, y: Int(height) - 2)
+            #expect(bottomRowPixel.x < 64)
+            let cx = Int(thumb[0] + thumb[2] * 0.5)
+            let rowYs: [Float] = [
+                thumb[1] + thumb[3] * 0.5,
+                thumb[1] + thumb[3] - 4.0,
+                thumb[1] + thumb[3] - 2.0,
+            ]
+            for rowY in rowYs {
+                let p = frame.pixel(x: cx, y: Int(rowY))
+                #expect(p.x == 255 && p.w == 255)
+            }
+        }
+    }
+
+    @Test("Extra KitIcons glyphs rasterize with ink (tests/glyphs.rs)")
+    func extraGlyphsRasterizeWithInk() {
+        for icon in [KitIcons.mic, KitIcons.keyboard, KitIcons.cursorText, KitIcons.arrowRight, KitIcons.sparkle] {
+            let atlas = GlyphAtlas()
+            _ = atlas.rasterizeIcon(icon, pixelSize: 32)
+            let ink = atlas.atlas.texels.reduce(0) { $0 + Int($1) }
+            #expect(ink > 2000, "Expected \(icon.paths.count)-path glyph to have ink > 2000, got \(ink)")
+        }
+    }
+
+    @Test("RollingText preserves entering glyphs and roll direction across layout-read retries (tests/rolling_text_retry.rs)")
+    func rollingTextLayoutReadRetriesKeepChangedGlyphsEnterAndDirection() throws {
+        final class Counter: @unchecked Sendable { var count = 0 }
+        struct RetryState {
+            var value: Int = 9
+            var reads: Bool
+            var views = Counter()
+        }
+        let kit = Kit.neutral(dark: true)
+        for reads in [true, false] {
+            let store = RollingTextStore()
+            let rt = Runtime(state: RetryState(reads: reads), viewport: Vec2(400, 120), pixelScale: 2.0, systemDark: true) { s, cx in
+                s.views.count += 1
+                if s.reads {
+                    _ = cx.layoutSize("probe")
+                } else {
+                    _ = cx.layoutWith("probe") { $0[2] }
+                }
+                return col()
+                    .p(20)
+                    .child(el().key("probe").size(Float(s.value) * 10.0, 10.0))
+                    .child(RollingText<RetryState>(key: "retry-count", value: "\(s.value)", kit: kit, store: store).value(Double(s.value)).build())
+            }
+            _ = rt.frame(at: 0.0)
+            var now = 0.0
+            for value in [8, 9] {
+                let before = rt.state.views.count
+                rt.update { s, _ in s.value = value }
+                now += 1.0 / 120.0
+                _ = rt.frame(at: now)
+                #expect(rt.state.views.count >= before + 2)
+                let digit = try #require(rt.elements().first { !$0.exiting && ($0.key?.hasPrefix("retry-count#") ?? false) })
+                #expect(digit.opacity < 0.5)
+                let dy = digit.rect[1] - digit.target[1]
+                #expect(value == 8 ? dy < -1.0 : dy > 1.0)
+                for _ in 0..<120 {
+                    now += 1.0 / 120.0
+                    _ = rt.frame(at: now)
+                }
+            }
+        }
+    }
+
+    @Test("RollingText layout-read retry motion gate passes with zero findings (tests/rolling_text_retry.rs)")
+    func rollingTextRetryMotionGate() {
+        final class Counter: @unchecked Sendable { var count = 0 }
+        struct RetryState {
+            var value: Int = 9
+            var views = Counter()
+        }
+        let cells = MotionGateGate.run([(
+            "rolling-text/layout-read-retry",
+            {
+                let kit = Kit.neutral(dark: true)
+                let store = RollingTextStore()
+                let rt = Runtime(state: RetryState(), viewport: Vec2(400, 120), pixelScale: 2.0, systemDark: true) { s, cx in
+                    s.views.count += 1
+                    _ = cx.layoutSize("probe")
+                    return col()
+                        .p(20)
+                        .child(el().key("probe").size(Float(s.value) * 10.0, 10.0))
+                        .child(RollingText<RetryState>(key: "retry-count", value: "\(s.value)", kit: kit, store: store).value(Double(s.value)).build())
+                }
+                let run = MotionGateRun(rt, hz: 120.0)
+                run.idle(0.5)
+                run.step()
+                run.act("down") { rt in rt.update { s, _ in s.value = 8 } }
+                run.play(0.8)
+                run.act("up") { rt in rt.update { s, _ in s.value = 9 } }
+                run.play(1.0)
+                return run.rec
+            }
+        )])
+        let report = MotionGateGate.report(cells)
+        #expect(report.failing == 0, "\(report.text)")
     }
 }

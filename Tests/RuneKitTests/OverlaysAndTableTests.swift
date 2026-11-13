@@ -1222,4 +1222,160 @@ struct OverlaysAndTableTests {
         let cardInfo = try #require(rt.elements().first { $0.key == "hc-card" })
         #expect(cardInfo.rect[2] >= 200.0 && cardInfo.rect[2] <= 320.0)
     }
+
+    @Test("PopupList padding/rowRadius defaults and animated filtering motion (tests/popup_list_motion.rs)")
+    func popupListMotionParity() throws {
+        struct S {
+            var ids: [String]
+            var padding: Float? = nil
+            var rowRadius: Float? = nil
+            var animate: Bool = true
+        }
+        let six = ["a0", "a1", "a2", "a3", "a4", "a5"]
+        let ten = ["a1", "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8"]
+        let kit = Kit.neutral(dark: true)
+
+        func makeRt(_ s: S) -> Runtime<S> {
+            Runtime(state: s, viewport: Vec2(600, 600), systemDark: true) { st, cx in
+                var layer: [El<S>] = []
+                var list = PopupList<S>("p", anchor: "field")
+                    .anchored("field", side: .top, align: .start, gap: 8.0)
+                    .maxHeight(300.0)
+                    .items(st.ids.map { PopupItem<S>($0, $0) })
+                    .animateFiltering(st.animate)
+                    .active(0)
+                if let p = st.padding { list = list.padding(p) }
+                if let r = st.rowRadius { list = list.rowRadius(r) }
+                list.build(kit: kit, layer: &layer, cx: cx)
+                return RuneKit.root(col().pt(400.0).pl(40.0).child(el().key("field").w(300.0).h(60.0)), layer)
+            }
+        }
+        func settled(_ items: [String], animate: Bool = true, time: inout Double) -> Runtime<S> {
+            let rt = makeRt(S(ids: items, animate: animate))
+            rt.frame(at: time)
+            for _ in 0..<60 { time += 1.0 / 120.0; rt.frame(at: time) }
+            return rt
+        }
+        func y(_ rt: Runtime<S>, _ key: String) throws -> Float {
+            try #require(rt.elements().first { $0.key == key }).rect[1]
+        }
+
+        // 1. padding and row_radius default to 4 and follow builders
+        do {
+            var t = 0.0
+            let rt1 = settled(six, time: &t)
+            let c1 = try #require(rt1.elements().first { $0.key == "p-content" }).rect
+            let r1 = try #require(rt1.elements().first { $0.key == "p-option-a0" })
+            #expect(r1.radius == 4.0)
+            #expect(abs(r1.rect[0] - c1[0] - 4.0) < 0.05 && abs(r1.rect[1] - c1[1] - 4.0) < 0.05)
+            #expect(abs(c1[3] - (6.0 * 28.0 + 8.0)) < 0.05)
+
+            let rt2 = makeRt(S(ids: six, padding: 6.0, rowRadius: 6.0, animate: false))
+            rt2.frame(at: 0.0)
+            let c2 = try #require(rt2.elements().first { $0.key == "p-content" }).rect
+            let r2 = try #require(rt2.elements().first { $0.key == "p-option-a0" })
+            #expect(r2.radius == 6.0)
+            #expect(abs(r2.rect[0] - c2[0] - 6.0) < 0.05 && abs(r2.rect[1] - c2[1] - 6.0) < 0.05)
+            #expect(abs(r2.rect[2] - (c2[2] - 12.0)) < 0.05)
+            #expect(abs(c2[3] - (6.0 * 28.0 + 12.0)) < 0.05)
+            #expect(abs(c2[1] + c2[3] - 392.0) < 0.05)
+        }
+
+        // 2. instant commit & default non-animated swap rows and height at once
+        for animate in [true, false] {
+            var t = 0.0
+            let rt = settled(six, animate: animate, time: &t)
+            rt.update { s, tx in
+                s.ids = ["a1"]
+                if animate { tx.instant() }
+            }
+            t += 1.0 / 120.0
+            rt.frame(at: t)
+            for id in ["a0", "a2", "a3", "a4", "a5"] {
+                #expect(rt.elements().first { $0.key == "p-option-\(id)" } == nil)
+            }
+            #expect(abs(try y(rt, "p-content") - 356.0) < 0.05)
+            #expect(abs(try y(rt, "p-option-a1") - 360.0) < 0.05)
+
+            rt.update { s, tx in
+                s.ids = ten
+                if animate { tx.instant() }
+            }
+            t += 1.0 / 120.0
+            rt.frame(at: t)
+            #expect(abs(try y(rt, "p-content") - 104.0) < 0.05)
+            for (i, id) in ten.enumerated() {
+                #expect(abs(try y(rt, "p-option-\(id)") - (108.0 + 28.0 * Float(i))) < 0.05)
+            }
+        }
+
+        // 3. growing back while leaving vs settled: rows rise without overshoot
+        func checkGrowsWithoutOvershoot(_ rt: Runtime<S>, time: inout Double) throws {
+            rt.update { s, _ in s.ids = ten }
+            let keys = ten.map { "p-option-\($0)" } + ["p-content"]
+            var tracks = Array(repeating: [Float](), count: keys.count)
+            for _ in 0..<90 {
+                time += 1.0 / 120.0
+                rt.frame(at: time)
+                for (idx, k) in keys.enumerated() {
+                    tracks[idx].append(try y(rt, k))
+                }
+            }
+            for track in tracks {
+                let lowest = track.min() ?? 0
+                let end = track.last ?? 0
+                for f in 1..<track.count {
+                    #expect(track[f] <= track[f - 1] + 0.05)
+                }
+                #expect(end - lowest < 0.05)
+            }
+            #expect(abs(try y(rt, "p-content") - 104.0) < 0.5)
+            for (i, id) in ten.enumerated() {
+                #expect(abs(try y(rt, "p-option-\(id)") - (108.0 + 28.0 * Float(i))) < 0.5)
+            }
+        }
+        do {
+            var t = 0.0
+            let rt = settled(six, time: &t)
+            rt.update { s, _ in s.ids = ["a1"] }
+            for _ in 0..<20 { t += 1.0 / 120.0; rt.frame(at: t) }
+            #expect(rt.elements().first { $0.key == "p-option-a2" } != nil)
+            try checkGrowsWithoutOvershoot(rt, time: &t)
+        }
+        do {
+            var t = 0.0
+            let rt = settled(six, time: &t)
+            rt.update { s, _ in s.ids = ["a1"] }
+            for _ in 0..<120 { t += 1.0 / 120.0; rt.frame(at: t) }
+            #expect(rt.elements().first { $0.key == "p-option-a2" } == nil)
+            try checkGrowsWithoutOvershoot(rt, time: &t)
+        }
+
+        // 4. clipped away rows leave at once, visible filtered rows fade, newly brought-in rows fade in
+        do {
+            var t = 0.0
+            let sixty = (0..<60).map { "a\($0)" }
+            let rt1 = settled(sixty, time: &t)
+            #expect(rt1.elements().first { $0.key == "p-option-a20" } != nil)
+            rt1.update { s, _ in s.ids = ["a0"] }
+            t += 1.0 / 120.0
+            rt1.frame(at: t)
+            #expect(rt1.elements().first { $0.key == "p-option-a20" && $0.visible[3] > 0 && $0.visible[2] > 0 } == nil)
+            for _ in 0..<4 { t += 1.0 / 120.0; rt1.frame(at: t) }
+            let leaving = try #require(rt1.elements().first { $0.key == "p-option-a5" })
+            #expect(leaving.opacity > 0.05 && leaving.opacity < 1.0)
+
+            var t2 = 0.0
+            let rt2 = settled(sixty, time: &t2)
+            #expect(rt2.elements().first { $0.key == "p-option-a50" } == nil)
+            rt2.update { s, _ in s.ids = ["a50", "a51"] }
+            t2 += 1.0 / 120.0
+            rt2.frame(at: t2)
+            let entering = try #require(rt2.elements().first { $0.key == "p-option-a50" })
+            #expect(entering.opacity < 0.9)
+            for _ in 0..<60 { t2 += 1.0 / 120.0; rt2.frame(at: t2) }
+            let settledA50 = try #require(rt2.elements().first { $0.key == "p-option-a50" })
+            #expect(settledA50.opacity > 0.99)
+        }
+    }
 }

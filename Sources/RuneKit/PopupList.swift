@@ -376,7 +376,7 @@ public struct PopupList<State> {
         let viewportH = min(Float(itemList.count) * rh, maxHeightValue)
         let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
         let scrollY = max(trackedScrollYValue, cxScrollY)
-        let overscan: Float = 160.0
+        let overscan: Float = 265.0
         let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
         let beforeH = Float(start) * rh
         let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(viewportH, rh) + overscan) / rh)))
@@ -406,6 +406,7 @@ public struct PopupList<State> {
                 .gap(8.0)
                 .itemsCenter()
                 .rounded(rowRadiusValue)
+                .transition(Transition.opacity)
                 .bg(isActive ? k.c.hover : .transparent)
 
             if let desc = option.descriptionText {
@@ -455,7 +456,7 @@ public struct PopupList<State> {
             .wFull()
             .h(viewportH)
             .minH(isEmpty ? 0.0 : rh)
-            .clip(true)
+            .clipSoft(0.0)
             .scrollY()
             .child(rows)
         if let a11yLabel {
@@ -494,6 +495,8 @@ public struct PopupList<State> {
             .child(list)
         if shouldAnimateFiltering {
             content = content.animate(k.motion.overlay)
+        } else {
+            content = content.instantChanges()
         }
         let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
         layer.append(

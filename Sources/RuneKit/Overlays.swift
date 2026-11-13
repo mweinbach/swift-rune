@@ -308,6 +308,20 @@ extension Kit {
             .child(trailing)
     }
 
+    /// Body text inheriting page typography (`overlay::body_text`).
+    public func bodyText<State>(_ content: String) -> El<State> {
+        var style = ty.ui
+        style.letterSpacing = 0.0
+        return text(content).font(style.lh(24.0)).color(c.stdText)
+    }
+
+    /// Overlay text inheriting strong document ink (`overlay::overlay_text`).
+    public func overlayText<State>(_ content: String) -> El<State> {
+        var style = ty.ui
+        style.letterSpacing = 0.0
+        return text(content).font(style.lh(24.0)).color(c.textStrong)
+    }
+
     /// Sidebar shell container with header, sections, and optional footer (`Kit::sidebar`).
     public func sidebar<State>(
         key: String = "sidebar",
