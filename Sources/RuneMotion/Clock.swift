@@ -4,7 +4,7 @@ import Foundation
 /// and deterministic fixed-rate manual stepping for tests and headless scripts.
 public struct Clock: Sendable {
     private enum Mode: Sendable {
-        case display(anchorReal: Double, anchorAnim: Double)
+        case display(anchorReal: Double?, anchorAnim: Double)
         case manual(hz: Double)
     }
 
@@ -15,8 +15,8 @@ public struct Clock: Sendable {
     public private(set) var frameCount: UInt64 = 0
     private var pausedRealTime: Double?
 
-    /// Creates a real-time display clock anchored at `now` seconds.
-    public static func display(now: Double = 0.0) -> Clock {
+    /// Creates a real-time display clock. If `now` is `nil`, anchors on the first sampled frame.
+    public static func display(now: Double? = nil) -> Clock {
         Clock(
             mode: .display(anchorReal: now, anchorAnim: 0.0),
             currentAnimTime: 0.0,
@@ -29,8 +29,9 @@ public struct Clock: Sendable {
 
     /// Creates a deterministic manual clock stepping at `1 / hz` seconds per `step()`.
     public static func manual(hz: Double = 60.0) -> Clock {
-        Clock(
-            mode: .manual(hz: max(1.0, hz)),
+        precondition(hz > 0.0, "manual clock hz must be positive")
+        return Clock(
+            mode: .manual(hz: hz),
             currentAnimTime: 0.0,
             scale: 1.0,
             isPaused: false,
@@ -52,7 +53,7 @@ public struct Clock: Sendable {
     public func timeAt(realNow: Double) -> Double {
         switch mode {
         case let .display(anchorReal, anchorAnim):
-            if isPaused { return currentAnimTime }
+            guard let anchorReal, !isPaused else { return anchorAnim }
             let elapsed = max(0.0, realNow - anchorReal)
             return anchorAnim + elapsed * scale
         case .manual:
@@ -65,7 +66,7 @@ public struct Clock: Sendable {
         currentAnimTime = t
         if case .display = mode {
             // Re-anchor on next sample
-            mode = .display(anchorReal: pausedRealTime ?? 0.0, anchorAnim: t)
+            mode = .display(anchorReal: nil, anchorAnim: t)
         }
     }
 
@@ -75,15 +76,24 @@ public struct Clock: Sendable {
         frameCount &+= 1
         switch mode {
         case let .display(anchorReal, anchorAnim):
+            if anchorReal == nil {
+                mode = .display(anchorReal: realNow, anchorAnim: anchorAnim)
+            }
             if isPaused {
+                currentAnimTime = anchorAnim
                 return currentAnimTime
             }
-            let elapsed = max(0.0, realNow - anchorReal)
-            currentAnimTime = anchorAnim + elapsed * scale
+            currentAnimTime = timeAt(realNow: realNow)
             return currentAnimTime
         case .manual:
             return currentAnimTime
         }
+    }
+
+    /// Upstream alias for `sample(realNow:)`.
+    @discardableResult
+    public mutating func frame(host: Double) -> Double {
+        sample(realNow: host)
     }
 
     /// Advances a manual clock by one frame (`scale / hz`) and returns the new timestamp.
@@ -105,25 +115,30 @@ public struct Clock: Sendable {
         if isPaused || dt <= 0 { return currentAnimTime }
         currentAnimTime += dt * scale
         if case let .display(anchorReal, _) = mode {
-            mode = .display(anchorReal: anchorReal + dt, anchorAnim: currentAnimTime)
+            mode = .display(anchorReal: anchorReal.map { $0 + dt }, anchorAnim: currentAnimTime)
         }
         return currentAnimTime
     }
 
-    /// Changes slow-motion scale (`0.1` = 10x slower, `1.0` = real-time) without jumping running tracks.
+    /// Changes slow-motion scale (`[0.02, 4.0]`) without jumping running tracks.
     public mutating func setScale(_ newScale: Double, realNow: Double? = nil) {
-        let clamped = max(0.0, newScale)
-        if case .display = mode, let r = realNow {
-            _ = sample(realNow: r)
-            mode = .display(anchorReal: r, anchorAnim: currentAnimTime)
+        let clamped = newScale.clamped(to: 0.02...4.0)
+        if case let .display(anchorReal, _) = mode, anchorReal != nil, let r = realNow {
+            let t = timeAt(realNow: r)
+            currentAnimTime = t
+            mode = .display(anchorReal: r, anchorAnim: t)
         }
         scale = clamped
     }
 
     public mutating func pause(realNow: Double? = nil) {
         guard !isPaused else { return }
+        if case let .display(anchorReal, _) = mode {
+            let t = realNow.map { timeAt(realNow: $0) } ?? currentAnimTime
+            currentAnimTime = t
+            mode = .display(anchorReal: anchorReal, anchorAnim: t)
+        }
         if let r = realNow {
-            _ = sample(realNow: r)
             pausedRealTime = r
         }
         isPaused = true
@@ -132,8 +147,9 @@ public struct Clock: Sendable {
     public mutating func resume(realNow: Double? = nil) {
         guard isPaused else { return }
         isPaused = false
-        if case .display = mode, let r = realNow {
-            mode = .display(anchorReal: r, anchorAnim: currentAnimTime)
+        if case let .display(_, anchorAnim) = mode {
+            let r = realNow ?? pausedRealTime
+            mode = .display(anchorReal: r, anchorAnim: anchorAnim)
         }
         pausedRealTime = nil
     }

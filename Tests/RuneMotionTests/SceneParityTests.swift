@@ -248,13 +248,36 @@ struct SceneParityTests {
             let t = 0.2 + 1.0 / Self.hz
             let moved = MotionRect.fromXYWH(10, 30, 140, 40)
             s.insert(id, NodeSpec(moved).transition(transition), .initial)
-            s.landFrame(id, moved)
             let out = s.frameAt(t)
             #expect(!out.animating)
             let p = find(out.changed, id)!
             #expect(p.opacity == 1.0 && p.blur == 0.0 && p.transform.sx == 1.0 && p.phase == .present)
             #expect(p.rect == moved)
+            let (seen2, _) = runScene(&s, from: t, until: t + 1.0, id: id)
+            #expect(seen2.allSatisfy { $0.1.opacity == 1.0 && $0.1.rect == moved })
         }
+    }
+
+    @Test("Child mounted after parent visibly arrives enters on its own")
+    func childMountedAfterParentVisiblyArrivesEntersOnItsOwn() {
+        var s = Scene()
+        let (p, c) = (NodeId(42), NodeId(43))
+        s.insert(NodeId(1), spec(0, 0, 1, 1), .initial)
+        _ = s.frameAt(0.0)
+        s.insert(p, spec(0, 0, 100, 100), .animated)
+        var t = 0.0
+        while true {
+            t += 1.0 / Self.hz
+            let out = s.frameAt(t)
+            if let pp = find(out.changed, p), pp.opacity >= 1.0 - 1.0 / 255.0 { break }
+            #expect(t < 2.0)
+        }
+        #expect(s.phase(p) == .entering)
+        s.setTime(t + 1.0 / Self.hz)
+        s.insert(c, spec(10, 10, 20, 20).parent(p), .animated)
+        let cp = find(s.frame().changed, c)!
+        #expect(cp.phase == .entering)
+        #expect(cp.opacity < 0.5)
     }
 
     @Test("Stationary edges never move and width leads")
@@ -441,6 +464,16 @@ struct SceneParityTests {
         #expect(abs(startScale(Transition.scale(0.6).allowSmallScale()) - 0.6) < 1e-4)
         #expect(abs(startScale(Transition.scale(0.0).allowSmallScale()) - Transition.smallScaleFloor) < 1e-4)
         #expect(abs(startScale(Transition.scale(0.6).allowSmallScale().combined(with: .opacity)) - 0.6) < 1e-4)
+
+        var s = Scene()
+        let id = NodeId(10)
+        s.insert(id, spec(0, 0, 16, 16).transition(Transition.scale(0.6).allowSmallScale()), .initial)
+        _ = s.frameAt(0.0)
+        s.remove(id)
+        let (exitSeen, exitedAt) = runScene(&s, from: 0.0, until: 1.0, id: id)
+        let exited = exitedAt!
+        let last = exitSeen.last { $0.0 <= exited }!.1
+        #expect(last.transform.sx < 0.65 && last.opacity < 1.0 / 255.0)
     }
 
     @Test("Frozen ancestor holds screen travel without frames and trailing child rests with parent")
@@ -587,6 +620,50 @@ struct SceneParityTests {
         #expect(!lout.animating)
         let lp = sl.presented(id)!
         #expect((lp.rect.y, lp.opacity, lp.phase) == (0.0, 1.0, .present))
+
+        // A visible insertion effect fades out from where it waited
+        var sv = Scene()
+        _ = sv.frameAt(0.0)
+        let slideSpec = NodeSpec(MotionRect.fromXYWH(0, 0, 100, 40)).transition(Transition.offset(x: 0, y: 12))
+        sv.insertDelayed(id, slideSpec, .animated, delay: 0.3)
+        _ = sv.frameAt(0.1)
+        #expect((sv.presented(id)!.rect.y, sv.presented(id)!.opacity) == (12.0, 1.0))
+        sv.remove(id)
+        var prevOp: Float = 1.0
+        var vt = 0.1
+        while vt <= 0.25 + 1e-9 {
+            _ = sv.frameAt(vt)
+            if let vp = sv.presented(id) {
+                #expect(abs(vp.rect.y - 12.0) < 2.0 / 64.0)
+                #expect(vp.opacity <= prevOp + 1e-6)
+                prevOp = vp.opacity
+            }
+            vt += 1.0 / Self.hz
+        }
+        #expect(prevOp < 1.0)
+
+        // Reduced motion keeps the delay and only fades
+        var srm = Scene()
+        _ = srm.frameAt(0.0)
+        srm.setReducedMotion(true)
+        srm.insertDelayed(id, sp, .animated, delay: 0.3)
+        var firstShown: Double? = nil
+        var rt = 0.0
+        while rt <= 1.0 + 1e-9 {
+            _ = srm.frameAt(rt)
+            if let rp = srm.presented(id) {
+                #expect(rp.rect.y == 0.0)
+                if rt < 0.3 - 1e-9 {
+                    #expect(rp.opacity == 0.0)
+                }
+                if firstShown == nil && rp.opacity >= 1.0 {
+                    firstShown = rt
+                }
+            }
+            rt += 1.0 / Self.hz
+        }
+        let shown = firstShown!
+        #expect(shown > 0.3 && shown < 0.6)
     }
 
     @Test("Staggered list of five enters in order")
@@ -671,120 +748,248 @@ struct SceneParityTests {
         #expect(abs(kept.rect.y - plain.rect.y) > kept.rect.height * 0.5)
     }
 
-    @Test("Exhaustive 4-step presence sequence walks match reference phase/presence/presented")
+    @Test("Exhaustive presence walks match reference Dev model (all Presented fields)")
     func exhaustivePresenceSequencesMatchReference() {
         enum Step { case insert(Mount, Float), retransition, remove, reenter, enterNow, landWaiting, unmount, tick }
         let slow = SpringPair(enter: Spring(duration: 0.12, bounce: 0), exit: Spring(duration: 0.12, bounce: 0))
-        let mountTr = Transition.blurReplace().combined(with: Transition.reveal(edge: .leading)).springs(slow)
-        let retargetTr = Transition.push(from: .bottom).combined(with: .draw).springs(slow)
+        let blurReveal: (SpringPair) -> Transition = { sp in
+            Transition.blurReplace().combined(with: Transition.reveal(edge: .leading)).springs(sp)
+        }
+        let pushDraw: (SpringPair) -> Transition = { sp in
+            Transition.push(from: .bottom).combined(with: .draw).springs(sp)
+        }
+        let slideTr: (SpringPair) -> Transition = { sp in
+            Transition.move(edge: .leading).springs(sp)
+        }
+        let cornerScale: (SpringPair) -> Transition = { sp in
+            let removal = Transition.scale(0.9, anchor: Vec2(0, 0)).combined(with: Transition.reveal(edge: .top))
+            return Transition.asymmetric(insertion: Transition.move(edge: .leading), removal: removal).springs(sp)
+        }
+
         let id = NodeId(1)
         let frame = MotionRect.fromXYWH(10, 20, 100, 40)
 
-        func runPath(_ steps: [Step]) {
-            var sc = Scene()
-            var ref = AnimationStore()
-            ref.set(id, Props.PRESENCE, 1.0)
-            var alive = false
-            var phase = ScenePhase.present
-            var gen: UInt32 = 0
-            var tr = mountTr
-            var t = 0.0
+        func lanes(_ e: TransitionEffect) -> [Float] {
+            let hidden: Float = e.reveal != nil ? 1.0 : 0.0
+            return [
+                e.zeroOpacity ?? 1.0,
+                e.zeroScale.x,
+                e.pointOffset.x,
+                e.pointOffset.y,
+                e.relativeOffset.x,
+                e.relativeOffset.y,
+                e.zeroBlur,
+                hidden,
+                e.draw,
+            ]
+        }
+        let identityFx: [Float] = [1, 1, 0, 0, 0, 0, 0, 0, 1]
 
-            for st in steps {
-                switch st {
-                case let .insert(m, delay):
-                    tr = mountTr
-                    let sp = NodeSpec(frame).transition(tr)
-                    if delay > 0 { sc.insertDelayed(id, sp, m, delay: delay) } else { sc.insert(id, sp, m) }
-                    if alive {
-                        if case .exiting = phase {
-                            if m == .initial {
-                                gen &+= 1; phase = .present; ref.set(id, Props.PRESENCE, 1.0)
-                            } else {
-                                gen &+= 1; phase = .entering; ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(curve: .spring(slow.enter)))
-                            }
-                        }
-                    } else {
-                        alive = true; gen = 0
-                        let animate = (m == .animated && !tr.insertion.kitRules(removal: false).showsNothing)
-                        if animate {
-                            phase = .entering
-                            ref.set(id, Props.PRESENCE, 0.0)
-                            ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(curve: .spring(slow.enter), delay: delay))
-                        } else {
-                            phase = .present
-                            ref.set(id, Props.PRESENCE, 1.0)
-                        }
-                    }
-                case .retransition:
-                    sc.setTransition(id, retargetTr)
-                    if case .exiting = phase {} else { tr = retargetTr }
-                case .remove:
-                    let pNow = sc.store.sample(id, Props.PRESENCE) ?? 1.0
-                    sc.remove(id)
-                    if alive, case .exiting = phase { } else if alive {
-                        if pNow < 1e-3 && (sc.presented(id)?.opacity ?? (tr.insertion.zeroOpacity ?? 1.0)) < 1.0 / 512.0 {
-                            alive = false
-                        } else {
-                            gen &+= 1
-                            phase = .exiting(generation: gen)
-                            if pNow < 1e-3 { ref.set(id, Props.PRESENCE, 1.0) }
-                            ref.animate(id, Props.PRESENCE, to: 0.0, anim: Anim(curve: .spring(tr.exitSpring)))
-                        }
-                    }
-                case .reenter:
-                    sc.reenter(id)
-                    if alive && phase == .present {
-                        gen &+= 1; phase = .entering
-                        ref.set(id, Props.PRESENCE, 0.0)
-                        ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(curve: .spring(tr.enterSpring)))
-                    }
-                case .enterNow:
-                    sc.enterNow(id)
-                    if alive && phase == .entering {
-                        gen &+= 1; phase = .present; ref.set(id, Props.PRESENCE, 1.0)
-                    }
-                case .landWaiting:
-                    let pNow = sc.store.sample(id, Props.PRESENCE) ?? 1.0
-                    sc.landWaiting(id)
-                    if alive && phase == .entering && pNow < 1e-3 {
-                        gen &+= 1; phase = .present; ref.set(id, Props.PRESENCE, 1.0)
-                    }
-                case .unmount:
-                    sc.unmount(id)
-                    alive = false
-                case .tick:
-                    for _ in 0..<24 {
-                        t += 1.0 / 120.0
-                        sc.setTime(t)
-                        let scP = sc.store.sample(id, Props.PRESENCE) ?? 1.0
-                        let out = sc.frame()
-                        ref.setTime(t)
-                        let refP = ref.sample(id, Props.PRESENCE) ?? 1.0
-                        ref.tick()
-                        if alive {
-                            #expect(abs(scP - refP) <= 1e-5)
-                        }
-                        if ref.events.contains(where: { if case let .settled(_, n, q) = $0 { return n == id && q == Props.PRESENCE.id }; return false }) {
-                            switch phase {
-                            case .entering: phase = .present
-                            case .exiting(let g) where g == gen: alive = false
-                            default: break
-                            }
-                        }
-                        if out.exited.contains(id) {
-                            alive = false
-                        }
-                    }
-                }
-                #expect(sc.contains(id) == alive)
-                if alive { #expect(sc.phase(id) == phase) }
-            }
+        func lerpFx(_ a: [Float], _ b: [Float], _ p: Float) -> [Float] {
+            (0..<9).map { a[$0] * (1.0 - p) + b[$0] * p }
         }
 
-        let alphabet1: [Step] = [.insert(.animated, 0), .insert(.initial, 0), .retransition, .remove, .reenter, .tick]
-        let alphabet2: [Step] = [.insert(.animated, 0.05), .enterNow, .landWaiting, .remove, .unmount, .tick]
-        for alphabet in [alphabet1, alphabet2] {
+        func runCfg(
+            mountTr: Transition,
+            retargetTr: Transition,
+            springs: SpringPair,
+            alphabet: [Step],
+            maxDepth: Int
+        ) {
+            func runPath(_ steps: [Step]) {
+                var sc = Scene()
+                var ref = AnimationStore()
+                ref.set(id, Props.PRESENCE, 1.0)
+                var alive = false
+                var pendingExit = false
+                var phase = ScenePhase.present
+                var gen: UInt32 = 0
+                var fxA = identityFx
+                var fxB = identityFx
+                var anchor = Vec2(0.5, 0.5)
+                var reveal: Reveal? = nil
+                var tr = mountTr
+                var t = 0.0
+
+                func checkPresented(_ p: Presented, _ pres: Float) {
+                    let look = lerpFx(fxA, fxB, pres)
+                    let sx = frame.left + look[2] + look[4] * frame.width
+                    let sy = frame.top + look[3] + look[5] * frame.height
+                    #expect(abs(p.opacity - min(max(look[0], 0), 1)) <= 1e-6)
+                    #expect(abs(p.transform.sx - look[1]) <= 1e-6)
+                    #expect(abs(p.rect.left - sx) <= 2.0 / 64.0)
+                    #expect(abs(p.rect.top - sy) <= 2.0 / 64.0)
+                    let blur = max(look[6], 0) < 1.0 / 64.0 ? 0.0 : max(look[6], 0)
+                    #expect(abs(p.blur - blur) <= 1e-6)
+                    #expect(abs(p.draw - min(max(look[8], 0), 1)) <= 1e-6)
+                    #expect(abs(p.anchor.x - (sx + anchor.x * frame.width)) <= 2.0 / 64.0)
+                    #expect(abs(p.anchor.y - (sy + anchor.y * frame.height)) <= 2.0 / 64.0)
+                    var inset: [Float] = [0, 0, 0, 0]
+                    var feather: [Float] = [0, 0, 0, 0]
+                    if let rv = reveal {
+                        let hidden = min(max(look[7], 0), 1)
+                        if hidden > 0 {
+                            let (side, len): (Int, Float) = switch rv.edge {
+                            case .leading: (0, frame.width)
+                            case .top: (1, frame.height)
+                            case .trailing: (2, frame.width)
+                            case .bottom: (3, frame.height)
+                            }
+                            let opp = (side + 2) % 4
+                            inset[opp] += hidden * len
+                            feather[opp] = rv.feather * min(hidden * len / max(rv.feather, 1e-3), 1.0)
+                        }
+                    }
+                    let gotIn = p.mask.insetEdges
+                    let gotFe = p.mask.featherEdges
+                    for k in 0..<4 {
+                        #expect(abs(gotIn[k] - inset[k]) <= 1e-4)
+                        #expect(abs(gotFe[k] - feather[k]) <= 1e-4)
+                    }
+                    let isExiting: Bool = { if case .exiting = phase { return true }; return false }()
+                    #expect(p.inFlow == (!isExiting || !tr.popLayout))
+                }
+
+                for st in steps {
+                    let pNow = sc.store.sample(id, Props.PRESENCE) ?? 1.0
+                    switch st {
+                    case let .insert(m, delay):
+                        tr = mountTr
+                        let sp = NodeSpec(frame).transition(tr)
+                        if delay > 0 { sc.insertDelayed(id, sp, m, delay: delay) } else { sc.insert(id, sp, m) }
+                        if alive {
+                            if case .exiting = phase {
+                                if m == .initial {
+                                    gen &+= 1; phase = .present
+                                    let ins = tr.insertion.kitRules(removal: false)
+                                    fxA = lanes(ins); fxB = identityFx; anchor = ins.anchor; reveal = ins.reveal
+                                    ref.set(id, Props.PRESENCE, 1.0)
+                                } else {
+                                    let old0 = fxA; let old1 = fxB
+                                    if pNow <= 0.001 {
+                                        fxA = lanes(tr.insertion.kitRules(removal: false))
+                                    } else {
+                                        let cur = lerpFx(old0, old1, pNow)
+                                        let q = max(1.0 - pNow, 1e-3)
+                                        var nextA = old0
+                                        for k in 0..<8 { nextA[k] = (cur[k] - identityFx[k] * pNow) / q }
+                                        fxA = nextA
+                                    }
+                                    fxB = identityFx
+                                    gen &+= 1; phase = .entering
+                                    ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(spring: springs.enter))
+                                }
+                            }
+                        } else {
+                            alive = true; gen = 0
+                            let ins = tr.insertion.kitRules(removal: false)
+                            fxA = lanes(ins); fxB = identityFx; anchor = ins.anchor; reveal = ins.reveal
+                            let animate = (m == .animated && !ins.showsNothing)
+                            if animate {
+                                phase = .entering
+                                ref.set(id, Props.PRESENCE, 0.0)
+                                ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(spring: springs.enter, delay: delay))
+                            } else {
+                                phase = .present
+                                ref.set(id, Props.PRESENCE, 1.0)
+                            }
+                        }
+                    case .retransition:
+                        sc.setTransition(id, retargetTr)
+                        if case .exiting = phase {} else { tr = retargetTr }
+                    case .remove:
+                        sc.remove(id)
+                        if alive, case .exiting = phase {} else if alive {
+                            let unplayed = pNow < 1e-3
+                            if unplayed && lerpFx(fxA, fxB, pNow)[0] < 1.0 / 512.0 {
+                                alive = false; pendingExit = true
+                            } else {
+                                let rem = tr.removal.kitRules(removal: true)
+                                let target = lanes(rem)
+                                gen &+= 1; phase = .exiting(generation: gen)
+                                let oldA = fxA; let oldB = fxB
+                                if pNow >= 0.999 {
+                                    fxA = target; fxB = identityFx
+                                } else if unplayed {
+                                    fxB = lerpFx(oldA, oldB, pNow); fxA = target
+                                } else {
+                                    let cur = lerpFx(oldA, oldB, pNow)
+                                    fxA = target
+                                    for k in 0..<8 { fxB[k] = target[k] + (cur[k] - target[k]) / max(pNow, 1e-3) }
+                                }
+                                if rem.zeroScale != Vec2(1, 1) { anchor = rem.anchor }
+                                if rem.reveal != nil { reveal = rem.reveal }
+                                if unplayed { ref.set(id, Props.PRESENCE, 1.0) }
+                                ref.animate(id, Props.PRESENCE, to: 0.0, anim: Anim(spring: springs.exit))
+                            }
+                        }
+                    case .reenter:
+                        sc.reenter(id)
+                        if alive && phase == .present {
+                            gen &+= 1; phase = .entering
+                            fxA = lanes(tr.insertion.kitRules(removal: false)); fxB = identityFx
+                            ref.set(id, Props.PRESENCE, 0.0)
+                            ref.animate(id, Props.PRESENCE, to: 1.0, anim: Anim(spring: springs.enter))
+                        }
+                    case .enterNow:
+                        sc.enterNow(id)
+                        if alive && phase == .entering {
+                            let ins = tr.insertion.kitRules(removal: false)
+                            gen &+= 1; phase = .present
+                            fxA = lanes(ins); fxB = identityFx; anchor = ins.anchor; reveal = ins.reveal
+                            ref.set(id, Props.PRESENCE, 1.0)
+                        }
+                    case .landWaiting:
+                        sc.landWaiting(id)
+                        if alive && phase == .entering && pNow < 1e-3 {
+                            let ins = tr.insertion.kitRules(removal: false)
+                            gen &+= 1; phase = .present
+                            fxA = lanes(ins); fxB = identityFx; anchor = ins.anchor; reveal = ins.reveal
+                            ref.set(id, Props.PRESENCE, 1.0)
+                        }
+                    case .unmount:
+                        sc.unmount(id)
+                        if alive { alive = false; pendingExit = true }
+                    case .tick:
+                        for _ in 0..<24 {
+                            t += 1.0 / 120.0
+                            sc.setTime(t)
+                            let scP = sc.store.sample(id, Props.PRESENCE) ?? 1.0
+                            let out = sc.frame()
+                            ref.setTime(t)
+                            let refP = ref.sample(id, Props.PRESENCE) ?? 1.0
+                            ref.tick()
+                            let wasAlive = alive
+                            if wasAlive {
+                                #expect(abs(scP - refP) <= 1e-5)
+                            }
+                            let refSettled = ref.events.contains(where: { if case let .settled(_, n, q) = $0 { return n == id && q == Props.PRESENCE.id }; return false })
+                            var retired = false
+                            if wasAlive && refSettled {
+                                switch phase {
+                                case .entering: phase = .present
+                                case .exiting(let g) where g == gen:
+                                    alive = false; retired = true
+                                default: break
+                                }
+                            }
+                            if alive, case .exiting = phase, lerpFx(fxA, fxB, refP)[0] < 1.0 / 255.0 {
+                                alive = false; retired = true
+                            }
+                            let expectedExited = retired || pendingExit
+                            pendingExit = false
+                            #expect(out.exited.contains(id) == expectedExited, "exited mismatch after \(steps)")
+                            if let pres = find(out.changed, id) {
+                                let shownAt = sc.contains(id) ? (sc.store.sample(id, Props.PRESENCE) ?? 1.0) : scP
+                                checkPresented(pres, shownAt)
+                            }
+                        }
+                    }
+                    #expect(sc.contains(id) == alive, "contains mismatch after \(steps)")
+                    if alive { #expect(sc.phase(id) == phase, "phase mismatch after \(steps)") }
+                }
+            }
+
             var cur: [Step] = []
             func rec(_ depth: Int) {
                 if !cur.isEmpty { runPath(cur) }
@@ -793,7 +998,40 @@ struct SceneParityTests {
                     cur.append(s); rec(depth - 1); cur.removeLast()
                 }
             }
-            rec(3)
+            rec(maxDepth)
         }
+
+        // walk_entrances_and_exits (depth 5)
+        runCfg(
+            mountTr: blurReveal(slow),
+            retargetTr: pushDraw(slow),
+            springs: slow,
+            alphabet: [.insert(.animated, 0), .insert(.initial, 0), .retransition, .remove, .reenter, .tick],
+            maxDepth: 5
+        )
+        // walk_held_entrances (depth 5)
+        runCfg(
+            mountTr: blurReveal(slow),
+            retargetTr: pushDraw(slow),
+            springs: slow,
+            alphabet: [.insert(.animated, 0.05), .enterNow, .landWaiting, .remove, .unmount, .tick],
+            maxDepth: 5
+        )
+        // walk_visible_entrances_that_never_played (depth 5)
+        runCfg(
+            mountTr: slideTr(slow),
+            retargetTr: cornerScale(slow),
+            springs: slow,
+            alphabet: [.insert(.animated, 0), .insert(.initial, 0), .retransition, .remove, .reenter, .tick],
+            maxDepth: 5
+        )
+        // walk_instant_presence (depth 5)
+        runCfg(
+            mountTr: blurReveal(.none),
+            retargetTr: pushDraw(.none),
+            springs: .none,
+            alphabet: [.insert(.animated, 0), .retransition, .remove, .reenter, .enterNow, .tick],
+            maxDepth: 5
+        )
     }
 }

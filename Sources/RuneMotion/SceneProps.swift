@@ -28,7 +28,7 @@ extension Scene {
         spring: Spring,
         delay: Float = 0
     ) {
-        animate(id, prop, to: target, anim: Anim(curve: .spring(spring), delay: delay))
+        animate(id, prop, to: target, anim: Anim(curve: Curve.from(spring), delay: delay))
     }
 
     /// Puts the node at `frame` immediately, ending any motion toward another.

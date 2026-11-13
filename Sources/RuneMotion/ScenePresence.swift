@@ -43,19 +43,9 @@ extension Scene {
         linkNodeSlot(i, parent: parentIdx)
 
         let ins = transition.insertion.kitRules(removal: false)
-        let reduced = store.reducedMotion
         let plain = delay <= 0.0 && transition.insertion == Transition.opacity.insertion
-        let ridesParent = !reduced && hasEnteringAncestorBelowHalf(parentIdx, plain: plain)
-        let shouldAnimate: Bool
-        if mount == .animated {
-            if reduced {
-                shouldAnimate = !transition.isNone
-            } else {
-                shouldAnimate = !ins.showsNothing && !ridesParent
-            }
-        } else {
-            shouldAnimate = false
-        }
+        let ridesParent = hasEnteringAncestorBelowHalf(parentIdx, plain: plain)
+        let shouldAnimate = (mount == .animated) && !ridesParent && !ins.showsNothing
 
         let clampedDelay = delay.isFinite ? max(0.0, delay) : 0.0
         let acts = nodes[i].phaseStep(.mount(transition: transition, animate: shouldAnimate, delay: clampedDelay))
@@ -93,16 +83,18 @@ extension Scene {
 
     /// Lands an entrance only if it is still waiting at the start (`p < 1e-3`).
     public mutating func landWaiting(_ id: NodeId) {
-        guard let i = slot(id) else { return }
+        guard let i = slot(id), nodes[i].presence.isEntering else { return }
         let p = presenceNow(id)
-        let acts = nodes[i].phaseStep(.appear(transition: nodes[i].transition, p: p))
+        guard p < 1e-3 else { return }
+        let acts = nodes[i].phaseStep(.land(transition: nodes[i].transition))
         applyPhaseActs(i, acts)
     }
 
     /// Re-runs an already present node's entrance from `0 -> 1`.
     public mutating func reenter(_ id: NodeId) {
         guard let i = slot(id), nodes[i].alive, nodes[i].presence.isPresent else { return }
-        let acts = nodes[i].phaseStep(.fadeIn(transition: nodes[i].transition))
+        trackSet(i, Props.PRESENCE, 0.0)
+        let acts = nodes[i].phaseStep(.revive(transition: nodes[i].transition, p: 0.0))
         applyPhaseActs(i, acts)
     }
 
@@ -121,7 +113,7 @@ extension Scene {
         guard let i = slot(id), let tid = nodes[i].tracks[Int(Props.PRESENCE.id.rawValue)] else {
             return 1.0
         }
-        return store.valuesOf(tid)?.first ?? 1.0
+        return sample(tid)?.0.first ?? 1.0
     }
 
     private func hasEnteringAncestorBelowHalf(_ startParent: UInt32, plain: Bool) -> Bool {
@@ -138,7 +130,7 @@ extension Scene {
             case .entering:
                 let pv: Float
                 if let tid = nodes[pi].tracks[Int(Props.PRESENCE.id.rawValue)],
-                   let vals = store.valuesOf(tid), let first = vals.first {
+                   let (vals, _) = sample(tid), let first = vals.first {
                     pv = first
                 } else {
                     pv = 1.0
@@ -170,10 +162,7 @@ extension Scene {
                     trackSet(i, Props.PRESENCE, 1.0)
                 }
             case let .run(target, spring, delay):
-                let curve: Curve = store.reducedMotion && !nodes[i].transition.isNone
-                    ? .REDUCED_FADE
-                    : .spring(spring)
-                let anim = Anim<Float>(curve: curve, delay: delay)
+                let anim = Anim<Float>(curve: Curve.from(spring), delay: delay)
                 trackAnimate(i, Props.PRESENCE, target, anim)
             case .dirty:
                 nodes[i].dirty = true

@@ -633,7 +633,7 @@ public struct AnimationStore: Sendable {
                 t,
                 targets: target.toLanes(),
                 count: n,
-                curve: .spring(spring),
+                curve: Curve.from(spring),
                 blend: .auto,
                 delay: 0,
                 velocityRule: .inherit,
@@ -669,7 +669,7 @@ public struct AnimationStore: Sendable {
                 cancelPending(l)
                 if x < lo[i] || x > hi[i] {
                     let bound = min(max(x, lo[i]), hi[i])
-                    startLane(l, at: trackNow, target: bound, curve: .spring(spring), blend: .merge, vel: v, eps: eps)
+                    startLane(l, at: trackNow, target: bound, curve: Curve.from(spring), blend: .merge, vel: v, eps: eps)
                     continue
                 }
                 let proj = x + v / k
@@ -684,7 +684,7 @@ public struct AnimationStore: Sendable {
                             at: trackNow + max(0.0, tau),
                             target: b,
                             velocity: .nan,
-                            curve: .spring(spring),
+                            curve: Curve.from(spring),
                             blend: .merge,
                             next: Self.none
                         )

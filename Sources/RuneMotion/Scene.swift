@@ -60,7 +60,7 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 
     public init(_ spring: Spring) {
-        let a = Anim<Float>(curve: .spring(spring))
+        let a = Anim<Float>(curve: Curve.from(spring))
         self.x = a
         self.y = a
         self.leadCurve = nil
@@ -69,7 +69,7 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 
     public init(_ pair: SpringPair) {
-        let a = Anim<Float>(curve: .spring(pair.enter))
+        let a = Anim<Float>(curve: Curve.from(pair.enter))
         self.x = a
         self.y = a
         self.leadCurve = nil
@@ -85,10 +85,10 @@ public struct LayoutAnim: Sendable, Hashable {
         travel: Travel = .parent
     ) {
         let sx = widthScale.map { spring.withDuration(spring.duration * $0) } ?? spring
-        self.x = Anim(curve: .spring(sx))
-        self.y = Anim(curve: .spring(spring))
-        self.leadCurve = leadingSpring.map { Anim(curve: .spring($0)) }
-        self.trailCurve = leadingSpring.map { _ in Anim(curve: .spring(spring)) }
+        self.x = Anim(curve: Curve.from(sx))
+        self.y = Anim(curve: Curve.from(spring))
+        self.leadCurve = leadingSpring.map { Anim(curve: Curve.from($0)) }
+        self.trailCurve = leadingSpring.map { _ in Anim(curve: Curve.from(spring)) }
         self.travel = travel
     }
 
@@ -97,7 +97,7 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 
     public static func axes(_ x: Spring, _ y: Spring) -> LayoutAnim {
-        LayoutAnim(x: Anim(curve: .spring(x)), y: Anim(curve: .spring(y)))
+        LayoutAnim(x: Anim(curve: Curve.from(x)), y: Anim(curve: Curve.from(y)))
     }
 
     /// Width settles at `0.78 * duration` ahead of height.
@@ -122,7 +122,7 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 
     public func lead(_ lead: Spring, _ trail: Spring) -> LayoutAnim {
-        self.lead(Anim(curve: .spring(lead)), Anim(curve: .spring(trail)))
+        self.lead(Anim(curve: Curve.from(lead)), Anim(curve: Curve.from(trail)))
     }
 
     public static func lead(lead: Spring = MotionTokens.LEAD, trail: Spring = MotionTokens.SETTLE) -> LayoutAnim {
@@ -1523,18 +1523,18 @@ public struct Scene: Sendable {
                 nodes[existingIdx].hasFill = (spec.fill != nil)
                 nodes[existingIdx].hasBorder = (spec.border != nil)
                 if !cut, let sp = spec.styleSpring {
-                    let a = Anim<Float>(curve: .spring(sp))
+                    let a = Anim<Float>(curve: Curve.from(sp))
                     animate(spec.id, Props.OPACITY, to: spec.opacity, anim: a)
-                    animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: .spring(sp)))
+                    animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: Curve.from(sp)))
                     animate(spec.id, Props.ROTATE, to: spec.rotate, anim: a)
-                    animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: .spring(sp)))
-                    animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: .spring(sp)))
-                    animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: .spring(sp)))
+                    animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                    animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
+                    animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
                     if let fill = spec.fill {
-                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: .spring(sp)))
+                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: Curve.from(sp)))
                     }
                     if let border = spec.border {
-                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: .spring(sp)))
+                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: Curve.from(sp)))
                     }
                 } else {
                     set(spec.id, Props.OPACITY, spec.opacity)

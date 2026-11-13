@@ -30,14 +30,19 @@ public struct Animated<T: Animatable>: Sendable {
     /// Animates to `target` from the exact position and velocity at `now`.
     public mutating func animateTo(_ newTarget: T, anim: Anim<T>, at now: Double) {
         let tg = newTarget.toLanes()
-        if anim.initialVelocity == nil && tg == targetLanes {
+        let explicitVel: Float? = switch anim.velocityRule {
+        case .inherit: nil
+        case .zero: 0.0
+        case let .uniform(u): u
+        }
+        if anim.initialVelocity == nil && explicitVel == nil && tg == targetLanes {
             return
         }
         self.curve = anim.curve
         for i in 0..<T.laneCount {
             let s = layers[i]?.sample(at: now) ?? (offset: 0, velocity: 0)
             let x = targetLanes[i] + s.offset
-            let v = anim.initialVelocity?.lanes[i] ?? s.velocity
+            let v = anim.initialVelocity?.lanes[i] ?? explicitVel ?? s.velocity
             restartLane(i, x: x, v: v, target: tg[i], curve: anim.curve, at: now)
         }
         self.target = T.fromLanes(targetLanes)
@@ -62,13 +67,16 @@ public struct Animated<T: Animatable>: Sendable {
     }
 
     private mutating func restartLane(_ i: Int, x: Float, v: Float, target: Float, curve: Curve, at now: Double) {
+        let eps = Eps(pos: posEps, vel: velEps)
         if case let .decay(d) = curve {
-            let rest = d.target(from: x, initialVelocity: v)
-            targetLanes[i] = rest
-            layers[i] = Layer.make(curve: curve, offset: x - rest, velocity: v, t0: now, posEps: posEps, velEps: velEps)
+            let k = max(1e-3, d.rate)
+            targetLanes[i] = x + v / k
+            let layer = Layer.decay(rate: k, at: now, velocity: v, eps: eps)
+            layers[i] = layer.kind == .rest ? nil : layer
         } else {
             targetLanes[i] = target
-            layers[i] = Layer.make(curve: curve, offset: x - target, velocity: v, t0: now, posEps: posEps, velEps: velEps)
+            let layer = Layer.start(curve: curve, at: now, offset: x - target, velocity: v, eps: eps)
+            layers[i] = layer.kind == .rest ? nil : layer
         }
     }
 

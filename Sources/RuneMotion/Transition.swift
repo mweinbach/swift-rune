@@ -123,7 +123,7 @@ public struct TransitionEffect: Sendable, Hashable {
     public func combined(with other: TransitionEffect) -> TransitionEffect {
         let mergedOpacity: Float?
         switch (zeroOpacity, other.zeroOpacity) {
-        case let (a?, b?): mergedOpacity = min(a, b)
+        case let (a?, b?): mergedOpacity = a * b
         case let (a?, nil): mergedOpacity = a
         case let (nil, b?): mergedOpacity = b
         case (nil, nil): mergedOpacity = nil
@@ -134,7 +134,7 @@ public struct TransitionEffect: Sendable, Hashable {
             relativeOffset: Vec2(relativeOffset.x + other.relativeOffset.x, relativeOffset.y + other.relativeOffset.y),
             pointOffset: Vec2(pointOffset.x + other.pointOffset.x, pointOffset.y + other.pointOffset.y),
             zeroBlur: max(zeroBlur, other.zeroBlur),
-            reveal: other.reveal ?? reveal,
+            reveal: reveal ?? other.reveal,
             spring: other.spring ?? spring,
             anchor: zeroScale != Vec2(1, 1) ? anchor : other.anchor,
             smallScale: smallScale || other.smallScale,

@@ -153,8 +153,8 @@ public struct Layer: Sendable, Equatable {
             return tween(duration: duration, easing: easing, at: t0, offset: offset, velocity: velocity)
         case let .decay(d):
             return decay(rate: d.rate, at: t0, velocity: velocity, eps: eps)
-        case let .hermite(duration):
-            return hermite(duration: duration, at: t0, offset: offset, v0: velocity, v1: 0)
+        case let .hermite(duration, endVelocity):
+            return hermite(duration: duration, at: t0, offset: offset, v0: velocity, v1: endVelocity)
         }
     }
 
@@ -269,9 +269,9 @@ public struct Layer: Sendable, Equatable {
             if (abs(a) <= posEps && abs(v0) <= velEps) || duration <= 1e-5 { return nil }
             let l = tween(duration: duration, easing: easing, at: t0, offset: a, velocity: v0)
             return l.kind == .rest ? nil : l
-        case let .hermite(duration):
-            if (abs(a) <= posEps && abs(v0) <= velEps) || duration <= 1e-5 { return nil }
-            let l = hermite(duration: duration, at: t0, offset: a, v0: v0, v1: 0)
+        case let .hermite(duration, endVelocity):
+            if (abs(a) <= posEps && abs(v0) <= velEps && abs(endVelocity) <= velEps) || duration <= 1e-5 { return nil }
+            let l = hermite(duration: duration, at: t0, offset: a, v0: v0, v1: endVelocity)
             return l.kind == .rest ? nil : l
         case let .decay(d):
             if abs(a) <= posEps && abs(v0) <= velEps { return nil }

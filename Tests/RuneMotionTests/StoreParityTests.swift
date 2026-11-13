@@ -439,4 +439,320 @@ struct StoreParityTests {
         steady.tickAt(0.17)
         #expect(abs(s.get(old, X)! - steady.get(old, X)!) < 1e-4)
     }
+
+    @Test("keyframes_hit_values_and_keep_velocity_through_cubics")
+    func keyframesHitValuesAndKeepVelocityThroughCubics() {
+        var s = AnimationStore()
+        s.set(N, X, 0.0)
+        let kf = Keyframes<Float>()
+            .linear(10.0, duration: 0.1)
+            .cubic(30.0, duration: 0.2)
+            .cubic(20.0, duration: 0.2)
+            .cubic(40.0, duration: 0.2)
+            .spring(0.0, MotionTokens.SETTLE)
+        s.playKeyframes(N, X, kf)
+
+        func at(_ t: Double) -> (Float, Float) {
+            s.tickAt(t)
+            return (s.get(N, X)!, s.velocity(N, X)!)
+        }
+
+        #expect(abs(at(0.05).0 - 5.0) < 1e-3)
+        #expect(abs(at(0.1).0 - 10.0) < 1e-3)
+        #expect(abs(at(0.3).0 - 30.0) < 1e-3)
+        let before = at(0.5 - 1e-4).1
+        let after = at(0.5 + 1e-4).1
+        #expect(abs(before - after) < 0.5)
+        #expect(abs(at(0.7).0 - 40.0) < 1e-3)
+        _ = at(3.0)
+        #expect(at(3.1).0 == 0.0)
+    }
+
+    @Test("unchanged_target_keeps_the_trajectory")
+    func unchangedTargetKeepsTrajectory() {
+        var a = AnimationStore()
+        var b = AnimationStore()
+        a.set(N, X, 0.0)
+        b.set(N, X, 0.0)
+        a.animate(N, X, to: 100.0, anim: .spring(MotionTokens.SETTLE))
+        b.animate(N, X, to: 100.0, anim: .spring(MotionTokens.SETTLE))
+        b.setTime(0.1)
+        b.animate(N, X, to: 100.0, anim: .spring(MotionTokens.DRIFT))
+        for k in 1..<60 {
+            let t = Double(k) / 120.0
+            a.setTime(t)
+            b.setTime(t)
+            #expect(a.sample(N, X) == b.sample(N, X))
+            #expect(a.sampleVelocity(N, X) == b.sampleVelocity(N, X))
+        }
+    }
+
+    @Test("set_is_immediate_and_first_animate_doesnt_animate")
+    func setIsImmediateAndFirstAnimateDoesNotAnimate() {
+        var s = AnimationStore()
+        s.animate(N, X, to: 40.0, anim: .spring(MotionTokens.SETTLE))
+        s.tickAt(0.0)
+        #expect(s.get(N, X) == 40.0)
+        #expect(!s.isAnimating(N, X))
+        s.animate(N, X, to: 80.0, anim: .spring(MotionTokens.SETTLE))
+        s.tickAt(0.05)
+        #expect(s.isAnimating(N, X))
+        s.set(N, X, 10.0)
+        s.tickAt(0.06)
+        #expect(s.get(N, X) == 10.0)
+        #expect(!s.isAnimating(N, X))
+    }
+
+    @Test("a_removed_track_leaves_touched_even_when_its_slot_is_reused")
+    func removedTrackLeavesTouchedWhenSlotReused() {
+        var s = AnimationStore()
+        s.set(NodeId(1), X, 1.0)
+        s.set(NodeId(3), X, 3.0)
+        s.tick()
+        func touchedNodes(_ store: AnimationStore) -> [UInt64] {
+            store.touchedTracks().map { $0.1.rawValue }
+        }
+        #expect(touchedNodes(s) == [1, 3])
+        s.removeNode(NodeId(1))
+        #expect(touchedNodes(s) == [3])
+        s.set(NodeId(1), X, 1.0)
+        s.removeNode(NodeId(1))
+        s.set(NodeId(2), X, 2.0)
+        s.tick()
+        #expect(touchedNodes(s) == [2])
+    }
+
+    @Test("a_cue_on_a_frozen_step_waits_and_scaled_steps_keep_one_clock")
+    func cueOnFrozenStepWaitsAndScaledStepsKeepOneClock() {
+        let a = NodeId(1)
+        let b = NodeId(2)
+        var store = AnimationStore()
+        store.set(a, Props.OPACITY, 0.0)
+        store.set(b, Props.OPACITY, 0.0)
+        store.setNodeTimeScale(a, 0.0)
+        var ch = Choreography()
+        let s1 = ch.step(.now()) { s in
+            s.animate(a, Props.OPACITY, to: 1.0, anim: .spring(MotionTokens.SETTLE))
+        }
+        let s2 = ch.step(.arrived(s1)) { s in
+            s.animate(b, Props.OPACITY, to: 1.0, anim: .spring(MotionTokens.SETTLE))
+        }
+        for i in 0...240 {
+            store.setTime(Double(i) / 120.0)
+            if i == 120 { store.setNodeTimeScale(a, 1.0) }
+            ch.tick(store: &store)
+            store.tick()
+            if i == 119 {
+                #expect(ch.startTime(of: s2) == nil)
+            }
+        }
+        #expect(abs((ch.startTime(of: s2) ?? -99) - 1.3) < 1e-3)
+        #expect(store.get(b, Props.OPACITY) == 1.0)
+
+        var store2 = AnimationStore()
+        for n in [a, b] {
+            store2.set(n, Props.OPACITY, 0.0)
+            store2.setNodeTimeScale(n, 0.5)
+        }
+        var ch2 = Choreography()
+        let ss1 = ch2.step(.now()) { s in
+            s.animate(a, Props.OPACITY, to: 1.0, anim: .spring(MotionTokens.SETTLE))
+        }
+        _ = ch2.step(.arrived(ss1)) { s in
+            s.animate(b, Props.OPACITY, to: 1.0, anim: .spring(MotionTokens.SETTLE))
+        }
+        var aAt: Float = 0
+        var bAt: Float = 0
+        for i in 0...120 {
+            store2.setTime(Double(i) / 120.0)
+            ch2.tick(store: &store2)
+            store2.tick()
+            if i == 24 { aAt = store2.get(a, Props.OPACITY)! }
+            if i == 96 { bAt = store2.get(b, Props.OPACITY)! }
+        }
+        #expect(aAt > 0.05 && abs(aAt - bAt) < 1e-3)
+    }
+
+    @Test("a_once_phase_animator_waits_for_rest_and_stops_on_its_last_phase")
+    func oncePhaseAnimatorWaitsForRestAndStopsOnLastPhase() {
+        let n = NodeId(1)
+        var store = AnimationStore()
+        var ph = ChoreographyPhaseAnimator()
+            .phase { $0.animate(n, Props.UNIFORM_SCALE, to: 1.0, anim: .spring(MotionTokens.SETTLE)) }
+            .phase { $0.animate(n, Props.UNIFORM_SCALE, to: 1.04, anim: .spring(MotionTokens.SETTLE)) }
+            .phase { $0.animate(n, Props.UNIFORM_SCALE, to: 0.98, anim: .spring(MotionTokens.SETTLE)) }
+            .advanceOn(.settled)
+            .hold(0.1)
+            .once()
+        var phases: [Int] = []
+        var moving: [Bool] = []
+        for i in 0...600 {
+            store.setTime(Double(i) / 120.0)
+            ph.tick(store: &store)
+            store.tick()
+            phases.append(ph.currentIndex)
+            moving.append(store.isAnimating(n, Props.UNIFORM_SCALE))
+        }
+        let switches = (1..<phases.count).filter { phases[$0] != phases[$0 - 1] }
+        #expect(switches.count == 1)
+        let k = switches[0]
+        #expect(phases[k] == 2)
+        #expect(moving[..<(k - 12)].contains(true) && moving[(k - 12)..<k].allSatisfy { !$0 })
+        #expect(store.get(n, Props.UNIFORM_SCALE) == 0.98)
+        #expect(store.activeLen == 0)
+    }
+
+    @Test("a_phase_started_frozen_advances_after_resuming")
+    func phaseStartedFrozenAdvancesAfterResuming() {
+        var store = AnimationStore()
+        let n = NodeId(1)
+        store.setNodeTimeScale(n, 0.0)
+        var ph = ChoreographyPhaseAnimator()
+            .phase { $0.animate(n, Props.UNIFORM_SCALE, to: 1.0, anim: .spring(MotionTokens.SETTLE)) }
+            .phase { $0.animate(n, Props.UNIFORM_SCALE, to: 1.04, anim: .spring(MotionTokens.SETTLE)) }
+        var phases: [Int] = []
+        for i in 0...480 {
+            store.setTime(Double(i) / 120.0)
+            if i == 120 { store.setNodeTimeScale(n, 1.0) }
+            ph.tick(store: &store)
+            store.tick()
+            phases.append(ph.currentIndex)
+        }
+        func countSwitches(_ slice: ArraySlice<Int>) -> Int {
+            zip(slice, slice.dropFirst()).filter { $0 != $1 }.count
+        }
+        #expect(countSwitches(phases[1..<120]) == 0)
+        #expect(countSwitches(phases[120...]) >= 8)
+    }
+
+    @Test("the_none_spring_is_an_instant_curve_everywhere_a_spring_converts")
+    func noneSpringIsInstantEverywhere() {
+        #expect(Curve.from(Spring.none) == .instant)
+        #expect(Anim<Float>(spring: .none).curve == .instant)
+        #expect(Anim<Float>(SpringPair.none).curve == .instant)
+        #expect(PropClass.presence.forReducedMotion(Curve.from(Spring.none)) == .instant)
+        let t = Transition.none
+        #expect(t.insertion == .identity && t.removal == .identity && t.springs == .none)
+        #expect(Curve.from(Spring(duration: 0.001, bounce: 0.0)) == .spring(Spring(duration: 0.001, bounce: 0.0)))
+    }
+
+    @Test("animated_retarget_golden")
+    func animatedRetargetGolden() {
+        let anchors = [0, 1, 3, 9, 21, 39]
+        let samples: [[[Float]]] = [
+            [
+                [30.078003, 7.5296297, -800.0, 400.0],
+                [15.205883, 12.992083, -426.75085, 80.23154],
+                [3.2957265, 11.149232, -112.73632, -93.2812],
+                [-0.20551914, 1.577376, 1.509766, -24.364733],
+                [-0.0026638499, 0.009844182, 0.045319706, -0.1750176],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            [
+                [56.422695, -0.41329098, -800.0, 400.0],
+                [38.957146, 7.563013, -600.40234, 244.27997],
+                [17.499737, 14.067252, -277.22702, 37.680252],
+                [11.163436, 5.5244317, 65.7598, -71.8772],
+                [20.527206, -0.43597618, -1.4065659, 3.7947469],
+                [19.988346, 0.0052623716, 0.1345897, -0.10417824],
+            ],
+            [
+                [48.35736, 7.3219295, -800.0, 400.0],
+                [30.425076, 14.737576, -593.33307, 237.03568],
+                [11.4471245, 21.428228, -188.11761, 41.604954],
+                [29.531113, 6.3093452, 231.20714, -141.46454],
+                [40.0, 0.0, 0.0, -0.0],
+                [40.0, 0.0, 0.0, -0.0],
+            ],
+            [
+                [111.8616, -21.43715, -800.0, 400.0],
+                [92.35385, -11.683273, -760.94543, 380.47272],
+                [56.148865, 6.41922, -688.46295, 344.23148],
+                [-33.05693, 51.022118, -509.8728, 254.9364],
+                [-148.05019, 108.518745, -279.6561, 139.82805],
+                [-230.99655, 149.99193, -113.5973, 56.79865],
+            ],
+            [
+                [80.0, 0.0, 0.0, 0.0],
+                [80.0, 0.0, 0.0, 0.0],
+                [80.0, 0.0, 0.0, 0.0],
+                [80.0, 0.0, 0.0, 0.0],
+                [80.0, 0.0, 0.0, 0.0],
+                [80.0, 0.0, 0.0, 0.0],
+            ],
+        ]
+        let targets: [[Float]] = [[0.0, 0.0], [20.0, 0.0], [40.0, 0.0], [-287.7384, 178.36285], [80.0, 0.0]]
+        func close(_ got: Float, _ want: Float) -> Bool {
+            // `MotionMath` deterministic polynomials have ~3e-7 error vs libm over ~60pt jumps (~6e-6 at zero crossings).
+            abs(got - want) <= 1e-5 + 1e-6 * abs(want)
+        }
+        let tween = Curve.tween(duration: 0.3, easing: .easeOut)
+        let curves: [Curve] = [
+            .spring(MotionTokens.GLIDE),
+            .spring(Spring(duration: 0.5, bounce: 0.3)),
+            tween,
+            .decay(.IOS_NORMAL),
+            .instant,
+        ]
+        for (n, c) in curves.enumerated() {
+            var a = Animated<Vec2>(Vec2(0.0, 10.0), propClass: .other, pixelScale: 2.0)
+            a.animateTo(Vec2(100.0, -40.0), anim: .spring(MotionTokens.SNAP), at: 0.0)
+            a.animateTo(Vec2(-30.0, 60.0), anim: Anim(curve: c), at: 0.07)
+            a.animateTo(Vec2(5.0, 5.0), anim: Anim(curve: c).velocity(.uniform(250.0)), at: 0.13)
+            a.release(velocity: Vec2(-800.0, 400.0), target: Vec2(Float(20 * n), 0.0), curve: c, at: 0.2)
+            for (i, k) in anchors.enumerated() {
+                let t = 0.2 + Double(k) * 0.025
+                let x = a.sample(at: t)
+                let v = a.velocity(at: t)
+                let got = [x.x, x.y, v.x, v.y]
+                for j in 0..<4 {
+                    #expect(close(got[j], samples[n][i][j]), "curve \(n) sample \(k) field \(j): \(got[j]) vs \(samples[n][i][j])")
+                }
+            }
+            let tg = a.target
+            #expect(close(tg.x, targets[n][0]) && close(tg.y, targets[n][1]))
+        }
+    }
+
+    @Test("clock_parity_display_seek_and_manual")
+    func clockParityDisplaySeekAndManual() {
+        var c = Clock.display()
+        #expect(c.frame(host: 100.0) == 0.0)
+        #expect(abs(c.frame(host: 101.0) - 1.0) < 1e-12)
+        c.setScale(0.5, realNow: 101.0)
+        #expect(abs(c.frame(host: 101.0) - 1.0) < 1e-12)
+        #expect(abs(c.frame(host: 103.0) - 2.0) < 1e-12)
+        c.pause(realNow: 103.0)
+        #expect(abs(c.frame(host: 110.0) - 2.0) < 1e-12)
+        c.resume(realNow: 110.0)
+        #expect(abs(c.frame(host: 112.0) - 3.0) < 1e-12)
+
+        var c2 = Clock.display()
+        c2.pause(realNow: 5.0)
+        #expect(c2.frame(host: 7.0) == 0.0)
+        c2.resume(realNow: 9.0)
+        #expect(abs(c2.frame(host: 10.0) - 1.0) < 1e-12)
+        c2.seek(to: 4.0)
+        #expect(c2.timeAt(realNow: 50.0) == 4.0)
+        #expect(c2.frame(host: 50.0) == 4.0)
+        #expect(abs(c2.frame(host: 50.5) - 4.5) < 1e-12)
+        c2.pause(realNow: 50.5)
+        c2.seek(to: 2.0)
+        #expect(c2.frame(host: 60.0) == 2.0)
+        c2.resume(realNow: 60.0)
+        #expect(abs(c2.frame(host: 61.0) - 3.0) < 1e-12)
+
+        var m = Clock.manual(hz: 60.0)
+        #expect(m.frame(host: 100.0) == 0.0)
+        #expect(m.frame(host: 101.0) == 0.0)
+        m.setScale(0.5, realNow: 102.0)
+        m.pause(realNow: 103.0)
+        m.resume(realNow: 200.0)
+        #expect(abs(m.step() - 0.5 / 60.0) < 1e-12)
+        #expect(m.timeAt(realNow: 300.0) == m.now)
+
+        var m2 = Clock.manual(hz: 120.0)
+        for _ in 0..<120 { _ = m2.step() }
+        #expect(abs(m2.now - 1.0) < 1e-9)
+    }
 }

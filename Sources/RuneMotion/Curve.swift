@@ -47,9 +47,14 @@ public enum Curve: Sendable, Hashable {
     case spring(Spring)
     case tween(duration: Float, easing: Easing)
     case decay(Decay)
-    /// Velocity-matched cubic Hermite spline of `duration` seconds.
-    case hermite(duration: Float)
+    /// Velocity-matched cubic Hermite spline of `duration` seconds ending at `endVelocity`.
+    case hermite(duration: Float, endVelocity: Float)
     case instant
+
+    @inlinable
+    public static func from(_ spring: Spring) -> Curve {
+        spring == .none ? .instant : .spring(spring)
+    }
 
     public static let REDUCED_FADE = Curve.tween(duration: 0.18, easing: .easeInOut)
 
@@ -85,7 +90,7 @@ public enum Curve: Sendable, Hashable {
         case .spring(let s): return s.duration
         case .tween(let duration, _): return duration
         case .decay(let d): return 1.0 / d.rate
-        case .hermite(let duration): return duration
+        case .hermite(let duration, _): return duration
         case .instant: return 0.0
         }
     }
@@ -200,7 +205,29 @@ public struct Anim<T: Animatable>: Sendable, Hashable {
     }
 
     public static func spring(_ spring: Spring, blend: Blend = .auto) -> Anim<T> {
-        Anim(curve: .spring(spring), blend: blend)
+        Anim(curve: Curve.from(spring), blend: blend)
+    }
+
+    public init(
+        spring: Spring,
+        blend: Blend = .auto,
+        delay: Float = 0,
+        initialVelocity: Velocity<T>? = nil,
+        velocityRule: VelocityRule = .inherit,
+        token: UInt64 = 0
+    ) {
+        self.init(
+            curve: Curve.from(spring),
+            blend: blend,
+            delay: delay,
+            initialVelocity: initialVelocity,
+            velocityRule: velocityRule,
+            token: token
+        )
+    }
+
+    public init(_ pair: SpringPair, blend: Blend = .auto) {
+        self.init(curve: Curve.from(pair.enter), blend: blend)
     }
 
     public static func tween(duration: Float, easing: Easing = .easeInOut, blend: Blend = .auto) -> Anim<T> {

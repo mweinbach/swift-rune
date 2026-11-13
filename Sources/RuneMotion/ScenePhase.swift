@@ -128,7 +128,7 @@ internal enum PhaseEvent {
     case mount(transition: Transition, animate: Bool, delay: Float)
     case revive(transition: Transition, p: Float)
     case land(transition: Transition)
-    case appear(transition: Transition, p: Float)
+    case appear(transition: Transition)
     case fadeIn(transition: Transition)
     case exit(transition: Transition, p: Float)
     case settle
@@ -202,20 +202,22 @@ internal func stepPhase(
         state = .present(at0: fxOf(ins), at1: fxIdentity)
         acts.append(.anchor(ins.anchor))
         acts.append(.reveal(ins.reveal))
-        acts.append(.landIfNeeded(1.0))
+        acts.append(.land(1.0))
         acts.append(.dirty)
 
-    case let .appear(transition, p):
-        if case .entering = state, p < 1e-3 {
-            return stepPhase(state: &state, generation: &generation, event: .land(transition: transition))
-        }
+    case .appear:
+        let (_, at1) = state.pair
+        state = .present(at0: fxIdentity, at1: at1)
+        acts.append(.land(1.0))
+        acts.append(.dirty)
 
     case let .fadeIn(transition):
-        if case .present = state {
-            acts.append(.land(0.0))
-            let r = stepPhase(state: &state, generation: &generation, event: .revive(transition: transition, p: 0.0))
-            acts.append(contentsOf: r)
-        }
+        let (at0, at1) = state.pair
+        state = .entering(at0: at0, at1: at1)
+        acts.append(.land(0.0))
+        let sp = transition.enterSpring
+        acts.append(.run(target: 1.0, spring: sp, delay: 0.0))
+        acts.append(.dirty)
 
     case let .exit(transition, p):
         if case .exiting = state {

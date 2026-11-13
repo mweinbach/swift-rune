@@ -6681,7 +6681,8 @@
         {
           "upstream": "src/choreo.rs",
           "swift": [
-            "Sources/RuneMotion/Choreography.swift"
+            "Sources/RuneMotion/Choreography.swift",
+            "Sources/RuneMotion/Keyframes.swift"
           ],
           "status": "ported"
         },
@@ -6725,7 +6726,7 @@
           "swift": [
             "Sources/RuneMotion/Keyframes.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/layer.rs",
@@ -6737,7 +6738,7 @@
         {
           "upstream": "src/lib.rs",
           "swift": [
-            "Sources/RuneMotion/Animated.swift"
+            "Sources/RuneMotion/Props.swift"
           ],
           "status": "ported"
         },
@@ -6772,37 +6773,37 @@
         {
           "upstream": "src/scene/phase.rs",
           "swift": [
-            "Sources/RuneMotion/Scene.swift"
+            "Sources/RuneMotion/ScenePhase.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/scene/presence.rs",
           "swift": [
-            "Sources/RuneMotion/Scene.swift"
+            "Sources/RuneMotion/ScenePresence.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/scene/props.rs",
           "swift": [
-            "Sources/RuneMotion/Props.swift"
+            "Sources/RuneMotion/SceneProps.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/scene/trailing.rs",
           "swift": [
-            "Sources/RuneMotion/Scene.swift"
+            "Sources/RuneMotion/SceneTrailing.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/scene/travel.rs",
           "swift": [
-            "Sources/RuneMotion/Scene.swift"
+            "Sources/RuneMotion/SceneTravel.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/sequence.rs",
@@ -6835,14 +6836,14 @@
         {
           "upstream": "src/store/started.rs",
           "swift": [
-            "Sources/RuneMotion/AnimationStore.swift"
+            "Sources/RuneMotion/StoreStarted.swift"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/store/tracks.rs",
           "swift": [
-            "Sources/RuneMotion/AnimationStore.swift"
+            "Sources/RuneMotion/StoreTracks.swift"
           ],
           "status": "ported"
         },
@@ -6856,8 +6857,6 @@
         {
           "upstream": "src/tokens.rs",
           "swift": [
-            "Sources/RuneMotion/Curve.swift",
-            "Sources/RuneMotion/Easing.swift",
             "Sources/RuneMotion/Spring.swift"
           ],
           "status": "ported"

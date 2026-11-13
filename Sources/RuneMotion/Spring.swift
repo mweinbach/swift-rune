@@ -165,6 +165,7 @@ public struct Spring: Sendable, Hashable, Codable {
 
     /// Seconds until an arbitrary retarget stays within `epsilon` of `target`.
     public func settlingDuration(from x0: Float, velocity v0: Float, target: Float, epsilon: Float = 1e-3) -> Float {
+        if self == .none { return 0.0 }
         let eps = max(epsilon, 1e-6)
         guard let layer = Layer.make(
             curve: .spring(self),
