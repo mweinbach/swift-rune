@@ -1823,6 +1823,25 @@ public struct MaterialDraw: Sendable, Equatable {
         self.opacity = opacity
     }
 
+    /// Converts physical-pixel `rect` and `radius` to logical points for AppKit hosting.
+    public func points(scale: Float) -> MaterialDraw {
+        let s = max(scale, 1e-3)
+        return MaterialDraw(
+            id: id,
+            material: material,
+            blending: blending,
+            rect: MotionRect(
+                left: rect.left / s,
+                top: rect.top / s,
+                right: rect.right / s,
+                bottom: rect.bottom / s
+            ),
+            radius: radius / s,
+            continuous: continuous,
+            opacity: opacity
+        )
+    }
+
     #if os(macOS)
     public var nsMaterial: NSVisualEffectView.Material {
         switch material {

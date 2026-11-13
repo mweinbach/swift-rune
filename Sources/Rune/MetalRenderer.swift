@@ -29,14 +29,12 @@ public final class MetalRenderer {
     private let pipelineBackdropLinear: MTLRenderPipelineState
     private let pipelineBackdropGamma: MTLRenderPipelineState
     private let pipelineBackdropFloat: MTLRenderPipelineState
-    private let pipelineBackdropCompositeLinear: MTLRenderPipelineState
-    private let pipelineOutlineLinear: MTLRenderPipelineState
     private let computeSpringsPipeline: MTLComputePipelineState
     private let samplerLinear: MTLSamplerState
 
     public var hasCompiledExtendedShaders: Bool {
-        _ = (pipelineBackdropCompositeLinear, pipelineOutlineLinear, computeSpringsPipeline)
-        return true
+        _ = computeSpringsPipeline
+        return renderEngine.hasCompiledShaders
     }
 
     public typealias GPUSpringTrack = Rune.GPUSpringTrack
@@ -104,8 +102,6 @@ public final class MetalRenderer {
               let blurFragFn = library.makeFunction(name: "rune_blur_fragment"),
               let compFragFn = library.makeFunction(name: "rune_layer_composite_fragment"),
               let bdropFragFn = library.makeFunction(name: "rune_backdrop_fragment"),
-              let bdropCompFragFn = library.makeFunction(name: "rune_backdrop_composite_fragment"),
-              let outlineFragFn = library.makeFunction(name: "rune_outline_glyph_fragment"),
               let springsComputeFn = library.makeFunction(name: "rune_springs_compute") else {
             throw RendererError.shaderCompileFailed("Missing shader entry points")
         }
@@ -151,8 +147,6 @@ public final class MetalRenderer {
         self.pipelineBackdropGamma = try buildPipeline(vert: fsVertFn, frag: bdropFragFn, pixelFormat: .bgra8Unorm, blend: false)
         self.pipelineBackdropFloat = try buildPipeline(vert: fsVertFn, frag: bdropFragFn, pixelFormat: .rgba16Float, blend: false)
 
-        self.pipelineBackdropCompositeLinear = try buildPipeline(vert: fsVertFn, frag: bdropCompFragFn, pixelFormat: .bgra8Unorm_srgb, blend: true)
-        self.pipelineOutlineLinear = try buildPipeline(vert: fsVertFn, frag: outlineFragFn, pixelFormat: .bgra8Unorm_srgb, blend: true)
         self.computeSpringsPipeline = try dev.makeComputePipelineState(function: springsComputeFn)
 
         let sampDesc = MTLSamplerDescriptor()
@@ -1033,95 +1027,6 @@ public final class MetalRenderer {
         if (cov <= 0.0) return dst;
         float4 blurred = blurredTex.read(uint2(px));
         return dst * (1.0 - cov) + blurred * cov;
-    }
-
-    fragment float4 rune_backdrop_composite_fragment(
-        FullscreenVaryings in [[stage_in]],
-        constant LayerCompositeUniforms &u [[buffer(0)]],
-        texture2d<float> blurredTex [[texture(0)]],
-        sampler samp [[sampler(0)]]
-    ) {
-        float2 frag = in.position.xy;
-        if (u.clip.z <= 0.0 || u.clip.w <= 0.0) return float4(0.0);
-        float clipX = saturate(min(frag.x - u.clip.x + 0.5, (u.clip.x + u.clip.z) - frag.x + 0.5));
-        float clipY = saturate(min(frag.y - u.clip.y + 0.5, (u.clip.y + u.clip.w) - frag.y + 0.5));
-        float clipCov = clipX * clipY;
-        float2 center = u.rect.xy + u.rect.zw * 0.5;
-        float2 halfSize = u.rect.zw * 0.5;
-        float cov = box_cov(sd_box(frag - center, halfSize, u.radii)) * clipCov * u.extra.x;
-        if (cov <= 0.0) return float4(0.0);
-        float2 uv = (frag - u.vp.xy) / max(u.vp.zw, float2(1.0));
-        float4 col = blurredTex.sample(samp, uv);
-        return col * cov;
-    }
-
-    inline float outline_inside(float2 a2, float2 a1, float x0, float ta, float tb, float hx) {
-        if (tb <= ta) return 0.0;
-        float tm = 0.5 * (ta + tb);
-        float d = 0.5 * (tb - ta);
-        float x_mid = (a2.x * tm + a1.x) * tm + x0 + hx;
-        float2 dmid = 2.0 * a2 * tm + a1;
-        return 2.0 * d * x_mid * dmid.y + (2.0 * d * d * d / 3.0) * (a2.x * dmid.y + 2.0 * a2.y * dmid.x);
-    }
-
-    inline float outline_integrate(float2 q1, float2 q2, float2 q3, float lo, float hi, float hx) {
-        float2 a2 = q1 - 2.0 * q2 + q3;
-        float2 a1 = 2.0 * (q2 - q1);
-        bool y_rising = q3.y >= q1.y;
-        bool x_rising = q3.x >= q1.x;
-        float4 A2 = a2.yyxx;
-        float4 A1 = a1.yyxx;
-        float4 V = float4(y_rising ? float2(lo, hi) : float2(hi, lo), -hx, hx);
-        bool4 R = bool4(y_rising, y_rising, x_rising, x_rising);
-        float4 SG = select(float4(-1.0), float4(1.0), R);
-        float4 C = q1.yyxx - V;
-        bool4 sat0 = (C * SG) >= float4(0.0);
-        bool4 sat1 = ((q3.yyxx - V) * SG) <= float4(0.0);
-        float4 disc = max(A1 * A1 - 4.0 * A2 * C, float4(0.0));
-        float4 sq = sqrt(disc);
-        float4 qq = -0.5 * (A1 + select(-sq, sq, A1 >= float4(0.0)));
-        bool4 use_r1 = (A1 < float4(0.0)) == R;
-        float4 num = select(C, qq, use_r1);
-        float4 den = select(qq, A2, use_r1);
-        bool4 valid = den != float4(0.0);
-        float4 t_raw = clamp(select(float4(0.0), num / select(float4(1.0), den, valid), valid), float4(0.0), float4(1.0));
-        float4 T = select(select(t_raw, float4(1.0), sat1), float4(0.0), sat0);
-        if (T.y <= T.x) return 0.0;
-        float2 tc = clamp(T.zw, T.xx, T.yy);
-        float t1 = x_rising ? tc.x : tc.y;
-        float t2 = max(x_rising ? tc.y : tc.x, t1);
-        float acc = outline_inside(a2, a1, q1.x, t1, t2, hx);
-        float2 rab = x_rising ? float2(t2, T.y) : float2(T.x, t1);
-        float d = max(rab.y - rab.x, 0.0);
-        float tm = 0.5 * (rab.x + rab.y);
-        acc += d * (2.0 * a2.y * tm + a1.y) * (2.0 * hx);
-        return acc;
-    }
-
-    fragment float4 rune_outline_glyph_fragment(
-        FullscreenVaryings in [[stage_in]],
-        constant LayerCompositeUniforms &u [[buffer(0)]],
-        texture2d<uint, access::read> outlines [[texture(0)]]
-    ) {
-        uint rec = uint(u.extra.x);
-        uint4 head = outlines.read(uint2(rec & 1023u, rec >> 10u));
-        if (head.y == 0u) return float4(0.0);
-        float2 local = in.position.xy - u.rect.xy;
-        float scale = max(u.extra.y, 1e-4);
-        uint entryIdx = head.x;
-        uint4 entry = outlines.read(uint2(entryIdx & 1023u, entryIdx >> 10u));
-        float acc = 0.0;
-        for (uint k = 0u; k < entry.y; k += 1u) {
-            uint tIdx = entry.x + 2u * k;
-            uint4 t0 = outlines.read(uint2(tIdx & 1023u, tIdx >> 10u));
-            uint4 t1 = outlines.read(uint2((tIdx + 1u) & 1023u, (tIdx + 1u) >> 10u));
-            float2 p0 = float2(as_type<float>(t0.x), as_type<float>(t0.y)) * scale - local;
-            float2 p1 = float2(as_type<float>(t0.z), as_type<float>(t0.w)) * scale - local;
-            float2 p2 = float2(as_type<float>(t1.x), as_type<float>(t1.y)) * scale - local;
-            acc += outline_integrate(p0, p1, p2, -0.5, 0.5, 0.5);
-        }
-        float cov = clamp(abs(acc), 0.0, 1.0);
-        return float4(u.radii.rgb * cov, cov);
     }
 
     struct SpringTrack {

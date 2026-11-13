@@ -35,11 +35,21 @@ internal final class RenderFrameEngine {
     var springBindings: GPUSpringBindings?
     var springTimeSeconds: Double = 0
 
+    var hasCompiledShaders: Bool {
+        _ = (pipelineSRGB, pipelineSpringsSRGB, layerBlur, backdropBlur)
+        return true
+    }
+
     init(device: MTLDevice) throws {
         self.device = device
         let lib: MTLLibrary
         do {
-            lib = try device.makeLibrary(source: RenderShaders.shaderMSL, options: nil)
+            lib = try ShaderLibraryCache.load(
+                named: "shader",
+                source: RenderShaders.shaderMSL,
+                requiredFunction: "vs_springs",
+                on: device
+            )
         } catch {
             throw MetalRenderer.RendererError.shaderCompileFailed("RenderShaders.shaderMSL: \(error)")
         }
@@ -115,6 +125,8 @@ internal final class RenderFrameEngine {
         let blurSigma: Float
         let additive: Bool
         let isLayer: Bool
+        let cacheNodeId: UInt64?
+        let cacheSignature: UInt64?
     }
 
     func draw(
@@ -126,6 +138,7 @@ internal final class RenderFrameEngine {
         backdropHook: EffectBackdropHook?
     ) {
         layersPool.beginFrame()
+        layersPool.registerTracker(frame.residentTracker)
         defer { layersPool.endFrame() }
 
         let targetW = max(1, target.width)
@@ -133,7 +146,7 @@ internal final class RenderFrameEngine {
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
 
         let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
-        let imageTex = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: 1)
+        let imageTex = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: frame.imageRevision)
         let instances = frame.instances
         guard let instanceBuffer = uploader.ensureInstanceBuffer(device: device, instances: instances) else {
             return
@@ -179,7 +192,9 @@ internal final class RenderFrameEngine {
                 scopeInstance: nil,
                 blurSigma: 0,
                 additive: false,
-                isLayer: false
+                isLayer: false,
+                cacheNodeId: nil,
+                cacheSignature: nil
             )
         ]
 
@@ -263,7 +278,54 @@ internal final class RenderFrameEngine {
             }
         }
 
-        for i in 0..<instances.count {
+        func compositeLayer(
+            source: MTLTexture,
+            origin: SIMD2<Float>,
+            scopeInst: RenderInstance,
+            additive: Bool,
+            radiiOverride: SIMD4<Float>? = nil,
+            clearIndex: Int
+        ) {
+            if !stack[stack.count - 1].cleared {
+                encodeBatch(start: clearIndex, end: clearIndex, scope: &stack[stack.count - 1])
+            }
+            let parent = stack[stack.count - 1]
+            var compositeInst = RenderInstance(
+                rect: SIMD4<Float>(
+                    origin.x,
+                    origin.y,
+                    Float(source.width),
+                    Float(source.height)
+                ),
+                radii: radiiOverride ?? scopeInst.radii,
+                fill: SIMD4<Float>(1, 1, 1, scopeInst.fill.w),
+                border: scopeInst.border,
+                params: SIMD4<Float>(additive ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
+                uv: .zero,
+                clip: scopeInst.clip,
+                fade: scopeInst.fade
+            )
+            let rpd = MTLRenderPassDescriptor()
+            rpd.colorAttachments[0].texture = parent.texture
+            rpd.colorAttachments[0].loadAction = .load
+            rpd.colorAttachments[0].storeAction = .store
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+                let compPipe = pipelineFor(format: parent.format, additive: additive, springs: false)
+                enc.setRenderPipelineState(compPipe)
+                var g = globals
+                g.projection = SIMD4<Float>(parent.origin.x, parent.origin.y, Float(parent.texture.width), Float(parent.texture.height))
+                enc.setVertexBytes(&compositeInst, length: MemoryLayout<RenderInstance>.stride, index: 0)
+                enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
+                enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
+                if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
+                enc.setFragmentTexture(source, index: 1)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+                enc.endEncoding()
+            }
+        }
+
+        var i = 0
+        while i < instances.count {
             flushSurfacesBefore(i)
 
             let inst = instances[i]
@@ -279,8 +341,48 @@ internal final class RenderFrameEngine {
                 let oy = floorf(inst.rect.y - pad)
                 let lw = max(1, Int(ceilf(inst.rect.x + inst.rect.z + pad) - ox))
                 let lh = max(1, Int(ceilf(inst.rect.y + inst.rect.w + pad) - oy))
+                let additive = inst.params.x >= 0.5
+                let isCached = inst.params.w >= 0.5
+                let cacheNid: UInt64? = isCached ? unpackFloat4ToU64(inst.radii) : nil
+                let cacheSig: UInt64? = isCached ? unpackFloat4ToU64(inst.uv) : nil
 
-                if let layerTex = layersPool.acquireTarget(device: device, width: lw, height: lh, format: .rgba16Float) {
+                if let nid = cacheNid,
+                   let sig = cacheSig,
+                   let cachedTex = layersPool.lookupRetained(key: nid, signature: sig, width: lw, height: lh)
+                {
+                    var depth = 1
+                    var matchEnd = i + 1
+                    while matchEnd < instances.count {
+                        let k = Float(Int(instances[matchEnd].params.y.rounded()))
+                        if k == KIND_LAYER {
+                            depth += 1
+                        } else if k == KIND_LAYER_END {
+                            depth -= 1
+                            if depth == 0 { break }
+                        }
+                        matchEnd += 1
+                    }
+                    compositeLayer(
+                        source: cachedTex,
+                        origin: SIMD2<Float>(ox, oy),
+                        scopeInst: inst,
+                        additive: additive,
+                        radiiOverride: .zero,
+                        clearIndex: i
+                    )
+                    while surfaceCursor < frame.surfaces.count && Int(frame.surfaces[surfaceCursor].beforeInstance) <= matchEnd {
+                        surfaceCursor += 1
+                    }
+                    batchStart = min(instances.count, matchEnd + 1)
+                    i = matchEnd + 1
+                    continue
+                }
+
+                let acquired: MTLTexture? = isCached
+                    ? layersPool.acquireRetainedTarget(device: device, width: lw, height: lh, format: .rgba16Float)
+                    : layersPool.acquireTarget(device: device, width: lw, height: lh, format: .rgba16Float)
+
+                if let layerTex = acquired {
                     stack.append(
                         TargetScope(
                             texture: layerTex,
@@ -290,21 +392,31 @@ internal final class RenderFrameEngine {
                             cleared: false,
                             scopeInstance: inst,
                             blurSigma: sigma,
-                            additive: inst.params.x >= 0.5,
-                            isLayer: true
+                            additive: additive,
+                            isLayer: true,
+                            cacheNodeId: cacheNid,
+                            cacheSignature: cacheSig
                         )
                     )
                 }
+                i += 1
                 continue
             }
 
             if kind == KIND_LAYER_END {
                 flushPendingUpTo(i)
                 batchStart = i + 1
-                guard stack.count > 1 else { continue }
+                guard stack.count > 1 else {
+                    i += 1
+                    continue
+                }
                 let finished = stack.removeLast()
-                guard let scopeInst = finished.scopeInstance else { continue }
+                guard let scopeInst = finished.scopeInstance else {
+                    i += 1
+                    continue
+                }
 
+                layersPool.recordExtraPass(1)
                 var compositedSource = finished.texture
                 if finished.blurSigma > 0.05 {
                     if let blurred = layerBlur.encode(
@@ -319,44 +431,24 @@ internal final class RenderFrameEngine {
                     }
                 }
 
-                // Ensure parent is initialized before compositing the layer quad
-                if !stack[stack.count - 1].cleared {
-                    encodeBatch(start: i, end: i, scope: &stack[stack.count - 1])
+                if let nid = finished.cacheNodeId, let sig = finished.cacheSignature {
+                    if compositedSource !== finished.texture {
+                        layersPool.detachInUse(compositedSource)
+                        layersPool.recycleTarget(finished.texture)
+                    }
+                    layersPool.storeRetained(key: nid, signature: sig, texture: compositedSource)
+                    frame.residentTracker?.markResident(nodeId: nid, signature: sig)
                 }
-                let parent = stack[stack.count - 1]
-                var compositeInst = RenderInstance(
-                    rect: SIMD4<Float>(
-                        finished.origin.x,
-                        finished.origin.y,
-                        Float(compositedSource.width),
-                        Float(compositedSource.height)
-                    ),
-                    radii: scopeInst.radii,
-                    fill: SIMD4<Float>(1, 1, 1, scopeInst.fill.w),
-                    border: scopeInst.border,
-                    params: SIMD4<Float>(finished.additive ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
-                    uv: .zero,
-                    clip: scopeInst.clip,
-                    fade: scopeInst.fade
-                )
 
-                let rpd = MTLRenderPassDescriptor()
-                rpd.colorAttachments[0].texture = parent.texture
-                rpd.colorAttachments[0].loadAction = .load
-                rpd.colorAttachments[0].storeAction = .store
-                if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-                    let compPipe = pipelineFor(format: parent.format, additive: finished.additive, springs: false)
-                    enc.setRenderPipelineState(compPipe)
-                    var g = globals
-                    g.projection = SIMD4<Float>(parent.origin.x, parent.origin.y, Float(parent.texture.width), Float(parent.texture.height))
-                    enc.setVertexBytes(&compositeInst, length: MemoryLayout<RenderInstance>.stride, index: 0)
-                    enc.setVertexBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
-                    enc.setFragmentBytes(&g, length: MemoryLayout<RenderGlobals>.stride, index: 1)
-                    if let gt = glyphTex { enc.setFragmentTexture(gt, index: 0) }
-                    enc.setFragmentTexture(compositedSource, index: 1)
-                    enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
-                    enc.endEncoding()
-                }
+                compositeLayer(
+                    source: compositedSource,
+                    origin: finished.origin,
+                    scopeInst: scopeInst,
+                    additive: finished.additive,
+                    radiiOverride: finished.cacheNodeId != nil ? .zero : scopeInst.radii,
+                    clearIndex: i
+                )
+                i += 1
                 continue
             }
 
@@ -365,30 +457,58 @@ internal final class RenderFrameEngine {
                 batchStart = i + 1
 
                 let cur = stack[stack.count - 1]
+                let edge: (Float, Float, Int) -> Int = { v, o, maxV in
+                    min(max(Int(v - o), 0), maxV)
+                }
+                let bleed = max(Float(0), inst.params.z)
+                let sx0 = max(floorf(inst.clip.x), floorf(inst.rect.x - bleed))
+                let sy0 = max(floorf(inst.clip.y), floorf(inst.rect.y - bleed))
+                let sx1 = min(ceilf(inst.clip.z), ceilf(inst.rect.x + inst.rect.z + bleed))
+                let sy1 = min(ceilf(inst.clip.w), ceilf(inst.rect.y + inst.rect.w + bleed))
+                let x0 = edge(sx0, cur.origin.x, cur.texture.width)
+                let y0 = edge(sy0, cur.origin.y, cur.texture.height)
+                let x1 = edge(sx1, cur.origin.x, cur.texture.width)
+                let y1 = edge(sy1, cur.origin.y, cur.texture.height)
+                if x1 <= x0 || y1 <= y0 { continue }
+
                 let mark = i < frame.marks.count ? frame.marks[i] : effectMark(inst)
-                let wantsBackdrop = inst.params.z >= 0.5 && backdropHook != nil
+                let wantsBackdrop = inst.params.x >= 0.5 && backdropHook != nil
 
                 var backdropSnap: MTLTexture?
                 if wantsBackdrop {
-                    let rx = max(0, Int(floorf(inst.rect.x - cur.origin.x)))
-                    let ry = max(0, Int(floorf(inst.rect.y - cur.origin.y)))
-                    let rw = min(max(1, Int(ceilf(inst.rect.z))), max(1, cur.texture.width - rx))
-                    let rh = min(max(1, Int(ceilf(inst.rect.w))), max(1, cur.texture.height - ry))
-                    if let snap = layersPool.acquireTarget(device: device, width: rw, height: rh, format: cur.format, label: "rune.effect.backdrop"),
-                       let blit = commandBuffer.makeBlitCommandEncoder()
-                    {
-                        blit.copy(
-                            from: cur.texture,
-                            sourceSlice: 0,
-                            sourceLevel: 0,
-                            sourceOrigin: MTLOrigin(x: min(rx, cur.texture.width - 1), y: min(ry, cur.texture.height - 1), z: 0),
-                            sourceSize: MTLSize(width: min(rw, cur.texture.width - min(rx, cur.texture.width - 1)), height: min(rh, cur.texture.height - min(ry, cur.texture.height - 1)), depth: 1),
-                            to: snap,
-                            destinationSlice: 0,
-                            destinationLevel: 0,
-                            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-                        )
-                        blit.endEncoding()
+                    let vw = max(1, Int(globals.viewport.x))
+                    let vh = max(1, Int(globals.viewport.y))
+                    if let snap = layersPool.acquireTarget(device: device, width: vw, height: vh, format: cur.format, label: "rune.effect.backdrop") {
+                        if cur.isLayer {
+                            let clearPass = MTLRenderPassDescriptor()
+                            clearPass.colorAttachments[0].texture = snap
+                            clearPass.colorAttachments[0].loadAction = .clear
+                            clearPass.colorAttachments[0].storeAction = .store
+                            clearPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                            if let clearEnc = commandBuffer.makeRenderCommandEncoder(descriptor: clearPass) {
+                                clearEnc.endEncoding()
+                            }
+                        }
+                        let srcX = max(0, Int(-cur.origin.x))
+                        let srcY = max(0, Int(-cur.origin.y))
+                        let dstX = max(0, Int(cur.origin.x))
+                        let dstY = max(0, Int(cur.origin.y))
+                        let copyW = min(cur.texture.width - srcX, vw - dstX)
+                        let copyH = min(cur.texture.height - srcY, vh - dstY)
+                        if copyW > 0 && copyH > 0, let blit = commandBuffer.makeBlitCommandEncoder() {
+                            blit.copy(
+                                from: cur.texture,
+                                sourceSlice: 0,
+                                sourceLevel: 0,
+                                sourceOrigin: MTLOrigin(x: srcX, y: srcY, z: 0),
+                                sourceSize: MTLSize(width: copyW, height: copyH, depth: 1),
+                                to: snap,
+                                destinationSlice: 0,
+                                destinationLevel: 0,
+                                destinationOrigin: MTLOrigin(x: dstX, y: dstY, z: 0)
+                            )
+                            blit.endEncoding()
+                        }
                         backdropSnap = snap
                     }
                 }
@@ -398,7 +518,7 @@ internal final class RenderFrameEngine {
                     instance: inst,
                     mark: mark,
                     data: inst.uv,
-                    scale: 1.0,
+                    scale: inst.params.w,
                     pixelFormat: cur.format,
                     origin: cur.origin,
                     pixelSize: (cur.texture.width, cur.texture.height),
@@ -407,7 +527,7 @@ internal final class RenderFrameEngine {
                     backdrop: backdropSnap
                 )
 
-                if let bh = backdropHook {
+                if let bh = backdropHook, wantsBackdrop {
                     bh(.backdrop(commandBuffer), site)
                 }
 
@@ -417,19 +537,14 @@ internal final class RenderFrameEngine {
                     rpd.colorAttachments[0].loadAction = .load
                     rpd.colorAttachments[0].storeAction = .store
                     if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-                        let minX = max(0, Int(floorf(inst.rect.x - cur.origin.x)))
-                        let minY = max(0, Int(floorf(inst.rect.y - cur.origin.y)))
-                        let maxX = min(cur.texture.width, Int(ceilf(inst.rect.x + inst.rect.z - cur.origin.x)))
-                        let maxY = min(cur.texture.height, Int(ceilf(inst.rect.y + inst.rect.w - cur.origin.y)))
-                        if maxX > minX && maxY > minY {
-                            enc.setScissorRect(MTLScissorRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY))
-                            hook?(enc, site)
-                            backdropHook?(.draw(enc), site)
-                        }
+                        enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0))
+                        hook?(enc, site)
+                        backdropHook?(.draw(enc), site)
                         enc.endEncoding()
                     }
                 }
                 effectCounter &+= 1
+                i += 1
                 continue
             }
 
@@ -457,8 +572,10 @@ internal final class RenderFrameEngine {
                         )
                     }
                 }
+                i += 1
                 continue
             }
+            i += 1
         }
 
         // Flush remaining batch & trailing surfaces on the root target
@@ -543,7 +660,8 @@ extension MetalRenderer {
         frame: RenderFrame,
         to drawable: CAMetalDrawable,
         hook: EffectHook? = nil,
-        backdropHook: EffectBackdropHook? = nil
+        backdropHook: EffectBackdropHook? = nil,
+        synchronized: Bool = false
     ) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
         let sr = acquireSurfaceRenderer(pixelFormat: drawable.texture.pixelFormat)
@@ -555,8 +673,14 @@ extension MetalRenderer {
             hook: hook,
             backdropHook: backdropHook
         )
-        cmdBuf.present(drawable)
-        cmdBuf.commit()
+        if synchronized {
+            cmdBuf.commit()
+            cmdBuf.waitUntilScheduled()
+            drawable.present()
+        } else {
+            cmdBuf.present(drawable)
+            cmdBuf.commit()
+        }
     }
 
     /// Encodes a `RenderFrame` into `target` without committing (matches `render::Renderer::draw_range`).

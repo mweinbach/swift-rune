@@ -143,6 +143,7 @@ public final class Runtime<State> {
 
     internal struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
+        var revision: UInt64 = 1
         var shelfX: Int = 1
         var shelfY: Int = 1
         var shelfH: Int = 0
@@ -180,6 +181,7 @@ public final class Runtime<State> {
                     cache[k] = v
                 }
                 atlas = grown
+                revision &+= 1
             }
             if shelfX + bw + 1 >= atlas.width {
                 shelfX = 1
@@ -203,6 +205,7 @@ public final class Runtime<State> {
             shelfX += bw + 1
             shelfH = max(shelfH, bh)
             cache[h] = uv
+            revision &+= 1
             return uv
         }
     }
@@ -246,6 +249,8 @@ public final class Runtime<State> {
         }
     }
     public var srgbBlend: Bool = true
+    /// Enables native AppKit material views when backed by a transparent window; headless runs default to `false`.
+    public var nativeMaterials: Bool = false
     public var windowFocused: Bool = true {
         didSet {
             if windowFocused != oldValue { needsCommit = true }
@@ -395,6 +400,7 @@ public final class Runtime<State> {
     private var hitGeometryByPath: [String: HitGeometry] = [:]
     private var paintOrderPaths: [String] = []
     internal var imagePacker = ImageAtlasPacker()
+    internal let residentCacheTracker = ResidentLayerTracker()
     private var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true

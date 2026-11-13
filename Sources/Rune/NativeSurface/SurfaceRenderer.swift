@@ -84,7 +84,12 @@ public final class SurfaceRenderer: @unchecked Sendable {
     public init(device: MTLDevice, pixelFormat: MTLPixelFormat = .bgra8Unorm_srgb) throws {
         self.device = device
         self.primaryFormat = pixelFormat
-        self.library = try device.makeLibrary(source: Self.mslSource, options: nil)
+        self.library = try ShaderLibraryCache.load(
+            named: "video",
+            source: Self.mslSource,
+            requiredFunction: "vs",
+            on: device
+        )
 
         let linDesc = MTLSamplerDescriptor()
         linDesc.minFilter = .linear

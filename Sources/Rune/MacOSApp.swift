@@ -475,6 +475,11 @@ private final class RuneMetalHostView<State>: NSView {
         syncGeometryAndRender()
     }
 
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        materialHost?.setLiveResizing(true, mode: MaterialMode.fromEnv())
+    }
+
     private func syncGeometryAndRender() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
@@ -524,19 +529,34 @@ private final class RuneMetalHostView<State>: NSView {
             metalLayer.pixelFormat = desiredFmt
         }
 
+        let materialMode = MaterialMode.fromEnv()
+        if let w = window {
+            runtime.nativeMaterials = (!w.isOpaque && materialMode != .fallback)
+        } else {
+            runtime.nativeMaterials = false
+        }
+
         let commitsBefore = runtime.viewCommitCount
         let updateStart = CACurrentMediaTime()
         let renderFrame = runtime.renderFrame(at: t)
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
 
         if let w = window {
-            if materialHost == nil {
-                let mh = RuneMaterialHost(frame: bounds)
-                mh.attach(to: w, below: self)
-                materialHost = mh
+            if !w.isOpaque && materialMode != .fallback && !renderFrame.materials.isEmpty {
+                let mh: RuneMaterialHost
+                if let existing = materialHost {
+                    mh = existing
+                } else {
+                    mh = RuneMaterialHost(frame: bounds)
+                    materialHost = mh
+                }
+                mh.attach(to: w, below: self, metalLayer: metalLayer)
+                mh.setLiveResizing(inLiveResize, mode: materialMode)
+                mh.apply(renderFrame.materials, scale: CGFloat(runtime.pixelScale), mode: materialMode)
+            } else if let mh = materialHost {
+                mh.setLiveResizing(inLiveResize, mode: materialMode)
+                mh.hideAll(mode: materialMode)
             }
-            materialHost?.setLiveResizing(inLiveResize)
-            materialHost?.apply(renderFrame.materials)
         }
 
         if let title = runtime.windowTitle, window?.title != title {
@@ -571,6 +591,11 @@ private final class RuneMetalHostView<State>: NSView {
 
         var drawCount = 0
         if let drawable = metalLayer.nextDrawable() {
+            let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
+            if synced {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+            }
             if let comp = compositor, let cmdBuf = renderer.commandQueue.makeCommandBuffer() {
                 let compFrame = CompositorFrame<State>(
                     deviceKey: DeviceKey(rawValue: renderer.device.registryID),
@@ -594,11 +619,20 @@ private final class RuneMetalHostView<State>: NSView {
                 if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
                     compFrame.drawUI()
                 }
-                cmdBuf.present(drawable)
-                cmdBuf.commit()
+                if synced {
+                    cmdBuf.commit()
+                    cmdBuf.waitUntilScheduled()
+                    drawable.present()
+                } else {
+                    cmdBuf.present(drawable)
+                    cmdBuf.commit()
+                }
             } else {
                 drawCount = 1
-                renderer.draw(frame: renderFrame, to: drawable)
+                renderer.draw(frame: renderFrame, to: drawable, synchronized: synced)
+            }
+            if synced {
+                CATransaction.commit()
             }
             _ = surfaceMeter?.presented()
             if !didFireReady {

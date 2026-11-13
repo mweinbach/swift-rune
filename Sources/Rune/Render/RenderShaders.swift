@@ -322,28 +322,30 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
     }
 
     static inline float shadow_x(float x, float y, float sigma, float corner, float2 halfSize) {
-        float d = min(halfSize.y - abs(y), corner);
-        float c = select(0.0, corner - sqrt(max(corner * corner - d * d, 0.0)), d > 0.0);
-        return 0.5 * dot(erf2((float2(x) + float2(1.0, -1.0) * (halfSize.x - c)) / (sqrt(2.0) * sigma)), float2(1.0, -1.0));
+        float delta = min(halfSize.y - corner - abs(y), 0.0);
+        float curved = halfSize.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+        float2 integral = 0.5 + 0.5 * erf2((x + float2(-curved, curved)) * (sqrt(0.5) / sigma));
+        return integral.y - integral.x;
     }
 
-    constant float SHADOW_INSIDE = 3.0;
+    constant float SHADOW_INSIDE = 0.99863125;
 
     static inline float shadow_fn(float2 p, float2 halfSize, float sigma, float corner) {
-        float2 interior = max(halfSize - float2(corner + SHADOW_INSIDE * sigma), float2(0.0));
-        if (all(abs(p) <= interior)) { return 1.0; }
-        float lo = p.y - 3.0 * sigma;
-        float hi = p.y + 3.0 * sigma;
-        float start = clamp(p.y - halfSize.y, lo, hi);
-        float end = clamp(p.y + halfSize.y, lo, hi);
-        float step = (end - start) / 4.0;
-        if (step <= 0.0) { return 0.0; }
-        float sum = 0.0;
-        for (int k = 0; k < 4; k++) {
-            float y = start + (float(k) + 0.5) * step;
-            sum += shadow_x(p.x, p.y - y, sigma, corner, halfSize) * gaussian(y, sigma) * step;
+        if (abs(p.x) <= halfSize.x - 6.0 * sigma && abs(p.y) <= halfSize.y - corner - 6.0 * sigma) {
+            return SHADOW_INSIDE;
         }
-        return sum;
+        float lo = p.y - halfSize.y;
+        float hi = p.y + halfSize.y;
+        float start = clamp(-3.0 * sigma, lo, hi);
+        float end = clamp(3.0 * sigma, lo, hi);
+        float step = (end - start) / 4.0;
+        float y = start + step * 0.5;
+        float v = 0.0;
+        for (int k = 0; k < 4; k = k + 1) {
+            v = v + shadow_x(p.x, p.y - y, sigma, corner, halfSize) * gaussian(y, sigma) * step;
+            y = y + step;
+        }
+        return v;
     }
 
     static inline float segment_fn(float2 p, float2 a, float2 b, float hw, bool roundCap) {
@@ -369,45 +371,55 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         }
     }
 
-    static inline float edge_fn(float2 p, float2 a, float2 b) {
-        return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+    static inline float edge_fn(float2 p, float2 a, float2 b, float2 c) {
+        float2 e = b - a;
+        float l = max(length(e), 1e-6);
+        float2 n = float2(-e.y, e.x) / l;
+        float s = select(-1.0, 1.0, dot(c - a, n) >= 0.0);
+        return dot(p - a, n) * s;
     }
 
-    static inline bool owns_fn(float2 a, float2 b) {
-        bool forward = a.y < b.y || (a.y == b.y && a.x < b.x);
-        float2 lo = select(b, a, forward);
-        float2 hi = select(a, b, forward);
-        float dy = hi.y - lo.y;
-        return dy > 0.0 || (dy == 0.0 && hi.x > lo.x);
+    static inline bool owns_fn(float2 p, float2 a, float2 b, float2 c) {
+        bool swap = a.x > b.x || (a.x == b.x && a.y > b.y);
+        float2 lo = select(a, b, swap);
+        float2 hi = select(b, a, swap);
+        float2 e = hi - lo;
+        float side = e.x * (c.y - lo.y) - e.y * (c.x - lo.x);
+        float v = e.x * (p.y - lo.y) - e.y * (p.x - lo.x);
+        if (side > 0.0) {
+            return v >= 0.0;
+        }
+        return v < 0.0;
     }
 
-    static inline float soft_fn(float2 p, float2 a, float2 b, float2 d, float len) {
-        float2 u = d / len;
-        float t = dot(p - a, u) / len;
-        if (t < 0.0 || t > 1.0) { return select(0.0, 1.0, dot(p - a, float2(u.y, -u.x)) > 0.0); }
-        return clamp(dot(p - a, float2(u.y, -u.x)) + 0.5, 0.0, 1.0);
+    static inline float soft_fn(float2 p, float2 a, float2 b, float2 c) {
+        float d = edge_fn(p, a, b, c);
+        float2 e = b - a;
+        float t = dot(p - a, e) / max(dot(e, e), 1e-6);
+        if (t < 0.0 || t > 1.0) {
+            return select(0.0, 1.0, d >= 0.0);
+        }
+        return clamp(d + 0.5, 0.0, 1.0);
     }
 
-    static inline float triangle_fn(float2 p, float2 v0, float2 v1, float2 v2, uint aa) {
-        float area = edge_fn(v2, v0, v1);
-        float2 b = select(v2, v1, area >= 0.0);
-        float2 c = select(v1, v2, area >= 0.0);
-        float2 d0 = b - v0;
-        float2 d1 = c - b;
-        float2 d2 = v0 - c;
-        float l0 = length(d0);
-        float l1 = length(d1);
-        float l2 = length(d2);
-        if (l0 < 1e-4 || l1 < 1e-4 || l2 < 1e-4) { return 0.0; }
-        uint s1 = select(1u, 2u, area >= 0.0);
-        uint s2 = 3u - s1;
-        float e0 = edge_fn(p, v0, b);
-        float e1 = edge_fn(p, b, c);
-        float e2 = edge_fn(p, c, v0);
-        float c0 = select(select(0.0, 1.0, e0 > 0.0 || (e0 == 0.0 && owns_fn(v0, b))), soft_fn(p, v0, b, d0, l0), (aa & 1u) != 0u);
-        float c1 = select(select(0.0, 1.0, e1 > 0.0 || (e1 == 0.0 && owns_fn(b, c))), soft_fn(p, b, c, d1, l1), (aa & s1) != 0u);
-        float c2 = select(select(0.0, 1.0, e2 > 0.0 || (e2 == 0.0 && owns_fn(c, v0))), soft_fn(p, c, v0, d2, l2), (aa & s2) != 0u);
-        return c0 * c1 * c2;
+    static inline float triangle_fn(float2 p, float2 a, float2 b, float2 c, uint aa) {
+        float cov = 1.0;
+        if ((aa & 1u) == 1u) {
+            cov = cov * soft_fn(p, a, b, c);
+        } else if (!owns_fn(p, a, b, c)) {
+            return 0.0;
+        }
+        if ((aa & 2u) == 2u) {
+            cov = cov * soft_fn(p, b, c, a);
+        } else if (!owns_fn(p, b, c, a)) {
+            return 0.0;
+        }
+        if ((aa & 4u) == 4u) {
+            cov = cov * soft_fn(p, c, a, b);
+        } else if (!owns_fn(p, c, a, b)) {
+            return 0.0;
+        }
+        return cov;
     }
 
     static inline float4 srgb_encode(float4 c) {

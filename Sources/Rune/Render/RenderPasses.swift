@@ -180,15 +180,75 @@ public enum LayerBlurConstants {
 /// Bilinear-reduced symmetric Gaussian tap kernel for `layer_blur_fs`.
 public struct LayerBlurKernel: Sendable, Equatable {
     public let reduction: Int
+    public let reductionScale: SIMD2<Float>
+    public let reducedSize: (width: Int, height: Int)
     /// Pairs `(offsetInWorkTexels, weight)`. Index `0` is center `(0, w0)`.
     public let taps: [SIMD2<Float>]
+    public let verticalTaps: [SIMD2<Float>]
+
+    public static func == (lhs: LayerBlurKernel, rhs: LayerBlurKernel) -> Bool {
+        lhs.reduction == rhs.reduction
+            && lhs.reductionScale == rhs.reductionScale
+            && lhs.reducedSize.width == rhs.reducedSize.width
+            && lhs.reducedSize.height == rhs.reducedSize.height
+            && lhs.taps == rhs.taps
+            && lhs.verticalTaps == rhs.verticalTaps
+    }
+
+    public init(
+        reduction: Int,
+        reductionScale: SIMD2<Float> = SIMD2<Float>(1, 1),
+        reducedSize: (width: Int, height: Int) = (0, 0),
+        taps: [SIMD2<Float>],
+        verticalTaps: [SIMD2<Float>]? = nil
+    ) {
+        self.reduction = reduction
+        self.reductionScale = reductionScale
+        self.reducedSize = reducedSize
+        self.taps = taps
+        self.verticalTaps = verticalTaps ?? taps
+    }
 
     public static func make(sigma: Float) -> LayerBlurKernel {
-        let clamped = min(max(sigma, 0.0), LayerBlurConstants.maxSigma)
-        let reduction = min(max(Int(floorf(clamped / 3.0)), 1), LayerBlurConstants.maxReduction)
-        let effectiveSigma = clamped / Float(reduction)
+        let clamped = min(max(sigma, 0.001), LayerBlurConstants.maxSigma)
+        let reduction = min(max(clamped / 3.0, 1.0), Float(LayerBlurConstants.maxReduction))
+        let variance = (reduction * reduction - 1.0) * 0.25
+        let eff = sqrt(max(1e-6, clamped * clamped - variance)) / reduction
+        let taps = makeAxisTaps(effectiveSigma: eff)
+        return LayerBlurKernel(
+            reduction: max(1, Int(ceilf(reduction))),
+            reductionScale: SIMD2<Float>(reduction, reduction),
+            reducedSize: (0, 0),
+            taps: taps,
+            verticalTaps: taps
+        )
+    }
+
+    public static func make(sigma: Float, width: Int, height: Int) -> LayerBlurKernel {
+        let clamped = min(max(sigma, 0.001), LayerBlurConstants.maxSigma)
+        let reduction = min(max(clamped / 3.0, 1.0), Float(LayerBlurConstants.maxReduction))
+        let w = max(1, width)
+        let h = max(1, height)
+        let rw = max(1, Int(ceilf(Float(w) / reduction)))
+        let rh = max(1, Int(ceilf(Float(h) / reduction)))
+        let sx = Float(w) / Float(rw)
+        let sy = Float(h) / Float(rh)
+        let vx = (sx * sx - 1.0) * 0.25
+        let vy = (sy * sy - 1.0) * 0.25
+        let ex = sqrt(max(1e-6, clamped * clamped - vx)) / sx
+        let ey = sqrt(max(1e-6, clamped * clamped - vy)) / sy
+        return LayerBlurKernel(
+            reduction: (rw != w || rh != h) ? max(2, Int(ceilf(max(sx, sy)))) : 1,
+            reductionScale: SIMD2<Float>(sx, sy),
+            reducedSize: (rw, rh),
+            taps: makeAxisTaps(effectiveSigma: ex),
+            verticalTaps: makeAxisTaps(effectiveSigma: ey)
+        )
+    }
+
+    private static func makeAxisTaps(effectiveSigma: Float) -> [SIMD2<Float>] {
         if effectiveSigma < 0.05 {
-            return LayerBlurKernel(reduction: reduction, taps: [SIMD2<Float>(0, 1)])
+            return [SIMD2<Float>(0, 1)]
         }
         let radius = min(Int(ceilf(effectiveSigma * 3.0)), LayerBlurConstants.maxTaps * 2 - 2)
         var rawWeights = [Float](repeating: 0, count: radius + 1)
@@ -213,7 +273,7 @@ public struct LayerBlurKernel: Sendable, Equatable {
                 let w2 = rawWeights[i + 1]
                 let w = w1 + w2
                 if w > 1e-6 {
-                    let offset = (Float(i) * w1 + Float(i + 1) * w2) / w
+                    let offset = Float(i) + w2 / w
                     taps.append(SIMD2<Float>(offset, w))
                 }
                 i += 2
@@ -224,7 +284,7 @@ public struct LayerBlurKernel: Sendable, Equatable {
                 i += 1
             }
         }
-        return LayerBlurKernel(reduction: reduction, taps: taps)
+        return taps
     }
 }
 
@@ -232,8 +292,8 @@ public struct LayerBlurKernel: Sendable, Equatable {
 
 public enum BackdropBlurSchedule {
     public static let mips: Int = 7
-    public static let step: Int = 64
-    public static let sigmas: [Float] = [1.5, 3.0, 6.0, 12.0, 24.0, 36.0, 48.0]
+    public static let step: Int = 1 << (mips - 1) // 64
+    public static let sigmas: [Float] = [1.58, 4.53, 9.62, 19.51, 39.15, 78.36, 156.2]
 
     /// Packed 64-byte uniform buffer matching `BlurLevel` in `backdrop_blur.wgsl` / `backdrop_composite.wgsl`.
     public struct Uniforms: Sendable, Equatable {
@@ -260,23 +320,19 @@ public enum BackdropBlurSchedule {
         public let blend: Float
     }
 
-    /// Maps `(sigma, maxLevel)` to the number of active downsample/upsample levels and top upsample weight.
-    public static func levels(sigma: Float, top: Int = mips) -> (count: Int, topBlend: Float) {
-        if sigma <= 0.1 || top <= 0 {
+    /// Maps `(sigma, top)` to the up-chain start level `n` (`1...top`, running `n + 1` down passes
+    /// and `n` up passes) and the variance-linear crossfade share of level `n` (`render/backdrop_blur.rs`).
+    public static func levels(sigma: Float, top: Int = mips - 1) -> (count: Int, topBlend: Float) {
+        guard sigma > 0.0, top >= 1 else {
             return (0, 0)
         }
-        let limit = min(top, sigmas.count)
-        if sigma <= sigmas[0] {
-            return (1, min(max(sigma / sigmas[0], 0.0), 1.0))
-        }
-        for i in 1..<limit {
-            if sigma <= sigmas[i] {
-                let prev = sigmas[i - 1]
-                let span = max(sigmas[i] - prev, 1e-4)
-                return (i + 1, min(max((sigma - prev) / span, 0.0), 1.0))
-            }
-        }
-        return (limit, 1.0)
+        let maxTop = min(max(top, 1), sigmas.count - 1)
+        let s = min(max(sigma, sigmas[0]), sigmas[maxTop])
+        let n = (1...maxTop).first(where: { s <= sigmas[$0] }) ?? maxTop
+        let a = sigmas[n - 1]
+        let b = sigmas[n]
+        let share = min(max((s * s - a * a) / (b * b - a * a), 0.0), 1.0)
+        return (n, share)
     }
 }
 
@@ -394,20 +450,43 @@ public struct LayerDrawPlan: Sendable, Equatable {
 
 /// Manages bounded `rgba16Float` layer render targets, 64 MiB LRU layer caching, and `#819` GPU give-back on rest.
 public final class LayersPool {
+    private struct RetainedEntry {
+        var signature: UInt64
+        var slot: LayerTextureSlot
+    }
+
+    private struct WeakTracker {
+        weak var value: ResidentLayerTracker?
+    }
+
     public private(set) var cacheBudgetBytes: Int = Int(DEFAULT_LAYER_CACHE_BUDGET)
     public private(set) var frameNumber: UInt64 = 0
 
-    private var retained: [UInt64: LayerTextureSlot] = [:]
+    private var retained: [UInt64: RetainedEntry] = [:]
     private var spare: [LayerTextureSlot] = []
     private var inUse: [LayerTextureSlot] = []
+    private var trackers: [WeakTracker] = []
 
     private var retainedHits: UInt64 = 0
     private var retainedMisses: UInt64 = 0
     private var evictions: UInt64 = 0
     private var allocations: UInt64 = 0
+    private var lastFrameExtraPasses: Int = 0
 
     public init(cacheBudgetBytes: Int = Int(DEFAULT_LAYER_CACHE_BUDGET)) {
         self.cacheBudgetBytes = max(0, cacheBudgetBytes)
+    }
+
+    public func registerTracker(_ tracker: ResidentLayerTracker?) {
+        guard let tracker else { return }
+        trackers.removeAll { $0.value == nil }
+        if !trackers.contains(where: { $0.value === tracker }) {
+            trackers.append(WeakTracker(value: tracker))
+        }
+    }
+
+    public func recordExtraPass(_ count: Int = 1) {
+        lastFrameExtraPasses += max(0, count)
     }
 
     public func setCacheBudget(_ bytes: Int) {
@@ -417,6 +496,7 @@ public final class LayersPool {
 
     public func beginFrame() {
         frameNumber &+= 1
+        lastFrameExtraPasses = 0
         releaseInUse()
     }
 
@@ -486,39 +566,59 @@ public final class LayersPool {
         )
         desc.usage = [.renderTarget, .shaderRead]
         desc.storageMode = .private
-        let tex = device.makeTexture(descriptor: desc)
-        tex?.label = "rune.layer.retained"
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        tex.label = "rune.layer.retained"
+        allocations &+= 1
         return tex
     }
 
-    public func lookupRetained(key: UInt64, width: Int, height: Int) -> MTLTexture? {
-        guard var slot = retained[key] else {
+    public func detachInUse(_ texture: MTLTexture) {
+        if let idx = inUse.firstIndex(where: { $0.texture === texture }) {
+            inUse.remove(at: idx)
+        }
+    }
+
+    public func recycleTarget(_ texture: MTLTexture) {
+        if let idx = inUse.firstIndex(where: { $0.texture === texture }) {
+            inUse.remove(at: idx)
+        }
+        spare.append(LayerTextureSlot(texture: texture, lastUsedFrame: frameNumber))
+        trimSpare(budget: LayerPoolLimits.spareBudgetBytes)
+    }
+
+    public func lookupRetained(key: UInt64, signature: UInt64? = nil, width: Int, height: Int) -> MTLTexture? {
+        guard var entry = retained[key] else {
             retainedMisses &+= 1
             return nil
         }
         let w = min(max(width, 1), LayerPoolLimits.maxDimension)
         let h = min(max(height, 1), LayerPoolLimits.maxDimension)
-        guard slot.width == w && slot.height == h else {
+        if let sig = signature, entry.signature != sig {
             retainedMisses &+= 1
             return nil
         }
-        slot.lastUsedFrame = frameNumber
-        retained[key] = slot
+        guard entry.slot.width == w && entry.slot.height == h else {
+            retainedMisses &+= 1
+            return nil
+        }
+        entry.slot.lastUsedFrame = frameNumber
+        retained[key] = entry
         retainedHits &+= 1
-        return slot.texture
+        return entry.slot.texture
     }
 
-    public func storeRetained(key: UInt64, texture: MTLTexture) {
+    public func storeRetained(key: UInt64, signature: UInt64 = 0, texture: MTLTexture) {
         let slot = LayerTextureSlot(texture: texture, lastUsedFrame: frameNumber)
         if slot.byteSize > cacheBudgetBytes {
             spare.append(slot)
             trimSpare(budget: LayerPoolLimits.spareBudgetBytes)
+            notifyEvicted(key)
             return
         }
         if let previous = retained.removeValue(forKey: key) {
-            spare.append(previous)
+            spare.append(previous.slot)
         }
-        retained[key] = slot
+        retained[key] = RetainedEntry(signature: signature, slot: slot)
         evictRetainedToBudget()
     }
 
@@ -531,22 +631,24 @@ public final class LayersPool {
         if all {
             spare.removeAll()
             retained.removeAll()
+            notifyCleared()
             return
         }
         trimSpare(budget: LayerPoolLimits.restingSpareBudgetBytes)
         if !residentCaches {
             retained.removeAll()
+            notifyCleared()
         }
     }
 
     public func stats() -> LayerStats {
-        let cached = retained.values.reduce(0) { $0 + $1.byteSize }
+        let cached = retained.values.reduce(0) { $0 + $1.slot.byteSize }
         let spareBytes = spare.reduce(0) { $0 + $1.byteSize }
         let live = inUse.reduce(0) { $0 + $1.byteSize } + spareBytes
         return LayerStats(
-            targets: inUse.count + spare.count,
+            targets: inUse.count + spare.count + retained.count,
             bytes: UInt64(max(0, live + cached)),
-            extraPasses: 0,
+            extraPasses: lastFrameExtraPasses,
             allocations: allocations,
             cachedLayers: retained.count,
             cachedBytes: UInt64(max(0, cached)),
@@ -557,19 +659,30 @@ public final class LayersPool {
     }
 
     private func evictRetainedToBudget() {
-        var total = retained.values.reduce(0) { $0 + $1.byteSize }
+        var total = retained.values.reduce(0) { $0 + $1.slot.byteSize }
         while total > cacheBudgetBytes,
-              let oldest = retained.min(by: { $0.value.lastUsedFrame < $1.value.lastUsedFrame })
+              let oldest = retained.min(by: { $0.value.slot.lastUsedFrame < $1.value.slot.lastUsedFrame })
         {
             if let removed = retained.removeValue(forKey: oldest.key) {
-                total -= removed.byteSize
-                spare.append(removed)
+                total -= removed.slot.byteSize
+                spare.append(removed.slot)
                 evictions &+= 1
+                notifyEvicted(oldest.key)
             } else {
                 break
             }
         }
         trimSpare(budget: LayerPoolLimits.spareBudgetBytes)
+    }
+
+    private func notifyEvicted(_ key: UInt64) {
+        trackers.removeAll { $0.value == nil }
+        for t in trackers { t.value?.evict(nodeId: key) }
+    }
+
+    private func notifyCleared() {
+        trackers.removeAll { $0.value == nil }
+        for t in trackers { t.value?.clear() }
     }
 
     private func trimSpare(budget: Int) {
@@ -581,6 +694,69 @@ public final class LayersPool {
     }
 }
 
+// MARK: - Shader Library Loader & Precompiled Metallib Lookup
+
+/// Loads precompiled `.metallib` libraries when bundled, otherwise compiles and caches MSL source per `MTLDevice`.
+public enum ShaderLibraryCache {
+    private final class Box: @unchecked Sendable {
+        let lock = NSLock()
+        var libs: [Key: MTLLibrary] = [:]
+    }
+
+    private struct Key: Hashable {
+        let deviceId: UInt
+        let name: String
+    }
+
+    private static let box = Box()
+
+    public static func load(
+        named name: String,
+        source: String,
+        requiredFunction: String,
+        on device: MTLDevice
+    ) throws -> MTLLibrary {
+        let key = Key(deviceId: UInt(bitPattern: ObjectIdentifier(device)), name: name)
+        box.lock.lock()
+        if let cached = box.libs[key] {
+            box.lock.unlock()
+            return cached
+        }
+        box.lock.unlock()
+
+        let resolved: MTLLibrary
+        if let precompiled = findPrecompiled(named: name, requiredFunction: requiredFunction, on: device) {
+            resolved = precompiled
+        } else {
+            resolved = try device.makeLibrary(source: source, options: nil)
+        }
+
+        box.lock.lock()
+        box.libs[key] = resolved
+        box.lock.unlock()
+        return resolved
+    }
+
+    private static func findPrecompiled(
+        named name: String,
+        requiredFunction: String,
+        on device: MTLDevice
+    ) -> MTLLibrary? {
+        let bundles: [Bundle] = [Bundle.main, Bundle(for: LayerBlurPipeline.self)]
+        for bundle in bundles {
+            if let url = bundle.url(forResource: name, withExtension: "metallib"),
+               let lib = try? device.makeLibrary(URL: url),
+               lib.functionNames.contains(requiredFunction) {
+                return lib
+            }
+        }
+        if let def = device.makeDefaultLibrary(), def.functionNames.contains(requiredFunction) {
+            return def
+        }
+        return nil
+    }
+}
+
 // MARK: - Gaussian Layer Blur Pipeline (`render/layer_blur.rs`)
 
 /// Compiles specialized `layerBlurMSL` pipelines (`LBLUR_MODE` 0/1/2/3 x `LBLUR_ADDITIVE`) and runs H/V separable blur.
@@ -588,13 +764,18 @@ public final class LayerBlurPipeline {
     private let pipelineBlur: MTLRenderPipelineState
     private let pipelineBlurAdditive: MTLRenderPipelineState
     private let pipelinePrefilter: MTLRenderPipelineState
-    private let pipelinePrefilterAdditive: MTLRenderPipelineState
     private let pipelineResample: MTLRenderPipelineState
+    private let pipelinePrefilterAdditive: MTLRenderPipelineState
     private let pipelineResampleAdditive: MTLRenderPipelineState
     private let linearSampler: MTLSamplerState
 
     public init(device: MTLDevice, pixelFormat: MTLPixelFormat = .rgba16Float) throws {
-        let library = try device.makeLibrary(source: RenderShaders.layerBlurMSL, options: nil)
+        let library = try ShaderLibraryCache.load(
+            named: "layer_blur",
+            source: RenderShaders.layerBlurMSL,
+            requiredFunction: "layer_blur_vs",
+            on: device
+        )
         let vs = library.makeFunction(name: "layer_blur_vs")!
 
         func makeSpecialized(mode: UInt32, additive: Bool) throws -> MTLRenderPipelineState {
@@ -636,14 +817,18 @@ public final class LayerBlurPipeline {
         sigma: Float,
         additive: Bool = false
     ) -> MTLTexture? {
-        let kernel = LayerBlurKernel.make(sigma: sigma)
-        if kernel.taps.count <= 1 && kernel.reduction == 1 {
+        if sigma < 0.05 {
             return source
         }
         let w = source.width
         let h = source.height
-        let rw = max(1, (w + kernel.reduction - 1) / kernel.reduction)
-        let rh = max(1, (h + kernel.reduction - 1) / kernel.reduction)
+        let kernel = LayerBlurKernel.make(sigma: sigma, width: w, height: h)
+        let rw = kernel.reducedSize.width
+        let rh = kernel.reducedSize.height
+        let isReduced = (rw != w || rh != h)
+        if !isReduced && kernel.taps.count <= 1 && kernel.verticalTaps.count <= 1 {
+            return source
+        }
 
         var uniforms = [SIMD4<Float>](repeating: .zero, count: 130)
         for (idx, tap) in kernel.taps.prefix(LayerBlurConstants.maxTaps).enumerated() {
@@ -651,12 +836,12 @@ public final class LayerBlurPipeline {
         }
 
         var hInput: MTLTexture = source
-        if kernel.reduction > 1 {
+        if isReduced {
             guard let reduced = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.prefilter") else {
                 return nil
             }
-            uniforms[0] = SIMD4<Float>(Float(w), Float(h), 0, 0)
-            uniforms[1] = SIMD4<Float>(Float(w) / Float(rw), Float(h) / Float(rh), 0, 0)
+            uniforms[0] = SIMD4<Float>(Float(w), Float(h), 2, 0)
+            uniforms[1] = SIMD4<Float>(kernel.reductionScale.x, kernel.reductionScale.y, 0, 0)
             encodePass(
                 commandBuffer: commandBuffer,
                 pipeline: additive ? pipelinePrefilterAdditive : pipelinePrefilter,
@@ -671,7 +856,7 @@ public final class LayerBlurPipeline {
             return nil
         }
         uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 0, Float(kernel.taps.count))
-        uniforms[1] = .zero
+        uniforms[1] = SIMD4<Float>(1, 1, 0, 0)
         encodePass(
             commandBuffer: commandBuffer,
             pipeline: additive ? pipelineBlurAdditive : pipelineBlur,
@@ -680,12 +865,14 @@ public final class LayerBlurPipeline {
             uniforms: &uniforms
         )
 
-        let vOutWidth = kernel.reduction > 1 ? rw : w
-        let vOutHeight = kernel.reduction > 1 ? rh : h
-        guard let pong = pool.acquireTarget(device: device, width: vOutWidth, height: vOutHeight, format: source.pixelFormat, label: "rune.lblur.pong") else {
+        for (idx, tap) in kernel.verticalTaps.prefix(LayerBlurConstants.maxTaps).enumerated() {
+            uniforms[2 + idx] = SIMD4<Float>(tap.x, tap.y, 0, 0)
+        }
+        guard let pong = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.pong") else {
             return nil
         }
-        uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 1, Float(kernel.taps.count))
+        uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 1, Float(kernel.verticalTaps.count))
+        uniforms[1] = SIMD4<Float>(1, 1, 0, 0)
         encodePass(
             commandBuffer: commandBuffer,
             pipeline: additive ? pipelineBlurAdditive : pipelineBlur,
@@ -694,14 +881,14 @@ public final class LayerBlurPipeline {
             uniforms: &uniforms
         )
 
-        if kernel.reduction == 1 {
+        if !isReduced {
             return pong
         }
         guard let finalTex = pool.acquireTarget(device: device, width: w, height: h, format: source.pixelFormat, label: "rune.lblur.final") else {
             return nil
         }
-        uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 0, 0)
-        uniforms[1] = SIMD4<Float>(Float(rw) / Float(w), Float(rh) / Float(h), 0, 0)
+        uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 3, 0)
+        uniforms[1] = SIMD4<Float>(1.0 / kernel.reductionScale.x, 1.0 / kernel.reductionScale.y, 0, 0)
         encodePass(
             commandBuffer: commandBuffer,
             pipeline: additive ? pipelineResampleAdditive : pipelineResample,
@@ -752,9 +939,15 @@ public final class BackdropBlurPass {
     private var upMips: [MTLTexture] = []
     private var pyramidWidth: Int = 0
     private var pyramidHeight: Int = 0
+    private var backdropCopy: MTLTexture?
 
     public init(device: MTLDevice) throws {
-        let blurLib = try device.makeLibrary(source: RenderShaders.backdropBlurMSL, options: nil)
+        let blurLib = try ShaderLibraryCache.load(
+            named: "backdrop_blur",
+            source: RenderShaders.backdropBlurMSL,
+            requiredFunction: "backdrop_blur_vs",
+            on: device
+        )
         let blurVS = blurLib.makeFunction(name: "backdrop_blur_vs")!
         let downFS = blurLib.makeFunction(name: "backdrop_blur_down")!
         let upFS = blurLib.makeFunction(name: "backdrop_blur_up")!
@@ -771,7 +964,12 @@ public final class BackdropBlurPass {
         upDesc.colorAttachments[0].pixelFormat = .rgba16Float
         self.pipelineUp = try device.makeRenderPipelineState(descriptor: upDesc)
 
-        let compLib = try device.makeLibrary(source: RenderShaders.backdropCompositeMSL, options: nil)
+        let compLib = try ShaderLibraryCache.load(
+            named: "backdrop_composite",
+            source: RenderShaders.backdropCompositeMSL,
+            requiredFunction: "backdrop_composite_vs",
+            on: device
+        )
         let compVS = compLib.makeFunction(name: "backdrop_composite_vs")!
         let compFS = compLib.makeFunction(name: "backdrop_composite_fs")!
 
@@ -809,11 +1007,41 @@ public final class BackdropBlurPass {
         upMips.removeAll()
         pyramidWidth = 0
         pyramidHeight = 0
+        backdropCopy = nil
     }
 
-    private func ensurePyramid(device: MTLDevice, width: Int, height: Int) {
-        let w = max(2, width)
-        let h = max(2, height)
+    private static func nextMultiple(_ v: Int, of step: Int) -> Int {
+        guard v > 0 else { return step }
+        return ((v + step - 1) / step) * step
+    }
+
+    private func ensureBackdropCopy(device: MTLDevice, width: Int, height: Int, format: MTLPixelFormat) -> MTLTexture? {
+        if let existing = backdropCopy,
+           existing.width == width,
+           existing.height == height,
+           existing.pixelFormat == format {
+            return existing
+        }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format,
+            width: max(1, width),
+            height: max(1, height),
+            mipmapped: false
+        )
+        desc.usage = [.shaderRead]
+        desc.storageMode = .private
+        let tex = device.makeTexture(descriptor: desc)
+        tex?.label = "rune.backdrop.copy"
+        backdropCopy = tex
+        return tex
+    }
+
+    private func ensurePyramid(device: MTLDevice, needWidth: Int, needHeight: Int, capWidth: Int, capHeight: Int) {
+        let step = BackdropBlurSchedule.step
+        let clampedNeedW = max(step, needWidth)
+        let clampedNeedH = max(step, needHeight)
+        let w = max(clampedNeedW, min(pyramidWidth, capWidth))
+        let h = max(clampedNeedH, min(pyramidHeight, capHeight))
         if w == pyramidWidth && h == pyramidHeight && downMips.count == BackdropBlurSchedule.mips {
             return
         }
@@ -821,11 +1049,9 @@ public final class BackdropBlurPass {
         upMips.removeAll(keepingCapacity: true)
         pyramidWidth = w
         pyramidHeight = h
-        var mw = w
-        var mh = h
         for level in 0..<BackdropBlurSchedule.mips {
-            mw = max(1, mw >> 1)
-            mh = max(1, mh >> 1)
+            let mw = max(1, w >> level)
+            let mh = max(1, h >> level)
             let desc = MTLTextureDescriptor.texture2DDescriptor(
                 pixelFormat: .rgba16Float,
                 width: mw,
@@ -845,8 +1071,8 @@ public final class BackdropBlurPass {
         }
     }
 
-    /// Encodes a single `KIND_BACKDROP_BLUR` instance: snapshots region from `source`, blurs through the
-    /// 7-level pyramid (clamped to `MAX_BACKDROP_BLURS`), and composites into `target` with rounded SDF clip.
+    /// Encodes a single `KIND_BACKDROP_BLUR` instance: copies the bounded region from `source`, runs the
+    /// `(n + 1)` down / `n` up pyramid passes with `(2 << n)` origin alignment, and composites with rounded SDF clip.
     public func encode(
         device: MTLDevice,
         commandBuffer: MTLCommandBuffer,
@@ -860,97 +1086,142 @@ public final class BackdropBlurPass {
         viewport: SIMD2<Float>,
         originOffset: SIMD2<Float>
     ) {
-        let sigma = max(instance.params.z, 0.0)
-        if sigma <= 0.1 || instance.fill.w <= 0.0 {
+        let sigma = max(instance.params.x, 0.0)
+        if sigma <= 0.0 || instance.fill.w <= 0.0 {
             return
         }
-        ensurePyramid(device: device, width: source.width, height: source.height)
-        guard !downMips.isEmpty else { return }
-
-        let (levels, topBlend) = BackdropBlurSchedule.levels(sigma: sigma, top: downMips.count)
-        guard levels > 0 else { return }
+        let (n, share) = BackdropBlurSchedule.levels(sigma: sigma, top: BackdropBlurSchedule.mips - 1)
+        guard n >= 1 else { return }
 
         let srcW = Float(source.width)
         let srcH = Float(source.height)
-        let pad = ceilf(min(sigma * 3.0, 96.0))
-        let rx0 = max(0.0, instance.rect.x - originOffset.x - pad)
-        let ry0 = max(0.0, instance.rect.y - originOffset.y - pad)
-        let rx1 = min(srcW, instance.rect.x - originOffset.x + instance.rect.z + pad)
-        let ry1 = min(srcH, instance.rect.y - originOffset.y + instance.rect.w + pad)
-        let regionUV = SIMD4<Float>(
-            (rx0 + 0.5) / srcW,
-            (ry0 + 0.5) / srcH,
-            max((rx0 + 0.5) / srcW, (rx1 - 0.5) / srcW),
-            max((ry0 + 0.5) / srcH, (ry1 - 0.5) / srcH)
-        )
-        let mapUV = SIMD4<Float>(
-            max(1e-4, (rx1 - rx0) / srcW),
-            max(1e-4, (ry1 - ry0) / srcH),
-            rx0 / srcW,
-            ry0 / srcH
-        )
-        let place = SIMD4<Float>(
-            originOffset.x + rx0,
-            originOffset.y + ry0,
-            max(1.0, rx1 - rx0),
-            max(1.0, ry1 - ry0)
-        )
+        guard srcW > 0, srcH > 0 else { return }
 
-        var downSource: MTLTexture = source
-        for lvl in 0..<levels {
-            let dst = downMips[lvl]
+        let reach = min(sigma, BackdropBlurSchedule.sigmas[n]) * 3.0 + 2.0
+        let rx0 = max(0.0, instance.rect.x - originOffset.x - reach)
+        let ry0 = max(0.0, instance.rect.y - originOffset.y - reach)
+        let rx1 = min(srcW, instance.rect.x - originOffset.x + instance.rect.z + reach)
+        let ry1 = min(srcH, instance.rect.y - originOffset.y + instance.rect.w + reach)
+        if rx1 <= rx0 || ry1 <= ry0 { return }
+
+        let clipEdge: (Float, Float, Int) -> Int = { v, o, maxV in
+            min(max(Int(v - o), 0), maxV)
+        }
+        let compX0 = clipEdge(floorf(max(instance.rect.x, instance.clip.x)), originOffset.x, target.width)
+        let compY0 = clipEdge(floorf(max(instance.rect.y, instance.clip.y)), originOffset.y, target.height)
+        let compX1 = clipEdge(ceilf(min(instance.rect.x + instance.rect.z, instance.clip.z)), originOffset.x, target.width)
+        let compY1 = clipEdge(ceilf(min(instance.rect.y + instance.rect.w, instance.clip.w)), originOffset.y, target.height)
+        if compX1 <= compX0 || compY1 <= compY0 { return }
+
+        let align = Float(2 << n)
+        let origin = SIMD2<Float>(floorf(rx0 / align) * align, floorf(ry0 / align) * align)
+        let step = BackdropBlurSchedule.step
+        let needW = Self.nextMultiple(Int(ceilf((rx1 - origin.x) / 2.0)), of: step)
+        let needH = Self.nextMultiple(Int(ceilf((ry1 - origin.y) / 2.0)), of: step)
+        let capW = Self.nextMultiple(((source.width + 1) / 2) + step, of: step)
+        let capH = Self.nextMultiple(((source.height + 1) / 2) + step, of: step)
+        ensurePyramid(device: device, needWidth: needW, needHeight: needH, capWidth: capW, capHeight: capH)
+        guard downMips.count > n, !upMips.isEmpty else { return }
+
+        guard let snapshot = ensureBackdropCopy(device: device, width: source.width, height: source.height, format: source.pixelFormat) else {
+            return
+        }
+        let copyX0 = max(0, min(source.width - 1, Int(floorf(rx0))))
+        let copyY0 = max(0, min(source.height - 1, Int(floorf(ry0))))
+        let copyX1 = max(copyX0 + 1, min(source.width, Int(ceilf(rx1))))
+        let copyY1 = max(copyY0 + 1, min(source.height, Int(ceilf(ry1))))
+        if let blit = commandBuffer.makeBlitCommandEncoder() {
+            blit.copy(
+                from: source,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: copyX0, y: copyY0, z: 0),
+                sourceSize: MTLSize(width: copyX1 - copyX0, height: copyY1 - copyY0, depth: 1),
+                to: snapshot,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: MTLOrigin(x: copyX0, y: copyY0, z: 0)
+            )
+            blit.endEncoding()
+        }
+
+        let extent = SIMD2<Float>(Float(pyramidWidth) * 2.0, Float(pyramidHeight) * 2.0)
+        let inside = SIMD4<Float>(
+            (rx0 - origin.x) / extent.x,
+            (ry0 - origin.y) / extent.y,
+            (rx1 - origin.x) / extent.x,
+            (ry1 - origin.y) / extent.y
+        )
+        let place = SIMD4<Float>(originOffset.x + origin.x, originOffset.y + origin.y, extent.x, extent.y)
+        let firstRegionUV = SIMD4<Float>(rx0 / srcW, ry0 / srcH, rx1 / srcW, ry1 / srcH)
+        let firstMapUV = SIMD4<Float>(extent.x / srcW, extent.y / srcH, origin.x / srcW, origin.y / srcH)
+
+        func scissorForMip(_ m: Int) -> MTLScissorRect {
+            let k = Float(2 << m)
+            let mw = max(1, pyramidWidth >> m)
+            let mh = max(1, pyramidHeight >> m)
+            let sx = min(max(Int(floorf((rx0 - origin.x) / k)) - 2, 0), mw - 1)
+            let sy = min(max(Int(floorf((ry0 - origin.y) / k)) - 2, 0), mh - 1)
+            let sr = min(max(Int(ceilf((rx1 - origin.x) / k)) + 2, sx + 1), mw)
+            let sb = min(max(Int(ceilf((ry1 - origin.y) / k)) + 2, sy + 1), mh)
+            return MTLScissorRect(x: sx, y: sy, width: sr - sx, height: sb - sy)
+        }
+
+        for m in 0...n {
+            let dst = downMips[m]
+            let srcTex = (m == 0) ? snapshot : downMips[m - 1]
             var u = BackdropBlurSchedule.Uniforms(
-                w: SIMD4<Float>(1.0, 0, 0, 0),
-                region: lvl == 0 ? regionUV : SIMD4<Float>(0, 0, 1, 1),
-                map: lvl == 0 ? mapUV : SIMD4<Float>(1, 1, 0, 0),
+                w: SIMD4<Float>((m + 1 == n) ? share : 1.0, 0, 0, 0),
+                region: (m == 0) ? firstRegionUV : inside,
+                map: (m == 0) ? firstMapUV : SIMD4<Float>(1, 1, 0, 0),
                 place: place
             )
             let rpd = MTLRenderPassDescriptor()
             rpd.colorAttachments[0].texture = dst
-            rpd.colorAttachments[0].loadAction = .dontCare
+            rpd.colorAttachments[0].loadAction = .clear
             rpd.colorAttachments[0].storeAction = .store
+            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
             if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+                enc.setScissorRect(scissorForMip(m))
                 enc.setRenderPipelineState(pipelineDown)
-                enc.setFragmentTexture(downSource, index: 0)
+                enc.setFragmentTexture(srcTex, index: 0)
+                enc.setFragmentTexture(downMips[0], index: 1)
                 enc.setFragmentSamplerState(samplerLinear, index: 0)
                 enc.setFragmentBytes(&u, length: MemoryLayout<BackdropBlurSchedule.Uniforms>.stride, index: 0)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
                 enc.endEncoding()
             }
-            downSource = dst
         }
 
-        var coarse: MTLTexture = downMips[levels - 1]
-        if levels >= 2 {
-            for lvl in stride(from: levels - 2, through: 0, by: -1) {
-                let fine = downMips[lvl]
-                let dst = upMips[lvl]
-                let blend = (lvl == levels - 2) ? topBlend : 1.0
-                var u = BackdropBlurSchedule.Uniforms(
-                    w: SIMD4<Float>(blend, 0, 0, 0),
-                    region: SIMD4<Float>(0, 0, 1, 1),
-                    map: SIMD4<Float>(1, 1, 0, 0),
-                    place: place
-                )
-                let rpd = MTLRenderPassDescriptor()
-                rpd.colorAttachments[0].texture = dst
-                rpd.colorAttachments[0].loadAction = .dontCare
-                rpd.colorAttachments[0].storeAction = .store
-                if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-                    enc.setRenderPipelineState(pipelineUp)
-                    enc.setFragmentTexture(coarse, index: 0)
-                    enc.setFragmentTexture(fine, index: 1)
-                    enc.setFragmentSamplerState(samplerLinear, index: 0)
-                    enc.setFragmentBytes(&u, length: MemoryLayout<BackdropBlurSchedule.Uniforms>.stride, index: 0)
-                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-                    enc.endEncoding()
-                }
-                coarse = dst
+        for m in stride(from: n - 1, through: 0, by: -1) {
+            let coarse = (m + 1 == n) ? downMips[m + 1] : upMips[m + 1]
+            let fine = downMips[m]
+            let dst = upMips[m]
+            let blend = (m + 1 == n) ? share : 1.0
+            var u = BackdropBlurSchedule.Uniforms(
+                w: SIMD4<Float>(blend, 0, 0, 0),
+                region: inside,
+                map: SIMD4<Float>(1, 1, 0, 0),
+                place: place
+            )
+            let rpd = MTLRenderPassDescriptor()
+            rpd.colorAttachments[0].texture = dst
+            rpd.colorAttachments[0].loadAction = .clear
+            rpd.colorAttachments[0].storeAction = .store
+            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+                enc.setScissorRect(scissorForMip(m))
+                enc.setRenderPipelineState(pipelineUp)
+                enc.setFragmentTexture(coarse, index: 0)
+                enc.setFragmentTexture(fine, index: 1)
+                enc.setFragmentSamplerState(samplerLinear, index: 0)
+                enc.setFragmentBytes(&u, length: MemoryLayout<BackdropBlurSchedule.Uniforms>.stride, index: 0)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                enc.endEncoding()
             }
-        } else {
-            let _ = viewport
         }
 
+        let _ = viewport
         let compPipeline: MTLRenderPipelineState
         switch targetFormat {
         case .rgba16Float:
@@ -962,9 +1233,9 @@ public final class BackdropBlurPass {
         }
 
         var compUniform = BackdropBlurSchedule.Uniforms(
-            w: SIMD4<Float>(topBlend, 0, 0, 0),
-            region: regionUV,
-            map: mapUV,
+            w: SIMD4<Float>(1.0, 0, 0, 0),
+            region: inside,
+            map: SIMD4<Float>(1, 1, 0, 0),
             place: place
         )
         let rpd = MTLRenderPassDescriptor()
@@ -972,10 +1243,11 @@ public final class BackdropBlurPass {
         rpd.colorAttachments[0].loadAction = .load
         rpd.colorAttachments[0].storeAction = .store
         if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+            enc.setScissorRect(MTLScissorRect(x: compX0, y: compY0, width: compX1 - compX0, height: compY1 - compY0))
             enc.setRenderPipelineState(compPipeline)
             enc.setVertexBuffer(instanceBuffer, offset: instanceIndex * MemoryLayout<RenderInstance>.stride, index: 0)
             enc.setVertexBuffer(globalsBuffer, offset: 0, index: 1)
-            enc.setFragmentTexture(coarse, index: 0)
+            enc.setFragmentTexture(upMips[0], index: 0)
             enc.setFragmentSamplerState(samplerLinear, index: 0)
             enc.setFragmentBytes(&compUniform, length: MemoryLayout<BackdropBlurSchedule.Uniforms>.stride, index: 0)
             enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)

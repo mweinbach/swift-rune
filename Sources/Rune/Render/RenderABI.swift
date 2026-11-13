@@ -206,6 +206,60 @@ public struct RenderInstance: Sendable, Equatable {
     }
 }
 
+/// Losslessly encodes a `UInt64` across 4 `Float` lanes using 16-bit integer chunks (free of NaN hazards).
+@inline(__always)
+public func packU64ToFloat4(_ value: UInt64) -> SIMD4<Float> {
+    SIMD4<Float>(
+        Float(value & 0xFFFF),
+        Float((value >> 16) & 0xFFFF),
+        Float((value >> 32) & 0xFFFF),
+        Float((value >> 48) & 0xFFFF)
+    )
+}
+
+/// Decodes a `UInt64` previously encoded with `packU64ToFloat4(_:)`.
+@inline(__always)
+public func unpackFloat4ToU64(_ v: SIMD4<Float>) -> UInt64 {
+    let a = UInt64(max(0, min(65535, Int(v.x.rounded()))))
+    let b = UInt64(max(0, min(65535, Int(v.y.rounded()))))
+    let c = UInt64(max(0, min(65535, Int(v.z.rounded()))))
+    let d = UInt64(max(0, min(65535, Int(v.w.rounded()))))
+    return a | (b << 16) | (c << 32) | (d << 48)
+}
+
+/// Tracks which `(nodeId, signature)` cached layers are currently resident in GPU `LayersPool` memory so
+/// `Runtime` can elide unchanged cached subtrees (`cache_layer.rs`).
+public final class ResidentLayerTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [UInt64: UInt64] = [:]
+
+    public init() {}
+
+    public func isResident(nodeId: UInt64, signature: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[nodeId] == signature
+    }
+
+    public func markResident(nodeId: UInt64, signature: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[nodeId] = signature
+    }
+
+    public func evict(nodeId: UInt64) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeValue(forKey: nodeId)
+    }
+
+    public func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll()
+    }
+}
+
 // MARK: - IEEE-754 f16 + Fade & Clip Radii Packing
 
 @inline(__always)
@@ -556,10 +610,12 @@ public struct RenderFrame: Sendable {
     public var glyphs: R8Atlas
     public var glyphGeneration: UInt64
     public var images: RGBA8Atlas
+    public var imageRevision: UInt64
     public var instances: [RenderInstance]
     public var marks: [UInt32]
     public var surfaces: [SurfaceDraw]
     public var materials: [MaterialDraw]
+    public var residentTracker: ResidentLayerTracker?
 
     public init(
         width: Int,
@@ -569,10 +625,12 @@ public struct RenderFrame: Sendable {
         glyphs: R8Atlas = R8Atlas(),
         glyphGeneration: UInt64 = 1,
         images: RGBA8Atlas = RGBA8Atlas(),
+        imageRevision: UInt64 = 1,
         instances: [RenderInstance] = [],
         marks: [UInt32] = [],
         surfaces: [SurfaceDraw] = [],
-        materials: [MaterialDraw] = []
+        materials: [MaterialDraw] = [],
+        residentTracker: ResidentLayerTracker? = nil
     ) {
         self.width = max(1, width)
         self.height = max(1, height)
@@ -581,9 +639,11 @@ public struct RenderFrame: Sendable {
         self.glyphs = glyphs
         self.glyphGeneration = glyphGeneration
         self.images = images
+        self.imageRevision = imageRevision
         self.instances = instances
         self.marks = marks
         self.surfaces = surfaces
         self.materials = materials
+        self.residentTracker = residentTracker
     }
 }
