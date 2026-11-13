@@ -131,15 +131,22 @@ struct RuneFXParityTests {
     }
     #endif
 
-    @Test func coreFxTableCapsPingZapBurstPoseAndNoiseParity() {
+    @Test func coreFxTableCapsPingZapBurstPoseAndNoiseParity() throws {
         let card = FxShape.rounded(x: 100, y: 100, w: 240, h: 140, radius: 18)
 
         // 1. sparkle_cap_and_tables_reach_64_without_regrowing
         let sp100 = SparkleParams(count: 100, life: 10.0, burst: 0.0)
+        let spLayer = Fx.sparkles(sp100).on(card).at(1.0)
+        let spPacked = try #require(spLayer.pack())
+        #expect(spPacked.inst.p0.x == 64.0)
+        #expect(spLayer.fx.cost.samples == 128)
         var sTable: [SIMD4<Float>] = []
-        let (_, spCount) = RuneFXCPU.sparkles(sp100, rect: card.rect, t: 0.5, seed: 1, reduced: false, data: &sTable)
-        #expect(spCount <= 64)
-        #expect(sTable.count <= 128)
+        sTable.reserveCapacity(128)
+        let capBefore = sTable.capacity
+        let (_, spCount) = RuneFXCPU.sparkles(sp100, rect: card.rect, t: 1.0, seed: 1, reduced: false, data: &sTable)
+        #expect(spCount > 32.0 && spCount <= 64.0)
+        #expect(sTable.count == Int(spCount) * 2)
+        #expect(sTable.capacity == capBefore)
 
         // 2. layers_that_draw_nothing_never_keep_the_loop_awake (all 12 live/silent pairs)
         let glowP = GlowParams(breathe: 0.3)
@@ -195,13 +202,29 @@ struct RuneFXParityTests {
         // 4. zaps_and_bursts_live_out_their_window_then_cull
         let zap = Fx.electric(ElectricParams(style: .arc(a: .zero, b: SIMD2<Float>(200, 40)), zap: 1.0)).on(card)
         #expect(zap.at(0.5).pack() == nil)
-        #expect(zap.at(1.1).pack() != nil)
+        #expect(zap.at(1.1).pack() != nil && zap.at(1.1).isAnimating)
         #expect(zap.at(1.0 + ElectricParams.zapLife + 0.2).pack() == nil)
 
-        let burst = Fx.sparkles(SparkleParams(burst: 1.0)).on(card)
+        let burstP = SparkleParams(burst: 2.0)
+        let burst = Fx.sparkles(burstP).on(card)
         #expect(burst.at(0.5).pack() == nil)
-        #expect(burst.at(1.2).pack() != nil)
-        #expect(burst.at(1.0 + SparkleParams(burst: 1.0).burstLife + 0.5).pack() == nil)
+        #expect(burst.at(2.3).pack() != nil && burst.at(2.3).isAnimating)
+        let afterBurst = 2.0 + burstP.burstLife + 0.01
+        #expect(burst.at(afterBurst).pack() == nil && !burst.at(afterBurst).isAnimating)
+        var burstData: [SIMD4<Float>] = []
+        let (_, afterN) = RuneFXCPU.sparkles(burstP, rect: card.rect, t: afterBurst, seed: 1, reduced: false, data: &burstData)
+        #expect(afterN == 0.0)
+
+        let dense = SparkleParams(count: 64, life: 2.0, burst: 0.0)
+        let densePacked = try #require(Fx.sparkles(dense).on(card).at(0.3).pack())
+        #expect(densePacked.inst.p0.x == 64.0)
+        var dense100 = dense
+        dense100.count = 100
+        #expect(Fx.sparkles(dense100).cost.samples == 128)
+        burstData.removeAll()
+        let (_, n64) = RuneFXCPU.sparkles(dense, rect: card.rect, t: 0.3, seed: 1, reduced: false, data: &burstData)
+        #expect(n64 == 64.0)
+        #expect(burstData.count == 128)
 
         // 5. pose_inverse_round_trips (via MotionSamples inverse transforms)
         let pose = Pose(x: 25.0, y: -12.0, rotation: 0.35, scale: 1.2, opacity: 0.8)
@@ -254,7 +277,8 @@ struct RuneFXParityTests {
 
     @Test func fillPresetsAndCatalogInvariantsParity() {
         let card = FxShape.rounded(x: 10, y: 10, w: 120, h: 80, radius: 12)
-        let zeroShape = FxShape.rounded(x: 0, y: 0, w: 0, h: 40, radius: 0)
+        let zeroW = FxShape.rounded(x: 10, y: 10, w: 0, h: 40, radius: 0)
+        let zeroH = FxShape.rounded(x: 10, y: 10, w: 40, h: 0, radius: 0)
 
         // Every preset: idle culled, invisible !animating, moving deterministic, backdrop/source match FillInput
         for info in fillStyles() {
@@ -262,27 +286,91 @@ struct RuneFXParityTests {
             for preset in info.presets {
                 let p = preset.fill()
                 #expect(Fx.fill(p.intensity(0.0)).on(card).pack() == nil)
+                #expect(Fx.fill(p.intensity(.nan)).on(card).pack() == nil)
+                #expect(Fx.fill(p.border(-1.0)).on(card).pack() == nil)
+                #expect(Fx.fill(p.border(.nan)).on(card).pack() == nil)
+                #expect(Fx.fill(p.border(.infinity)).on(card).pack() == nil)
+                #expect(Fx.fill(p).on(zeroW).pack() == nil)
+                #expect(Fx.fill(p).on(zeroH).pack() == nil)
                 #expect(Fx.fill(p).on(card).opacity(0.0).pack() == nil)
-                #expect(Fx.fill(p).on(zeroShape).pack() == nil)
+                #expect(!Fx.fill(p).on(card).opacity(0.0).isAnimating)
                 #expect(!Fx.fill(p.intensity(0.0)).on(card).isAnimating)
 
-                let l = Fx.fill(p).on(card).at(2.5).seed(11)
-                #expect(l.pack()?.inst == l.pack()?.inst)
+                let l = Fx.fill(p).on(card).at(1.5).seed(11)
+                #expect(l.isAnimating == p.animates, "\(info.id) \(preset.id)")
+                var pa = l.pack()!
+                var pb = l.pack()!
+                #expect(pa.inst == pb.inst)
+                var da: [SIMD4<Float>] = []
+                var db: [SIMD4<Float>] = []
+                l.fillTables(into: &pa.inst, data: &da)
+                l.fillTables(into: &pb.inst, data: &db)
+                #expect(da == db)
+                #expect(da.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite })
+
+                if p.needsBackdrop {
+                    #expect(info.readsBackdrop, "\(info.id) \(preset.id)")
+                }
+                #expect(l.fx.needsBackdrop == p.needsBackdrop)
+                #expect(l.place == (p.needsBackdrop ? .over : .under))
+                #expect(l.fx.cost.backdrop == p.needsBackdrop)
+            }
+        }
+        #expect(fillStyles().flatMap(\.presets).contains(where: { $0.fill().animates }))
+        #expect(FillParams(.liquidMetal(.gold())).animates)
+        #expect(!FillParams(.liquidMetal(LiquidMetalParams(flow: 0.0))).animates)
+        #expect(!FillParams(.flutedGlass(.reeded())).animates)
+        #expect(!FillParams(.dither(.bayer())).animates)
+        #expect(!FillParams(.waves(WaveParams(amplitude: 0.0))).animates)
+
+        // Element anchor only moves the anchor slot
+        #expect(LiquidMetalParams().anchor == .world)
+        let worldMetal = Fx.fill(FillParams(.liquidMetal(.gold()))).on(card).at(3.0).pack()!.inst
+        let elementMetal = Fx.fill(FillParams(.liquidMetal(LiquidMetalParams.gold().anchor(.element)))).on(card).at(3.0).pack()!.inst
+        #expect(worldMetal.p2 == .zero)
+        #expect(elementMetal.p2 == SIMD4<Float>(1.0, 0.0, 0.0, 0.0))
+        var zeroedElement = elementMetal
+        zeroedElement.p2 = .zero
+        #expect(zeroedElement == worldMetal)
+
+        // Plastic holds still and non-finite inputs pack finitely
+        for plastic in [PlasticParams.glossy(), .matte(), .dished()] {
+            let f = FillParams(.plastic(plastic))
+            #expect(!f.animates)
+            #expect(!Fx.fill(f).on(card).at(2.0).isAnimating)
+            #expect(Fx.fill(f).cost == FxCost(passes: 1, samples: 0, alu: 0, backdrop: false, source: false))
+        }
+        let nonFinitePlastic = FillParams(.plastic(PlasticParams(roughness: .nan, dome: .infinity, bevel: -.infinity, angle: .nan)))
+        let nonFiniteMetal = FillParams(.liquidMetal(LiquidMetalParams(
+            flow: .nan,
+            scale: .nan,
+            speed: .infinity,
+            bevel: .nan,
+            dome: -.infinity,
+            angle: .nan,
+            iridescence: .infinity,
+            contrast: .nan
+        )))
+        for nf in [nonFinitePlastic, nonFiniteMetal] {
+            let packed = Fx.fill(nf).on(card).at(1.0).pack()!.inst
+            for v in [packed.p0, packed.p1, packed.p2] {
+                #expect(v.x.isFinite && v.y.isFinite && v.z.isFinite && v.w.isFinite)
             }
         }
 
-        // Plastic holds still
-        for plastic in [PlasticParams.glossy(), .matte(), .dished()] {
-            #expect(!Fx.fill(FillParams(.plastic(plastic))).on(card).isAnimating)
-        }
-
-        // Mesh points stay bounded around anchors within drift
+        // Mesh points stay bounded around anchors within drift across 40 steps, and hold still when drift == 0
         let mesh = MeshGradientParams.dusk()
-        let pts = RuneFXCPU.meshPoints(mesh, time: 3.7, seed: 5)
-        #expect(pts.count == mesh.points.count)
-        for (moved, base) in zip(pts, mesh.points) {
-            #expect(hypotf(moved.x - base.x, moved.y - base.y) <= mesh.drift * 1.5 + 1e-4)
+        for k in 0..<40 {
+            let pts = RuneFXCPU.meshPoints(mesh, time: Float(k) * 0.37, seed: 5)
+            #expect(pts.count == mesh.points.count)
+            for (moved, base) in zip(pts, mesh.points) {
+                #expect(abs(moved.x - base.x) <= mesh.drift * 1.5 + 1e-4)
+                #expect(abs(moved.y - base.y) <= mesh.drift * 1.5 + 1e-4)
+            }
         }
+        var stillMesh = mesh
+        stillMesh.drift = 0.0
+        #expect(RuneFXCPU.meshPoints(stillMesh, time: 3.0, seed: 5) == stillMesh.points)
 
         // Stops keep order and cap at maxStops; empty input yields 1 stop
         let many = Stops.hex([0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff, 0x111111, 0x222222])

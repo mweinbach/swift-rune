@@ -59,15 +59,37 @@ struct RuneFXTests {
     }
 
     @Test func oneShotsPoolAndRetireSmoothly() {
-        var shots = OneShots<Int>(cap: 2)
-        shots.trigger(at: 0.0, data: 1)
-        shots.trigger(at: 0.1, data: 2)
-        shots.trigger(at: 0.2, data: 3)
+        var shots = OneShots<Int>(cap: 3)
+        for k in 0..<3 {
+            shots.trigger(at: Float(k) * 0.1, data: k)
+        }
         let live = shots.live(at: 0.25, life: 1.0)
-        #expect(live.count == 3)
-        #expect(live[0].opacity < 1.0 && live[0].opacity > 0.0)
-        #expect(live[1].opacity == 1.0)
-        #expect(live[2].opacity == 1.0)
+        #expect(live.map { $0.shot.data } == [0, 1, 2])
+        #expect(live.map { $0.opacity } == [1.0, 1.0, 1.0])
+
+        // Retiring the oldest shot fades smoothly over fadeDuration and keeps remaining at 1.0.
+        shots.trigger(at: 0.3, data: 3)
+        func opacityOf(_ t: Float) -> Float {
+            shots.live(at: t, life: 1.0).first(where: { $0.shot.data == 0 })?.opacity ?? 0.0
+        }
+        #expect(opacityOf(0.3) == 1.0)
+        var prev: Float = 1.0
+        for i in 1...20 {
+            let v = opacityOf(0.3 + Float(i) * OneShots<Int>.fadeDuration / 20.0)
+            #expect(v <= prev && prev - v < 0.2)
+            prev = v
+        }
+        #expect(prev == 0.0)
+        #expect(shots.live(at: 0.31, life: 1.0).filter { $0.opacity == 1.0 }.count == 3)
+
+        // A storm of 100 triggers stays bounded at <= cap * 2 and issues distinct seeds.
+        for k in 0..<100 {
+            shots.trigger(at: 0.4 + Float(k) * 0.001, data: k)
+        }
+        let storm = shots.live(at: 0.5, life: 1.0)
+        #expect(storm.count <= 6)
+        let seeds = Set(storm.map(\.shot.seed))
+        #expect(seeds.count > 1)
 
         shots.prune(at: 2.0, life: 1.0)
         #expect(!shots.isAnimating(at: 2.0, life: 1.0))
@@ -101,35 +123,49 @@ struct RuneFXTests {
     }
 
     @Test func reducedMotionHoldsSingleDeterministicPose() {
-        let fills: [FillStyle] = [
-            .liquidMetal(.chrome()),
-            .meshGradient(.dusk()),
-            .dither(.handheld()),
-            .grainGradient(.ember()),
-            .flutedGlass(.frosted()),
-            .metaballs(.lava()),
-            .swirl(.ink()),
-            .voronoi(.cells()),
-            .waves(.sea()),
-            .halftone(.print()),
-            .plastic(.glossy()),
-        ]
-        for style in fills {
-            let layer = Fx.fill(FillParams(style)).on(card).seed(7).reduced(true)
-            #expect(!layer.isAnimating)
-            let p0 = layer.at(0.5).pack()!
-            let p1 = layer.at(9.5).pack()!
-            #expect(p0.inst == p1.inst)
+        for info in fillStyles() {
+            for preset in info.presets {
+                let layer = Fx.fill(preset.fill()).on(card).seed(3).reduced(true)
+                #expect(!layer.isAnimating, "\(info.id) \(preset.id)")
+                var p0 = layer.at(0.5).pack()!
+                var p1 = layer.at(7.25).pack()!
+                var t0: [SIMD4<Float>] = []
+                var t1: [SIMD4<Float>] = []
+                layer.at(0.5).fillTables(into: &p0.inst, data: &t0)
+                layer.at(7.25).fillTables(into: &p1.inst, data: &t1)
+                #expect(p0.inst == p1.inst, "\(info.id) \(preset.id)")
+                #expect(t0 == t1, "\(info.id) \(preset.id)")
+            }
         }
     }
 
     @Test func foldTPreservesPrecisionAtLargeTimes() {
         #expect(RuneFXCPU.foldT(0.0) == 0.0)
+        #expect(RuneFXCPU.foldT(1.2) == 1.2)
         #expect(RuneFXCPU.foldT(512.0) == 512.0)
-        let a = RuneFXCPU.foldT(1e5)
-        let b = RuneFXCPU.foldT(1e5 + 1.0 / 60.0)
-        #expect(a >= 0.0 && a <= 512.0)
-        #expect(abs(b - a) > 1e-3 && abs(b - a) < 0.05)
+        for t: Float in [1e4, 1e5, -1e5] {
+            let a = RuneFXCPU.foldT(t)
+            let b = RuneFXCPU.foldT(t + 1.0 / 60.0)
+            #expect(a >= 0.0 && a <= 512.0 && b >= 0.0 && b <= 512.0)
+            #expect(abs(b - a) > 1e-3 && abs(b - a) < 0.05)
+        }
+        for info in fillStyles() {
+            for preset in info.presets {
+                let p = preset.fill()
+                let layer = Fx.fill(p).on(card).seed(7)
+                var i0 = layer.at(1e5).pack()!.inst
+                var i1 = layer.at(1e5 + 0.25).pack()!.inst
+                var d0: [SIMD4<Float>] = []
+                var d1: [SIMD4<Float>] = []
+                layer.at(1e5).fillTables(into: &i0, data: &d0)
+                layer.at(1e5 + 0.25).fillTables(into: &i1, data: &d1)
+                #expect(i0.t.x >= 0.0 && i0.t.x <= 512.0, "\(info.id) \(preset.id)")
+                #expect(d0.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite && $0.w.isFinite }, "\(info.id) \(preset.id)")
+                if p.animates {
+                    #expect(i0.t.x != i1.t.x || d0 != d1, "\(info.id) \(preset.id) still moves at t = 1e5")
+                }
+            }
+        }
     }
 
     @Test func motionSamplesIntegrateWithRuneMotion() {
@@ -160,11 +196,27 @@ struct RuneFXTests {
         for (idx, val) in flat.enumerated() {
             #expect(abs(val - (Float(idx) + 0.5) / Float(flat.count)) < 1e-5)
         }
+        let n = RuneFXCPU.blueN
+        func noiseAt(_ x: Int, _ y: Int) -> Float {
+            let idx = (y % n) * n + (x % n)
+            return tile[idx / 4][idx % 4]
+        }
+        var worst: Float = 0.0
+        for y in 0..<n {
+            for x in 0..<n {
+                let mean = (noiseAt(x, y) + noiseAt(x + 1, y) + noiseAt(x, y + 1) + noiseAt(x + 1, y + 1)) / 4.0
+                worst = max(worst, abs(mean - 0.5))
+            }
+        }
+        #expect(worst < 0.36)
 
         let whiteLab = oklab(Rgb(1.0, 1.0, 1.0))
         #expect(abs(whiteLab.x - 1.0) < 1e-3)
         #expect(abs(whiteLab.y) < 1e-3)
         #expect(abs(whiteLab.z) < 1e-3)
+        let greyLab = oklab(rgb(0x777777))
+        #expect(abs(greyLab.y) < 1e-3)
+        #expect(abs(greyLab.z) < 1e-3)
     }
 
     @Test func renderPassGraphBuildsPassesAndCullsOffscreen() {

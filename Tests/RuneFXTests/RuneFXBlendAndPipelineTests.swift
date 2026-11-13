@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import Rune
 @testable import RuneFX
 
 #if canImport(Metal)
@@ -1027,6 +1028,119 @@ struct RuneFXBlendAndPipelineTests {
         let oneR60 = Float(Float16(bitPattern: oneWords[(48 * 96 + 60) * 4]))
         let twoR60 = Float(Float16(bitPattern: twoWords[(48 * 96 + 60) * 4]))
         #expect(twoR60 > oneR60 + 0.05)
+
+        // End-to-end Runtime + MetalRenderer + FxRenderer check for:
+        // (a) in_layer.rs:115-136 (`fill_in_a_faded_rounded_layer_matches_the_plain_fill_faded`: 0.5 * f + 0.5 * bg, layer format == rgba16Float)
+        // (b) in_layer.rs:301-317 (`backdrop_slots_blur_background_and_stack_glass_over_glass_in_painter_order`: including post-glass green badge at (72, 64))
+        struct EmptyS {}
+        func renderRuntimeScene(
+            srgb: Bool,
+            formatsOut: inout [MTLPixelFormat],
+            effectForMark: @escaping (UInt32) -> Fx,
+            view: @escaping () -> El<EmptyS>
+        ) throws -> Frame {
+            let ui = try MetalRenderer(device: device)
+            let fxComp = try FxRenderer(device: device, pixelFormat: .rgba8Unorm_srgb, options: FxOptions(dither: false, srgbBlend: srgb))
+            fxComp.addFormat(.bgra8Unorm)
+            fxComp.addFormat(.bgra8Unorm_srgb)
+            fxComp.addFormat(.rgba16Float)
+            fxComp.setSrgbBlend(srgb)
+
+            let rt = Runtime<EmptyS>(state: EmptyS(), viewport: Vec2(96, 96), pixelScale: 1.0) { _, _ in view() }
+            rt.setSrgbBlend(srgb)
+            var seenFormats: [MTLPixelFormat] = []
+            let out = try ui.renderOffscreen(rt.renderFrame(at: 0), backdropHook: { phase, site in
+                let s = max(site.scale, 1.0)
+                let shape = FxShape.rounded(
+                    x: site.instance.rect.x / s,
+                    y: site.instance.rect.y / s,
+                    w: site.instance.rect.z / s,
+                    h: site.instance.rect.w / s,
+                    radius: site.instance.radii.x / s
+                )
+                let layer = effectForMark(site.mark).on(shape)
+                let vp = SIMD2<UInt32>(
+                    UInt32(max(0, Int(site.origin.x.rounded(.down)))) + UInt32(site.pixelSize.width),
+                    UInt32(max(0, Int(site.origin.y.rounded(.down)))) + UInt32(site.pixelSize.height)
+                )
+                let slot = FxSlot(scale: s, clip: site.instance.clip, fade: site.instance.fade)
+                switch phase {
+                case .backdrop(let cb):
+                    fxComp.prepare(frame: FxFrame(viewport: vp, scale: s, layers: [layer], backdrop: site.backdrop), slots: [slot])
+                    if let bd = site.backdrop {
+                        _ = try? fxComp.blurBackdrop(commandBuffer: cb, backdrop: bd, layer: 0)
+                    }
+                case .draw(let enc):
+                    if site.inLayer { seenFormats.append(site.pixelFormat) }
+                    if site.backdrop == nil {
+                        fxComp.prepare(frame: FxFrame(viewport: vp, scale: s, layers: [layer]), slots: [slot])
+                    }
+                    try? fxComp.drawLayer(encoder: enc, format: site.pixelFormat, origin: site.origin, layer: 0)
+                }
+            })
+            formatsOut = seenFormats
+            return out
+        }
+
+        let duskFill = Fx.fill(FillParams(.meshGradient(.dusk())))
+        for srgb in [false, true] {
+            var plainFmts: [MTLPixelFormat] = []
+            let plainImg = try renderRuntimeScene(srgb: srgb, formatsOut: &plainFmts, effectForMark: { _ in duskFill }) {
+                el().size(96, 96).bg(Color.hex("#202020")!)
+                    .child(el().absolute(x: 16, y: 16).size(64, 64).effect(1))
+            }
+            var layerFmts: [MTLPixelFormat] = []
+            let layerImg = try renderRuntimeScene(srgb: srgb, formatsOut: &layerFmts, effectForMark: { _ in duskFill }) {
+                el().size(96, 96).bg(Color.hex("#202020")!)
+                    .child(
+                        el().absolute(x: 16, y: 16).size(64, 64).opacity(0.5).clipRounded(24)
+                            .child(el().absolute(x: 0, y: 0).size(64, 64).effect(1))
+                            .child(el().absolute(x: 48, y: 48).size(8, 8).bg(Color.hex("#0000ff")!))
+                    )
+            }
+            let bg: Float = 32.0 / 255.0
+            for (x, y) in [(40, 40), (60, 30)] {
+                let p = plainImg.pixel(x: x, y: y)
+                let l = layerImg.pixel(x: x, y: y)
+                let fillC: [Float] = [Float(p.x) / 255.0, Float(p.y) / 255.0, Float(p.z) / 255.0]
+                let gotC: [UInt8] = [l.x, l.y, l.z]
+                for c in 0..<3 {
+                    let f = fillC[c]
+                    let v = srgb ? (0.5 * f + 0.5 * bg) : srgbEncode(0.5 * srgbDecode(f) + 0.5 * srgbDecode(bg))
+                    let want = UInt8((v * 255.0).rounded())
+                    #expect(abs(Int(gotC[c]) - Int(want)) <= 4, "srgb=\(srgb) at (\(x),\(y)) c=\(c)")
+                }
+            }
+            let cPx = layerImg.pixel(x: 17, y: 17)
+            #expect(abs(Int(cPx.x) - 32) <= 2 && abs(Int(cPx.y) - 32) <= 2 && abs(Int(cPx.z) - 32) <= 2)
+            #expect(layerFmts == [.rgba16Float])
+        }
+
+        let frostedFx: (UInt32) -> Fx = { mark in
+            mark == 1 ? glass1.fx : glass2.fx
+        }
+        var dummyFmts: [MTLPixelFormat] = []
+        let oneGlassImg = try renderRuntimeScene(srgb: false, formatsOut: &dummyFmts, effectForMark: frostedFx) {
+            el().size(96, 96).bg(Color.hex("#202020")!)
+                .child(el().absolute(x: 0, y: 0).size(48, 96).bg(Color.hex("#00e5ff")!))
+                .child(el().absolute(x: 16, y: 16).size(64, 64).effect(1).effectBackdrop(true))
+        }
+        let pOne = oneGlassImg.pixel(x: 54, y: 48)
+        #expect(pOne.y > 60 && pOne.z > 70)
+
+        let stackedImg = try renderRuntimeScene(srgb: false, formatsOut: &dummyFmts, effectForMark: frostedFx) {
+            el().size(96, 96).bg(Color.hex("#202020")!)
+                .child(el().absolute(x: 0, y: 0).size(48, 96).bg(Color.hex("#00e5ff")!))
+                .child(el().absolute(x: 16, y: 16).size(64, 64).effect(1).effectBackdrop(true))
+                .child(el().absolute(x: 40, y: 32).size(16, 32).bg(Color.hex("#ff2040")!))
+                .child(el().absolute(x: 24, y: 24).size(56, 48).effect(2).effectBackdrop(true))
+                .child(el().absolute(x: 68, y: 60).size(10, 10).bg(Color.hex("#00ff00")!))
+        }
+        let pTwo = stackedImg.pixel(x: 60, y: 48)
+        let pOne60 = oneGlassImg.pixel(x: 60, y: 48)
+        #expect(Int(pTwo.x) > Int(pOne60.x) + 15)
+        let badgePx = stackedImg.pixel(x: 72, y: 64)
+        #expect(badgePx.x < 10 && badgePx.y > 245 && badgePx.z < 10)
 
         // 3. backdrop_origin_tracks_fractional_scale_scroll_live_offset_and_nested_layers + negative_layer_origins_copy_the_visible_region_at_all_window_edges
         let shiftedLayer = Fx.fill(FillParams(.plastic(PlasticParams(color: rgb(0x00e5ff), roughness: 0.5))))
