@@ -6,6 +6,7 @@ internal struct TextLinkTarget: Sendable, Equatable {
     var path: String
     var key: String?
     var linkIndex: Int
+    var button: PointerButton = .primary
 }
 
 /// Cached window/target hit boxes and sliced text for one `TextLink` attached to a text node.
@@ -166,6 +167,7 @@ internal extension Runtime {
             let isLinkPressed = isLinkHovered
                 && pressedLink?.path == snap.path
                 && pressedLink?.linkIndex == k
+                && pressedLink?.button == .primary
                 && linkIndex(atPath: snap.path, at: pointerPosition) == k
             let isLinkFocused = isFocused
                 && activeLinkIdx == k
@@ -303,6 +305,7 @@ internal extension Runtime {
                 let isLinkPressed = isLinkHovered
                     && pressedLink?.path == parent.path
                     && pressedLink?.linkIndex == box.linkIndex
+                    && pressedLink?.button == .primary
                     && linkIndex(atPath: parent.path, at: pointerPosition) == box.linkIndex
                 let words: String? = (parent.text != nil && !parent.secure) ? box.sliceText : nil
 
@@ -372,12 +375,15 @@ internal extension Runtime {
         return nil
     }
 
-    /// Resolves link cursor shape (`.pointer` unless overridden by `.cursor(...)`).
+    /// Resolves link cursor shape (`.pointer` unless overridden by `.cursor(...)` other than text selection `.text`).
     func linkCursor(atPath path: String, at pos: Vec2) -> Cursor? {
         guard let idx = nodeByPath[path], !flatNodes[idx].effectiveInert else { return nil }
         let el = flatNodes[idx].el
         guard hasActiveTextLinks(el), linkIndex(atPath: path, at: pos) != nil else { return nil }
-        return el.attachedCursor ?? .pointer
+        if let c = el.attachedCursor, c != .text {
+            return c
+        }
+        return .pointer
     }
 
     /// Keeps `focusedLinkIndex` and `focusedKey` synchronized with `focusedPath`.
@@ -439,6 +445,47 @@ internal extension Runtime {
         return true
     }
 
+    /// Opens the secondary menu for the currently focused text link (`Key.contextMenu` -> bottom-left of link).
+    private func resolveOnLinkSecondary(from startIdx: Int) -> ((inout State, String, PointerPress, inout Tx) -> Void)? {
+        var cur: Int? = startIdx
+        while let i = cur, i < flatNodes.count {
+            if let fn = flatNodes[i].el.handlers.onLinkSecondary {
+                return fn
+            }
+            cur = flatNodes[i].parentIndex
+        }
+        return nil
+    }
+
+    func activateFocusedLinkSecondary(at now: Double) -> Bool {
+        guard let fPath = focusedPath,
+              let idx = nodeByPath[fPath],
+              !flatNodes[idx].effectiveInert,
+              hasActiveTextLinks(flatNodes[idx].el) else {
+            return false
+        }
+        let links = flatNodes[idx].el.textLinks
+        let k = min(max(0, focusedLinkIndex ?? 0), links.count - 1)
+        guard let onSec = resolveOnLinkSecondary(from: idx),
+              let box = linkBoxesByPath[fPath]?.first(where: { $0.linkIndex == k }) else {
+            return false
+        }
+        let rect = presentedRectByPath[fPath] ?? flatNodes[idx].targetRect
+        let winPos = Vec2(box.windowUnion.x, box.windowUnion.y + box.windowUnion.w)
+        let press = PointerPress(
+            window: winPos,
+            local: Vec2(winPos.x - rect.x, winPos.y - rect.y),
+            elementSize: Vec2(rect.width, rect.height),
+            button: .secondary,
+            mods: .none,
+            clicks: 1
+        )
+        var tx = makeTx(at: now, button: .secondary)
+        onSec(&state, links[k].id, press, &tx)
+        applyTx(tx, at: now)
+        return true
+    }
+
     /// Handles pointer press on a link range while preserving existing keyboard focus.
     func dispatchLinkDown(
         node: FlatNode,
@@ -449,44 +496,51 @@ internal extension Runtime {
         at now: Double
     ) -> Bool {
         guard hasActiveTextLinks(node.el),
-              let box = linkBoxesByPath[node.path]?.first(where: { $0.linkIndex == linkIdx }) else {
+              linkBoxesByPath[node.path]?.contains(where: { $0.linkIndex == linkIdx }) == true else {
             return false
         }
         if button == .secondary {
-            guard let onSec = node.el.handlers.onLinkSecondary else { return false }
-            let rect = presentedRectByPath[node.path] ?? node.targetRect
-            let unturnedLocal = hitGeometryByPath[node.path]?.turn?.unturn(pos) ?? pos
-            let press = PointerPress(
-                window: pos,
-                local: Vec2(unturnedLocal.x - rect.x, unturnedLocal.y - rect.y),
-                elementSize: Vec2(rect.width, rect.height),
-                button: button,
-                mods: mods,
-                clicks: clickCount
-            )
-            var tx = makeTx(at: now)
-            onSec(&state, box.link.id, press, &tx)
-            applyTx(tx, at: now)
+            guard node.el.handlers.onLinkSecondary != nil else { return false }
+            pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: .secondary)
+            dirtyCommit(at: now)
             return true
         }
         guard button == .primary else { return false }
-        pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx)
+        pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: .primary)
         dirtyCommit(at: now)
         return true
     }
 
     /// Completes a pressed link click when pointer releases inside the same link range
     /// and was not suppressed by a selectable text drag.
-    func dispatchLinkUp(at pos: Vec2, button: PointerButton, suppressed: Bool, at now: Double) -> Bool {
+    func dispatchLinkUp(at pos: Vec2, button: PointerButton, mods: Mods, suppressed: Bool, at now: Double) -> Bool {
         guard let pl = pressedLink else { return false }
         pressedLink = nil
         dirtyCommit(at: now)
-        if !suppressed && button == .primary,
-           linkIndex(atPath: pl.path, at: pos) == pl.linkIndex,
-           let idx = nodeByPath[pl.path],
-           !flatNodes[idx].effectiveInert,
-           let box = linkBoxesByPath[pl.path]?.first(where: { $0.linkIndex == pl.linkIndex }),
-           let onLink = flatNodes[idx].el.handlers.onLink {
+        guard !suppressed && button == pl.button,
+              linkIndex(atPath: pl.path, at: pos) == pl.linkIndex,
+              let idx = nodeByPath[pl.path],
+              !flatNodes[idx].effectiveInert,
+              let box = linkBoxesByPath[pl.path]?.first(where: { $0.linkIndex == pl.linkIndex }) else {
+            return true
+        }
+        if button == .secondary {
+            if let onSec = resolveOnLinkSecondary(from: idx) {
+                let rect = presentedRectByPath[pl.path] ?? flatNodes[idx].targetRect
+                let unturnedLocal = hitGeometryByPath[pl.path]?.turn?.unturn(pos) ?? pos
+                let press = PointerPress(
+                    window: pos,
+                    local: Vec2(unturnedLocal.x - rect.x, unturnedLocal.y - rect.y),
+                    elementSize: Vec2(rect.width, rect.height),
+                    button: .secondary,
+                    mods: mods,
+                    clicks: clickCount
+                )
+                var tx = makeTx(at: now, button: .secondary)
+                onSec(&state, box.link.id, press, &tx)
+                applyTx(tx, at: now)
+            }
+        } else if button == .primary, let onLink = flatNodes[idx].el.handlers.onLink {
             var tx = makeTx(at: now)
             onLink(&state, box.link.id, &tx)
             applyTx(tx, at: now)

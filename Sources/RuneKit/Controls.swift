@@ -660,6 +660,7 @@ public enum ButtonVariant: Sendable, Hashable {
     case accent
     case neutral
     case ghost
+    case ghostMuted
     case danger
 }
 
@@ -708,7 +709,7 @@ extension Kit {
             borderCol = c.borderBase
             borderW = 1
             elev = elevation.buttonNeutral
-        case .ghost:
+        case .ghost, .ghostMuted:
             bgCol = .transparent
             fgCol = c.textBase
             hoverCol = c.hover
@@ -768,6 +769,9 @@ extension Kit {
         size: ControlSize = .md,
         variant: ButtonVariant = .ghost,
         disabled: Bool = false,
+        visualState: ControlVisualState = .rest,
+        expanded: Bool? = nil,
+        omitHelp: Bool = false,
         onClick: @escaping (inout State, inout Tx) -> Void
     ) -> El<State> {
         let bgCol: Color
@@ -777,6 +781,8 @@ extension Kit {
         let borderCol: Color
         let borderW: Float
         let elev: [Shadow]
+
+        let activeOn = !disabled && (visualState == .pressed || expanded == true)
 
         switch variant {
         case .primary:
@@ -804,8 +810,16 @@ extension Kit {
             borderW = 1
             elev = elevation.buttonNeutral
         case .ghost:
-            bgCol = .transparent
+            bgCol = (expanded == true && !disabled) ? c.pressed : .transparent
             fgCol = c.iconBase
+            hoverCol = c.hover
+            pressCol = c.pressed
+            borderCol = .transparent
+            borderW = 0
+            elev = []
+        case .ghostMuted:
+            bgCol = (expanded == true && !disabled) ? c.pressed : .transparent
+            fgCol = activeOn ? c.iconBase : c.iconMuted
             hoverCol = c.hover
             pressCol = c.pressed
             borderCol = .transparent
@@ -821,19 +835,32 @@ extension Kit {
             elev = []
         }
 
-        let node: El<State> = row()
+        let (cornerRadius, glyphSize): (Float, Float) = switch size {
+        case .mini: (radius.sm, 12)
+        case .small, .sm: (radius.sm, 16)
+        case .regular, .large, .md, .lg: (radius.md, 16)
+        case .extraLarge: (radius.lg, 18)
+        }
+
+        var node: El<State> = row()
             .key(key)
             .role(.button)
             .label(labelText)
-            .help(labelText)
+        if !omitHelp {
+            node = node.help(labelText)
+        }
+        if let expanded {
+            node = node.expanded(expanded)
+        }
+        node = node
             .square(size.height)
             .center()
-            .rounded(radius.md)
+            .rounded(cornerRadius)
             .bg(bgCol)
             .border(borderW, borderCol)
             .shadows(shadowLayers(elev))
             .animate(motion.control)
-            .child(icon(svg, size: 16).color(fgCol))
+            .child(icon(svg, size: glyphSize).key("icon").color(fgCol).a11yHidden())
 
         if disabled {
             return node.opacity(0.45).inert(true)

@@ -683,23 +683,27 @@ struct MarkdownFullParityTests {
         }
         _ = rt.frame(at: 0.0)
 
-        let paraEl = rt.elements().first(where: { $0.key == "b0" })
-        #expect(paraEl != nil)
-        #expect(paraEl?.help == "Open https://x.dev/a")
-        if let r = paraEl?.rect {
-            let leftHit = Vec2(r[0] + 40, r[1] + r[3] * 0.5)
+        let els = rt.elements()
+        let docsLink = els.first(where: { $0.role == .link && $0.key == "https://x.dev/a" })
+        let codeLink = els.first(where: { $0.role == .link && $0.key == "file://src/main.swift" })
+        #expect(docsLink != nil)
+        #expect(codeLink != nil)
+        #expect(docsLink?.help == "Open https://x.dev/a")
+        if let dr = docsLink?.rect {
+            let leftHit = Vec2(dr[0] + dr[2] * 0.5, dr[1] + dr[3] * 0.5)
             rt.pointerMove(to: leftHit, at: 0.01)
             rt.pointerDown(at: leftHit, at: 0.01)
             rt.pointerUp(at: leftHit, at: 0.01)
             _ = rt.frame(at: 0.02)
             #expect(rt.state.primary == ["https://x.dev/a"])
-
-            let rightHit = Vec2(r[0] + r[2] * 0.7, r[1] + r[3] * 0.5)
+        }
+        if let cr = codeLink?.rect {
+            let rightHit = Vec2(cr[0] + cr[2] * 0.5, cr[1] + cr[3] * 0.5)
             rt.pointerMove(to: rightHit, at: 0.03)
             rt.pointerDown(at: rightHit, button: .secondary, at: 0.03)
             rt.pointerUp(at: rightHit, button: .secondary, at: 0.03)
             _ = rt.frame(at: 0.04)
-            #expect(!rt.state.secondary.isEmpty)
+            #expect(rt.state.secondary == ["file://src/main.swift"])
         }
     }
 
@@ -1040,7 +1044,7 @@ struct MarkdownFullParityTests {
             if takes {
                 #expect(keyRT.selectedText() == nil)
             } else {
-                #expect(keyRT.selectedText() == "a\nb")
+                #expect(keyRT.selectedText() == "a\n\nb")
             }
         }
 
@@ -1064,7 +1068,7 @@ struct MarkdownFullParityTests {
         _ = crlfRT.frame(at: 0.02)
         _ = crlfRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
         #expect(crlfRT.clipboard.text == crlf)
-        #expect(crlfRT.selectedText() == "fn main() {}\n@@ -1 +1 @@\n-old\n+new")
+        #expect(crlfRT.selectedText() == "fn main() {}\n\n@@ -1 +1 @@\n-old\n+new")
 
         // 4. markdown_select: without_selectable_nothing_selects
         let firstMsg = "Hello **world** and [link](https://x.dev/a).\n\n- alpha\n- beta\n\n```\nfn main() {}\n```\n"
@@ -1142,7 +1146,7 @@ struct MarkdownFullParityTests {
         try #require(m0Para2.count >= 2 && m0Alpha.count >= 3, "m0Para2=\(m0Para2.count) m0Alpha=\(m0Alpha.count) paths=\(streamRT.elements().map(\.path))")
         drag(streamRT, from: Vec2(m0Para2[1].x - 3.0, m0Para2[1].y), to: Vec2(m0Alpha[3].x - 3.0, m0Alpha[3].y), t: &st)
         let beforeStream = streamRT.selectedText()
-        #expect(beforeStream == "ello world and link.\nal")
+        #expect(beforeStream == "ello world and link.\n\n- al")
         for chunk in [" streams", " in\n\nand", " on"] {
             streamRT.update(at: st) { s, _ in
                 s.msgs[1].append(chunk)
@@ -1766,6 +1770,7 @@ struct MarkdownFullParityTests {
         #expect(MarkdownFind.findBounds(in: fixture, doc: doc, query: "link").count == 1)
     }
 
+    @MainActor
     @Test("tests/markdown_diagram_stream.rs, markdown_diagram_frame.rs, markdown_quote_frame.rs (#158-#161, #168-#171)")
     func markdownDiagramAndQuoteFrameParity() {
         let kit = Kit.neutral(dark: true)

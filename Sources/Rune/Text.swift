@@ -2531,7 +2531,20 @@ public final class TextSystem: @unchecked Sendable {
             CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
         }
 
-        // Apply per-paragraph base writing direction so RTL paragraphs align and justify natively.
+        var monoTabInterval: CGFloat? = nil
+        if style.family == .monospace && shapedText.contains("\t") {
+            var spaceChar: UniChar = 0x20
+            var spaceGlyph: CGGlyph = 0
+            if CTFontGetGlyphsForCharacters(baseFont, &spaceChar, &spaceGlyph, 1), spaceGlyph != 0 {
+                var adv = CGSize.zero
+                let w = CTFontGetAdvancesForGlyphs(baseFont, .horizontal, &spaceGlyph, &adv, 1)
+                if w > 0 {
+                    monoTabInterval = (CGFloat(w) + CGFloat(style.letterSpacing * scale)) * 4.0
+                }
+            }
+        }
+
+        // Apply per-paragraph base writing direction (and 4-column tab stops for monospace) natively.
         let shapedNS = shapedText as NSString
         var paraScanStart = 0
         while paraScanStart < fullLen {
@@ -2548,14 +2561,36 @@ public final class TextSystem: @unchecked Sendable {
                 case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
                 }
             }()
-            if var dir = resolvedDir {
-                let pStyle = withUnsafeBytes(of: &dir) { ptr -> CTParagraphStyle in
-                    let setting = CTParagraphStyleSetting(
-                        spec: .baseWritingDirection,
-                        valueSize: MemoryLayout<CTWritingDirection>.size,
-                        value: ptr.baseAddress!
-                    )
-                    return CTParagraphStyleCreate([setting], 1)
+            if resolvedDir != nil || monoTabInterval != nil {
+                var dirVal = resolvedDir ?? .natural
+                var tabVal = monoTabInterval ?? 0
+                var emptyStops = [] as CFArray
+                let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr in
+                    withUnsafeMutableBytes(of: &tabVal) { tabPtr in
+                        withUnsafePointer(to: &emptyStops) { stopsPtr -> CTParagraphStyle in
+                            var settings: [CTParagraphStyleSetting] = []
+                            if resolvedDir != nil {
+                                settings.append(CTParagraphStyleSetting(
+                                    spec: .baseWritingDirection,
+                                    valueSize: MemoryLayout<CTWritingDirection>.size,
+                                    value: dirPtr.baseAddress!
+                                ))
+                            }
+                            if monoTabInterval != nil {
+                                settings.append(CTParagraphStyleSetting(
+                                    spec: .tabStops,
+                                    valueSize: MemoryLayout<CFArray>.size,
+                                    value: stopsPtr
+                                ))
+                                settings.append(CTParagraphStyleSetting(
+                                    spec: .defaultTabInterval,
+                                    valueSize: MemoryLayout<CGFloat>.size,
+                                    value: tabPtr.baseAddress!
+                                ))
+                            }
+                            return CTParagraphStyleCreate(settings, settings.count)
+                        }
+                    }
                 }
                 let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
                 if pRangeLen > 0 {

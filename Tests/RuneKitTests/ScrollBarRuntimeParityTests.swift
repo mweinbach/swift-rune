@@ -404,6 +404,7 @@ struct ScrollBarRuntimeParityTests {
             )
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)

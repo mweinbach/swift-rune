@@ -1105,6 +1105,15 @@ extension Runtime {
                 vpH = Double(vpRect.height)
                 itemH = Double(tRect.height)
                 itemTop = Double(tRect.y - vpRect.y) + Double(cur.y)
+            } else if let hlHit = highlightTargetWithNode(selector: req.key, scrolled: true),
+                      let foundVIdx = findScrollViewportIndex(forNode: hlHit.nodeIndex, scopeKey: req.scope) {
+                vIdx = foundVIdx
+                vPath = flatNodes[vIdx].path
+                let vpRect = flatNodes[vIdx].targetRect
+                cur = scrollOffsets[vPath] ?? .zero
+                vpH = Double(vpRect.height)
+                itemH = Double(hlHit.rect.height)
+                itemTop = Double(hlHit.rect.y - vpRect.y) + Double(cur.y)
             } else {
                 var resolved: (vIdx: Int, itemTop: Double, itemH: Double, cur: Vec2)? = nil
                 for (listIdx, node) in flatNodes.enumerated() {
@@ -1223,11 +1232,11 @@ extension Runtime {
             scrollRequestsState.stepDestination()
         }
 
-        dispatchScrollCallbacks()
+        dispatchScrollCallbacks(at: now)
     }
 
     /// Delivers `onAtBottom`, `onFarFromBottom`, and `onScrollOffset` callbacks for current scroll offsets.
-    internal func dispatchScrollCallbacks() {
+    internal func dispatchScrollCallbacks(at now: Double) {
         // Scroll callbacks: onAtBottom, onFarFromBottom, onScrollOffset
         for i in flatNodes.indices {
             let node = flatNodes[i]
@@ -1272,12 +1281,12 @@ extension Runtime {
                 }
             }
 
-            dispatchScrollOffsetObserverIfChanged(for: node)
+            dispatchScrollOffsetObserverIfChanged(for: node, at: now)
         }
     }
 
-    internal func dispatchScrollOffsetObserverIfChanged(for node: FlatNode) {
-        guard let onScrollOffset = node.el.handlers.onScrollOffset else { return }
+    internal func dispatchScrollOffsetObserverIfChanged(for node: FlatNode, at now: Double = 0.0) {
+        guard node.el.handlers.onScrollOffset != nil || node.el.handlers.onScroll != nil else { return }
         let path = node.path
         let cur = scrollOffsets[path] ?? .zero
         let maxExt = scrollMaxExtents[path] ?? .zero
@@ -1290,7 +1299,18 @@ extension Runtime {
         )
         if lastScrollOffsetReports[path] != pos {
             lastScrollOffsetReports[path] = pos
-            dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
+            if let onScrollOffset = node.el.handlers.onScrollOffset {
+                dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
+            }
+            if let onScroll = node.el.handlers.onScroll {
+                var tx = makeTx(at: now)
+                if let scope = turnScope {
+                    scope(&state) { s in onScroll(&s, pos, &tx) }
+                } else {
+                    onScroll(&state, pos, &tx)
+                }
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onScroll")
+            }
         }
     }
 

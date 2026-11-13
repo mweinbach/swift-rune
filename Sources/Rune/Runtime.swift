@@ -607,18 +607,6 @@ public final class Runtime<State> {
     private var liveSubscriptions: [LiveSubscription] = []
     private var isLiveVisible: Bool = true
     private var livePendingDirty: Bool = false
-    public private(set) var liveOnlyEvents: UInt64 = 0
-    private var liveOnlyCheckEnabled: Bool = {
-        #if DEBUG
-        return true
-        #else
-        return false
-        #endif
-    }()
-    private var lastCommitClock: Double = 0.0
-    private var liveOnlyCheckBefore: LiveOnlyViewPrint? = nil
-    private var liveOnlyCheckLabel: String? = nil
-    public private(set) var liveOnlyWarnings: [String] = []
 
     internal struct VirtualInputEntry {
         var path: String
@@ -677,6 +665,11 @@ public final class Runtime<State> {
     private var drawnRectByPath: [String: MotionRect] = [:]
     private var rectSpringingById: [NodeId: Bool] = [:]
     private var lastCommittedSpecs: [NodeSpec] = []
+    public internal(set) var liveOnlyEvents: UInt64 = 0
+    public internal(set) var liveOnlyWarnings: [String] = []
+    internal var liveOnlyCheckEnabled: Bool = true
+    internal var lastLiveCommitClock: Double = -.infinity
+    internal var pendingLiveOnlyCheck: (handler: String, before: LiveOnlyViewPrint)? = nil
 
     public init(
         state: State,
@@ -1256,6 +1249,8 @@ public final class Runtime<State> {
                 unclippedMatchedFlightIds.removeAll()
             }
             let sincePass = memo.nextPass()
+            let liveCheck = pendingLiveOnlyCheck
+            pendingLiveOnlyCheck = nil
             MemoSnapshot.enter {
                 commitTreePass(
                     at: now,
@@ -1269,6 +1264,8 @@ public final class Runtime<State> {
                 )
             }
             memo.keepSince(sincePass)
+            lastLiveCommitClock = now
+            compareLiveOnlyCheck(liveCheck)
         }
     }
 
@@ -2054,6 +2051,48 @@ public final class Runtime<State> {
         return out
     }
 
+    internal func highlightTargetWithNode(
+        selector: String,
+        scrolled: Bool = true
+    ) -> (nodeIndex: Int, rect: MotionRect)? {
+        let candidates = LayoutKeyIndex.markedCandidates(selector: selector, index: layoutKeyIndex.indexIfValid(stamp: layoutCommitGen), nodes: flatNodes)
+            ?? Array(flatNodes.indices)
+        var union: MotionRect? = nil
+        var ownerIdx: Int? = nil
+        for i in candidates {
+            let n = flatNodes[i]
+            guard let hls = n.el.textHighlights, !hls.isEmpty else { continue }
+            let matches: [Bool] = hls.map { hl in
+                guard let hkey = hl.key else { return false }
+                return LayoutKeyIndex.selectsUnder(
+                    selector: selector,
+                    nodeIndex: i,
+                    nodes: flatNodes,
+                    keyOf: { $0.key },
+                    parentOf: { $0.parentIndex },
+                    highlightKey: hkey
+                )
+            }
+            guard matches.contains(true) else { continue }
+            if ownerIdx == nil { ownerIdx = i }
+            let baseRect = scrolled ? n.targetRect : n.unscrolledRect
+            for (k, r) in highlightBoxes(node: n, boxRect: baseRect) where matches[k] {
+                if let u = union {
+                    union = MotionRect(
+                        left: min(u.left, r.left),
+                        top: min(u.top, r.top),
+                        right: max(u.right, r.right),
+                        bottom: max(u.bottom, r.bottom)
+                    )
+                } else {
+                    union = r
+                }
+            }
+        }
+        guard let ownerIdx, let union else { return nil }
+        return (ownerIdx, union)
+    }
+
     private func highlightTarget(
         selector: String,
         nodes: [FlatNode],
@@ -2419,14 +2458,6 @@ public final class Runtime<State> {
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         reconcilePlaygroundAfterCommit(at: now)
-        lastCommitClock = now
-        #if DEBUG
-        if let before = liveOnlyCheckBefore, let label = liveOnlyCheckLabel {
-            liveOnlyCheckBefore = nil
-            liveOnlyCheckLabel = nil
-            recordLiveOnlyDiffIfNeeded(handler: label, before: before)
-        }
-        #endif
 
         lastPixelsSizeByPath.removeAll(keepingCapacity: true)
         for node in pass.nodes {
@@ -2805,7 +2836,7 @@ public final class Runtime<State> {
                 )
                 scrollOffsets[flatNodes[i].path] = clamped
                 flatNodes[i].scrollShift = clamped
-                dispatchScrollOffsetObserverIfChanged(for: flatNodes[i])
+                dispatchScrollOffsetObserverIfChanged(for: flatNodes[i], at: now)
                 if flatNodes[i].el.scrollEdgeFadeWidth > 0 || flatNodes[i].el.scrollFadeStyle.end != nil {
                     scrollFadeInfo = computeScrollFadeSpec(for: flatNodes[i])
                 }
@@ -2846,7 +2877,7 @@ public final class Runtime<State> {
             }
         }
         scene.commit(lastCommittedSpecs, at: now, initialCut: false)
-        dispatchScrollCallbacks()
+        dispatchScrollCallbacks(at: now)
     }
 
     private func drainLayoutActions(at now: Double) -> (ranFeedback: Bool, ranExternal: Bool) {
@@ -3725,21 +3756,25 @@ public final class Runtime<State> {
                 }
                 return (input.parentStickyShift, input.parentStickyMag)
             }()
-            if stickyShift != .zero {
+            if let a = el.anchor,
+               !snap.isSticky,
+               let aNode = flatNodes.first(where: { $0.key == a.key }) {
+                let aShift = stuckShiftsByPath[aNode.path] ?? .zero
+                if aShift != .zero, let aPres = presentedRectById[aNode.nodeId] {
+                    let placement = AnchorLayoutHelper.zoomedPlacement(
+                        anchor: a,
+                        triggerZoomed: aPres,
+                        anchorScale: aNode.inheritedScale,
+                        localSize: Vec2(rect.width, rect.height),
+                        overlayOwnScale: el.scale,
+                        viewport: viewport
+                    )
+                    rect = MotionRect.fromXYWH(placement.unscaledOrigin.x, placement.unscaledOrigin.y, rect.width, rect.height)
+                }
+            } else if stickyShift != .zero {
                 rect = MotionRect.fromXYWH(
                     rect.x + stickyShift.x,
                     rect.y + stickyShift.y,
-                    rect.width,
-                    rect.height
-                )
-            } else if let ak = el.anchor?.key,
-                      !snap.isSticky,
-                      let aNode = flatNodes.first(where: { $0.key == ak }),
-                      let aShift = stuckShiftsByPath[aNode.path],
-                      aShift != .zero {
-                rect = MotionRect.fromXYWH(
-                    rect.x + aShift.x,
-                    rect.y + aShift.y,
                     rect.width,
                     rect.height
                 )
@@ -4626,7 +4661,19 @@ public final class Runtime<State> {
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
+                    var highlightInks: [TextLinkInkRange] = []
                     if let hls = el.textHighlights, !hls.isEmpty, let txt = paintedLabelValue, !txt.isEmpty {
+                        let txtLen = txt.utf8.count
+                        for h in hls {
+                            guard let fg = h.fg else { continue }
+                            let a = min(h.byteRange.lowerBound, txtLen)
+                            let b = min(h.byteRange.upperBound, txtLen)
+                            guard a < b else { continue }
+                            let rects = textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pxScale)
+                            if !rects.isEmpty {
+                                highlightInks.append(TextLinkInkRange(color: fg, rects: rects))
+                            }
+                        }
                         let quads = TextHighlightPainter.quads(
                             highlights: hls,
                             in: txt,
@@ -4671,7 +4718,7 @@ public final class Runtime<State> {
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha
                     if glyphAlpha > 0.0005 {
                         for g in shaped.glyphs {
-                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             primitives.append(attachFade(.glyph(
                                 rect: SIMD4<Float>(
@@ -5646,6 +5693,9 @@ public final class Runtime<State> {
                 if !skipHoverCommit || linkChanged || helpTargetChanges(at: pos) {
                     suppressRevealFromHoverCommit = true
                     dirtyCommit(at: now)
+                } else if linkChanged || helpTargetChanges(at: pos) {
+                    suppressRevealFromHoverCommit = true
+                    dirtyCommit(at: now)
                 }
             } else if linkChanged || helpTargetChanges(at: pos) {
                 dirtyCommit(at: now)
@@ -5704,7 +5754,7 @@ public final class Runtime<State> {
 
         if button == .secondary {
             if let (node, rect, local) = hitTestDetailed(at: pos, predicate: {
-                $0.el.handlers.onSecondaryClick != nil || ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el))
+                $0.el.handlers.onSecondaryClick != nil || ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el) && self.linkIndex(atPath: $0.path, at: pos) != nil)
             }) {
                 if self.hasActiveTextLinks(node.el),
                    let linkIdx = self.linkIndex(atPath: node.path, at: pos),
@@ -5929,7 +5979,7 @@ public final class Runtime<State> {
             }
         }
 
-        if dispatchLinkUp(at: pos, button: button, suppressed: suppressedClickFromSelDrag, at: now) {
+        if dispatchLinkUp(at: pos, button: button, mods: mods, suppressed: suppressedClickFromSelDrag, at: now) {
             dirtyCommit(at: now)
             return
         }
@@ -6217,7 +6267,7 @@ public final class Runtime<State> {
                     if let onKey = flatNodes[curIdx].el.handlers.onKey {
                         var tx = makeTx(at: now)
                         if onKey(&state, ev, &tx) {
-                            applyTx(tx, at: now)
+                            applyTx(tx, at: now, liveOnlyLabel: "onKey")
                             return true
                         }
                     }
@@ -6332,9 +6382,14 @@ public final class Runtime<State> {
                 }
             }
 
-            // Space/Enter activates focused text links first, then buttons/rows (`takesReturn`).
+            // Space/Enter/ContextMenu activates focused text links first, then buttons/rows (`takesReturn`).
             if ev.mods == .none && (ev.key == .space || ev.key == .enter) && !isRepeat {
                 if activateFocusedLink(at: now) {
+                    return true
+                }
+            }
+            if ev.mods == .none && ev.key == .contextMenu && !isRepeat {
+                if activateFocusedLinkSecondary(at: now) {
                     return true
                 }
             }
@@ -6459,7 +6514,7 @@ public final class Runtime<State> {
             let taken = globalOnKey(&state, ev, &tx)
             Tx.took(taken, &tx)
             if taken {
-                applyTx(tx, at: now)
+                applyTx(tx, at: now, liveOnlyLabel: "onKey")
                 return true
             }
         }
@@ -6972,20 +7027,10 @@ public final class Runtime<State> {
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty)
         if tx.liveOnlyRequested {
             livePendingDirty = true
-            #if DEBUG
-            if liveOnlyCheckEnabled && (now - lastCommitClock) >= 0.25 {
-                if liveOnlyCheckBefore == nil {
-                    liveOnlyCheckBefore = captureLiveOnlySnapshot()
-                    liveOnlyCheckLabel = liveOnlyLabel
-                }
+            if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
                 dirtyCommit(at: now, external: external)
-                return
             }
-            #endif
-            liveOnlyEvents &+= 1
-            return
-        }
-        if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
+        } else if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
             dirtyCommit(at: now, external: external)
         }
     }
@@ -7219,15 +7264,6 @@ public final class Runtime<State> {
         return livePendingDirty || liveWake.isVisiblePending
     }
 
-    /// Enables or disables debug stale-view spot checks for `Tx.liveOnly()` (`Runtime::check_live_only`).
-    public func checkLiveOnly(_ on: Bool) {
-        #if DEBUG
-        liveOnlyCheckEnabled = on
-        #else
-        _ = on
-        #endif
-    }
-
     /// Runs `poll` while the window is hidden (`Runtime::poll_hidden`), returning `true` if
     /// the view or pending scroll/flight state became out of date.
     @discardableResult
@@ -7308,100 +7344,6 @@ public final class Runtime<State> {
             dirtyCommit(at: now)
             return true
         }
-    }
-
-    private struct LiveOnlyNodePrint {
-        var path: String
-        var target: [Float]
-        var bg: Color?
-        var borderColor: Color?
-        var borderWidth: Float
-        var opacity: Float?
-        var text: String?
-        var textColor: Color?
-
-        func difference(to now: LiveOnlyNodePrint) -> (path: String, what: String, values: (String, String)?)? {
-            let tol: Float = 0.01
-            if zip(target, now.target).contains(where: { abs($0 - $1) > tol }) {
-                return (path, "layout rect", ("\(target)", "\(now.target)"))
-            }
-            if bg != now.bg {
-                return (path, "fill", ("\(String(describing: bg))", "\(String(describing: now.bg))"))
-            }
-            if borderColor != now.borderColor || abs(borderWidth - now.borderWidth) > tol {
-                return (path, "border", nil)
-            }
-            if let o1 = opacity, let o2 = now.opacity, abs(o1 - o2) > 0.001 {
-                return (path, "opacity", ("\(o1)", "\(o2)"))
-            }
-            if text != now.text {
-                return (path, "text", (text ?? "nil", now.text ?? "nil"))
-            }
-            if textColor != now.textColor {
-                return (path, "text colour", nil)
-            }
-            return nil
-        }
-    }
-
-    private struct LiveOnlyViewPrint {
-        var nodes: [LiveOnlyNodePrint]
-
-        func firstDifference(after: LiveOnlyViewPrint) -> (path: String, what: String, values: (String, String)?)? {
-            let a = nodes
-            let b = after.nodes
-            func has(_ list: [LiveOnlyNodePrint], path: String) -> Bool {
-                list.contains { $0.path == path }
-            }
-            var i = 0
-            var j = 0
-            while i < a.count && j < b.count {
-                let x = a[i]
-                let y = b[j]
-                if x.path == y.path {
-                    if let d = x.difference(to: y) { return d }
-                    i += 1
-                    j += 1
-                } else if !has(b, path: x.path) {
-                    return (x.path, "removed element", nil)
-                } else if !has(a, path: y.path) {
-                    return (y.path, "added element", nil)
-                } else {
-                    return (x.path, "order", nil)
-                }
-            }
-            if i < a.count { return (a[i].path, "removed element", nil) }
-            if j < b.count { return (b[j].path, "added element", nil) }
-            return nil
-        }
-    }
-
-    private func captureLiveOnlySnapshot() -> LiveOnlyViewPrint {
-        LiveOnlyViewPrint(nodes: flatNodes.map { node in
-            let el = node.el
-            let hasLiveBg = el.liveBindings.contains { $0.target == .fill }
-            let hasLiveOpacity = el.liveBindings.contains { $0.target == .opacity }
-            let textVal: String? = el.liveText != nil ? nil : (el.isSecure ? "[redacted]" : el.plainText)
-            return LiveOnlyNodePrint(
-                path: node.path,
-                target: [node.targetRect.left, node.targetRect.top, node.targetRect.width, node.targetRect.height],
-                bg: hasLiveBg ? nil : el.background,
-                borderColor: el.borderColor,
-                borderWidth: el.borderWidth,
-                opacity: hasLiveOpacity ? nil : el.opacity,
-                text: textVal,
-                textColor: el.textColor
-            )
-        })
-    }
-
-    private func recordLiveOnlyDiffIfNeeded(handler: String, before: LiveOnlyViewPrint) {
-        let after = captureLiveOnlySnapshot()
-        guard let d = before.firstDifference(after: after) else { return }
-        let head = "rune: \(handler) called Tx.liveOnly, but the view built something else after it: \(d.what) of \"\(d.path)\""
-        if liveOnlyWarnings.contains(where: { $0.hasPrefix(head) }) { return }
-        let values = d.values.map { " went from \($0.0) to \($0.1)" } ?? ""
-        liveOnlyWarnings.append("\(head)\(values). Set only Live values in a live-only handler, or disable with checkLiveOnly(false).")
     }
 
     /// Delivers a window focus transition to `onFocus`, deduplicating redundant transitions and

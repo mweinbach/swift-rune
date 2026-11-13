@@ -259,6 +259,35 @@ public enum NoteParser {
     }
 }
 
+/// Builder for rendering a structured Markdown note (`rune_kit::notes::Note`).
+public struct Note: Sendable, Equatable {
+    public var key: String
+    public var source: String
+    public var gap: Float
+
+    public init(_ source: String) {
+        self.key = "note"
+        self.source = source
+        self.gap = 12
+    }
+
+    public func key(_ key: String) -> Note {
+        var copy = self
+        copy.key = key
+        return copy
+    }
+
+    public func gap(_ gap: Float) -> Note {
+        var copy = self
+        copy.gap = gap
+        return copy
+    }
+
+    public func build<State>(_ k: Kit) -> El<State> {
+        k.note(source, key: key, gap: gap)
+    }
+}
+
 extension Kit {
     /// Renders a structured Markdown note (`facts`, `compare`, `steps`, `size`, titled/marked code fences, `> [!note]` callouts).
     public func note<State>(

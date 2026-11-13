@@ -959,45 +959,79 @@ public enum MarkdownFind {
             let foldedQ = foldQuery(query)
             guard !foldedQ.isEmpty else { return }
             // Case-fold scalar by scalar keeping byte index mapping (handles sigma 'ς'/'σ' + multi-char lowercase)
-            var folded = ""
+            var fBytes: [UInt8] = []
             var fToV: [Int] = []
+            fBytes.reserveCapacity(visBytes.count)
+            fToV.reserveCapacity(visBytes.count + 1)
             var curVByte = 0
             for ch in vis {
+                if let ascii = ch.asciiValue {
+                    fToV.append(curVByte)
+                    fBytes.append((ascii >= 65 && ascii <= 90) ? (ascii + 32) : ascii)
+                    curVByte += 1
+                    continue
+                }
                 let chBytes = String(ch).utf8.count
                 if ch == "ς" {
                     fToV.append(curVByte)
-                    folded.append("σ")
+                    fBytes.append(contentsOf: "σ".utf8)
                 } else {
                     var first = true
                     for fc in String(ch).lowercased() {
-                        let fcBytes = String(fc).utf8.count
+                        let fcUtf8 = String(fc).utf8
                         fToV.append(first ? curVByte : Int.max)
                         first = false
-                        folded.append(fc)
-                        for _ in 1..<fcBytes { fToV.append(Int.max) }
+                        fBytes.append(contentsOf: fcUtf8)
+                        for _ in 1..<fcUtf8.count { fToV.append(Int.max) }
                     }
                 }
-                while fToV.count < folded.utf8.count { fToV.append(Int.max) }
+                while fToV.count < fBytes.count { fToV.append(Int.max) }
                 curVByte += chBytes
             }
             fToV.append(visBytes.count)
 
             let qBytes = Array(foldedQ.utf8)
-            let fBytes = Array(folded.utf8)
-            guard !qBytes.isEmpty, fBytes.count >= qBytes.count else { return }
-            var i = 0
-            while i <= fBytes.count - qBytes.count {
-                if fBytes[i..<(i + qBytes.count)].elementsEqual(qBytes) {
-                    let v0 = fToV[i]
-                    let v1 = fToV[i + qBytes.count]
-                    if v0 != Int.max && v1 != Int.max && v0 < v1 {
-                        let ranges = mapVisRange(srcBytes: srcBytes, segs: segs, segIdx: &segIdx, vRange: v0..<v1)
-                        if !ranges.isEmpty { out.append(ranges) }
-                        i += qBytes.count
-                        continue
-                    }
+            let qLen = qBytes.count
+            guard !qBytes.isEmpty, fBytes.count >= qLen else { return }
+            // KMP prefix table keeps periodic rejected candidates (e.g. #133) strict O(N + M)
+            var lps = [Int](repeating: 0, count: qLen)
+            var lpsLen = 0
+            var k = 1
+            while k < qLen {
+                if qBytes[k] == qBytes[lpsLen] {
+                    lpsLen += 1
+                    lps[k] = lpsLen
+                    k += 1
+                } else if lpsLen != 0 {
+                    lpsLen = lps[lpsLen - 1]
+                } else {
+                    lps[k] = 0
+                    k += 1
                 }
-                i += 1
+            }
+            var j = 0
+            var i = 0
+            while i < fBytes.count {
+                if fBytes[i] == qBytes[j] {
+                    i += 1
+                    j += 1
+                    if j == qLen {
+                        let start = i - qLen
+                        let v0 = fToV[start]
+                        let v1 = fToV[i]
+                        if v0 != Int.max && v1 != Int.max && v0 < v1 {
+                            let ranges = mapVisRange(srcBytes: srcBytes, segs: segs, segIdx: &segIdx, vRange: v0..<v1)
+                            if !ranges.isEmpty { out.append(ranges) }
+                            j = 0
+                        } else {
+                            j = lps[j - 1]
+                        }
+                    }
+                } else if j != 0 {
+                    j = lps[j - 1]
+                } else {
+                    i += 1
+                }
             }
         }
     }
@@ -1168,25 +1202,70 @@ public enum MarkdownPlain {
 
 /// Thread-safe LRU cache for parsed Markdown documents with incremental cut reuse (`rune_kit::markdown::cache`).
 public final class MarkdownDocCache: @unchecked Sendable {
-    public static let shared = MarkdownDocCache(capacity: 24)
+    public static let shared = MarkdownDocCache(capacity: 256, budgetBytes: 16 << 20)
+    public static let sharedStream = MarkdownDocCache(capacity: 256, budgetBytes: 4 << 20)
 
     private struct Entry {
         var source: String
         var autolink: Bool
         var doc: MarkdownParsedDoc
+        var bytes: Int
         var stamp: UInt64
     }
 
     private let lock = NSLock()
     private let capacity: Int
+    private let budgetBytes: Int
     private var entries: [Entry] = []
+    private var lastSourceByAutolink: [Bool: String] = [:]
     private var clock: UInt64 = 0
+    private var totalBytes: Int = 0
+    public private(set) var fullParseCount: Int = 0
+    public private(set) var incrementalExtendCount: Int = 0
 
-    public init(capacity: Int = 24) {
+    public init(capacity: Int = 256, budgetBytes: Int = 16 << 20) {
         self.capacity = max(1, capacity)
+        self.budgetBytes = max(1024, budgetBytes)
+    }
+
+    public var currentEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+
+    public var estimatedBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return totalBytes
+    }
+
+    public func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll()
+        lastSourceByAutolink.removeAll()
+        clock = 0
+        totalBytes = 0
+        fullParseCount = 0
+        incrementalExtendCount = 0
+    }
+
+    public func peek(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.first(where: { $0.autolink == autolink && $0.source == source })?.doc
+    }
+
+    public func streamCached(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
+        cached(source, autolink: autolink, streaming: true)
     }
 
     public func docCached(_ source: String, autolink: Bool = true) -> MarkdownParsedDoc {
+        cached(source, autolink: autolink, streaming: false)
+    }
+
+    private func cached(_ source: String, autolink: Bool, streaming: Bool) -> MarkdownParsedDoc {
         lock.lock()
         clock += 1
         let now = clock
@@ -1199,29 +1278,65 @@ public final class MarkdownDocCache: @unchecked Sendable {
 
         // Incremental prefix cut reuse when streaming appends onto an existing cached prefix
         var incremental: MarkdownParsedDoc?
-        if let bestIdx = entries.indices
+        var grownFrom: String? = nil
+        if let lastSrc = lastSourceByAutolink[autolink],
+           source.utf8.count > lastSrc.utf8.count,
+           source.hasPrefix(lastSrc),
+           let lastIdx = entries.firstIndex(where: { $0.autolink == autolink && $0.source == lastSrc }) {
+            grownFrom = lastSrc
+            let base = entries[lastIdx].doc
+            let baseLen = entries[lastIdx].source.utf8.count
+            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink, streaming: streaming)
+        } else if let bestIdx = entries.indices
             .filter({ entries[$0].autolink == autolink && source.utf8.count > entries[$0].source.utf8.count && source.hasPrefix(entries[$0].source) })
             .max(by: { entries[$0].source.utf8.count < entries[$1].source.utf8.count }) {
             let base = entries[bestIdx].doc
             let baseLen = entries[bestIdx].source.utf8.count
-            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink)
+            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink, streaming: streaming)
         }
+        let didExtend = incremental != nil
         lock.unlock()
 
-        let parsed = incremental ?? MarkdownParser.parseDocument(source, autolink: autolink)
+        let parsed: MarkdownParsedDoc
+        if let incremental {
+            parsed = incremental
+        } else if streaming {
+            var tail = MarkdownTailStream(autolink: autolink)
+            tail.reset(source)
+            parsed = tail.document(streaming: true)
+        } else {
+            parsed = MarkdownParser.parseDocument(source, autolink: autolink)
+        }
+
+        let entryBytes = 2 * source.utf8.count + 64 * parsed.cuts.count + 128
 
         lock.lock()
+        if didExtend {
+            incrementalExtendCount += 1
+        } else {
+            fullParseCount += 1
+        }
+        if let grownFrom,
+           let deadIdx = entries.firstIndex(where: { $0.autolink == autolink && $0.source == grownFrom }) {
+            totalBytes -= entries[deadIdx].bytes
+            entries.remove(at: deadIdx)
+        }
         clock += 1
         let putStamp = clock
-        if entries.count >= capacity, let evict = entries.indices.min(by: { entries[$0].stamp < entries[$1].stamp }) {
+        while (entries.count >= capacity || (totalBytes + entryBytes > budgetBytes && !entries.isEmpty)),
+              let evict = entries.indices.min(by: { entries[$0].stamp < entries[$1].stamp }) {
+            totalBytes -= entries[evict].bytes
             entries.remove(at: evict)
         }
-        entries.append(Entry(source: source, autolink: autolink, doc: parsed, stamp: putStamp))
+        entries.append(Entry(source: source, autolink: autolink, doc: parsed, bytes: entryBytes, stamp: putStamp))
+        totalBytes += entryBytes
+        lastSourceByAutolink[autolink] = source
         lock.unlock()
         return parsed
     }
 
-    private static func incrementalExtend(base: MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool) -> MarkdownParsedDoc? {
+    private static func incrementalExtend(base: MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool, streaming: Bool = false) -> MarkdownParsedDoc? {
+        guard !streaming else { return nil }
         // Keep everything strictly before the last safe cut that starts on a finished line;
         // a reference link definition (`[id]: url`) can invalidate links anywhere in the document.
         guard !source.contains("]:") else { return nil }
@@ -2038,7 +2153,7 @@ public enum MarkdownParser {
                             }
                             if peek < lines.count {
                                 let peekStr = utf8Slice(source, range: lines[peek].contentRange) ?? ""
-                                if let pm = parseListMarker(peekStr), pm.ordered == isOrdered, pm.indent <= firstMarker.contentIndent {
+                                if let pm = parseListMarker(peekStr), pm.ordered == isOrdered, pm.marker == firstMarker.marker, pm.indent <= firstMarker.contentIndent {
                                     j = peek
                                     continue
                                 }
@@ -2051,7 +2166,7 @@ public enum MarkdownParser {
                             break
                         }
 
-                        if let m = parseListMarker(lStr), m.ordered == isOrdered, m.indent < firstMarker.contentIndent {
+                        if let m = parseListMarker(lStr), m.ordered == isOrdered, m.marker == firstMarker.marker, m.indent < firstMarker.contentIndent {
                             // New item in this list
                             var cStart = lines[j].contentRange.lowerBound + m.contentOffsetBytes
                             var taskState: MarkdownTaskState?
@@ -3041,6 +3156,7 @@ public enum MarkdownParser {
     private struct ListMarkerInfo {
         var indent: Int
         var ordered: Bool
+        var marker: Character
         var start: UInt64
         var contentIndent: Int
         var contentOffsetBytes: Int
@@ -3054,7 +3170,7 @@ public enum MarkdownParser {
             let after = trimmed.dropFirst()
             if after.isEmpty || after.first == " " || after.first == "\t" {
                 let sp = after.first != nil ? 1 : 0
-                return ListMarkerInfo(indent: indent, ordered: false, start: 1, contentIndent: indent + 1 + sp, contentOffsetBytes: leadBytes + 1 + sp)
+                return ListMarkerInfo(indent: indent, ordered: false, marker: first, start: 1, contentIndent: indent + 1 + sp, contentOffsetBytes: leadBytes + 1 + sp)
             }
         }
         let digits = trimmed.prefix(while: { $0.isASCII && $0.isNumber })
@@ -3064,7 +3180,7 @@ public enum MarkdownParser {
                 let afterDelim = afterDigits.dropFirst()
                 if afterDelim.isEmpty || afterDelim.first == " " || afterDelim.first == "\t" {
                     let sp = afterDelim.first != nil ? 1 : 0
-                    return ListMarkerInfo(indent: indent, ordered: true, start: num, contentIndent: indent + digits.count + 1 + sp, contentOffsetBytes: leadBytes + digits.count + 1 + sp)
+                    return ListMarkerInfo(indent: indent, ordered: true, marker: delim, start: num, contentIndent: indent + digits.count + 1 + sp, contentOffsetBytes: leadBytes + digits.count + 1 + sp)
                 }
             }
         }
@@ -3737,12 +3853,37 @@ public struct MarkdownStyle: Sendable, Equatable {
 
     public static func == (lhs: MarkdownStyle, rhs: MarkdownStyle) -> Bool {
         lhs.text == rhs.text && lhs.muted == rhs.muted && lhs.accent == rhs.accent &&
+        lhs.linkUnderline == rhs.linkUnderline && lhs.codeBg == rhs.codeBg &&
         lhs.codeBlockFill == rhs.codeBlockFill && lhs.codeBlockBorder == rhs.codeBlockBorder &&
-        lhs.quote == rhs.quote && lhs.rule == rhs.rule && lhs.body == rhs.body &&
-        lhs.headings == rhs.headings && lhs.codeBlock == rhs.codeBlock &&
-        lhs.tableMargin == rhs.tableMargin && lhs.codeMargin == rhs.codeMargin &&
-        lhs.tableFullWidth == rhs.tableFullWidth && lhs.textWidth == rhs.textWidth &&
-        lhs.highlight == rhs.highlight && lhs.syntax == rhs.syntax && lhs.diagram == rhs.diagram
+        lhs.quoteRule == rhs.quoteRule && lhs.quote == rhs.quote && lhs.rule == rhs.rule &&
+        lhs.body == rhs.body && lhs.headings == rhs.headings && lhs.codeBlock == rhs.codeBlock &&
+        lhs.codeText == rhs.codeText && lhs.plainCodeText == rhs.plainCodeText &&
+        lhs.shell == rhs.shell && lhs.linkHover == rhs.linkHover &&
+        lhs.listOutside == rhs.listOutside && lhs.listNested == rhs.listNested &&
+        lhs.tableAlign == rhs.tableAlign && lhs.inlineCodeScale == rhs.inlineCodeScale &&
+        lhs.inlineCodeWeight == rhs.inlineCodeWeight && lhs.inlineCodePad == rhs.inlineCodePad &&
+        lhs.codeBlockPad == rhs.codeBlockPad && lhs.listIndent == rhs.listIndent &&
+        lhs.listGap == rhs.listGap && lhs.strongWeight == rhs.strongWeight &&
+        lhs.tableOutline == rhs.tableOutline && lhs.tableRule == rhs.tableRule &&
+        lhs.tableHeadFill == rhs.tableHeadFill && lhs.tableHeadText == rhs.tableHeadText &&
+        lhs.tableHeadRule == rhs.tableHeadRule && lhs.tableHeadWeight == rhs.tableHeadWeight &&
+        lhs.tableMinColumn == rhs.tableMinColumn && lhs.tableTabular == rhs.tableTabular &&
+        lhs.tableFont == rhs.tableFont && lhs.tablePad == rhs.tablePad &&
+        lhs.tableFlushLeft == rhs.tableFlushLeft && lhs.tableFrame == rhs.tableFrame &&
+        lhs.tableBody == rhs.tableBody && lhs.tableHeadPad == rhs.tableHeadPad &&
+        lhs.tableFullWidth == rhs.tableFullWidth && lhs.tableMargin == rhs.tableMargin &&
+        lhs.codeMargin == rhs.codeMargin && lhs.tableBar == rhs.tableBar &&
+        lhs.textWidth == rhs.textWidth && lhs.wideFade == rhs.wideFade &&
+        lhs.linkIcon == rhs.linkIcon && lhs.diffAdd == rhs.diffAdd &&
+        lhs.diffRemove == rhs.diffRemove && lhs.diffAddText == rhs.diffAddText &&
+        lhs.diffRemoveText == rhs.diffRemoveText && lhs.diffHues == rhs.diffHues &&
+        lhs.diffHunk == rhs.diffHunk && lhs.syntax == rhs.syntax &&
+        lhs.highlight == rhs.highlight && lhs.selection == rhs.selection &&
+        lhs.highlightBg == rhs.highlightBg && lhs.highlightFg == rhs.highlightFg &&
+        lhs.highlightRing?.0 == rhs.highlightRing?.0 && lhs.highlightRing?.1 == rhs.highlightRing?.1 &&
+        lhs.highlightCurrentBg == rhs.highlightCurrentBg && lhs.highlightCurrentFg == rhs.highlightCurrentFg &&
+        lhs.highlightCurrentRing?.0 == rhs.highlightCurrentRing?.0 && lhs.highlightCurrentRing?.1 == rhs.highlightCurrentRing?.1 &&
+        lhs.task == rhs.task && lhs.diagram == rhs.diagram
     }
 
     public static func fromKit(_ k: Kit) -> MarkdownStyle {
@@ -3993,6 +4134,13 @@ public struct MarkdownStyle: Sendable, Equatable {
         s.diagram.hoverNeighbours = neighbours
         return s
     }
+    /// Sets sequence diagram note fill and border colors (`MarkdownStyle::diagram_note`).
+    public func diagramNote(_ fill: Color, _ border: Color) -> MarkdownStyle {
+        var s = self
+        s.diagram.noteFill = fill
+        s.diagram.noteBorder = border
+        return s
+    }
     public func highlightBg(_ color: Color) -> MarkdownStyle { var s = self; s.highlightBg = color; return s }
     public func highlightFg(_ color: Color?) -> MarkdownStyle { var s = self; s.highlightFg = color; return s }
     public func highlightRing(_ color: Color, _ width: Float = 1.0) -> MarkdownStyle {
@@ -4008,6 +4156,12 @@ public struct MarkdownStyle: Sendable, Equatable {
         return s
     }
     public func linkIcon(_ position: MarkdownLinkIconPosition?) -> MarkdownStyle { var s = self; s.linkIcon = position; return s }
+    /// Shows an inline globe (or GitHub / favicon) icon before external `http`/`https` links (`size` pt square, `gap` pt before text).
+    public func linkIcons(_ size: Float, _ gap: Float) -> MarkdownStyle {
+        var s = self
+        s.linkIcon = .leading(gap: max(0, gap), size: max(0, size))
+        return s
+    }
 
     // Table styles
     public func tableOutline(_ color: Color?) -> MarkdownStyle { var s = self; s.tableOutline = color; s.tableFrame = nil; return s }
@@ -4026,6 +4180,18 @@ public struct MarkdownStyle: Sendable, Equatable {
     public func tableFont(_ f: TextStyle) -> MarkdownStyle { var s = self; s.tableFont = f; return s }
     public func tableCellPadding(x: Float, y: Float) -> MarkdownStyle { var s = self; s.tablePad = [Self.pts(x), Self.pts(y)]; return s }
     public func tableFlushLeft(_ on: Bool) -> MarkdownStyle { var s = self; s.tableFlushLeft = on; return s }
+    public func tableLike(_ t: TableStyle) -> MarkdownStyle {
+        var s = self
+        s.tableFont = t.font
+        s.tablePad = [t.cellPad, max(0, (t.rowHeight - (t.font.lineHeight ?? 20)) / 2)]
+        s.tableRule = t.rule
+        s.tableHeadText = t.headerText
+        if s.tableOutline != nil { s.tableOutline = t.rule }
+        s.tableFrame = nil
+        s.tableBody = nil
+        s.tableHeadPad = nil
+        return s
+    }
     public func tableFrame(fill: Color, ring: Color, pad: Float) -> MarkdownStyle {
         var s = self
         s.tableOutline = nil
@@ -4126,6 +4292,53 @@ public struct MarkdownImageFrameContext: Sendable, Equatable {
 
 // MARK: - Fluent `Markdown` Document & `MarkdownView<State>` Builder (`rune_kit::markdown::Markdown`)
 
+/// Built-in icons placed before external links when `MarkdownStyle.linkIcons` is set (`link_icon.rs`).
+public enum MarkdownLinkIcons {
+    public static let globe = SVGIcon(
+        viewBox: 16.0,
+        body: #"<circle cx="8" cy="8" r="6" stroke="currentColor"/><ellipse cx="8" cy="8" rx="2.5" ry="6" stroke="currentColor"/><path d="M2 8h12" stroke="currentColor"/>"#
+    )
+    public static let github = SVGIcon(
+        viewBox: 16.0,
+        body: #"<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.23.49-2.69-.94-2.69-.94-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.8.06 1.22.82 1.22.82.71 1.21 1.87.86 2.33.66.07-.51.28-.86.51-1.06-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.19 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" fill="currentColor"/>"#
+    )
+
+    static func linkHost(_ url: String) -> String? {
+        let rest: Substring
+        if url.hasPrefix("https://") {
+            rest = url.dropFirst(8)
+        } else if url.hasPrefix("http://") {
+            rest = url.dropFirst(7)
+        } else if let idx = url.range(of: "://") {
+            let scheme = url[..<idx.lowerBound].lowercased()
+            guard scheme == "http" || scheme == "https" else { return nil }
+            rest = url[idx.upperBound...]
+        } else {
+            return nil
+        }
+        let authority = rest.split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" }).first ?? rest
+        let hostPart: Substring
+        if let atIdx = authority.lastIndex(of: "@") {
+            hostPart = authority[authority.index(after: atIdx)...]
+        } else {
+            hostPart = authority
+        }
+        let host: Substring
+        if hostPart.hasPrefix("[") {
+            if let close = hostPart.firstIndex(of: "]") {
+                host = hostPart[...close]
+            } else {
+                host = hostPart
+            }
+        } else if let colon = hostPart.firstIndex(of: ":") {
+            host = hostPart[..<colon]
+        } else {
+            host = hostPart
+        }
+        return host.isEmpty ? nil : host.lowercased()
+    }
+}
+
 /// Fluent, full-parity CommonMark + GFM Markdown component (`rune_kit::markdown::Markdown`).
 public struct Markdown: Sendable {
     public var source: String
@@ -4144,6 +4357,7 @@ public struct Markdown: Sendable {
     public var linkLookFn: (@Sendable (String) -> (color: Color?, underline: Bool, weight: Float?, hoverColor: Color?)?)?
     public var linkRingFn: (@Sendable (String) -> (Color, Float)?)?
     public var linkHelpFn: (@Sendable (String) -> String?)?
+    public var linkFaviconFn: (@Sendable (String) -> RGBA8Atlas?)?
     public var codeLinkMatchFn: (@Sendable (String) -> (url: String, color: Color)?)?
     public var imageAltVisible: Bool = false
 
@@ -4179,6 +4393,9 @@ public struct Markdown: Sendable {
     public func linkHelp(_ fn: @escaping @Sendable (String) -> String?) -> Markdown {
         var c = self; c.linkHelpFn = fn; return c
     }
+    public func linkFavicon(_ fn: @escaping @Sendable (String) -> RGBA8Atlas?) -> Markdown {
+        var c = self; c.linkFaviconFn = fn; return c
+    }
     public func images(_ showAlt: Bool = true) -> Markdown {
         var c = self; c.imageAltVisible = showAlt; return c
     }
@@ -4192,6 +4409,9 @@ public struct Markdown: Sendable {
         MarkdownView<State>(config: self).onLink(fn)
     }
     public func onLinkSecondary<State>(_ fn: @escaping @Sendable (inout State, String, inout Tx) -> Void) -> MarkdownView<State> {
+        MarkdownView<State>(config: self).onLinkSecondary(fn)
+    }
+    public func onLinkSecondary<State>(_ fn: @escaping @Sendable (inout State, String, PointerPress, inout Tx) -> Void) -> MarkdownView<State> {
         MarkdownView<State>(config: self).onLinkSecondary(fn)
     }
     public func onTask<State>(_ fn: @escaping @Sendable (inout State, String, Int, Bool, inout Tx) -> Void) -> MarkdownView<State> {
@@ -4212,8 +4432,12 @@ public struct Markdown: Sendable {
 
     // Pure document operations (no State needed)
     public func document() -> MarkdownParsedDoc {
-        let stream = MarkdownTailStream(autolink: isAutolinkEnabled)
-        var s = stream
+        if isAutolinkEnabled {
+            return isStreaming
+                ? MarkdownDocCache.sharedStream.streamCached(source, autolink: true)
+                : MarkdownDocCache.shared.docCached(source, autolink: true)
+        }
+        var s = MarkdownTailStream(autolink: false)
         s.reset(source)
         return s.document(streaming: isStreaming)
     }
@@ -4320,7 +4544,7 @@ public struct Markdown: Sendable {
 public struct MarkdownView<State>: Sendable {
     public var config: Markdown
     public var onLinkHandler: (@Sendable (inout State, String, inout Tx) -> Void)?
-    public var onLinkSecondaryHandler: (@Sendable (inout State, String, inout Tx) -> Void)?
+    public var onLinkSecondaryHandler: (@Sendable (inout State, String, PointerPress, inout Tx) -> Void)?
     public var onTaskHandler: (@Sendable (inout State, String, Int, Bool, inout Tx) -> Void)?
     public var diagramFrameHandler: (@Sendable (El<State>, MarkdownDiagramFrameContext) -> El<State>)?
     public var codeFrameHandler: (@Sendable (El<State>, MarkdownCodeFrameContext) -> El<State>)?
@@ -4360,10 +4584,18 @@ public struct MarkdownView<State>: Sendable {
     public func linkHelp(_ fn: @escaping @Sendable (String) -> String?) -> Self {
         var c = self; c.config.linkHelpFn = fn; return c
     }
+    public func linkFavicon(_ fn: @escaping @Sendable (String) -> RGBA8Atlas?) -> Self {
+        var c = self; c.config.linkFaviconFn = fn; return c
+    }
     public func onLink(_ fn: @escaping @Sendable (inout State, String, inout Tx) -> Void) -> Self {
         var c = self; c.onLinkHandler = fn; return c
     }
     public func onLinkSecondary(_ fn: @escaping @Sendable (inout State, String, inout Tx) -> Void) -> Self {
+        var c = self
+        c.onLinkSecondaryHandler = { state, url, _, tx in fn(&state, url, &tx) }
+        return c
+    }
+    public func onLinkSecondary(_ fn: @escaping @Sendable (inout State, String, PointerPress, inout Tx) -> Void) -> Self {
         var c = self; c.onLinkSecondaryHandler = fn; return c
     }
     public func onTask(_ fn: @escaping @Sendable (inout State, String, Int, Bool, inout Tx) -> Void) -> Self {
@@ -4412,10 +4644,33 @@ private final class MarkdownRenderer<State> {
     var currentBlockKey = "b0"
     var flow = FlowState()
 
+    enum Lead {
+        case bullet
+        case number(UInt64)
+        case task(Bool)
+
+        var marker: String {
+            switch self {
+            case .bullet: return "- "
+            case let .number(n): return "\(n). "
+            case let .task(done): return done ? "- [x] " : "- [ ] "
+            }
+        }
+
+        var width: Int {
+            switch self {
+            case let .number(n): return String(n).count + 2
+            case .bullet, .task: return 2
+            }
+        }
+    }
+
     struct FlowState {
         var lists = 0
         var inset: Float = 0
         var ink: Color? = nil
+        var cols: Int = 0
+        var lead: (cols: Int, lead: Lead, before: UInt8)? = nil
     }
 
     init(view: MarkdownView<State>, style: MarkdownStyle, doc: MarkdownParsedDoc) {
@@ -4548,6 +4803,9 @@ private final class MarkdownRenderer<State> {
             if topLevel {
                 currentBlockKey = key
             }
+            if i > 0 {
+                flow.lead = nil
+            }
 
             let ownDir = MarkdownBidi.blocksDirection([b])
             let resolvedDir = ownDir ?? lastDir
@@ -4607,11 +4865,12 @@ private final class MarkdownRenderer<State> {
         case let .quote(inner):
             let savedFlow = flow
             let savedTaskIdx = nextTask
-            flow = FlowState(lists: savedFlow.lists, inset: savedFlow.inset + s.quote.width + s.quote.pad, ink: s.quote.text ?? savedFlow.ink)
+            flow = FlowState(lists: savedFlow.lists, inset: savedFlow.inset + s.quote.width + s.quote.pad, ink: s.quote.text ?? savedFlow.ink, cols: savedFlow.cols, lead: nil)
             let innerMaps = map.quoteMaps ?? []
             let drawn = blocksIn(inner, maps: innerMaps, keys: [], topLevel: false, inItem: false)
             flow = savedFlow
             let qEl: El<State> = row()
+                .role(.blockquote)
                 .wFull()
                 .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
                 .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
@@ -4758,12 +5017,104 @@ private final class MarkdownRenderer<State> {
         return spans
     }
 
-    private func textHighlights(for renderedText: String, map: MarkdownSpanMap?) -> [(range: Range<Int>, isCurrent: Bool)] {
+    private func withReveal(_ node: El<State>) -> El<State> {
+        node
+    }
+
+    private func makeTextHighlights(for renderedText: String, map: MarkdownSpanMap?) -> [TextHighlight] {
         guard let map, !view.config.highlightsList.isEmpty else { return [] }
-        var out: [(Range<Int>, Bool)] = []
-        for item in view.config.highlightsList {
+        var out: [TextHighlight] = []
+        for (idx, item) in view.config.highlightsList.enumerated() {
+            let hl = item.style
+            let bg = hl.bg ?? (hl.current ? s.highlightCurrentBg : s.highlightBg)
+            let fg = hl.fg ?? (hl.current ? s.highlightCurrentFg : s.highlightFg)
+            let ringTuple = (hl.ringColor != nil && hl.ringWidth != nil)
+                ? (hl.ringColor!, hl.ringWidth!)
+                : (hl.current ? s.highlightCurrentRing : s.highlightRing)
+            let key = hl.key ?? Markdown.highlightKey(idx)
             for r in map.mapRanges(item.ranges, in: renderedText) {
-                out.append((r, item.style.current))
+                var th = TextHighlight(r, bg: bg, fg: fg, ring: ringTuple.map { TextRing(color: $0.0, width: $0.1) }, key: key)
+                if hl.key == nil && key.isEmpty {
+                    th.key = Markdown.highlightKey(idx)
+                }
+                out.append(th)
+            }
+        }
+        return out
+    }
+
+    private func applyLinkIcons(_ node: El<State>, inl: MarkdownInline) -> El<State> {
+        guard let pos = s.linkIcon else { return node }
+        let size: Float
+        let gap: Float
+        switch pos {
+        case let .leading(g, sz), let .trailing(g, sz):
+            size = sz
+            gap = g
+        }
+        var out = node
+        for link in inl.links {
+            guard let host = MarkdownLinkIcons.linkHost(link.url),
+                  let slice = utf8Slice(inl.text, range: link.start..<link.end),
+                  !slice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                continue
+            }
+            let icon: InlineIcon
+            if host != "github.com", let px = view.config.linkFaviconFn?(link.url) {
+                icon = InlineIcon.image(px).radius(2.0).size(size).gap(gap)
+            } else {
+                let glyph = (host == "github.com") ? MarkdownLinkIcons.github : MarkdownLinkIcons.globe
+                icon = InlineIcon.glyph(glyph).color(s.accent).size(size).gap(gap)
+            }
+            out = out.inlineIcon(at: link.start, icon)
+        }
+        return out
+    }
+
+    private func wireLinks(_ node: El<State>, inl: MarkdownInline) -> El<State> {
+        guard !inl.links.isEmpty else { return node }
+        let interactive = view.onLinkHandler != nil || view.onLinkSecondaryHandler != nil || view.config.linkHelpFn != nil || view.config.linkLookFn != nil || view.config.linkRingFn != nil || s.linkHover != nil
+        guard interactive else { return node }
+        var out = node
+        for link in inl.links {
+            let look = view.config.linkLookFn?(link.url)
+            let hoverInk = look?.hoverColor ?? s.linkHover
+            let underlineOn = look?.underline ?? true
+            let ringTuple = view.config.linkRingFn?(link.url)
+            var paint = LinkPaint()
+            if let hoverInk {
+                paint = paint.color(hoverInk)
+            }
+            if underlineOn {
+                paint = paint.underline(true)
+            } else {
+                paint = paint.underline(false)
+            }
+            if let ringTuple {
+                paint = paint.ring(ringTuple.0, width: ringTuple.1)
+            }
+            let help = view.config.linkHelpFn?(link.url)
+            out = out.link(TextLink(link.start..<link.end, id: link.url, hover: paint, help: help))
+        }
+        if let onLink = view.onLinkHandler {
+            out = out.onLink { state, linkID, tx in
+                onLink(&state, linkID, &tx)
+            }
+        }
+        if let onSec = view.onLinkSecondaryHandler {
+            out = out.onLinkSecondary { state, linkID, press, tx in
+                onSec(&state, linkID, press, &tx)
+            }
+        }
+        return out
+    }
+
+    private func selectInline(_ node: El<State>, inl: MarkdownInline, map: MarkdownSpanMap?) -> El<State> {
+        var out = node.textHighlights(makeTextHighlights(for: inl.text, map: map))
+        out = applySelect(wireLinks(applyLinkIcons(out, inl: inl), inl: inl))
+        if view.config.isSelectable {
+            for sp in inl.spans where sp.style == .codePad {
+                out = out.uncopied(sp.start..<sp.end)
             }
         }
         return out
@@ -4771,61 +5122,82 @@ private final class MarkdownRenderer<State> {
 
     private func renderPara(_ rawInl: MarkdownInline, map: MarkdownSpanMap?, font: TextStyle, color: Color, dir: MarkdownDirection?) -> El<State> {
         let inl = withCodeLinks(rawInl)
-        var spans = buildTextSpans(inl, font: font, baseColor: color)
-        let hlRanges = textHighlights(for: inl.text, map: map)
-        if !hlRanges.isEmpty {
-            spans = applyUTF8Highlights(
-                spans: spans,
-                ranges: hlRanges,
-                activeIndex: nil,
-                bg: s.highlightBg,
-                activeBg: s.highlightCurrentBg,
-                fg: s.highlightFg,
-                activeFg: s.highlightCurrentFg
-            )
-        }
-        var elNode: El<State> = rich(spans).font(font).color(color).wFull()
+        let spans = buildTextSpans(inl, font: font, baseColor: color)
+        var elNode: El<State> = withReveal(rich(spans).font(font).color(color)).wFull()
         if let dir {
             elNode = elNode.textAlign(dir.textAlign)
         }
-        if !inl.links.isEmpty && (view.onLinkHandler != nil || view.onLinkSecondaryHandler != nil || view.config.linkHelpFn != nil) {
-            if let helpFn = view.config.linkHelpFn, let first = inl.links.first, let h = helpFn(first.url) {
-                elNode = elNode.help(h)
+        if let lead = flow.lead {
+            elNode = elNode.copyPrefix(String(repeating: " ", count: lead.cols) + lead.lead.marker).copyBreaks(lead.before, 1)
+        } else {
+            elNode = elNode.copyBreaks(2, 2)
+        }
+        return selectInline(elNode, inl: inl, map: map)
+    }
+
+    private func tabbedRich(_ code: String, spans: [TextSpan], highlights: [TextHighlight], style: TextStyle, color: Color) -> El<State> {
+        if !code.contains("\t") || style.family == .monospace {
+            return rich(spans).font(style).color(color).textHighlights(highlights)
+        }
+        // Expand tabs visually to 4-column stops while keeping tab characters and uncopied spaces for selection copy
+        var shown = ""
+        shown.reserveCapacity(code.utf8.count + code.utf8.count / 8)
+        var tabs: [(srcByte: Int, shownByte: Int, pad: Int, totalPad: Int)] = []
+        var col = 0
+        var srcByte = 0
+        for ch in code {
+            let utf8Len = ch.utf8.count
+            if ch == "\t" {
+                let pad = 3 - (col % 4)
+                let total = (tabs.last?.totalPad ?? 0) + pad
+                tabs.append((srcByte, shown.utf8.count, pad, total))
+                shown.append("\t")
+                shown.append(String(repeating: " ", count: pad))
+                col += pad + 1
+            } else {
+                col = (ch == "\n") ? 0 : (col + 1)
+                shown.append(ch)
             }
-            if let onLink = view.onLinkHandler {
-                let capturedLinks = inl.links
-                let fullText = inl.text
-                let totalLen = max(1, fullText.utf8.count)
-                elNode = elNode.onClickPress { state, press, tx in
-                    if capturedLinks.count == 1 {
-                        onLink(&state, capturedLinks[0].url, &tx)
-                    } else {
-                        let frac = max(0, min(1, press.local.x / max(1, press.elementSize.x)))
-                        let byteGuess = Int(frac * Float(totalLen))
-                        let hit = capturedLinks.min(by: {
-                            let d0 = byteGuess < $0.start ? ($0.start - byteGuess) : (byteGuess > $0.end ? (byteGuess - $0.end) : 0)
-                            let d1 = byteGuess < $1.start ? ($1.start - byteGuess) : (byteGuess > $1.end ? (byteGuess - $1.end) : 0)
-                            return d0 < d1
-                        }) ?? capturedLinks[0]
-                        onLink(&state, hit.url, &tx)
-                    }
+            srcByte += utf8Len
+        }
+        func shiftByte(_ b: Int) -> Int {
+            var lo = 0
+            var hi = tabs.count
+            while lo < hi {
+                let mid = (lo + hi) >> 1
+                if tabs[mid].srcByte < b {
+                    lo = mid + 1
+                } else {
+                    hi = mid
                 }
             }
-            if let onSec = view.onLinkSecondaryHandler {
-                let capturedLinks = inl.links
-                elNode = elNode.onSecondaryClick { state, press, tx in
-                    let frac = max(0, min(1, press.local.x / max(1, press.elementSize.x)))
-                    let byteGuess = Int(frac * Float(max(1, inl.text.utf8.count)))
-                    let hit = capturedLinks.min(by: {
-                        let d0 = byteGuess < $0.start ? ($0.start - byteGuess) : (byteGuess > $0.end ? (byteGuess - $0.end) : 0)
-                        let d1 = byteGuess < $1.start ? ($1.start - byteGuess) : (byteGuess > $1.end ? (byteGuess - $1.end) : 0)
-                        return d0 < d1
-                    }) ?? capturedLinks[0]
-                    onSec(&state, hit.url, &tx)
-                }
+            return lo == 0 ? b : (b + tabs[lo - 1].totalPad)
+        }
+        // Rebuild TextSpans cleanly onto `shown` by re-slicing original `spans` offsets
+        var outSpans: [TextSpan] = []
+        outSpans.reserveCapacity(spans.count + tabs.count)
+        var origCursor = 0
+        for sp in spans {
+            let origLen = sp.text.utf8.count
+            let s0 = shiftByte(origCursor)
+            let s1 = shiftByte(origCursor + origLen)
+            origCursor += origLen
+            if let slice = utf8Slice(shown, range: s0..<s1) {
+                var copy = sp
+                copy.text = slice
+                outSpans.append(copy)
             }
         }
-        return applySelect(elNode)
+        let shiftedHighlights = highlights.map { h -> TextHighlight in
+            var c = h
+            c.byteRange = shiftByte(h.byteRange.lowerBound)..<shiftByte(h.byteRange.upperBound)
+            return c
+        }
+        var elNode: El<State> = rich(outSpans).font(style).color(color).textHighlights(shiftedHighlights)
+        for t in tabs where t.pad > 0 {
+            elNode = elNode.uncopied((t.shownByte + 1)..<(t.shownByte + 1 + t.pad))
+        }
+        return elNode
     }
 
     private func renderCode(_ code: String, source: MarkdownCodeSource?, map: MarkdownSpanMap?) -> El<State> {
@@ -4851,12 +5223,11 @@ private final class MarkdownRenderer<State> {
             ink = s.codeText ?? s.text
         }
 
-        let expanded = expandTabs(code)
         let syntaxPrefix: String
         if let source, source.open {
-            syntaxPrefix = utf8Slice(expanded, range: 0..<min(source.colouredBytes, expanded.utf8.count)) ?? ""
+            syntaxPrefix = utf8Slice(code, range: 0..<min(source.colouredBytes, code.utf8.count)) ?? ""
         } else {
-            syntaxPrefix = expanded
+            syntaxPrefix = code
         }
 
         var spans: [TextSpan]
@@ -4864,53 +5235,48 @@ private final class MarkdownRenderer<State> {
             let colouredCount = syntaxPrefix.utf8.count
             let highlights = view.config.syntaxHighlighter.highlight(language: lang, code: syntaxPrefix)
             spans = s.syntax.spans(for: syntaxPrefix, highlights: highlights, defaultColor: ink)
-            if colouredCount < expanded.utf8.count,
-               let tail = utf8Slice(expanded, range: colouredCount..<expanded.utf8.count), !tail.isEmpty {
+            if colouredCount < code.utf8.count,
+               let tail = utf8Slice(code, range: colouredCount..<code.utf8.count), !tail.isEmpty {
                 spans.append(TextSpan(tail, color: ink, monospace: true))
             }
         } else {
-            spans = [TextSpan(expanded.isEmpty ? " " : expanded, color: ink, monospace: true)]
+            spans = [TextSpan(code.isEmpty ? " " : code, color: ink, monospace: true)]
         }
 
-        let hls = textHighlights(for: code, map: map)
-        if !hls.isEmpty && expanded == code {
-            spans = applyUTF8Highlights(
-                spans: spans,
-                ranges: hls,
-                activeIndex: nil,
-                bg: s.highlightBg,
-                activeBg: s.highlightCurrentBg,
-                fg: s.highlightFg,
-                activeFg: s.highlightCurrentFg
-            )
-        }
-
-        let body = applySelect(rich(spans).font(s.codeBlock).color(ink).wFull())
+        let hls = makeTextHighlights(for: code, map: map)
+        let richCode = withReveal(tabbedRich(code, spans: spans, highlights: hls, style: s.codeBlock, color: ink)).copyBreaks(2, 2)
         let frame: El<State> = col()
+            .role(.code)
             .wFull()
             .rounded(6)
             .bg(fill)
             .border(0.5, border)
 
         if view.config.isScrollWide {
-            let viewport: El<State> = col().key("scroll").wFull().scrollX()
-                .child(col().px(s.codeBlockPad[0]).py(s.codeBlockPad[1]).child(body))
-            return frame.child(viewport)
+            var viewport: El<State> = col().key("scroll").wFull().scrollX()
+            if s.wideFade > 0 {
+                viewport = viewport.scrollEdgeFade(s.wideFade)
+            }
+            return frame.child(viewport.child(col().px(s.codeBlockPad[0]).py(s.codeBlockPad[1]).child(applySelect(richCode))))
         }
-        return frame.px(s.codeBlockPad[0]).py(s.codeBlockPad[1]).child(body)
+        return frame.px(s.codeBlockPad[0]).py(s.codeBlockPad[1]).child(applySelect(richCode.wFull()))
     }
 
     private func renderDiff(_ src: String, map: MarkdownSpanMap?) -> El<State> {
-        let hls = textHighlights(for: src, map: map)
-        var c: El<State> = col().wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder)
+        let hls = makeTextHighlights(for: src, map: map)
+        var c: El<State> = col().role(.code).wFull().py(s.codeBlockPad[1]).rounded(6).bg(s.codeBlockFill).border(0.5, s.codeBlockBorder)
         var offset = 0
         let rawLines = src.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let last = max(0, rawLines.count - 1)
         for (n, rawLine) in rawLines.enumerated() {
             let lineEnd = offset + rawLine.utf8.count
-            let lineHLs = hls.compactMap { item -> (Range<Int>, Bool)? in
-                let a = max(item.range.lowerBound, offset)
-                let b = min(item.range.upperBound, lineEnd)
-                return a < b ? ((a - offset)..<(b - offset), item.isCurrent) : nil
+            let lineHLs: [TextHighlight] = hls.compactMap { hl in
+                let a = max(hl.byteRange.lowerBound, offset)
+                let b = min(hl.byteRange.upperBound, lineEnd)
+                guard a < b else { return nil }
+                var shifted = hl
+                shifted.byteRange = (a - offset)..<(b - offset)
+                return shifted
             }
             offset = lineEnd + 1
             let line = rawLine.hasSuffix("\r") ? String(rawLine.dropLast()) : rawLine
@@ -4931,11 +5297,13 @@ private final class MarkdownRenderer<State> {
                 color = s.text
             }
             let shown = line.isEmpty ? " " : line
-            var spans = [TextSpan(shown, color: color, monospace: true)]
-            if !lineHLs.isEmpty {
-                spans = applyUTF8Highlights(spans: spans, ranges: lineHLs, activeIndex: nil, bg: s.highlightBg, activeBg: s.highlightCurrentBg, fg: s.highlightFg, activeFg: s.highlightCurrentFg)
-            }
-            var r: El<State> = row().key("l\(n)").wFull().px(s.codeBlockPad[0]).child(applySelect(rich(spans).font(s.codeBlock).color(color).wFull()))
+            let spans = [TextSpan(shown, color: color, monospace: true)]
+            let lineNode = applySelect(
+                withReveal(tabbedRich(shown, spans: spans, highlights: lineHLs, style: s.codeBlock, color: color))
+                    .wFull()
+                    .copyBreaks(n == 0 ? 2 : 1, n == last ? 2 : 1)
+            )
+            var r: El<State> = row().key("l\(n)").wFull().px(s.codeBlockPad[0]).child(lineNode)
             if let tint { r = r.bg(tint) }
             c = c.child(r)
         }
@@ -4954,10 +5322,10 @@ private final class MarkdownRenderer<State> {
             let trimmed = lines.trimmingCharacters(in: .whitespacesAndNewlines)
             let labeled = d.label(KitMermaid.kindLabel(lines)).description(trimmed).key("card")
             let framed = view.diagramFrameHandler?(labeled, MarkdownDiagramFrameContext(index: index, source: lines, open: open)) ?? labeled
-            return col().wFull().child(framed)
+            return col().wFull().transition(.none).child(framed)
         }
         if open && view.config.isStreaming && mayDrawMermaid(lines) {
-            return col().wFull()
+            return col().wFull().transition(.none)
         }
         return col().wFull().child(renderCode(src, source: source, map: map).key("source"))
     }
@@ -4970,14 +5338,29 @@ private final class MarkdownRenderer<State> {
             indent = s.listIndent
         }
 
-        var c: El<State> = col().wFull()
+        var c: El<State> = col().role(.list).wFull()
         let n = items.count
         for (k, item) in items.enumerated() {
             let imap = k < itemMaps.count ? itemMaps[k] : []
             let task = nextTask < doc.tasks.count ? doc.tasks[nextTask] : nil
             nextTask += 1
             let saved = flow
-            flow = FlowState(lists: saved.lists + 1, inset: saved.inset + indent, ink: saved.ink)
+            let lead: Lead
+            if let task {
+                lead = .task(task.checked)
+            } else if let start {
+                lead = .number(start + UInt64(k))
+            } else {
+                lead = .bullet
+            }
+            let beforeBreaks: UInt8 = (k == 0 && saved.lists == 0) ? 2 : 1
+            flow = FlowState(
+                lists: saved.lists + 1,
+                inset: saved.inset + indent,
+                ink: saved.ink,
+                cols: saved.cols + lead.width,
+                lead: (saved.cols, lead, beforeBreaks)
+            )
 
             let topGap: Float = k == 0 ? 0 : s.listGap
             let rowEl: El<State>
@@ -4994,8 +5377,9 @@ private final class MarkdownRenderer<State> {
                 rowEl = row()
                     .key("i\(k)")
                     .role(.listItem)
+                    .positionInSet(k + 1, size: n)
                     .wFull()
-                    .child(marker)
+                    .child(withReveal(marker).a11yHidden())
                     .child(blocksIn(item, maps: imap, keys: [], topLevel: false, inItem: true).grow(1).shrink(1))
             }
             flow = saved
@@ -5013,7 +5397,6 @@ private final class MarkdownRenderer<State> {
         markerOffset: Int,
         checked: Bool
     ) -> El<State> {
-        _ = n
         let t = s.task
         let interactive = view.onTaskHandler != nil && !view.config.areTasksReadOnly
         let fill = checked ? t.fillOn : t.fillOff
@@ -5030,6 +5413,7 @@ private final class MarkdownRenderer<State> {
             .bg(fill)
             .border(1, border)
             .child(icon(t.check, size: t.size * 0.625).key("mark").color(t.mark).opacity(checked ? 1 : 0))
+            .a11yHidden()
         if interactive {
             control = control.hover(t.hover)
         }
@@ -5043,6 +5427,9 @@ private final class MarkdownRenderer<State> {
             .key("i\(k)")
             .role(.checkbox)
             .label(bodyText)
+            .checked(checked)
+            .readOnly(!interactive)
+            .positionInSet(k + 1, size: n)
             .selected(checked ? "true" : "false")
             .focusable(interactive)
             .wFull()
@@ -5073,6 +5460,9 @@ private final class MarkdownRenderer<State> {
         }
 
         var frame: El<State> = col().wFull().p(inset)
+        if !view.config.isScrollWide {
+            frame = frame.role(.table)
+        }
         if !s.tableFullWidth {
             frame = frame.maxW(total + 2 * inset)
         }
@@ -5080,9 +5470,11 @@ private final class MarkdownRenderer<State> {
         if let ring { frame = frame.rounded(6).border(0.5, ring) }
 
         let headPad = s.tableHeadPad ?? s.tablePad
-        let headFont = TextStyle(size: (s.tableFont ?? s.body).size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: (s.tableFont ?? s.body).lineHeight, family: (s.tableFont ?? s.body).family)
-        let bodyFont = s.tableFont ?? s.body
-        let headRow = renderTableRow(cells: t.head, maps: headMaps, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: headFont, color: s.tableHeadText, pad: headPad).key("th")
+        let baseTableFont = s.tableFont ?? s.body
+        let tableFeatures = s.tableTabular ? "tnum" : baseTableFont.features
+        let headFont = TextStyle(size: baseTableFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseTableFont.lineHeight, family: baseTableFont.family, features: tableFeatures)
+        let bodyFont = TextStyle(size: baseTableFont.size, weight: baseTableFont.weight, lineHeight: baseTableFont.lineHeight, letterSpacing: baseTableFont.letterSpacing, italic: baseTableFont.italic, family: baseTableFont.family, features: tableFeatures)
+        let headRow = renderTableRow(cells: t.head, maps: headMaps, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: headFont, color: s.tableHeadText, pad: headPad, cellRole: .columnHeader).key("th")
 
         if let bodyLook = s.tableBody {
             frame = frame.child(headRow)
@@ -5090,7 +5482,7 @@ private final class MarkdownRenderer<State> {
                 var rowsCol: El<State> = col().key("tbc").wFull()
                 for (i, cells) in t.rows.enumerated() {
                     let rmap = i < rowMaps.count ? rowMaps[i] : []
-                    var rowEl = renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad).key("r\(i)")
+                    var rowEl = renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)")
                     if i + 1 < t.rows.count {
                         rowEl = rowEl.borderSides(bottom: 0.5, color: s.tableRule)
                     }
@@ -5103,12 +5495,12 @@ private final class MarkdownRenderer<State> {
             frame = frame.child(headRow.bg(s.tableHeadFill))
             for (i, cells) in t.rows.enumerated() {
                 let sepColor = (i == 0 ? s.tableHeadRule : nil) ?? s.tableRule
-                frame = frame.child(el().key("s\(i)").wFull().h(0.5).bg(sepColor))
+                frame = frame.child(el().key("s\(i)").wFull().h(0.5).bg(sepColor).a11yHidden())
                 let rmap = i < rowMaps.count ? rowMaps[i] : []
-                frame = frame.child(renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad).key("r\(i)"))
+                frame = frame.child(renderTableRow(cells: cells, maps: rmap, table: t, widths: fixedWidths, natural: colWidths.natural, minWidths: colWidths.min, font: bodyFont, color: s.text, pad: s.tablePad, cellRole: .gridCell).key("r\(i)"))
             }
             if ring == nil {
-                frame = frame.child(el().key("s-end").wFull().h(0.5).bg((t.rows.isEmpty ? s.tableHeadRule : nil) ?? s.tableRule))
+                frame = frame.child(el().key("s-end").wFull().h(0.5).bg((t.rows.isEmpty ? s.tableHeadRule : nil) ?? s.tableRule).a11yHidden())
             }
         }
 
@@ -5119,7 +5511,7 @@ private final class MarkdownRenderer<State> {
             } else {
                 frame = s.tableFullWidth ? frame.maxW(total + 2 * inset) : frame.w(total + 2 * inset)
             }
-            return col().wFull().child(col().key("scroll").wFull().scrollX().child(frame))
+            return col().role(.table).wFull().child(col().key("scroll").wFull().scrollX().child(frame))
         }
         return frame
     }
@@ -5133,13 +5525,15 @@ private final class MarkdownRenderer<State> {
         minWidths: [Float],
         font: TextStyle,
         color: Color,
-        pad: [Float]
+        pad: [Float],
+        cellRole: ElementRole
     ) -> El<State> {
         let total = natural.reduce(0, +)
-        var r: El<State> = row().wFull()
+        var r: El<State> = row().role(.row).wFull()
         let tableDir = MarkdownBidi.tableDirection(table)
         for j in 0..<natural.count {
-            let inl = j < cells.count ? cells[j] : MarkdownInline()
+            let rawInl = j < cells.count ? cells[j] : MarkdownInline()
+            let inl = withCodeLinks(rawInl)
             let m = j < maps.count ? maps[j] : nil
             var align = (s.tableAlign && j < table.align.count) ? table.align[j] : .start
             let dir = MarkdownBidi.inlineDirection(inl)
@@ -5147,13 +5541,10 @@ private final class MarkdownRenderer<State> {
                 if align == .start { align = .end }
                 else if align == .end { align = .start }
             }
-            var spans = buildTextSpans(inl, font: font, baseColor: color)
-            let hl = textHighlights(for: inl.text, map: m)
-            if !hl.isEmpty {
-                spans = applyUTF8Highlights(spans: spans, ranges: hl, activeIndex: nil, bg: s.highlightBg, activeBg: s.highlightCurrentBg, fg: s.highlightFg, activeFg: s.highlightCurrentFg)
-            }
-            let content = applySelect(rich(spans).font(font).color(color).textAlign(align.textAlign).wFull())
-            var cell: El<State> = col().key("c\(j)")
+            let spans = buildTextSpans(inl, font: font, baseColor: color)
+            let rawContent: El<State> = withReveal(rich(spans).font(font).color(color).textAlign(align.textAlign).wrap(view.config.isScrollWide ? .noWrap : .wrap)).wFull()
+            let content = selectInline(rawContent, inl: inl, map: m)
+            var cell: El<State> = col().key("c\(j)").role(cellRole)
             if let fixed = widths, j < fixed.count {
                 cell = cell.w(fixed[j])
             } else if s.tableFullWidth && total > 0 {
@@ -5195,8 +5586,10 @@ private final class MarkdownRenderer<State> {
             return (natural, mins, fit)
         }
 
-        let baseFont = s.tableFont ?? s.body
-        let headFont = TextStyle(size: baseFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseFont.lineHeight, family: baseFont.family)
+        let rawTableFont = s.tableFont ?? s.body
+        let tableFeatures = s.tableTabular ? "tnum" : rawTableFont.features
+        let baseFont = TextStyle(size: rawTableFont.size, weight: rawTableFont.weight, lineHeight: rawTableFont.lineHeight, letterSpacing: rawTableFont.letterSpacing, italic: rawTableFont.italic, family: rawTableFont.family, features: tableFeatures)
+        let headFont = TextStyle(size: baseFont.size, weight: s.tableHeadWeight ?? s.strongWeight, lineHeight: baseFont.lineHeight, family: baseFont.family, features: tableFeatures)
         let (hn, hm, hf) = measureLines([t.head], font: headFont)
         let (bn, bm, bf) = measureLines(settledRows, font: baseFont)
         let headPadX = (s.tableHeadPad ?? s.tablePad)[0]
