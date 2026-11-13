@@ -321,7 +321,7 @@ public struct ShapedText: @unchecked Sendable {
     public var strikethroughs: [SIMD4<Float>] = []
     public var backgrounds: [(SIMD4<Float>, Color)]
     #if canImport(CoreText) && canImport(CoreGraphics)
-    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
+    internal var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
     #endif
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
 }
@@ -1473,7 +1473,7 @@ public final class TextSystem: @unchecked Sendable {
         return nil
     }
 
-    private func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
+    internal func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
         syncGlobalFamiliesIfNeeded()
         let sizePx = style.size * pixelScale
         let key = FontKey(
@@ -1965,6 +1965,123 @@ public final class TextSystem: @unchecked Sendable {
         }
         return rects
     }
+
+    internal func computeInk(_ text: String, style: TextStyle) -> TextInk? {
+        guard !text.isEmpty else { return nil }
+        let k = TextInkAccumulator.oversample
+        let shaped = shape(text: text, spans: nil, style: style, maxWidth: nil, pixelScale: k, emitGlyphs: false)
+        let baseFont = resolveCTFont(style: style, pixelScale: k)
+        let lhPx = style.resolvedLineHeight * k
+        let ascentPx = Float(CTFontGetAscent(baseFont))
+        let descentPx = Float(CTFontGetDescent(baseFont))
+        let halfLeadingPx = (lhPx - (ascentPx + descentPx)) * 0.5
+        let graySpace = CGColorSpaceCreateDeviceGray()
+        let rgbSpace = CGColorSpaceCreateDeviceRGB()
+
+        var acc = TextInkAccumulator()
+        for (lineIdx, rec) in shaped.lineStrings.enumerated() {
+            guard let ctLine = rec.ctLine else { continue }
+            let lineTopPx = Float(lineIdx) * lhPx
+            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
+            let alignOffsetPx = rec.originX * k
+            let runs = CTLineGetGlyphRuns(ctLine) as? [CTRun] ?? []
+            for run in runs {
+                let glyphCount = CTRunGetGlyphCount(run)
+                if glyphCount == 0 { continue }
+                let attrs = CTRunGetAttributes(run) as NSDictionary
+                let runFont = (attrs[kCTFontAttributeName] as! CTFont)
+                let runIsColor = GlyphAtlas.isColorFont(runFont)
+
+                var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
+                var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
+                CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
+                CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+
+                for i in 0..<glyphCount {
+                    var g = glyphs[i]
+                    var bbox = CGRect.zero
+                    CTFontGetBoundingRectsForGlyphs(runFont, .default, &g, &bbox, 1)
+                    if bbox.isEmpty || bbox.width <= 0.01 || bbox.height <= 0.01 {
+                        continue
+                    }
+
+                    let gxPx = alignOffsetPx + Float(positions[i].x)
+                    let gyPx = baselineYPx - Float(positions[i].y)
+                    let floorX = floorf(gxPx)
+                    let subX = gxPx - floorX
+
+                    let minX = Int(floor(bbox.minX)) - 1
+                    let maxX = Int(ceil(bbox.maxX + CGFloat(subX))) + 1
+                    let minY = Int(floor(bbox.minY)) - 1
+                    let maxY = Int(ceil(bbox.maxY)) + 1
+                    let bw = max(1, maxX - minX)
+                    let bh = max(1, maxY - minY)
+
+                    if runIsColor {
+                        var rgba = Array<UInt8>(repeating: 0, count: bw * bh * 4)
+                        guard let ctx = CGContext(
+                            data: &rgba,
+                            width: bw,
+                            height: bh,
+                            bitsPerComponent: 8,
+                            bytesPerRow: bw * 4,
+                            space: rgbSpace,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                        ) else { continue }
+                        ctx.setAllowsAntialiasing(true)
+                        ctx.setShouldAntialias(true)
+                        var pos = CGPoint(x: CGFloat(-minX) + CGFloat(subX), y: CGFloat(-minY))
+                        CTFontDrawGlyphs(runFont, &g, &pos, 1, ctx)
+                        for row in 0..<bh {
+                            for col in 0..<bw {
+                                let a = Float(rgba[(row * bw + col) * 4 + 3]) / 255.0
+                                if a > 0 {
+                                    acc.add(
+                                        x: floorX + Float(minX) + Float(col),
+                                        y: gyPx - Float(maxY) + Float(row),
+                                        alpha: a
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        var bitmap = Array<UInt8>(repeating: 0, count: bw * bh)
+                        guard let ctx = CGContext(
+                            data: &bitmap,
+                            width: bw,
+                            height: bh,
+                            bitsPerComponent: 8,
+                            bytesPerRow: bw,
+                            space: graySpace,
+                            bitmapInfo: CGImageAlphaInfo.none.rawValue
+                        ) else { continue }
+                        ctx.setAllowsAntialiasing(true)
+                        ctx.setShouldAntialias(true)
+                        ctx.setAllowsFontSmoothing(false)
+                        ctx.setShouldSmoothFonts(false)
+                        ctx.setAllowsFontSubpixelPositioning(true)
+                        ctx.setShouldSubpixelPositionFonts(true)
+                        ctx.setFillColor(gray: 1.0, alpha: 1.0)
+                        var pos = CGPoint(x: CGFloat(-minX) + CGFloat(subX), y: CGFloat(-minY))
+                        CTFontDrawGlyphs(runFont, &g, &pos, 1, ctx)
+                        for row in 0..<bh {
+                            for col in 0..<bw {
+                                let a = Float(bitmap[row * bw + col]) / 255.0
+                                if a > 0 {
+                                    acc.add(
+                                        x: floorX + Float(minX) + Float(col),
+                                        y: gyPx - Float(maxY) + Float(row),
+                                        alpha: a
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return acc.finish()
+    }
     #else
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
         measureFramePhase(.text) {
@@ -1995,6 +2112,10 @@ public final class TextSystem: @unchecked Sendable {
 
     public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
         selectionRectsPortable(in: shaped, utf8Range: utf8Range, pixelScale: pixelScale)
+    }
+
+    internal func computeInk(_ text: String, style: TextStyle) -> TextInk? {
+        computeInkPortable(text, style: style)
     }
     #endif
 
@@ -2355,5 +2476,43 @@ public final class TextSystem: @unchecked Sendable {
             rects.append(SIMD4<Float>(min(x0, x1), rec.originY, max(2.0, abs(x1 - x0)), shaped.lineHeight))
         }
         return rects
+    }
+
+    internal func computeInkPortable(_ text: String, style: TextStyle) -> TextInk? {
+        guard !text.isEmpty else { return nil }
+        let k = TextInkAccumulator.oversample
+        let shaped = shapePortable(text: text, spans: nil, style: style, maxWidth: nil, pixelScale: k, emitGlyphs: false)
+        let lineH = style.resolvedLineHeight * k
+        let baselineOffset = lineH * 0.78
+        let isMono = style.family == .monospace
+        let isBold = style.weight >= 600.0
+        var acc = TextInkAccumulator()
+        for rec in shaped.portableLines {
+            var penX = rec.originX * k
+            let baselineY = rec.originY * k + baselineOffset
+            for scalar in rec.text.unicodeScalars {
+                let adv = PortableGlyphFont.advanceRatio(for: scalar, mono: isMono) * style.size * k
+                if scalar.value > 0x20 {
+                    let r = PortableGlyphFont.rasterizeScaled(
+                        scalar: scalar,
+                        fontSizePx: style.size * k,
+                        bold: isBold,
+                        italic: style.italic
+                    )
+                    let left = penX + 0.5
+                    let top = baselineY + r.bearingY
+                    for row in 0..<r.height {
+                        for col in 0..<r.width {
+                            let a = Float(r.bitmap[row * r.width + col]) / 255.0
+                            if a > 0 {
+                                acc.add(x: left + Float(col), y: top + Float(row), alpha: a)
+                            }
+                        }
+                    }
+                }
+                penX += adv
+            }
+        }
+        return acc.finish()
     }
 }
