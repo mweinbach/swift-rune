@@ -26,6 +26,9 @@ private final class RunCellLayoutCache: @unchecked Sendable {
         var singleStyle = style
         singleStyle.wrap = .noWrap
         singleStyle.maxLines = 0
+        if singleStyle.fontSmoothing == .systemDefault {
+            singleStyle.fontSmoothing = textSystem.smoothing
+        }
         let scale = max(1.0, pixelScale)
         let isPortable: Bool = {
             #if canImport(CoreText) && canImport(CoreGraphics)

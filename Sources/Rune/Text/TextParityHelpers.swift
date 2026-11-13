@@ -276,6 +276,9 @@ extension TextSystem {
         let s = max(scale, 1.0)
         var single = style
         single.wrap = .noWrap
+        if single.fontSmoothing == .systemDefault {
+            single.fontSmoothing = smoothing
+        }
         let shaped = shape(text: run.text, spans: nil, style: single, maxWidth: nil, pixelScale: s, emitGlyphs: false)
         var entries: [RunLayout.GraphemeEntry] = []
         var utf8Cursor = 0

@@ -963,6 +963,13 @@ public final class GlyphAtlas: @unchecked Sendable {
         return total
     }
 
+    /// Number of placed icon entries currently cached (`GlyphAtlas::icons`).
+    public var cachedIconCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return iconCache.count
+    }
+
     /// Fast cross-launch font identity hash (`#807`: byte length, first/last 64 KiB, and SFNT `head` table).
     public static func fontIdentityHash(_ fontBytes: Data) -> UInt64 {
         let edgeBytes = 64 * 1024
@@ -1362,7 +1369,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         #endif
     }
 
-    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry {
+    public func rasterizeIconIfPlaced(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry? {
         let px = drawnSize != nil ? max(1, pixelSize) : max(4, pixelSize)
         let q: UInt8
         let rasterDrawn: Float?
@@ -1387,6 +1394,9 @@ public final class GlyphAtlas: @unchecked Sendable {
         lock.unlock()
 
         var bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px, drawnSize: rasterDrawn)
+        guard bitmap.contains(where: { $0 != 0 }) else {
+            return nil
+        }
         if mirrored && px > 1 && bitmap.count >= px * px {
             for row in 0..<px {
                 let rowBase = row * px
@@ -1401,7 +1411,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         lock.lock()
         guard let placed = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
             lock.unlock()
-            return Entry(uv: .zero, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
+            return nil
         }
         let entry = Entry(
             uv: placed.uv,
@@ -1415,6 +1425,12 @@ public final class GlyphAtlas: @unchecked Sendable {
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
+    }
+
+    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry {
+        let px = drawnSize != nil ? max(1, pixelSize) : max(4, pixelSize)
+        return rasterizeIconIfPlaced(icon, pixelSize: pixelSize, drawnSize: drawnSize, mirrored: mirrored)
+            ?? Entry(uv: .zero, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
     }
 
     private func shelfLocked(_ page: Int) -> ShelfState {
@@ -2329,7 +2345,9 @@ public final class TextSystem: @unchecked Sendable {
     public func iconQuad(_ icon: SVGIcon, pixelSize: Float, origin: SIMD2<Float> = .zero) -> PositionedGlyph? {
         guard pixelSize.isFinite && pixelSize > 0 else { return nil }
         let px = max(1, Int(pixelSize.rounded()))
-        let entry = glyphAtlas.rasterizeIcon(icon, pixelSize: px)
+        guard let entry = glyphAtlas.rasterizeIconIfPlaced(icon, pixelSize: px) else {
+            return nil
+        }
         return PositionedGlyph(
             rect: SIMD4<Float>(origin.x, origin.y, Float(entry.pixelSize.x), Float(entry.pixelSize.y)),
             uv: entry.uv,
@@ -4287,8 +4305,12 @@ public final class TextSystem: @unchecked Sendable {
         pixelScale: Float,
         emitGlyphs: Bool = true
     ) -> ShapedText {
-        measureFramePhase(.text) {
-            shapePortable(text: text, spans: spans, pills: pills, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+        var effectiveStyle = style
+        if effectiveStyle.fontSmoothing == .systemDefault {
+            effectiveStyle.fontSmoothing = smoothing
+        }
+        return measureFramePhase(.text) {
+            shapePortable(text: text, spans: spans, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
         }
     }
 

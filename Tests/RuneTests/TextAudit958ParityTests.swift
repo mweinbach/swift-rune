@@ -209,6 +209,24 @@ struct TextAudit958ParityTests {
         #expect(ts.iconQuad(star, pixelSize: 0) == nil)
         #expect(ts.iconQuad(star, pixelSize: -4) == nil)
         #expect(ts.iconQuad(star, pixelSize: .nan) == nil)
+        let defaultTs = TextSystem()
+        let beforeIcons = defaultTs.glyphAtlas.cachedIconCount
+        #expect(defaultTs.iconQuad(star, pixelSize: Float(GlyphAtlas.atlasSize)) == nil)
+        #expect(defaultTs.iconQuad(star, pixelSize: Float(GlyphAtlas.atlasSize - 1)) == nil)
+        #expect(defaultTs.glyphAtlas.cachedIconCount == beforeIcons)
+        #expect(defaultTs.iconQuad(star, pixelSize: 24) != nil)
+
+        // L742: TextSystem.smoothing resolves FontSmoothing.systemDefault in both runLayout and shape
+        let tsOff = TextSystem()
+        tsOff.smoothing = .off
+        let rlDefault = tsOff.runLayout(TextRun("Hi"), style: TextStyle(size: 14, fontSmoothing: .systemDefault), scale: 1.0)
+        #expect(rlDefault.cellLayout?.style.fontSmoothing == .off)
+        let offGlyphs = tsOff.glyphsIn(run: rlDefault, at: 0, scale: 1.0)
+        #expect(!offGlyphs.isEmpty)
+        let tsOffExplicit = TextSystem()
+        let rlExplicit = tsOffExplicit.runLayout(TextRun("Hi"), style: TextStyle(size: 14, fontSmoothing: .off), scale: 1.0)
+        let explicitGlyphs = tsOffExplicit.glyphsIn(run: rlExplicit, at: 0, scale: 1.0)
+        #expect(offGlyphs.map(\.uv) == explicitGlyphs.map(\.uv))
 
         // L770: first glyph baseline origin alignment & distinct shape outputs across different styles
         let a = ts.shape(text: "Hello", style: style, maxWidth: nil, pixelScale: 2.0, emitGlyphs: true)
