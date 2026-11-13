@@ -365,7 +365,7 @@ private func fnvMixFloat4(_ h: inout UInt64, _ v: SIMD4<Float>) {
 
 private func hashCachedLayerContent(
     instances: ArraySlice<RenderInstance>,
-    glyphFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float)>,
+    glyphFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16)>,
     imageFixups: ArraySlice<(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)>,
     surfacesCount: Int,
     origin: SIMD2<Float>,
@@ -505,6 +505,7 @@ extension Runtime {
     }
 
     internal func buildRenderFrame(frameOut: FrameOutput, now: Double) -> RenderFrame {
+        textSystem.glyphAtlas.beginFrame(pinnedMask: 0)
         let scale = max(pixelScale, 0.5)
         let widthPx = max(1, Int((viewport.x * scale).rounded()))
         let heightPx = max(1, Int((viewport.y * scale).rounded()))
@@ -570,7 +571,7 @@ extension Runtime {
         var materials: [MaterialDraw] = []
 
         // Normalized-to-texel fixups applied once glyph/image atlases reach final size
-        var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float)] = []
+        var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16)] = []
         var imageFixups: [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)] = []
 
         var childrenByParent: [Int: [FlatNode]] = [:]
@@ -1375,7 +1376,7 @@ extension Runtime {
                     fade: activeFade
                 ))
                 marks.append(0)
-                glyphFixups.append((idx, placed.uv, pw, ph))
+                glyphFixups.append((idx, placed.uv, pw, ph, placed.page))
             }
 
             // 11. Text (`plainText` / `richSpans`)
@@ -1410,7 +1411,7 @@ extension Runtime {
                         fade: activeFade
                     ))
                     marks.append(0)
-                    glyphFixups.append((idx, gq.uv, gw, gh))
+                    glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage))
                 }
             }
 
@@ -1536,13 +1537,18 @@ extension Runtime {
         }
 
         // Convert normalized glyph & image UVs to exact pixel texel origins using final grown atlas sizes.
-        let glyphW = Float(textSystem.glyphAtlas.atlas.width)
-        let glyphH = Float(textSystem.glyphAtlas.atlas.height)
+        let glyphPages = textSystem.glyphAtlas.pageCount
+        let compositedGlyphs = textSystem.glyphAtlas.compositedAtlas()
+        let glyphW = Float(compositedGlyphs.width)
+        let glyphH = Float(compositedGlyphs.height)
         for fix in glyphFixups where fix.index < instances.count {
+            let pageIdx = Float(min(Int(fix.page), max(0, glyphPages - 1)))
+            let ny0 = glyphPages > 1 ? (fix.normUV.y + pageIdx) / Float(glyphPages) : fix.normUV.y
+            let ny1 = glyphPages > 1 ? (fix.normUV.w + pageIdx) / Float(glyphPages) : fix.normUV.w
             let u0 = fix.normUV.x * glyphW
-            let v0 = fix.normUV.y * glyphH
+            let v0 = ny0 * glyphH
             let uw = max(1.0, (fix.normUV.z - fix.normUV.x) * glyphW)
-            let vh = max(1.0, (fix.normUV.w - fix.normUV.y) * glyphH)
+            let vh = max(1.0, (ny1 - ny0) * glyphH)
             let scaled = abs(uw - fix.texW) > 0.5 || abs(vh - fix.texH) > 0.5
             instances[fix.index].uv = SIMD4<Float>(u0, v0, scaled ? uw : 0, scaled ? vh : 0)
         }
@@ -1568,7 +1574,7 @@ extension Runtime {
             height: heightPx,
             srgbBlend: srgbBlend,
             clearColor: SIMD4<Float>(clear.x * clear.w, clear.y * clear.w, clear.z * clear.w, clear.w),
-            glyphs: textSystem.glyphAtlas.atlas,
+            glyphs: compositedGlyphs,
             glyphGeneration: textSystem.glyphAtlas.generation,
             images: imagePacker.atlas,
             imageRevision: imagePacker.revision,

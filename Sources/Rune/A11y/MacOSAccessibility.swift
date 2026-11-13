@@ -51,7 +51,7 @@ public extension AccessibilityTreeBuilder {
 
             return AccessibilityNode(
                 id: nodeId,
-                role: info.role,
+                role: (isSecure && info.role == .textInput) ? .passwordInput : info.role,
                 label: projectedLabel,
                 value: projectedValue,
                 help: info.help,
@@ -129,11 +129,154 @@ public extension AccessibilityTreeBuilder {
 public extension Runtime {
     /// Returns the current accessibility tree snapshot built from live runtime elements.
     func accessibilitySnapshot(securePaths: Set<String> = []) -> AccessibilityNode {
-        AccessibilityTreeBuilder.project(
-            elements: elements(),
-            focusedPath: focusedPath,
-            viewport: viewport,
-            securePaths: securePaths
+        if flatNodes.isEmpty {
+            return AccessibilityTreeBuilder.project(
+                elements: elements(),
+                focusedPath: focusedPath,
+                viewport: viewport,
+                securePaths: securePaths
+            )
+        }
+
+        // Map keyed elements to descriptive text for `labelledBy` / `describedBy`.
+        var textByKey: [String: String] = [:]
+        func collectText(_ idx: Int, into parts: inout [String], childrenByParent: [Int: [Int]]) {
+            let n = flatNodes[idx]
+            guard !n.el.isA11yHidden && !n.el.isSecure else { return }
+            if let lbl = n.el.a11yLabel, !lbl.isEmpty { parts.append(lbl) }
+            else if let txt = n.el.plainText, !txt.isEmpty { parts.append(txt) }
+            for c in (childrenByParent[idx] ?? []) {
+                collectText(c, into: &parts, childrenByParent: childrenByParent)
+            }
+        }
+
+        var childrenByParent: [Int: [Int]] = [:]
+        var roots: [Int] = []
+        for (idx, node) in flatNodes.enumerated() {
+            if node.effectiveInert || node.el.isA11yHidden { continue }
+            if let pIdx = node.parentIndex,
+               pIdx >= 0,
+               pIdx < flatNodes.count,
+               !flatNodes[pIdx].effectiveInert,
+               !flatNodes[pIdx].el.isA11yHidden {
+                childrenByParent[pIdx, default: []].append(idx)
+            } else {
+                roots.append(idx)
+            }
+        }
+        for (idx, node) in flatNodes.enumerated() where !node.effectiveInert && !node.el.isA11yHidden {
+            if let k = node.key {
+                var parts: [String] = []
+                collectText(idx, into: &parts, childrenByParent: childrenByParent)
+                if !parts.isEmpty {
+                    textByKey[k] = parts.joined(separator: " ")
+                }
+            }
+        }
+
+        let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
+        func build(_ idx: Int) -> AccessibilityNode {
+            let node = flatNodes[idx]
+            let el = node.el
+            var editIsSecure = el.isSecure
+            var editText: String? = el.plainText
+            var editChars: Int? = nil
+            var editSel: [Int]? = nil
+            if let editLens = el.handlers.editLens {
+                let edit = editLens.get(state)
+                editIsSecure = editIsSecure || edit.isSecure
+                if !editIsSecure {
+                    editText = edit.text
+                    editChars = edit.text.count
+                    let lo = min(edit.anchor, edit.cursor)
+                    let hi = max(edit.anchor, edit.cursor)
+                    editSel = [0, lo, 0, hi]
+                } else {
+                    editText = nil
+                }
+            }
+            let isSecure = editIsSecure || securePaths.contains(node.path) || (el.role == .textInput && editText == nil)
+            let rect = presentedRectByPath[node.path] ?? node.targetRect
+            let nodeId = node.key ?? node.path
+
+            var actions: [AccessibilityAction] = []
+            if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
+               [.button, .checkbox, .switchControl, .radio, .tab, .menuItem].contains(el.role) {
+                actions.append(.press)
+            }
+            if el.focusable && !node.effectiveInert {
+                actions.append(.focus)
+            }
+            if el.role == .slider {
+                actions.append(.increment)
+                actions.append(.decrement)
+            }
+
+            let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
+            let labelledByText = el.a11yLabelledBy.flatMap { textByKey[$0] }
+            let describedByText = el.a11yDescribedBy.flatMap { textByKey[$0] }
+            let resolvedLabel: String? = isSecure
+                ? (el.a11yLabel ?? labelledByText ?? "Password")
+                : (el.a11yLabel ?? labelledByText ?? (el.role == .textInput ? nil : el.plainText))
+            let resolvedHelp: String? = el.a11yDescription ?? describedByText ?? el.a11yHelp
+            let selectedState: Bool? = (selectableRoles.contains(el.role) || el.itemSelected) ? el.itemSelected : nil
+
+            let hasScroll = !el.layout.scrollAxes.isEmpty
+            let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
+            let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
+
+            let resolvedRole: ElementRole = (isSecure && el.role == .textInput) ? .passwordInput : el.role
+
+            return AccessibilityNode(
+                id: nodeId,
+                role: resolvedRole,
+                label: resolvedLabel,
+                value: resolvedValue,
+                help: resolvedHelp,
+                placeholder: el.placeholder,
+                range: el.a11yRange,
+                frame: rect,
+                isFocused: (node.path == focusedPath) || (focusedKey != nil && node.key == focusedKey),
+                isFocusable: el.focusable && !node.effectiveInert,
+                isSelected: el.itemSelected,
+                selectedState: selectedState,
+                isExpanded: el.a11yExpanded,
+                level: el.a11yLevel,
+                positionInSet: el.a11yPosInSet?.position,
+                sizeOfSet: el.a11yPosInSet?.size,
+                keyboardShortcut: el.a11yShortcutHint,
+                url: el.a11yHref,
+                activeDescendant: el.a11yActiveDescendant,
+                sortAscending: el.a11ySorted,
+                isDisabled: el.a11yDisabled,
+                isReadOnly: el.a11yReadOnly,
+                isInvalid: el.a11yInvalid,
+                toggled: el.a11yChecked,
+                liveRegion: el.a11yLive,
+                clipsChildren: el.layout.clipOverflow,
+                scrollX: sOff?.x,
+                scrollY: sOff?.y,
+                scrollYMax: sMax?.y,
+                textSelection: editSel,
+                characterCount: editChars,
+                isModal: el.isModal || el.role == .dialog,
+                isSecure: isSecure,
+                actions: actions,
+                children: (childrenByParent[idx] ?? []).map(build)
+            )
+        }
+
+        let builtRoots = roots.map(build)
+        if builtRoots.count == 1 {
+            return builtRoots[0]
+        }
+        return AccessibilityNode(
+            id: "root",
+            role: .group,
+            label: nil,
+            value: nil,
+            frame: MotionRect.fromXYWH(0, 0, viewport.x, viewport.y),
+            children: builtRoots
         )
     }
 

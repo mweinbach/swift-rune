@@ -63,6 +63,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var variations: String
     public var features: String
     public var opticalSize: OpticalSize
+    public var direction: TextFlow?
 
     public init(
         size: Float = 14.0,
@@ -76,7 +77,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
         fontSmoothing: FontSmoothing = .systemDefault,
         variations: String = "",
         features: String = "",
-        opticalSize: OpticalSize = .auto
+        opticalSize: OpticalSize = .auto,
+        direction: TextFlow? = nil
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -90,10 +92,11 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.variations = variations
         self.features = features
         self.opticalSize = opticalSize
+        self.direction = direction
     }
 
     private enum CodingKeys: String, CodingKey {
-        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, fontSmoothing, variations, features, opticalSize
+        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, fontSmoothing, variations, features, opticalSize, direction
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,7 +113,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
             fontSmoothing: try c.decode(FontSmoothing.self, forKey: .fontSmoothing),
             variations: try c.decodeIfPresent(String.self, forKey: .variations) ?? "",
             features: try c.decodeIfPresent(String.self, forKey: .features) ?? "",
-            opticalSize: try c.decodeIfPresent(OpticalSize.self, forKey: .opticalSize) ?? .auto
+            opticalSize: try c.decodeIfPresent(OpticalSize.self, forKey: .opticalSize) ?? .auto,
+            direction: try c.decodeIfPresent(TextFlow.self, forKey: .direction)
         )
     }
 
@@ -306,17 +310,21 @@ public struct PositionedGlyph: Sendable, Equatable {
     public var color: Color?
     /// Non-nil index into `GlyphAtlas.colorGlyph(_:)` for RGBA color/emoji glyphs (`#807`).
     public var colorGlyphIndex: UInt32?
+    /// Alpha atlas page index (`GlyphAtlas.pageData(_:)`, `atlas.rs:168`).
+    public var atlasPage: UInt16
 
     public init(
         rect: SIMD4<Float>,
         uv: SIMD4<Float>,
         color: Color? = nil,
-        colorGlyphIndex: UInt32? = nil
+        colorGlyphIndex: UInt32? = nil,
+        atlasPage: UInt16 = 0
     ) {
         self.rect = rect
         self.uv = uv
         self.color = color
         self.colorGlyphIndex = colorGlyphIndex
+        self.atlasPage = atlasPage
     }
 }
 
@@ -453,6 +461,7 @@ public struct ShapedText: @unchecked Sendable {
     #endif
     fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
+    internal var forcedDirection: TextFlow? = nil
 }
 
 internal struct PillMetrics: Sendable, Hashable {
@@ -491,6 +500,24 @@ public final class GlyphAtlas: @unchecked Sendable {
         public var pixelSize: SIMD2<Int>
         /// Top-left offset from baseline origin in device pixels (`x` right, `y` down from baseline).
         public var bearingPx: SIMD2<Float>
+        /// Alpha atlas page holding this entry (`0` = primary page, `1...` = secondary/overflow pages).
+        public var page: UInt16
+        /// Pixel origin `(x, y)` within `page` (`atlas.rs:34`).
+        public var pixelOrigin: SIMD2<Int>
+
+        public init(
+            uv: SIMD4<Float>,
+            pixelSize: SIMD2<Int>,
+            bearingPx: SIMD2<Float>,
+            page: UInt16 = 0,
+            pixelOrigin: SIMD2<Int> = .zero
+        ) {
+            self.uv = uv
+            self.pixelSize = pixelSize
+            self.bearingPx = bearingPx
+            self.page = page
+            self.pixelOrigin = pixelOrigin
+        }
     }
 
     /// Cached RGBA8 color glyph bitmap (`#807`, Apple Color Emoji / COLR / CBDT / sbix).
@@ -508,8 +535,91 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
 
+    /// Upstream steady-state shelf page size (`atlas.rs:7`, `ATLAS_SIZE`).
+    public static let atlasSize: Int = 2048
+    /// Steady-state shelf pages (page 0 + one secondary page for ping-pong eviction, `atlas.rs:48`).
+    public static let maxSteadyPages: Int = 2
+    /// Hard ceiling on total glyph atlas pages (`atlas.rs:50`).
+    public static let maxOverflowPages: Int = 8
     /// Upstream CPU byte budget for cached RGBA color glyphs (`atlas.rs:52`, `COLOR_GLYPH_BUDGET`).
     public static let colorGlyphBudgetBytes: Int = 16 * 1024 * 1024
+
+    private enum ShelfUse: Equatable {
+        case idle
+        case lastFrame
+        case thisFrame
+    }
+
+    private struct ShelfState {
+        let width: Int
+        let height: Int
+        var x: Int = 1
+        var y: Int = 1
+        var h: Int = 0
+        var used: ShelfUse = .idle
+        var full: Bool = false
+        var age: UInt64
+        var liveTexels: UInt32 = 0
+
+        init(width: Int, height: Int, age: UInt64) {
+            self.width = width
+            self.height = height
+            self.age = age
+        }
+
+        mutating func reset(age: UInt64) {
+            self = ShelfState(width: width, height: height, age: age)
+        }
+
+        var nonEmpty: Bool {
+            x > 1 || y > 1 || h > 0
+        }
+
+        func usedRows() -> (Int, Int)? {
+            nonEmpty ? (0, min(y + h + 1, height)) : nil
+        }
+
+        mutating func alloc(w: Int, h: Int) -> (Int, Int)? {
+            if x + w + 1 > width {
+                y += self.h + 1
+                x = 1
+                self.h = 0
+            }
+            if y + h + 1 > height {
+                full = true
+                return nil
+            }
+            let pos = (x, y)
+            x += w + 1
+            self.h = max(self.h, h)
+            return pos
+        }
+
+        mutating func touch(texels: UInt32) {
+            used = .thisFrame
+            liveTexels = liveTexels &+ min(UInt32.max &- liveTexels, texels)
+        }
+
+        mutating func endFrame() {
+            switch used {
+            case .thisFrame: used = .lastFrame
+            case .idle, .lastFrame: used = .idle
+            }
+            liveTexels = 0
+        }
+    }
+
+    private struct AtlasPageState {
+        var atlas: R8Atlas
+        var dirty: (Int, Int)?
+        var shelf: ShelfState
+
+        init(width: Int, height: Int, age: UInt64) {
+            self.atlas = R8Atlas(width: width, height: height)
+            self.dirty = nil
+            self.shelf = ShelfState(width: width, height: height, age: age)
+        }
+    }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
     private struct GlyphKey: Hashable {
@@ -549,9 +659,12 @@ public final class GlyphAtlas: @unchecked Sendable {
     private let targetWidth: Int
     private let targetHeight: Int
     private var backingAllocated: Bool = false
-    private var shelfX: Int = 1
-    private var shelfY: Int = 1
-    private var shelfHeight: Int = 0
+    private var page0Shelf: ShelfState
+    private var page0Dirty: (Int, Int)? = nil
+    private var overflowPages: [AtlasPageState] = []
+    private var clock: UInt64 = 1
+    private var resetsCount: UInt64 = 0
+    private var rasterizedCount: UInt64 = 0
     private var accessCounter: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
@@ -564,7 +677,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
 
     /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
-    public convenience init(width: Int = 1024, height: Int = 1024, maxCachedEntries: Int = 4096) {
+    public convenience init(width: Int = GlyphAtlas.atlasSize, height: Int = GlyphAtlas.atlasSize, maxCachedEntries: Int = 4096) {
         self.init(
             width: width,
             height: height,
@@ -575,16 +688,164 @@ public final class GlyphAtlas: @unchecked Sendable {
 
     /// Initializes the atlas with an explicit color-glyph CPU memory budget (`#807`, default 16 MiB).
     public init(
-        width: Int = 1024,
-        height: Int = 1024,
+        width: Int = GlyphAtlas.atlasSize,
+        height: Int = GlyphAtlas.atlasSize,
         maxCachedEntries: Int = 4096,
         colorGlyphBudget: Int
     ) {
-        self.targetWidth = max(1, width)
-        self.targetHeight = max(1, height)
+        let w = max(1, width)
+        let h = max(1, height)
+        self.targetWidth = w
+        self.targetHeight = h
         self.atlas = R8Atlas(width: 1, height: 1)
+        self.page0Shelf = ShelfState(width: w, height: h, age: 1)
         self.maxCachedEntries = max(1, maxCachedEntries)
         self.maxColorGlyphBytes = max(0, colorGlyphBudget)
+    }
+
+    /// Number of allocated shelf pages (at least 1, matching `atlas.rs:248`).
+    public var pageCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return 1 + overflowPages.count
+    }
+
+    /// Alpha texels for a page returned by `Entry.page` / `PositionedGlyph.atlasPage` (`atlas.rs:253`).
+    public func pageData(_ page: Int) -> [UInt8]? {
+        lock.lock()
+        defer { lock.unlock() }
+        if page == 0 {
+            return backingAllocated ? atlas.texels : []
+        }
+        guard page >= 1 && page <= overflowPages.count else { return nil }
+        return overflowPages[page - 1].atlas.texels
+    }
+
+    /// Returns a single `R8Atlas` containing all active pages stacked vertically (`width x (height * pageCount)`).
+    /// When only page 0 exists, returns `atlas` directly with zero copy.
+    public func compositedAtlas() -> R8Atlas {
+        lock.lock()
+        defer { lock.unlock() }
+        if overflowPages.isEmpty {
+            return atlas
+        }
+        let total = 1 + overflowPages.count
+        let pageW = max(1, targetWidth)
+        let pageH = max(1, targetHeight)
+        let pageBytes = pageW * pageH
+        var combined = [UInt8](repeating: 0, count: pageBytes * total)
+        if backingAllocated && atlas.width == pageW && atlas.height == pageH && atlas.texels.count == pageBytes {
+            combined.replaceSubrange(0..<pageBytes, with: atlas.texels)
+        } else if backingAllocated && !atlas.texels.isEmpty {
+            let copyRows = min(pageH, atlas.height)
+            let copyCols = min(pageW, atlas.width)
+            for row in 0..<copyRows {
+                let srcStart = row * atlas.width
+                let dstStart = row * pageW
+                combined.replaceSubrange(dstStart..<(dstStart + copyCols), with: atlas.texels[srcStart..<(srcStart + copyCols)])
+            }
+        }
+        for i in overflowPages.indices {
+            let pageAtlas = overflowPages[i].atlas
+            let dstBase = (i + 1) * pageBytes
+            if pageAtlas.width == pageW && pageAtlas.height == pageH && pageAtlas.texels.count == pageBytes {
+                combined.replaceSubrange(dstBase..<(dstBase + pageBytes), with: pageAtlas.texels)
+            }
+        }
+        return R8Atlas(width: pageW, height: pageH * total, texels: combined)
+    }
+
+    /// Dirty row range `[y0, y1)` for a page since the last upload/reset (`atlas.rs:205`).
+    public func dirtyRows(_ page: Int) -> (Int, Int)? {
+        lock.lock()
+        defer { lock.unlock() }
+        if page == 0 { return page0Dirty }
+        guard page >= 1 && page <= overflowPages.count else { return nil }
+        return overflowPages[page - 1].dirty
+    }
+
+    /// Number of shelf page resets since creation (`atlas.rs:258`).
+    public var resets: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return resetsCount
+    }
+
+    /// Number of glyphs and icons placed into the atlas since creation (`atlas.rs:263`).
+    public var rasterized: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return rasterizedCount
+    }
+
+    /// Marks every used row on every page for re-upload (`atlas.rs:230`).
+    public func invalidate() {
+        lock.lock()
+        defer { lock.unlock() }
+        page0Dirty = page0Shelf.usedRows()
+        for i in overflowPages.indices {
+            overflowPages[i].dirty = overflowPages[i].shelf.usedRows()
+        }
+        generation &+= 1
+    }
+
+    /// Marks `page` as used in the current frame (`atlas.rs:299`).
+    public func touch(page: UInt16, texels: UInt32 = 0) {
+        lock.lock()
+        defer { lock.unlock() }
+        touchLocked(page: page, texels: texels)
+    }
+
+    /// Evicts a single atlas page, clearing cached entries pointing to it and resetting its shelf (`atlas.rs:307`).
+    public func evictPage(_ page: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        evictPageLocked(page)
+    }
+
+    /// Advances the frame boundary across pages, reclaiming idle or overflow pages not in `pinnedMask` (`atlas.rs:324`).
+    public func beginFrame(pinnedMask: UInt32 = 0) {
+        lock.lock()
+        defer { lock.unlock() }
+        let total = 1 + overflowPages.count
+        var totalLive: UInt64 = 0
+        for p in 0..<total {
+            totalLive += UInt64(shelfLocked(p).liveTexels)
+        }
+        let halfPage = max(1, UInt64(targetWidth * targetHeight / 2))
+        let needed = min(Self.maxOverflowPages, max(Self.maxSteadyPages, Int(totalLive / halfPage) + Self.maxSteadyPages))
+        let fullCount = (0..<total).filter { shelfLocked($0).full }.count
+        if fullCount >= needed || total > needed {
+            let keep = min(needed, total)
+            if let oldest = (0..<keep)
+                .filter({ p in shelfLocked(p).full && (pinnedMask & (UInt32(1) << min(p, 31))) == 0 })
+                .min(by: { shelfLocked($0).age < shelfLocked($1).age }) {
+                evictPageLocked(oldest)
+            }
+            for p in keep..<total {
+                if (pinnedMask & (UInt32(1) << min(p, 31))) == 0 && shelfLocked(p).nonEmpty {
+                    evictPageLocked(p)
+                }
+            }
+            while 1 + overflowPages.count > needed {
+                let last = overflowPages.count
+                if (pinnedMask & (UInt32(1) << min(last, 31))) != 0 || shelfLocked(last).nonEmpty {
+                    break
+                }
+                overflowPages.removeLast()
+            }
+        }
+        let finalTotal = 1 + overflowPages.count
+        for p in 0..<finalTotal {
+            if p == 0 {
+                page0Shelf.endFrame()
+            } else {
+                overflowPages[p - 1].shelf.endFrame()
+            }
+            if (pinnedMask & (UInt32(1) << min(p, 31))) != 0 {
+                touchLocked(page: UInt16(p), texels: 0)
+            }
+        }
     }
 
     /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
@@ -723,6 +984,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
             portableGlyphCache[key] = cached
+            touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
             return cached.entry
         }
@@ -735,14 +997,16 @@ public final class GlyphAtlas: @unchecked Sendable {
             italic: italic
         )
         lock.lock()
-        guard let uv = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap) else {
+        guard let placed = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap) else {
             lock.unlock()
             return Entry(uv: .zero, pixelSize: SIMD2<Int>(r.width, r.height), bearingPx: SIMD2<Float>(0, r.bearingY))
         }
         let entry = Entry(
-            uv: uv,
+            uv: placed.uv,
             pixelSize: SIMD2<Int>(r.width, r.height),
-            bearingPx: SIMD2<Float>(0, r.bearingY)
+            bearingPx: SIMD2<Float>(0, r.bearingY),
+            page: placed.page,
+            pixelOrigin: placed.origin
         )
         accessCounter &+= 1
         portableGlyphCache[key] = (entry, accessCounter)
@@ -860,6 +1124,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
             glyphCache[key] = cached
+            touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
             return cached.entry
         }
@@ -913,15 +1178,17 @@ public final class GlyphAtlas: @unchecked Sendable {
         CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
 
         lock.lock()
-        guard let uv = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
+        guard let placed = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
             lock.unlock()
             return nil
         }
         // CoreGraphics row 0 in `bitmap` is the TOP row (`y = maxY` above baseline)!
         let entry = Entry(
-            uv: uv,
+            uv: placed.uv,
             pixelSize: SIMD2<Int>(bw, bh),
-            bearingPx: SIMD2<Float>(Float(minX) - subShift, Float(-maxY))
+            bearingPx: SIMD2<Float>(Float(minX) - subShift, Float(-maxY)),
+            page: placed.page,
+            pixelOrigin: placed.origin
         )
         accessCounter &+= 1
         glyphCache[key] = (entry, accessCounter)
@@ -994,6 +1261,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
             iconCache[key] = cached
+            touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
             return cached.entry
         }
@@ -1002,16 +1270,57 @@ public final class GlyphAtlas: @unchecked Sendable {
         let bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px)
 
         lock.lock()
-        guard let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
+        guard let placed = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
             lock.unlock()
             return Entry(uv: .zero, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
         }
-        let entry = Entry(uv: uv, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
+        let entry = Entry(
+            uv: placed.uv,
+            pixelSize: SIMD2<Int>(px, px),
+            bearingPx: .zero,
+            page: placed.page,
+            pixelOrigin: placed.origin
+        )
         accessCounter &+= 1
         iconCache[key] = (entry, accessCounter)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
+    }
+
+    private func shelfLocked(_ page: Int) -> ShelfState {
+        page == 0 ? page0Shelf : overflowPages[page - 1].shelf
+    }
+
+    private func touchLocked(page: UInt16, texels: UInt32) {
+        if page == 0 {
+            page0Shelf.touch(texels: texels)
+        } else {
+            let idx = Int(page) - 1
+            if idx >= 0 && idx < overflowPages.count {
+                overflowPages[idx].shelf.touch(texels: texels)
+            }
+        }
+    }
+
+    private func evictPageLocked(_ page: Int) {
+        let p16 = UInt16(page)
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        glyphCache = glyphCache.filter { $0.value.entry.page != p16 }
+        #endif
+        portableGlyphCache = portableGlyphCache.filter { $0.value.entry.page != p16 }
+        iconCache = iconCache.filter { $0.value.entry.page != p16 }
+        clock &+= 1
+        resetsCount &+= 1
+        let age = clock
+        if page == 0 {
+            page0Dirty = nil
+            page0Shelf.reset(age: age)
+        } else if page >= 1 && page <= overflowPages.count {
+            overflowPages[page - 1].dirty = nil
+            overflowPages[page - 1].shelf.reset(age: age)
+        }
+        generation &+= 1
     }
 
     private func ensureBackingLocked() {
@@ -1021,71 +1330,164 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
 
-    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float>? {
-        guard bw > 0, bh > 0 else { return nil }
-        ensureBackingLocked()
-        if bw + 2 > atlas.width || bh + 2 > atlas.height {
-            growAtlas(minWidth: max(atlas.width, bw + 4), minHeight: max(atlas.height, bh + 4))
-        }
-        guard bw + 2 <= atlas.width && bh + 2 <= atlas.height else {
+    private func placeLocked(width bw: Int, height bh: Int) -> (page: Int, x: Int, y: Int)? {
+        guard bw > 0, bh > 0, bw + 2 <= targetWidth, bh + 2 <= targetHeight else {
             return nil
         }
-        if shelfX + bw + 1 >= atlas.width {
-            shelfX = 1
-            shelfY += shelfHeight + 1
-            shelfHeight = 0
-        }
-        if shelfY + bh + 1 >= atlas.height {
-            if atlas.height >= maxAtlasDimension {
-                resetShelfLocked()
-            } else {
-                growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
+        let total = 1 + overflowPages.count
+
+        // 1. Non-full pages first.
+        for p in 0..<total {
+            if !shelfLocked(p).full {
+                let pos: (Int, Int)?
+                if p == 0 {
+                    pos = page0Shelf.alloc(w: bw, h: bh)
+                } else {
+                    pos = overflowPages[p - 1].shelf.alloc(w: bw, h: bh)
+                }
+                if let (x, y) = pos {
+                    if p == 0 { ensureBackingLocked() }
+                    return (p, x, y)
+                }
             }
         }
-        guard shelfX + bw + 1 <= atlas.width && shelfY + bh + 1 <= atlas.height else {
+        // 2. Shelf tails on full pages for small glyphs before opening or resetting a page.
+        for p in 0..<total {
+            let pos: (Int, Int)?
+            if p == 0 {
+                pos = page0Shelf.alloc(w: bw, h: bh)
+            } else {
+                pos = overflowPages[p - 1].shelf.alloc(w: bw, h: bh)
+            }
+            if let (x, y) = pos {
+                if p == 0 { ensureBackingLocked() }
+                return (p, x, y)
+            }
+        }
+        // 3. Recycle an idle page (untouched in both the last frame and this frame).
+        if let p = (0..<total)
+            .filter({ p in
+                let s = shelfLocked(p)
+                return s.used == .idle && s.nonEmpty
+            })
+            .min(by: { shelfLocked($0).age < shelfLocked($1).age }) {
+            evictPageLocked(p)
+            let pos = p == 0 ? page0Shelf.alloc(w: bw, h: bh) : overflowPages[p - 1].shelf.alloc(w: bw, h: bh)
+            if let (x, y) = pos {
+                if p == 0 { ensureBackingLocked() }
+                return (p, x, y)
+            }
+        }
+        // 4. Steady-state page pair reached: recycle the oldest page not touched this frame.
+        if total >= Self.maxSteadyPages,
+           let p = (0..<total)
+            .filter({ p in
+                let s = shelfLocked(p)
+                return s.used != .thisFrame && s.nonEmpty
+            })
+            .min(by: { shelfLocked($0).age < shelfLocked($1).age }) {
+            evictPageLocked(p)
+            let pos = p == 0 ? page0Shelf.alloc(w: bw, h: bh) : overflowPages[p - 1].shelf.alloc(w: bw, h: bh)
+            if let (x, y) = pos {
+                if p == 0 { ensureBackingLocked() }
+                return (p, x, y)
+            }
+        }
+        // 5. Grow overflow page up to MAX_OVERFLOW_PAGES.
+        if total < Self.maxOverflowPages {
+            clock &+= 1
+            var newPage = AtlasPageState(width: targetWidth, height: targetHeight, age: clock)
+            if let (x, y) = newPage.shelf.alloc(w: bw, h: bh) {
+                overflowPages.append(newPage)
+                return (overflowPages.count, x, y)
+            }
+        }
+        // Every page is referenced this frame; leave unplaced rather than overwriting emitted quads.
+        return nil
+    }
+
+    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> (uv: SIMD4<Float>, page: UInt16, origin: SIMD2<Int>)? {
+        guard let (page, dstX, dstY) = placeLocked(width: bw, height: bh) else {
             return nil
         }
 
-        let dstX = shelfX
-        let dstY = shelfY
-        for row in 0..<bh {
-            let srcStart = row * bw
-            let dstStart = (dstY + row) * atlas.width + dstX
-            for col in 0..<bw {
-                atlas.texels[dstStart + col] = bitmap[srcStart + col]
-            }
+        let pageW: Int
+        let pageH: Int
+        if page == 0 {
+            pageW = atlas.width
+            pageH = atlas.height
+            blitWithGutter(into: &atlas.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap)
+            let d = (dstY - 1, dstY + bh + 1)
+            page0Dirty = page0Dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
+        } else {
+            let idx = page - 1
+            pageW = overflowPages[idx].atlas.width
+            pageH = overflowPages[idx].atlas.height
+            blitWithGutter(into: &overflowPages[idx].atlas.texels, pageWidth: pageW, dstX: dstX, dstY: dstY, bw: bw, bh: bh, bitmap: bitmap)
+            let d = (dstY - 1, dstY + bh + 1)
+            overflowPages[idx].dirty = overflowPages[idx].dirty.map { (min($0.0, d.0), max($0.1, d.1)) } ?? d
         }
-        shelfX += bw + 1
-        shelfHeight = max(shelfHeight, bh)
+
+        rasterizedCount &+= 1
+        touchLocked(page: UInt16(page), texels: UInt32(bw * bh))
         generation &+= 1
 
-        let invW = 1.0 / Float(atlas.width)
-        let invH = 1.0 / Float(atlas.height)
-        return SIMD4<Float>(
+        let invW = 1.0 / Float(pageW)
+        let invH = 1.0 / Float(pageH)
+        let uv = SIMD4<Float>(
             Float(dstX) * invW,
             Float(dstY) * invH,
             Float(dstX + bw) * invW,
             Float(dstY + bh) * invH
         )
+        return (uv, UInt16(page), SIMD2<Int>(dstX, dstY))
     }
 
-    private func resetShelfLocked() {
-        shelfX = 1
-        shelfY = 1
-        shelfHeight = 0
-        if !atlas.texels.isEmpty {
-            atlas.texels.withUnsafeMutableBytes { raw in
-                if let base = raw.baseAddress {
-                    memset(base, 0, raw.count)
-                }
-            }
+    /// Directly packs an arbitrary R8 mask onto the shelf pages (matching `Atlas::put` in `atlas.rs:429`).
+    public func placeMask(width bw: Int, height bh: Int, bitmap: [UInt8]) -> Entry? {
+        guard bw > 0, bh > 0, bitmap.count >= bw * bh else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let placed = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
+            return nil
         }
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        glyphCache.removeAll()
-        #endif
-        portableGlyphCache.removeAll()
-        iconCache.removeAll()
-        generation &+= 1
+        return Entry(
+            uv: placed.uv,
+            pixelSize: SIMD2<Int>(bw, bh),
+            bearingPx: .zero,
+            page: placed.page,
+            pixelOrigin: placed.origin
+        )
+    }
+
+    private func blitWithGutter(
+        into texels: inout [UInt8],
+        pageWidth: Int,
+        dstX: Int,
+        dstY: Int,
+        bw: Int,
+        bh: Int,
+        bitmap: [UInt8]
+    ) {
+        let x0 = dstX - 1
+        let x1 = dstX + bw + 1
+        let topRow = (dstY - 1) * pageWidth
+        for c in x0..<x1 {
+            texels[topRow + c] = 0
+        }
+        for row in 0..<bh {
+            let srcStart = row * bw
+            let line = (dstY + row) * pageWidth
+            texels[line + x0] = 0
+            for col in 0..<bw {
+                texels[line + dstX + col] = bitmap[srcStart + col]
+            }
+            texels[line + dstX + bw] = 0
+        }
+        let botRow = (dstY + bh) * pageWidth
+        for c in x0..<x1 {
+            texels[botRow + c] = 0
+        }
     }
 
     private func evictLRUIfNeededLocked() {
@@ -1161,54 +1563,6 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
     #endif
-
-    private func growAtlas(minWidth: Int, minHeight: Int) {
-        let oldW = atlas.width
-        let oldH = atlas.height
-        let newW = min(maxAtlasDimension, minWidth > oldW ? max(oldW * 2, minWidth) : oldW)
-        let newH = min(maxAtlasDimension, minHeight > oldH ? max(oldH * 2, minHeight) : oldH)
-        if atlas.texels.isEmpty {
-            atlas = R8Atlas(width: newW, height: newH, texels: [])
-        } else {
-            var newTexels = Array<UInt8>(repeating: 0, count: newW * newH)
-            if newW == oldW {
-                newTexels.replaceSubrange(0..<atlas.texels.count, with: atlas.texels)
-            } else {
-                for r in 0..<oldH {
-                    let srcOff = r * oldW
-                    let dstOff = r * newW
-                    newTexels.replaceSubrange(dstOff..<(dstOff + oldW), with: atlas.texels[srcOff..<(srcOff + oldW)])
-                }
-            }
-            atlas = R8Atlas(width: newW, height: newH, texels: newTexels)
-        }
-        let wRatio = Float(oldW) / Float(newW)
-        let hRatio = Float(oldH) / Float(newH)
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        for (k, var v) in glyphCache {
-            v.entry.uv.x *= wRatio
-            v.entry.uv.z *= wRatio
-            v.entry.uv.y *= hRatio
-            v.entry.uv.w *= hRatio
-            glyphCache[k] = v
-        }
-        #endif
-        for (k, var v) in portableGlyphCache {
-            v.entry.uv.x *= wRatio
-            v.entry.uv.z *= wRatio
-            v.entry.uv.y *= hRatio
-            v.entry.uv.w *= hRatio
-            portableGlyphCache[k] = v
-        }
-        for (k, var v) in iconCache {
-            v.entry.uv.x *= wRatio
-            v.entry.uv.z *= wRatio
-            v.entry.uv.y *= hRatio
-            v.entry.uv.w *= hRatio
-            iconCache[k] = v
-        }
-        generation &+= 1
-    }
 
     #if canImport(CoreGraphics)
     internal static func parseSVGPath(_ d: String) -> CGPath {
@@ -2035,8 +2389,14 @@ public final class TextSystem: @unchecked Sendable {
                 break
             }
             let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
-            if Self.isRTLParagraph(paraSub) {
-                var dir: CTWritingDirection = .rightToLeft
+            let resolvedDir: CTWritingDirection? = {
+                switch style.direction {
+                case .rtl: return .rightToLeft
+                case .ltr: return .leftToRight
+                case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
+                }
+            }()
+            if var dir = resolvedDir {
                 let pStyle = withUnsafeBytes(of: &dir) { ptr -> CTParagraphStyle in
                     let setting = CTParagraphStyleSetting(
                         spec: .baseWritingDirection,
@@ -2605,7 +2965,8 @@ public final class TextSystem: @unchecked Sendable {
                             Float(entry.pixelSize.y) * invS
                         ),
                         uv: entry.uv,
-                        color: runColor
+                        color: runColor,
+                        atlasPage: entry.page
                     ))
                 }
             }
@@ -2626,7 +2987,8 @@ public final class TextSystem: @unchecked Sendable {
             pillChips: pillChipsOut,
             inlineIcons: inlineIconsOut,
             lineStrings: lineRecords,
-            markerMap: markerMap
+            markerMap: markerMap,
+            forcedDirection: style.direction
         )
     }
 
@@ -3280,7 +3642,8 @@ public final class TextSystem: @unchecked Sendable {
                         glyphs.append(PositionedGlyph(
                             rect: SIMD4<Float>(gx, gy, gw, gh),
                             uv: entry.uv,
-                            color: spanColor
+                            color: spanColor,
+                            atlasPage: entry.page
                         ))
                     }
                 }
@@ -3334,7 +3697,8 @@ public final class TextSystem: @unchecked Sendable {
             backgrounds: backgrounds,
             pillChips: pillChipsOut,
             inlineIcons: inlineIconsOut,
-            portableLines: lineRecords
+            portableLines: lineRecords,
+            forcedDirection: style.direction
         )
     }
 

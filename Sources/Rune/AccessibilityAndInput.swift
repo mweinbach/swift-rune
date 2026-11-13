@@ -195,16 +195,17 @@ public enum AccessibilityTreeBuilder {
         }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
-        var isSecure = false
+        var isSecure = element.isSecure
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
-            isSecure = edit.isSecure
-            value = edit.isSecure ? nil : edit.text
+            isSecure = isSecure || edit.isSecure
+            value = isSecure ? nil : edit.text
         }
 
+        let resolvedRole: ElementRole = (isSecure && element.role == .textInput) ? .passwordInput : element.role
         let label = isSecure ? (element.a11yLabel ?? "Password") : (element.a11yLabel ?? element.plainText)
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
-        let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(element.role)
+        let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(resolvedRole)
         let selectedState: Bool? = (selectableRole || element.itemSelected) ? element.itemSelected : nil
 
         var projectedChildren: [AccessibilityNode] = []
@@ -226,7 +227,7 @@ public enum AccessibilityTreeBuilder {
 
         return AccessibilityNode(
             id: nodeId,
-            role: element.role,
+            role: resolvedRole,
             label: label,
             value: value,
             help: element.a11yDescription ?? element.a11yHelp,
@@ -271,7 +272,7 @@ public enum AppKitAccessibilityMapper {
         case .switchControl: return .checkBox
         case .radio: return .radioButton
         case .tab: return .radioButton
-        case .textInput: return .textField
+        case .textInput, .passwordInput: return .textField
         case .slider: return .slider
         case .progress: return .progressIndicator
         case .listItem: return .row
@@ -388,7 +389,7 @@ public enum UIKitAccessibilityMapper {
         case .image, .icon: return .image
         case .slider: return .adjustable
         case .checkbox, .switchControl, .radio, .tab: return .button
-        case .textInput: return .none
+        case .textInput, .passwordInput: return .none
         case .progress: return .updatesFrequently
         case .combobox, .option, .link: return .button
         case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main:
@@ -898,6 +899,11 @@ public struct ShortcutSequence: Sendable, Hashable {
         self.chords = parsed
     }
 
+    /// Parses a single accelerator with explicit `KeyPlatform` resolution (`shortcuts/parse.rs:29`).
+    public static func parseOn(_ input: String, platform: KeyPlatform) throws -> ParsedShortcut {
+        try ParsedShortcut.parseOn(input, platform: platform)
+    }
+
     /// Formats a chord in compact macOS symbol style (`⌘⇧P`) or cross-platform style (`Ctrl+Shift+P`).
     public static func formatDisplay(_ chord: Chord, macOSSymbols: Bool = true) -> String {
         if macOSSymbols {
@@ -906,7 +912,7 @@ public struct ShortcutSequence: Sendable, Hashable {
             if chord.mods.alt { prefix += "⌥" }
             if chord.mods.shift { prefix += "⇧" }
             if chord.mods.cmd || chord.mods.logo { prefix += "⌘" }
-            return prefix + keyDisplay(chord.key, macOSSymbols: true)
+            return prefix + keyDisplay(chord.key, mods: chord.mods, macOSSymbols: true)
         }
         return chord.description
     }
@@ -917,10 +923,22 @@ public struct ShortcutSequence: Sendable, Hashable {
             .joined(separator: " ")
     }
 
-    private static func keyDisplay(_ key: Key, macOSSymbols: Bool) -> String {
+    private static func keyDisplay(_ key: Key, mods: Mods, macOSSymbols: Bool) -> String {
         switch key {
-        case .command(let ch): return String(ch).uppercased()
-        case .text(let s): return s.uppercased()
+        case .command(let ch):
+            if macOSSymbols, KeyPlatform.current.isMac,
+               let name = MacOSCarbonKeyMap.carbonKeyName(for: .char(ch)),
+               let lbl = MacOSCarbonKeyMap.displayLabel(for: name, modifiers: MacOSCarbonKeyMap.carbonModifiers(for: mods)) {
+                return lbl.uppercased()
+            }
+            return String(ch).uppercased()
+        case .text(let s):
+            if macOSSymbols, KeyPlatform.current.isMac, s.count == 1, let ch = s.first,
+               let name = MacOSCarbonKeyMap.carbonKeyName(for: .char(ch)),
+               let lbl = MacOSCarbonKeyMap.displayLabel(for: name, modifiers: MacOSCarbonKeyMap.carbonModifiers(for: mods)) {
+                return lbl.uppercased()
+            }
+            return s.uppercased()
         case .enter: return macOSSymbols ? "↩" : "Enter"
         case .tab: return macOSSymbols ? "⇥" : "Tab"
         case .escape: return macOSSymbols ? "⎋" : "Esc"
@@ -1100,5 +1118,524 @@ public final class ShortcutRegistry: @unchecked Sendable {
             return true
         }
         return false
+    }
+}
+
+// MARK: - Shortcut::parse_on & Bindings State Machine (crates/rune/src/shortcuts/parse.rs, service/machine.rs)
+
+/// Validated, layout-independent global accelerator (`rune::shortcuts::Shortcut`, `parse.rs:17`).
+public struct ParsedShortcut: Sendable, Hashable, CustomStringConvertible {
+    public static let ctrlBit: UInt8 = 1
+    public static let altBit: UInt8 = 2
+    public static let shiftBit: UInt8 = 4
+    public static let superBit: UInt8 = 8
+    private static let primaryNameBit: UInt8 = 16
+
+    public var mods: UInt8
+    public var keyName: String
+
+    public init(mods: UInt8, keyName: String) {
+        self.mods = mods
+        self.keyName = keyName
+    }
+
+    private func modifierKeycaps(on platform: KeyPlatform) -> [String] {
+        var out: [String] = []
+        if (mods & Self.ctrlBit) != 0 { out.append(platform.isMac ? "⌃" : "Ctrl") }
+        if (mods & Self.altBit) != 0 { out.append(platform.isMac ? "⌥" : "Alt") }
+        if (mods & Self.shiftBit) != 0 { out.append(platform.isMac ? "⇧" : "Shift") }
+        if (mods & Self.superBit) != 0 {
+            switch platform {
+            case .mac: out.append("⌘")
+            case .windows: out.append("Win")
+            case .linux: out.append("Super")
+            }
+        }
+        return out
+    }
+
+    private static func usOrNamedKeycap(_ name: String, platform: KeyPlatform) -> String {
+        let mac = platform.isMac
+        switch name {
+        case "escape": return mac ? "⎋" : "Esc"
+        case "enter": return mac ? "↩" : "Return"
+        case "space": return "Space"
+        case "tab": return mac ? "⇥" : "Tab"
+        case "backspace": return mac ? "⌫" : "Backspace"
+        case "delete": return mac ? "⌦" : "Delete"
+        case "insert": return "Insert"
+        case "home": return mac ? "↖" : "Home"
+        case "end": return mac ? "↘" : "End"
+        case "pageup": return mac ? "⇞" : "Page Up"
+        case "pagedown": return mac ? "⇟" : "Page Down"
+        case "left": return "←"
+        case "right": return "→"
+        case "up": return "↑"
+        case "down": return "↓"
+        case "minus": return "-"
+        case "equal": return "="
+        case "comma": return ","
+        case "period": return "."
+        case "slash": return "/"
+        case "semicolon": return ";"
+        case "quote": return "'"
+        case "bracketleft": return "["
+        case "bracketright": return "]"
+        case "backslash": return "\\"
+        case "backquote": return "`"
+        default: return name.uppercased()
+        }
+    }
+
+    private var carbonLayoutMods: UInt32 {
+        var mask: UInt32 = 0
+        if (mods & Self.superBit) != 0 { mask |= MacOSKeyboardLayout.cmdKeyMask }
+        if (mods & Self.ctrlBit) != 0 { mask |= MacOSKeyboardLayout.controlKeyMask }
+        return mask
+    }
+
+    /// Physical-position keycaps using the active macOS keyboard layout (`shortcuts/keys.rs:77`).
+    public func keycaps(on platform: KeyPlatform = .current) -> [String] {
+        var labels = modifierKeycaps(on: platform)
+        let namedKeys: Set<String> = [
+            "escape", "enter", "space", "tab", "backspace", "delete", "insert",
+            "home", "end", "pageup", "pagedown", "left", "right", "up", "down"
+        ]
+        if namedKeys.contains(keyName) || keyName.hasPrefix("f") && Int(keyName.dropFirst()) != nil {
+            labels.append(Self.usOrNamedKeycap(keyName, platform: platform))
+            return labels
+        }
+        if platform.isMac,
+           let label = MacOSCarbonKeyMap.displayLabel(for: keyName, modifiers: carbonLayoutMods) {
+            labels.append(label.uppercased())
+        } else {
+            labels.append(Self.usOrNamedKeycap(keyName, platform: platform))
+        }
+        return labels
+    }
+
+    /// Menu-style keycaps using the character/accelerator name on every layout (`shortcuts/keys.rs:88`).
+    public func menuKeycaps(on platform: KeyPlatform = .current) -> [String] {
+        var labels = modifierKeycaps(on: platform)
+        labels.append(Self.usOrNamedKeycap(keyName, platform: platform))
+        return labels
+    }
+
+    public var description: String {
+        var out = ""
+        for (bit, name) in [
+            (Self.ctrlBit, "ctrl"),
+            (Self.altBit, "alt"),
+            (Self.shiftBit, "shift"),
+            (Self.superBit, "super"),
+        ] {
+            if (mods & bit) != 0 {
+                out += name + "+"
+            }
+        }
+        out += keyName
+        return out
+    }
+
+    /// Parses an accelerator resolving `"mod"`/`"primary"` for `platform` (`parse.rs:29`).
+    public static func parseOn(_ input: String, platform: KeyPlatform = .current) throws -> ParsedShortcut {
+        var mods: UInt8 = 0
+        var named: UInt8 = 0
+        var key: String? = nil
+
+        for rawPart in input.split(separator: "+", omittingEmptySubsequences: false) {
+            let part = rawPart.trimmingCharacters(in: .whitespaces).lowercased()
+            let (nameBit, modBit): (UInt8, UInt8)
+            switch part {
+            case "ctrl", "control":
+                (nameBit, modBit) = (ctrlBit, ctrlBit)
+            case "alt", "option", "opt":
+                (nameBit, modBit) = (altBit, altBit)
+            case "shift":
+                (nameBit, modBit) = (shiftBit, shiftBit)
+            case "cmd", "command", "super", "meta", "logo", "win":
+                (nameBit, modBit) = (superBit, superBit)
+            case "mod", "primary":
+                (nameBit, modBit) = (primaryNameBit, platform == .mac ? superBit : ctrlBit)
+            default:
+                (nameBit, modBit) = (0, 0)
+            }
+
+            if modBit != 0 {
+                if key != nil || (named & nameBit) != 0 {
+                    throw ShortcutError.invalidAccelerator(input)
+                }
+                named |= nameBit
+                mods |= modBit
+            } else {
+                if key != nil {
+                    throw ShortcutError.invalidAccelerator(input)
+                }
+                let normalized = normalizeKeyName(part)
+                guard isKnownPhysicalKeyName(normalized) else {
+                    throw ShortcutError.invalidAccelerator(input)
+                }
+                key = normalized
+            }
+        }
+
+        guard let resolvedKey = key else {
+            throw ShortcutError.invalidAccelerator(input)
+        }
+        return ParsedShortcut(mods: mods, keyName: resolvedKey)
+    }
+
+    private static func normalizeKeyName(_ part: String) -> String {
+        switch part {
+        case "esc": return "escape"
+        case "return", "numpadenter": return "enter"
+        case "spacebar": return "space"
+        case "arrowleft": return "left"
+        case "arrowright": return "right"
+        case "arrowup": return "up"
+        case "arrowdown": return "down"
+        case "del": return "delete"
+        case "ins": return "insert"
+        case "pgup": return "pageup"
+        case "pgdn": return "pagedown"
+        case "-": return "minus"
+        case "=", "plus": return "equal"
+        case ",": return "comma"
+        case ".": return "period"
+        case "/": return "slash"
+        case ";": return "semicolon"
+        case "'": return "quote"
+        case "[": return "bracketleft"
+        case "]": return "bracketright"
+        case "\\": return "backslash"
+        case "`": return "backquote"
+        default:
+            if part.hasPrefix("key"), part.count == 4, let c = part.last, c.isASCII, c.isLowercase {
+                return String(c)
+            }
+            if part.hasPrefix("digit"), part.count == 6, let c = part.last, c.isASCII, c.isNumber {
+                return String(c)
+            }
+            return part
+        }
+    }
+
+    private static func isKnownPhysicalKeyName(_ name: String) -> Bool {
+        if name.count == 1, let ch = name.first, ch.isASCII, (ch.isLowercase || ch.isNumber) {
+            return true
+        }
+        if name.hasPrefix("f"), let n = Int(name.dropFirst()), (1...24).contains(n), !name.dropFirst().hasPrefix("0") {
+            return true
+        }
+        switch name {
+        case "escape", "enter", "tab", "space", "backspace", "delete", "insert",
+             "home", "end", "pageup", "pagedown", "left", "right", "up", "down",
+             "minus", "equal", "comma", "period", "slash", "semicolon", "quote",
+             "bracketleft", "bracketright", "backslash", "backquote":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+public protocol ShortcutBackendDriver: AnyObject {
+    func register(id: UInt32, shortcut: ParsedShortcut) -> Result<Void, ShortcutError>
+    func unregister(id: UInt32) -> Result<Void, ShortcutError>
+}
+
+public enum ShortcutBindingsState<Backend> {
+    case virtual([UInt32: ParsedShortcut])
+    case disconnected
+    case connected(native: Backend, registrations: [UInt32: ParsedShortcut])
+
+    public func find(_ shortcut: ParsedShortcut) -> UInt32? {
+        switch self {
+        case .virtual(let regs), .connected(_, let regs):
+            return regs.first(where: { $0.value == shortcut })?.key
+        case .disconnected:
+            return nil
+        }
+    }
+}
+
+public enum ShortcutBindEvent<Backend> {
+    case register(id: UInt32, shortcut: ParsedShortcut, claimed: Bool)
+    case opened(native: Backend, id: UInt32, shortcut: ParsedShortcut)
+    case bound(id: UInt32, shortcut: ParsedShortcut)
+    case rejected(ShortcutError)
+    case unregister(UInt32)
+    case unbound(UInt32)
+    case release
+}
+
+public enum ShortcutBindEffect<Backend> {
+    case refuse(ShortcutError)
+    case connect(id: UInt32, shortcut: ParsedShortcut)
+    case bind(id: UInt32, shortcut: ParsedShortcut)
+    case unbind(UInt32)
+    case claim(id: UInt32, shortcut: ParsedShortcut)
+    case disclaim(UInt32)
+    case disclaimAll([UInt32: ParsedShortcut])
+    case disconnect(Backend)
+}
+
+/// Pure shortcut-bindings state machine (`shortcuts/service/machine.rs:133`).
+public func stepShortcutBindings<Backend>(
+    _ state: inout ShortcutBindingsState<Backend>,
+    event: ShortcutBindEvent<Backend>
+) -> [ShortcutBindEffect<Backend>] {
+    switch event {
+    case .register(let id, let shortcut, let claimed):
+        switch state {
+        case .virtual(var regs):
+            if regs.values.contains(shortcut) {
+                return [.refuse(.alreadyInUse(owner: nil))]
+            }
+            regs[id] = shortcut
+            state = .virtual(regs)
+            return []
+        case .disconnected:
+            if claimed {
+                return [.refuse(.alreadyInUse(owner: nil))]
+            }
+            return [.connect(id: id, shortcut: shortcut)]
+        case .connected(let native, let regs):
+            if claimed || regs.values.contains(shortcut) {
+                return [.refuse(.alreadyInUse(owner: nil))]
+            }
+            _ = native
+            return [.bind(id: id, shortcut: shortcut)]
+        }
+
+    case .opened(let native, let id, let shortcut):
+        state = .connected(native: native, registrations: [:])
+        return [.bind(id: id, shortcut: shortcut)]
+
+    case .bound(let id, let shortcut):
+        guard case .connected(let native, var regs) = state else { return [] }
+        regs[id] = shortcut
+        state = .connected(native: native, registrations: regs)
+        return [.claim(id: id, shortcut: shortcut)]
+
+    case .rejected(let error):
+        var out: [ShortcutBindEffect<Backend>] = []
+        if let disc = disconnectBindingsIfEmpty(&state) {
+            out.append(disc)
+        }
+        out.append(.refuse(error))
+        return out
+
+    case .unregister(let id):
+        switch state {
+        case .virtual(var regs):
+            if regs.removeValue(forKey: id) != nil {
+                state = .virtual(regs)
+                return []
+            }
+            return [.refuse(.unknownId("\(id)"))]
+        case .connected(_, let regs) where regs[id] != nil:
+            return [.unbind(id)]
+        default:
+            return [.refuse(.unknownId("\(id)"))]
+        }
+
+    case .unbound(let id):
+        guard case .connected(let native, var regs) = state else { return [] }
+        regs.removeValue(forKey: id)
+        state = .connected(native: native, registrations: regs)
+        var out: [ShortcutBindEffect<Backend>] = []
+        if let disc = disconnectBindingsIfEmpty(&state) {
+            out.append(disc)
+        }
+        out.append(.disclaim(id))
+        return out
+
+    case .release:
+        switch state {
+        case .virtual(var regs):
+            regs.removeAll()
+            state = .virtual(regs)
+            return []
+        case .disconnected:
+            return []
+        case .connected(let native, let regs):
+            state = .disconnected
+            return [.disconnect(native), .disclaimAll(regs)]
+        }
+    }
+}
+
+private func disconnectBindingsIfEmpty<Backend>(_ state: inout ShortcutBindingsState<Backend>) -> ShortcutBindEffect<Backend>? {
+    guard case .connected(let native, let regs) = state, regs.isEmpty else { return nil }
+    state = .disconnected
+    return .disconnect(native)
+}
+
+/// Process-wide shortcut ownership registry so same-process engines reject duplicates with owner app title (`service.rs:377`).
+public final class ShortcutProcessClaims: @unchecked Sendable {
+    public static let shared = ShortcutProcessClaims()
+
+    private let lock = NSLock()
+    private var claims: [ParsedShortcut: (engineID: ObjectIdentifier, regID: UInt32, owner: String)] = [:]
+
+    public init() {}
+
+    public func owner(of shortcut: ParsedShortcut) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return claims[shortcut]?.owner
+    }
+
+    public func isClaimed(_ shortcut: ParsedShortcut) -> Bool {
+        owner(of: shortcut) != nil
+    }
+
+    public func claim(shortcut: ParsedShortcut, engineID: ObjectIdentifier, regID: UInt32, owner: String) {
+        lock.lock()
+        claims[shortcut] = (engineID, regID, owner)
+        lock.unlock()
+    }
+
+    public func disclaim(engineID: ObjectIdentifier, regID: UInt32) {
+        lock.lock()
+        claims = claims.filter { !($0.value.engineID == engineID && $0.value.regID == regID) }
+        lock.unlock()
+    }
+
+    public func disclaimAll(engineID: ObjectIdentifier) {
+        lock.lock()
+        claims = claims.filter { $0.value.engineID != engineID }
+        lock.unlock()
+    }
+
+    public var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return claims.count
+    }
+}
+
+/// Coordinates `ShortcutBindingsState`, backend connect/bind/unbind, and process-wide claim names (`shortcuts/service.rs:377`).
+public final class ShortcutEngine {
+    public let title: String
+    public var bindings: ShortcutBindingsState<any ShortcutBackendDriver>
+    public let claims: ShortcutProcessClaims
+    private let connect: () -> Result<any ShortcutBackendDriver, ShortcutError>
+
+    public init(
+        title: String,
+        bindings: ShortcutBindingsState<any ShortcutBackendDriver> = .disconnected,
+        claims: ShortcutProcessClaims = .shared,
+        connect: @escaping () -> Result<any ShortcutBackendDriver, ShortcutError> = { .failure(.rejectedByOS("unsupported")) }
+    ) {
+        self.title = title
+        self.bindings = bindings
+        self.claims = claims
+        self.connect = connect
+    }
+
+    deinit {
+        release()
+    }
+
+    private var engineID: ObjectIdentifier { ObjectIdentifier(self) }
+
+    public func owner(of shortcut: ParsedShortcut) -> String? {
+        if let inProcess = claims.owner(of: shortcut) {
+            return inProcess
+        }
+        if bindings.find(shortcut) != nil {
+            return title
+        }
+        return nil
+    }
+
+    @discardableResult
+    public func register(id: UInt32, shortcut: ParsedShortcut) -> Result<Void, ShortcutError> {
+        let alreadyClaimed = claims.isClaimed(shortcut)
+        let effects = stepShortcutBindings(&bindings, event: .register(id: id, shortcut: shortcut, claimed: alreadyClaimed))
+        for effect in effects {
+            switch effect {
+            case .refuse(let err):
+                if case .alreadyInUse = err {
+                    return .failure(.alreadyInUse(owner: claims.owner(of: shortcut)))
+                }
+                return .failure(err)
+            case .connect(let cid, let cs):
+                switch connect() {
+                case .success(let driver):
+                    return applyBind(driver: driver, id: cid, shortcut: cs, fromOpened: true)
+                case .failure(let err):
+                    return .failure(err)
+                }
+            case .bind(let bid, let bs):
+                if case .connected(let driver, _) = bindings {
+                    return applyBind(driver: driver, id: bid, shortcut: bs, fromOpened: false)
+                }
+            default:
+                break
+            }
+        }
+        return .success(())
+    }
+
+    private func applyBind(
+        driver: any ShortcutBackendDriver,
+        id: UInt32,
+        shortcut: ParsedShortcut,
+        fromOpened: Bool
+    ) -> Result<Void, ShortcutError> {
+        if fromOpened {
+            _ = stepShortcutBindings(&bindings, event: .opened(native: driver, id: id, shortcut: shortcut))
+        }
+        switch driver.register(id: id, shortcut: shortcut) {
+        case .success:
+            for eff in stepShortcutBindings(&bindings, event: .bound(id: id, shortcut: shortcut)) {
+                if case .claim(let cid, let cs) = eff {
+                    claims.claim(shortcut: cs, engineID: engineID, regID: cid, owner: title)
+                }
+            }
+            return .success(())
+        case .failure(let err):
+            _ = stepShortcutBindings(&bindings, event: .rejected(err))
+            return .failure(err)
+        }
+    }
+
+    @discardableResult
+    public func unregister(id: UInt32) -> Result<Void, ShortcutError> {
+        let effects = stepShortcutBindings(&bindings, event: .unregister(id))
+        for effect in effects {
+            switch effect {
+            case .refuse(let err):
+                return .failure(err)
+            case .unbind(let uid):
+                guard case .connected(let driver, _) = bindings else { return .failure(.unknownId("\(uid)")) }
+                switch driver.unregister(id: uid) {
+                case .success:
+                    for eff in stepShortcutBindings(&bindings, event: .unbound(uid)) {
+                        if case .disclaim(let did) = eff {
+                            claims.disclaim(engineID: engineID, regID: did)
+                        }
+                    }
+                    return .success(())
+                case .failure(let err):
+                    return .failure(err)
+                }
+            default:
+                break
+            }
+        }
+        return .success(())
+    }
+
+    public func release() {
+        let effects = stepShortcutBindings(&bindings, event: .release)
+        for effect in effects {
+            if case .disclaimAll = effect {
+                claims.disclaimAll(engineID: engineID)
+            }
+        }
     }
 }

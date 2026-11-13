@@ -100,14 +100,40 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
         self.key = key
     }
 
-    public init(chordMods: [ChordMod], key chordKey: ChordKey) {
+    public init(chordMods: [ChordMod], key chordKey: ChordKey, platform: KeyPlatform = .current) {
         let bits = chordMods.reduce(UInt8(0)) { $0 | $1.bit }
         self.chordModBits = bits
         self.chordKey = chordKey
-        let resolvedMods = ChordBits.modsFromBits(bits, platform: .current)
+        let resolvedMods = ChordBits.modsFromBits(bits, platform: platform)
         self.mods = resolvedMods
-        let hasPrimary = (ChordBits.fold(bits, platform: .current) & ChordBits.primary) != 0
+        let hasPrimary = (ChordBits.fold(bits, platform: platform) & ChordBits.primary) != 0
         self.key = ChordTable.key(from: chordKey, hasPrimary: hasPrimary)
+    }
+
+    /// Parses `spec` with platform-specific `mod` resolution (`chord.rs:248`, `KeyPlatform`).
+    public static func parse(_ spec: String, platform: KeyPlatform) throws -> Chord {
+        let parsed = try parse(spec)
+        var list: [ChordMod] = []
+        if (parsed.chordModBits & ChordBits.primary) != 0 { list.append(.primary) }
+        if (parsed.chordModBits & ChordBits.ctrl) != 0 { list.append(.ctrl) }
+        if (parsed.chordModBits & ChordBits.alt) != 0 { list.append(.alt) }
+        if (parsed.chordModBits & ChordBits.shift) != 0 { list.append(.shift) }
+        if (parsed.chordModBits & ChordBits.super) != 0 { list.append(.super) }
+        return Chord(chordMods: list, key: parsed.chordKey, platform: platform)
+    }
+
+    /// Parses a comma-separated chord list (`""` or `"none"` returns `[]`, matching `chord::parse_list`).
+    public static func parseList(_ spec: String, platform: KeyPlatform = .current) throws -> [Chord] {
+        let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.lowercased() == "none" {
+            return []
+        }
+        var out: [Chord] = []
+        for rawPart in trimmed.split(separator: ",", omittingEmptySubsequences: false) {
+            let part = String(rawPart).trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(try parse(part, platform: platform))
+        }
+        return out
     }
 
     /// Strictly parses a chord string (`"mod+shift+t"`, `"cmd+s"`, `"mod++"`, `"super+space"`), throwing `ChordError` on invalid input.
@@ -231,7 +257,24 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
             case (.super, .linux): return "Super"
             }
         }
-        caps.append(Self.keycapString(chordKey, platform: platform))
+        if platform.isMac,
+           case .char(let ch) = chordKey,
+           let keyName = MacOSCarbonKeyMap.carbonKeyName(for: .char(ch)),
+           let translated = MacOSCarbonKeyMap.displayLabel(
+               for: keyName,
+               modifiers: MacOSCarbonKeyMap.carbonModifiers(for: mods(on: .mac).reduce(into: Mods.none) { acc, m in
+                   switch m {
+                   case .primary, .super: acc.cmd = true
+                   case .ctrl: acc.ctrl = true
+                   case .alt: acc.alt = true
+                   case .shift: acc.shift = true
+                   }
+               })
+           ) {
+            caps.append(translated.uppercased())
+        } else {
+            caps.append(Self.keycapString(chordKey, platform: platform))
+        }
         return caps
     }
 
@@ -323,6 +366,8 @@ public struct Chord: Sendable, Hashable, CustomStringConvertible {
 /// Action-mapped shortcut table (`rune::Keybind<A>`).
 public struct Keybind<Action: Sendable>: Sendable {
     public var bindings: [(Chord, Action)] = []
+    private var defaultChords: [Chord] = []
+    private var platformOverrides: [(KeyPlatform, [Chord])] = []
 
     public init(_ specs: [(String, Action)] = []) {
         for (spec, action) in specs {
@@ -345,6 +390,59 @@ public struct Keybind<Action: Sendable>: Sendable {
             }
         }
         return nil
+    }
+}
+
+extension Keybind where Action == Void {
+    /// Creates a platform-aware multi-chord `Keybind` from a comma-separated spec (`chord.rs:277`).
+    public static func new(_ spec: String) -> Keybind<Void> {
+        do {
+            var kb = Keybind<Void>()
+            kb.defaultChords = try Chord.parseList(spec)
+            return kb
+        } catch {
+            fatalError("Invalid keybind spec '\(spec)': \(error)")
+        }
+    }
+
+    /// Overrides the chords used on `platform` (`chord.rs:283`).
+    public func on(_ platform: KeyPlatform, _ spec: String) -> Keybind<Void> {
+        do {
+            let parsed = try Chord.parseList(spec, platform: platform)
+            return onChords(platform, parsed)
+        } catch {
+            fatalError("Invalid keybind spec '\(spec)' on \(platform): \(error)")
+        }
+    }
+
+    /// Overrides the chords used on `platform` (`chord.rs:288`).
+    public func onChords(_ platform: KeyPlatform, _ chords: [Chord]) -> Keybind<Void> {
+        var copy = self
+        copy.platformOverrides.removeAll { $0.0 == platform }
+        copy.platformOverrides.append((platform, chords))
+        return copy
+    }
+
+    /// Chords that apply on `platform` (`chord.rs:295`).
+    public func chords(on platform: KeyPlatform = .current) -> [Chord] {
+        platformOverrides.first(where: { $0.0 == platform })?.1 ?? defaultChords
+    }
+
+    /// Whether `ev` matches any of `platform`'s chords (`chord.rs:309`).
+    public func matches(_ ev: KeyEvent, on platform: KeyPlatform = .current) -> Bool {
+        chords(on: platform).contains { $0.matches(ev, on: platform) }
+    }
+
+    /// First chord's label on `platform`, or `""` when nothing is bound (`chord.rs:322`).
+    public func label(on platform: KeyPlatform = .current) -> String {
+        chords(on: platform).first?.label(on: platform) ?? ""
+    }
+
+    /// Canonical comma-separated spec on `platform` (`"none"` when empty, `chord.rs:327`).
+    public func spec(on platform: KeyPlatform = .current) -> String {
+        let active = chords(on: platform)
+        guard !active.isEmpty else { return "none" }
+        return active.map(\.canonicalString).joined(separator: ", ")
     }
 }
 
@@ -488,6 +586,8 @@ public struct TextEdit: Sendable, Equatable {
     internal var typingStyle: TypingStyle = .inherited
     public internal(set) var caretColumn: CaretColumn = .free
     public internal(set) var caretAffinity: TextAffinity = .downstream
+    /// Optional Ctrl+Shift forced paragraph direction (`direction_keys.rs`).
+    public var dir: FieldDir = .natural
     /// Optional open IME composition `(preeditText, cursorRangeInBytes)`.
     public var preedit: (text: String, cursor: Range<Int>?)? = nil {
         didSet {
@@ -518,6 +618,7 @@ public struct TextEdit: Sendable, Equatable {
         lhs.richMarks == rhs.richMarks &&
         lhs.blocks == rhs.blocks &&
         lhs.softBreaks == rhs.softBreaks &&
+        lhs.dir == rhs.dir &&
         lhs.preedit?.text == rhs.preedit?.text &&
         lhs.preedit?.cursor == rhs.preedit?.cursor &&
         lhs.preeditClauses == rhs.preeditClauses
@@ -1244,6 +1345,11 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Processes a keyboard `KeyEvent`, returning how the editor responded.
     public mutating func handleKey(_ ev: KeyEvent) -> EditOutcome {
+        handleKey(ev, layout: nil)
+    }
+
+    /// Processes a keyboard `KeyEvent` with optional shaped bidi `layout` for visual arrow stepping (`edit/input.rs:339`).
+    public mutating func handleKey(_ ev: KeyEvent, layout: ShapedText?) -> EditOutcome {
         didRequestBlur = false
         let shift = ev.mods.shift
         let alt = ev.mods.alt
@@ -1394,7 +1500,14 @@ public struct TextEdit: Sendable, Equatable {
             return text != before ? .modified : .navigation
 
         case .arrowLeft:
-            moveLeft(extend: shift, word: alt || ev.mods.ctrl)
+            let word = alt || ev.mods.ctrl
+            if !(!shift && hasSelection && !word),
+               let (nextPos, aff) = visualStep(layout: layout, right: false, word: word) {
+                setCursor(utf8Offset: nextPos, extendSelection: shift)
+                caretAffinity = aff
+            } else {
+                moveLeft(extend: shift, word: word)
+            }
             return .navigation
 
         case .arrowRight:
@@ -1402,7 +1515,14 @@ public struct TextEdit: Sendable, Equatable {
                 leaveTrailingBlock()
                 return .modified
             }
-            moveRight(extend: shift, word: alt || ev.mods.ctrl)
+            let word = alt || ev.mods.ctrl
+            if !(!shift && hasSelection && !word),
+               let (nextPos, aff) = visualStep(layout: layout, right: true, word: word) {
+                setCursor(utf8Offset: nextPos, extendSelection: shift)
+                caretAffinity = aff
+            } else {
+                moveRight(extend: shift, word: word)
+            }
             return .navigation
 
         case .arrowUp:
@@ -1600,56 +1720,53 @@ public struct TextEdit: Sendable, Equatable {
         return text.utf8.distance(from: text.utf8.startIndex, to: scalarIdx)
     }
 
+    private func visualStep(layout: ShapedText?, right: Bool, word: Bool) -> (Int, TextAffinity)? {
+        guard let shaped = layout else { return nil }
+        let arrow: CaretArrow = {
+            switch (right, word) {
+            case (false, false): return .left
+            case (true, false): return .right
+            case (false, true): return .wordLeft
+            case (true, true): return .wordRight
+            }
+        }()
+        let hidden = isSecure && !isRevealed
+        guard let (landing, flow) = CaretVisualStepper.visualIn(
+            shaped,
+            at: cursor,
+            side: caretAffinity,
+            arrow: arrow,
+            hidden: hidden
+        ) else {
+            return nil
+        }
+        switch landing {
+        case .at(let j, let side):
+            return (snapToGraphemeBoundary(j), side)
+        case .edge:
+            let forward = right == (flow == .ltr)
+            let nextPos: Int = {
+                switch (forward, word) {
+                case (true, false):
+                    return pillAfter(cursor) ?? nextGraphemeBoundary(from: cursor)
+                case (true, true):
+                    return nextWordBoundary(from: cursor)
+                case (false, false):
+                    return pillBefore(cursor) ?? prevGraphemeBoundary(from: cursor)
+                case (false, true):
+                    return prevWordBoundary(from: cursor)
+                }
+            }()
+            return (nextPos, .downstream)
+        }
+    }
+
     private func prevWordBoundary(from offset: Int) -> Int {
-        if isSecure && !isRevealed { return 0 }
-        let clamped = snapToGraphemeBoundary(offset)
-        if let pillStart = pillBefore(clamped) {
-            return pillStart
-        }
-        var idx = stringIndex(forUTF8Offset: clamped)
-        while idx > text.startIndex && !isWordChar(text[text.index(before: idx)]) {
-            idx = text.index(before: idx)
-            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
-            // Upstream r378: after stepping back over trailing punctuation (e.g. "hi @noah!"),
-            // stop at the pill's trailing edge before taking the pill whole on the next step.
-            if pillBefore(pos) != nil {
-                return pos
-            }
-        }
-        while idx > text.startIndex && isWordChar(text[text.index(before: idx)]) {
-            let prev = text.index(before: idx)
-            let prevPos = text.utf8.distance(from: text.utf8.startIndex, to: prev.samePosition(in: text.utf8)!)
-            if pillAround(prevPos) != nil || pillBefore(prevPos) != nil {
-                let curPos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
-                return pillAround(curPos)?.1 ?? curPos
-            }
-            idx = prev
-        }
-        return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+        prevWord(offset)
     }
 
     private func nextWordBoundary(from offset: Int) -> Int {
-        if isSecure && !isRevealed { return text.utf8.count }
-        let clamped = snapToGraphemeBoundary(offset)
-        if let pillEnd = pillAfter(clamped) {
-            return pillEnd
-        }
-        var idx = stringIndex(forUTF8Offset: clamped)
-        while idx < text.endIndex && !isWordChar(text[idx]) {
-            idx = text.index(after: idx)
-            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
-            if let pillEnd = pillAfter(pos) {
-                return pillEnd
-            }
-        }
-        while idx < text.endIndex && isWordChar(text[idx]) {
-            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
-            if pillAfter(pos) != nil {
-                return pos
-            }
-            idx = text.index(after: idx)
-        }
-        return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+        nextWord(offset)
     }
 
     private func lineStart(for offset: Int) -> Int {

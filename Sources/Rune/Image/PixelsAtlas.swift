@@ -118,6 +118,7 @@ public final class Pixels: @unchecked Sendable {
     private var rgbaData: [UInt8] = []
     private var decodedMips: DecodedImage?
     private var generationValue: UInt64 = 0
+    internal var cacheRetainOwner: AnyObject?
     public private(set) var sourceURLString: String?
     public private(set) var sourceSetString: String?
 

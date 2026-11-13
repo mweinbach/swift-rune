@@ -201,9 +201,10 @@
         {
           "upstream": "src/clipboard/secret.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/Edit/ClipboardSanitizer.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "SecretMachine, WipeBehavior (.normal/.refuse/.noop), SecretHold generation & timeout (ClipboardSanitizer.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/clipboard/secret_tests.rs",
@@ -292,17 +293,23 @@
         {
           "upstream": "src/edit/caret_motion.rs",
           "swift": [
+            "Sources/Rune/Edit/CaretMotionAndDir.swift",
             "Sources/Rune/Edit.swift",
-            "Sources/Rune/Edit/RichTextEdit.swift"
+            "Sources/Rune/Runtime.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "UAX #29 path word segmentation, ZWNJ preservation, pill stops, bidi CaretVisualStepper wired in Edit.handleKey(_:layout:) & Runtime.keyDown (CaretMotionAndDir.swift + Edit.swift + Runtime.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/edit/direction_keys.rs",
           "swift": [
-            "Sources/Rune/Edit.swift"
+            "Sources/Rune/Edit/CaretMotionAndDir.swift",
+            "Sources/Rune/Edit.swift",
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Layout/RuntimeLayout.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "FieldDir & stepDirChord Ctrl+LeftShift/RightShift wired in Runtime.physicalInput, RuntimeLayout textStyle.direction & RichTextEdit toHTML dir= (CaretMotionAndDir.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/edit/display.rs",
@@ -1045,11 +1052,12 @@
         {
           "upstream": "src/image.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift",
-            "Sources/Rune/Image/LinearMipGenerator.swift",
-            "Sources/Rune/Image/PixelsAtlas.swift"
+            "Sources/Rune/Image/ImageFromURL.swift",
+            "Sources/Rune/Image/PixelsAtlas.swift",
+            "Sources/Rune/MediaPipeline.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Weak-value ImageCache + Pixels.cacheRetainOwner keeps decoded entry alive while drawn Pixels exist (TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/image/animated.rs",
@@ -1112,22 +1120,23 @@
         {
           "upstream": "src/input.rs",
           "swift": [
-            "Sources/Rune/Input/CanvasInputExtensions.swift",
-            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/El.swift",
+            "Sources/Rune/Input/MacOSFnAndLayout.swift",
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift",
+            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift"
           ],
           "status": "ported",
-          "note": "Core input types, canvas gestures/buttons/keyUp, PointerObserver, DropPointer, KeyDiagnostics ported"
+          "note": "Input, chords, FnKeyMonitor, Keycaps, SecureInputClaim, PointerObserver & KeyDiagnostics ported (gap/text); canvas_input gesture/keyUp hooks owned by gap/el"
         },
         {
           "upstream": "src/input/canvas_input.rs",
           "swift": [
-            "Sources/Rune/Input/CanvasInputExtensions.swift",
             "Sources/Rune/El.swift",
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Edit/HostInputAndPasteExtensions.swift"
           ],
-          "status": "ported",
-          "note": "MagnifyEvent, RotateEvent, SmartMagnifyEvent, PointerButtonEvent, El modifiers, Tx.button, Runtime dispatch ported"
+          "status": "partial",
+          "note": "PointerButton, GesturePhase, WheelEvent, El.onWheel & PointerButton.fromAppKit ported; MagnifyEvent, RotateEvent, onMagnify, onRotate, onSmartMagnify, pointerButtons, onKeyUp owned by gap/el"
         },
         {
           "upstream": "src/input/chord.rs",
@@ -1198,18 +1207,22 @@
         {
           "upstream": "src/input/fn_key.rs",
           "swift": [
-            "Sources/Rune/Input/ChordSupport.swift"
+            "Sources/Rune/Input/MacOSFnAndLayout.swift",
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/WindowHostingMacOS.swift",
+            "Sources/Rune/Platform/OverlayHostingMacOS.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "FnKeyMonitor flagsChanged local monitor + classifyFlagsChanged + take() wired in MacOSApp, WindowHostingMacOS & OverlayHostingMacOS (MacOSFnAndLayout.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/input/key_diagnostics.rs",
           "swift": [
             "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
-            "Sources/Rune/Input/InputTimeAndKeycaps.swift"
+            "Sources/Rune/Runtime.swift"
           ],
           "status": "ported",
-          "note": "DuplicateKeyWarning, KeyDiagnostics.warnings/isClean/renameDuplicates ported"
+          "note": "KeyDiagnostics.find(in:) wired in Runtime.commitTreePass -> Runtime.lastKeyDiagnostics (PointerObserverAndDiagnostics.swift + Runtime.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/input/keycaps.rs",
@@ -4460,9 +4473,12 @@
         {
           "upstream": "src/shortcuts/layout_macos.rs",
           "swift": [
-            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
+            "Sources/Rune/Input/MacOSFnAndLayout.swift",
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift",
+            "Sources/Rune/AccessibilityAndInput.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "MacOSKeyboardLayout via TIS/UCKeyTranslate + chordLabelCascade wired via MacOSCarbonKeyMap.displayLabel into Chord.keycaps, ParsedShortcut.keycaps & ShortcutSequence.formatDisplay (MacOSFnAndLayout.swift + TextAuditCloseoutTests.swift)"
         },
         {
           "upstream": "src/shortcuts/macos.rs",
@@ -4664,9 +4680,11 @@
           "upstream": "src/text/atlas.rs",
           "swift": [
             "Sources/Rune/Text.swift",
-            "Sources/Rune/PortableText.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Render/RenderElAndRuntime.swift"
           ],
-          "status": "ported"
+          "status": "ported",
+          "note": "Multi-page GlyphAtlas (2048px, 1px zeroed gutter, 2 steady / 8 overflow pages, pinnedMask eviction, lazy allocation, beginFrame & compositedAtlas UV remap wired in Runtime.buildRefScene & buildRenderFrame)"
         },
         {
           "upstream": "src/text/atlas_fill.rs",
@@ -4751,10 +4769,9 @@
         },
         {
           "upstream": "src/text/default_fonts_tests.rs",
-          "swift": [
-            "Tests/RuneTests/TextP0WiringTests.swift"
-          ],
-          "status": "ported"
+          "swift": [],
+          "status": "n/a",
+          "note": "Compares Web-subset assets/web/*.ttf against native .ttf via swash; excluded on Apple CoreText targets"
         },
         {
           "upstream": "src/text/fallback.rs",

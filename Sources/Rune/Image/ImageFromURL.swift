@@ -22,41 +22,32 @@ public struct ImageLoadError: Error, Equatable, CustomStringConvertible, Sendabl
     public var description: String { message }
 }
 
-/// Shared handle to an asynchronous or immediate cached image load (`rune::Image`).
-public final class CachedImage: @unchecked Sendable {
+/// Shared decode state retained by both `CachedImage` and its `Pixels` (`rune::image::State`).
+public final class CachedImageState: @unchecked Sendable {
     public let id: ImageId
-    public let pixels: Pixels
-
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
     private var settled = false
     private var outcome: Result<(UInt32, UInt32), ImageLoadError>?
 
-    init(id: ImageId, pixels: Pixels) {
+    init(id: ImageId) {
         self.id = id
-        self.pixels = pixels
     }
 
-    public var size: (width: UInt32, height: UInt32)? {
-        let s = pixels.size
-        guard s.width > 0, s.height > 0 else { return nil }
-        return s
-    }
-
-    public var error: ImageLoadError? {
+    var error: ImageLoadError? {
         lock.lock()
         defer { lock.unlock() }
         if case .failure(let err) = outcome { return err }
         return nil
     }
 
-    public var isReady: Bool {
+    var isReady: Bool {
         lock.lock()
         defer { lock.unlock() }
         return settled
     }
 
-    internal func resolve(with result: Result<DecodedImage, ImageLoadError>) {
+    func resolve(with result: Result<DecodedImage, ImageLoadError>, into pixels: Pixels) {
         lock.lock()
         if settled {
             lock.unlock()
@@ -65,9 +56,7 @@ public final class CachedImage: @unchecked Sendable {
         switch result {
         case .success(let decoded):
             pixels.setDecoded(decoded)
-            let w = decoded.width
-            let h = decoded.height
-            outcome = .success((w, h))
+            outcome = .success((decoded.width, decoded.height))
         case .failure(let err):
             outcome = .failure(err)
         }
@@ -76,9 +65,7 @@ public final class CachedImage: @unchecked Sendable {
         semaphore.signal()
     }
 
-    /// Blocks until the image finishes loading or `timeout` elapses (`Image::wait`).
-    @discardableResult
-    public func wait(timeout: TimeInterval = 5.0) -> Result<(UInt32, UInt32), ImageLoadError> {
+    func wait(timeout: TimeInterval) -> Result<(UInt32, UInt32), ImageLoadError> {
         lock.lock()
         if let existing = outcome {
             lock.unlock()
@@ -98,6 +85,41 @@ public final class CachedImage: @unchecked Sendable {
     }
 }
 
+/// Shared handle to an asynchronous or immediate cached image load (`rune::Image`).
+public final class CachedImage: @unchecked Sendable {
+    public let id: ImageId
+    public let pixels: Pixels
+    public let state: CachedImageState
+
+    init(id: ImageId, pixels: Pixels, state: CachedImageState? = nil) {
+        self.id = id
+        self.pixels = pixels
+        let resolvedState = state ?? CachedImageState(id: id)
+        self.state = resolvedState
+        pixels.cacheRetainOwner = resolvedState
+    }
+
+    public var size: (width: UInt32, height: UInt32)? {
+        let s = pixels.size
+        guard s.width > 0, s.height > 0 else { return nil }
+        return s
+    }
+
+    public var error: ImageLoadError? { state.error }
+
+    public var isReady: Bool { state.isReady }
+
+    internal func resolve(with result: Result<DecodedImage, ImageLoadError>) {
+        state.resolve(with: result, into: pixels)
+    }
+
+    /// Blocks until the image finishes loading or `timeout` elapses (`Image::wait`).
+    @discardableResult
+    public func wait(timeout: TimeInterval = 5.0) -> Result<(UInt32, UInt32), ImageLoadError> {
+        state.wait(timeout: timeout)
+    }
+}
+
 /// URL, responsive `srcset`, local file, and HTTP/`URLProtocol` image cache (`rune::ImageCache`).
 public final class ImageCache: @unchecked Sendable {
     public typealias RemoteLoader = @Sendable (String, UInt32) async throws -> FetchedImage
@@ -108,11 +130,24 @@ public final class ImageCache: @unchecked Sendable {
         var srcset: String?
     }
 
+    private struct WeakEntry {
+        weak var handle: CachedImage?
+        weak var state: CachedImageState?
+        weak var pixels: Pixels?
+    }
+
     private let lock = NSLock()
-    private var entries: [CacheKey: CachedImage] = [:]
+    private var entries: [CacheKey: WeakEntry] = [:]
     private let wake: @Sendable () -> Void
     private let session: URLSession?
     private let remoteLoader: RemoteLoader?
+
+    /// Number of live (handle or drawn `Pixels` still retained) entries currently tracked (`image.rs:760`).
+    public var liveEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.values.filter { $0.state != nil }.count
+    }
 
     /// Creates an image cache with an optional redraw `wake` closure, `URLSession` (for custom
     /// `URLProtocol` testing/HTTP), or injectable `remoteLoader`.
@@ -210,15 +245,41 @@ public final class ImageCache: @unchecked Sendable {
 
     /// Wraps raw straight-alpha RGBA8 bytes immediately without assigning a `sourceURLString` (`ImageCache::rgba`).
     public func rgba(width: UInt32, height: UInt32, data: [UInt8]) -> CachedImage {
-        let pixels = Pixels()
         let raw = Data(data)
         let id = ImageId.contentHash(raw)
-        let handle = CachedImage(id: id, pixels: pixels)
-        switch Self.land(url: "rgba", fetched: .rgba(width: width, height: height, data: raw), pixelSize: max(width, height)) {
-        case .success(let decoded):
-            handle.resolve(with: .success(decoded))
-        case .failure(let err):
-            handle.resolve(with: .failure(err))
+        let hexId = id.bytes.map { String(format: "%02x", $0) }.joined()
+        let key = CacheKey(url: "rgba:\(width)x\(height):\(hexId)", pixelSize: max(width, height), srcset: nil)
+        let handle: CachedImage
+        var needResolve = false
+        lock.lock()
+        entries = entries.filter { $0.value.state != nil }
+        if let existing = entries[key] {
+            if let liveHandle = existing.handle {
+                handle = liveHandle
+            } else if let state = existing.state, let pixels = existing.pixels {
+                handle = CachedImage(id: state.id, pixels: pixels, state: state)
+                entries[key] = WeakEntry(handle: handle, state: state, pixels: pixels)
+            } else {
+                let pixels = Pixels()
+                handle = CachedImage(id: id, pixels: pixels)
+                entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
+                needResolve = true
+            }
+        } else {
+            let pixels = Pixels()
+            handle = CachedImage(id: id, pixels: pixels)
+            entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
+            needResolve = true
+        }
+        lock.unlock()
+        if needResolve {
+            switch Self.land(url: "rgba", fetched: .rgba(width: width, height: height, data: raw), pixelSize: max(width, height)) {
+            case .success(let decoded):
+                handle.resolve(with: .success(decoded))
+            case .failure(let err):
+                handle.resolve(with: .failure(err))
+            }
+            wake()
         }
         return handle
     }
@@ -229,13 +290,24 @@ public final class ImageCache: @unchecked Sendable {
         let key = CacheKey(url: url, pixelSize: px, srcset: nil)
         let handle: CachedImage
         lock.lock()
+        entries = entries.filter { $0.value.state != nil }
         if let existing = entries[key] {
-            handle = existing
+            if let liveHandle = existing.handle {
+                handle = liveHandle
+            } else if let state = existing.state, let pixels = existing.pixels {
+                handle = CachedImage(id: state.id, pixels: pixels, state: state)
+                entries[key] = WeakEntry(handle: handle, state: state, pixels: pixels)
+            } else {
+                let pixels = Pixels()
+                pixels.setSourceURL(url)
+                handle = CachedImage(id: ImageId.forURL(url, pixelSize: px), pixels: pixels)
+                entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
+            }
         } else {
             let pixels = Pixels()
             pixels.setSourceURL(url)
             handle = CachedImage(id: ImageId.forURL(url, pixelSize: px), pixels: pixels)
-            entries[key] = handle
+            entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
         }
         lock.unlock()
         handle.resolve(with: Self.land(url: url, fetched: fetched, pixelSize: px))
@@ -251,9 +323,18 @@ public final class ImageCache: @unchecked Sendable {
         srcset: String?
     ) -> CachedImage {
         lock.lock()
+        entries = entries.filter { $0.value.state != nil }
         if let existing = entries[key] {
-            lock.unlock()
-            return existing
+            if let liveHandle = existing.handle {
+                lock.unlock()
+                return liveHandle
+            }
+            if let state = existing.state, let pixels = existing.pixels {
+                let reused = CachedImage(id: state.id, pixels: pixels, state: state)
+                entries[key] = WeakEntry(handle: reused, state: state, pixels: pixels)
+                lock.unlock()
+                return reused
+            }
         }
         let pixels = Pixels()
         pixels.setSourceURL(url)
@@ -261,7 +342,7 @@ public final class ImageCache: @unchecked Sendable {
             pixels.setSourceSet(srcset)
         }
         let handle = CachedImage(id: id, pixels: pixels)
-        entries[key] = handle
+        entries[key] = WeakEntry(handle: handle, state: handle.state, pixels: pixels)
         lock.unlock()
 
         let wakeFn = self.wake

@@ -71,7 +71,10 @@ final class RetainedLayoutCoordinator {
                     if el.isRevealed { edit.isRevealed = true }
                 }
                 let str = edit.displayString.isEmpty ? (el.placeholder ?? " ") : edit.displayString
-                let textStyle = el.textStyle
+                var textStyle = el.textStyle
+                if let fDir = edit.forcedDir {
+                    textStyle.direction = fDir
+                }
                 let isSecure = edit.isSecure
                 var hasher = Hasher()
                 hasher.combine(1)

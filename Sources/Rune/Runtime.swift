@@ -402,6 +402,9 @@ public final class Runtime<State> {
     public internal(set) var focusedKey: String? = nil
     public private(set) var focusVisible: Bool = false
     private var webFocusTabStartPath: String? = nil
+    private var dirChord: DirChord = .idle
+    private var lastPinnedGlyphMask: UInt32 = 0
+    public private(set) var lastKeyDiagnostics: [DuplicateKeyWarning] = []
 
     private var lastClickTime: Double = -10.0
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
@@ -1161,6 +1164,7 @@ public final class Runtime<State> {
         }
 
         // Flatten tree, assign unique structural/keyed paths, clamp scroll offsets, and collect NodeSpecs
+        lastKeyDiagnostics = KeyDiagnostics.find(in: layoutRoot)
         var newFlat: [FlatNode] = []
         var newByPath: [String: Int] = [:]
         var newById: [NodeId: FlatNode] = [:]
@@ -2233,6 +2237,9 @@ public final class Runtime<State> {
     // MARK: - Primitive Emission & ElementInfo Snapshot
 
     private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
+        textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
+        var glyphPageEntries: [(index: Int, page: UInt16)] = []
+        var usedGlyphMask: UInt32 = 0
         let pxScale = pixelScale
         let devW = max(1, Int((viewport.x * pxScale).rounded()))
         let devH = max(1, Int((viewport.y * pxScale).rounded()))
@@ -2943,6 +2950,7 @@ public final class Runtime<State> {
                     let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
                     let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
                     let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    let primIdx = primitives.count
                     primitives.append(attachFade(.glyph(
                         rect: devRect,
                         uv: entry.uv,
@@ -2951,6 +2959,8 @@ public final class Runtime<State> {
                         clip: devClip,
                         turn: useLayer ? 0 : effRotate
                     )))
+                    glyphPageEntries.append((primIdx, entry.page))
+                    usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
                 }
 
                 // 7. Vector Canvas Shapes (triangles & segments)
@@ -3019,6 +3029,7 @@ public final class Runtime<State> {
                         : defaultTextColor
                     var inputStyle = el.textStyle
                     if edit.multiline { inputStyle.wrap = .wrap }
+                    if let fDir = edit.forcedDir { inputStyle.direction = fDir }
 
                     let shaped = textSystem.shape(
                         text: renderedStr,
@@ -3085,6 +3096,7 @@ public final class Runtime<State> {
                     // Text glyphs
                     for g in shaped.glyphs {
                         let gc = (g.color ?? textCol).scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
+                        let primIdx = primitives.count
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
                                 (textOriginX + g.rect.x * scaleVec.x) * pxScale,
@@ -3097,6 +3109,8 @@ public final class Runtime<State> {
                             gamma: systemDark ? 0.88 : 1.05,
                             clip: devInputClip
                         ))
+                        glyphPageEntries.append((primIdx, g.atlasPage))
+                        usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                     }
 
                     // Caret bar when focused & window focused
@@ -3168,6 +3182,7 @@ public final class Runtime<State> {
                     if glyphAlpha > 0.0005 {
                         for g in shaped.glyphs {
                             let gc = (selPaintInk?.color(for: g) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let primIdx = primitives.count
                             primitives.append(attachFade(.glyph(
                                 rect: SIMD4<Float>(
                                     (textOriginX + g.rect.x * scaleVec.x) * pxScale,
@@ -3181,6 +3196,8 @@ public final class Runtime<State> {
                                 clip: devClip,
                                 turn: useLayer ? 0 : effRotate
                             )))
+                            glyphPageEntries.append((primIdx, g.atlasPage))
+                            usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                         }
                     }
                 }
@@ -3511,6 +3528,7 @@ public final class Runtime<State> {
                     let sy = srcExtent.height > 0.5 ? presentedRect.height / srcExtent.height : 1.0
                     for g in shaped.glyphs {
                         let gc = (g.color ?? flightColor).scaleAlpha(srcAlpha).simd4(srgb: srgbBlend)
+                        let primIdx = primitives.count
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
                                 (presentedRect.x + g.rect.x * sx) * pxScale,
@@ -3523,6 +3541,8 @@ public final class Runtime<State> {
                             gamma: systemDark ? 0.88 : 1.05,
                             clip: unclippedDevClip
                         ))
+                        glyphPageEntries.append((primIdx, g.atlasPage))
+                        usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                     }
                 }
                 infos.append(ElementInfo(
@@ -3581,13 +3601,23 @@ public final class Runtime<State> {
             isAnimating = true
         }
         _ = now
+        lastPinnedGlyphMask = usedGlyphMask
+        let pageCount = textSystem.glyphAtlas.pageCount
+        if pageCount > 1 {
+            let pagesF = Float(pageCount)
+            for item in glyphPageEntries where item.index < primitives.count {
+                let p = Float(min(Int(item.page), pageCount - 1))
+                primitives[item.index].uv.y = (primitives[item.index].uv.y + p) / pagesF
+                primitives[item.index].uv.w = (primitives[item.index].uv.w + p) / pagesF
+            }
+        }
 
         return RefScene(
             width: devW,
             height: devH,
             srgbBlend: srgbBlend,
             clearColor: clearColor.simd4(srgb: srgbBlend),
-            glyphs: textSystem.glyphAtlas.atlas,
+            glyphs: textSystem.glyphAtlas.compositedAtlas(),
             images: imagePacker.atlas,
             primitives: primitives
         )
@@ -4247,6 +4277,21 @@ public final class Runtime<State> {
 
     /// Routes keyboard `KeyEvent` through active drag cancel (`Escape`), focused `TextEdit`,
     /// ancestor `onKey` handlers, `Tab` / arrow focus traversal, and app-level `globalOnKey`.
+    private static func modifierKey(for code: PhysicalKeyCode) -> ModifierKey? {
+        switch code {
+        case .shiftLeft: return .shiftLeft
+        case .shiftRight: return .shiftRight
+        case .controlLeft: return .controlLeft
+        case .controlRight: return .controlRight
+        case .altLeft: return .altLeft
+        case .altRight: return .altRight
+        case .superLeft: return .superLeft
+        case .superRight: return .superRight
+        case .fn: return .fn
+        default: return nil
+        }
+    }
+
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, at now: Double) -> Bool {
         currentTime = now
@@ -4254,6 +4299,9 @@ public final class Runtime<State> {
             commitTree(at: now, cut: forceInitialSettle)
             needsCommit = false
             forceInitialSettle = false
+        }
+        if case .focusLost = event {
+            dirChord = .idle
         }
 
         // Dispatch along focused -> ancestor chain (stopping at inert / modal boundary)
@@ -4281,6 +4329,31 @@ public final class Runtime<State> {
                         return true
                     }
                 }
+            }
+        }
+
+        if case .key(let physCode, let mods, let pressed, let isRepeat) = event, !isRepeat {
+            if let modKey = Self.modifierKey(for: physCode) {
+                let (nextChord, flow) = stepDirChord(
+                    dirChord,
+                    modifier: modKey,
+                    pressed: pressed,
+                    ctrl: mods.ctrl,
+                    shift: mods.shift
+                )
+                dirChord = nextChord
+                if let flow,
+                   let fPath = focusedPath,
+                   let fIdx = nodeByPath[fPath],
+                   let editLens = flatNodes[fIdx].el.handlers.editLens {
+                    var edit = editLens.get(state)
+                    edit.forceDir(flow)
+                    editLens.set(&state, edit)
+                    dirtyCommit(at: now)
+                    return true
+                }
+            } else if pressed {
+                dirChord = .idle
             }
         }
 
@@ -4361,7 +4434,31 @@ public final class Runtime<State> {
                      ev.key == .command("x") || ev.key == .text("x") || ev.key == .text("X")) {
                     return true
                 }
-                let outcome = edit.handleKey(ev)
+                let isCopyOrCut = ev.mods.primaryCommand &&
+                    (ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C") ||
+                     ev.key == .command("x") || ev.key == .text("x") || ev.key == .text("X"))
+                let preCopyHTML: String? = (isCopyOrCut && edit.isRichEnabled && !edit.isSecure && edit.hasSelection)
+                    ? {
+                        let html = edit.toHTML(range: edit.selectedUTF8Range)
+                        return html.isEmpty ? nil : html
+                    }()
+                    : nil
+                var editLayout: ShapedText? = nil
+                if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight) {
+                    var inputStyle = fNode.el.textStyle
+                    if edit.multiline { inputStyle.wrap = .wrap }
+                    if let fDir = edit.forcedDir { inputStyle.direction = fDir }
+                    let pad = fNode.el.layout.padding
+                    let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
+                    editLayout = textSystem.shape(
+                        text: edit.displayString,
+                        style: inputStyle,
+                        maxWidth: edit.multiline ? innerW : nil,
+                        pixelScale: pixelScale,
+                        emitGlyphs: false
+                    )
+                }
+                let outcome = edit.handleKey(ev, layout: editLayout)
                 switch outcome {
                 case .ignored:
                     break
@@ -4394,7 +4491,8 @@ public final class Runtime<State> {
                     // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
                 case .copy(let copied):
                     editLens.set(&state, edit)
-                    clipboard = ClipboardContent(copied)
+                    clipboard = ClipboardContent(copied, html: preCopyHTML)
+                    richClipboard = RichClipboardPayload(content: clipboard)
                     if let onChange = fNode.el.handlers.onTextChange {
                         var tx = makeTx(at: now)
                         onChange(&state, edit.text, &tx)
@@ -4541,7 +4639,14 @@ public final class Runtime<State> {
             return
         }
         var edit = editLens.get(state)
-        edit.paste(content.text)
+        if flatNodes[fIdx].el.isSecure {
+            edit.isSecure = true
+        }
+        if edit.isRichEnabled && !edit.isSecure, let html = content.html, !html.isEmpty {
+            edit.pasteHTML(html, plain: content.text)
+        } else {
+            edit.paste(content.text)
+        }
         editLens.set(&state, edit)
         var tx = makeTx(at: now)
         if flatNodes[fIdx].el.layoutAnim == nil {
