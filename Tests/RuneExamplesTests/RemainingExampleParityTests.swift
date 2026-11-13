@@ -82,18 +82,61 @@ struct RemainingExampleParityTests {
         rt.frame(at: 0.04)
         #expect(rt.state.dragging == "app")
 
-        rt.pointerUp(at: Vec2(appCenter.x + 20, appCenter.y), at: 0.05)
+        let started = try #require(rt.takeDragOutStart())
+        #expect(started.item.files == [URL(fileURLWithPath: "/Applications/Example.app")])
+
+        rt.finishDragOut(.copied, at: 0.05)
         rt.frame(at: 0.06)
         #expect(rt.state.dragging == nil)
         #expect(rt.state.last?.0 == "app")
+        #expect(rt.state.last?.1 == .copied)
     }
 
     // Upstream: examples/drag-out/src/main.rs:68
-    @Test(
-        "drag-out: dragging_a_tile_hands_its_file_to_the_system",
-        .disabled("Blocked on @platform/@el: El.dragOut / El.onDragStart and Runtime.events drag-out dispatch")
-    )
-    func dragOutSystemSession() {}
+    @Test("drag-out: dragging_a_tile_hands_its_file_to_the_system")
+    func dragOutSystemSession() throws {
+        let state = DragOutState(
+            file: URL(fileURLWithPath: "/tmp/a.txt"),
+            app: URL(fileURLWithPath: "/Applications/Example.app")
+        )
+        let rt = Runtime<DragOutState>(
+            state: state,
+            viewport: Vec2(520, 200),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: dragOutView
+        )
+        rt.frame(at: 0.0)
+
+        let fileRect = try #require(rt.element(byKey: "file")?.rect)
+        let fileCenter = Vec2(fileRect[0] + fileRect[2] * 0.5, fileRect[1] + fileRect[3] * 0.5)
+        rt.pointerMove(to: fileCenter, at: 0.01)
+        rt.pointerDown(at: fileCenter, at: 0.02)
+        rt.pointerMove(to: Vec2(fileCenter.x + 24, fileCenter.y), at: 0.03)
+        rt.frame(at: 0.04)
+        let fileDrag = try #require(rt.takeDragOutStart())
+        #expect(fileDrag.item.files == [state.file])
+        #expect(rt.state.dragging == "file")
+
+        rt.finishDragOut(.copied, at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.state.dragging == nil)
+        #expect(rt.state.last?.0 == "file")
+        #expect(rt.state.last?.1 == .copied)
+
+        let textRect = try #require(rt.element(byKey: "text")?.rect)
+        let textCenter = Vec2(textRect[0] + textRect[2] * 0.5, textRect[1] + textRect[3] * 0.5)
+        rt.pointerMove(to: textCenter, at: 0.07)
+        rt.pointerDown(at: textCenter, at: 0.08)
+        rt.pointerMove(to: Vec2(textCenter.x + 24, textCenter.y), at: 0.09)
+        rt.frame(at: 0.10)
+        let textDrag = try #require(rt.takeDragOutStart())
+        #expect(textDrag.item.text == "Hello from Rune")
+        rt.finishDragOut(.cancelled, at: 0.11)
+        rt.frame(at: 0.12)
+        #expect(rt.state.last?.0 == "text")
+        #expect(rt.state.last?.1 == .cancelled)
+    }
 
     // Upstream: examples/drop-files/src/main.rs:75 (unblocked zone layout & formatting)
     @Test("drop-files: formats dropped file names and highlights hovered zone")
@@ -114,17 +157,55 @@ struct RemainingExampleParityTests {
         rt.frame(at: 0.0)
         let picRect = try #require(rt.element(byKey: "pictures")?.rect)
         let center = Vec2(picRect[0] + picRect[2] * 0.5, picRect[1] + picRect[3] * 0.5)
-        rt.pointerMove(to: center, at: 0.01)
+        rt.dragFiles([URL(fileURLWithPath: "/tmp/sunset.png")], at: center, at: 0.01)
         rt.frame(at: 0.02)
         #expect(rt.state.over == "pictures")
+        rt.dragFilesLeave(at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.state.over == nil)
     }
 
     // Upstream: examples/drop-files/src/main.rs:75
-    @Test(
-        "drop-files: pictures_go_to_the_pictures_zone_and_the_rest_to_the_zone_around_them",
-        .disabled("Blocked on @platform/@el: El.onDropFiles / El.onDropHover / acceptsExtensions and Runtime.dragFiles/dropFiles")
-    )
-    func dropFilesSystemDispatch() {}
+    @Test("drop-files: pictures_go_to_the_pictures_zone_and_the_rest_to_the_zone_around_them")
+    func dropFilesSystemDispatch() throws {
+        let rt = Runtime<DropFilesState>(
+            state: DropFilesState(),
+            viewport: Vec2(520, 240),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: dropFilesView
+        )
+        rt.frame(at: 0.0)
+        let picRect = try #require(rt.element(byKey: "pictures")?.rect)
+        let picCenter = Vec2(picRect[0] + picRect[2] * 0.5, picRect[1] + picRect[3] * 0.5)
+        let anyRect = try #require(rt.element(byKey: "anything")?.rect)
+        let anyCenter = Vec2(anyRect[0] + anyRect[2] * 0.5, anyRect[1] + anyRect[3] * 0.5)
+
+        let png = URL(fileURLWithPath: "/tmp/sunset.png")
+        let txt = URL(fileURLWithPath: "/tmp/notes.txt")
+
+        rt.dragFiles([png], at: picCenter, at: 0.01)
+        #expect(rt.state.over == "pictures")
+        #expect(rt.dropFiles([png], at: picCenter, at: 0.02))
+        rt.frame(at: 0.03)
+        #expect(rt.state.over == nil)
+        #expect(rt.state.last?.0 == "pictures")
+        #expect(formatNames(rt.state.last?.1 ?? []) == "sunset.png")
+
+        rt.dragFiles([txt], at: picCenter, at: 0.04)
+        #expect(rt.state.over == nil)
+        #expect(rt.dropFiles([txt], at: picCenter, at: 0.05))
+        rt.frame(at: 0.06)
+        #expect(rt.state.last?.0 == "window")
+        #expect(formatNames(rt.state.last?.1 ?? []) == "notes.txt")
+
+        rt.dragFiles([txt], at: anyCenter, at: 0.07)
+        #expect(rt.state.over == "anything")
+        #expect(rt.dropFiles([txt], at: anyCenter, at: 0.08))
+        rt.frame(at: 0.09)
+        #expect(rt.state.last?.0 == "anything")
+        #expect(formatNames(rt.state.last?.1 ?? []) == "notes.txt")
+    }
 
     // Upstream: examples/motion-bento/src/tests.rs:11
     @Test("motion-bento: script_taps_reach_the_same_state_as_the_schedule")

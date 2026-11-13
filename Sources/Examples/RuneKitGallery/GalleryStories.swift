@@ -173,7 +173,6 @@ func popupListComposer(_ s: GalleryState, _ k: Kit, _ overlays: inout [El<Galler
 }
 
 func textSelectableHelp(_ s: GalleryState, _ k: Kit, _: inout [El<GalleryState>]) -> El<GalleryState> {
-    // Phase 2 (@el/@text): replace text row with El.selectable(true).selectionColor(k.selection())
     let copyBtn: El<GalleryState> = k.iconButton(
         key: "copy",
         svg: OpenCodeIcons.copy,
@@ -212,6 +211,8 @@ func textSelectableHelp(_ s: GalleryState, _ k: Kit, _: inout [El<GalleryState>]
                 .key("command")
                 .font(k.ty.mono)
                 .color(k.c.textBase)
+                .selectable(true)
+                .selectionStyle(SelectionStyle(highlight: k.selection()))
                 .grow(1)
                 .minW(0)
         )

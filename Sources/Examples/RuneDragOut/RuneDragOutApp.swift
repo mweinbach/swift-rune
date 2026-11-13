@@ -41,6 +41,7 @@ public func dragOutTile(
     return container
         .key(key)
         .role(.button)
+        // Re-add .cursor(.grab) once gap/platform Increment 7 (#440) lands on main.
         .size(150, 92)
         .p(12)
         .gap(4)
@@ -52,24 +53,16 @@ public func dragOutTile(
         .opacity(isDragging ? 0.28 : 1.0)
         .child(text(title).size(15).semibold().color(t.text))
         .child(text(detail).size(12).medium().color(t.textSecondary))
-        .onDrag { state, _, _ in
-            if state.dragging != key {
-                state.dragging = key
-            }
+        .dragOut { state in
+            makeItem(state).opaque(t.bg)
         }
-        .onDragEnd { state, _, _ in
-            let item = makeItem(state).opaque(t.bg)
-            _ = item
-            print("drag-end \(key) DragOutcome.copied")
+        .onDragStart { state, _ in
+            state.dragging = key
+        }
+        .onDragOutEnd { state, outcome, _ in
+            print("drag-end \(key) \(outcome)")
             state.dragging = nil
-            state.last = (key, .copied)
-        }
-        .onClick { state in
-            let item = makeItem(state).opaque(t.bg)
-            if let txt = item.text {
-                Clipboard.shared.writeText(txt)
-            }
-            state.last = (key, .copied)
+            state.last = (key, outcome)
         }
 }
 
