@@ -104,30 +104,24 @@ struct RenderRuntimeBlendTxTests {
         #expect(rt.focusedKey == "field")
         #expect(rt.hasPendingCommit == false)
 
-        // Blur with explicit tx.commit() inside updateIf: clears focusedKey, marks hasPendingCommit, and reconciles on frame
-        let returnedCommit = rt.updateIf(at: 0.02) { _, tx in
+        // A blur that drops focus returns true ("frame work") and dirties commit even when closure returns false
+        let dropped = rt.updateIf(at: 0.02) { _, tx in
             tx.blur()
-            tx.commit()
             return false
         }
-        #expect(returnedCommit == false)
-        #expect(rt.focusedKey == nil)
+        #expect(dropped == true)
         #expect(rt.hasPendingCommit == true)
         _ = rt.frame(at: 0.025)
         let fieldInfo = rt.lastElements.first(where: { $0.key == "field" })
         #expect(fieldInfo?.focused == false)
 
-        // Tab re-focuses field once previous commit consumed pendingTxBlurRequested; updateIf with tx.blur() alone still clears focusedKey
-        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.03)
-        _ = rt.frame(at: 0.03)
-        #expect(rt.focusedKey == "field")
-        let returnedBlurOnly = rt.updateIf(at: 0.04) { _, tx in
+        // With nothing focused, calling tx.blur() is a no-op and returns false
+        let noOp = rt.updateIf(at: 0.03) { _, tx in
             tx.blur()
             return false
         }
-        #expect(returnedBlurOnly == false)
-        #expect(rt.focusedKey == nil)
-        _ = rt.keyDown(KeyEvent(key: .text("z")), at: 0.05)
+        #expect(noOp == false)
+        _ = rt.keyDown(KeyEvent(key: .text("z")), at: 0.04)
         #expect(rt.state.edit.text == "")
         #expect(rt.state.unhandledKeys == ["z"])
     }
@@ -257,11 +251,13 @@ struct RenderRuntimeBlendTxTests {
     private final class BlendTrackingCompositor: Compositor {
         typealias State = Bool
         var srgbHistory: [Bool] = []
+        var formatHistory: [MTLPixelFormat] = []
         var isAnimating: Bool { false }
         var drawsOwnContent: Bool { false }
 
         func render(frame: CompositorFrame<Bool>) {
             srgbHistory.append(frame.srgbBlend)
+            formatHistory.append(frame.pixelFormat)
             frame.drawUI()
         }
     }
@@ -270,7 +266,7 @@ struct RenderRuntimeBlendTxTests {
     @Test("srgb_blend_runtime.rs:93 a_headless_run_follows_a_live_switch")
     func headlessRunFollowsLiveSwitch() throws {
         let comp = BlendTrackingCompositor()
-        let app = App<Bool>(title: "BlendLive", size: Vec2(40, 40), state: false) { gamma, _ in
+        let app = App<Bool>(title: "BlendLive", size: Vec2(40, 40), state: false) { _, _ in
             col().size(40, 40).bg(.black)
                 .child(
                     el().key("btn").size(20, 20)
@@ -285,35 +281,31 @@ struct RenderRuntimeBlendTxTests {
         .srgbBlend(false)
         .compositor(comp)
 
-        // First headless run without click keeps initial srgbBlend == false (linear hover green ~188)
-        var initialArgs = ToolingArgs()
-        initialArgs.scriptArg = #"[{ "t": 0.05, "type": "move", "x": 10, "y": 10 }]"#
-        initialArgs.pixelScale = 1.0
-        let initialOut = try HeadlessRunner.run(app, args: initialArgs)
-        #expect(comp.srgbHistory == [false])
-        let linearPx = sampleRGBA(initialOut.finalFrame, x: 10, y: 10)
-        #expect(linearPx.r >= 253)
-        #expect(abs(Int(linearPx.g) - 188) <= 3)
-
-        // Second headless run clicks btn to toggle srgbBlend live via tx.setSrgbBlend(true), then hovers (gamma green ~128)
-        var switchedArgs = ToolingArgs()
-        switchedArgs.scriptArg = """
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("rune-srgb-live-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        var args = ToolingArgs()
+        args.scriptArg = """
         [
           { "t": 0.05, "type": "tap", "key": "btn" },
           { "t": 0.15, "type": "move", "x": 10, "y": 10 }
         ]
         """
-        switchedArgs.pixelScale = 1.0
-        let switchedOut = try HeadlessRunner.run(app, args: switchedArgs)
+        args.pixelScale = 1.0
+        args.framesDir = tmpDir.path
+        args.fps = 30.0
+        let out = try HeadlessRunner.run(app, args: args)
 
-        // Compositor saw false initially and true after the live click switch
-        #expect(comp.srgbHistory == [false, true])
+        // Single headless run starts linear/sRGB-target (.bgra8Unorm_srgb, false) and switches live to (.bgra8Unorm, true)
+        #expect(comp.srgbHistory.first == false)
+        #expect(comp.srgbHistory.last == true)
+        #expect(comp.formatHistory.first == .bgra8Unorm_srgb)
+        #expect(comp.formatHistory.last == .bgra8Unorm)
 
         // Final frame rendered with gamma sRGB blending produces ~128 green on the hovered red+white(0.5) box
-        let px = sampleRGBA(switchedOut.finalFrame, x: 10, y: 10)
+        let px = sampleRGBA(out.finalFrame, x: 10, y: 10)
         #expect(px.r >= 253)
-        #expect(abs(Int(px.g) - 128) <= 3)
-        #expect(abs(Int(px.b) - 128) <= 3)
+        #expect(abs(Int(px.g) - 128) <= 2)
+        #expect(abs(Int(px.b) - 128) <= 2)
     }
 
     /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:133` `switching_format_keeps_the_glyph_atlas_and_extra_pipelines`

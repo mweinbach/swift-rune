@@ -4327,13 +4327,7 @@ public final class Runtime<State> {
                 nodeTurn = ancestorTurn
             }
 
-            let parentWindowClip: MotionRect = {
-                if let flightClipOverride { return flightClipOverride }
-                if nodeById[p.id] != nil {
-                    return snap.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].clipRect : nil } ?? windowRect
-                }
-                return snap.clipRect
-            }()
+            let parentWindowClip: MotionRect = flightClipOverride ?? snap.clipRect
             let effectiveOuterClip: MotionRect
             let effectiveHitClip: MotionRect
             let childLocalTurnClip: MotionRect?
@@ -7838,7 +7832,9 @@ public final class Runtime<State> {
         if let dragRepeatDelay = tx.runtimeActions["dragRepeatAfter"] as? Double {
             kitHooks.requestedDragRepeatDelay = dragRepeatDelay
         }
+        var blurDroppedFocus = false
         if tx.blurFocusRequested {
+            blurDroppedFocus = (focusedPath != nil || focusedKey != nil)
             if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
@@ -7977,7 +7973,7 @@ public final class Runtime<State> {
         if tx.pasteRequested {
             pendingPasteRequests += 1
         }
-        let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty)
+        let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
                 dirtyCommit(at: now, external: external)
@@ -8154,8 +8150,9 @@ public final class Runtime<State> {
             } else {
                 changed = body(&state, &tx)
             }
+            let hadFocusBeforeUpdate = (focusedPath != nil || focusedKey != nil)
             applyTx(tx, at: t, markDirtyIfNotLiveOnly: changed || tx.isForceCommitRequested)
-            return changed
+            return changed || (tx.blurFocusRequested && hadFocusBeforeUpdate)
         }
     }
 

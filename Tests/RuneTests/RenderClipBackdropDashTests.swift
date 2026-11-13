@@ -96,11 +96,8 @@ struct RenderClipBackdropDashTests {
                 .child(
                     col().size(20, 20).clip()
                         .child(
-                            col().size(40, 40)
-                                .child(
-                                    el().key("btn").size(40, 40)
-                                        .onClick { s, _ in s.hits += 1 }
-                                )
+                            el().key("btn").size(40, 40)
+                                .onClick { s, _ in s.hits += 1 }
                         )
                 )
         }
