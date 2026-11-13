@@ -217,4 +217,36 @@ struct ExampleParityTests {
         rt.frame(at: 2.0 / 60.0)
         #expect(rt.state.speed == 0.5)
     }
+
+    @Test("settings: headless scenes and script replay cover all 7 scenes, toggles, accent, and speed")
+    func settingsScenesAndScriptReplay() throws {
+        let spec = RuneSettingsApp.makeSpec()
+        for (sceneName, expectedText) in [
+            ("default", "Launch at login"),
+            ("light", "Appearance"),
+            ("dark", "Appearance"),
+            ("reduced-motion", "Reduce motion"),
+            ("toggles-off", "Play sounds"),
+            ("accent-pink", "Accent colour"),
+            ("slow", "0.50×"),
+        ] {
+            let out = try HeadlessRunner.run(spec, args: ToolingArgs.parse(["--scene", sceneName]))
+            let tree = String(decoding: out.treeJSON, as: UTF8.self)
+            #expect(tree.contains(expectedText), "Missing \(expectedText) in settings scene \(sceneName)")
+        }
+
+        var scriptArgs = ToolingArgs()
+        scriptArgs.scriptArg = """
+        [
+          {"t": 0.05, "type": "tap", "key": "Light"},
+          {"t": 0.15, "type": "tap", "key": "green"},
+          {"t": 0.25, "type": "tap", "key": "login"},
+          {"t": 0.35, "type": "tap", "key": "sounds"},
+          {"t": 0.45, "type": "drag", "key": "slider/knob", "dx": 40, "dy": 0, "dur": 0.2}
+        ]
+        """
+        let scripted = try HeadlessRunner.run(spec, args: scriptArgs)
+        let scriptedTree = String(decoding: scripted.treeJSON, as: UTF8.self)
+        #expect(!scriptedTree.contains("1.00×"))
+    }
 }
