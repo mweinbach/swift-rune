@@ -220,6 +220,10 @@ public enum RuneLuauBenchApp {
     private static func benchMemoHit(n: Int) -> (Stat, UInt64) {
         let (rt, startNow) = makeSettledRuntime()
         var now = startNow
+        // Warm one host-tick commit after initial render so tracked scroll keys are in `deps`.
+        now += dt
+        rt.update(at: now) { s, _ in s.hostTicks += 1 }
+        _ = rt.frame(at: now)
         var calls: UInt64 = 0
         var samples: [Double] = []
         samples.reserveCapacity(n)

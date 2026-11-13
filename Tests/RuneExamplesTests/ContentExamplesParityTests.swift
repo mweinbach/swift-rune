@@ -124,7 +124,7 @@ struct ContentExamplesParityTests {
         #expect(report.output.contains("scenario=minute rewind=on metric=bytes median=\(report.minuteBytes) frames=20"))
     }
 
-    @Test("rune-luau-bench runs Luau perf gates and behavior checks cleanly", .disabled("Blocked on #464: RuneLuau UI.swift:1206 numeric key & LuauVM.swift:116 markStack unwind"))
+    @Test("rune-luau-bench runs Luau perf gates and behavior checks cleanly")
     func luauBenchSmoke() {
         let report = RuneLuauBenchApp.run(scale: .smoke)
         #expect(report.idle.frames == 30)
@@ -411,7 +411,7 @@ struct ContentExamplesParityTests {
         #expect(report.overlayName == "HUD")
         #expect(report.overlayVisibleAfterShow)
         let hzOverlay = RuneOverlayHudCostApp.overlaySpec(showHz: true)
-        #expect(hzOverlay.options.name == "HUD")
+        #expect(hzOverlay.spec.name == "HUD")
     }
 
     @Test("rune-pacing advances spring pill layout across frames cleanly")
@@ -430,7 +430,7 @@ struct ContentExamplesParityTests {
         #expect(!report.visibleAfterFadeOut)
         #expect(report.overlayInstances > 0)
         let nativeOverlay = RunePacingOverlayApp.overlaySpec(nativePulse: true)
-        #expect(!nativeOverlay.options.name.isEmpty)
+        #expect(!nativeOverlay.spec.name.isEmpty)
     }
 
     @Test("rune-material-check attaches glass/popover materials and prewarmed overlay")

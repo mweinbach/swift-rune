@@ -160,9 +160,7 @@ public enum RuneKitScrollBenchApp {
             .rounded(8)
             .bg(Color.white.alpha(fillAlpha))
             .border(1, Color.white.alpha(0.08))
-            .onDrawnLayoutTx { _, _, tx in
-                tx.liveOnly()
-            }
+            // NOTE: upstream calls `.on_drawn_layout(|_, _, tx| tx.live_only())`, awaiting `gap/el` (`b2ac79f`) re-land on `main`.
             .child(head)
             .child(MarkdownView<State>(note).render(s.style).key("note"))
             .child(links)
@@ -206,7 +204,7 @@ public enum RuneKitScrollBenchApp {
                 .wFull()
                 .gap(14)
                 .p(16)
-                .hoverMotionWithin(.instant, .instant)
+                // NOTE: upstream calls `.hover_motion_within(Motion::instant(), Motion::instant())`, awaiting `gap/el` (`b2ac79f`) re-land on `main`.
                 .children(s.notes.enumerated().map { entryCard(s, $0.offset, $0.element) })
         default:
             fatalError("Unknown scroll_bench workload: \(s.workload)")
