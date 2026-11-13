@@ -70,6 +70,33 @@ public struct FxPreparedLayer: Sendable, Equatable {
     public let backdropSrgb: Bool
     public let sourceSlot: UInt32?
     public let instanceIndex: UInt32
+    public let fireSimGrid: Int?
+
+    public init(
+        layerIndex: Int,
+        kind: FxEffectKind,
+        place: Place,
+        blend: FxBlend,
+        boundsPx: SIMD4<Float>,
+        blurPx: Float,
+        needsBackdrop: Bool,
+        backdropSrgb: Bool,
+        sourceSlot: UInt32?,
+        instanceIndex: UInt32,
+        fireSimGrid: Int? = nil
+    ) {
+        self.layerIndex = layerIndex
+        self.kind = kind
+        self.place = place
+        self.blend = blend
+        self.boundsPx = boundsPx
+        self.blurPx = blurPx
+        self.needsBackdrop = needsBackdrop
+        self.backdropSrgb = backdropSrgb
+        self.sourceSlot = sourceSlot
+        self.instanceIndex = instanceIndex
+        self.fireSimGrid = fireSimGrid
+    }
 }
 
 public struct FxRenderPassGraph: Sendable, Equatable {
@@ -91,7 +118,8 @@ public struct FxRenderPassGraph: Sendable, Equatable {
         layers: [FxLayer],
         slots: [FxSlot]? = nil,
         srgbBlend: Bool = false,
-        hasBackdrop: Bool = false
+        hasBackdrop: Bool = false,
+        fireSim: FireSim? = nil
     ) -> FxRenderPassGraph {
         let vpW = Float(viewport.x)
         let vpH = Float(viewport.y)
@@ -100,6 +128,8 @@ public struct FxRenderPassGraph: Sendable, Equatable {
         var instances: [FxInstRaw] = []
         var tableData: [SIMD4<Float>] = []
         var maxBlurPx: Float = 0.0
+
+        fireSim?.beginFrame()
 
         for (idx, layer) in layers.enumerated() {
             let slot = (slots != nil && idx < slots!.count) ? slots![idx] : FxSlot()
@@ -131,6 +161,23 @@ public struct FxRenderPassGraph: Sendable, Equatable {
 
             layer.fillTables(into: &inst, data: &tableData)
 
+            var fireSimGrid: Int? = nil
+            if case .fire(let fp) = layer.fx,
+               fp.style == .top || fp.style == .heat,
+               let sim = fireSim {
+                let (gridIdx, ext) = sim.plan(
+                    layer: layer,
+                    params: fp,
+                    domain: boundsPt,
+                    frozen: layer.reducedMotion
+                )
+                inst.t.z = 4.0
+                inst.aux = SIMD4<Float>(boundsPt.x, boundsPt.y, ext.x, ext.y)
+                inst.p3.y = boundsPt.w
+                inst.p3.z = boundsPt.h
+                fireSimGrid = gridIdx
+            }
+
             var blurPx: Float = 0.0
             if case .distort(.lens(let l)) = layer.fx, l.frost > 0.0 {
                 blurPx = max(min(max(l.frost, 0.0), 1.0) * FxPackConstants.lensFrostSigma * effScale, 0.0)
@@ -161,7 +208,8 @@ public struct FxRenderPassGraph: Sendable, Equatable {
                 needsBackdrop: needsBd,
                 backdropSrgb: slot.backdropSrgb ?? defaultBdSrgb,
                 sourceSlot: layer.source?.slot,
-                instanceIndex: instIndex
+                instanceIndex: instIndex,
+                fireSimGrid: fireSimGrid
             ))
         }
 
@@ -329,6 +377,8 @@ public final class FxRenderer: @unchecked Sendable {
     private var mipLibrary: MTLLibrary?
     private var mipPipeline: MTLRenderPipelineState?
     private var fireSimPipeline: MTLComputePipelineState?
+    private var fireSimPipelines: FireSimPipelines?
+    private var fireSim: FireSim?
 
     private var instBuffer: MTLBuffer
     private var instCapacity: Int
@@ -527,13 +577,43 @@ public final class FxRenderer: @unchecked Sendable {
             mipPipeline = try device.makeRenderPipelineState(descriptor: dm)
         }
 
-        if fireSimPipeline == nil {
+        if fireSimPipeline == nil || fireSimPipelines == nil {
             let lib = try device.makeLibrary(source: RuneFXShaders.fireSimShader, options: nil)
-            guard let k = lib.makeFunction(name: "fx_firesim_step_kernel") else {
-                throw FxRendererError.shaderCompileFailed("Missing firesim kernel")
+            if fireSimPipeline == nil {
+                guard let k = lib.makeFunction(name: "fx_firesim_step_kernel") else {
+                    throw FxRendererError.shaderCompileFailed("Missing firesim kernel")
+                }
+                fireSimPipeline = try device.makeComputePipelineState(function: k)
             }
-            fireSimPipeline = try device.makeComputePipelineState(function: k)
+            if fireSimPipelines == nil {
+                fireSimPipelines = try FireSimPipelines(device: device, library: lib)
+            }
         }
+    }
+
+    /// Enable or disable the fluid fire simulation (styles `.top` and `.heat`).
+    public func setFireSim(_ on: Bool) {
+        if on && fireSim == nil {
+            fireSim = FireSim(device: device)
+        } else if !on {
+            fireSim = nil
+        }
+    }
+
+    /// Whether `simulate(commandBuffer:)` has pending steps to record this frame.
+    public var simulatePending: Bool {
+        fireSim?.pending ?? false
+    }
+
+    /// Record this frame's planned fire simulation steps as one compute pass before drawing fire layers.
+    @discardableResult
+    public func simulate(commandBuffer: MTLCommandBuffer) throws -> Bool {
+        guard let sim = fireSim, sim.pending else { return false }
+        if fireSimPipelines == nil {
+            try compileUtilityPipelines()
+        }
+        guard let pipelines = fireSimPipelines else { return false }
+        return sim.record(commandBuffer: commandBuffer, pipelines: pipelines)
     }
 
     public func warmAll() throws {
@@ -583,7 +663,8 @@ public final class FxRenderer: @unchecked Sendable {
             layers: frame.layers,
             slots: slots.isEmpty ? nil : slots,
             srgbBlend: options.srgbBlend,
-            hasBackdrop: frame.backdrop != nil
+            hasBackdrop: frame.backdrop != nil,
+            fireSim: fireSim
         )
 
         previousBindCache = currentBindCache
@@ -612,9 +693,9 @@ public final class FxRenderer: @unchecked Sendable {
             preparedByLayer[item.layerIndex] = item
             let readsBd = item.needsBackdrop && frame.backdrop != nil
             let bdTex: MTLTexture = readsBd ? (frame.backdrop ?? dummyTexture) : dummyTexture
-            let srcTex: MTLTexture = item.sourceSlot.flatMap {
-                Int($0) < frame.sources.count ? frame.sources[Int($0)] : nil
-            } ?? dummyTexture
+            let srcTex: MTLTexture = item.fireSimGrid.flatMap { fireSim?.finalTexture(at: $0) }
+                ?? item.sourceSlot.flatMap { Int($0) < frame.sources.count ? frame.sources[Int($0)] : nil }
+                ?? dummyTexture
             let blurredTex: MTLTexture = (item.blurPx > 0.0 && frame.backdrop != nil)
                 ? (blurPyramid?.result ?? dummyTexture)
                 : dummyTexture
@@ -638,11 +719,14 @@ public final class FxRenderer: @unchecked Sendable {
     public func setLayerBackdrop(_ backdrop: MTLTexture, layer: Int) {
         guard let item = preparedByLayer[layer], item.needsBackdrop else { return }
         layerBackdrops[layer] = backdrop
+        let srcTex: MTLTexture = item.fireSimGrid.flatMap { fireSim?.finalTexture(at: $0) }
+            ?? item.sourceSlot.flatMap { Int($0) < lastFrameSources.count ? lastFrameSources[Int($0)] : nil }
+            ?? dummyTexture
         let blurredTex: MTLTexture = item.blurPx > 0.0 ? (blurPyramid?.result ?? dummyTexture) : dummyTexture
         let encFlags: UInt8 = 2 | (item.backdropSrgb ? 1 : 0)
         layerBindIDs[layer] = resolveBindID(
             backdrop: backdrop,
-            source: dummyTexture,
+            source: srcTex,
             blurred: blurredTex,
             encFlags: encFlags
         )
@@ -780,9 +864,9 @@ public final class FxRenderer: @unchecked Sendable {
         let overrideBd = layerBackdrops[layer]
         let hasBd = (overrideBd != nil || lastFrameBackdrop != nil) && item.needsBackdrop
         let bdTex = hasBd ? (overrideBd ?? lastFrameBackdrop ?? dummyTexture) : dummyTexture
-        let srcTex: MTLTexture = item.sourceSlot.flatMap {
-            Int($0) < lastFrameSources.count ? lastFrameSources[Int($0)] : nil
-        } ?? dummyTexture
+        let srcTex: MTLTexture = item.fireSimGrid.flatMap { fireSim?.finalTexture(at: $0) }
+            ?? item.sourceSlot.flatMap { Int($0) < lastFrameSources.count ? lastFrameSources[Int($0)] : nil }
+            ?? dummyTexture
         let blurredTex: MTLTexture = (item.blurPx > 0.0 && (overrideBd != nil || lastFrameBackdrop != nil))
             ? (blurPyramid?.result ?? dummyTexture)
             : dummyTexture
@@ -848,9 +932,9 @@ public final class FxRenderer: @unchecked Sendable {
             encoder.setRenderPipelineState(pso)
             var enc = FxBackdropEncoding(encoded: item.backdropSrgb ? 1.0 : 0.0, present: backdrop != nil ? 1.0 : 0.0)
             encoder.setFragmentBytes(&enc, length: MemoryLayout<FxBackdropEncoding>.stride, index: 4)
-            let srcTex: MTLTexture = item.sourceSlot.flatMap {
-                Int($0) < sources.count ? sources[Int($0)] : nil
-            } ?? dummyTexture
+            let srcTex: MTLTexture = item.fireSimGrid.flatMap { fireSim?.finalTexture(at: $0) }
+                ?? item.sourceSlot.flatMap { Int($0) < sources.count ? sources[Int($0)] : nil }
+                ?? dummyTexture
             encoder.setFragmentTexture(srcTex, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: Int(item.instanceIndex))
         }
