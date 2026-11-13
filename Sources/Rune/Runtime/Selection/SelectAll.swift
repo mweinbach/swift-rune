@@ -1,0 +1,125 @@
+import Foundation
+import RuneMotion
+
+/// Node metadata snapshot for resolving Cmd+A across `El.selectionGroup` subtrees
+/// (`crates/rune/src/runtime/selection/select_all.rs`).
+public struct SelectableNodeSnapshot: Sendable, Equatable {
+    public var path: String
+    public var key: String?
+    public var parentPath: String?
+    public var isSelectable: Bool
+    public var isSelectionGroup: Bool
+    public var isFocusedTextInput: Bool
+    public var text: String
+    public var rect: MotionRect
+
+    public init(
+        path: String,
+        key: String? = nil,
+        parentPath: String? = nil,
+        isSelectable: Bool = false,
+        isSelectionGroup: Bool = false,
+        isFocusedTextInput: Bool = false,
+        text: String = "",
+        rect: MotionRect = .zero
+    ) {
+        self.path = path
+        self.key = key
+        self.parentPath = parentPath
+        self.isSelectable = isSelectable
+        self.isSelectionGroup = isSelectionGroup
+        self.isFocusedTextInput = isFocusedTextInput
+        self.text = text
+        self.rect = rect
+    }
+}
+
+/// Remembers which `selectionGroup` was last interacted with so Cmd+A targets it even after
+/// clicking blank space (`crates/rune/src/runtime/selection/select_all.rs`).
+public struct SelectAllPick: Sendable, Equatable {
+    public private(set) var lastGroupPath: String?
+
+    public init(lastGroupPath: String? = nil) {
+        self.lastGroupPath = lastGroupPath
+    }
+
+    public mutating func noteClick(groupPath: String?) {
+        if let groupPath {
+            lastGroupPath = groupPath
+        }
+    }
+
+    public mutating func clear() {
+        lastGroupPath = nil
+    }
+}
+
+/// Outcome of Cmd+A `SelectAllResolver` (`crates/rune/src/runtime/select_all_tests.rs`).
+public enum SelectAllOutcome: Sendable, Equatable {
+    case handledByApp
+    case handledByFocusedInput
+    case selectGroup(groupPath: String, nodePaths: [String], joinedText: String)
+    case none
+}
+
+/// Implements upstream's Cmd+A target selection rule (`crates/rune/src/runtime/selection/select_all.rs`):
+/// 1. App `onKey` handler wins if it claims `Cmd+A`.
+/// 2. A focused `textInput` keeps its own Select All.
+/// 3. Otherwise choose the last clicked live `selectionGroup` if still mounted, or the window's
+///    unique `selectionGroup` if only one exists; multiple groups with no prior click select nothing.
+public enum SelectAllResolver {
+    public static func groupPath(forNodeAt index: Int, in nodes: [SelectableNodeSnapshot]) -> String? {
+        let byPath = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.path, $0.offset) })
+        var cursor: Int? = nodes[index].parentPath.flatMap { byPath[$0] }
+        while let idx = cursor {
+            if nodes[idx].isSelectionGroup {
+                return nodes[idx].path
+            }
+            cursor = nodes[idx].parentPath.flatMap { byPath[$0] }
+        }
+        return nil
+    }
+
+    public static func groupTexts(groupPath: String, in nodes: [SelectableNodeSnapshot]) -> [SelectableNodeSnapshot] {
+        nodes.enumerated().compactMap { idx, node in
+            guard node.isSelectable, Self.groupPath(forNodeAt: idx, in: nodes) == groupPath else { return nil }
+            return node
+        }
+    }
+
+    public static func resolve(
+        nodes: [SelectableNodeSnapshot],
+        pick: inout SelectAllPick,
+        appHandledCmdA: Bool = false
+    ) -> SelectAllOutcome {
+        if appHandledCmdA {
+            return .handledByApp
+        }
+        if nodes.contains(where: { $0.isFocusedTextInput }) {
+            return .handledByFocusedInput
+        }
+        let liveGroups = nodes.filter { $0.isSelectionGroup && !groupTexts(groupPath: $0.path, in: nodes).isEmpty }
+        let chosenGroup: SelectableNodeSnapshot?
+        if let remembered = pick.lastGroupPath,
+           let matched = liveGroups.first(where: { $0.path == remembered }) {
+            chosenGroup = matched
+        } else {
+            if liveGroups.count != 1 {
+                if pick.lastGroupPath != nil && !liveGroups.contains(where: { $0.path == pick.lastGroupPath }) {
+                    pick.clear()
+                }
+                return .none
+            }
+            chosenGroup = liveGroups.first
+        }
+        guard let group = chosenGroup else { return .none }
+        let texts = groupTexts(groupPath: group.path, in: nodes)
+        let pieces = texts.map { (rect: $0.rect, text: $0.text) }
+        let joined = CopyJoin.join(pieces)
+        return .selectGroup(
+            groupPath: group.path,
+            nodePaths: texts.map(\.path),
+            joinedText: joined
+        )
+    }
+}
