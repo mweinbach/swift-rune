@@ -250,4 +250,48 @@ struct ThemeColorTokParityTests {
             }
         }
     }
+
+    @Test func srgbEquivalentChromaticAndThemePaletteErrorAlphaParity() throws {
+        // Chromatic translucent color keeps linear RGB unchanged and fits luminance-weighted alpha.
+        let fg = Color.hex("#40c08040")!
+        let bg = Color.hex("#182030")!
+        let eq = fg.srgbEquivalent(over: bg)
+        #expect(eq.r == fg.r && eq.g == fg.g && eq.b == fg.b)
+        #expect(eq.a >= 0.0 && eq.a <= 1.0 && eq.a != fg.a)
+        let opaque = Color.hex("#40c080ff")!
+        #expect(opaque.srgbEquivalent(over: bg) == opaque)
+
+        // Theme keeps dark flag, exposes unused palette hex colors, provides alpha(_:_:), and throws on invalid colors.
+        let json = """
+        {
+          "name": "test",
+          "palette": { "unused-ink": "#336699", "bg": "#161616", "fg": "#ffffff" },
+          "blend": { "mode": "srgb", "over": "bg" },
+          "dark": { "bg": "bg", "fg": "fg" },
+          "light": { "bg": "fg", "fg": "bg" }
+        }
+        """
+        let darkTheme = try Theme.fromJSON(json, dark: true)
+        #expect(darkTheme.dark == true)
+        #expect(darkTheme.tryColor("unused-ink") == Color.hex("#336699"))
+        let lightTheme = try Theme.fromJSON(json, dark: false)
+        #expect(lightTheme.dark == false)
+
+        let alphaLinear = Theme.withBlend(false) { darkTheme.alpha(Color.hex("#ffffff")!, 0.1) }
+        let alphaSRGB = Theme.withBlend(true) { darkTheme.alpha(Color.hex("#ffffff")!, 0.1) }
+        #expect(abs(alphaSRGB.a - 0.1) < 1e-4)
+        #expect(alphaLinear.a < alphaSRGB.a)
+
+        let badJSON = """
+        {
+          "dark": { "bad-token": "not-a-color-or-palette-key" }
+        }
+        """
+        do {
+            _ = try Theme.fromJSON(badJSON, dark: true)
+            Issue.record("Expected ThemeError.invalidColor for unknown color reference")
+        } catch let err as ThemeError {
+            #expect(err == .invalidColor(token: "bad-token", value: "not-a-color-or-palette-key"))
+        }
+    }
 }

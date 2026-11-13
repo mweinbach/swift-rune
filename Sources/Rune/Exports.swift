@@ -223,34 +223,28 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
 
     /// Solves for a straight-alpha linear-light color whose linear-light composite over `bg`
     /// reproduces CSS / browser gamma-space sRGB blending of `self` over `bg`!
+    ///
+    /// Matches `rune::theme::srgb_equivalent`: ITU-R BT.709 luminance-weighted least-squares
+    /// fit keeping linear RGB unchanged (`theme.rs:86-104`).
     public func srgbEquivalent(over bg: Color) -> Color {
-        if a <= 0.0001 || a >= 0.9999 { return self }
-        let sa = a.clamped(to: 0...1)
-        let fgSRGB = SIMD3<Float>(RefShader.linearToSRGB(r), RefShader.linearToSRGB(g), RefShader.linearToSRGB(b))
-        let bgSRGB = SIMD3<Float>(RefShader.linearToSRGB(bg.r), RefShader.linearToSRGB(bg.g), RefShader.linearToSRGB(bg.b))
-        let targetSRGB = fgSRGB * sa + bgSRGB * (1.0 - sa)
-        let targetLin = SIMD3<Float>(
-            RefShader.srgbToLinear(targetSRGB.x),
-            RefShader.srgbToLinear(targetSRGB.y),
-            RefShader.srgbToLinear(targetSRGB.z)
-        )
-        let bgLin = SIMD3<Float>(bg.r, bg.g, bg.b)
-        let fgLin = SIMD3<Float>(r, g, b)
-        let delta = fgLin - bgLin
-        let denom = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z
-        if denom < 1e-6 {
-            return self
+        if a >= 0.999 || a <= 0.0 { return self }
+        @inline(__always)
+        func ch(_ cv: Float, _ bv: Float) -> (Float, Float, Float) {
+            let t = a * RefShader.linearToSRGB(cv) + (1.0 - a) * RefShader.linearToSRGB(bv)
+            return (RefShader.srgbToLinear(t), cv, bv)
         }
-        let diff = targetLin - bgLin
-        let solvedA = (diff.x * delta.x + diff.y * delta.y + diff.z * delta.z) / denom
-        let clampedA = solvedA.clamped(to: 0.001...1.0)
-        let rawRGB = (targetLin - bgLin * (1.0 - clampedA)) / clampedA
-        let solvedRGB = SIMD3<Float>(
-            rawRGB.x.clamped(to: 0...1),
-            rawRGB.y.clamped(to: 0...1),
-            rawRGB.z.clamped(to: 0...1)
-        )
-        return Color(r: solvedRGB.x, g: solvedRGB.y, b: solvedRGB.z, a: clampedA)
+        let parts = [ch(r, bg.r), ch(g, bg.g), ch(b, bg.b)]
+        let w: (Float, Float, Float) = (0.2126, 0.7152, 0.0722)
+        let weights = [w.0, w.1, w.2]
+        var num: Float = 0.0
+        var den: Float = 0.0
+        for (i, part) in parts.enumerated() {
+            let d = part.1 - part.2
+            num += weights[i] * d * (part.0 - part.2)
+            den += weights[i] * d * d
+        }
+        let solvedA = den > 1e-9 ? (num / den).clamped(to: 0...1) : a
+        return Color(r: r, g: g, b: b, a: solvedA)
     }
 
     @inlinable
@@ -484,17 +478,20 @@ public enum Tok {
 /// as well as `"defs"` + `"theme"` `{ "dark": ..., "light": ... }` maps (`rune::theme::Theme`).
 public struct JsonTheme: Sendable, Equatable {
     public var name: String
+    public var dark: Bool
     public var colors: [String: Color]
     public var numbers: [String: Float]
     public var blendBg: Color?
 
     public init(
         name: String = "custom",
+        dark: Bool = true,
         colors: [String: Color] = [:],
         numbers: [String: Float] = [:],
         blendBg: Color? = nil
     ) {
         self.name = name
+        self.dark = dark
         self.colors = colors
         self.numbers = numbers
         self.blendBg = blendBg

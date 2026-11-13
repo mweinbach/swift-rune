@@ -49,13 +49,22 @@ extension JsonTheme {
         color.srgbEquivalent(over: bg)
     }
 
+    /// Returns `color` at opacity `a`, re-solved when blending linearly and `blendBg` is set.
+    public func alpha(_ color: Color, _ a: Float) -> Color {
+        blended(color.alpha(a))
+    }
+
+    private func blended(_ color: Color) -> Color {
+        if let bg = blendBg {
+            return Self.forBlend(color, over: bg)
+        }
+        return color
+    }
+
     /// Looks up a color token adapted for the active blend mode (`blendsSrgb()`), or `nil` if absent.
     public func tryColor(_ key: String) -> Color? {
         guard let authored = colors[key] else { return nil }
-        if let bg = blendBg {
-            return Self.forBlend(authored, over: bg)
-        }
-        return authored
+        return blended(authored)
     }
 
     /// Looks up a color token adapted for the active blend mode (`blendsSrgb()`), returning `.transparent` if missing.
@@ -162,18 +171,27 @@ enum JsonThemeParser {
                     return literal
                 }
                 let refKey = str.hasPrefix("$") ? String(str.dropFirst()) : str
-                guard !visited.contains(refKey) else { return nil }
-                visited.insert(refKey)
-                defer { visited.remove(refKey) }
 
-                if let modeVal = modeDict[refKey] {
-                    return resolve(modeVal, visited: &visited, depth: depth + 1)
+                if let palVal = palette[refKey], !visited.contains("pal:\(refKey)") {
+                    visited.insert("pal:\(refKey)")
+                    defer { visited.remove("pal:\(refKey)") }
+                    if let c = resolve(palVal, visited: &visited, depth: depth + 1) {
+                        return c
+                    }
                 }
-                if let palVal = palette[refKey] {
-                    return resolve(palVal, visited: &visited, depth: depth + 1)
+                if let defVal = defs[refKey], !visited.contains("def:\(refKey)") {
+                    visited.insert("def:\(refKey)")
+                    defer { visited.remove("def:\(refKey)") }
+                    if let c = resolve(defVal, visited: &visited, depth: depth + 1) {
+                        return c
+                    }
                 }
-                if let defVal = defs[refKey] {
-                    return resolve(defVal, visited: &visited, depth: depth + 1)
+                if let modeVal = modeDict[refKey], !visited.contains("mode:\(refKey)") {
+                    visited.insert("mode:\(refKey)")
+                    defer { visited.remove("mode:\(refKey)") }
+                    if let c = resolve(modeVal, visited: &visited, depth: depth + 1) {
+                        return c
+                    }
                 }
                 return nil
             } else if let variants = value as? [String: Any] {
@@ -199,11 +217,20 @@ enum JsonThemeParser {
             if skippedRootKeys.contains(k) { continue }
             if let n = v as? NSNumber, !(v is Bool) {
                 resolvedNums[k] = n.floatValue
-            } else {
-                var visited: Set<String> = [k]
-                if let c = resolve(v, visited: &visited) {
-                    resolved[k] = c
+            } else if v is String || v is [String: Any] {
+                var visited: Set<String> = ["mode:\(k)"]
+                guard let c = resolve(v, visited: &visited) else {
+                    let rawDesc = (v as? String) ?? String(describing: v)
+                    throw ThemeError.invalidColor(token: k, value: rawDesc)
                 }
+                resolved[k] = c
+            }
+        }
+
+        // Insert palette entries not shadowed by mode-specific tokens (theme.rs:124-130).
+        for (k, v) in palette where resolved[k] == nil {
+            if let s = v as? String, let c = Color.css(s) {
+                resolved[k] = c
             }
         }
 
@@ -222,6 +249,6 @@ enum JsonThemeParser {
             }
         }
 
-        return JsonTheme(name: name, colors: resolved, numbers: resolvedNums, blendBg: blendBg)
+        return JsonTheme(name: name, dark: dark, colors: resolved, numbers: resolvedNums, blendBg: blendBg)
     }
 }
