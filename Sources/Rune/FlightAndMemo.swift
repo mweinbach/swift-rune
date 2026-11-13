@@ -801,57 +801,70 @@ public func regionWith<State, Inputs: Equatable>(
 
 /// A latest-wins background request with optional debounce and stale-answer rejection (`rune::Latest<T>`).
 public final class Latest<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var generation: UInt64 = 0
-    private var pendingWorkItem: DispatchWorkItem?
-    private var latestResult: T?
-    private var lastKey: AnyHashable?
-    private var pending: Bool = false
-    private var waker: (@Sendable () -> Void)?
-    public var debounceSeconds: TimeInterval
+    private let inner: LatestInner<T>
+    private let pool: LatestPool
+    private var debounceStorage: TimeInterval
 
-    private let queue = DispatchQueue(label: "com.rune.latest", qos: .userInitiated, attributes: .concurrent)
+    public var debounceSeconds: TimeInterval {
+        get {
+            inner.cond.lock()
+            defer { inner.cond.unlock() }
+            return debounceStorage
+        }
+        set {
+            inner.cond.lock()
+            debounceStorage = max(0, newValue)
+            inner.cond.unlock()
+        }
+    }
 
     public init(
         waker: (@Sendable () -> Void)? = nil,
         debounceSeconds: TimeInterval = 0
     ) {
-        self.waker = waker
-        self.debounceSeconds = max(0, debounceSeconds)
+        self.pool = LatestPool.shared
+        self.inner = LatestInner<T>(waker: waker)
+        self.debounceStorage = max(0, debounceSeconds)
+    }
+
+    internal init(
+        pool: LatestPool,
+        waker: (@Sendable () -> Void)? = nil,
+        debounceSeconds: TimeInterval = 0
+    ) {
+        self.pool = pool
+        self.inner = LatestInner<T>(waker: waker)
+        self.debounceStorage = max(0, debounceSeconds)
     }
 
     deinit {
-        lock.lock()
-        generation &+= 1
-        pendingWorkItem?.cancel()
-        pendingWorkItem = nil
-        latestResult = nil
-        lastKey = nil
-        pending = false
-        waker = nil
-        lock.unlock()
+        inner.cond.lock()
+        inner.slot.waker = nil
+        inner.slot.cancel()
+        inner.cond.broadcast()
+        inner.cond.unlock()
     }
 
     /// Builder-style debounce configuration (`latest.rs: debounce`).
     @discardableResult
     public func debounce(_ seconds: TimeInterval) -> Self {
-        lock.lock()
-        debounceSeconds = max(0, seconds)
-        lock.unlock()
+        inner.cond.lock()
+        debounceStorage = max(0, seconds)
+        inner.cond.unlock()
         return self
     }
 
     /// Whether a request is waiting out debounce or actively running.
     public var isPending: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return pending
+        inner.cond.lock()
+        defer { inner.cond.unlock() }
+        return inner.slot.isPending
     }
 
     public func setWaker(_ waker: @escaping @Sendable () -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.waker = waker
+        inner.cond.lock()
+        inner.slot.waker = waker
+        inner.cond.unlock()
     }
 
     /// Submits a background task; only the newest request's result is retained.
@@ -864,14 +877,24 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
         }
     }
 
+    /// Submits a throwing background task; errors settle without landing or waking (`catch_unwind` parity).
+    public func requestThrows<Input: Sendable>(
+        _ input: Input,
+        work: @escaping @Sendable (Input) throws -> T
+    ) {
+        inner.cond.lock()
+        inner.slot.key = nil
+        enqueueLocked(input, work: { value in try work(value) })
+    }
+
     /// Submits a background task that may settle with `nil` (superseding older answers without waking).
     public func requestOpt<Input: Sendable>(
         _ input: Input,
         work: @escaping @Sendable (Input) -> T?
     ) {
-        lock.lock()
-        lastKey = nil
-        enqueueLocked(input, work: work)
+        inner.cond.lock()
+        inner.slot.key = nil
+        enqueueLocked(input, work: { value in work(value) })
     }
 
     /// Submits `work` only if `key` differs from the previous request's key.
@@ -879,88 +902,50 @@ public final class Latest<T: Sendable>: @unchecked Sendable {
         key: Key,
         work: @escaping @Sendable (Key) -> T
     ) {
-        lock.lock()
+        inner.cond.lock()
         let wrapped = AnyHashable(key)
-        if lastKey == wrapped {
-            lock.unlock()
+        if inner.slot.key == wrapped {
+            inner.cond.unlock()
             return
         }
-        lastKey = wrapped
-        enqueueLocked(key) { value in
-            work(value)
-        }
+        inner.slot.key = wrapped
+        enqueueLocked(key, work: { value in work(value) })
     }
 
     private func enqueueLocked<Input: Sendable>(
         _ input: Input,
-        work: @escaping @Sendable (Input) -> T?
+        work: @escaping @Sendable (Input) throws -> T?
     ) {
-        pendingWorkItem?.cancel()
-        generation &+= 1
-        let token = generation
-        latestResult = nil
-        pending = true
-        let delay = debounceSeconds
-
-        let item = DispatchWorkItem { [weak self] in
-            let current = self?.isCurrent(token) ?? false
-            guard current else { return }
-            let result = work(input)
-            self?.commitResult(result, for: token)
+        let due = ProcessInfo.processInfo.systemUptime + debounceStorage
+        inner.slot.wait(due: due, work: { try work(input) })
+        let shouldSubmit = !inner.slot.driven
+        if shouldSubmit {
+            inner.slot.driven = true
         }
-        pendingWorkItem = item
-        lock.unlock()
-
-        if delay > 0 {
-            queue.asyncAfter(deadline: .now() + delay, execute: item)
-        } else {
-            queue.async(execute: item)
+        inner.cond.broadcast()
+        inner.cond.unlock()
+        if shouldSubmit {
+            pool.submit(inner)
         }
-    }
-
-    private func isCurrent(_ token: UInt64) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return generation == token
-    }
-
-    private func commitResult(_ result: T?, for token: UInt64) {
-        lock.lock()
-        let accepted = (generation == token)
-        var wake: (@Sendable () -> Void)? = nil
-        if accepted {
-            pending = false
-            pendingWorkItem = nil
-            if let value = result {
-                latestResult = value
-                wake = waker
-            } else {
-                latestResult = nil
-            }
-        }
-        lock.unlock()
-        wake?()
     }
 
     /// Takes the latest completed result once, returning `nil` if none is ready.
     public func take() -> T? {
-        lock.lock()
-        defer { lock.unlock() }
-        let out = latestResult
-        latestResult = nil
-        return out
+        inner.cond.lock()
+        defer { inner.cond.unlock() }
+        if case .settled(let out) = inner.slot.request {
+            inner.slot.request = .settled(nil)
+            return out
+        }
+        return nil
     }
 
     /// Cancels any in-flight or debounced request.
     public func cancel() {
-        lock.lock()
-        defer { lock.unlock() }
-        generation &+= 1
-        pendingWorkItem?.cancel()
-        pendingWorkItem = nil
-        latestResult = nil
-        lastKey = nil
-        pending = false
+        inner.cond.lock()
+        inner.slot.cancel()
+        inner.cond.broadcast()
+        inner.cond.unlock()
     }
 }
 

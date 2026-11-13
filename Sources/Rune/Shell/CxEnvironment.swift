@@ -196,6 +196,13 @@ struct RuntimeShellSettings {
         return scaledTime(at: clampedNow)
     }
 
+    mutating func setSplitAnchor(hostTime: Double, animTime: Double) {
+        lastHostTime = hostTime
+        lastScaleHostTime = hostTime
+        scaledTimeBase = animTime
+        hasScaledClock = true
+    }
+
     mutating func setTimeScale(_ newScale: Float, at hostNow: Double) {
         let clamped = min(max(newScale.isFinite ? newScale : 1.0, 0.0), 8.0)
         guard clamped != viewTimeScale || hasScaledClock else { return }
