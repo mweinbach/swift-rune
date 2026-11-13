@@ -1072,7 +1072,7 @@ struct ShellAuditParityTests {
         let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 120)) { _, _ in
             el().key("outer-scroll").scrollY().w(200).h(120).child(
                 el().key("wrap-1").w(200).child(
-                    el().key("wrap-2").w(200).children([
+                    col().key("wrap-2").w(200).children([
                         el().key("inner-scroll").scrollY().w(200).h(80).child(
                             el().key("wrap-3").w(200).child(
                                 el().key("leaf").w(200).h(300)
