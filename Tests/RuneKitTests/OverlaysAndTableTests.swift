@@ -629,8 +629,7 @@ struct OverlaysAndTableTests {
         #expect(!triggerAfterScrim.focusVisible)
     }
 
-    @Test("Closing a scrolled virtual Combobox keeps rows in place while fading (tests/combobox.rs:61)",
-          .disabled("Blocked on @motion/@el: Scene.swift:1844 unmounts omitted descendants lacking compatHadTransition even while an exiting ancestor (modalOverlay/anchored) is fading out"))
+    @Test("Closing a scrolled virtual Combobox keeps rows in place while fading (tests/combobox.rs:61)")
     func comboboxClosingScrolledPopupKeepsRowsInPlaceWhileFading() throws {
         let rt = makeComboRuntime()
         let searchRect = try #require(rt.elements().first { $0.key == "models-search" }).rect
@@ -728,9 +727,8 @@ struct OverlaysAndTableTests {
         #expect(abs(movedUp.top) < 0.5)
     }
 
-    @Test("Offscreen Combobox matches skip enter fade & entering matches re-fade on scroll/filter (tests/combobox.rs:259)",
-          .disabled("Blocked on @el: Sources/Rune lacks unseen_presence.rs (enterNow for offscreen rows and Scene.reenter when clipped rows enter view)"))
-    func comboboxUnseenPresenceCrossfadeBlockedOnEl() throws {
+    @Test("Offscreen Combobox matches skip enter fade & entering matches re-fade on scroll/filter (tests/combobox.rs:259)")
+    func comboboxUnseenPresenceCrossfade() throws {
         var s = ComboApp()
         s.animate = true
         let rt = makeComboRuntime(s)
@@ -1685,11 +1683,8 @@ struct OverlaysAndTableTests {
         }
     }
 
-    @Test(
-        "PopupList animated filtering snaps rows on tx.instant() (tests/popup_list_motion.rs)",
-        .disabled("Blocked on @el: Runtime.swift:1182 checks commitKind == .settle instead of commitKind.snaps for commitCut/Scene initialCut, keeping omitted rows exiting on tx.instant()")
-    )
-    func popupListMotionInstantCommitBlockedOnEl() throws {
+    @Test("PopupList animated filtering snaps rows on tx.instant() (tests/popup_list_motion.rs)")
+    func popupListMotionInstantCommit() throws {
         struct S {
             var ids: [String]
             var animate: Bool = true

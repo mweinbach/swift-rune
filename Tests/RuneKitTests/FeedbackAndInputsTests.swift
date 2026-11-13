@@ -983,8 +983,7 @@ struct FeedbackAndInputsTests {
     }
 
     @Test(
-        "ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)",
-        .disabled("Blocked on @el: El.wrapScrollArea / clipToContent (forwarding wrapper clipFadeLinear to viewport child only; El.onScrollOffset is now wired)")
+        "ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)"
     )
     func scrollBarFadeOverViewportDrawsWholeThumb() throws {
         let width: Float = 200

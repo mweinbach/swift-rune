@@ -1204,57 +1204,24 @@ extension El {
         }
 
         // Transfer outer box/flex/positioning layout properties onto the wrapper `col()`
-        // so the wrapped viewport lays out identically to the bare viewport (`scroll_bar.rs`).
-        var outer: El<State> = col()
-            .key("\(effectiveStyle.key)-wrap-\(viewportKey)")
-        outer.layout.displayNone = self.layout.displayNone
-        outer.layout.width = self.layout.width
-        outer.layout.height = self.layout.height
-        outer.layout.minWidth = (self.layout.scrollAxes.contains(.horizontal) && self.layout.minWidth == .auto)
-            ? .points(0)
-            : self.layout.minWidth
-        outer.layout.minHeight = (self.layout.scrollAxes.contains(.vertical) && self.layout.minHeight == .auto)
-            ? .points(0)
-            : self.layout.minHeight
-        outer.layout.maxWidth = self.layout.maxWidth
-        outer.layout.maxHeight = self.layout.maxHeight
-        outer.layout.flexGrow = self.layout.flexGrow
-        outer.layout.flexShrink = self.layout.flexShrink
-        outer.layout.flexBasis = self.layout.flexBasis
-        outer.layout.margin = self.layout.margin
-        outer.layout.alignSelf = self.layout.alignSelf
-        outer.layout.aspectRatio = self.layout.aspectRatio
-        outer.layout.aspectFit = self.layout.aspectFit
-        outer.layout.gridItem = self.layout.gridItem
-        outer.layout.isAbsolute = self.layout.isAbsolute
-        outer.layout.pinLeft = self.layout.pinLeft
-        outer.layout.pinTop = self.layout.pinTop
-        outer.layout.pinRight = self.layout.pinRight
-        outer.layout.pinBottom = self.layout.pinBottom
-        outer.layout.sticky = self.layout.sticky
-
-        var inner = self
-        inner.layout.displayNone = false
+        // via `El.wrapScrollArea()` so parity clip/fade modifiers forward to `inner`
+        // while keeping `track`/`thumb` unclipped (`scroll_bar.rs`).
+        let savedSticky = self.layout.sticky
+        let autoScrollMinWidthZero = self.layout.scrollAxes.contains(.horizontal) && self.layout.minWidth == .auto
+        let autoScrollMinHeightZero = self.layout.scrollAxes.contains(.vertical) && self.layout.minHeight == .auto
+        var (_, _, outer, inner) = self.wrapScrollArea()
+        outer.keyId = "\(effectiveStyle.key)-wrap-\(viewportKey)"
+        if autoScrollMinWidthZero {
+            outer.layout.minWidth = .points(0)
+        }
+        if autoScrollMinHeightZero {
+            outer.layout.minHeight = .points(0)
+        }
+        if let savedSticky {
+            outer.layout.sticky = savedSticky
+            inner.layout.sticky = nil
+        }
         inner.layout.width = .fraction(1.0)
-        inner.layout.height = .auto
-        inner.layout.minWidth = .points(0)
-        inner.layout.minHeight = .points(0)
-        inner.layout.maxWidth = .auto
-        inner.layout.maxHeight = .auto
-        inner.layout.flexGrow = 1
-        inner.layout.flexShrink = 1
-        inner.layout.flexBasis = .auto
-        inner.layout.margin = .all(0)
-        inner.layout.alignSelf = nil
-        inner.layout.aspectRatio = nil
-        inner.layout.aspectFit = nil
-        inner.layout.gridItem = nil
-        inner.layout.isAbsolute = false
-        inner.layout.pinLeft = nil
-        inner.layout.pinTop = nil
-        inner.layout.pinRight = nil
-        inner.layout.pinBottom = nil
-        inner.layout.sticky = nil
 
         return outer
             .child(inner.chainScrollOffset { pos in
