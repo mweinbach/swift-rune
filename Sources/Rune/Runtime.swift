@@ -217,6 +217,8 @@ public final class Runtime<State> {
         var fullDelta: Vec2 = .zero
         var restOffset: Vec2 = .zero
         var snap: PixelSnap.Inherit = PixelSnap.Inherit()
+        var scaleMotion: PaintScaleMotion = .still
+        var stillScale: Float = 1.0
         var parentDrawnWidth: Float? = nil
         var parentTargetWidth: Float? = nil
         var parentMoving: Bool = false
@@ -234,6 +236,26 @@ public final class Runtime<State> {
         var parentPath: String?
         var nearestGroupHovered: Bool
         var nearestGroupHoverFrac: Float
+    }
+
+    private enum PaintScaleMotion: Int, Comparable {
+        case still = 0
+        case live = 1
+        case moving = 2
+
+        static func < (lhs: PaintScaleMotion, rhs: PaintScaleMotion) -> Bool {
+            lhs.rawValue < rhs.rawValue
+        }
+
+        func raster(sc: Float, rest: Float) -> Float {
+            let k: Float
+            switch self {
+            case .still: k = sc
+            case .live: k = powf(2.0, (log2(max(1e-4, sc)) * 4.0).rounded() * 0.25)
+            case .moving: k = rest
+            }
+            return (k >= 1.0 / 16.0 && k <= 4.0) ? k : 1.0
+        }
     }
 
     internal struct DragSession {
@@ -359,6 +381,7 @@ public final class Runtime<State> {
             }
             if viewport != oldValue && !suppressViewportCommitFlag {
                 needsCommit = true
+                pendingResizeRelayout = true
             }
         }
     }
@@ -370,12 +393,18 @@ public final class Runtime<State> {
             scene.pixelScale = pixelScale
             if pixelScale != oldValue {
                 needsCommit = true
+                stateUnchangedSinceBuild = false
+                pendingResizeRelayout = false
             }
         }
     }
     public var systemDark: Bool {
         didSet {
-            if systemDark != oldValue { needsCommit = true }
+            if systemDark != oldValue {
+                needsCommit = true
+                stateUnchangedSinceBuild = false
+                pendingResizeRelayout = false
+            }
         }
     }
     private var isApplyingEffectiveReducedMotion = false
@@ -387,7 +416,11 @@ public final class Runtime<State> {
             if !isApplyingEffectiveReducedMotion {
                 cxSettings.hostReducedMotion = reducedMotion
             }
-            if reducedMotion != oldValue { needsCommit = true }
+            if reducedMotion != oldValue {
+                needsCommit = true
+                stateUnchangedSinceBuild = false
+                pendingResizeRelayout = false
+            }
         }
     }
     public var srgbBlend: Bool = true
@@ -395,7 +428,11 @@ public final class Runtime<State> {
     public var nativeMaterials: Bool = false
     public var windowFocused: Bool = true {
         didSet {
-            if windowFocused != oldValue { needsCommit = true }
+            if windowFocused != oldValue {
+                needsCommit = true
+                stateUnchangedSinceBuild = false
+                pendingResizeRelayout = false
+            }
         }
     }
     public var clearColor: Color = Color(r: 0, g: 0, b: 0, a: 1)
@@ -466,6 +503,8 @@ public final class Runtime<State> {
     internal var fitWindowState = FitWindowState()
     public var pendingWindowFrame: WindowFrameRequest? = nil
     internal var userResizeNeedsCut: Bool = false
+    private var activeResizeSnap: Bool = false
+    private var activeExplicitSnap: Bool = false
     internal var suppressViewportCommitFlag: Bool = false
     internal var lastCommitMotionSpring: Spring? = nil
     private var lastScaledAnimNow: Double = 0.0
@@ -710,6 +749,7 @@ public final class Runtime<State> {
     internal let residentCacheTracker = ResidentLayerTracker()
     internal var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
+    internal var virtualFillNeedsCommit: Bool = false
     internal var forceInitialSettle: Bool = true
     private var pendingEventTime: Double? = nil
 
@@ -733,7 +773,7 @@ public final class Runtime<State> {
     private var pendingLayoutActions: [PendingLayoutAction] = []
     private var pendingLayoutFeedbackRan: Bool = false
     private var pendingExternalLayoutActionRan: Bool = false
-    private var layoutSeen = LayoutSeenState()
+    internal var layoutSeen = LayoutSeenState()
     private var layoutKeyIndex = LayoutKeyIndex()
     private var layoutCommitGen: UInt64 = 0
     private var layoutFeedback = LayoutFeedback.initial
@@ -751,6 +791,11 @@ public final class Runtime<State> {
     internal var liveOnlyCheckEnabled: Bool = true
     internal var lastLiveCommitClock: Double = -.infinity
     internal var pendingLiveOnlyCheck: (handler: String, before: LiveOnlyViewPrint)? = nil
+    internal var stateUnchangedSinceBuild: Bool = false
+    internal var pendingResizeRelayout: Bool = false
+    internal var resizeReadMovedFlag: Bool = false
+    internal var hasActiveExitingNodes: Bool = false
+    internal var cachedResizeBuild: ResizeCachedViewBuild<State>? = nil
 
     public init(
         state: State,
@@ -1008,6 +1053,8 @@ public final class Runtime<State> {
         needsCommit = true
         if external {
             hasExternalDirtyCommit = true
+            stateUnchangedSinceBuild = false
+            pendingResizeRelayout = false
         }
         pendingEventTime = now
     }
@@ -1056,11 +1103,13 @@ public final class Runtime<State> {
         }
         if layoutFeedback.isOpen && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
+            resizeReadMovedFlag = true
         }
         if cxSettings.caretReadByView,
            let nextCaret = currentFocusedCaret(),
            cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
             needsCommit = true
+            resizeReadMovedFlag = true
         }
         if rewindRecorder != nil {
             captureRewindFrame(at: now)
@@ -1196,7 +1245,8 @@ public final class Runtime<State> {
         stepToFrameOutputScaled(at: now).frameOut
     }
 
-    private func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
+    @inline(never)
+    private func prepareAndCommitFrame(at now: Double) -> (animNow: Double, growthMoving: Bool) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
@@ -1277,13 +1327,14 @@ public final class Runtime<State> {
             }
             let commitAt = min(pendingEventTime ?? now, now)
             pendingEventTime = nil
-            let shouldCut = forceInitialSettle || userResizeNeedsCut
+            let shouldCut = forceInitialSettle
+            let resizeSnap = userResizeNeedsCut
             userResizeNeedsCut = false
             needsCommit = false
             hasExternalDirtyCommit = false
             popupNeedsLayout = false
             forceInitialSettle = false
-            commitTree(at: commitAt, cut: shouldCut)
+            commitTree(at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             reconcileDropHoverAfterCommit(at: now)
             flushHiddenDropSteps(at: now)
             if didEdgeScroll {
@@ -1295,6 +1346,10 @@ public final class Runtime<State> {
                 hasExternalDirtyCommit = false
                 popupNeedsLayout = false
             }
+        }
+        if virtualFillNeedsCommit {
+            virtualFillNeedsCommit = false
+            needsCommit = true
         }
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
@@ -1352,6 +1407,11 @@ public final class Runtime<State> {
             }
         } else if !scrollGlidingPaths.isEmpty {
             scrollGlidingPaths.removeAll(keepingCapacity: true)
+            if !needsCommit {
+                directScrolledPaths.removeAll(keepingCapacity: true)
+            }
+        } else if !needsCommit && !directScrolledPaths.isEmpty && !scrollStore.isAnimating {
+            directScrolledPaths.removeAll(keepingCapacity: true)
         }
         scrollRequestsState.stepFinish(
             gliding: { scrollGlidingPaths.contains($0) },
@@ -1376,7 +1436,16 @@ public final class Runtime<State> {
             hasExternalDirtyCommit = false
             commitTree(at: now, cut: false)
         }
+        if virtualFillNeedsCommit {
+            virtualFillNeedsCommit = false
+            needsCommit = true
+        }
         scrollMovedSinceLastFrame = false
+        return (animNow, growthMoving)
+    }
+
+    private func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
+        let (animNow, growthMoving) = prepareAndCommitFrame(at: now)
 
         // Sample Scene & Live property bindings using scaled animation clock
         refreshHoverAndSyncTracks(at: animNow, cut: false)
@@ -1435,6 +1504,7 @@ public final class Runtime<State> {
 
         // Prune snapshots of exiting nodes that have finished exiting
         let activeIds = Set(frameOut.nodes.map(\.id))
+        hasActiveExitingNodes = frameOut.nodes.contains(where: \.isExiting)
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
         launchedFlightIds = launchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
@@ -1452,8 +1522,16 @@ public final class Runtime<State> {
                 caretsByKey[k] = MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
             }
         }
-        var out: [String: MemoElementGeometry] = [:]
         let source = nodes ?? flatNodes
+        if nodes != nil,
+           let nextCaret = focusedCaretInfo(in: source),
+           nextCaret.rect.count >= 4,
+           let matchedNode = source.first(where: { $0.path == nextCaret.keyPath }),
+           let k = matchedNode.key {
+            let c = nextCaret.rect
+            caretsByKey[k] = MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+        }
+        var out: [String: MemoElementGeometry] = [:]
         out.reserveCapacity(source.count)
         for node in source {
             if let k = node.key {
@@ -1467,9 +1545,20 @@ public final class Runtime<State> {
         return out
     }
 
-    private func commitTree(at now: Double, cut: Bool) {
+    private func commitTree(at now: Double, cut: Bool, resizeSnap: Bool = false) {
+        let prevResizeSnap = activeResizeSnap
+        let prevExplicitSnap = activeExplicitSnap
+        activeResizeSnap = resizeSnap
+        defer {
+            activeResizeSnap = prevResizeSnap
+            activeExplicitSnap = prevExplicitSnap
+        }
         measureFramePhase(.commit) {
-            let commitKind = pendingCommitKind
+            activeExplicitSnap = pendingCommitKind.snaps
+            let explicitSettle = pendingCommitKind == .settle
+            let commitKind: TxCommit = resizeSnap
+                ? TxCommit(snaps: true, lands: pendingCommitKind.lands)
+                : pendingCommitKind
             pendingCommitKind = .animate
             let commitMotion = pendingCommitMotion
             pendingCommitMotion = nil
@@ -1477,7 +1566,7 @@ public final class Runtime<State> {
             pendingColorMotionSpring = nil
             let commitFollowEdge = pendingFollowEdge
             pendingFollowEdge = false
-            let commitCut = cut || commitKind == .settle
+            let commitCut = cut || explicitSettle
 
             if commitCut {
                 enterDelays.removeAll()
@@ -1489,6 +1578,7 @@ public final class Runtime<State> {
             let sincePass = memo.nextPass()
             let liveCheck = pendingLiveOnlyCheck
             pendingLiveOnlyCheck = nil
+            var didRunView = false
             MemoSnapshot.enter {
                 commitTreePass(
                     at: now,
@@ -1498,10 +1588,13 @@ public final class Runtime<State> {
                     commitMotion: commitMotion,
                     commitColorSpring: commitColorSpring,
                     commitFollowEdge: commitFollowEdge,
-                    commitCut: commitCut
+                    commitCut: commitCut,
+                    didRunView: &didRunView
                 )
             }
-            memo.keepSince(sincePass)
+            if didRunView {
+                memo.keepSince(sincePass)
+            }
             lastLiveCommitClock = now
             compareLiveOnlyCheck(liveCheck)
             commitCount &+= 1
@@ -1533,7 +1626,9 @@ public final class Runtime<State> {
         !activeVirtualPaths.isEmpty || lastViewReadScroll || hasScrollCallbacks()
     }
 
-    private struct MeasurePassResult {
+    internal final class MeasurePassResult {
+        var viewRootEl: El<State>
+        var expandedRootEl: El<State>
         var nodes: [FlatNode]
         var byPath: [String: Int]
         var byId: [NodeId: FlatNode]
@@ -1546,6 +1641,41 @@ public final class Runtime<State> {
         var rootBackground: Color?
         var rootHeight: Float
         var helpLook: HelpLook?
+        var viewportRead: Bool
+
+        init(
+            viewRootEl: El<State>,
+            expandedRootEl: El<State>,
+            nodes: [FlatNode],
+            byPath: [String: Int],
+            byId: [NodeId: FlatNode],
+            specs: [NodeSpec],
+            loopSpecs: [(id: NodeId, spec: LoopSpec)],
+            ancestorInstants: [Bool],
+            warnings: [String],
+            reads: [LayoutReadEntry],
+            virtualExpansion: VirtualExpansionContext,
+            rootBackground: Color?,
+            rootHeight: Float,
+            helpLook: HelpLook?,
+            viewportRead: Bool = false
+        ) {
+            self.viewRootEl = viewRootEl
+            self.expandedRootEl = expandedRootEl
+            self.nodes = nodes
+            self.byPath = byPath
+            self.byId = byId
+            self.specs = specs
+            self.loopSpecs = loopSpecs
+            self.ancestorInstants = ancestorInstants
+            self.warnings = warnings
+            self.reads = reads
+            self.virtualExpansion = virtualExpansion
+            self.rootBackground = rootBackground
+            self.rootHeight = rootHeight
+            self.helpLook = helpLook
+            self.viewportRead = viewportRead
+        }
     }
 
     @inline(__always)
@@ -1737,7 +1867,7 @@ public final class Runtime<State> {
         ) else {
             return nil
         }
-        return buildMeasureResult(
+        let result = buildMeasureResult(
             rootEl: viewPass.rootEl,
             passHelpLook: viewPass.helpLook,
             collector: collector,
@@ -1749,11 +1879,14 @@ public final class Runtime<State> {
             commitCut: commitCut,
             prevMountedIds: prevMountedIds
         )
+        result.viewRootEl = viewPass.rootEl
+        return result
     }
 
     @inline(never)
-    private func buildMeasureResult(
+    internal func buildMeasureResult(
         rootEl: El<State>,
+        expandedContextOverride: VirtualExpansionContext? = nil,
         passHelpLook: HelpLook?,
         collector: LayoutReadCollector,
         at now: Double,
@@ -1766,7 +1899,12 @@ public final class Runtime<State> {
     ) -> MeasurePassResult {
         let rootBg: Color? = rootEl.background.a >= 0.999 ? rootEl.background : nil
 
-        let (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
+        let (expandedRoot, virtualExpansion): (El<State>, VirtualExpansionContext)
+        if let override = expandedContextOverride {
+            (expandedRoot, virtualExpansion) = (rootEl, override)
+        } else {
+            (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
+        }
         var layoutRoot = expandedRoot
         var solvedRoot = measureFramePhase(.layout) {
             retainedLayout.compute(
@@ -2050,7 +2188,7 @@ public final class Runtime<State> {
                     ?? commitMotion?.spring
                     ?? ((el.pressScaleFactor != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
             }
-            let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
+            let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
                 guard self.scene.hasNode(nid),
                       self.scene.store.isAnimating(nid, Props.FRAME),
@@ -2222,7 +2360,11 @@ public final class Runtime<State> {
             walkStack.append(contentsOf: childItems.reversed())
         }
 
+        LayoutDiagnostics.checkCollapsedScrolls(nodes: newFlat)
+
         return MeasurePassResult(
+            viewRootEl: rootEl,
+            expandedRootEl: layoutRoot,
             nodes: newFlat,
             byPath: newByPath,
             byId: newById,
@@ -2234,7 +2376,8 @@ public final class Runtime<State> {
             virtualExpansion: virtualExpansion,
             rootBackground: rootBg,
             rootHeight: solvedRoot.layout.localRect.height,
-            helpLook: passHelpLook
+            helpLook: passHelpLook,
+            viewportRead: collector.viewportRead
         )
     }
 
@@ -2396,7 +2539,7 @@ public final class Runtime<State> {
         layoutSeen.rects = nextRects
     }
 
-    private func evaluateLayoutMoved(reads: [LayoutReadEntry], nodes: [FlatNode], force: Bool) -> Bool {
+    internal func evaluateLayoutMoved(reads: [LayoutReadEntry], nodes: [FlatNode], force: Bool) -> Bool {
         guard !reads.isEmpty else { return false }
         var passIndex = LayoutKeyIndex()
         let activeIdx: LayoutKeyIndex?
@@ -2462,18 +2605,55 @@ public final class Runtime<State> {
         commitMotion: MotionSource?,
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
-        commitCut: Bool
+        commitCut: Bool,
+        didRunView: inout Bool
     ) {
         viewCommitCount += 1
         if settlePass == 0 {
             CommitGenerationStore.increment()
             captureKeepAnchorsBeforeCommit()
+            if layoutReadsMoved() {
+                resizeReadMovedFlag = true
+            }
             refreshLayoutSeen()
         }
         let focusedCaret = currentFocusedCaret()
         cxSettings.lastCommittedCaret = focusedCaret
         let prevMountedIds = Set(nodeById.keys)
 
+        let plannedKind: ResizeCommitKind = (settlePass == 0)
+            ? nextCommitKind()
+            : .rebuild
+
+        if plannedKind == .relayout,
+           let relayoutPass = tryRelayoutPass(
+               at: now,
+               cut: cut,
+               commitKind: commitKind,
+               commitMotion: commitMotion,
+               commitColorSpring: commitColorSpring,
+               commitCut: commitCut,
+               prevMountedIds: prevMountedIds
+           ) {
+            pendingResizeRelayout = false
+            resizeReadMovedFlag = false
+            applyMeasurePass(
+                relayoutPass,
+                at: now,
+                cut: cut,
+                settlePass: settlePass,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitFollowEdge: commitFollowEdge,
+                commitCut: commitCut,
+                prevMountedIds: prevMountedIds,
+                didRunView: &didRunView
+            )
+            return
+        }
+
+        didRunView = true
         guard var pass = measurePass(
             at: now,
             cut: cut,
@@ -2493,12 +2673,19 @@ public final class Runtime<State> {
                 commitMotion: commitMotion,
                 commitColorSpring: commitColorSpring,
                 commitFollowEdge: commitFollowEdge,
-                commitCut: commitCut
+                commitCut: commitCut,
+                didRunView: &didRunView
             )
             return
         }
-        if !pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: false) {
+        var retryCaret = focusedCaret
+        let initialCaretMoved = cxSettings.caretReadByView && caretMoved(from: retryCaret, in: pass.nodes)
+        if (!pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: false)) || initialCaretMoved {
             for extra in 0..<LayoutReadConstants.passes {
+                if cxSettings.caretReadByView, let nextC = focusedCaretInfo(in: pass.nodes) {
+                    retryCaret = nextC
+                    cxSettings.lastCommittedCaret = nextC
+                }
                 if let nextPass = measurePass(
                     at: now,
                     cut: cut,
@@ -2507,21 +2694,40 @@ public final class Runtime<State> {
                     commitColorSpring: commitColorSpring,
                     commitCut: commitCut,
                     prevMountedIds: prevMountedIds,
-                    focusedCaret: focusedCaret,
+                    focusedCaret: retryCaret,
                     allowZoomSettle: false,
                     memoNodes: pass.nodes
                 ) {
                     pass = nextPass
                 }
                 let isLast = (extra + 1 == LayoutReadConstants.passes)
-                if !evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: isLast) {
+                let readsStillMoved = !pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: isLast)
+                let caretStillMoved = cxSettings.caretReadByView && caretMoved(from: retryCaret, in: pass.nodes)
+                if !readsStillMoved && !caretStillMoved {
                     break
                 }
             }
         }
 
+        cachedResizeBuild = ResizeCachedViewBuild(
+            viewRootEl: pass.viewRootEl,
+            expandedRootEl: pass.expandedRootEl,
+            virtualExpansion: pass.virtualExpansion,
+            helpLook: pass.helpLook,
+            env: currentResizeBuildEnv(),
+            fitHeight: fitHeight,
+            reusable: Self.isTreeReusableForRelayout(pass.expandedRootEl),
+            reads: pass.reads,
+            caretRead: cxSettings.caretReadByView,
+            viewport: viewport,
+            viewportRead: pass.viewportRead
+        )
+        stateUnchangedSinceBuild = true
+        pendingResizeRelayout = false
+        resizeReadMovedFlag = false
+
         applyMeasurePass(
-            &pass,
+            pass,
             at: now,
             cut: cut,
             settlePass: settlePass,
@@ -2530,13 +2736,14 @@ public final class Runtime<State> {
             commitColorSpring: commitColorSpring,
             commitFollowEdge: commitFollowEdge,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds
+            prevMountedIds: prevMountedIds,
+            didRunView: &didRunView
         )
     }
 
     @inline(never)
     private func applyMeasurePass(
-        _ pass: inout MeasurePassResult,
+        _ pass: MeasurePassResult,
         at now: Double,
         cut: Bool,
         settlePass: Int,
@@ -2545,7 +2752,8 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Set<NodeId>,
+        didRunView: inout Bool
     ) {
         // Keep seen layout rects aligned with final pass keys
         var finalSeen: [String: [Float]?] = [:]
@@ -2683,7 +2891,8 @@ public final class Runtime<State> {
                 commitMotion: commitMotion,
                 commitColorSpring: commitColorSpring,
                 commitFollowEdge: commitFollowEdge,
-                commitCut: commitCut
+                commitCut: commitCut,
+                didRunView: &didRunView
             )
             return
         }
@@ -2888,7 +3097,7 @@ public final class Runtime<State> {
                 changedScrollDeltas[kPath] = Vec2(prev.x + kd.x, prev.y + kd.y)
             }
         }
-        let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
+        let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
         scene.keepFlights(keepsFlights)
         applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
         syncRideTrailingFlags(pass.nodes, on: &scene)
@@ -2898,7 +3107,7 @@ public final class Runtime<State> {
                 at: cxSettings.scaledTime(at: now),
                 initialCut: commitCut,
                 snapMounts: commitKind.snaps,
-                snapOmittedNonExiting: commitKind.snaps,
+                snapOmittedNonExiting: activeExplicitSnap,
                 matchedStarts: matchedStarts
             )
         }
@@ -2918,7 +3127,7 @@ public final class Runtime<State> {
         }
         recordVirtualMeasurementsAndCallbacks(expansion: pass.virtualExpansion, at: now)
         stepVirtualFillAfterCommit(now: now)
-        if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty {
+        if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
         }
         syncRideTrailingFlags(pass.nodes, on: &scene)
@@ -4254,6 +4463,17 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
             ))
             let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
+            let ownScaleSpringMoving = scene.store.isAnimating(p.id, Props.SCALE)
+                || scene.store.isAnimating(p.id, Props.UNIFORM_SCALE)
+                || scene.store.isAnimating(p.id, Props.PRESENCE)
+            let ownLiveScaleMoving = el.liveBindings.contains(where: { b in
+                b.target == .scale
+                    && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
+            })
+            let nodeScaleMotion: PaintScaleMotion = max(
+                inh.scaleMotion,
+                ownScaleSpringMoving ? .moving : (ownLiveScaleMoving ? .live : .still)
+            )
             let isAnchoredOverlay = el.anchor != nil
             let isGrowthRow = growthRows["growth:\(snap.path)"] != nil || growthRows["fold:\(snap.path)"] != nil
             let opensSnapLayer = hasOwnScale || (isAnchoredOverlay && !unscaled)
@@ -4652,33 +4872,100 @@ public final class Runtime<State> {
                     }
                 }
 
+                let avgScale = (scaleVec.x + scaleVec.y) * 0.5
+                let wExact = max(0, rExact[2] - rExact[0])
+                let hExact = max(0, rExact[3] - rExact[1])
+                let exactSide = min(wExact, hExact)
+                let boxGliding = gliding || (snapRest?.left != nil && snapRest!.left != .zero)
+
                 // 6. SVG Icon payload
                 if let (svg, _) = el.iconPayload {
-                    let pxSize = max(4, Int((min(rect.width, rect.height) * pxScale).rounded()))
-                    let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
+                    let effGlyphTurn = useLayer ? 0 : effRotate
+                    let iconResting = (flightCover == nil)
+                        && (nodeScaleMotion == .still)
+                        && !boxGliding
+                        && abs(effGlyphTurn) <= 1e-6
+                        && abs(avgScale - 1.0) < 1e-5
                     let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
                     let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    let primIdx = primitives.count
-                    primitives.append(attachFade(.glyph(
-                        rect: devRect,
-                        uv: entry.uv,
-                        color: tint,
-                        gamma: 1.0,
-                        clip: devClip,
-                        turn: useLayer ? 0 : effRotate
-                    )))
-                    glyphPageEntries.append((primIdx, entry.page))
-                    usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
+                    if iconResting && exactSide > 1e-4 {
+                        let canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
+                        let atX = floor(rExact[0] + (wExact - exactSide) * 0.5 + 0.5)
+                        let atY = floor(rExact[1] + (hExact - exactSide) * 0.5 + 0.5)
+                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide)
+                        let primIdx = primitives.count
+                        primitives.append(attachFade(.glyph(
+                            rect: SIMD4<Float>(atX, atY, Float(canvas), Float(canvas)),
+                            uv: entry.uv,
+                            color: tint,
+                            gamma: 1.0,
+                            clip: devClip,
+                            turn: 0
+                        )))
+                        glyphPageEntries.append((primIdx, entry.page))
+                        usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
+                    } else if exactSide > 1e-4 {
+                        let tk = (flightCover != nil) ? Float(1.0) : avgScale
+                        let raster = (flightCover != nil) ? Float(1.0) : nodeScaleMotion.raster(sc: avgScale, rest: inh.stillScale)
+                        let zoom = tk / max(1e-4, raster)
+                        let rawSide = max(0, min(rawRect.width, rawRect.height)) * pxScale
+                        let snapU: Float = (flightCover == nil && abs(rawSide - rawSide.rounded()) < 1.0 / 512.0)
+                            ? max(0, min(1, 1.0 - abs(avgScale - 1.0) * 32.0))
+                            : 0.0
+                        let drawn = exactSide + (min(devRect.z, devRect.w) - exactSide) * snapU
+                        if drawn > 1e-4 {
+                            let px: Int = (flightCover == nil && nodeScaleMotion != .still)
+                                ? max(1, Int((rawSide * raster).rounded()))
+                                : max(1, Int((drawn / max(1e-4, zoom)).rounded()))
+                            let posX = devRect.x + (devRect.z - drawn) * 0.5
+                            let posY = devRect.y + (devRect.w - drawn) * 0.5
+                            let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: px)
+                            let pxF = Float(max(1, entry.pixelSize.x))
+                            let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
+                            let quadRect: SIMD4<Float>
+                            let quadUV: SIMD4<Float>
+                            if abs(effGlyphTurn) <= 1e-6 && nearWhole(posX) && nearWhole(posY) && abs(drawn - pxF) < 1.0 / 512.0 {
+                                quadRect = SIMD4<Float>(posX.rounded(), posY.rounded(), pxF, pxF)
+                                quadUV = entry.uv
+                            } else {
+                                let t = drawn / pxF
+                                let du = (entry.uv.z - entry.uv.x) / pxF
+                                let dv = (entry.uv.w - entry.uv.y) / pxF
+                                quadRect = SIMD4<Float>(posX - t, posY - t, drawn + 2.0 * t, drawn + 2.0 * t)
+                                quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
+                            }
+                            let primIdx = primitives.count
+                            primitives.append(attachFade(.glyph(
+                                rect: quadRect,
+                                uv: quadUV,
+                                color: tint,
+                                gamma: 1.0,
+                                clip: devClip,
+                                turn: effGlyphTurn
+                            )))
+                            glyphPageEntries.append((primIdx, entry.page))
+                            usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
+                        }
+                    }
                 }
 
                 // 7. Vector Canvas Shapes (triangles & segments)
+                let shapeStill = (flightCover == nil)
+                    && (nodeScaleMotion == .still)
+                    && !boxGliding
+                    && abs(avgScale - 1.0) < 1e-5
+                let shapeAt = shapeStill
+                    ? SIMD2<Float>(floor(rExact[0] + 0.5), floor(rExact[1] + 0.5))
+                    : SIMD2<Float>(devRect.x + (devRect.z - wExact) * 0.5, devRect.y + (devRect.w - hExact) * 0.5)
                 for shape in el.shapes {
                     let effectiveShape = liveTrim.map { shape.trimmed(start: $0.x, end: $0.y) } ?? shape
-                    let origin = SIMD2<Float>(rect.x * pxScale, rect.y * pxScale)
+                    let origin: SIMD2<Float>
                     let k: SIMD2<Float>
                     if let vb = effectiveShape.viewBox, vb.x > 0, vb.y > 0 {
-                        k = SIMD2<Float>((rect.width * pxScale) / vb.x, (rect.height * pxScale) / vb.y)
+                        origin = SIMD2<Float>(devRect.x, devRect.y)
+                        k = SIMD2<Float>(devRect.z / vb.x, devRect.w / vb.y)
                     } else {
+                        origin = shapeAt
                         k = SIMD2<Float>(scaleVec.x * pxScale, scaleVec.y * pxScale)
                     }
                     let kPx = scaleVec.x * pxScale
@@ -5322,6 +5609,8 @@ public final class Runtime<State> {
                 let ownLiveOff = Vec2(ownRaw.left - p.rect.left, ownRaw.top - p.rect.top)
                 let childOffsetDelta = Vec2(inh.offsetDelta.x + ownLiveOff.x, inh.offsetDelta.y + ownLiveOff.y)
                 let childFullDelta = Vec2(inh.fullDelta.x + ownLiveOff.x, inh.fullDelta.y + ownLiveOff.y)
+                let childScaleMotion: PaintScaleMotion = (childFlightCover != nil) ? .moving : nodeScaleMotion
+                let childStillScale: Float = (childScaleMotion == .still) ? ((scaleVec.x + scaleVec.y) * 0.5) : inh.stillScale
                 let childInh = PaintInh(
                     opacity: childAncestorOp,
                     scale: rawScaleVec,
@@ -5331,6 +5620,8 @@ public final class Runtime<State> {
                     fullDelta: childFullDelta,
                     restOffset: nodeRestOffset,
                     snap: childSnap,
+                    scaleMotion: childScaleMotion,
+                    stillScale: childStillScale,
                     parentDrawnWidth: rect.width,
                     parentTargetWidth: snap.targetRect.width,
                     parentMoving: nodeMoving,
@@ -6450,14 +6741,15 @@ public final class Runtime<State> {
                     scrollOffsets[path] = cur
                     scrollStore.snap(nid, Props.SCROLL, to: cur)
                     scrollGlidingPaths.remove(path)
-                    directScrolledPaths.insert(path)
                     markScrollMovedByHand(path: path)
                     scrollRequestsState.stepCancel()
                     scrollMovedSinceLastFrame = true
                     if scrollRequiresCommit {
+                        directScrolledPaths.insert(path)
                         pendingCommitKind = pendingCommitKind.instant()
                         dirtyCommit(at: now)
                     } else {
+                        directScrolledPaths.remove(path)
                         updateScrollPositions(at: now)
                     }
                     return
@@ -6479,8 +6771,12 @@ public final class Runtime<State> {
         let nid = NodeId.hash("scroll:" + path)
         let cur = scrollOffsets[path] ?? .zero
         scrollGlidingPaths.remove(path)
-        directScrolledPaths.insert(path)
         markScrollMovedByHand(path: path)
+        if scrollRequiresCommit {
+            directScrolledPaths.insert(path)
+        } else {
+            directScrolledPaths.remove(path)
+        }
         scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
@@ -7613,12 +7909,16 @@ public final class Runtime<State> {
             return
         }
         if viewVP != viewport || viewScale != pixelScale {
+            let vpChanged = viewVP != viewport
             cxSettings.isApplyingZoom = true
             viewport = viewVP
             pixelScale = viewScale
             cxSettings.isApplyingZoom = false
             userResizeNeedsCut = true
             needsCommit = true
+            if vpChanged {
+                pendingResizeRelayout = true
+            }
         }
     }
 
@@ -7635,11 +7935,15 @@ public final class Runtime<State> {
             return
         }
         if viewVP != viewport || viewScale != pixelScale {
+            let vpChanged = viewVP != viewport
             cxSettings.isApplyingZoom = true
             viewport = viewVP
             pixelScale = viewScale
             cxSettings.isApplyingZoom = false
             needsCommit = true
+            if vpChanged {
+                pendingResizeRelayout = true
+            }
         }
     }
 

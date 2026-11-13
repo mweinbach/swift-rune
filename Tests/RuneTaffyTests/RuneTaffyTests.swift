@@ -701,9 +701,46 @@ struct RuneTaffyTests {
             cs.setMarginX(4)
             cs.setMarginY(2)
             ts.margin = Rect(left: .length(4), right: .length(4), top: .length(2), bottom: .length(2))
+            cs.setMarginLeft(1)
+            ts.margin.left = .length(1)
+            cs.setMarginRight(2)
+            ts.margin.right = .length(2)
+            cs.setMarginTop(3)
+            ts.margin.top = .length(3)
+            cs.setMarginBottom(5)
+            ts.margin.bottom = .length(5)
             cs.setBorder((1, 2, 3, 4))
             ts.border = Rect(left: .length(4), right: .length(2), top: .length(1), bottom: .length(3))
             #expect(cs == ts)
+
+            cs.setSize(Size(width: .length(120), height: .percent(0.5)))
+            ts.size = Size(width: .length(120), height: .percent(0.5))
+            cs.setFlexGrow(2.25)
+            ts.flexGrow = 2.25
+            cs.setFlexShrink(0.5)
+            ts.flexShrink = 0.5
+            cs.setFlexBasis(.percent(0.25))
+            ts.flexBasis = .percent(0.25)
+            cs.setFlexDirection(.columnReverse)
+            ts.flexDirection = .columnReverse
+            cs.setEqualColumns(3)
+            ts.display = .grid
+            ts.gridTemplateColumns = Array(
+                repeating: .single(TrackSizingFunction(min: .auto, max: .fr(1))),
+                count: 3
+            )
+            cs.setGridCell(2)
+            ts.gridRow = Line(start: .line(1), end: .span(1))
+            ts.gridColumn = Line(start: .line(3), end: .span(1))
+            cs.setPositionAbsolute()
+            ts.position = .absolute
+            cs.setAbsoluteInset(Rect(left: .length(4), right: .auto, top: .percent(0.1), bottom: .length(6)))
+            ts.inset = Rect(left: .length(4), right: .auto, top: .percent(0.1), bottom: .length(6))
+            cs.setAspectRatio(nil)
+            ts.aspectRatio = nil
+            #expect(cs == ts)
+            #expect(cs.position == .absolute)
+            #expect(CompactStyle.runeBase(dir).position == .relative)
 
             cs.setOverflow(.hidden, .scroll)
             cs.setAspectRatio(2.0)
@@ -720,7 +757,104 @@ struct RuneTaffyTests {
         // Prelude helpers
         #expect(evenlySizedTracks(3) == .repeat(.count(3), [TrackSizingFunction(min: .length(0), max: .fr(1))]))
         #expect(flex(2.0) == TrackSizingFunction.fr(2.0))
+        let zDim: Dimension = zero()
+        let zLpa: LengthPercentageAuto = zero()
+        let zLp: LengthPercentage = zero()
+        #expect(zDim == .length(0) && zLpa == .length(0) && zLp == .length(0))
         #expect(Contain.layout.contains(.layout))
+        #expect(Display.block != Display.flex && Display.grid != Display.none)
+        #expect(BoxSizing.contentBox != BoxSizing.borderBox)
+    }
+
+    @Test func compactStyleRoundTripsAllLengthVariants() {
+        var s = Style(
+            display: .grid,
+            position: .absolute,
+            boxSizing: .contentBox,
+            overflow: Point(x: .scroll, y: .visible),
+            size: Size(width: .length(123.5), height: .percent(0.75)),
+            minSize: Size(width: .percent(0.1), height: .length(12)),
+            maxSize: Size(width: .auto, height: .length(999)),
+            aspectRatio: 1.5,
+            margin: Rect(left: .auto, right: .length(-6), top: .percent(0.05), bottom: .length(18)),
+            padding: Rect(left: .length(0), right: .percent(0.15), top: .length(7.25), bottom: .length(2)),
+            border: Rect(left: .length(1), right: .percent(0.02), top: .length(3), bottom: .length(4)),
+            inset: Rect(left: .length(4), right: .percent(0.25), top: .auto, bottom: .length(-8)),
+            gap: Size(width: .percent(0.125), height: .length(10.5)),
+            flexDirection: .columnReverse,
+            flexWrap: .wrapReverse,
+            flexGrow: 2.5,
+            flexShrink: 0.75,
+            flexBasis: .percent(0.4),
+            alignItems: .flexEnd,
+            alignSelf: .center,
+            alignContent: .spaceAround,
+            justifyContent: .spaceEvenly,
+            gridTemplateRows: [.percent(0.3), .minContent, .maxContent],
+            gridTemplateColumns: [.length(64), .fr(1.5), .minmax(.length(20), .fr(2)), .auto],
+            gridAutoFlow: .columnDense,
+            gridRow: Line(start: .auto, end: .line(-1)),
+            gridColumn: Line(start: .line(2), end: .span(3))
+        )
+        let compact: CompactStyle = s
+        #expect(compact == s)
+        #expect(compact.display == .grid && compact.boxSizing == .contentBox)
+        #expect(compact.gridTemplateColumns.count == 4 && compact.gridTemplateRows.count == 3)
+
+        var base: Style = .runeBase(.column)
+        base.setWidth(.length(100))
+        base.setHeight(.percent(0.5))
+        let inlineCompact: CompactStyle = base
+        #expect(inlineCompact == base)
+        s.aspectRatio = nil
+        #expect(compact != s)
+    }
+
+    @Test func layoutStoreSlotAndIntrospectionCoverage() {
+        var store = LayoutStore()
+        store.beginCommit()
+        let cMark = store.beginChildren()
+        var cStyle = TaffyStyle.runeBase(.row)
+        cStyle.setWidth(length(50))
+        cStyle.setHeight(length(20))
+        let (cSlot, _) = store.syncNode(
+            key: 101,
+            nodeIndex: 1,
+            style: cStyle,
+            measure: nil,
+            forceMeasureDirty: false,
+            childMark: cMark,
+            childrenDirty: false
+        )
+        let rMark = store.beginChildren()
+        store.pushChild(cSlot)
+        var rStyle = TaffyStyle.runeBase(.column)
+        rStyle.setWidth(length(200))
+        rStyle.setHeight(length(100))
+        var (rSlot, _) = store.syncNode(
+            key: 100,
+            nodeIndex: 0,
+            style: rStyle,
+            measure: nil,
+            forceMeasureDirty: false,
+            childMark: rMark,
+            childrenDirty: true
+        )
+        store.endCommit(root: &rSlot) { _, _ in }
+        store.computeLayout(root: rSlot, availableSpace: Size(width: .definite(200), height: .definite(100))) { _, _, _ in
+            LayoutOutput.fromOuterSize(.zero)
+        }
+
+        let nodeId = rSlot.toNodeId
+        #expect(SlotId.from(nodeId) == rSlot)
+        #expect(store.isUsedThisCommit(key: 100))
+        #expect(!store.isUsedThisCommit(key: 999))
+        #expect(store.style(rSlot) == rStyle)
+        #expect(Array(store.childIds(rSlot)) == [cSlot.toNodeId])
+        #expect(store.boxLayout(cSlot).w == 50)
+        #expect(store.layout(cSlot).size == Size(width: 50, height: 20))
+        let stats = store.storageStats()
+        #expect(stats.liveNodes == 2 && stats.slotCapacity >= 2 && stats.totalRetainedBytes > 0)
     }
 
     @Test func layoutStoreLargeToSmallSwapCompactsSparseSlots() {

@@ -290,6 +290,9 @@ public final class AppHandle<State>: @unchecked Sendable {
     public func focus() { shared.requestFocus() }
     public func setPosition(_ point: Vec2) { shared.requestPosition(point) }
     public func place(_ request: PlaceRequest) { shared.requestPlace(request) }
+    public func place(_ display: DisplayTarget, placement: OverlayPlacement) {
+        shared.requestPlace(PlaceRequest(display: display, placement: placement))
+    }
     public func activate() { shared.requestActivate() }
     public func close() { shared.requestClose() }
     public func minimize() { shared.requestMinimize() }

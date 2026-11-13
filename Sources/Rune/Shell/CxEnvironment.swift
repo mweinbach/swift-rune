@@ -392,7 +392,7 @@ extension Cx {
 /// Checks whether `key` matches any segment of the focused field's `keyPath` (`cx::caret_of`).
 func caretRectForKey(_ caret: (keyPath: String, rect: [Float])?, key: String) -> [Float]? {
     guard let caret else { return nil }
-    return caret.keyPath.split(separator: "/").contains { $0 == key } ? caret.rect : nil
+    return caret.keyPath.split(separator: "/").contains { $0 == key || $0 == "@\(key)" } ? caret.rect : nil
 }
 
 // MARK: - Runtime System Settings & Zoom API (`system_settings.rs`, `zoom.rs`, `titlebar.rs`)

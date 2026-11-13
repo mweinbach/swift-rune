@@ -189,7 +189,18 @@ extension Runtime {
 
         let (prefix, total) = vState.computeOffsets(keys: keys, estimated: est)
         let vpPath = nextScrollPath ?? path
-        let vpH = max(1, scrollViewportSizes[vpPath]?.y ?? viewport.y)
+        let oldVpH = scrollViewportSizes[vpPath]?.y
+        let oldRootH = flatNodes.first?.targetRect.height
+        let vpH: Float
+        if let oldVpH {
+            if let oldRootH, abs(viewport.y - oldRootH) > 0.5, abs(oldVpH - oldRootH) < 0.5 {
+                vpH = max(1, viewport.y)
+            } else {
+                vpH = max(1, oldVpH)
+            }
+        } else {
+            vpH = max(1, viewport.y)
+        }
         let isFirstMount = (scrollOffsets[vpPath] == nil && !wasPinnedToBottom.contains(vpPath))
         let stickyPin = nextStickBottom && (isFirstMount || wasPinnedToBottom.contains(vpPath))
 
@@ -701,7 +712,7 @@ extension Runtime {
 
         let effect = virtualFill.step(.frame(now: now, wanted: wanted, missing: missing, moved: moved))
         if effect == .draw {
-            needsCommit = true
+            virtualFillNeedsCommit = true
         }
     }
 

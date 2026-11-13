@@ -469,7 +469,16 @@ public struct Tx {
 
 /// Read-only view-building context (`rune::Cx`).
 public struct Cx<State> {
-    public internal(set) var viewport: Vec2
+    private var _viewport: Vec2
+    public internal(set) var viewport: Vec2 {
+        get {
+            layoutCollector.viewportRead = true
+            return _viewport
+        }
+        set {
+            _viewport = newValue
+        }
+    }
     public internal(set) var pixelScale: Float
     public internal(set) var systemDark: Bool
     public internal(set) var reducedMotion: Bool
@@ -504,7 +513,7 @@ public struct Cx<State> {
         contentSizeLookup: @escaping (String) -> Vec2 = { _ in .zero },
         layoutRectLookup: @escaping (String) -> MotionRect? = { _ in nil }
     ) {
-        self.viewport = viewport
+        self._viewport = viewport
         self.pixelScale = pixelScale
         self.systemDark = systemDark
         self.reducedMotion = reducedMotion
@@ -540,7 +549,7 @@ public struct Cx<State> {
         layoutRectLookup: @escaping (String) -> MotionRect? = { _ in nil },
         layoutCollector: LayoutReadCollector
     ) {
-        self.viewport = viewport
+        self._viewport = viewport
         self.pixelScale = pixelScale
         self.systemDark = systemDark
         self.reducedMotion = reducedMotion
