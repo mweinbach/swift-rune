@@ -18,7 +18,7 @@ public enum PrimitiveKind: Int, Sendable, Codable {
     case effectSlot = 13
 }
 
-/// Device-pixel primitive instance matching the 32-float GPU instance layout.
+/// Device-pixel CPU oracle primitive instance (36 floats) used by `RuneRef` parity scenes.
 public struct Primitive: Sendable, Equatable {
     /// Bounding quad `[x, y, w, h]` in device pixels (for `.triangle`, `[v2.x, v2.y, bboxW, bboxH]` or bbox with v2 in `fadeOrigin`).
     public var rect: SIMD4<Float>

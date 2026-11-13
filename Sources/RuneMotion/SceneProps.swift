@@ -117,12 +117,16 @@ extension Scene {
             lanes[0] = n.baseScale2D.x
             lanes[1] = n.baseScale2D.y
         case Props.FRAME.id:
+            if let r = n.frame as? T { return r }
             lanes = n.frame.toLanes()
         case Props.CORNERS.id:
+            if let c = n.radius as? T { return c }
             lanes = n.radius.toLanes()
         case Props.FILL.id:
+            if let c = n.fill as? T { return c }
             lanes = n.fill.toLanes()
         case Props.BORDER.id:
+            if let c = n.border as? T { return c }
             lanes = n.border.toLanes()
         case Props.OFFSET.id, Props.ROTATE.id, Props.BLUR_SCALAR.id, Props.BLUR.id, Props.MASK.id:
             break

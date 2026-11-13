@@ -234,6 +234,8 @@ public struct NodeSpec: Sendable, Equatable {
     public var border: MotionColor?
     public var layoutAnim: LayoutAnim?
     public var styleSpring: Spring?
+    public var colorSpring: Spring?
+    public var animateOffset: Bool
     public var transition: Transition?
 
     /// Layout frame in parent space when used with `Scene.insert` (alias for `rect`).
@@ -257,6 +259,8 @@ public struct NodeSpec: Sendable, Equatable {
         self.border = nil
         self.layoutAnim = nil
         self.styleSpring = nil
+        self.colorSpring = nil
+        self.animateOffset = true
         self.transition = .opacity
     }
 
@@ -274,6 +278,8 @@ public struct NodeSpec: Sendable, Equatable {
         border: MotionColor? = nil,
         layoutAnim: LayoutAnim? = nil,
         styleSpring: Spring? = nil,
+        colorSpring: Spring? = nil,
+        animateOffset: Bool = true,
         transition: Transition? = nil
     ) {
         self.id = id
@@ -289,6 +295,8 @@ public struct NodeSpec: Sendable, Equatable {
         self.border = border
         self.layoutAnim = layoutAnim
         self.styleSpring = styleSpring
+        self.colorSpring = colorSpring
+        self.animateOffset = animateOffset
         self.transition = transition
     }
 
@@ -1773,15 +1781,15 @@ public struct Scene: Sendable {
                     animate(spec.id, Props.OPACITY, to: spec.opacity, anim: a)
                     animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: Curve.from(sp)))
                     animate(spec.id, Props.ROTATE, to: spec.rotate, anim: a)
-                    animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                    if spec.animateOffset {
+                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                    } else if let la = spec.layoutAnim {
+                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: la.x.curve))
+                    } else {
+                        set(spec.id, Props.OFFSET, spec.offset)
+                    }
                     animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
                     animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
-                    if let fill = spec.fill {
-                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: Curve.from(sp)))
-                    }
-                    if let border = spec.border {
-                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: Curve.from(sp)))
-                    }
                 } else if wasExiting && !cut && matchedStarts[spec.id] != nil && !store.reducedMotion {
                     // Matched start animates opacity/corners/fill from the source snapshot.
                     set(spec.id, Props.SCALE, spec.scale)
@@ -1794,12 +1802,6 @@ public struct Scene: Sendable {
                     if matchedStarts[spec.id]?.startOpacity == nil {
                         set(spec.id, Props.OPACITY, spec.opacity)
                     }
-                    if matchedStarts[spec.id]?.startFill == nil, let fill = spec.fill {
-                        set(spec.id, Props.FILL, fill)
-                    }
-                    if let border = spec.border {
-                        set(spec.id, Props.BORDER, border)
-                    }
                 } else {
                     set(spec.id, Props.OPACITY, spec.opacity)
                     set(spec.id, Props.SCALE, spec.scale)
@@ -1807,10 +1809,20 @@ public struct Scene: Sendable {
                     set(spec.id, Props.OFFSET, spec.offset)
                     set(spec.id, Props.CORNERS, spec.corners)
                     set(spec.id, Props.BLUR, Blur(spec.blur))
-                    if let fill = spec.fill {
+                }
+                let skipFillForMatch = wasExiting && !cut && matchedStarts[spec.id]?.startFill != nil && !store.reducedMotion
+                let resolvedColorSpring = !cut ? (spec.colorSpring ?? spec.styleSpring) : nil
+                if !skipFillForMatch, let fill = spec.fill {
+                    if let csp = resolvedColorSpring {
+                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: Curve.from(csp)))
+                    } else {
                         set(spec.id, Props.FILL, fill)
                     }
-                    if let border = spec.border {
+                }
+                if let border = spec.border {
+                    if let csp = resolvedColorSpring {
+                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: Curve.from(csp)))
+                    } else {
                         set(spec.id, Props.BORDER, border)
                     }
                 }

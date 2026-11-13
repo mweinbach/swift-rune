@@ -532,6 +532,8 @@ public struct EffectSite {
     public let pixelSize: (width: Int, height: Int)
     public let origin: SIMD2<Float>
     public let inLayer: Bool
+    public let opacity: Float
+    public let turn: Float
     public let srgbBlend: Bool
     #if canImport(Metal)
     public let pixelFormat: MTLPixelFormat
@@ -547,6 +549,8 @@ public struct EffectSite {
         origin: SIMD2<Float>,
         pixelSize: (width: Int, height: Int),
         inLayer: Bool,
+        opacity: Float = 1.0,
+        turn: Float = 0.0,
         srgbBlend: Bool,
         backdrop: MTLTexture?
     ) {
@@ -559,6 +563,8 @@ public struct EffectSite {
         self.origin = origin
         self.pixelSize = pixelSize
         self.inLayer = inLayer
+        self.opacity = opacity
+        self.turn = turn
         self.srgbBlend = srgbBlend
         self.backdrop = backdrop
     }
@@ -572,6 +578,8 @@ public struct EffectSite {
         origin: SIMD2<Float>,
         pixelSize: (width: Int, height: Int),
         inLayer: Bool,
+        opacity: Float = 1.0,
+        turn: Float = 0.0,
         srgbBlend: Bool
     ) {
         self.index = index
@@ -582,6 +590,8 @@ public struct EffectSite {
         self.origin = origin
         self.pixelSize = pixelSize
         self.inLayer = inLayer
+        self.opacity = opacity
+        self.turn = turn
         self.srgbBlend = srgbBlend
     }
     #endif

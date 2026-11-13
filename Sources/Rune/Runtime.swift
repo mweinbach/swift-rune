@@ -206,6 +206,7 @@ public final class Runtime<State> {
         var rowLayout: ParityRowLayout = .free
         var parentHasGrowth: Bool = false
         var parentNewlyMounted: Bool = false
+        var inheritedStyleSpring: Spring? = nil
     }
 
     private struct PaintInh {
@@ -611,6 +612,7 @@ public final class Runtime<State> {
     internal var activeVirtualPaths: Set<String> = []
     internal var virtualFill = VirtualFillStateMachine()
     internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]
+    private var lastHoverScrollOffsets: [String: Vec2] = [:]
     internal struct RuntimeGrowthEntry: Sendable {
         var track: GrowTrack
         var edge: StreamEdge
@@ -2209,6 +2211,7 @@ public final class Runtime<State> {
             let selfInstantLayoutOrStyle = childInstant || commitKind.snaps || commitCut || reducedMotion
 
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
+            let nodeStyleSpring = el.styleSpring ?? item.inheritedStyleSpring
             // Provide a subtle default interactive spring when pressScale / press is used
             var styleSp: Spring?
             if selfInstantLayoutOrStyle {
@@ -2216,11 +2219,14 @@ public final class Runtime<State> {
                     ? MotionTokens.INSTANT
                     : nil
             } else {
-                styleSp = el.styleSpring
+                styleSp = nodeStyleSpring
                     ?? commitColorSpring
                     ?? commitMotion?.spring
                     ?? ((el.pressScaleFactor != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
             }
+            var colorSp: Spring? = (childInstant || commitKind.snaps || commitCut)
+                ? nil
+                : (nodeStyleSpring ?? commitColorSpring ?? commitMotion?.spring ?? MotionTokens.DEFAULT)
             let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
                 guard self.scene.hasNode(nid),
@@ -2302,9 +2308,11 @@ public final class Runtime<State> {
                 specTransition = nil
                 layoutAnimSpec = nil
                 styleSp = nil
+                colorSp = nil
             } else if releasedEnterDelays.remove(nid) != nil {
                 let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
                 styleSp = enterSp
+                colorSp = enterSp
                 layoutAnimSpec = el.layoutAnim ?? LayoutAnim(spring: enterSp)
             }
             ancestorInstants.append(ancestorInstant)
@@ -2324,9 +2332,11 @@ public final class Runtime<State> {
                 corners: el.corners,
                 blur: specBlur,
                 fill: effectiveFill.motionColor,
-                border: el.borderColor.motionColor,
+                border: ((el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec)?.top ?? el.borderColor).motionColor,
                 layoutAnim: layoutAnimSpec,
                 styleSpring: styleSp,
+                colorSpring: colorSp,
+                animateOffset: (el.styleSpring != nil || commitMotion != nil || el.layoutAnim != nil),
                 transition: specTransition
             ))
 
@@ -2387,7 +2397,8 @@ public final class Runtime<State> {
                     staticInh: childStaticInh,
                     rowLayout: childInRow,
                     parentHasGrowth: el.growthSpec != nil,
-                    parentNewlyMounted: isFreshMount
+                    parentNewlyMounted: isFreshMount,
+                    inheritedStyleSpring: nodeStyleSpring
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -2872,9 +2883,11 @@ public final class Runtime<State> {
                 specs[i].transition = nil
                 specs[i].layoutAnim = nil
                 specs[i].styleSpring = nil
+                specs[i].colorSpring = nil
             } else if releasedEnterDelays.remove(nid) != nil {
                 let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
                 specs[i].styleSpring = enterSp
+                specs[i].colorSpring = enterSp
                 specs[i].layoutAnim = el.layoutAnim ?? LayoutAnim(spring: enterSp)
             }
         }
@@ -3134,6 +3147,29 @@ public final class Runtime<State> {
         scene.keepFlights(keepsFlights)
         applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
         syncRideTrailingFlags(pass.nodes, on: &scene)
+        var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
+        pendingBorderBottoms.reserveCapacity(8)
+        var pendingRadialStops: [(id: NodeId, index: Int, target: MotionColor, spring: Spring?)] = []
+        for (i, node) in pass.nodes.enumerated() where i < specs.count {
+            let nid = node.nodeId
+            let wasPresent = scene.contains(nid)
+            let csp: Spring? = (!commitCut && !reducedMotion && wasPresent) ? specs[i].colorSpring : nil
+            if let rGrad = node.el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec {
+                for (si, stop) in rGrad.stops.prefix(16).enumerated() {
+                    pendingRadialStops.append((id: nid, index: si, target: stop.color.motionColor, spring: csp))
+                }
+            }
+            let bGrad = node.el.runtimeExtras[RenderExtrasKey.borderGradient] as? RenderBorderGradientSpec
+            let bw = bGrad?.width ?? node.el.borderWidth
+            guard bw > 0 else { continue }
+            let hadBottom = scene.store.has(nid, Props.BORDER_BOTTOM)
+            guard bGrad != nil || hadBottom else { continue }
+            let seed: MotionColor? = (bGrad != nil && !hadBottom && wasPresent)
+                ? (scene.get(nid, Props.BORDER) ?? prevFlatNodesSnapshot.first(where: { $0.nodeId == nid })?.el.borderColor.motionColor ?? node.el.borderColor.motionColor)
+                : nil
+            let target = (bGrad?.bottom ?? node.el.borderColor).motionColor
+            pendingBorderBottoms.append((id: nid, seed: seed, target: target, spring: csp))
+        }
         measureFramePhase(.apply) {
             scene.commit(
                 specs,
@@ -3152,6 +3188,24 @@ public final class Runtime<State> {
                 resolvedNS[i] = ns
                 scene.traceName(n.nodeId, n.el.traceNameValue ?? n.key)
                 scene.traceNamespace(n.nodeId, ns)
+            }
+        }
+        for item in pendingBorderBottoms {
+            if let seed = item.seed {
+                scene.set(item.id, Props.BORDER_BOTTOM, seed)
+            }
+            if let csp = item.spring {
+                scene.animate(item.id, Props.BORDER_BOTTOM, to: item.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(item.id, Props.BORDER_BOTTOM, item.target)
+            }
+        }
+        for rs in pendingRadialStops {
+            let prop = radialStopProps[rs.index]
+            if let csp = rs.spring {
+                scene.animate(rs.id, prop, to: rs.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(rs.id, prop, rs.target)
             }
         }
         scene.keepFlights(false)
@@ -4386,7 +4440,7 @@ public final class Runtime<State> {
             }
             let borderColor: Color
             if let pb = p.border {
-                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER)
+                let settledBorder = !scene.store.isMoving(p.id, Props.BORDER) && !scene.store.isMoving(p.id, Props.BORDER_BOTTOM)
                     && abs(pb.r - el.borderColor.r) < 1e-3
                     && abs(pb.g - el.borderColor.g) < 1e-3
                     && abs(pb.b - el.borderColor.b) < 1e-3
@@ -4580,6 +4634,7 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + paintMargin
             )
             let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0 && onScreenForEmit
+            let surfaceVisible = shouldEmit && visibleRect.width > 0 && visibleRect.height > 0
             unseenPresence.recordPaintedNode(
                 id: p.id,
                 inView: isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
@@ -4628,7 +4683,7 @@ public final class Runtime<State> {
                 if let vsnap = surf.videoSnapshot() {
                     newVideoSnaps[snap.path] = vsnap
                 }
-                if !shouldEmit {
+                if !surfaceVisible {
                     newVideoSig = VideoSignature.foldUnpulled(newVideoSig, surface: surf)
                 }
             }
@@ -4734,7 +4789,7 @@ public final class Runtime<State> {
                 }
 
                 let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
-                if let (surf, fit) = el.surfacePayload {
+                if let (surf, fit) = el.surfacePayload, surfaceVisible {
                     if hasFill && el.gradient == nil {
                         primitives.append(attachFade(.roundedRect(
                             rect: devRect,
@@ -5887,6 +5942,18 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
+        if scrollOffsets != lastHoverScrollOffsets {
+            lastHoverScrollOffsets = scrollOffsets
+            if activeDrag == nil,
+               pointerPosition.x >= 0,
+               pointerPosition.y >= 0,
+               pointerPosition.x < viewport.x,
+               pointerPosition.y < viewport.y {
+                if refreshHover(at: currentTime, isPointerEvent: false) {
+                    isAnimating = true
+                }
+            }
+        }
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives)
@@ -6274,6 +6341,34 @@ public final class Runtime<State> {
             return
         }
 
+        _ = refreshHover(
+            at: now,
+            isPointerEvent: true,
+            moveDispatched: moveDispatched,
+            moveAllLiveOnly: moveAllLiveOnly
+        )
+    }
+
+    private func hasHoverVisualInChain(_ path: String?) -> Bool {
+        var idxOpt = path.flatMap { nodeByPath[$0] }
+        while let idx = idxOpt {
+            let el = flatNodes[idx].el
+            if el.hoverBg != nil || el.isHoverGroup || el.isHoverAlone || el.hoverGroupShare != nil {
+                return true
+            }
+            idxOpt = flatNodes[idx].parentIndex
+        }
+        return false
+    }
+
+    @discardableResult
+    private func refreshHover(
+        at now: Double,
+        isPointerEvent: Bool,
+        moveDispatched: Bool = false,
+        moveAllLiveOnly: Bool = true
+    ) -> Bool {
+        let pos = pointerPosition
         let hit = hitTest(at: pos) { node in
             Self.hoverHitPredicate(node) || self.hasActiveTextLinks(node.el)
         }
@@ -6294,55 +6389,62 @@ public final class Runtime<State> {
             }
             let newPath = hit?.node.path
             let newKey = hit?.node.key
+            var changed = false
             if newPath != hoveredPath {
                 let oldPath = hoveredPath
                 hoveredPath = newPath
                 hoveredKey = newKey
-                isDispatchingHover = true
-                var ranAnyHover = false
-                var hoverAllLiveOnly = true
-                if let old = oldPath, let oldIdx = nodeByPath[old],
-                   !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
-                    var tx = makeTx(at: now)
-                    cb(&state, false, &tx)
-                    if !tx.liveOnlyRequested {
-                        perfWatch.meter.handler(name: "on_hover", path: old)
+                if isPointerEvent {
+                    isDispatchingHover = true
+                    var ranAnyHover = false
+                    var hoverAllLiveOnly = true
+                    if let old = oldPath, let oldIdx = nodeByPath[old],
+                       !flatNodes[oldIdx].el.hasKitHoverDelays,
+                       let cb = flatNodes[oldIdx].el.handlers.onHover {
+                        var tx = makeTx(at: now)
+                        cb(&state, false, &tx)
+                        if !tx.liveOnlyRequested {
+                            perfWatch.meter.handler(name: "on_hover", path: old)
+                        }
+                        ranAnyHover = true
+                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                     }
-                    ranAnyHover = true
-                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                }
-                if let np = newPath, let newIdx = nodeByPath[np],
-                   !flatNodes[newIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[newIdx].el.handlers.onHover {
-                    var tx = makeTx(at: now)
-                    cb(&state, true, &tx)
-                    if !tx.liveOnlyRequested {
-                        perfWatch.meter.handler(name: "on_hover", path: np)
+                    if let np = newPath, let newIdx = nodeByPath[np],
+                       !flatNodes[newIdx].el.hasKitHoverDelays,
+                       let cb = flatNodes[newIdx].el.handlers.onHover {
+                        var tx = makeTx(at: now)
+                        cb(&state, true, &tx)
+                        if !tx.liveOnlyRequested {
+                            perfWatch.meter.handler(name: "on_hover", path: np)
+                        }
+                        ranAnyHover = true
+                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                     }
-                    ranAnyHover = true
-                    hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                }
-                isDispatchingHover = false
-                let skipHoverCommit = ((ranAnyHover && hoverAllLiveOnly) || (moveDispatched && moveAllLiveOnly && !ranAnyHover))
-                    && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)
-                if !skipHoverCommit || linkChanged || helpTargetChanges(at: pos) {
-                    suppressRevealFromHoverCommit = true
+                    isDispatchingHover = false
+                    let hoverSkippedCommit = ranAnyHover
+                        ? (hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
+                        : (moveDispatched && moveAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
+                    if !hoverSkippedCommit || linkChanged || helpTargetChanges(at: pos) {
+                        suppressRevealFromHoverCommit = true
+                        dirtyCommit(at: now)
+                        changed = true
+                    }
+                } else if linkChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
                     dirtyCommit(at: now)
-                } else if linkChanged || helpTargetChanges(at: pos) {
-                    suppressRevealFromHoverCommit = true
-                    dirtyCommit(at: now)
+                    changed = true
                 }
             } else if linkChanged || helpTargetChanges(at: pos) {
                 dirtyCommit(at: now)
+                changed = true
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
-        } else if helpTargetChanges(at: pos) {
-            dirtyCommit(at: now)
+            settleKitHoverDelays(at: pos, now: now)
+            return changed
         }
         settleKitHoverDelays(at: pos, now: now)
+        return false
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
@@ -7737,6 +7839,7 @@ public final class Runtime<State> {
         }
         if let srgb = tx.srgbBlendRequest, srgb != srgbBlend {
             srgbBlend = srgb
+            pendingColorMotionSpring = pendingColorMotionSpring ?? Spring.none
             dirtyCommit(at: now)
         }
         if let smoothing = tx.fontSmoothingRequest, smoothing != fontSmoothing {
@@ -8101,6 +8204,7 @@ public final class Runtime<State> {
     public func setSrgbBlend(_ enabled: Bool, at now: Double? = nil) {
         guard srgbBlend != enabled else { return }
         srgbBlend = enabled
+        pendingColorMotionSpring = pendingColorMotionSpring ?? Spring.none
         dirtyCommit(at: now ?? currentTime)
     }
 
@@ -8156,7 +8260,6 @@ public final class Runtime<State> {
         guard liveVisible else { return false }
         return livePendingDirty || liveWake.isVisiblePending
     }
-
     /// Runs `poll` while the window is hidden (`Runtime::poll_hidden`), returning `true` if
     /// the view or pending scroll/flight state became out of date.
     @discardableResult

@@ -27,7 +27,7 @@ public enum MediaSource: Sendable, Hashable {
 }
 
 /// Snapshot of desired playback controls & URL request headers (`rune::video::MediaRequest`).
-public struct MediaRequest: Sendable, Equatable {
+public struct MediaRequest: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
     public var source: MediaSource
     public var kind: MediaKind
     public var headers: [(name: String, value: String)]
@@ -37,6 +37,15 @@ public struct MediaRequest: Sendable, Equatable {
     public var volume: Float
     public var rate: Float
     public var seek: (time: Double, generation: UInt64)?
+
+    public var description: String {
+        let names = headers.map(\.name)
+        return "MediaRequest(source: \(source), kind: \(kind), headers: \(names))"
+    }
+
+    public var debugDescription: String {
+        description
+    }
 
     public init(
         source: MediaSource,
@@ -122,12 +131,35 @@ public struct VideoMeta: Sendable, Equatable {
     public var duration: Double?
     public var size: (UInt32, UInt32)?
     public var hasSound: Bool
+    public var frameDuration: Double
 
-    public init(kind: MediaKind = .video, duration: Double? = nil, size: (UInt32, UInt32)? = nil, hasSound: Bool = false) {
+    public init(
+        kind: MediaKind = .video,
+        duration: Double? = nil,
+        size: (UInt32, UInt32)? = nil,
+        hasSound: Bool = false,
+        frameDuration: Double = 1.0 / 30.0
+    ) {
         self.kind = kind
         self.duration = duration
         self.size = size
         self.hasSound = hasSound
+        self.frameDuration = frameDuration > 0 && frameDuration.isFinite ? frameDuration : (1.0 / 30.0)
+    }
+
+    public var frameCount: Int64 {
+        guard let duration else { return 1 }
+        return max(1, Int64((duration / frameDuration).rounded()))
+    }
+
+    public func frameIndex(at time: Double) -> Int64 {
+        let raw = Int64((time / frameDuration + 1e-6).rounded(.down))
+        return min(max(0, raw), frameCount - 1)
+    }
+
+    public func frameTime(for index: Int64) -> Double {
+        let t = (Double(index) + 0.5) * frameDuration
+        return duration.map { min(t, $0) } ?? t
     }
 
     public static func == (lhs: VideoMeta, rhs: VideoMeta) -> Bool {
@@ -135,7 +167,8 @@ public struct VideoMeta: Sendable, Equatable {
         lhs.duration == rhs.duration &&
         lhs.size?.0 == rhs.size?.0 &&
         lhs.size?.1 == rhs.size?.1 &&
-        lhs.hasSound == rhs.hasSound
+        lhs.hasSound == rhs.hasSound &&
+        lhs.frameDuration == rhs.frameDuration
     }
 }
 
@@ -164,6 +197,19 @@ public final class WakerSlot: @unchecked Sendable {
         lock.unlock()
         cb?()
     }
+
+    internal var isLockFreeForTest: Bool {
+        if lock.try() {
+            lock.unlock()
+            return true
+        }
+        return false
+    }
+}
+
+internal protocol HeadlessVideoDriver: AnyObject {
+    func advanceHeadless(to now: Double)
+    func resetHeadlessClock()
 }
 
 /// Virtual clock + frame hook shared by headless video tests (`video::headless_reset` / `headless_frame`).
@@ -173,8 +219,8 @@ public enum VideoHeadless {
     private nonisolated(unsafe) static var registered: [ObjectIdentifier: WeakBox] = [:]
 
     private final class WeakBox {
-        weak var player: Player?
-        init(_ player: Player) { self.player = player }
+        weak var driver: HeadlessVideoDriver?
+        init(_ driver: HeadlessVideoDriver) { self.driver = driver }
     }
 
     public static var virtualClock: Double {
@@ -183,35 +229,41 @@ public enum VideoHeadless {
         return clock
     }
 
-    internal static func register(_ player: Player) {
+    internal static func register(_ driver: HeadlessVideoDriver) {
         lock.lock()
-        registered[ObjectIdentifier(player)] = WeakBox(player)
+        registered[ObjectIdentifier(driver)] = WeakBox(driver)
         lock.unlock()
     }
 
-    internal static func unregister(_ player: Player) {
+    internal static func unregister(_ driver: HeadlessVideoDriver) {
         lock.lock()
-        registered.removeValue(forKey: ObjectIdentifier(player))
+        registered.removeValue(forKey: ObjectIdentifier(driver))
         lock.unlock()
     }
 
     public static func reset() {
+        let drivers: [HeadlessVideoDriver]
         lock.lock()
         clock = 0.0
-        registered = registered.filter { $0.value.player != nil }
+        registered = registered.filter { $0.value.driver != nil }
+        drivers = registered.values.compactMap { $0.driver }
         lock.unlock()
+
+        for d in drivers {
+            d.resetHeadlessClock()
+        }
     }
 
     public static func frame(at now: Double) {
-        let players: [Player]
+        let drivers: [HeadlessVideoDriver]
         lock.lock()
         clock = now
-        registered = registered.filter { $0.value.player != nil }
-        players = registered.values.compactMap { $0.player }
+        registered = registered.filter { $0.value.driver != nil }
+        drivers = registered.values.compactMap { $0.driver }
         lock.unlock()
 
-        for p in players {
-            p.advanceHeadless(to: now)
+        for d in drivers {
+            d.advanceHeadless(to: now)
         }
     }
 }

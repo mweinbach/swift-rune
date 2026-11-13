@@ -433,10 +433,13 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         int2 dims = int2(images.get_width(), images.get_height());
         int2 ct = clamp(t, int2(0), max(dims - int2(1), int2(0)));
         float4 c = images.read(uint2(ct));
-        if (!premultiplied) {
-            c = float4(c.rgb * c.a, c.a);
+        if (g.flags.x > 0.5) {
+            if (c.a <= 0.0) { return float4(0.0); }
+            float3 lin = select(c.rgb, c.rgb / c.a, premultiplied);
+            return float4(srgb_encode(float4(lin, 1.0)).rgb * c.a, c.a);
         }
-        return select(c, srgb_encode(c), g.flags.x > 0.5);
+        if (premultiplied) { return c; }
+        return float4(c.rgb * c.a, c.a);
     }
 
     static inline float2 ring_arc(float2 p, float2 size, float4 radii, float bw) {

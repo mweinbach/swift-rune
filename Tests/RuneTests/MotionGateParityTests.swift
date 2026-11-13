@@ -80,7 +80,7 @@ struct MotionGateParityTests {
                             .key("teleporter")
                             .size(40, 40)
                             .bg(.white)
-                            .offset(s.shifted ? 80 : 0, 0)
+                            .ml(s.shifted ? 80 : 0)
                     )
             }
         )
@@ -103,7 +103,7 @@ struct MotionGateParityTests {
                             .key("teleporter")
                             .size(40, 40)
                             .bg(.white)
-                            .offset(s.shifted ? 80 : 0, 0)
+                            .ml(s.shifted ? 80 : 0)
                             .motionIntent(.step)
                     )
             }
@@ -176,6 +176,7 @@ struct MotionGateParityTests {
                             .key("card")
                             .size(80, 60)
                             .bg(s.lit ? Color(r: 1, g: 0, b: 0, a: 1) : Color(r: 0, g: 0, b: 1, a: 1))
+                            .tokenMotion(.none)
                     )
             }
         )
@@ -199,6 +200,7 @@ struct MotionGateParityTests {
                             .key("card")
                             .size(80, 60)
                             .bg(s.lit ? Color(r: 1, g: 0, b: 0, a: 1) : Color(r: 0, g: 0, b: 1, a: 1))
+                            .tokenMotion(.none)
                     )
             }
         )
@@ -245,7 +247,7 @@ struct MotionGateParityTests {
                     viewport: Vec2(120, 60),
                     pixelScale: 1.0,
                     view: { s, _ in
-                        col().size(120, 60).child(el().key("box").size(20, 20).bg(.white).offset(s.x ? 50 : 0, 0))
+                        col().size(120, 60).child(el().key("box").size(20, 20).bg(.white).ml(s.x ? 50 : 0))
                     }
                 )
                 let r = MotionGateRun(rt)
