@@ -52,11 +52,44 @@ struct RemainingExampleParityTests {
     }
 
     // Upstream: examples/rich-clipboard/src/main.rs:72
-    @Test(
-        "rich-clipboard: a_rich_paste_shows_its_forms_and_the_field_keeps_the_text",
-        .disabled("Blocked on @el/@platform: Runtime lacks Runtime.useClipboard(_:), tx.requestPaste(), and El.onPaste")
-    )
-    func richClipboardFullPasteFlow() {}
+    @Test("rich-clipboard: a_rich_paste_shows_its_forms_and_the_field_keeps_the_text")
+    func richClipboardFullPasteFlow() throws {
+        let board = Clipboard(kind: .memory)
+        let rt = Runtime<RichClipboardState>(
+            state: RichClipboardState(clipboard: board),
+            viewport: Vec2(560, 420),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: richClipboardView
+        )
+        rt.useClipboard(board)
+        rt.frame(at: 0.0)
+        rt.update(at: 0.01) { _, tx in
+            tx.focus("field")
+        }
+        rt.frame(at: 0.02)
+        board.writeRich(
+            RichClipboardPayload(
+                text: "Hi",
+                html: "<b>Hi</b><img src=x onerror=alert(1)>"
+            )
+        )
+        rt.update(at: 0.03) { _, tx in
+            tx.requestPaste()
+        }
+        rt.frame(at: 0.04)
+        #expect(rt.state.field.text == "Hi")
+        let last = try #require(rt.state.last)
+        #expect(last.0 == "Pasted")
+        #expect(last.1.html == "<b>Hi</b><img src=x>")
+
+        let copyRect = try #require(rt.element(byKey: "copy")?.rect)
+        let copyCenter = Vec2(copyRect[0] + copyRect[2] * 0.5, copyRect[1] + copyRect[3] * 0.5)
+        rt.pointerDown(at: copyCenter, at: 0.05)
+        rt.pointerUp(at: copyCenter, at: 0.06)
+        rt.frame(at: 0.07)
+        #expect(board.readRich(sanitizeUntrustedHTML: false) == sampleRichPayload())
+    }
 
     // Upstream: examples/drag-out/src/main.rs:68 (unblocked drag state + tile layout)
     @Test("drag-out: renders file/app/text tiles and dims active tile while dragging")

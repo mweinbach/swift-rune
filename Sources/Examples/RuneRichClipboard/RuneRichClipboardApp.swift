@@ -72,6 +72,10 @@ public func richClipboardView(_ s: RichClipboardState, _ cx: inout Cx<RichClipbo
         .border(1, t.cardBorder)
         .font(Tok.Typography.body)
         .color(t.text)
+        .onInputPaste { state, content, _ in
+            recordSeen(&state, how: "Pasted", content: content)
+            return false
+        }
 
     return col()
         .sizeFull()

@@ -85,8 +85,10 @@ let package = Package(
         .executable(name: "rune-one-snap", targets: ["RuneOneSnap"]),
         .executable(name: "rune-custom-titlebar", targets: ["RuneCustomTitlebar"]),
         .executable(name: "rune-keep-stuck", targets: ["RuneKeepStuck"]),
+        .executable(name: "rune-scroll-anchor", targets: ["RuneScrollAnchor"]),
         .executable(name: "rune-growth-reorder", targets: ["RuneGrowthReorder"]),
         .executable(name: "rune-window-resize", targets: ["RuneWindowResize"]),
+        .executable(name: "rune-canvas-input", targets: ["RuneCanvasInput"]),
         .executable(name: "rune-popup-menu", targets: ["RunePopupMenu"]),
         .executable(name: "rune-motion-bench", targets: ["RuneMotionBench"]),
         .executable(name: "rune-interaction-cost", targets: ["RuneInteractionCost"]),
@@ -511,6 +513,11 @@ let package = Package(
             path: "Sources/Examples/RuneKeepStuck"
         ),
         .executableTarget(
+            name: "RuneScrollAnchor",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneScrollAnchor"
+        ),
+        .executableTarget(
             name: "RuneGrowthReorder",
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneGrowthReorder"
@@ -519,6 +526,11 @@ let package = Package(
             name: "RuneWindowResize",
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneWindowResize"
+        ),
+        .executableTarget(
+            name: "RuneCanvasInput",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneCanvasInput"
         ),
         .executableTarget(
             name: "RunePopupMenu",
@@ -805,8 +817,10 @@ let package = Package(
                 "RuneOneSnap",
                 "RuneCustomTitlebar",
                 "RuneKeepStuck",
+                "RuneScrollAnchor",
                 "RuneGrowthReorder",
                 "RuneWindowResize",
+                "RuneCanvasInput",
                 "RuneShapes",
                 "RuneLuauPanel",
                 "RuneLuau",

@@ -2,10 +2,11 @@ import Foundation
 import Testing
 @testable import Rune
 @testable import RuneKeepStuck
+@testable import RuneScrollAnchor
 @testable import RuneGrowthReorder
 @testable import RuneSticky
 
-@Suite("Phase 3 El Motion Examples (keep_stuck, growth_reorder, sticky)")
+@Suite("Phase 3 El Motion Examples (keep_stuck, scroll_anchor, growth_reorder, sticky)")
 struct Phase3ElMotionTests {
     @Test("keep_stuck: clicking header toggles group and invokes Tx.keepOnScreen")
     func keepStuckTogglesHeaderAndKeepsOnScreen() throws {
@@ -25,6 +26,33 @@ struct Phase3ElMotionTests {
         rt.pointerUp(at: pt, at: 0.03)
         rt.frame(at: 0.04)
         #expect(rt.state.open == false)
+    }
+
+    @Test("scroll_anchor: Enter adds earlier rows while anchor mode preserves viewport item")
+    func scrollAnchorAddsEarlierMessagesOnEnter() throws {
+        let rtAnchored = Runtime<ScrollAnchorFeed>(
+            state: ScrollAnchorFeed(earlier: 0, anchor: true),
+            viewport: Vec2(420, 400),
+            pixelScale: 2.0,
+            systemDark: true,
+            onKey: onScrollAnchorKey,
+            view: scrollAnchorView
+        )
+        rtAnchored.frame(at: 0.0)
+        let feed = try #require(rtAnchored.element(byKey: "feed"))
+        let center = Vec2(feed.rect[0] + feed.rect[2] * 0.5, feed.rect[1] + feed.rect[3] * 0.5)
+        rtAnchored.wheel(WheelEvent(dy: -240), at: center, now: 0.02)
+        rtAnchored.frame(at: 0.03)
+        let msg8Before = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
+
+        #expect(rtAnchored.keyDown(KeyEvent(key: .enter), at: 0.04))
+        rtAnchored.frame(at: 0.05)
+        #expect(rtAnchored.state.earlier == 3)
+        let msg8After = try #require(rtAnchored.element(byKey: "msg-8")?.rect[1])
+        #expect(abs(msg8After - msg8Before) < 2.0)
+
+        let plainSpec = RuneScrollAnchorApp.makeSpec(arguments: ["plain"])
+        #expect(plainSpec.makeState().anchor == false)
     }
 
     @Test("growth_reorder: default swap and steer launch + deliver reorder rows")
