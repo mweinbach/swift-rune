@@ -4358,7 +4358,7 @@ private final class MarkdownRenderer<State> {
 
     private func applySelect(_ node: El<State>) -> El<State> {
         view.config.isSelectable
-            ? node.selectable(true).selectionStyle(SelectionStyle(highlight: s.selection))
+            ? node.selectable(true).selectionStyle(SelectionStyle(highlight: s.selection)).cursor(.text)
             : node
     }
 
