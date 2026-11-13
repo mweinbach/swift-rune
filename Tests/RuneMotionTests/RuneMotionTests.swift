@@ -52,16 +52,34 @@ struct RuneMotionTests {
         let velBefore = store.velocity(node, Props.OPACITY).lanes.l0
         #expect(velBefore > 10.0)
 
-        // Retarget back to 20.0 mid-flight!
+        // Retarget audit defaults to disabled (opt-in matching store.rs:246).
         store.set(node, Props.OPACITY, to: 20.0, anim: .spring(.snappy, blend: .merge), at: 0.12)
-        let audit = store.takeRetargetAudit()
-        #expect(audit.lanes == 1)
-        #expect(audit.maxVelocityError < 1e-2)
+        #expect(store.takeRetargetAudit().lanes == 0)
 
         let posAfter = store.get(node, Props.OPACITY)!
         let velAfter = store.velocity(node, Props.OPACITY).lanes.l0
         #expect(abs(posAfter - posBefore) < 1e-4)
         #expect(abs(velAfter - velBefore) < 1e-2)
+
+        // Opting in audits spatial springs only (`store.rs:288-294,733-734`).
+        store.auditRetargets(true)
+        store.set(node, Props.OPACITY, to: 80.0, anim: .spring(.snappy, blend: .merge), at: 0.14)
+        #expect(store.takeRetargetAudit().lanes == 0)
+
+        store.snap(node, Props.OFFSET, to: Vec2(0, 0))
+        store.set(node, Props.OFFSET, to: Vec2(100, 50), anim: .spring(.snappy), at: 0.15)
+        store.sample(at: 0.25)
+        let offBefore = store.get(node, Props.OFFSET)!
+        let offVelBefore = store.velocity(node, Props.OFFSET)
+        store.set(node, Props.OFFSET, to: Vec2(20, 10), anim: .spring(.snappy, blend: .merge), at: 0.25)
+        let audit = store.takeRetargetAudit()
+        #expect(audit.lanes == 2)
+        #expect(audit.maxVelocityError < 1e-2)
+
+        let offAfter = store.get(node, Props.OFFSET)!
+        let offVelAfter = store.velocity(node, Props.OFFSET)!
+        #expect(abs(offAfter.x - offBefore.x) < 1e-4 && abs(offAfter.y - offBefore.y) < 1e-4)
+        #expect(abs(offVelAfter.x - offVelBefore!.x) < 1e-2 && abs(offVelAfter.y - offVelBefore!.y) < 1e-2)
     }
 
     @Test("Additive blending superposes offsets without jumping")
@@ -328,6 +346,8 @@ struct RuneMotionTests {
             #expect(got.pair.enter.duration == exp.1 && got.pair.enter.bounce == exp.2)
             #expect(got.pair.exit.duration == exp.3 && got.pair.exit.bounce == exp.4)
         }
+        #expect(MotionTokens.INSTANT_PAIR == SpringPair(enter: MotionTokens.INSTANT, exit: MotionTokens.INSTANT_EXIT))
+        #expect(MotionTokens.INSTANT_PAIR.enter.duration == 0.10 && MotionTokens.INSTANT_PAIR.exit.duration == 0.10)
     }
 
     @Test("Spring.settlingDuration bounds the entire tail and critical spring is monotonic")
@@ -341,6 +361,19 @@ struct RuneMotionTests {
                 #expect(abs(x - 1.0) <= 1.01e-3)
                 #expect(abs(v) <= 1.01e-2)
             }
+        }
+        let nonZeroSettle = Spring(duration: 0.4, bounce: 0.2).settlingDuration(
+            from: 100.0,
+            velocity: -50.0,
+            target: 25.0,
+            epsilon: 1e-2
+        )
+        #expect(nonZeroSettle > 0.1 && nonZeroSettle < 20.0)
+        for i in 0..<100 {
+            let t = nonZeroSettle + Float(i) * 0.05
+            let (x, v) = Spring(duration: 0.4, bounce: 0.2).sample(from: 100.0, velocity: -50.0, target: 25.0, at: t)
+            #expect(abs(x - 25.0) <= 1.01e-2)
+            #expect(abs(v) <= 0.11)
         }
         var prev: Float = 0
         for i in 1...400 {
@@ -400,6 +433,15 @@ struct RuneMotionTests {
         #expect(abs(tracker.velocity() - 300.0) < 0.5)
         tracker.add(at: 30.0 / 120.0 + 0.2, value: 75.0)
         #expect(tracker.velocity() == 0.0)
+
+        var xformTracker = VelocityTracker<Transform2D>()
+        for i in 0..<10 {
+            let t = Double(i) / 120.0
+            let tf = Float(t)
+            xformTracker.add(at: t, value: Transform2D(tx: 10 * tf, ty: 20 * tf, sx: 1, sy: 1, rot: 2 * tf))
+        }
+        let xformVel = xformTracker.velocity()
+        #expect(abs(xformVel.tx - 10.0) < 0.2 && abs(xformVel.ty - 20.0) < 0.2 && abs(xformVel.rot - 2.0) < 0.05)
     }
 
     @Test("MotionSequence, Cycle, StaggerFrom, PhaseAnimator, and Release")
@@ -414,11 +456,32 @@ struct RuneMotionTests {
 
         let cycle = Cycle(period: 2.0, stops: [(0.0, 0.2), (0.5, 1.0), (1.0, 0.2)])
         #expect(abs(cycle.sample(at: 0.5) - 0.6) < 1e-5)
+        #expect(Cycle(period: 2.0, stops: []).sample(at: 0.5) == 1.0)
 
         let stag = Stagger(step: 0.05, maxDelay: 0.0, from: .center)
         #expect(stag.delay(index: 1, count: 3) == 0.0)
         #expect(abs(stag.delay(index: 0, count: 3) - 0.05) < 1e-6)
         #expect(abs(stag.delay(index: 2, count: 3) - 0.05) < 1e-6)
+        #expect(stag.delay(index: 0, count: 1) == 0.0)
+        // stagger_delays_ripple_from_the_origin (choreo.rs:5-16)
+        let dFirst = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .start) }
+        #expect(dFirst == [0.0, 0.1, 0.2, 0.3, 0.4])
+        let dLast = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .end) }
+        #expect(dLast == [0.4, 0.3, 0.2, 0.1, 0.0])
+        let dCenter = (0..<5).map { stagger(index: $0, count: 5, gap: 0.1, from: .center) }
+        #expect(abs(dCenter[0] - 0.2) < 1e-6 && dCenter[2] == 0.0 && abs(dCenter[4] - 0.2) < 1e-6)
+        let eased = Stagger(step: 0.1).ease(.easeIn)
+        #expect(eased.delay(index: 0, count: 5) == 0.0 && abs(eased.delay(index: 4, count: 5) - 0.4) < 1e-5)
+        #expect(eased.delay(index: 1, count: 5) < 0.1)
+        let uncapped = Stagger(step: 0.05)
+        #expect(uncapped.maxDelay == 0.0)
+        #expect(abs(uncapped.delay(index: 10, count: 12) - 0.50) < 1e-6)
+        var defaultAnimated = Animated<Float>(0.0)
+        defaultAnimated.animateTo(1.0, anim: .spring(MotionTokens.SETTLE), at: 0.0)
+        var spatialAnimated = Animated<Float>(0.0, propClass: .spatial)
+        spatialAnimated.animateTo(1.0, anim: .spring(MotionTokens.SETTLE), at: 0.0)
+        #expect(spatialAnimated.isSettled(at: 0.55) && !defaultAnimated.isSettled(at: 0.55))
+        #expect(NodeSpec(MotionRect.fromXYWH(0, 0, 10, 10)).transition == .opacity)
 
         var pa = PhaseAnimator(["a", "b", "c"])
         #expect(pa.step(at: 0.0) { _ in 0.5 }.phase == "a")
@@ -476,6 +539,28 @@ struct RuneMotionTests {
         #expect(choreo.isDone(in: store))
         #expect(store.get(n2, Props.OPACITY) == 1.0)
 
+        // sequence_starts_on_arrival_not_on_physical_rest (choreo.rs:19-50)
+        var arrStore = AnimationStore()
+        let (a, b, c) = (NodeId(1), NodeId(2), NodeId(3))
+        for n in [a, b, c] { arrStore.snap(n, Props.OPACITY, to: 0.0) }
+        var chArr = Choreography()
+        let s1 = chArr.step(.now()) { $0.animate(a, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SETTLE)) }
+        let s2 = chArr.step(.arrived(s1).after(0.05)) { $0.animate(b, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SETTLE)) }
+        let s3 = chArr.step(.settled(s2).notBefore(1.5)) { $0.animate(c, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SNAP)) }
+        var ct = 0.0
+        while ct < 4.0 {
+            arrStore.setTime(ct)
+            chArr.tick(store: &arrStore, at: ct)
+            arrStore.tick()
+            ct += 1.0 / 120.0
+        }
+        #expect(abs((chArr.startTime(of: s2) ?? -1.0) - 0.35) < 1e-6)
+        #expect((chArr.startTime(of: s3) ?? 0.0) >= 1.5)
+        #expect(chArr.isDone(in: arrStore))
+        for n in [a, b, c] {
+            #expect(arrStore.get(n, Props.OPACITY) == 1.0)
+        }
+
         // ChoreographyPhaseAnimator
         var store2 = AnimationStore(pixelScale: 2.0)
         let box = NodeId(103)
@@ -499,6 +584,22 @@ struct RuneMotionTests {
         rot.retime(spec: .rotation(period: 2.0), at: 0.25)
         #expect(abs(rot.phase(at: 0.25) - 0.25) < 1e-6)
         #expect(abs(rot.phase(at: 1.25) - 0.75) < 1e-6)
+
+        // cycle_preserves_wall_phase_stops_still_and_cadence (looping.rs:249-258)
+        let cyc = Cycle(
+            period: 1.7,
+            phase: 0.3,
+            stops: [(0.0, 0.2), (0.2, 1.0), (0.7, 0.1), (1.0, 0.2)],
+            still: 0.4,
+            fps: 30.0
+        )
+        let cycTrack = LoopTrack(spec: .cycle(cyc), now: 4.0)
+        for i in 0..<200 {
+            let wall = Double(i) * 0.037
+            #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: false) == cyc.sample(at: wall))
+            #expect(cycTrack.sampleAt(now: 4.0, wall: wall, reduced: true) == cyc.still)
+        }
+        #expect(cycTrack.frameInterval() == 1.0 / Double(Float(30.0)))
 
         // Ping-pong & count modes
         let pp = LoopSpec.opacity(period: 1.0, low: 0.0, high: 1.0).mode(.pingPong)
@@ -593,12 +694,18 @@ struct RuneMotionTests {
             isMoving: true
         )
         trace.frame(at: 0.0, presented: [p], intents: [(node, TraceIntent.forProp(Props.OPACITY.id), 0.2)])
+        var masked = p
+        masked.mask = Mask(inset: Sides(top: 1, right: 0, bottom: 0, left: 2), feather: .zeroValue)
+        trace.frame(at: 0.008, presented: [masked], intents: [(node, TraceIntent.forProp(Props.MASK.id), 0.1)])
         trace.frame(at: 0.016, presented: [], gone: [node])
         let jsonl = trace.contents()
         #expect(jsonl.contains("\"type\":\"header\""))
         #expect(jsonl.contains("\"nm\":\"card\""))
         #expect(jsonl.contains("\"cm\":["))
         #expect(jsonl.contains("\"g\":[1]"))
+        #expect(TraceIntent.forProp(Props.MASK.id) == TraceIntent.reveal && TraceIntent.reveal == 32)
+        // mask.inset [left:2, top:1, right:0, bottom:0] clips rect [10,20,110,60] -> [12,21,100,40] -> xywh [12,21,98,39]
+        #expect(jsonl.contains("12.0,21.0,98.0,39.0"))
 
         // Critical spring is monotonic with zero overshoot
         let critical = MotionTraceCapture.sampleSpring(Spring(duration: 0.3, bounce: 0.0), from: 0, to: 100)
@@ -671,5 +778,28 @@ struct RuneMotionTests {
         ], at: 0.1)
         let f1 = orderScene.frame(at: 0.1)
         #expect(f1.nodes.map(\.id) == [otherRoot, parentId, childB, childA])
+    }
+
+    @Test("Layer regimes match batch sampling and settle bounds (layer.rs:263)")
+    func layerKindsSampleAndSettleParity() {
+        let eps = Eps(pos: 1e-3, vel: 1e-2)
+        let springs = [
+            Spring(duration: 0.35, bounce: 0.3), // under
+            Spring(duration: 0.35, bounce: 0.0), // critical
+            Spring.fromDurationDampingRatio(duration: 0.4, dampingRatio: 1.4), // over
+        ]
+        for s in springs {
+            let layer = Layer.spring(s, at: 0.0, offset: -100.0, v0: 25.0, eps: eps)
+            let (p0, v0) = layer.sample(at: 0.0)
+            #expect(abs(p0 - (-100.0)) < 1e-3 && abs(v0 - 25.0) < 1e-2)
+            let (pend, vend) = layer.sample(at: layer.end + 0.01)
+            #expect(abs(pend) <= eps.pos && abs(vend) <= eps.vel)
+        }
+        let dec = Layer.start(curve: .decay(Decay(rate: 4.0)), at: 0.0, offset: 0.0, velocity: 400.0, eps: eps)
+        let tw = Layer.start(curve: .tween(duration: 0.25, easing: .easeInOut), at: 0.0, offset: -50.0, velocity: 10.0, eps: eps)
+        let hm = Layer.start(curve: .hermite(duration: 0.3, endVelocity: 0.0), at: 0.0, offset: -40.0, velocity: 20.0, eps: eps)
+        #expect(dec.sample(at: dec.end + 0.01).0 == 0 && dec.sample(at: dec.end + 0.01).1 == 0)
+        #expect(tw.sample(at: 0.26) == (0, 0))
+        #expect(hm.isSettled(at: 0.31) && abs(hm.sample(at: 0.31).0) < 1e-4 && abs(hm.sample(at: 0.31).1) < 1e-3)
     }
 }

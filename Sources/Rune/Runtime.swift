@@ -3636,7 +3636,14 @@ public final class Runtime<State> {
                 newRectSpringingById[p.id] = nodeRectSpringing
             }
 
-            var fillColor = p.fill.map(Color.init) ?? el.background
+            var fillColor: Color
+            if let pf = p.fill {
+                let isPressedNode = (pressedPath == snap.path) && !snap.effectiveInert
+                let effFill = (isPressedNode ? el.pressBg.map { blendColorOver(bottom: el.background, top: $0, srgb: srgbBlend) } : nil) ?? el.background
+                fillColor = (pf == effFill.motionColor) ? effFill : Color(pf)
+            } else {
+                fillColor = el.background
+            }
             var blurPt = p.blur
             var liveTrim: Vec2? = nil
             for b in el.liveBindings {
@@ -3649,7 +3656,12 @@ public final class Runtime<State> {
                     liveTrim = tr
                 }
             }
-            let borderColor = p.border.map(Color.init) ?? el.borderColor
+            let borderColor: Color
+            if let pb = p.border {
+                borderColor = (pb == el.borderColor.motionColor) ? el.borderColor : Color(pb)
+            } else {
+                borderColor = el.borderColor
+            }
 
             var visClip = flightClipOverride ?? (inh.clip.map { intersectRects(snap.clipRect, $0) } ?? snap.clipRect)
             if let rev = p.revealClip {
