@@ -104,6 +104,18 @@ let package = Package(
         .executable(name: "rune-kit-layout-text-cost", targets: ["RuneKitLayoutTextCost"]),
         .executable(name: "rune-kit-markdown-resize", targets: ["RuneKitMarkdownResize"]),
         .executable(name: "rune-kit-scroll-bench", targets: ["RuneKitScrollBench"]),
+        .executable(name: "rune-embed-cost", targets: ["RuneEmbedCost"]),
+        .executable(name: "rune-window-scroll-cost", targets: ["RuneWindowScrollCost"]),
+        .executable(name: "rune-overlay-hud-cost", targets: ["RuneOverlayHudCost"]),
+        .executable(name: "rune-pacing", targets: ["RunePacing"]),
+        .executable(name: "rune-pacing-overlay", targets: ["RunePacingOverlay"]),
+        .executable(name: "rune-material-check", targets: ["RuneMaterialCheck"]),
+        .executable(name: "rune-live-resize-check", targets: ["RuneLiveResizeCheck"]),
+        .executable(name: "rune-spaces-probe", targets: ["RuneSpacesProbe"]),
+        .executable(name: "rune-window-panel", targets: ["RuneWindowPanel"]),
+        .executable(name: "rune-menu-probe", targets: ["RuneMenuProbe"]),
+        .executable(name: "rune-dock-menu-probe", targets: ["RuneDockMenuProbe"]),
+        .executable(name: "rune-shortcut-probe", targets: ["RuneShortcutProbe"]),
     ],
     targets: [
         .target(
@@ -592,6 +604,66 @@ let package = Package(
             dependencies: ["Rune", "RuneKit"],
             path: "Sources/Examples/RuneKitScrollBench"
         ),
+        .executableTarget(
+            name: "RuneEmbedCost",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneEmbedCost"
+        ),
+        .executableTarget(
+            name: "RuneWindowScrollCost",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneWindowScrollCost"
+        ),
+        .executableTarget(
+            name: "RuneOverlayHudCost",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneOverlayHudCost"
+        ),
+        .executableTarget(
+            name: "RunePacing",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePacing"
+        ),
+        .executableTarget(
+            name: "RunePacingOverlay",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePacingOverlay"
+        ),
+        .executableTarget(
+            name: "RuneMaterialCheck",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneMaterialCheck"
+        ),
+        .executableTarget(
+            name: "RuneLiveResizeCheck",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLiveResizeCheck"
+        ),
+        .executableTarget(
+            name: "RuneSpacesProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneSpacesProbe"
+        ),
+        .executableTarget(
+            name: "RuneWindowPanel",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneWindowPanel"
+        ),
+        .executableTarget(
+            name: "RuneMenuProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneMenuProbe"
+        ),
+        .executableTarget(
+            name: "RuneDockMenuProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneDockMenuProbe"
+        ),
+        .executableTarget(
+            name: "RuneShortcutProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneShortcutProbe"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -757,6 +829,18 @@ let package = Package(
                 "RuneKitLayoutTextCost",
                 "RuneKitMarkdownResize",
                 "RuneKitScrollBench",
+                "RuneEmbedCost",
+                "RuneWindowScrollCost",
+                "RuneOverlayHudCost",
+                "RunePacing",
+                "RunePacingOverlay",
+                "RuneMaterialCheck",
+                "RuneLiveResizeCheck",
+                "RuneSpacesProbe",
+                "RuneWindowPanel",
+                "RuneMenuProbe",
+                "RuneDockMenuProbe",
+                "RuneShortcutProbe",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

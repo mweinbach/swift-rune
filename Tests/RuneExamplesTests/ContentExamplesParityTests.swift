@@ -2,23 +2,35 @@ import Foundation
 import Testing
 @testable import Rune
 @testable import RuneCachePanZoom
+@testable import RuneDockMenuProbe
+@testable import RuneEmbedCost
 @testable import RuneGpuSprings
 @testable import RuneInteractionCost
 @testable import RuneKit
 @testable import RuneKitLayoutTextCost
 @testable import RuneKitMarkdownResize
 @testable import RuneKitScrollBench
+@testable import RuneLiveResizeCheck
 @testable import RuneLongNote
 @testable import RuneLuauBench
+@testable import RuneMaterialCheck
+@testable import RuneMenuProbe
 @testable import RuneMotion
 @testable import RuneMotionBench
+@testable import RuneOverlayHudCost
+@testable import RunePacing
+@testable import RunePacingOverlay
 @testable import RunePopupMenu
 @testable import RuneRewindCost
 @testable import RuneScrollCommits
+@testable import RuneShortcutProbe
+@testable import RuneSpacesProbe
 @testable import RuneTaffyAdapterBench
 @testable import RuneTextGpu
 @testable import RuneTreeSwap
 @testable import RuneUploadBench
+@testable import RuneWindowPanel
+@testable import RuneWindowScrollCost
 @testable import RuneZoomSweep
 
 @Suite("Content crate-level examples parity", .serialized)
@@ -277,5 +289,116 @@ struct ContentExamplesParityTests {
         #expect(report.output.contains("WORKLOAD name=sticky"))
         #expect(report.output.contains("WORKLOAD name=growth"))
         #expect(report.output.contains("WORKLOAD name=card"))
+    }
+
+    @Test("rune-embed-cost exercises LayerHost frame pacing and memory reporting")
+    func embedCostSmoke() throws {
+        let report = try RuneEmbedCostApp.runReport(warmup: 3, frames: 10, useLiveLayer: false)
+        #expect(report.frames == 10)
+        #expect(report.drew > 0)
+        #expect(report.fps > 0 && report.fps.isFinite)
+        #expect(report.output.contains("frames=10"))
+    }
+
+    @Test("rune-window-scroll-cost measures scrollable list CPU cost and scroll offset")
+    func windowScrollCostSmoke() {
+        let report = RuneWindowScrollCostApp.runBench(rows: 80, frames: 8)
+        #expect(report.frames == 8)
+        #expect(report.instances > 0)
+        #expect(report.scrollOffset > 0)
+        #expect(report.usPerFrame >= 0 && report.usPerFrame.isFinite)
+    }
+
+    @Test("rune-overlay-hud-cost drives Compositor frame/UI draw and OverlaySpec lifecycle")
+    func overlayHudCostSmoke() {
+        let report = RuneOverlayHudCostApp.runHeadlessVerify(frames: 5, writes: 2)
+        #expect(report.frames == 5)
+        #expect(report.uiDraws == 5)
+        #expect(report.overlayName == "HUD")
+        #expect(report.overlayVisibleAfterShow)
+    }
+
+    @Test("rune-pacing advances spring pill layout across frames cleanly")
+    func pacingSmoke() {
+        let report = RunePacingApp.runPacingReport()
+        #expect(report.frames >= 3)
+        #expect(report.animatingMidMotion)
+        #expect(report.midX > report.startX)
+        #expect(report.endX >= report.midX)
+    }
+
+    @Test("rune-pacing-overlay renders looping overlay pill and fades in/out")
+    func pacingOverlaySmoke() {
+        let report = RunePacingOverlayApp.runHeadlessVerify()
+        #expect(report.visibleOnFadeIn)
+        #expect(!report.visibleAfterFadeOut)
+        #expect(report.overlayInstances > 0)
+    }
+
+    @Test("rune-material-check attaches glass/popover materials and prewarmed overlay")
+    func materialCheckSmoke() {
+        let report = RuneMaterialCheckApp.runHeadlessVerify()
+        #expect(report.mainMaterialCount >= 2)
+        #expect(report.overlayPrewarmed)
+        #expect(report.overlayVisible)
+        #expect(report.overlayInstances > 0)
+    }
+
+    @Test("rune-live-resize-check keeps edge bars aligned across viewport widths")
+    func liveResizeCheckSmoke() {
+        let report = RuneLiveResizeCheckApp.runHeadlessVerify()
+        #expect(report.compositorFrames == 4)
+        #expect(report.barRights.count == 4)
+        for (w, right) in zip(report.widths, report.barRights) {
+            #expect(abs(right - w) <= 1.0)
+        }
+    }
+
+    @Test("rune-spaces-probe configures capture-excluded prewarmed overlay and resize/hide")
+    func spacesProbeSmoke() {
+        let report = RuneSpacesProbeApp.runHeadlessVerify()
+        #expect(report.excludedOption)
+        #expect(report.prewarmOption)
+        #expect(report.visibleDuringShow)
+        #expect(report.sizeAfterResize == Vec2(340, 64))
+        #expect(!report.visibleAfterHide)
+        #expect(report.instances > 0)
+    }
+
+    @Test("rune-window-panel validates multi-window panel spec and Escape/blur dismissal")
+    func windowPanelSmoke() throws {
+        let report = try RuneWindowPanelApp.runHeadlessVerify()
+        #expect(report.windowKeys == ["main", "panel"])
+        #expect(report.panelEscaped)
+        #expect(report.panelBlurred)
+        #expect(report.mainFrames == 1)
+    }
+
+    @Test("rune-menu-probe validates NativeMenuBar items and dispatches actions")
+    func menuProbeSmoke() throws {
+        let report = try RuneMenuProbeApp.runHeadlessVerify()
+        #expect(report.itemCount == 5)
+        #expect(report.firstDispatchStatus == "triggered menu action #1")
+        #expect(report.countAfterDispatch == 11)
+        #expect(report.checkedAfterToggle)
+    }
+
+    @Test("rune-dock-menu-probe configures accessory dock items, icon, and actions")
+    func dockMenuProbeSmoke() throws {
+        let report = try RuneDockMenuProbeApp.runHeadlessVerify()
+        #expect(report.isAccessory)
+        #expect(report.dockMenuItemCount == 2)
+        #expect(report.dockClicksAfterDispatch == 1)
+        #expect(report.validIcon)
+    }
+
+    @Test("rune-shortcut-probe registers, detects conflict, dispatches, and unregisters shortcuts")
+    func shortcutProbeSmoke() {
+        let report = RuneShortcutProbeApp.runHeadlessVerify()
+        #expect(report.registeredPrimary)
+        #expect(report.conflictRejected)
+        #expect(report.dispatchHandledId == "probe.global")
+        #expect(report.triggerCount == 1)
+        #expect(report.unregisteredOK)
     }
 }
