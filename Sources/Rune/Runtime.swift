@@ -580,6 +580,7 @@ public final class Runtime<State> {
     internal var visibleWatchState: [UInt64: Bool] = [:]
     internal var inheritedHoverCurvesByPath: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var anchorHoverWithinByKey: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
+    internal var unseenPresence = UnseenPresenceState()
     internal var hoverCurvesById: [NodeId: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var lastHoverTargetById: [NodeId: Float] = [:]
     internal var pressedKeyFocusPath: String? = nil
@@ -2659,6 +2660,9 @@ public final class Runtime<State> {
             )
         }
         scene.keepFlights(false)
+        if applyUnseenPresenceAfterCommit(specs: specs, cut: commitCut, to: &scene) {
+            isAnimating = true
+        }
         recordVirtualMeasurementsAndCallbacks(expansion: pass.virtualExpansion, at: now)
         stepVirtualFillAfterCommit(now: now)
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty {
@@ -3446,6 +3450,7 @@ public final class Runtime<State> {
         let defaultRingOutline = cxSettings.viewDefaults.focusRing
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
         stuckShiftsByPath.removeAll(keepingCapacity: true)
+        unseenPresence.beginPaint()
         let activeSelectionRanges = computeActiveSelectionRangesByPath()
         pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(devW), Float(devH)))
 
@@ -4057,6 +4062,10 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + paintMargin
             )
             let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0 && onScreenForEmit
+            unseenPresence.recordPaintedNode(
+                id: p.id,
+                inView: isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
+            )
 
             let devRect = SIMD4<Float>(
                 snappedEdgesPx[0],
@@ -5253,6 +5262,7 @@ public final class Runtime<State> {
         linkBoxesByPath = newLinkBoxes
         appendLinkElements(to: &infos)
         lastElements = infos
+        landUnseenEntrances(frameNodes: frameOut.nodes, on: &scene)
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
         hitGeometryByPath = newHitGeometries
