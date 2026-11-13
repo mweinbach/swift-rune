@@ -7,33 +7,17 @@ public enum TitlebarAction: Equatable, Sendable {
     case doubleClick
 }
 
-internal struct KitHoverDelayEntry {
-    enum Phase {
-        case enterDue(Double)
-        case shown
-        case leaveDue(Double)
-    }
-
-    var phase: Phase
-}
-
-internal struct KitDragRepeatEntry {
-    var path: String
-    var windowPos: Vec2
-    var mods: Mods
-    var button: PointerButton
-    var due: Double
-}
-
 internal struct KitRuntimeHooksState {
-    var pendingTitlebarAction: TitlebarAction? = nil
-    var lastBareTitlebarPress: (at: Double, point: Vec2)? = nil
-    var hoverDelays: [String: KitHoverDelayEntry] = [:]
+    var titlebar = TitlebarMachine()
+    var doubleClickInterval: Double = 0.5
+    var hoverDelays = KitHoverDelayList()
+    var hoverDelayCallbacks: [String: (inout Any, Bool, inout Tx) -> Void] = [:]
     var hoverHoldAfterActionUntilMove: Bool = false
     var windowFocused: Bool = true
     var isDispatchingByKeys: Bool = false
     var isDispatchingFocusLost: Bool = false
-    var dragRepeat: KitDragRepeatEntry? = nil
+    var pressRepeat = PressRepeatMachine()
+    var pressRepeatPayload: PressRepeatPayload? = nil
     var requestedDragRepeatDelay: Double? = nil
     var pendingTxFocusVisible: Bool? = nil
 }
@@ -107,34 +91,27 @@ extension El {
     }
 }
 
-fileprivate let kitTitlebarDoubleClickInterval: Double = 0.5
-fileprivate let kitTitlebarDoubleClickSlop: Float = 4.0
-
 extension Runtime {
 
     /// Returns and clears any pending OS titlebar drag/zoom action requested by the last press (`Runtime::take_titlebar_action`).
     public func takeTitlebarAction() -> TitlebarAction? {
-        defer { kitHooks.pendingTitlebarAction = nil }
-        return kitHooks.pendingTitlebarAction
+        defer { kitHooks.titlebar.action = nil }
+        return kitHooks.titlebar.action
     }
 
     /// Notifies the runtime of OS window activation/blur (`Runtime::window_focus`).
     public func windowFocus(_ focused: Bool, at now: Double? = nil) {
-        let t = now ?? currentTime
-        kitHooks.windowFocused = focused
-        if !focused {
-            finishComposition(at: t)
-            kitHooks.dragRepeat = nil
-            kitHooks.hoverHoldAfterActionUntilMove = true
-            endKitHoverDelays(at: t)
-        }
+        dispatchFocus(focused, at: now)
+    }
+
+    internal func dispatchKitWindowFocusHandlers(_ focused: Bool, at now: Double) -> (ran: Bool, allLiveOnly: Bool) {
         var ranHandler = false
         var allLiveOnly = true
-        for node in flatNodes {
+        for node in flatNodes where !node.effectiveInert {
             let handlers = node.el.kitWindowFocusHandlers
             guard !handlers.isEmpty else { continue }
             for handler in handlers {
-                var tx = makeTx(at: t)
+                var tx = makeTx(at: now)
                 var boxedState: Any = state
                 handler(&boxedState, focused, &tx)
                 if let typed = boxedState as? State {
@@ -142,37 +119,16 @@ extension Runtime {
                 }
                 ranHandler = true
                 allLiveOnly = allLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: t, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
             }
         }
-        if !focused && (!ranHandler || !allLiveOnly) {
-            dirtyCommit(at: t)
-        }
-    }
-
-    internal func recordBareTitlebarPressIfNeeded(at pos: Vec2, button: PointerButton, now: Double) {
-        guard button == .primary, isBareTitlebarDragRegion(at: pos) else {
-            kitHooks.lastBareTitlebarPress = nil
-            return
-        }
-        if let prev = kitHooks.lastBareTitlebarPress,
-           (now - prev.at) <= kitTitlebarDoubleClickInterval,
-           hypot(pos.x - prev.point.x, pos.y - prev.point.y) <= kitTitlebarDoubleClickSlop {
-            kitHooks.pendingTitlebarAction = .doubleClick
-            kitHooks.lastBareTitlebarPress = nil
-        } else {
-            kitHooks.pendingTitlebarAction = .drag
-            kitHooks.lastBareTitlebarPress = (at: now, point: pos)
-        }
+        return (ranHandler, allLiveOnly)
     }
 
     internal func cancelKitHoverAndRepeatOnPress() {
         kitHooks.hoverHoldAfterActionUntilMove = true
-        let paths = Array(kitHooks.hoverDelays.keys)
-        for path in paths {
-            if let entry = kitHooks.hoverDelays[path], case .enterDue = entry.phase {
-                kitHooks.hoverDelays.removeValue(forKey: path)
-            }
+        for path in kitHooks.hoverDelays.paths {
+            _ = kitHooks.hoverDelays.step(path, .pressed)
         }
     }
 
@@ -216,100 +172,82 @@ extension Runtime {
             && pos.y >= rect.y && pos.y < rect.y + rect.height
     }
 
-    internal func settleKitHoverDelays(at pos: Vec2, now: Double) {
-        let mayEnter = activeDrag == nil && !kitHooks.hoverHoldAfterActionUntilMove && kitHooks.windowFocused
-        var activeDelayPaths: Set<String> = []
-        for node in flatNodes {
-            guard let spec = node.el.kitHoverDelaysSpec, node.el.handlers.onHover != nil else { continue }
-            activeDelayPaths.insert(node.path)
-            let inside = isPointerInsideHoverDelayNode(node, at: pos)
-            let current = kitHooks.hoverDelays[node.path]
-            let shown: Bool = {
-                guard let phase = current?.phase else { return false }
-                switch phase {
-                case .shown, .leaveDue: return true
-                case .enterDue: return false
+    @discardableResult
+    private func stepKitHoverDelay(path: String, event: KitHoverDelayEvent, at now: Double) -> Bool {
+        var didMarkDirty = false
+        let effects = kitHooks.hoverDelays.step(path, event)
+        for effect in effects {
+            if case .report(let inside) = effect {
+                if let idx = nodeByPath[path], let onHover = flatNodes[idx].el.handlers.onHover {
+                    var tx = makeTx(at: now)
+                    onHover(&state, inside, &tx)
+                    if !tx.liveOnlyRequested { didMarkDirty = true }
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                } else if let boxedCb = kitHooks.hoverDelayCallbacks[path] {
+                    var tx = makeTx(at: now)
+                    var boxed: Any = state
+                    boxedCb(&boxed, inside, &tx)
+                    if let typed = boxed as? State { state = typed }
+                    if !tx.liveOnlyRequested { didMarkDirty = true }
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
                 }
-            }()
-            let want = inside && (shown || mayEnter)
-            if want == shown {
-                if shown {
-                    kitHooks.hoverDelays[node.path] = KitHoverDelayEntry(phase: .shown)
-                } else {
-                    kitHooks.hoverDelays.removeValue(forKey: node.path)
-                }
-                continue
-            }
-            if let phase = current?.phase {
-                switch phase {
-                case .enterDue where want, .leaveDue where !want:
-                    continue
-                default:
-                    break
-                }
-            }
-            let delay = want ? spec.enter : spec.leave
-            if delay <= 0 {
-                if want {
-                    kitHooks.hoverDelays[node.path] = KitHoverDelayEntry(phase: .shown)
-                } else {
-                    kitHooks.hoverDelays.removeValue(forKey: node.path)
-                }
-                dispatchKitHoverCallback(node: node, inside: want, at: now)
-            } else {
-                let due = now + delay
-                kitHooks.hoverDelays[node.path] = KitHoverDelayEntry(
-                    phase: want ? .enterDue(due) : .leaveDue(due)
-                )
             }
         }
-        // Any delayed node removed from the tree ends immediately.
-        let trackedPaths = Array(kitHooks.hoverDelays.keys)
-        for path in trackedPaths where !activeDelayPaths.contains(path) {
-            kitHooks.hoverDelays.removeValue(forKey: path)
+        if !kitHooks.hoverDelays.paths.contains(path) {
+            kitHooks.hoverDelayCallbacks.removeValue(forKey: path)
+        }
+        return didMarkDirty
+    }
+
+    internal func settleKitHoverDelays(at pos: Vec2, now: Double) {
+        let mayEnter = pressedPath == nil && activeDrag == nil && !kitHooks.hoverHoldAfterActionUntilMove
+        var activeSpecByPath: [String: (enter: Double, leave: Double)] = [:]
+        for node in flatNodes {
+            guard let spec = node.el.kitHoverDelaysSpec, let onHover = node.el.handlers.onHover else { continue }
+            activeSpecByPath[node.path] = spec
+            kitHooks.hoverDelayCallbacks[node.path] = { boxed, inside, tx in
+                guard var typed = boxed as? State else { return }
+                onHover(&typed, inside, &tx)
+                boxed = typed
+            }
+        }
+        var paths = Set(kitHooks.hoverDelays.paths)
+        paths.formUnion(activeSpecByPath.keys)
+        for path in paths.sorted() {
+            let event: KitHoverDelayEvent
+            if let spec = activeSpecByPath[path], let idx = nodeByPath[path] {
+                let inside = isPointerInsideHoverDelayNode(flatNodes[idx], at: pos)
+                event = .settle(
+                    inside: inside,
+                    mayEnter: mayEnter,
+                    enterDelay: spec.enter,
+                    leaveDelay: spec.leave,
+                    now: now
+                )
+            } else {
+                event = .ended
+            }
+            _ = stepKitHoverDelay(path: path, event: event, at: now)
         }
     }
 
     internal func stepKitHoverDelaysOnFrame(at now: Double) {
-        let trackedPaths = Array(kitHooks.hoverDelays.keys).sorted()
-        for path in trackedPaths {
-            guard let entry = kitHooks.hoverDelays[path] else { continue }
-            switch entry.phase {
-            case .enterDue(let due) where due <= now + 1e-9:
-                kitHooks.hoverDelays[path] = KitHoverDelayEntry(phase: .shown)
-                if let idx = nodeByPath[path] {
-                    dispatchKitHoverCallback(node: flatNodes[idx], inside: true, at: now)
-                }
-            case .leaveDue(let due) where due <= now + 1e-9:
-                kitHooks.hoverDelays.removeValue(forKey: path)
-                if let idx = nodeByPath[path] {
-                    dispatchKitHoverCallback(node: flatNodes[idx], inside: false, at: now)
-                }
-            default:
-                break
-            }
+        guard kitHooks.hoverDelays.waiting else { return }
+        let clockNow = now + 1e-6
+        for path in kitHooks.hoverDelays.paths {
+            _ = stepKitHoverDelay(path: path, event: .due(now: clockNow), at: now)
         }
     }
 
-    internal func endKitHoverDelays(at now: Double) {
-        let trackedPaths = Array(kitHooks.hoverDelays.keys).sorted()
-        for path in trackedPaths {
-            guard let entry = kitHooks.hoverDelays.removeValue(forKey: path) else { continue }
-            let wasShown: Bool = switch entry.phase {
-            case .shown, .leaveDue: true
-            case .enterDue: false
-            }
-            if wasShown, let idx = nodeByPath[path] {
-                dispatchKitHoverCallback(node: flatNodes[idx], inside: false, at: now)
+    @discardableResult
+    internal func endKitHoverDelays(at now: Double) -> Bool {
+        var didMarkDirty = false
+        for path in kitHooks.hoverDelays.paths {
+            if stepKitHoverDelay(path: path, event: .ended, at: now) {
+                didMarkDirty = true
             }
         }
-    }
-
-    private func dispatchKitHoverCallback(node: FlatNode, inside: Bool, at now: Double) {
-        guard let onHover = node.el.handlers.onHover else { return }
-        var tx = makeTx(at: now)
-        onHover(&state, inside, &tx)
-        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+        return didMarkDirty
     }
 
     internal func armKitDragRepeatIfRequested(path: String, windowPos: Vec2, mods: Mods, button: PointerButton, now: Double) {
@@ -317,59 +255,61 @@ extension Runtime {
             return
         }
         kitHooks.requestedDragRepeatDelay = nil
-        kitHooks.dragRepeat = KitDragRepeatEntry(
+        guard pressedPath == path || activeDrag?.path == path else { return }
+        kitHooks.pressRepeatPayload = PressRepeatPayload(
             path: path,
             windowPos: windowPos,
             mods: mods,
-            button: button,
-            due: now + delay
+            button: button
         )
+        _ = kitHooks.pressRepeat.step(.arm(path: path, due: now + delay))
+    }
+
+    internal func endKitPressRepeat() {
+        _ = kitHooks.pressRepeat.step(.end)
+        kitHooks.pressRepeatPayload = nil
+        kitHooks.requestedDragRepeatDelay = nil
     }
 
     internal func stepKitDragRepeatOnFrame(at now: Double) {
-        guard let rep = kitHooks.dragRepeat, activeDrag != nil else {
-            if activeDrag == nil { kitHooks.dragRepeat = nil }
+        guard let attempt = kitHooks.pressRepeat.attempt, activeDrag != nil else {
+            if activeDrag == nil { endKitPressRepeat() }
             return
         }
-        guard rep.due <= now + 1e-9 else { return }
-        kitHooks.dragRepeat = nil
-        guard let drag = activeDrag,
-              drag.path == rep.path,
-              let idx = nodeByPath[drag.path],
-              let onDrag = flatNodes[idx].el.handlers.onDrag else {
-            return
+        let effects = kitHooks.pressRepeat.step(.due(attempt: attempt, now: now))
+        for effect in effects {
+            guard case .fire(let path) = effect,
+                  let drag = activeDrag,
+                  drag.path == path,
+                  let rep = kitHooks.pressRepeatPayload,
+                  rep.path == path,
+                  let idx = nodeByPath[drag.path],
+                  let onDrag = flatNodes[idx].el.handlers.onDrag else {
+                continue
+            }
+            let sx = abs(drag.startScale.x) > 1e-6 ? drag.startScale.x : 1.0
+            let sy = abs(drag.startScale.y) > 1e-6 ? drag.startScale.y : 1.0
+            let d = Drag(
+                window: rep.windowPos,
+                local: Vec2((rep.windowPos.x - drag.startElementOrigin.x) / sx, (rep.windowPos.y - drag.startElementOrigin.y) / sy),
+                delta: Vec2(rep.windowPos.x - drag.startWindow.x, rep.windowPos.y - drag.startWindow.y),
+                startLocal: drag.startLocal,
+                size: drag.elementSize,
+                clicks: drag.clicks,
+                mods: rep.mods
+            )
+            var tx = makeTx(at: now, button: drag.button)
+            tx.runtimeActions["dragRepeat"] = true
+            onDrag(&state, d, &tx)
+            if !tx.askedMotion { tx.instant() }
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            armKitDragRepeatIfRequested(path: drag.path, windowPos: rep.windowPos, mods: rep.mods, button: drag.button, now: now)
         }
-        let sx = abs(drag.startScale.x) > 1e-6 ? drag.startScale.x : 1.0
-        let sy = abs(drag.startScale.y) > 1e-6 ? drag.startScale.y : 1.0
-        let d = Drag(
-            window: rep.windowPos,
-            local: Vec2((rep.windowPos.x - drag.startElementOrigin.x) / sx, (rep.windowPos.y - drag.startElementOrigin.y) / sy),
-            delta: Vec2(rep.windowPos.x - drag.startWindow.x, rep.windowPos.y - drag.startWindow.y),
-            startLocal: drag.startLocal,
-            size: drag.elementSize,
-            clicks: drag.clicks,
-            mods: rep.mods
-        )
-        var tx = makeTx(at: now, button: drag.button)
-        tx.runtimeActions["dragRepeat"] = true
-        onDrag(&state, d, &tx)
-        if !tx.askedMotion { tx.instant() }
-        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-        armKitDragRepeatIfRequested(path: drag.path, windowPos: rep.windowPos, mods: rep.mods, button: drag.button, now: now)
     }
 
     internal func kitNextWakeDeadline(after now: Double) -> Double? {
-        var best: Double? = nil
-        for entry in kitHooks.hoverDelays.values {
-            let due: Double? = switch entry.phase {
-            case .enterDue(let d), .leaveDue(let d): d
-            case .shown: nil
-            }
-            if let due, due > now {
-                best = best.map { min($0, due) } ?? due
-            }
-        }
-        if let repDue = kitHooks.dragRepeat?.due, repDue > now {
+        var best = kitHooks.hoverDelays.nextWakeDeadline(after: now)
+        if let repDue = kitHooks.pressRepeat.nextWakeDeadline(after: now) {
             best = best.map { min($0, repDue) } ?? repDue
         }
         return best
