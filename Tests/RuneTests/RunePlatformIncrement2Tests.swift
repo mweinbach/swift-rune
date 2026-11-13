@@ -395,6 +395,155 @@ struct RunePlatformIncrement2Tests {
         hidden.land(h)
         hidden.turn()
         #expect(hidden.resamples == 0)
+
+        // ordinary_frames_never_resample
+        var ordinary = Sim()
+        for _ in 0..<20 { ordinary.frame() }
+        #expect(ordinary.resamples == 0)
+        ordinary.state.shown(last: ordinary.acquired)
+        ordinary.turn()
+        #expect(ordinary.resamples == 1)
+        for _ in 0..<20 { ordinary.frame() }
+        #expect(ordinary.resamples == 1)
+
+        // resize_and_scale_wait_for_a_frame_drawn_after_them (including stale pre-change frame)
+        for _ in ["resize", "scale"] {
+            var resized = Sim()
+            resized.state.shown(last: 0)
+            resized.frame()
+            #expect(resized.resamples == 1)
+            let stale = resized.present()
+            resized.state.redraw()
+            resized.land(stale)
+            resized.turn()
+            #expect(resized.resamples == 1)
+            resized.frame()
+            #expect(resized.resamples == 2)
+            resized.frame()
+            #expect(resized.resamples == 2)
+        }
+
+        // prewarm_resamples_after_its_hidden_frame_and_reveal_after_the_cached_one
+        var prewarm = Sim()
+        prewarm.state.redraw()
+        prewarm.frame()
+        #expect(prewarm.resamples == 1)
+        prewarm.frame()
+        prewarm.frame()
+        #expect(prewarm.resamples == 1)
+        prewarm.state.shown(last: prewarm.acquired)
+        prewarm.turn()
+        #expect(prewarm.resamples == 2)
+        prewarm.state.hidden()
+        let pending = prewarm.present()
+        prewarm.state.shown(last: pending)
+        prewarm.turn()
+        #expect(prewarm.resamples == 2)
+        prewarm.land(pending)
+        prewarm.turn()
+        #expect(prewarm.resamples == 3)
+
+        // a_show_keeps_waiting_for_the_frame_a_resize_asked_for
+        var waiting = Sim()
+        waiting.frame()
+        waiting.state.redraw()
+        waiting.state.shown(last: waiting.acquired)
+        waiting.turn()
+        #expect(waiting.resamples == 0)
+        waiting.frame()
+        #expect(waiting.resamples == 1)
     }
     #endif
+
+    @Test("WindowSpec (window/spec.rs): explicit empty args never inspect host CLI and override scene/size")
+    func windowArgsResolutionParity() {
+        let opts = RuneRunOptions(accessory: true)
+        let copied = opts
+        #expect(opts.accessory && copied.accessory)
+
+        let isolatedArgs = RuneMultiWindow.windowArgs(explicit: []) {
+            Issue.record("must not inspect host CLI when explicit empty args are provided")
+            return ToolingArgs.parse(["--snap", "unexpected.png"])
+        }
+        #expect(!isolatedArgs.isHeadlessRequested)
+        #expect(isolatedArgs.sceneName == nil && isolatedArgs.viewportOverride == nil)
+
+        let inheritedArgs = RuneMultiWindow.windowArgs(explicit: nil) {
+            ToolingArgs.parse(["--snap", "out.png"])
+        }
+        #expect(inheritedArgs.isHeadlessRequested)
+
+        let base = AppSpec(title: "test", size: Vec2(100, 100), state: ()) { _, _ in el() }
+        let inheritedScene = ToolingArgs.parse(["--scene", "host-scene"])
+        let pill = RuneWindowSpec(key: "pill", app: base).args(["--size", "320x80"])
+        let resolvedPill = pill.resolveArgs(inherited: { inheritedScene })
+        #expect(resolvedPill.viewportOverride == Vec2(320, 80))
+        #expect(resolvedPill.sceneName == nil)
+
+        let plain = RuneWindowSpec(key: "plain", app: base)
+        #expect(plain.resolveArgs(inherited: { inheritedScene }).sceneName == "host-scene")
+
+        let trace = ToolingArgs.parse(["--snap", "host.png"])
+        let isolated = RuneWindowSpec(key: "isolated", app: base).args([])
+        #expect(!isolated.resolveArgs(inherited: { trace }).isHeadlessRequested)
+
+        let traced = RuneWindowSpec(key: "traced", app: base).args(["--snap", "window.png"])
+        #expect(traced.resolveArgs(inherited: { ToolingArgs() }).isHeadlessRequested)
+    }
+
+    @Test("Titlebar Drag Regions (titlebar.rs): honors .windowDrag(), ignores interactive children and works with chrome.dragRegions")
+    func titlebarDragRegionsRespectWindowDragAndButtons() {
+        let app = AppSpec(title: "drag", size: Vec2(200, 200), state: 0) { _, _ in
+            col()
+                .w(200)
+                .h(200)
+                .child(
+                    row()
+                        .key("titlebar")
+                        .w(200)
+                        .h(40)
+                        .windowDrag()
+                        .child(
+                            el()
+                                .key("btn")
+                                .w(40)
+                                .h(40)
+                                .onClick { $0 += 1 }
+                        )
+                        .child(
+                            el()
+                                .key("non-drag-spacer")
+                                .w(40)
+                                .h(40)
+                                .onDoubleClick { _, _ in }
+                        )
+                )
+                .child(
+                    el()
+                        .key("body")
+                        .w(200)
+                        .h(160)
+                )
+        }
+
+        // Case 1: chrome.dragRegions without Titlebar must allow bare .windowDrag() and reject interactive children
+        var chromeOnly = RuneChrome.default
+        chromeOnly.dragRegions = true
+        let chromeEntry = RuneWindowSpec<Int>(key: "chrome", app: app).chrome(chromeOnly).boxed().makeHostEntry()
+        let rt1 = chromeEntry.createRuntime(pixelScale: 1.0, systemDark: true, reducedMotion: true, waker: Waker())
+        _ = chromeEntry.frame(runtimeObj: rt1, at: 0.0)
+        #expect(chromeEntry.copyTitlebarDragHits(runtimeObj: rt1, point: Vec2(120, 20)))
+        #expect(!chromeEntry.copyTitlebarDragHits(runtimeObj: rt1, point: Vec2(20, 20)))
+        #expect(!chromeEntry.copyTitlebarDragHits(runtimeObj: rt1, point: Vec2(60, 20)))
+        #expect(!chromeEntry.copyTitlebarDragHits(runtimeObj: rt1, point: Vec2(100, 100)))
+
+        // Case 2: Titlebar without .windowDrag() elements inside band must NOT drag non-marked elements
+        let noMarkApp = AppSpec(title: "nomark", size: Vec2(200, 200), state: 0) { _, _ in
+            col().w(200).h(200).child(el().key("plain-header").w(200).h(40))
+        }
+        let tbEntry = RuneWindowSpec<Int>(key: "tb", app: noMarkApp).titlebar(RuneTitlebar(height: 40)).boxed().makeHostEntry()
+        let rt2 = tbEntry.createRuntime(pixelScale: 1.0, systemDark: true, reducedMotion: true, waker: Waker())
+        _ = tbEntry.frame(runtimeObj: rt2, at: 0.0)
+        #expect(!tbEntry.copyTitlebarDragHits(runtimeObj: rt2, point: Vec2(100, 20)))
+    }
 }

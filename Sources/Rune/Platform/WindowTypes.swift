@@ -878,6 +878,7 @@ public struct RuneWindowSpec<State> {
     public var onReopen: ((inout State, Bool, inout Tx) -> Bool)?
     public var onOpenUrl: ((inout State, String, inout Tx) -> Void)?
     public var childWindows: [AnyRuneWindowSpec]
+    public var args: [String]?
 
     public init(key: String, app: AppSpec<State>) {
         self.key = key
@@ -895,6 +896,18 @@ public struct RuneWindowSpec<State> {
         self.onReopen = nil
         self.onOpenUrl = nil
         self.childWindows = []
+        self.args = nil
+    }
+
+    public func args(_ arguments: [String]) -> RuneWindowSpec<State> {
+        var copy = self
+        copy.args = arguments
+        return copy
+    }
+
+    /// Resolves this window's CLI args: explicit per-window args never inspect `inherited`.
+    public func resolveArgs(inherited: () -> ToolingArgs = { ToolingArgs() }) -> ToolingArgs {
+        RuneMultiWindow.windowArgs(explicit: args, inherited: inherited)
     }
 
     public func options(_ options: RuneWindowOptions) -> RuneWindowSpec<State> {
@@ -1155,15 +1168,10 @@ private final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool {
-        let r = rt(runtimeObj)
-        guard let hit = r.hitTestElement(at: point) else { return false }
-        if hit.role == .button || hit.role == .textInput || hit.focusable {
+        guard spec.titlebar != nil || spec.chrome.dragRegions else {
             return false
         }
-        if let tb = spec.titlebar {
-            return point.y <= tb.height
-        }
-        return false
+        return rt(runtimeObj).isBareTitlebarDragRegion(at: point)
     }
 
     func runQuitHook(runtimeObj: AnyObject) {
@@ -1307,6 +1315,15 @@ public enum RuneMultiWindow {
             openedLock.unlock()
         }
         return anySpec.handle
+    }
+
+    /// Resolves CLI arguments for a secondary window (`tooling::window_args`):
+    /// explicit per-window args (even empty) never read the host CLI.
+    public static func windowArgs(explicit: [String]?, inherited: () -> ToolingArgs) -> ToolingArgs {
+        if let explicit {
+            return ToolingArgs.parse(explicit)
+        }
+        return inherited()
     }
 
     /// Drains windows queued via `openWindow`.

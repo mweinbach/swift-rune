@@ -2218,20 +2218,44 @@ public enum ScreenEdge: String, Sendable, Equatable {
 
 public enum OverlayPlacement: Sendable, Equatable {
     case edge(ScreenEdge, margin: Float)
+    case edgeAligned(ScreenEdge, margin: Float, align: OverlayAlign, inset: Float)
     case rect(MotionRect)
     case fullDisplay
+
+    public static func edge(
+        _ edge: ScreenEdge,
+        margin: Float,
+        align: OverlayAlign,
+        inset: Float = 0
+    ) -> OverlayPlacement {
+        .edgeAligned(edge, margin: margin, align: align, inset: inset)
+    }
 }
 
 public enum OverlayKeyPolicy: Sendable, Equatable {
     case nonActivating
     case activating
+    case none
 }
 
 public struct OverlayOptions: Sendable, Equatable {
     public var placement: OverlayPlacement
+    public var legacyPlacement: OverlayPlacement?
+    public var display: OverlayDisplayTarget
+    public var followPointer: Bool
+    public var level: OverlayLevel
+    public var excludeFromCapture: Bool
     public var keyPolicy: OverlayKeyPolicy
+    public var input: OverlayInput
+    public var prewarm: Bool
     public var releaseGpuWhenHidden: Bool
+    public var releaseGpuAfter: Double?
     public var levelOffset: Int
+    public var interactive: Bool
+    public var srgbBlend: Bool
+    public var macosLevel: Int?
+    public var modifierKeys: Bool
+    public var animateReveal: Bool
 
     public init(
         placement: OverlayPlacement = .edge(.top, margin: 16),
@@ -2240,15 +2264,74 @@ public struct OverlayOptions: Sendable, Equatable {
         levelOffset: Int = 0
     ) {
         self.placement = placement
+        self.legacyPlacement = nil
+        self.display = .primary
+        self.followPointer = false
+        self.level = .status
+        self.excludeFromCapture = false
         self.keyPolicy = keyPolicy
+        self.input = .legacy
+        self.prewarm = false
         self.releaseGpuWhenHidden = releaseGpuWhenHidden
+        self.releaseGpuAfter = releaseGpuWhenHidden ? 0.0 : nil
         self.levelOffset = levelOffset
+        self.interactive = false
+        self.srgbBlend = true
+        self.macosLevel = nil
+        self.modifierKeys = false
+        self.animateReveal = false
+    }
+
+    public init(
+        placement: OverlayPlacement? = nil,
+        display: OverlayDisplayTarget = .primary,
+        followPointer: Bool = false,
+        level: OverlayLevel = .status,
+        excludeFromCapture: Bool = false,
+        keyPolicy: OverlayKeyPolicy = .nonActivating,
+        input: OverlayInput = .legacy,
+        prewarm: Bool = false,
+        releaseGpuWhenHidden: Bool = false,
+        releaseGpuAfter: Double? = nil,
+        levelOffset: Int = 0,
+        interactive: Bool = false,
+        srgbBlend: Bool = true,
+        macosLevel: Int? = nil,
+        modifierKeys: Bool = false,
+        animateReveal: Bool = false
+    ) {
+        self.placement = placement ?? .edge(.top, margin: 16)
+        self.legacyPlacement = placement
+        self.display = display
+        self.followPointer = followPointer
+        self.level = level
+        self.excludeFromCapture = excludeFromCapture
+        self.keyPolicy = keyPolicy
+        self.input = input
+        self.prewarm = prewarm
+        self.releaseGpuWhenHidden = releaseGpuWhenHidden
+        self.releaseGpuAfter = releaseGpuAfter ?? (releaseGpuWhenHidden ? 0.0 : nil)
+        self.levelOffset = levelOffset
+        self.interactive = interactive
+        self.srgbBlend = srgbBlend
+        self.macosLevel = macosLevel
+        self.modifierKeys = modifierKeys
+        self.animateReveal = animateReveal
+    }
+
+    public var resolvedPlacement: OverlayPlacement? {
+        legacyPlacement ?? placement
     }
 }
 
 public struct OverlaySpec<State> {
     public var name: String
     public var size: Vec2
+    public var edge: ScreenEdge
+    public var margin: Float
+    public var align: OverlayAlign
+    public var inset: Float
+    public var interactive: Bool
     public var options: OverlayOptions
     public var makeState: () -> State
     public var view: (State, inout Cx<State>) -> El<State>
@@ -2256,87 +2339,759 @@ public struct OverlaySpec<State> {
     public init(
         name: String,
         size: Vec2,
+        edge: ScreenEdge = .top,
+        margin: Float = 0,
+        align: OverlayAlign = .center,
+        inset: Float = 0,
+        interactive: Bool = false,
         options: OverlayOptions = OverlayOptions(),
         makeState: @escaping () -> State,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
         self.name = name
         self.size = size
-        self.options = options
+        self.edge = edge
+        self.margin = margin
+        self.align = align
+        self.inset = inset
+        self.interactive = interactive
+        var merged = options
+        if interactive {
+            merged.interactive = true
+        }
+        self.options = merged
         self.makeState = makeState
         self.view = view
     }
+
+    public func configured(_ options: OverlayOptions) -> ConfiguredOverlay<State> {
+        var copy = options
+        if interactive { copy.interactive = true }
+        return ConfiguredOverlay(spec: self, options: copy)
+    }
 }
 
+/// Builder wrapper preserving source compatibility on `OverlaySpec` (`overlay/options.rs`).
+public struct ConfiguredOverlay<State> {
+    public var spec: OverlaySpec<State>
+    public var options: OverlayOptions
+    public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
+    public var onFocus: ((inout State, Bool, inout Tx) -> Void)?
+    public var poll: ((inout State, Double, inout Tx) -> Bool)?
+    public var onCreated: ((OverlayCreated) -> Void)?
+    public var setup: ((inout State, Waker) -> Void)?
+
+    public init(spec: OverlaySpec<State>, options: OverlayOptions? = nil) {
+        self.spec = spec
+        var resolved = options ?? spec.options
+        if spec.interactive { resolved.interactive = true }
+        self.options = resolved
+    }
+
+    public func onKey(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
+        var copy = self; copy.onKey = handler; return copy
+    }
+
+    public func onFocus(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self; copy.onFocus = handler; return copy
+    }
+
+    public func poll(_ handler: @escaping (inout State, Double, inout Tx) -> Bool) -> Self {
+        var copy = self; copy.poll = handler; return copy
+    }
+
+    public func onCreated(_ handler: @escaping (OverlayCreated) -> Void) -> Self {
+        var copy = self; copy.onCreated = handler; return copy
+    }
+
+    public func setup(_ handler: @escaping (inout State, Waker) -> Void) -> Self {
+        var copy = self; copy.setup = handler; return copy
+    }
+
+    public func srgbBlend(_ enabled: Bool) -> Self {
+        var copy = self; copy.options.srgbBlend = enabled; return copy
+    }
+
+    public func macosLevel(_ level: Int) -> Self {
+        var copy = self; copy.options.macosLevel = level; return copy
+    }
+
+    public func modifierKeys(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.modifierKeys = enabled; return copy
+    }
+
+    public func animateReveal(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.animateReveal = enabled; return copy
+    }
+
+    public func releaseGpuWhenHidden() -> Self {
+        var copy = self
+        copy.options.releaseGpuWhenHidden = true
+        copy.options.releaseGpuAfter = 0.0
+        return copy
+    }
+
+    public func releaseGpuAfter(_ seconds: Double) -> Self {
+        var copy = self
+        copy.options.releaseGpuAfter = max(0.0, seconds)
+        copy.options.releaseGpuWhenHidden = seconds <= 0.0
+        return copy
+    }
+
+    public func prewarm(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.prewarm = enabled; return copy
+    }
+
+    public func makeHandle() -> OverlayHandle<State> {
+        OverlayHandle(configured: self)
+    }
+}
+
+/// Live handle to a floating overlay (`overlay.rs`), backed on macOS by a real `NSPanel` + `MetalRenderer` + `Runtime`.
 public final class OverlayHandle<State>: @unchecked Sendable {
     private let lock = NSLock()
     public let name: String
     public private(set) var isVisible: Bool = false
     public private(set) var size: Vec2
     public private(set) var options: OverlayOptions
-    private var state: State
+    public private(set) var placementSpec: OverlayGeometry.Placement
+    public private(set) var availability: OverlayAvailability = .pending
+    public private(set) var failure: String? = nil
+    public private(set) var surfaceDescription: String? = nil
+    public private(set) var surfaceStats: OverlaySurfaceSnapshot = OverlaySurfaceSnapshot()
+    public private(set) var overlayPresence: OverlayPresence = .initial
+    public private(set) var releasePolicy: OverlayGpuRelease
+    public private(set) var isDirty: Bool = true
+    public private(set) var isIdle: Bool = true
+    public private(set) var isFrameless: Bool = true
+    public private(set) var systemDark: Bool = true
+    public private(set) var systemContrast: Bool = false
+    public private(set) var systemScrollBars = SystemScrollBars.current()
+    public private(set) var wakeDeadline: Double? = nil
+
+    public let runtime: Runtime<State>
+    private let pollHandler: ((inout State, Double, inout Tx) -> Bool)?
+    private let focusHandler: ((inout State, Bool, inout Tx) -> Void)?
+    private let onCreatedHandler: ((OverlayCreated) -> Void)?
+    private var didRunSetup: Bool = false
+    private let setupHandler: ((inout State, Waker) -> Void)?
 
     #if os(macOS)
-    @MainActor private var panel: NSPanel?
+    @MainActor private var macHost: RuneOverlayMacOSHost<State>?
     #endif
 
-    public init(spec: OverlaySpec<State>) {
+    public convenience init(spec: OverlaySpec<State>) {
+        self.init(configured: ConfiguredOverlay(spec: spec))
+    }
+
+    public init(configured: ConfiguredOverlay<State>) {
+        let spec = configured.spec
+        let opts = configured.options
         self.name = spec.name
-        self.size = spec.size
-        self.options = spec.options
-        self.state = spec.makeState()
+        self.size = Vec2(max(1, spec.size.x), max(1, spec.size.y))
+        self.options = opts
+        self.placementSpec = OverlayGeometry.Placement(
+            size: self.size,
+            edge: spec.edge,
+            margin: spec.margin,
+            align: spec.align,
+            inset: spec.inset
+        )
+        #if os(macOS)
+        let isMacOS = true
+        #else
+        let isMacOS = false
+        #endif
+        self.releasePolicy = OverlayGpuRelease.make(afterSeconds: opts.releaseGpuAfter, isMacOS: isMacOS)
+        self.pollHandler = configured.poll
+        self.focusHandler = configured.onFocus
+        self.onCreatedHandler = configured.onCreated
+        self.setupHandler = configured.setup
+
+        let prefs = SystemPreferences.current()
+        let dark = prefs.darkMode ?? true
+        self.systemDark = dark
+        self.systemContrast = prefs.contrast != nil
+
+        let initialState = spec.makeState()
+        let onKey = configured.onKey
+        let rt = Runtime<State>(
+            state: initialState,
+            viewport: self.size,
+            pixelScale: 2.0,
+            systemDark: dark,
+            reducedMotion: prefs.reducedMotion,
+            onKey: onKey.map { handler in
+                { state, event, tx in handler(&state, event, &tx) }
+            },
+            view: spec.view
+        )
+        rt.srgbBlend = opts.srgbBlend
+        rt.clearColor = Color.transparent
+        self.runtime = rt
+
+        if let setupHandler {
+            didRunSetup = true
+            var st = rt.state
+            setupHandler(&st, rt.waker)
+            rt.state = st
+            rt.markNeedsCommit(settle: true)
+        }
+
+        #if os(macOS)
+        if opts.prewarm {
+            runOnMainActor {
+                self.makeMacHostIfNeeded().prewarm()
+            }
+        }
+        #else
+        self.availability = .available
+        self.surfaceDescription = "Software headless overlay"
+        #endif
+    }
+
+    #if os(macOS)
+    @MainActor
+    private func makeMacHostIfNeeded() -> RuneOverlayMacOSHost<State> {
+        if let macHost { return macHost }
+        lock.lock()
+        let currentSize = size
+        let currentPlacement = placementSpec
+        let currentOptions = options
+        let release = releasePolicy == .now
+        lock.unlock()
+
+        let host = RuneOverlayMacOSHost<State>(
+            size: currentSize,
+            placement: currentPlacement,
+            options: currentOptions,
+            releaseWhenHidden: release
+        )
+        host.onCreated = { [weak self] created in
+            self?.availability = .available
+            self?.onCreatedHandler?(created)
+        }
+        host.onFailure = { [weak self] msg in
+            self?.lock.lock()
+            self?.failure = msg
+            self?.availability = .unavailable
+            self?.lock.unlock()
+        }
+        host.onSurfaceSnapshot = { [weak self] snap in
+            self?.lock.lock()
+            self?.surfaceStats = snap
+            self?.lock.unlock()
+        }
+        host.shouldKeepDrawing = { [weak self] in
+            guard let self else { return false }
+            self.lock.lock()
+            let keep = self.overlayPresence.isDrawing && !self.overlayPresence.isOccluded &&
+                (self.isDirty || !self.isIdle || self.runtime.isAnimating || self.wakeDeadline != nil)
+            self.lock.unlock()
+            return keep
+        }
+        host.configureView = { [weak self] view in
+            guard let self else { return }
+            view.onEvaluateFrame = { [weak self] now, settle in
+                guard let self else {
+                    return (
+                        RefScene(width: 1, height: 1, srgbBlend: true, clearColor: .zero, glyphs: R8Atlas(), images: RGBA8Atlas(), primitives: []),
+                        [],
+                        false,
+                        true
+                    )
+                }
+                return self.evaluateLockedFrame(at: now, forceSettle: settle)
+            }
+            view.onPointerMove = { [weak self] pt, mods, now in
+                self?.withLockedRuntime { rt in
+                    rt.pointerMove(to: pt, mods: mods, at: now)
+                }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerExit = { [weak self] now in
+                self?.withLockedRuntime { rt in rt.pointerExit(at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerDown = { [weak self] pt, btn, mods, now in
+                self?.withLockedRuntime { rt in rt.pointerDown(at: pt, button: btn, mods: mods, at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerUp = { [weak self] pt, btn, mods, now in
+                self?.withLockedRuntime { rt in rt.pointerUp(at: pt, button: btn, mods: mods, at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onWheel = { [weak self] wev, pt, now in
+                self?.withLockedRuntime { rt in rt.wheel(wev, at: pt, now: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onKeyDown = { [weak self] kev, now in
+                guard let self else { return false }
+                let handled = self.withLockedRuntime { rt in rt.keyDown(kev, at: now) }
+                if handled {
+                    view.renderFrame(settle: false, visible: true, drawing: true)
+                }
+                return handled
+            }
+            view.onAppearanceChanged = { [weak self] dark in
+                self?.setThemeDark(dark)
+            }
+            view.onNeedsResyncGeometry = { [weak self] w, h, scale in
+                self?.withLockedRuntime { rt in
+                    rt.viewport = Vec2(max(1, w), max(1, h))
+                    rt.pixelScale = max(0.5, scale)
+                }
+            }
+        }
+        self.macHost = host
+        return host
+    }
+    #endif
+
+    public var windowNumber: UInt32? {
+        #if os(macOS)
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { macHost?.windowNumber }
+        }
+        #endif
+        return nil
+    }
+
+    public var capabilities: OverlayCapabilities {
+        #if os(macOS)
+        if Thread.isMainThread {
+            return MainActor.assumeIsolated { macHost?.capabilities ?? OverlayCapabilities() }
+        }
+        #endif
+        return OverlayCapabilities()
+    }
+
+    public var captureExclusion: OverlaySupport {
+        capabilities.captureExclusion
     }
 
     public func show() {
+        fadeIn(0.0)
+    }
+
+    public func hide() {
+        fadeOut(0.0)
+    }
+
+    public func fadeIn(_ durationSeconds: Double) {
+        let dur = max(0.0, durationSeconds)
         lock.lock()
+        let wasFading = overlayPresence.isFading
+        _ = overlayPresence.step(.show, release: releasePolicy)
         isVisible = true
+        isFrameless = false
+        let settle = !wasFading && !options.animateReveal
+        if settle {
+            runtime.markNeedsCommit(settle: true)
+        }
+        isDirty = true
+        isIdle = false
         lock.unlock()
+
         #if os(macOS)
-        Task { @MainActor in
-            if self.panel == nil {
-                let p = NSPanel(
-                    contentRect: NSRect(x: 0, y: 0, width: CGFloat(self.size.x), height: CGFloat(self.size.y)),
-                    styleMask: [.nonactivatingPanel, .borderless],
-                    backing: .buffered,
-                    defer: false
-                )
-                p.level = .statusBar
-                p.isOpaque = false
-                p.backgroundColor = .clear
-                p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                self.panel = p
-            }
-            self.panel?.orderFrontRegardless()
+        runOnMainActor {
+            let host = self.makeMacHostIfNeeded()
+            host.show(fadeSeconds: dur, settleBeforeReveal: settle)
+            self.surfaceDescription = host.surfaceDescription
         }
         #endif
     }
 
-    public func hide() {
+    public func fadeOut(_ durationSeconds: Double, now: Double = Date().timeIntervalSinceReferenceDate) {
+        let dur = max(0.0, durationSeconds)
         lock.lock()
+        let effects = overlayPresence.step(.hide(fadeSeconds: dur, now: now), release: releasePolicy)
         isVisible = false
-        let release = options.releaseGpuWhenHidden
+        for effect in effects {
+            switch effect {
+            case .stopDrawing:
+                isFrameless = true
+                isIdle = true
+                wakeDeadline = nil
+            case .hideWindow:
+                if let deadline = overlayPresence.deadline {
+                    wakeDeadline = deadline
+                }
+            case .releaseGpu:
+                break
+            }
+        }
+        lock.unlock()
+
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.hide(fadeSeconds: dur)
+        }
+        #endif
+    }
+
+    public func advanceDue(at now: Double) {
+        lock.lock()
+        let effects = overlayPresence.step(.due(now: now), release: releasePolicy)
+        for effect in effects {
+            switch effect {
+            case .stopDrawing:
+                isFrameless = true
+                isIdle = true
+                wakeDeadline = nil
+            case .hideWindow:
+                break
+            case .releaseGpu:
+                break
+            }
+        }
         lock.unlock()
         #if os(macOS)
-        Task { @MainActor in
-            self.panel?.orderOut(nil)
-            if release {
-                self.panel = nil
+        if effects.contains(.releaseGpu) {
+            runOnMainActor {
+                self.macHost?.releasePanel()
             }
+        }
+        #endif
+    }
+
+    @discardableResult
+    public func setOccluded(_ covered: Bool) -> Bool {
+        lock.lock()
+        let accepted = overlayPresence.setOccluded(covered)
+        lock.unlock()
+        return accepted
+    }
+
+    public func requestKeys() {
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.requestKeys()
+        }
+        #endif
+    }
+
+    public func setInput(_ input: OverlayInput) {
+        lock.lock()
+        options.input = input
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setFollowPointer(_ follow: Bool) {
+        lock.lock()
+        options.followPointer = follow
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func refollowPointer() {
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.placePanel()
+        }
+        #endif
+    }
+
+    public func setPlacement(_ placement: OverlayPlacement?) {
+        lock.lock()
+        options.legacyPlacement = placement
+        if let placement {
+            options.placement = placement
+        }
+        let currentPlacement = placementSpec
+        let opts = options
+        isDirty = true
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setDisplay(_ display: OverlayDisplayTarget) {
+        lock.lock()
+        options.display = display
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setEdge(_ edge: ScreenEdge) {
+        lock.lock()
+        placementSpec.edge = edge
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func place(edge: ScreenEdge, margin: Float) {
+        lock.lock()
+        placementSpec.edge = edge
+        placementSpec.margin = margin
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setAlign(_ align: OverlayAlign, inset: Float) {
+        lock.lock()
+        placementSpec.align = align
+        placementSpec.inset = inset
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func resize(_ newSize: Vec2) {
+        let clamped = Vec2(max(1, newSize.x), max(1, newSize.y))
+        lock.lock()
+        size = clamped
+        placementSpec.size = clamped
+        runtime.viewport = clamped
+        isDirty = true
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setMacosLevel(_ level: Int) {
+        lock.lock()
+        options.macosLevel = level
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.setMacosLevel(level)
+        }
+        #endif
+    }
+
+    public func setExcludeFromCapture(_ exclude: Bool) {
+        lock.lock()
+        options.excludeFromCapture = exclude
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.setCaptureExclusion(exclude)
         }
         #endif
     }
 
     public func update(_ body: (inout State) -> Void) {
         lock.lock()
-        body(&state)
+        var s = runtime.state
+        body(&s)
+        runtime.state = s
+        runtime.markNeedsCommit(settle: false)
+        isDirty = true
+        isIdle = false
         lock.unlock()
+    }
+
+    public func updateTx(_ body: (inout State, inout Tx) -> Void) {
+        _ = updateIf { state, tx in
+            body(&state, &tx)
+            return true
+        }
+    }
+
+    @discardableResult
+    public func updateIf(_ body: (inout State, inout Tx) -> Bool) -> Bool {
+        lock.lock()
+        var s = runtime.state
+        var tx = Tx()
+        let changed = body(&s, &tx)
+        runtime.state = s
+        if changed {
+            runtime.markNeedsCommit(settle: tx.settleRequested)
+            isDirty = true
+            isIdle = false
+        }
+        if let wake = tx.runtimeActions["wakeAfter"] as? Double {
+            wakeDeadline = runtime.currentTime + wake
+            isIdle = false
+        }
+        lock.unlock()
+        return changed
     }
 
     public func readState<R>(_ body: (State) -> R) -> R {
         lock.lock()
         defer { lock.unlock() }
-        return body(state)
+        return body(runtime.state)
     }
+
+    public func setThemeDark(_ dark: Bool) {
+        lock.lock()
+        if systemDark != dark || runtime.systemDark != dark {
+            systemDark = dark
+            runtime.systemDark = dark
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func setScrollBars(_ prefs: SystemScrollBars) {
+        lock.lock()
+        if systemScrollBars != prefs {
+            systemScrollBars = prefs
+            runtime.markNeedsCommit(settle: false)
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func setContrast(_ highContrast: Bool) {
+        lock.lock()
+        if systemContrast != highContrast {
+            systemContrast = highContrast
+            runtime.markNeedsCommit(settle: false)
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func deliverFocus(_ focused: Bool) {
+        lock.lock()
+        if let focusHandler {
+            var s = runtime.state
+            var tx = Tx()
+            focusHandler(&s, focused, &tx)
+            runtime.state = s
+            runtime.markNeedsCommit(settle: tx.settleRequested)
+            isDirty = true
+        }
+        lock.unlock()
+    }
+
+    /// Evaluates a single frame deterministically at `now` (used both live and in headless tests).
+    @discardableResult
+    public func present(at now: Double) -> RefScene? {
+        lock.lock()
+        if let deadline = overlayPresence.deadline, deadline <= now {
+            _ = overlayPresence.step(.due(now: now), release: releasePolicy)
+        }
+        guard overlayPresence.isDrawing else {
+            isFrameless = true
+            isIdle = true
+            lock.unlock()
+            return nil
+        }
+        isFrameless = false
+        let (scene, _, _, _) = evaluateStateAndFrameLocked(at: now, forceSettle: false)
+        lock.unlock()
+        return scene
+    }
+
+    private func evaluateLockedFrame(
+        at now: Double,
+        forceSettle: Bool
+    ) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return evaluateStateAndFrameLocked(at: now, forceSettle: forceSettle)
+    }
+
+    private func evaluateStateAndFrameLocked(
+        at now: Double,
+        forceSettle: Bool
+    ) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool) {
+        if forceSettle {
+            runtime.markNeedsCommit(settle: true)
+        }
+        var pollAskedNextFrame = false
+        if let pollHandler {
+            var s = runtime.state
+            var tx = Tx()
+            let changed = pollHandler(&s, now, &tx)
+            runtime.state = s
+            if changed {
+                runtime.markNeedsCommit(settle: tx.settleRequested)
+            }
+            if let wake = tx.runtimeActions["wakeAfter"] as? Double {
+                wakeDeadline = now + wake
+                pollAskedNextFrame = true
+            } else {
+                wakeDeadline = nil
+            }
+        }
+
+        let scene = runtime.frame(at: now)
+        let regions = runtime.overlayInteractiveRegions()
+        isDirty = false
+        isIdle = !(runtime.isAnimating || pollAskedNextFrame)
+        surfaceStats = OverlaySurfaceSnapshot(
+            frameCount: surfaceStats.frameCount &+ 1,
+            pixelWidth: scene.width,
+            pixelHeight: scene.height,
+            backingScale: runtime.pixelScale,
+            srgbBlend: runtime.srgbBlend,
+            isVisible: isVisible,
+            isDrawing: overlayPresence.isDrawing,
+            isAnimating: runtime.isAnimating
+        )
+        return (scene, regions, runtime.isAnimating, runtime.srgbBlend)
+    }
+
+    private func withLockedRuntime<R>(_ body: (Runtime<State>) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(runtime)
+    }
+
+    #if os(macOS)
+    private func runOnMainActor(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { work() }
+        } else {
+            Task { @MainActor in work() }
+        }
+    }
+    #endif
 }
 
 // MARK: - 12. Web Scene Export (runtime/web/)
