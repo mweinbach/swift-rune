@@ -2700,7 +2700,7 @@ public final class Runtime<State> {
 
         return MeasurePassResult(
             viewRootEl: rootEl,
-            expandedRootEl: layoutRoot,
+            expandedRootEl: expandedRoot,
             nodes: newFlat,
             byPath: newByPath,
             byId: newById,
