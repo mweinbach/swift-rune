@@ -391,8 +391,9 @@ public final class Runtime<State> {
 
     private var lastClickTime: Double = -10.0
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
-    private var clickCount: Int = 0
+    internal var clickCount: Int = 0
     private var activeDrag: DragSession? = nil
+    internal var hasActivePointerDrag: Bool { activeDrag != nil || armedDragOut != nil }
 
     // Scroll state keyed by element path
     internal var scrollOffsets: [String: Vec2] = [:]
@@ -439,7 +440,9 @@ public final class Runtime<State> {
     internal var lastVirtualFillMoved: Bool = false
     internal var lastFocusSelectedPaths: Set<String> = []
     internal var lastRevealSelectedPaths: Set<String> = []
-    private var loopRuntime = LoopRuntime()
+    internal var loopRuntime = LoopRuntime()
+    internal var loopClock = LoopClock()
+    internal var selectionState = RuntimeSelectionState()
     private var enterDelays: [NodeId: Double] = [:]
     private var releasedEnterDelays: Set<NodeId> = []
     private struct MatchedSeenSnapshot {
@@ -709,12 +712,14 @@ public final class Runtime<State> {
                 best = best.map { min($0, due) } ?? due
             }
         }
-        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
-            let t = now + loopInterval
-            best = best.map { min($0, t) } ?? t
+        if let loopWake = nextLoopWakeDeadline(after: now) {
+            best = best.map { min($0, loopWake) } ?? loopWake
         }
         if let fillDue = virtualFill.armedWake?.due, fillDue > now {
             best = best.map { min($0, fillDue) } ?? fillDue
+        }
+        if let edgeWake = nextSelectableEdgeScrollWakeDeadline(after: now) {
+            best = best.map { min($0, edgeWake) } ?? edgeWake
         }
         return best
     }
@@ -798,6 +803,7 @@ public final class Runtime<State> {
             }
         }
 
+        let didEdgeScroll = stepSelectableEdgeScroll(at: now)
         if needsCommit {
             let commitAt = min(pendingEventTime ?? now, now)
             pendingEventTime = nil
@@ -806,6 +812,9 @@ public final class Runtime<State> {
             popupNeedsLayout = false
             forceInitialSettle = false
             reconcileDropHoverAfterCommit(at: now)
+            if didEdgeScroll {
+                laidSelectableEdgeScroll(at: now)
+            }
             if needsCommit {
                 commitTree(at: now, cut: false)
                 needsCommit = false
@@ -815,6 +824,7 @@ public final class Runtime<State> {
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
         let animNow = cxSettings.advanceClock(to: now)
+        syncMotionLoopClock(to: now)
 
         // Sample inertial scroll decay tracks and re-commit layout positions if scroll is moving
         scrollStore.sample(at: animNow)
@@ -880,7 +890,8 @@ public final class Runtime<State> {
             || virtualFill.isFilling
             || !enterDelays.isEmpty
             || tooltipFading(at: now)
-            || loopRuntime.hasActiveLoops(at: now, reducedMotion: reducedMotion)
+            || hasActiveMotionLoops(at: now)
+            || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
         isAnimating = rawAnimating && cxSettings.viewTimeScale > 0.0
 
@@ -1489,10 +1500,7 @@ public final class Runtime<State> {
             }
             walkStack.append(contentsOf: childItems.reversed())
         }
-        loopRuntime.sync(specs: loopSpecs, at: now, reducedMotion: reducedMotion, cut: commitCut)
-        if commitCut {
-            loopRuntime.settleAll(at: now)
-        }
+        syncMotionLoops(specs: loopSpecs, at: now, cut: commitCut)
 
         // Apply modal inertness: if any mounted subtree is `.modal(...)`, elements outside the topmost modal
         // (and its anchored portal popovers) become inert!
@@ -1543,6 +1551,7 @@ public final class Runtime<State> {
         let prevFocusedKey = focusedKey
         let prevFocusVisible = focusVisible
 
+        let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: newById, cut: cut)
         flatNodes = newFlat
         nodeByPath = newByPath
         nodeById = newById
@@ -1745,6 +1754,8 @@ public final class Runtime<State> {
         }
         let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
         scene.keepFlights(keepsFlights)
+        applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
+        syncRideTrailingFlags(newFlat, on: &scene)
         measureFramePhase(.apply) {
             scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: commitCut, matchedStarts: matchedStarts)
         }
@@ -1754,6 +1765,8 @@ public final class Runtime<State> {
         if virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty {
             needsCommit = true
         }
+        syncRideTrailingFlags(newFlat, on: &scene)
+        finalizeSelectionAfterCommit(at: now)
     }
 
     private func findNodeForFlightSelector(_ selector: String, in nodes: [FlatNode]) -> FlatNode? {
@@ -1848,7 +1861,7 @@ public final class Runtime<State> {
         )
     }
 
-    private func nodeTakesFocus(_ el: El<State>) -> Bool {
+    internal func nodeTakesFocus(_ el: El<State>) -> Bool {
         if el.focusable { return true }
         let pressableRoles: Set<ElementRole> = [
             .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
@@ -2179,6 +2192,7 @@ public final class Runtime<State> {
         let defaultRingOutline = cxSettings.viewDefaults.focusRing
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
         stuckShiftsByPath.removeAll(keepingCapacity: true)
+        let activeSelectionRanges = computeActiveSelectionRangesByPath()
 
         // Precompute presented rect, scale, and node lookup for every node in `frameOut.nodes`
         var presentedRectById: [NodeId: MotionRect] = [:]
@@ -2202,7 +2216,7 @@ public final class Runtime<State> {
             var sc = p.scale
             var rot = p.rotate
 
-            if let ls = loopRuntime.sample(id: p.id, nodeSize: rect.size, at: now, reducedMotion: reducedMotion) {
+            if let ls = sampleLoopPresentation(id: p.id, nodeSize: rect.size, wallNow: currentTime) {
                 op *= ls.opacity
                 rot += ls.rotation
                 rect = rect.offsetBy(ls.offset)
@@ -3080,10 +3094,16 @@ public final class Runtime<State> {
                             textTruncated = true
                         }
                     }
+                    let selPaintInk = emitSelectableHighlightIfNeeded(
+                        snap: snap, el: el, isExiting: p.isExiting, activeSelectionRanges: activeSelectionRanges,
+                        textOriginX: textOriginX, textOriginY: textOriginY, scaleVec: scaleVec, pxScale: pxScale,
+                        localAlpha: localAlpha, shaped: shaped, devClip: devClip, useLayer: useLayer, effRotate: effRotate,
+                        into: &primitives
+                    )
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha
                     if glyphAlpha > 0.0005 {
                         for g in shaped.glyphs {
-                            let gc = (g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let gc = (selPaintInk?.color(for: g) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
                             primitives.append(attachFade(.glyph(
                                 rect: SIMD4<Float>(
                                     (textOriginX + g.rect.x * scaleVec.x) * pxScale,
@@ -3517,7 +3537,7 @@ public final class Runtime<State> {
         return lastElements.first(where: { $0.path == hit.node.path })
     }
 
-    private func hitTest(at point: Vec2, predicate: ((FlatNode) -> Bool)? = nil) -> (node: FlatNode, rect: MotionRect)? {
+    internal func hitTest(at point: Vec2, predicate: ((FlatNode) -> Bool)? = nil) -> (node: FlatNode, rect: MotionRect)? {
         guard let detailed = hitTestDetailed(at: point, predicate: predicate) else { return nil }
         return (detailed.node, detailed.rect)
     }
@@ -3775,6 +3795,10 @@ public final class Runtime<State> {
             return
         }
 
+        if handleSelectablePointerMove(to: pos, mods: mods, at: now) {
+            return
+        }
+
         // Active drag capture takes priority over hover
         if let drag = activeDrag {
             if let idx = nodeByPath[drag.path] {
@@ -3892,6 +3916,8 @@ public final class Runtime<State> {
                 var tx = makeTx(at: now)
                 node.el.handlers.onSecondaryClick?(&state, press, &tx)
                 applyTx(tx, at: now)
+            } else {
+                handleSelectableSecondaryClick(at: pos, at: now)
             }
             return
         }
@@ -3909,6 +3935,7 @@ public final class Runtime<State> {
             if cxSettings.viewDefaults.webFocus, let bgHit = hitTest(at: pos, predicate: { _ in true }) {
                 webFocusTabStartPath = bgHit.node.path
             }
+            handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: nil, at: now)
             if focusedPath != nil {
                 focusedPath = nil
                 focusedKey = nil
@@ -3918,12 +3945,14 @@ public final class Runtime<State> {
             return
         }
 
+        let preservesSel = preservesTextSelectionInChain(node)
+        handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         pressedPath = node.path
         pressedKey = node.key
-        if cxSettings.viewDefaults.webFocus {
+        if cxSettings.viewDefaults.webFocus && !preservesSel {
             webFocusTabStartPath = node.path
         }
-        if nodeTakesFocus(node.el) {
+        if !preservesSel && nodeTakesFocus(node.el) {
             if focusedPath != node.path {
                 imeReset = true
             }
@@ -4024,13 +4053,14 @@ public final class Runtime<State> {
         let releasedPath = pressedPath
         pressedPath = nil
         pressedKey = nil
+        let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
         dirtyCommit(at: now)
 
-        var draggedPastThreshold = false
+        var draggedPastThreshold = suppressedClickFromSelDrag
         if let drag = activeDrag {
             activeDrag = nil
-            draggedPastThreshold = !drag.isTextSelectionDrag &&
-                hypot(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0
+            draggedPastThreshold = suppressedClickFromSelDrag || (!drag.isTextSelectionDrag &&
+                hypot(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0)
             if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
                 var tx = makeTx(at: now)
                 onEnd(&state, false, &tx)
@@ -4059,7 +4089,7 @@ public final class Runtime<State> {
 
         // Fire click / double-click only if pointer released inside the pressed element and not dragged!
         let inside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
-        if inside && button == .primary && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
+        if inside && button == .primary && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
             if clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
                 var tx = makeTx(at: now)
                 onDbl(&state, &tx)
@@ -4428,6 +4458,11 @@ public final class Runtime<State> {
                 dirtyCommit(at: now)
                 return true
             }
+        }
+
+        // 6. Selectable-text `Cmd+A` / `Cmd+C` fallback
+        if handleSelectableKeyDown(ev, at: now) {
+            return true
         }
 
         return false
@@ -4800,6 +4835,7 @@ public final class Runtime<State> {
         if tx.unclippedFlightsRequested {
             pendingUnclippedFlights = true
         }
+        applySelectionTx(tx, at: now)
         let hasCommitRequests = tx.followEdgeRequested
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty

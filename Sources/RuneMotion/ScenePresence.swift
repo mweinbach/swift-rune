@@ -56,6 +56,7 @@ extension Scene {
         guard let i = slot(id) else { return }
         if !nodes[i].presence.isExiting {
             nodes[i].transition = transition
+            nodes[i].compatHadTransition = true
         }
     }
 

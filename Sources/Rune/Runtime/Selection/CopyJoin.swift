@@ -29,8 +29,8 @@ public enum CopyJoin {
 /// `SelectAll`, copy formatting (`El.selectionCopy` + `CopyJoin`), and `El.onSelectionChange`
 /// coalescing (`crates/rune/src/runtime/selection/selectable.rs`).
 public final class SelectionCoordinator {
-    public private(set) var phase: SelectionPhase = .empty
-    public private(set) var pick = SelectAllPick()
+    public internal(set) var phase: SelectionPhase = .empty
+    public internal(set) var pick = SelectAllPick()
     private var heardByPath: [String: TextSelection] = [:]
 
     public init() {}

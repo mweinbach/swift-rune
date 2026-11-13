@@ -19,6 +19,9 @@ extension Runtime {
     internal func makeTx(at now: Double) -> Tx {
         var tx = Tx()
         tx.clock = now
+        if let sel = currentTextSelection() {
+            tx.setCurrentTextSelection(sel)
+        }
         return tx
     }
 
