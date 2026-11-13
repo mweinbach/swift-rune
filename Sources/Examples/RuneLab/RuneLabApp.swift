@@ -85,50 +85,61 @@ private func onLabKey(_ s: inout LabState, _ e: KeyEvent, _ tx: inout Tx) -> Boo
 
 @main
 enum RuneLabApp {
-    static func makeSpec() -> AppSpec<LabState> {
-        AppSpec(
+    static func makeApp() -> App<LabState> {
+        App<LabState>(
             title: "Rune Lab",
             size: Vec2(1320, 800),
             minSize: Vec2(1080, 640),
             state: LabState(),
-            onKey: onLabKey,
             view: labView
         )
-        .scene("lamp") { $0.scene = .lamp }
-        .scene("flashlight") { $0.scene = .flashlight }
-        .scene("gi") { $0.scene = .gi }
-        .scene("keys") { $0.scene = .keys }
-        .scene("godrays") { $0.scene = .godRays }
-        .scene("glow") { $0.scene = .glow }
-        .scene("pulses") { $0.scene = .pulses }
-        .scene("electric") { $0.scene = .electric }
-        .scene("fire") { $0.scene = .fire }
-        .scene("motion") { $0.scene = .motion }
-        .scene("lens") { $0.scene = .lens }
-        .scene("lens-frost") {
-            $0.scene = .lens
+        .families(["Inter", "IBM Plex Mono"])
+        .modifierKeys(true)
+        .onKey(onLabKey)
+        .poll { s, t, _ in
+            let moved = s.now != t
+            s.now = t
+            let beforeShots = s.shots.count
+            s.shots.removeAll { (Float(t) - $0.t0) >= 1.5 }
+            let shotExpired = s.shots.count != beforeShots
+            return shotExpired
+                || (moved && (!s.shots.isEmpty || !s.card.isSettled(at: t) || s.keys.contains { !$0.isSettled(at: t) }))
+        }
+        .scene("lamp") { s, _ in s.scene = .lamp }
+        .scene("flashlight") { s, _ in s.scene = .flashlight }
+        .scene("gi") { s, _ in s.scene = .gi }
+        .scene("keys") { s, _ in s.scene = .keys }
+        .scene("godrays") { s, _ in s.scene = .godRays }
+        .scene("glow") { s, _ in s.scene = .glow }
+        .scene("pulses") { s, _ in s.scene = .pulses }
+        .scene("electric") { s, _ in s.scene = .electric }
+        .scene("fire") { s, _ in s.scene = .fire }
+        .scene("motion") { s, _ in s.scene = .motion }
+        .scene("lens") { s, _ in s.scene = .lens }
+        .scene("lens-frost") { s, _ in
+            s.scene = .lens
             if let i = knobSpecs(for: .lens).firstIndex(where: { $0.id == "frost" }) {
-                $0.vals[LabScene.lens.idx][i] = 1.0
+                s.vals[LabScene.lens.idx][i] = 1.0
             }
         }
-        .scene("extras") { $0.scene = .extras }
-        .scene("motion-thrown") {
-            $0.scene = .motion
-            $0.card.set(Vec2(-60, 300))
-            $0.card.release(
+        .scene("extras") { s, _ in s.scene = .extras }
+        .scene("motion-thrown") { s, _ in
+            s.scene = .motion
+            s.card.set(Vec2(-60, 300))
+            s.card.release(
                 velocity: Vec2(2400, -900),
                 target: Vec2(470, 160),
                 curve: .spring(Spring(duration: 0.6, bounce: 0)),
                 at: 0.0
             )
         }
-        .scene("fire-reduced") {
-            $0.scene = .fire
-            $0.reduced = true
+        .scene("fire-reduced") { s, _ in
+            s.scene = .fire
+            s.reduced = true
         }
     }
 
     static func main() throws {
-        try RuneApp.run(makeSpec())
+        try makeApp().run()
     }
 }

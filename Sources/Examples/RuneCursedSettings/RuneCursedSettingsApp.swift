@@ -801,55 +801,84 @@ func cursedView(_ s: CursedState, _ cx: inout Cx<CursedState>) -> El<CursedState
     return root
 }
 
-let spec = AppSpec<CursedState>(
-    title: "Settings",
-    size: Vec2(960, 660),
-    state: CursedState(),
-    view: cursedView
-)
-.scene("default") { _ in }
-.scene("general") { $0.page = .general }
-.scene("appearance") { $0.page = .appearance }
-.scene("network") { $0.page = .network }
-.scene("security") { $0.page = .security }
-.scene("accessibility") { $0.page = .accessibility }
-.scene("developer") { $0.page = .developer }
-.scene("fire") {
-    $0.page = .network
-    $0.p.firewall = true
-    $0.p.staticIP = true
-}
-.scene("fence") {
-    $0.page = .security
-    $0.p.fence = true
-}
-.scene("dark") {
-    $0.page = .appearance
-    $0.p.appearance = .dark
-}
-.scene("spotlight") {
-    $0.p.spotlight = true
-}
-.scene("contrast") {
-    $0.page = .accessibility
-    $0.p.contrast = true
-}
-.scene("frosted") {
-    $0.page = .accessibility
-    $0.p.reduceTransparency = true
-}
-.scene("hot") {
-    $0.page = .developer
-    $0.p.hotReload = true
-}
-.scene("flushed") {
-    $0.page = .developer
-    $0.p.flushed = true
-}
-.scene("reduced-fire") {
-    $0.page = .network
-    $0.p.firewall = true
-    $0.p.reduceMotion = true
-}
+@main
+enum RuneCursedSettingsApp {
+    static func makeApp() -> App<CursedState> {
+        App<CursedState>(
+            title: "Settings",
+            size: Vec2(960, 660),
+            minSize: Vec2(860, 600),
+            state: CursedState(),
+            view: cursedView
+        )
+        .families([OpenCodeTheme.families.sans, OpenCodeTheme.families.mono])
+        .poll { s, clock, _ in
+            let moved = s.now != clock
+            s.now = clock
+            var changed = false
+            if let until = s.toastUntil, s.now >= until {
+                s.toastUntil = nil
+                changed = true
+            }
+            if s.flushRequested {
+                s.flushRequested = false
+                s.flushT0 = clock
+                changed = true
+            }
+            if let t0 = s.flushT0, clock >= t0 + 1.4, !s.p.flushed {
+                s.p.flushed = true
+                changed = true
+            }
+            let activeGag = s.p.firewall || s.p.fence || s.p.hotReload || s.toastUntil != nil || s.flushT0 != nil
+            return changed || (moved && activeGag)
+        }
+        .scene("default") { _, _ in }
+        .scene("general") { s, _ in s.page = .general }
+        .scene("appearance") { s, _ in s.page = .appearance }
+        .scene("network") { s, _ in s.page = .network }
+        .scene("security") { s, _ in s.page = .security }
+        .scene("accessibility") { s, _ in s.page = .accessibility }
+        .scene("developer") { s, _ in s.page = .developer }
+        .scene("fire") { s, _ in
+            s.page = .network
+            s.p.firewall = true
+            s.p.staticIP = true
+        }
+        .scene("fence") { s, _ in
+            s.page = .security
+            s.p.fence = true
+        }
+        .scene("dark") { s, _ in
+            s.page = .appearance
+            s.p.appearance = .dark
+        }
+        .scene("spotlight") { s, _ in
+            s.p.spotlight = true
+        }
+        .scene("contrast") { s, _ in
+            s.page = .accessibility
+            s.p.contrast = true
+        }
+        .scene("frosted") { s, _ in
+            s.page = .accessibility
+            s.p.reduceTransparency = true
+        }
+        .scene("hot") { s, _ in
+            s.page = .developer
+            s.p.hotReload = true
+        }
+        .scene("flushed") { s, _ in
+            s.page = .developer
+            s.p.flushed = true
+        }
+        .scene("reduced-fire") { s, _ in
+            s.page = .network
+            s.p.firewall = true
+            s.p.reduceMotion = true
+        }
+    }
 
-try RuneApp.run(spec)
+    static func main() throws {
+        try makeApp().run()
+    }
+}
