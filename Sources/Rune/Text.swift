@@ -1923,6 +1923,8 @@ public final class TextSystem: @unchecked Sendable {
         var sizePx10: Int
         var weight10: Int
         var italic: Bool
+        var variations: String
+        var features: String
     }
 
     private struct MeasureKey: Hashable {
@@ -2242,6 +2244,56 @@ public final class TextSystem: @unchecked Sendable {
         return nil
     }
 
+    private static func parseOpenTypeFeatures(_ raw: String) -> [[CFString: Any]] {
+        guard !raw.isEmpty else { return [] }
+        var out: [[CFString: Any]] = []
+        for item in raw.split(separator: ",") {
+            let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let parts = trimmed.split(whereSeparator: { $0.isWhitespace })
+            guard let rawTag = parts.first else { continue }
+            let tag = rawTag.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            guard tag.utf8.count == 4 else { continue }
+            let value: Int
+            if parts.count >= 2 {
+                let valStr = String(parts[1]).lowercased()
+                if valStr == "on" {
+                    value = 1
+                } else if valStr == "off" {
+                    value = 0
+                } else if let n = Int(valStr) {
+                    value = n
+                } else {
+                    continue
+                }
+            } else {
+                value = 1
+            }
+            out.append([
+                kCTFontOpenTypeFeatureTag: tag as CFString,
+                kCTFontOpenTypeFeatureValue: value as CFNumber,
+            ])
+        }
+        return out
+    }
+
+    private static func parseFontVariations(_ raw: String) -> [NSNumber: Double] {
+        guard !raw.isEmpty else { return [:] }
+        var out: [NSNumber: Double] = [:]
+        for item in raw.split(separator: ",") {
+            let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let parts = trimmed.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 2 else { continue }
+            let tag = parts[0].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            let bytes = Array(tag.utf8)
+            guard bytes.count == 4, let val = Double(parts[1]) else { continue }
+            let fourCC = (Int32(bytes[0]) << 24) | (Int32(bytes[1]) << 16) | (Int32(bytes[2]) << 8) | Int32(bytes[3])
+            out[NSNumber(value: fourCC)] = val
+        }
+        return out
+    }
+
     internal func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
         syncGlobalFamiliesIfNeeded()
         let sizePx = style.size * pixelScale
@@ -2249,7 +2301,9 @@ public final class TextSystem: @unchecked Sendable {
             family: style.family,
             sizePx10: Int((sizePx * 10.0).rounded()),
             weight10: Int(style.weight.rounded()),
-            italic: style.italic
+            italic: style.italic,
+            variations: style.variations,
+            features: style.features
         )
         lock.lock()
         if let cached = fontCache[key] {
@@ -2268,25 +2322,56 @@ public final class TextSystem: @unchecked Sendable {
             traits[kCTFontSlantTrait] = CGFloat(0.15)
         }
 
+        DefaultFonts.registerIfNeeded()
+
         let baseFont: CTFont
         switch style.family {
         case .systemUI:
-            baseFont = (!sansList.isEmpty ? Self.firstMatchingFont(in: sansList, sizePx: CGFloat(sizePx)) : nil)
+            let effectiveSans = sansList.isEmpty ? DefaultFonts.sansFamily : sansList
+            baseFont = Self.firstMatchingFont(in: effectiveSans, sizePx: CGFloat(sizePx))
                 ?? CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("SFProText-Regular" as CFString, CGFloat(sizePx), nil)
         case .monospace:
-            baseFont = (!monoList.isEmpty ? Self.firstMatchingFont(in: monoList, sizePx: CGFloat(sizePx)) : nil)
+            let effectiveMono = monoList.isEmpty ? DefaultFonts.monoFamily : monoList
+            baseFont = Self.firstMatchingFont(in: effectiveMono, sizePx: CGFloat(sizePx))
                 ?? CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("Menlo-Regular" as CFString, CGFloat(sizePx), nil)
         case .custom(let name):
             baseFont = CTFontCreateWithName(name as CFString, CGFloat(sizePx), nil)
         }
 
-        let desc = CTFontDescriptorCreateCopyWithAttributes(
-            CTFontCopyFontDescriptor(baseFont),
-            [kCTFontTraitsAttribute: traits] as CFDictionary
-        )
-        let weighted = CTFontCreateCopyWithAttributes(baseFont, CGFloat(sizePx), nil, desc)
+        let familyName = CTFontCopyFamilyName(baseFont) as String
+        let featureSettings = Self.parseOpenTypeFeatures(style.features)
+        let variationSettings = Self.parseFontVariations(style.variations)
+        var attrs: [CFString: Any] = [
+            kCTFontFamilyNameAttribute: familyName,
+            kCTFontTraitsAttribute: traits,
+        ]
+        if !featureSettings.isEmpty {
+            attrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
+        }
+        if !variationSettings.isEmpty {
+            attrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+        }
+        let weightDesc = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+        let matched = CTFontCreateWithFontDescriptor(weightDesc, CGFloat(sizePx), nil)
+        let weighted: CTFont
+        if (CTFontCopyFamilyName(matched) as String).caseInsensitiveCompare(familyName) == .orderedSame {
+            weighted = matched
+        } else {
+            var copyAttrs: [CFString: Any] = [kCTFontTraitsAttribute: traits]
+            if !featureSettings.isEmpty {
+                copyAttrs[kCTFontFeatureSettingsAttribute] = featureSettings as CFArray
+            }
+            if !variationSettings.isEmpty {
+                copyAttrs[kCTFontVariationAttribute] = variationSettings as CFDictionary
+            }
+            let desc = CTFontDescriptorCreateCopyWithAttributes(
+                CTFontCopyFontDescriptor(baseFont),
+                copyAttrs as CFDictionary
+            )
+            weighted = CTFontCreateCopyWithAttributes(baseFont, CGFloat(sizePx), nil, desc)
+        }
         lock.lock()
         fontCache[key] = weighted
         lock.unlock()

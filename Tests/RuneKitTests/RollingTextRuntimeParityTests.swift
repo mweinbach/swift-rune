@@ -123,6 +123,42 @@ struct RollingTextRuntimeParityTests {
         }
     }
 
+    // 2. crates/rune-kit/tests/rolling_text.rs:123
+    @Test("Proportional label keeps prefix and springs its width (tests/rolling_text.rs:123)")
+    func proportionalLabelKeepsPrefixAndSpringsWidth() throws {
+        let key = "copy"
+        let (rt, _) = makeBasicRuntime(key: key, text: "Copy password", mono: false, reduced: false)
+        let before = glyphKeys(rt, key: key)
+        #expect(before.count >= 3)
+        let elems0 = Dictionary(uniqueKeysWithValues: rt.elements().compactMap { e in e.key.map { ($0, e) } })
+        let rest = try before.prefix(3).map { pair in
+            try #require(elems0[pair.key]).rect
+        }
+        let width = try #require(elems0[key]).rect[2]
+
+        rt.update { s, _ in s.text = "Copied, clears in 0:30" }
+        var now = 0.0
+        _ = rt.frame(at: now)
+        let after = glyphKeys(rt, key: key)
+        #expect(after.prefix(3).map(\.key) == before.prefix(3).map(\.key))
+        #expect(after.prefix(3).map(\.text) == before.prefix(3).map(\.text))
+        #expect(after.map(\.text).joined() == "Copied, clears in 0:30")
+
+        let keys = before.map(\.key) + after.dropFirst(3).map(\.key) + [key]
+        let frames = film(rt, keys: keys, seconds: 1.0, now: &now)
+        for f in frames {
+            for i in 0..<3 {
+                let r = try #require(f[i]?.0)
+                #expect(Array(r.prefix(2)) == Array(rest[i].prefix(2)), "kept prefix stays put")
+            }
+        }
+        let widths = try frames.map { try #require($0.last ?? nil).0[2] }
+        let target = try #require(widths.last)
+        #expect(target > width + 40.0, "\(width) -> \(target)")
+        #expect(widths[0] < width + (target - width) * 0.2, "width springs from old width: \(widths[0])")
+        #expect(largestStep(frames) < 4.0, "no jumps: \(largestStep(frames))")
+    }
+
     // 3. crates/rune-kit/tests/rolling_text.rs:210
     @Test("Kept glyphs glide to their new advance monotonically and match plain text (tests/rolling_text.rs:210)")
     func keptGlyphsGlideToTheirNewAdvance() throws {

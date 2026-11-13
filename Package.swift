@@ -140,6 +140,7 @@ let package = Package(
             path: "Sources/Rune",
             resources: [
                 .copy("Resources/Metal"),
+                .copy("Resources/Fonts"),
             ],
             linkerSettings: [
                 .linkedLibrary("user32", .when(platforms: [.windows])),
