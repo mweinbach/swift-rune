@@ -68,6 +68,23 @@ struct RenderClipBackdropDashTests {
         #expect(sampleRGBA(img1, x: 10, y: 10).r > 240)
         #expect(sampleRGBA(img1, x: 30, y: 10).r < 10)
         #expect(sampleRGBA(img1, x: 10, y: 30).r < 10)
+
+        // Opened at the bottom with stickBottom: true, top overflow is clipped above [0, 0, 20, 20] too
+        let rtStick = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40).bg(.black)
+                .child(el().size(40, 10))
+                .child(
+                    col().key("scroll").size(20, 20).scrollY(stickBottom: true).scrollEdgeFade(0).clip()
+                        .child(el().key("top").size(20, 40).bg(red))
+                        .child(el().key("bot").size(20, 40).bg(red))
+                )
+        }
+        rtStick.clearColor = .black
+        let rfStick = rtStick.renderFrame(at: 0.0)
+        let imgStick = try renderer.renderOffscreen(rfStick)
+        #expect(sampleRGBA(imgStick, x: 10, y: 15).r > 240)
+        #expect(sampleRGBA(imgStick, x: 10, y: 5).r < 10) // content scrolled above box y=10 isn't drawn
+        #expect(sampleRGBA(imgStick, x: 10, y: 35).r < 10) // below box y=30 isn't drawn
     }
 
     /// Upstream: `crates/rune/tests/clip.rs:64` `a_press_outside_the_box_misses_clipped_content`
@@ -359,30 +376,49 @@ struct RenderClipBackdropDashTests {
         #expect(imgZero.rgba == imgNone.rgba)
     }
 
+    private func bwStripes<State>(_ w: Float, _ h: Float, stripeWidth: Float = 4) -> El<State> {
+        let count = Int(ceil(w / stripeWidth))
+        return row().size(w, h).absolute(x: 0, y: 0).children(
+            (0..<count).map { i in
+                el().size(stripeWidth, h).bg(i.isMultiple(of: 2) ? .black : .white)
+            }
+        )
+    }
+
+    private func redSpread(_ frame: Frame, y: Int, x0: Int, x1: Int) -> Int {
+        var lo = 255
+        var hi = 0
+        for x in x0..<x1 {
+            let r = Int(sampleRGBA(frame, x: x, y: y).r)
+            lo = min(lo, r)
+            hi = max(hi, r)
+        }
+        return hi - lo
+    }
+
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:113` `two_bars_each_blur_their_own_backdrop`
     @Test("backdrop_blur.rs:113 two_bars_each_blur_their_own_backdrop")
     func twoBarsEachBlurTheirOwnBackdrop() throws {
         let renderer = try MetalRenderer()
         struct S {}
-        let rt = Runtime<S>(state: S(), viewport: Vec2(120, 60), pixelScale: 1.0) { _, _ in
-            col().size(120, 60)
-                .child(stripes(120, 60))
-                .child(el().size(36, 40).absolute(x: 8, y: 10).rounded(6).backdropBlur(12))
-                .child(el().size(36, 40).absolute(x: 76, y: 10).rounded(6).backdropBlur(12))
+        let redHalf = Color(r: 1, g: 0, b: 0, a: 0.5)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
+            col().size(200, 120)
+                .child(bwStripes(200, 120))
+                .child(el().size(70, 60).absolute(x: 10, y: 30).rounded(16).backdropBlur(8))
+                .child(el().size(70, 60).absolute(x: 120, y: 30).rounded(16).bg(redHalf).backdropBlur(8))
         }
+        rt.clearColor = .black
         let rf = rt.renderFrame(at: 0.0)
         let blurs = rf.instances.filter { $0.params.y == KIND_BACKDROP_BLUR }
         #expect(blurs.count == 2)
 
         let img = try renderer.renderOffscreen(rf)
-        // Both blurred bars blend adjacent red+blue stripes into purple
-        let leftBar = sampleRGBA(img, x: 26, y: 30)
-        let rightBar = sampleRGBA(img, x: 94, y: 30)
-        #expect(leftBar.r > 40 && leftBar.b > 40)
-        #expect(rightBar.r > 40 && rightBar.b > 40)
-        // Unblurred stripe gap at x=57 (stripe 14, even -> red) stays crisp pure red
-        let gapPx = sampleRGBA(img, x: 57, y: 30)
-        #expect(gapPx.r > 230 && gapPx.b < 15)
+        #expect(redSpread(img, y: 60, x0: 25, x1: 65) <= 3)
+        #expect(redSpread(img, y: 60, x0: 135, x1: 175) <= 3)
+        #expect(redSpread(img, y: 60, x0: 85, x1: 115) > 200)
+        let tinted = sampleRGBA(img, x: 155, y: 60)
+        #expect(Int(tinted.r) > Int(tinted.g) + 60)
     }
 
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:136` `a_faded_bar_blurs_the_window_not_its_own_layer`
@@ -390,29 +426,29 @@ struct RenderClipBackdropDashTests {
     func fadedBarBlursWindowNotOwnLayer() throws {
         let renderer = try MetalRenderer()
         struct S {}
-        let rt = Runtime<S>(state: S(), viewport: Vec2(80, 60), pixelScale: 1.0) { _, _ in
-            col().size(80, 60)
-                .child(stripes(80, 60))
+        let rt = Runtime<S>(state: S(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
+            col().size(200, 120)
+                .child(bwStripes(200, 120))
                 .child(
-                    el().size(40, 40).absolute(x: 20, y: 10)
-                        .rounded(6)
+                    el().size(120, 60).absolute(x: 40, y: 30)
+                        .rounded(16)
                         .opacity(0.5)
-                        .backdropBlur(12)
-                        .bg(Color(r: 0, g: 1, b: 0, a: 0.1))
+                        .backdropBlur(8)
+                        .bg(Color.white.alpha(0.2))
+                        .child(el().size(10, 10).bg(.white))
                 )
         }
+        rt.clearColor = .black
         let rf = rt.renderFrame(at: 0.0)
         let blurIdx = try #require(rf.instances.firstIndex(where: { $0.params.y == KIND_BACKDROP_BLUR }))
-        // Backdrop blur instance is emitted at top-level (before or outside any layer for the bar itself) with opacity 0.5
-        #expect(abs(rf.instances[blurIdx].fill.w - 0.5) < 0.05)
+        #expect(abs(rf.instances[blurIdx].fill.w - 0.5) < 0.01)
         if let layerIdx = rf.instances.firstIndex(where: { $0.params.y == KIND_LAYER }) {
             #expect(blurIdx < layerIdx)
         }
 
         let img = try renderer.renderOffscreen(rf)
-        // Center of faded blurred bar must still show blurred red/blue stripes from window behind, not transparent black
-        let center = sampleRGBA(img, x: 40, y: 30)
-        #expect(center.r > 30 && center.b > 30)
+        let s = redSpread(img, y: 60, x0: 60, x1: 140)
+        #expect((40..<200).contains(s))
     }
 
     /// Upstream: `crates/rune/tests/backdrop_blur.rs:191` `scrolled_content_changes_the_blur_and_a_still_frame_stays_idle`
@@ -644,7 +680,7 @@ struct RenderClipBackdropDashTests {
             case .solid:
                 card = card.border(1.0, rim)
             case .dashed:
-                card = card.dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0)
+                card = card.dashedBorder(1.0, rim, dash: 8, gap: 4)
             case .filledDashed:
                 card = card.bg(dark).dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0)
             case .gradientDashed:
@@ -683,46 +719,25 @@ struct RenderClipBackdropDashTests {
         let dashed = try renderer.renderOffscreen(makeCapsuleFrame(mode: .dashed))
         let filled = try renderer.renderOffscreen(makeCapsuleFrame(mode: .filledDashed))
 
-        // At scale 2, capsule rect is [8, 8, 120, 28] with radii=14, borderWidth=2 (top edge y=8..10, flat x in [22..114]).
-        // Verify dash segments match solid AA pixels vertically while gaps are transparent in `dashed`
-        var sawDashMatchingSolid = false
-        var sawClearGap = false
-        for x in stride(from: 24, through: 108, by: 2) {
-            let d = sampleRGBA(dashed, x: x, y: 9)
-            let dPrev = sampleRGBA(dashed, x: x - 2, y: 9)
-            let dNext = sampleRGBA(dashed, x: x + 2, y: 9)
-            if d.a > 200 && dPrev.a > 200 && dNext.a > 200 {
-                // Interior of dash away from longitudinal end-cap matches solid border AA vertically within <= 2
-                for y in 7...11 {
-                    let dy = sampleRGBA(dashed, x: x, y: y)
-                    let sy = sampleRGBA(solid, x: x, y: y)
-                    #expect(abs(Int(dy.r) - Int(sy.r)) <= 2)
-                    #expect(abs(Int(dy.a) - Int(sy.a)) <= 2)
-                }
-                sawDashMatchingSolid = true
-            } else if d.a == 0 {
-                // Gap in `filled` shows dark fill RGBA(18, 22, 28, 255) instead of rim white!
-                let f = sampleRGBA(filled, x: x, y: 9)
-                #expect(f.a > 240)
-                #expect(f.r < 40 && f.g < 40 && f.b < 45)
-                sawClearGap = true
-            }
+        // At scale 2, first dash covers x=22..38.1, first gap 38.1..46.2; exact pixel match at x=30 and gap at x=42
+        for y in 6..<12 {
+            #expect(sampleRGBA(dashed, x: 30, y: y) == sampleRGBA(solid, x: 30, y: y))
+            #expect(sampleRGBA(dashed, x: 42, y: y).a == 0)
         }
-        #expect(sawDashMatchingSolid && sawClearGap)
+        #expect(sampleRGBA(solid, x: 30, y: 8).a > 250 && sampleRGBA(solid, x: 30, y: 9).a > 250)
 
-        // Curved top-right corner arc (center x=114, y=22, radius=13): contains both solid-matching dashes and transparent gaps
-        var cornerLit = 0
-        var cornerGap = 0
-        for deg in stride(from: 5, through: 85, by: 5) {
-            let rad = Float(deg) * (.pi / 180.0)
-            let px = Int((114.0 + 13.0 * sin(rad)).rounded())
-            let py = Int((22.0 - 13.0 * cos(rad)).rounded())
-            let da = sampleRGBA(dashed, x: px, y: py).a
-            let sa = sampleRGBA(solid, x: px, y: py).a
-            if da > 120 && abs(Int(da) - Int(sa)) <= 3 { cornerLit += 1 }
-            if da < 15 { cornerGap += 1 }
+        // Top-right corner arc (centre line radius 13 about (114, 22)): continues from gap into dash
+        let corner: [UInt8] = (0...16).map { n in
+            let a = Float(n) / 16.0 * (.pi / 2.0)
+            return sampleRGBA(dashed, x: Int(114.0 + 13.0 * sin(a)), y: Int(22.0 - 13.0 * cos(a))).a
         }
-        #expect(cornerLit > 0 && cornerGap > 0)
+        #expect(corner[..<2].allSatisfy { $0 == 0 } && corner[6..<14].allSatisfy { $0 > 150 })
+
+        // Filled + phase 2pt (4px) shifts gap to x=38 showing dark fill, while dash draws over fill at x=26
+        let dark = sampleRGBA(filled, x: 68, y: 20)
+        #expect(dark.a > 250 && dark.r < 100)
+        #expect(sampleRGBA(filled, x: 38, y: 8) == dark)
+        #expect(sampleRGBA(filled, x: 26, y: 8).r > 250)
     }
 }
 #endif

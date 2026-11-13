@@ -7,6 +7,7 @@ import RuneRef
 #if canImport(Metal) && canImport(QuartzCore)
 import Metal
 import QuartzCore
+#endif
 
 @Suite("Render Runtime Blend, Format & Tx Blur Parity Tests")
 struct RenderRuntimeBlendTxTests {
@@ -168,32 +169,6 @@ struct RenderRuntimeBlendTxTests {
         #expect(srgbInst.fill.y != linearInst.fill.y || rfLinear.srgbBlend != rfSrgb.srgbBlend)
     }
 
-    /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:56` `a_self_drawn_runtime_renders_gamma_blended_pixels`
-    @Test("srgb_blend_runtime.rs:56 a_self_drawn_runtime_renders_gamma_blended_pixels")
-    func selfDrawnRuntimeRendersGammaBlendedPixels() throws {
-        let renderer = try MetalRenderer()
-
-        let rtGamma = makeBlendTestRuntime(srgbBlend: true)
-        _ = rtGamma.renderFrame(at: 0.0)
-        rtGamma.pointerMove(to: Vec2(10, 10), at: 0.01)
-        let imgGamma = try renderer.renderOffscreen(rtGamma.renderFrame(at: 0.02))
-        let pxGamma = sampleRGBA(imgGamma, x: 10, y: 10)
-        #expect(pxGamma.r >= 253)
-        #expect(abs(Int(pxGamma.g) - 128) <= 2)
-        #expect(abs(Int(pxGamma.b) - 128) <= 2)
-        #expect(pxGamma.a == 255)
-
-        let rtLinear = makeBlendTestRuntime(srgbBlend: false)
-        _ = rtLinear.renderFrame(at: 0.0)
-        rtLinear.pointerMove(to: Vec2(10, 10), at: 0.01)
-        let imgLinear = try renderer.renderOffscreen(rtLinear.renderFrame(at: 0.02))
-        let pxLinear = sampleRGBA(imgLinear, x: 10, y: 10)
-        #expect(pxLinear.r >= 253)
-        #expect(abs(Int(pxLinear.g) - 188) <= 2)
-        #expect(abs(Int(pxLinear.b) - 188) <= 2)
-        #expect(pxLinear.a == 255)
-    }
-
     /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:65` `switching_blend_mode_redraws`
     @Test("srgb_blend_runtime.rs:65 switching_blend_mode_redraws")
     func switchingBlendModeRedraws() {
@@ -250,6 +225,33 @@ struct RenderRuntimeBlendTxTests {
         rt.pointerUp(at: Vec2(20, 20), button: .primary, at: 0.04)
         #expect(rt.srgbBlend == false)
         #expect(rt.renderFrame(at: 0.04).srgbBlend == false)
+    }
+
+#if canImport(Metal) && canImport(QuartzCore)
+    /// Upstream: `crates/rune/tests/srgb_blend_runtime.rs:56` `a_self_drawn_runtime_renders_gamma_blended_pixels`
+    @Test("srgb_blend_runtime.rs:56 a_self_drawn_runtime_renders_gamma_blended_pixels")
+    func selfDrawnRuntimeRendersGammaBlendedPixels() throws {
+        let renderer = try MetalRenderer()
+
+        let rtGamma = makeBlendTestRuntime(srgbBlend: true)
+        _ = rtGamma.renderFrame(at: 0.0)
+        rtGamma.pointerMove(to: Vec2(10, 10), at: 0.01)
+        let imgGamma = try renderer.renderOffscreen(rtGamma.renderFrame(at: 0.02))
+        let pxGamma = sampleRGBA(imgGamma, x: 10, y: 10)
+        #expect(pxGamma.r >= 253)
+        #expect(abs(Int(pxGamma.g) - 128) <= 2)
+        #expect(abs(Int(pxGamma.b) - 128) <= 2)
+        #expect(pxGamma.a == 255)
+
+        let rtLinear = makeBlendTestRuntime(srgbBlend: false)
+        _ = rtLinear.renderFrame(at: 0.0)
+        rtLinear.pointerMove(to: Vec2(10, 10), at: 0.01)
+        let imgLinear = try renderer.renderOffscreen(rtLinear.renderFrame(at: 0.02))
+        let pxLinear = sampleRGBA(imgLinear, x: 10, y: 10)
+        #expect(pxLinear.r >= 253)
+        #expect(abs(Int(pxLinear.g) - 188) <= 2)
+        #expect(abs(Int(pxLinear.b) - 188) <= 2)
+        #expect(pxLinear.a == 255)
     }
 
     private final class BlendTrackingCompositor: Compositor {
@@ -363,5 +365,5 @@ struct RenderRuntimeBlendTxTests {
         #expect(renderer.renderEngine.pipelineFloat != nil)
         #expect(renderer.hasCompiledExtendedShaders)
     }
-}
 #endif
+}
