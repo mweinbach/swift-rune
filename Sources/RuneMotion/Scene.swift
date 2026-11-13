@@ -1977,6 +1977,39 @@ public struct Scene: Sendable {
             let parentRemainedPresent = (pIdx == Self.noneIdx) || seen.contains(nodes[Int(pIdx)].id)
             guard parentRemainedPresent else { continue }
             if !nodes[i].compatHadTransition || ((snapOmittedNonExiting || unmountNewOmissions) && !nodes[i].presence.isExiting) {
+                if !nodes[i].compatHadTransition && !snapOmittedNonExiting && !unmountNewOmissions {
+                    // Detach any active transitioning flights under an un-transitioned parent so they fade out rather than popping.
+                    var queue: [UInt32] = []
+                    var c = nodes[i].firstChild
+                    while c != Self.noneIdx {
+                        queue.append(c)
+                        c = nodes[Int(c)].nextSibling
+                    }
+                    var qIdx = 0
+                    while qIdx < queue.count {
+                        let di = Int(queue[qIdx])
+                        qIdx += 1
+                        guard nodes[di].alive else { continue }
+                        if !seen.contains(nodes[di].id) && !matchedRemovedIds.contains(nodes[di].id),
+                           nodes[di].path != nil && nodes[di].compatHadTransition {
+                            let pw = parentTargetOrigin(di)
+                            if var sp = nodes[di].path {
+                                sp.endLocal = sp.endLocal.translated(pw)
+                                sp.origin = .zero
+                                nodes[di].path = sp
+                            }
+                            nodes[di].frame = nodes[di].frame.translated(pw)
+                            reparentSlot(di, to: nil)
+                            remove(nodes[di].id)
+                            continue
+                        }
+                        var dc = nodes[di].firstChild
+                        while dc != Self.noneIdx {
+                            queue.append(dc)
+                            dc = nodes[Int(dc)].nextSibling
+                        }
+                    }
+                }
                 unmount(nid)
             } else if !nodes[i].presence.isExiting {
                 remove(nid)

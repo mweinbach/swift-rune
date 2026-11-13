@@ -64,6 +64,8 @@ internal extension Runtime {
         snap: FlatNode,
         el: El<State>,
         text: String,
+        authoredText: String? = nil,
+        caseMap: TextCaseMapping? = nil,
         shaped: ShapedText,
         elided: TextElision? = nil,
         textOriginX: Float,
@@ -87,7 +89,8 @@ internal extension Runtime {
         interactiveHits: inout [HelpInteractiveHitRecord]
     ) -> [TextLinkInkRange] {
         guard hasActiveTextLinks(el), !isExiting else { return [] }
-        let utf8Bytes = Array(text.utf8)
+        let rawString = authoredText ?? text
+        let utf8Bytes = Array(rawString.utf8)
         let len = utf8Bytes.count
         guard len > 0 else { return [] }
 
@@ -98,11 +101,18 @@ internal extension Runtime {
         var nodeBoxes: [TextLinkBox] = []
         var inkRanges: [TextLinkInkRange] = []
 
-        let drawnText = elided != nil ? shaped.drawnText : text
+        let drawnText = elided != nil ? shaped.drawnText : rawString
         let drawnBytes = Array(drawnText.utf8)
         let drawnLen = drawnBytes.count
-        let mappedLinks: [(origIndex: Int, link: TextLink)] = elided.map {
-            $0.mapLinks(el.textLinks, contentLength: len)
+        let mappedLinks: [(origIndex: Int, link: TextLink)] = elided.map { elision in
+            let displayedLinks: [TextLink] = caseMap.map { cm in
+                el.textLinks.map { lk in
+                    var copy = lk
+                    copy.byteRange = cm.displayedRange(forSourceUTF8Range: lk.byteRange)
+                    return copy
+                }
+            } ?? el.textLinks
+            return elision.mapLinks(displayedLinks, contentLength: text.utf8.count)
         } ?? Array(el.textLinks.enumerated()).map { ($0.offset, $0.element) }
 
         for (k, link) in mappedLinks {
@@ -110,7 +120,8 @@ internal extension Runtime {
             let b = max(a, min(link.byteRange.upperBound, drawnLen))
             guard a < b else { continue }
 
-            let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pxScale)
+            let shapeRange = (elided != nil) ? (a..<b) : (caseMap?.displayedRange(forSourceUTF8Range: a..<b) ?? (a..<b))
+            let localBoxes = textSystem.selectionRects(in: shaped, utf8Range: shapeRange, pixelScale: pxScale)
             guard !localBoxes.isEmpty else { continue }
 
             var winRects: [SIMD4<Float>] = []

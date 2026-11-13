@@ -257,7 +257,8 @@ extension Runtime {
             curOffsetY = max(0, total - vpH)
             scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
             wasPinnedToBottom.insert(vpPath)
-        } else if let anchorKey = vState.lastAnchorKey,
+        } else if curOffsetY > 0.5,
+                  let anchorKey = vState.lastAnchorKey,
                   !scrollRequestsState.owns(vpPath),
                   !directScrolledPaths.contains(vpPath),
                   let anchorIdx = keys.firstIndex(of: anchorKey) {
