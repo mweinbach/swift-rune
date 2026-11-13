@@ -41,6 +41,11 @@ public struct ElementInfo: Sendable, Equatable {
     public var scrolled: [Float]
     public var caret: [Float]?
     public var secure: Bool = false
+    public var disabled: Bool = false
+    public var checked: A11yChecked? = nil
+    public var a11yValue: String? = nil
+    public var a11yDescription: String? = nil
+    public var a11yHidden: Bool = false
 }
 
 /// Retained stateful coordinator driving declarative `El<State>` views, layout, `Scene` motion,
@@ -61,6 +66,24 @@ public final class Runtime<State> {
         var clipRect: MotionRect
         var effectiveInert: Bool
         var zOrder: Int
+        var inheritedScale: Float = 1.0
+        var activeClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = nil
+    }
+
+    private struct WalkItem {
+        var el: El<State>
+        var solved: LayoutEngine.ResultNode
+        var resolvedKey: String?
+        var path: String
+        var parentIdx: Int?
+        var parentOrigin: Vec2
+        var parentScroll: Vec2
+        var parentScale: Float
+        var inheritedClip: MotionRect
+        var inheritedInert: Bool
+        var inheritedZ: Int
+        var inInstantSubtree: Bool
+        var inheritedClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)?
     }
 
     private struct DragSession {
@@ -235,8 +258,13 @@ public final class Runtime<State> {
     // Scroll state keyed by element path
     private var scrollOffsets: [String: Vec2] = [:]
     private var scrollMaxExtents: [String: Vec2] = [:]
+    private var scrollViewportSizes: [String: Vec2] = [:]
+    private var scrollContentSizes: [String: Vec2] = [:]
     private var wasPinnedToBottom: Set<String> = []
     private var autofocusAppliedPaths: Set<String> = []
+    private var loopRuntime = LoopRuntime()
+    private var enterDelays: [NodeId: Double] = [:]
+    private var releasedEnterDelays: Set<NodeId> = []
 
     // Live property tracking `(path, target) -> lastSeenSequence`
     private struct LiveKey: Hashable {
@@ -435,6 +463,19 @@ public final class Runtime<State> {
             node.el.role != .textInput
     }
 
+    /// Earliest future wall-clock timestamp when an active `enterDelay` or `looping`/`cycle` animation needs a frame.
+    public func nextWakeDeadline(after now: Double) -> Double? {
+        var best: Double? = nil
+        for readyAt in enterDelays.values where readyAt > now {
+            best = best.map { min($0, readyAt) } ?? readyAt
+        }
+        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
+            let t = now + loopInterval
+            best = best.map { min($0, t) } ?? t
+        }
+        return best
+    }
+
     @inline(__always)
     private func dirtyCommit(at now: Double) {
         needsCommit = true
@@ -453,6 +494,17 @@ public final class Runtime<State> {
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
         _ = runPoll(at: now)
+
+        // Release any `enterDelay` elements whose wait window has elapsed
+        var releasedAny = false
+        for (nid, readyAt) in enterDelays where now >= readyAt {
+            enterDelays.removeValue(forKey: nid)
+            releasedEnterDelays.insert(nid)
+            releasedAny = true
+        }
+        if releasedAny && !needsCommit {
+            commitTree(at: now, cut: false)
+        }
 
         // Check if any `LiveText` changed; if a fixed-box LiveText changed we refresh its text without full commit if possible
         for (_, idx) in nodeByPath {
@@ -504,7 +556,12 @@ public final class Runtime<State> {
         let liveActive = updateLiveBindings(at: now)
         liveStore.sample(at: now)
 
-        isAnimating = frameOut.isAnimating || scrollStore.isAnimating || liveStore.isAnimating || liveActive
+        isAnimating = frameOut.isAnimating
+            || scrollStore.isAnimating
+            || liveStore.isAnimating
+            || liveActive
+            || !enterDelays.isEmpty
+            || loopRuntime.hasActiveLoops(at: now, reducedMotion: reducedMotion)
 
         // Prune snapshots of exiting nodes that have finished exiting
         let activeIds = Set(frameOut.nodes.map(\.id))
@@ -516,6 +573,10 @@ public final class Runtime<State> {
     // MARK: - View Commit, Reconciliation & Layout
 
     private func commitTree(at now: Double, cut: Bool) {
+        if cut {
+            enterDelays.removeAll()
+            releasedEnterDelays.removeAll()
+        }
         viewCommitCount += 1
         var cx = Cx<State>(
             viewport: viewport,
@@ -529,10 +590,35 @@ public final class Runtime<State> {
             waker: waker,
             scrollLookup: { [weak self] key in
                 guard let self else { return .zero }
-                if let match = self.flatNodes.first(where: { $0.key == key }) {
+                if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
                     return self.scrollOffsets[match.path] ?? .zero
                 }
                 return .zero
+            },
+            scrollMaxLookup: { [weak self] key in
+                guard let self else { return .zero }
+                if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
+                    return self.scrollMaxExtents[match.path] ?? .zero
+                }
+                return .zero
+            },
+            viewportSizeLookup: { [weak self] key in
+                guard let self else { return .zero }
+                if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
+                    return self.scrollViewportSizes[match.path] ?? Vec2(match.targetRect.width, match.targetRect.height)
+                }
+                return .zero
+            },
+            contentSizeLookup: { [weak self] key in
+                guard let self else { return .zero }
+                if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {
+                    return self.scrollContentSizes[match.path] ?? match.contentSize
+                }
+                return .zero
+            },
+            layoutRectLookup: { [weak self] key in
+                guard let self else { return nil }
+                return self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })?.targetRect
             }
         )
         let rootEl = view(state, &cx)
@@ -553,43 +639,46 @@ public final class Runtime<State> {
         var newByPath: [String: Int] = [:]
         var newById: [NodeId: FlatNode] = [:]
         var specs: [NodeSpec] = []
+        var loopSpecs: [(id: NodeId, spec: LoopSpec)] = []
         var warnings: [String] = []
+        let prevMountedIds = Set(nodeById.keys)
 
         let fullWindowClip = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
 
-        func walk(
-            el: El<State>,
-            solved: LayoutEngine.ResultNode,
-            parentIdx: Int?,
-            parentPath: String,
-            siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int],
-            parentOrigin: Vec2,
-            parentScroll: Vec2,
-            inheritedClip: MotionRect,
-            inheritedInert: Bool,
-            inheritedZ: Int
-        ) {
-            let resolvedKey: String?
-            let segment: String
-            if let rawK = el.keyId {
-                let count = siblingKeysSeen[rawK, default: 0]
-                siblingKeysSeen[rawK] = count + 1
-                if count == 0 {
-                    resolvedKey = rawK
-                    segment = "@\(rawK)"
-                } else {
-                    let dup = "\(rawK)#dup\(count)"
-                    resolvedKey = dup
-                    segment = "@\(dup)"
-                    warnings.append("Duplicate sibling key '\(rawK)' renamed to '\(dup)' under \(parentPath)")
-                }
-            } else {
-                resolvedKey = nil
-                segment = "\(siblingIndex)"
-            }
+        let rootResolvedKey: String? = rootEl.keyId
+        var walkStack: [WalkItem] = [
+            WalkItem(
+                el: rootEl,
+                solved: solvedRoot,
+                resolvedKey: rootResolvedKey,
+                path: "/0",
+                parentIdx: nil,
+                parentOrigin: .zero,
+                parentScroll: .zero,
+                parentScale: 1.0,
+                inheritedClip: fullWindowClip,
+                inheritedInert: false,
+                inheritedZ: 0,
+                inInstantSubtree: false,
+                inheritedClipFade: nil
+            )
+        ]
 
-            let path = parentPath.isEmpty ? "/0" : "\(parentPath)/\(segment)"
+        while let item = walkStack.popLast() {
+            let el = item.el
+            let solved = item.solved
+            let resolvedKey = item.resolvedKey
+            let path = item.path
+            let parentIdx = item.parentIdx
+            let parentOrigin = item.parentOrigin
+            let parentScroll = item.parentScroll
+            let parentScale = item.parentScale
+            let inheritedClip = item.inheritedClip
+            let inheritedInert = item.inheritedInert
+            let inheritedZ = item.inheritedZ
+            let inInstantSubtree = item.inInstantSubtree
+            let inheritedClipFade = item.inheritedClipFade
+
             let nid: NodeId
             if el.layoutAnim?.travel == .screen, let rk = resolvedKey {
                 nid = NodeId.hash("screen:@" + rk)
@@ -598,8 +687,24 @@ public final class Runtime<State> {
             }
 
             let localRect = solved.layout.localRect
-            let worldX = parentOrigin.x + localRect.x - parentScroll.x
+            var worldX = parentOrigin.x + localRect.x - parentScroll.x
             var worldY = parentOrigin.y + localRect.y - parentScroll.y
+            var anchorScaleFactor: Float = 1.0
+
+            if let a = el.anchor,
+               let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
+                let zoom = (!a.unscaled && el.scale == Vec2(1, 1)) ? max(0.001, anchorFlat.inheritedScale) : 1.0
+                anchorScaleFactor = zoom
+                let tr = anchorFlat.targetRect
+                let placed = anchorPosition(
+                    a,
+                    trigger: [tr.left, tr.top, tr.right, tr.bottom],
+                    size: (localRect.width * zoom, localRect.height * zoom),
+                    viewport: (viewport.x, viewport.y)
+                )
+                worldX = placed.0
+                worldY = placed.1
+            }
 
             // Apply sticky pinning inside scroll viewport if `.stickyTop` / `.stickyBottom` is set
             if let sticky = el.layout.sticky {
@@ -616,10 +721,14 @@ public final class Runtime<State> {
             }
 
             let targetRect = MotionRect.fromXYWH(worldX, worldY, localRect.width, localRect.height)
+            let nodeInheritedScale = (el.anchor == nil ? parentScale : anchorScaleFactor) * el.scale.x
 
             // Update scroll bounds for scrollable containers
             var ownScroll = Vec2.zero
+            var scrollFadeInfo: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = nil
             if !el.layout.scrollAxes.isEmpty {
+                scrollViewportSizes[path] = Vec2(targetRect.width, targetRect.height)
+                scrollContentSizes[path] = solved.layout.contentSize
                 let maxSX = el.layout.scrollAxes.contains(.horizontal)
                     ? max(0, solved.layout.contentSize.x - targetRect.width)
                     : 0
@@ -644,18 +753,51 @@ public final class Runtime<State> {
                 )
                 scrollOffsets[path] = curScroll
                 ownScroll = curScroll
+
+                if el.scrollEdgeFadeWidth > 0 {
+                    let w = el.scrollEdgeFadeWidth
+                    let hidTop = curScroll.y
+                    let hidBot = max(0, maxSY - curScroll.y)
+                    let hidLeft = curScroll.x
+                    let hidRight = max(0, maxSX - curScroll.x)
+                    let topW: Float = (el.layout.scrollAxes.contains(.vertical) && hidTop > 0.5) ? w : 0
+                    let botW: Float = (el.layout.scrollAxes.contains(.vertical) && hidBot > 0.5) ? w : 0
+                    let leftW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidLeft > 0.5) ? w : 0
+                    let rightW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidRight > 0.5) ? w : 0
+                    if topW > 0 || botW > 0 || leftW > 0 || rightW > 0 {
+                        let minTop = 1.0 - min(1.0, hidTop / 15.0)
+                        let minBot = 1.0 - min(1.0, hidBot / 15.0)
+                        let minLeft = 1.0 - min(1.0, hidLeft / 15.0)
+                        let minRight = 1.0 - min(1.0, hidRight / 15.0)
+                        scrollFadeInfo = (
+                            rect: intersectRects(inheritedClip, targetRect),
+                            widths: SIMD4<Float>(leftW, topW, rightW, botW),
+                            minAlpha: SIMD4<Float>(minLeft, minTop, minRight, minBot)
+                        )
+                    }
+                }
             }
 
             let ownZ = el.zIndex != 0 ? el.zIndex : inheritedZ
             let effectiveInert = inheritedInert || el.isInert
 
-            // Children clip against this node if `clipOverflow` is true
+            // Children clip against this node if `clipOverflow`, `clipRadius`, or `clipFade` is set
             let childClip: MotionRect
-            if el.layout.clipOverflow {
+            if el.layout.clipOverflow || el.clipRadius != nil || el.clipFade != nil {
                 childClip = intersectRects(inheritedClip, targetRect)
             } else {
                 childClip = inheritedClip
             }
+
+            let childClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = {
+                if let sf = scrollFadeInfo {
+                    return sf
+                }
+                if let cf = el.clipFade {
+                    return (rect: intersectRects(inheritedClip, targetRect), widths: cf, minAlpha: .zero)
+                }
+                return inheritedClipFade
+            }()
 
             let myIndex = newFlat.count
             let flat = FlatNode(
@@ -669,7 +811,9 @@ public final class Runtime<State> {
                 contentSize: solved.layout.contentSize,
                 clipRect: inheritedClip,
                 effectiveInert: effectiveInert,
-                zOrder: ownZ
+                zOrder: ownZ,
+                inheritedScale: nodeInheritedScale,
+                activeClipFade: inheritedClipFade
             )
             newFlat.append(flat)
             newByPath[path] = myIndex
@@ -696,64 +840,115 @@ public final class Runtime<State> {
                 effectiveFill = blendColorOver(bottom: effectiveFill, top: hBg)
             }
 
-            var effectiveScale = el.scale
+            var effectiveScale = Vec2(el.scale.x * anchorScaleFactor, el.scale.y * anchorScaleFactor)
             if isPressed, let ps = el.pressScaleFactor {
                 effectiveScale = Vec2(effectiveScale.x * ps, effectiveScale.y * ps)
             }
 
+            let ancestorInstant = inInstantSubtree && !el.hasAnimatedChanges
+            let childInstant = ancestorInstant || el.hasInstantChanges
+            let selfInstantLayoutOrStyle = childInstant
+
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
             // Provide a subtle default interactive spring when pressScale / hover / press is used
-            let styleSp = el.styleSpring ?? ((el.pressScaleFactor != nil || el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
+            var styleSp = selfInstantLayoutOrStyle
+                ? ((el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
+                : (el.styleSpring ?? ((el.pressScaleFactor != nil || el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil))
+            var layoutAnimSpec = selfInstantLayoutOrStyle ? nil : el.layoutAnim
+            var specTransition = ancestorInstant ? nil : el.transition
+            var specRect = targetRect
+            var specOpacity = el.opacity
+            var specScale = effectiveScale
+            var specBlur = el.blur
+
+            let isFreshMount = !prevMountedIds.contains(nid)
+            if el.enterDelay > 0 && viewCommitCount > 1 && !cut && !ancestorInstant && isFreshMount && !releasedEnterDelays.contains(nid) && enterDelays[nid] == nil {
+                enterDelays[nid] = now + Double(el.enterDelay)
+            }
+            if let readyAt = enterDelays[nid], now < readyAt {
+                let eff = el.transition?.insertion
+                specOpacity = eff?.zeroOpacity ?? (el.transition != nil ? 0 : el.opacity)
+                if let eff {
+                    specScale = Vec2(specScale.x * eff.zeroScale.x, specScale.y * eff.zeroScale.y)
+                    let dx = eff.pointOffset.x + eff.relativeOffset.x * targetRect.width
+                    let dy = eff.pointOffset.y + eff.relativeOffset.y * targetRect.height
+                    specRect = targetRect.offsetBy(Vec2(dx, dy))
+                    specBlur = max(specBlur, eff.zeroBlur)
+                }
+                specTransition = nil
+                layoutAnimSpec = nil
+                styleSp = nil
+            } else if releasedEnterDelays.remove(nid) != nil {
+                let enterSp = el.transition?.insertion.spring ?? el.styleSpring ?? MotionTokens.SETTLE
+                styleSp = enterSp
+                layoutAnimSpec = el.layoutAnim ?? LayoutAnim(spring: enterSp)
+            }
+
+            if let ls = el.loopingSpec {
+                loopSpecs.append((id: nid, spec: ls))
+            }
 
             specs.append(NodeSpec(
                 id: nid,
                 parent: parentNid,
-                rect: targetRect,
-                opacity: el.opacity,
-                scale: effectiveScale,
+                rect: specRect,
+                opacity: specOpacity,
+                scale: specScale,
                 rotate: el.rotate,
                 offset: el.offset,
                 corners: el.corners,
-                blur: el.blur,
+                blur: specBlur,
                 fill: effectiveFill.motionColor,
                 border: el.borderColor.motionColor,
-                layoutAnim: el.layoutAnim,
+                layoutAnim: layoutAnimSpec,
                 styleSpring: styleSp,
-                transition: el.transition
+                transition: specTransition
             ))
 
             var childKeysSeen: [String: Int] = [:]
+            var childItems: [WalkItem] = []
+            childItems.reserveCapacity(min(el.children.count, solved.children.count))
             for (cIdx, childEl) in el.children.enumerated() where cIdx < solved.children.count {
-                walk(
+                let childResolvedKey: String?
+                let childSegment: String
+                if let rawK = childEl.keyId {
+                    let count = childKeysSeen[rawK, default: 0]
+                    childKeysSeen[rawK] = count + 1
+                    if count == 0 {
+                        childResolvedKey = rawK
+                        childSegment = "@\(rawK)"
+                    } else {
+                        let dup = "\(rawK)#dup\(count)"
+                        childResolvedKey = dup
+                        childSegment = "@\(dup)"
+                        warnings.append("Duplicate sibling key '\(rawK)' renamed to '\(dup)' under \(path)")
+                    }
+                } else {
+                    childResolvedKey = nil
+                    childSegment = "\(cIdx)"
+                }
+                childItems.append(WalkItem(
                     el: childEl,
                     solved: solved.children[cIdx],
+                    resolvedKey: childResolvedKey,
+                    path: "\(path)/\(childSegment)",
                     parentIdx: myIndex,
-                    parentPath: path,
-                    siblingIndex: cIdx,
-                    siblingKeysSeen: &childKeysSeen,
                     parentOrigin: Vec2(worldX, worldY),
                     parentScroll: ownScroll,
+                    parentScale: nodeInheritedScale,
                     inheritedClip: childClip,
                     inheritedInert: effectiveInert,
-                    inheritedZ: ownZ
-                )
+                    inheritedZ: ownZ,
+                    inInstantSubtree: childInstant,
+                    inheritedClipFade: childClipFade
+                ))
             }
+            walkStack.append(contentsOf: childItems.reversed())
         }
-
-        var rootSiblingKeys: [String: Int] = [:]
-        walk(
-            el: rootEl,
-            solved: solvedRoot,
-            parentIdx: nil,
-            parentPath: "",
-            siblingIndex: 0,
-            siblingKeysSeen: &rootSiblingKeys,
-            parentOrigin: .zero,
-            parentScroll: .zero,
-            inheritedClip: fullWindowClip,
-            inheritedInert: false,
-            inheritedZ: 0
-        )
+        loopRuntime.sync(specs: loopSpecs, at: now, reducedMotion: reducedMotion, cut: cut)
+        if cut {
+            loopRuntime.settleAll(at: now)
+        }
 
         // Apply modal inertness: if any mounted subtree is `.modal(true)`, elements outside the topmost modal become inert!
         if let modalRootIdx = newFlat.indices.last(where: { newFlat[$0].el.isModal }) {
@@ -923,14 +1118,22 @@ public final class Runtime<State> {
             nodeByFrameId[p.id] = p
         }
 
-        // Compute own presented rect, opacity, and scale (applying Live bindings on top of Scene)
+        // Compute own presented rect, opacity, scale, and rotation (applying Live & Loop tracks on top of Scene)
         var ownOpacityById: [NodeId: Float] = [:]
         var ownScaleById: [NodeId: Vec2] = [:]
+        var ownRotateById: [NodeId: Float] = [:]
         for p in frameOut.nodes {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { continue }
             var rect = p.rect
             var op = p.opacity
             var sc = p.scale
+            var rot = p.rotate
+
+            if let ls = loopRuntime.sample(id: p.id, nodeSize: rect.size, at: now, reducedMotion: reducedMotion) {
+                op *= ls.opacity
+                rot += ls.rotation
+                rect = rect.offsetBy(ls.offset)
+            }
 
             for b in snap.el.liveBindings {
                 let lnid = NodeId.hash("live:\(snap.path):\(b.target)")
@@ -958,6 +1161,7 @@ public final class Runtime<State> {
             presentedRectById[p.id] = rect
             ownOpacityById[p.id] = op.clamped(to: 0...1)
             ownScaleById[p.id] = sc
+            ownRotateById[p.id] = rot
             let parentSc = p.parent.flatMap { presentedScaleById[$0] } ?? Vec2(1, 1)
             presentedScaleById[p.id] = Vec2(sc.x * parentSc.x, sc.y * parentSc.y)
 
@@ -966,6 +1170,41 @@ public final class Runtime<State> {
             } else {
                 rootNodes.append(p)
             }
+        }
+
+        // Precompute `hoverAlone` & `hoverGroupShared` active state from pointer / keyboard focus
+        let ptrPos = pointerPosition
+        let ptrInside: (FlatNode) -> Bool = { node in
+            guard ptrPos.x > -9000, ptrPos.y > -9000 else { return false }
+            let r = presentedRectById[node.nodeId] ?? node.targetRect
+            return halfOpenContains(intersectRects(node.clipRect, r), ptrPos)
+        }
+        let alonePath: String? = flatNodes
+            .filter { $0.el.isHoverAlone && !$0.effectiveInert && ptrInside($0) }
+            .max(by: { $0.path.count < $1.path.count })?.path
+        let sharedHoverKeys: Set<String> = Set(flatNodes.compactMap { node -> String? in
+            guard let k = node.el.hoverGroupShare, !node.effectiveInert else { return nil }
+            let focusIn = focusVisible && (focusedPath == node.path || (focusedPath?.hasPrefix(node.path + "/") ?? false))
+            return (ptrInside(node) || focusIn) ? k : nil
+        })
+        func isGroupHovered(_ node: FlatNode) -> Bool {
+            guard !node.effectiveInert else { return false }
+            if let alonePath, alonePath != node.path, alonePath.hasPrefix(node.path + "/") {
+                return false
+            }
+            if hoveredPath == node.path || (hoveredPath?.hasPrefix(node.path + "/") ?? false) {
+                return true
+            }
+            if ptrInside(node) {
+                return true
+            }
+            if let share = node.el.hoverGroupShare, sharedHoverKeys.contains(share) {
+                return true
+            }
+            if focusVisible, let fp = focusedPath, (fp == node.path || fp.hasPrefix(node.path + "/")) {
+                return true
+            }
+            return false
         }
 
         func sortByZOrder(_ nodes: [Presented]) -> [Presented] {
@@ -994,20 +1233,26 @@ public final class Runtime<State> {
             ancestorTurn: Turn?,
             outerTurnClip: MotionRect?,
             localTurnClip: MotionRect?,
-            parentPath: String?
+            parentPath: String?,
+            nearestGroupHovered: Bool
         ) {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return }
             let el = snap.el
             let rect = presentedRectById[p.id] ?? p.rect
             let ownOp = ownOpacityById[p.id] ?? p.opacity
-            let alpha = (ownOp * ancestorOpacity).clamped(to: 0...1)
+            let groupFactor: Float = {
+                guard let (restOp, hovOp) = el.groupOpacity else { return 1.0 }
+                return nearestGroupHovered ? hovOp : restOp
+            }()
+            let alpha = (ownOp * ancestorOpacity * groupFactor).clamped(to: 0...1)
             let scaleVec = presentedScaleById[p.id] ?? p.scale
+            let effRotate = ownRotateById[p.id] ?? p.rotate
 
-            let ownHasTurn = abs(p.rotate) > 1e-6
+            let ownHasTurn = abs(effRotate) > 1e-6
             let nodeTurn: Turn?
             if ownHasTurn {
                 let pivot = Vec2(rect.x + rect.width * el.origin.x, rect.y + rect.height * el.origin.y)
-                let localTurn = Turn.about(pivot, radians: p.rotate)
+                let localTurn = Turn.about(pivot, radians: effRotate)
                 nodeTurn = ancestorTurn.map { $0.after(localTurn) } ?? localTurn
             } else {
                 nodeTurn = ancestorTurn
@@ -1017,14 +1262,22 @@ public final class Runtime<State> {
             let effectiveOuterClip: MotionRect
             let effectiveHitClip: MotionRect
             let childLocalTurnClip: MotionRect?
-            if let outerTurnClip {
+            if ownHasTurn {
+                let outerBase: MotionRect
+                if let outerTurnClip, let localTurnClip, let ancestorTurn {
+                    outerBase = intersectRects(outerTurnClip, ancestorTurn.bbox(localTurnClip))
+                } else if let outerTurnClip {
+                    outerBase = outerTurnClip
+                } else {
+                    outerBase = parentWindowClip
+                }
+                effectiveOuterClip = outerBase
+                effectiveHitClip = windowRect
+                childLocalTurnClip = el.layout.clipOverflow ? rect : windowRect
+            } else if let outerTurnClip {
                 effectiveOuterClip = outerTurnClip
                 effectiveHitClip = localTurnClip ?? windowRect
                 childLocalTurnClip = el.layout.clipOverflow ? intersectRects(effectiveHitClip, rect) : effectiveHitClip
-            } else if ownHasTurn {
-                effectiveOuterClip = parentWindowClip
-                effectiveHitClip = windowRect
-                childLocalTurnClip = el.layout.clipOverflow ? rect : windowRect
             } else {
                 effectiveOuterClip = parentWindowClip
                 effectiveHitClip = parentWindowClip
@@ -1077,7 +1330,7 @@ public final class Runtime<State> {
             let paintedLabelValue: String? = {
                 guard let raw = el.liveText?.get() ?? el.plainText else { return nil }
                 if nodeIsSecure && !el.isRevealed && !raw.isEmpty {
-                    return el.textStyle.wrap == .wrap ? "••••••••••••" : String(repeating: "•", count: raw.count)
+                    return "••••••••••••"
                 }
                 return raw
             }()
@@ -1091,6 +1344,31 @@ public final class Runtime<State> {
                 visClip.height * pxScale
             )
             let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0
+
+            let activeEdgeFade: (fade: SIMD4<Float>, origin: SIMD2<Float>) = {
+                guard let cf = snap.activeClipFade else { return (.zero, .zero) }
+                let primRect = SIMD4<Float>(rect.x * pxScale, rect.y * pxScale, rect.width * pxScale, rect.height * pxScale)
+                return AnchorLayoutHelper.edgeFadeParams(
+                    clipRect: cf.rect,
+                    primRectPx: primRect,
+                    pxScale: pxScale,
+                    left: cf.widths.x,
+                    top: cf.widths.y,
+                    right: cf.widths.z,
+                    bottom: cf.widths.w,
+                    minAlphaTop: cf.minAlpha.y,
+                    minAlphaBottom: cf.minAlpha.w,
+                    minAlphaLeft: cf.minAlpha.x,
+                    minAlphaRight: cf.minAlpha.z
+                )
+            }()
+            func attachFade(_ prim: Primitive) -> Primitive {
+                guard activeEdgeFade.fade.z != 0 else { return prim }
+                var copy = prim
+                copy.fade = activeEdgeFade.fade
+                copy.fadeOrigin = activeEdgeFade.origin
+                return copy
+            }
 
             if shouldEmit {
                 let devRect = SIMD4<Float>(
@@ -1112,7 +1390,7 @@ public final class Runtime<State> {
                         opacity: alpha,
                         blurRadius: blurPt * pxScale,
                         clip: devClip,
-                        turn: p.rotate
+                        turn: effRotate
                     ))
                 }
                 let localAlpha: Float = useLayer ? 1.0 : alpha
@@ -1181,7 +1459,7 @@ public final class Runtime<State> {
                         )
                     }
                     let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
-                    primitives.append(.roundedRect(
+                    primitives.append(attachFade(.roundedRect(
                         rect: devRect,
                         radii: devRadii,
                         fill: f4,
@@ -1189,8 +1467,8 @@ public final class Runtime<State> {
                         borderWidth: bwPx,
                         borderSides: sidePx,
                         clip: devClip,
-                        turn: useLayer ? 0 : p.rotate
-                    ))
+                        turn: useLayer ? 0 : effRotate
+                    )))
                 }
 
                 // 3. Dashed border ring
@@ -1238,15 +1516,16 @@ public final class Runtime<State> {
                 if let (svg, _) = el.iconPayload {
                     let pxSize = max(4, Int((min(rect.width, rect.height) * pxScale).rounded()))
                     let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
-                    let tint = (el.textColor ?? .white).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    primitives.append(.glyph(
+                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? .white
+                    let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    primitives.append(attachFade(.glyph(
                         rect: devRect,
                         uv: entry.uv,
                         color: tint,
                         gamma: 1.0,
                         clip: devClip,
-                        turn: useLayer ? 0 : p.rotate
-                    ))
+                        turn: useLayer ? 0 : effRotate
+                    )))
                 }
 
                 // 7. Vector Canvas Shapes (triangles & segments)
@@ -1304,7 +1583,7 @@ public final class Runtime<State> {
                 let innerW = max(0, rect.width - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
                 let textOriginX = rect.x + padL
                 let textOriginY = rect.y + padT
-                let defaultTextColor = el.textColor ?? Tok.theme(dark: systemDark).text
+                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
                     let displayStr = edit.displayString
@@ -1428,7 +1707,7 @@ public final class Runtime<State> {
                     )
                     for g in shaped.glyphs {
                         let gc = (g.color ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        primitives.append(.glyph(
+                        primitives.append(attachFade(.glyph(
                             rect: SIMD4<Float>(
                                 (textOriginX + g.rect.x * scaleVec.x) * pxScale,
                                 (textOriginY + g.rect.y * scaleVec.y) * pxScale,
@@ -1439,8 +1718,8 @@ public final class Runtime<State> {
                             color: gc,
                             gamma: systemDark ? 0.88 : 1.05,
                             clip: devClip,
-                            turn: useLayer ? 0 : p.rotate
-                        ))
+                            turn: useLayer ? 0 : effRotate
+                        )))
                     }
                 }
 
@@ -1523,11 +1802,17 @@ public final class Runtime<State> {
                 press: isPressed ? 1.0 : 0.0,
                 scrolled: [scrolled.x, scrolled.y],
                 caret: caretOut,
-                secure: nodeIsSecure
+                secure: nodeIsSecure,
+                disabled: el.a11yDisabled,
+                checked: el.a11yChecked,
+                a11yValue: el.a11yValue,
+                a11yDescription: el.a11yDescription,
+                a11yHidden: el.isA11yHidden
             ))
 
             let childAncestorOp: Float = (shouldEmit && useLayer) ? 1.0 : alpha
             let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
+            let nextGroupHovered = el.isHoverGroup ? isGroupHovered(snap) : nearestGroupHovered
             if let children = childrenByParent[p.id] {
                 for child in sortByZOrder(children) {
                     emitSubtree(
@@ -1536,7 +1821,8 @@ public final class Runtime<State> {
                         ancestorTurn: nodeTurn,
                         outerTurnClip: nextOuterClip,
                         localTurnClip: childLocalTurnClip,
-                        parentPath: snap.path
+                        parentPath: snap.path,
+                        nearestGroupHovered: nextGroupHovered
                     )
                 }
             }
@@ -1553,7 +1839,8 @@ public final class Runtime<State> {
                 ancestorTurn: nil,
                 outerTurnClip: nil,
                 localTurnClip: nil,
-                parentPath: nil
+                parentPath: nil,
+                nearestGroupHovered: false
             )
         }
 
@@ -1697,6 +1984,7 @@ public final class Runtime<State> {
         let hit = hitTest(at: pos) { node in
             let h = node.el.handlers
             return node.el.hoverBg != nil || node.el.pressBg != nil ||
+                   node.el.isHoverGroup || node.el.isHoverAlone ||
                    h.onHover != nil || h.onClick != nil || h.onClickPress != nil ||
                    h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil
         }
@@ -2000,6 +2288,52 @@ public final class Runtime<State> {
     /// Routes keyboard `KeyEvent` through active drag cancel (`Escape`), focused `TextEdit`,
     /// ancestor `onKey` handlers, `Tab` / arrow focus traversal, and app-level `globalOnKey`.
     @discardableResult
+    public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, at now: Double) -> Bool {
+        currentTime = now
+        if needsCommit {
+            commitTree(at: now, cut: forceInitialSettle)
+            needsCommit = false
+            forceInitialSettle = false
+        }
+
+        // Dispatch along focused -> ancestor chain (stopping at inert / modal boundary)
+        if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
+            var walkIdx: Int? = fIdx
+            while let curIdx = walkIdx {
+                if flatNodes[curIdx].effectiveInert { break }
+                if let onPhys = flatNodes[curIdx].el.handlers.onPhysicalInput {
+                    var tx = Tx()
+                    if onPhys(&state, event, &tx) {
+                        applyTx(tx, at: now)
+                        return true
+                    }
+                }
+                if flatNodes[curIdx].el.isModal { break }
+                walkIdx = flatNodes[curIdx].parentIndex
+            }
+        } else {
+            // If no element has focus, dispatch to non-inert physical handlers from innermost/root
+            for node in flatNodes.reversed() where !node.effectiveInert {
+                if let onPhys = node.el.handlers.onPhysicalInput {
+                    var tx = Tx()
+                    if onPhys(&state, event, &tx) {
+                        applyTx(tx, at: now)
+                        return true
+                    }
+                }
+            }
+        }
+
+        if let fallbackKey {
+            if case .key(_, _, let pressed, _) = event, !pressed {
+                return false
+            }
+            return keyDown(fallbackKey, at: now)
+        }
+        return false
+    }
+
+    @discardableResult
     public func keyDown(_ ev: KeyEvent, at now: Double) -> Bool {
         // 1. Escape cancels an in-progress drag and restores pre-drag state!
         if ev.key == .escape, let drag = activeDrag {
@@ -2188,6 +2522,11 @@ public final class Runtime<State> {
             if let ex = e.expanded { obj["expanded"] = ex }
             if e.itemSelected { obj["itemSelected"] = true }
             if e.secure { obj["secure"] = true }
+            if e.disabled { obj["disabled"] = true }
+            if let ch = e.checked { obj["checked"] = ch.rawValue }
+            if let av = e.a11yValue { obj["a11yValue"] = av }
+            if let ad = e.a11yDescription { obj["description"] = ad }
+            if e.a11yHidden { obj["a11yHidden"] = true }
             if zip(e.rect, e.target).contains(where: { abs($0 - $1) > 0.01 }) {
                 obj["target"] = e.target.map(r2)
             }
@@ -2526,30 +2865,37 @@ public final class Runtime<State> {
     }
 
     private func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
+        var resolvedEdit = edit
+        if node.el.isSecure {
+            resolvedEdit.isSecure = true
+            if node.el.isRevealed { resolvedEdit.isRevealed = true }
+        }
         let rect = presentedRectByPath[node.path] ?? node.targetRect
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
+        var hitStyle = node.el.textStyle
+        if resolvedEdit.multiline { hitStyle.wrap = .wrap }
         let shaped = textSystem.shape(
-            text: edit.displayString,
-            style: node.el.textStyle,
-            maxWidth: edit.multiline ? innerW : nil,
+            text: resolvedEdit.displayString,
+            style: hitStyle,
+            maxWidth: resolvedEdit.multiline ? innerW : nil,
             pixelScale: pixelScale,
             emitGlyphs: false
         )
         let localX = (windowPos.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x)
         let localY = (windowPos.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(0.01, sc.y)
         let hit = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
-        if edit.isSecure {
+        if resolvedEdit.isSecure {
             // Map bullet index (`•` is 3 UTF-8 bytes) back to underlying grapheme index!
             let charIdx = max(0, hit / 3)
             var byteCount = 0
-            for (i, ch) in edit.text.enumerated() {
+            for (i, ch) in resolvedEdit.text.enumerated() {
                 if i >= charIdx { break }
                 byteCount += ch.utf8.count
             }
             return byteCount
         }
-        return edit.snapToGraphemeBoundary(hit)
+        return resolvedEdit.snapToGraphemeBoundary(hit)
     }
 }
 

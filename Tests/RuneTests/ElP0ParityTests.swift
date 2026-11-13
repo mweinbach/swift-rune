@@ -217,4 +217,61 @@ struct ElP0ParityTests {
         #expect(knob?.key == "knob")
         #expect(rt.find("slider/knob") != nil)
     }
+
+    @Test("Hidden secure labels measure and paint fixed 12-bullet mask regardless of wrap or plaintext length")
+    func hiddenSecureLabelMaskMatchesLengthAgnosticLayout() throws {
+        struct State {
+            var revealed = false
+        }
+        let rt = Runtime(state: State(), viewport: Vec2(400, 200)) { s, _ in
+            col().itemsStart().gap(8)
+                .child(text("a").key("short").secure(true).revealed(s.revealed))
+                .child(text("much-longer-secret-string").key("long").secure(true).revealed(s.revealed))
+        }
+        _ = rt.frame(at: 0.0)
+        let shortInfo = try #require(rt.element(byKey: "short"))
+        let longInfo = try #require(rt.element(byKey: "long"))
+        #expect(abs(shortInfo.rect[2] - longInfo.rect[2]) < 0.01)
+        #expect(abs(shortInfo.rect[3] - longInfo.rect[3]) < 0.01)
+
+        // When revealed, true text lengths determine layout bounds
+        rt.state.revealed = true
+        rt.markNeedsCommit()
+        _ = rt.frame(at: 0.02)
+        let shortRev = try #require(rt.element(byKey: "short"))
+        let longRev = try #require(rt.element(byKey: "long"))
+        #expect(longRev.rect[2] > shortRev.rect[2] + 20)
+    }
+
+    @Test("Nested rotated element folds ancestor rotated clip into outerClip for hit-testing")
+    func nestedRotatedClipHitTesting() throws {
+        struct State {
+            var clicks = 0
+        }
+        // Outer clipped box [100..200, 100..160] centered at (150, 130), rotated 90 deg -> screen footprint [120..180, 80..180].
+        // Inner child at [100..200, 100..120] (top strip in outer's space -> right strip [160..180, 80..180] in screen space),
+        // also rotated 90 deg around its own center (150, 110) before outer's turn, extending outside outer's clip.
+        let rt = Runtime(state: State(), viewport: Vec2(400, 400)) { _, _ in
+            el().size(400, 400)
+                .child(
+                    el().key("outer")
+                        .pin(top: 100, left: 100)
+                        .size(100, 60)
+                        .clip()
+                        .rotate(.pi * 0.5)
+                        .child(
+                            el().key("inner")
+                                .size(100, 20)
+                                .rotate(.pi * 0.5)
+                                .onClick { s in s.clicks += 1 }
+                        )
+                )
+        }
+        _ = rt.frame(at: 0.0)
+        // Center of inner's [100..200, 100..120] strip inside outer's clip maps to (170, 130) after outer's 90deg turn;
+        // wait: after inner's own 90deg turn around (150,110) + outer's 90deg turn around (150,130), center (150,110) maps to (170, 130), inside outer's rotated bbox [120..180, 80..180].
+        #expect(rt.contains("inner", x: 170, y: 130) == true)
+        // Point (170, 200) lies along inner's unclipped rotated extent in outer's turned space but OUTSIDE outer's rotated clip bbox [120..180, 80..180] -> must miss!
+        #expect(rt.contains("inner", x: 170, y: 200) == false)
+    }
 }

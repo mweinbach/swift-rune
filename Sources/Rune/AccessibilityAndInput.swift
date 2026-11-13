@@ -107,7 +107,7 @@ public enum AccessibilityTreeBuilder {
         focusedKey: String? = nil,
         path: String = "root"
     ) -> AccessibilityNode? {
-        if element.isInert {
+        if element.isInert || element.isA11yHidden {
             return nil
         }
 
@@ -200,6 +200,20 @@ public enum AppKitAccessibilityMapper {
         case .menuItem: return .menuItem
         case .image, .icon: return .image
         case .separator: return .splitter
+        case .combobox: return .comboBox
+        case .listbox: return .list
+        case .option: return .menuItem
+        case .tree: return .outline
+        case .treeItem: return .row
+        case .grid: return .table
+        case .row: return .row
+        case .gridCell: return .cell
+        case .columnHeader: return .column
+        case .radiogroup: return .radioGroup
+        case .tabList: return .tabGroup
+        case .tooltip: return .helpTag
+        case .alert, .region, .main: return .group
+        case .link: return .link
         }
     }
 
@@ -292,6 +306,9 @@ public enum UIKitAccessibilityMapper {
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .textInput: return .none
         case .progress: return .updatesFrequently
+        case .combobox, .option, .link: return .button
+        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main:
+            return .staticText
         }
     }
 
