@@ -193,6 +193,26 @@ public final class AccessibilityTreeState {
         h.combine(node.isSelected)
         h.combine(node.isExpanded)
         h.combine(node.level)
+        h.combine(node.placeholder)
+        h.combine(node.range?.value)
+        h.combine(node.positionInSet)
+        h.combine(node.sizeOfSet)
+        h.combine(node.keyboardShortcut)
+        h.combine(node.url)
+        h.combine(node.activeDescendant)
+        h.combine(node.sortAscending)
+        h.combine(node.isDisabled)
+        h.combine(node.isReadOnly)
+        h.combine(node.isInvalid)
+        h.combine(node.toggled)
+        h.combine(node.selectedState)
+        h.combine(node.liveRegion)
+        h.combine(node.clipsChildren)
+        h.combine(node.scrollX)
+        h.combine(node.scrollY)
+        h.combine(node.scrollYMax)
+        h.combine(node.textSelection)
+        h.combine(node.characterCount)
         h.combine(node.isModal)
         h.combine(node.isSecure)
         h.combine(node.frame)
@@ -206,7 +226,7 @@ public final class AccessibilityTreeState {
 
 /// Nested JSON dump of a projected `AccessibilityNode` tree (`a11y/dump.rs`).
 public enum AccessibilityDump {
-    public static func dictionary(from node: AccessibilityNode) -> [String: Any] {
+    public static func dictionary(from node: AccessibilityNode, isRoot: Bool = true) -> [String: Any] {
         var dict: [String: Any] = [
             "key": node.id,
             "role": node.role.rawValue,
@@ -217,23 +237,109 @@ public enum AccessibilityDump {
                 round1(node.frame.height),
             ],
         ]
-        if let label = node.label { dict["name"] = label }
-        // Never leak plaintext for secure fields in accessibility dumps (`a11y::dump` / `D-A1`).
-        if !node.isSecure, let val = node.value { dict["value"] = val }
+        if let name = resolvedName(for: node) {
+            dict["name"] = name
+        }
+        // Static text nodes carry their content in `name` (`Role::Label`); never emit `value` for `.text` or secure fields (`dump.rs:51`).
+        if node.role != .text && !node.isSecure, let val = node.value {
+            dict["value"] = val
+        }
         if let help = node.help, help != node.label { dict["description"] = help }
-        if let heading = node.level { dict["level"] = heading }
+        if let placeholder = node.placeholder { dict["placeholder"] = placeholder }
+        if let range = node.range {
+            dict["range"] = [range.value, range.min, range.max, range.step as Any? ?? NSNull()]
+        }
+        if let heading = node.level { dict["level"] = heading + 1 }
+        if let pos = node.positionInSet { dict["position"] = pos + 1 }
+        if let size = node.sizeOfSet { dict["setSize"] = size }
+        if let shortcut = node.keyboardShortcut { dict["shortcut"] = shortcut }
+        if let url = node.url { dict["url"] = url }
+        if let active = node.activeDescendant { dict["activeDescendant"] = active }
+        if let sortAsc = node.sortAscending {
+            dict["sort"] = sortAsc ? "ascending" : "descending"
+        }
+
         var states: [String] = []
-        if node.isFocused { states.append("focused") }
-        if node.isFocusable { states.append("focusable") }
-        if node.isSelected { states.append("selected") }
+        if node.isFocused && !isRoot { states.append("focused") }
+        if node.isDisabled { states.append("disabled") }
+        if node.isReadOnly { states.append("read-only") }
+        if node.isInvalid { states.append("invalid") }
         if node.isModal { states.append("modal") }
+        if let toggled = node.toggled {
+            switch toggled {
+            case .trueState: states.append("checked")
+            case .falseState: states.append("unchecked")
+            case .mixed: states.append("mixed")
+            }
+        }
         if let exp = node.isExpanded { states.append(exp ? "expanded" : "collapsed") }
+        if let sel = node.selectedState {
+            states.append(sel ? "selected" : "unselected")
+        } else if node.isSelected {
+            states.append("selected")
+        }
+        if let live = node.liveRegion {
+            states.append(live == .assertive ? "live-assertive" : "live-polite")
+        }
+        if node.clipsChildren { states.append("clips") }
         if !states.isEmpty { dict["states"] = states }
+
         if !node.actions.isEmpty { dict["actions"] = node.actions.map(\.rawValue) }
+        if let sy = node.scrollY {
+            dict["scroll"] = [round1(node.scrollX ?? 0), round1(sy), round1(node.scrollYMax ?? 0)]
+        }
+        if let sel = node.textSelection, sel.count == 4 {
+            dict["selection"] = sel
+        }
+        if let chars = node.characterCount {
+            dict["chars"] = chars
+        }
         if !node.children.isEmpty {
-            dict["children"] = node.children.map { dictionary(from: $0) }
+            dict["children"] = node.children.map { dictionary(from: $0, isRoot: false) }
         }
         return dict
+    }
+
+    private static func resolvedName(for node: AccessibilityNode) -> String? {
+        if let label = node.label { return label }
+        if node.role == .text {
+            return node.isSecure ? nil : node.value
+        }
+        if namedByContainerContent(node.role) {
+            var parts: [String] = []
+            collectDescendantLabels(in: node.children, out: &parts)
+            return parts.isEmpty ? nil : parts.joined(separator: " ")
+        }
+        return nil
+    }
+
+    private static func namedByContainerContent(_ role: ElementRole) -> Bool {
+        switch role {
+        case .button, .checkbox, .link, .menuItem, .radio, .switchControl, .tab,
+             .listItem, .option, .treeItem, .row, .gridCell, .columnHeader, .heading, .alert:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func collectDescendantLabels(in children: [AccessibilityNode], out: inout [String]) {
+        for child in children {
+            switch child.role {
+            case .text:
+                if let text = child.isSecure ? nil : (child.label ?? child.value), !text.isEmpty {
+                    out.append(text)
+                }
+            case .image, .icon:
+                if let label = child.label, !label.isEmpty {
+                    out.append(label)
+                }
+            case .group:
+                collectDescendantLabels(in: child.children, out: &out)
+            default:
+                break
+            }
+        }
     }
 
     public static func jsonString(from node: AccessibilityNode, pretty: Bool = false) -> String {

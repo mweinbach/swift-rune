@@ -126,22 +126,77 @@ public enum TextLanguageRegistry {
     }
 
     /// Detects writing system from the characters in `text` (`rune::text::language::of_text`).
-    /// Hiragana/Katakana => Japanese; Hangul => Korean; CJK Unified Ideographs => Simplified Chinese.
-    public static func writingOfText(_ text: String) -> TextWriting? {
+    /// Kana => Japanese; Hangul => Korean; Bopomofo => Traditional Chinese; Han => `chosenLanguage` if CJK, else Simplified Chinese.
+    public static func writingOfText(_ text: String, chosenLanguage: String? = nil) -> TextWriting? {
+        guard let tag = effectiveLanguageTag(for: text, chosen: chosenLanguage) else {
+            return nil
+        }
+        return parseWriting(from: tag)?.writing
+    }
+
+    /// Computes the shaping/fallback BCP-47 language tag for `text` given interface `chosen` (`language::of_text`).
+    public static func effectiveLanguageTag(for text: String, chosen: String?) -> String? {
+        let normalizedChosen = chosen.flatMap { normalizeTag($0) }
+        if text.utf8.allSatisfy({ $0 < 0x80 }) {
+            return normalizedChosen
+        }
         var sawHan = false
+        var scriptTag: String? = nil
         for scalar in text.unicodeScalars {
             let v = scalar.value
-            if (0x3040...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) || (0x31F0...0x31FF).contains(v) || (0xFF66...0xFF9F).contains(v) {
-                return .japanese
+            if (0x3041...0x309F).contains(v) || (0x30A0...0x30FF).contains(v) || (0x31F0...0x31FF).contains(v) || (0xFF66...0xFF9F).contains(v) {
+                scriptTag = "ja"
+                break
             }
-            if (0xAC00...0xD7AF).contains(v) || (0x1100...0x11FF).contains(v) || (0x3130...0x318F).contains(v) {
-                return .korean
+            if (0x1100...0x11FF).contains(v) || (0x3130...0x318F).contains(v) || (0xA960...0xA97F).contains(v) || (0xAC00...0xD7AF).contains(v) || (0xD7B0...0xD7FF).contains(v) {
+                scriptTag = "ko"
+                break
             }
-            if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) || (0xF900...0xFAFF).contains(v) || (0x20000...0x2A6DF).contains(v) {
+            if (0x3100...0x312F).contains(v) || (0x31A0...0x31BF).contains(v) {
+                scriptTag = "zh-Hant"
+                break
+            }
+            if (0x3400...0x4DBF).contains(v) || (0x4E00...0x9FFF).contains(v) || (0xF900...0xFAFF).contains(v) || (0x20000...0x3FFFF).contains(v) {
                 sawHan = true
             }
         }
-        return sawHan ? .simplifiedChinese : nil
+        let chosenPrimary = normalizedChosen.map { primarySubtag($0) }
+        if let scriptTag {
+            let scriptPrimary = primarySubtag(scriptTag)
+            if chosenPrimary == scriptPrimary {
+                return normalizedChosen
+            }
+            return scriptTag
+        }
+        if sawHan && !(chosenPrimary == "ja" || chosenPrimary == "ko" || chosenPrimary == "zh") {
+            return "zh-Hans"
+        }
+        return normalizedChosen
+    }
+
+    /// Normalizes a single BCP-47 language tag (returns `nil` for empty/unparseable tags).
+    public static func normalizeTag(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let first = String(trimmed.split(whereSeparator: { $0 == "," || $0 == ";" }).first ?? "").trimmingCharacters(in: .whitespaces)
+        guard !first.isEmpty, first.unicodeScalars.allSatisfy({
+            ($0.value >= 0x41 && $0.value <= 0x5A)
+            || ($0.value >= 0x61 && $0.value <= 0x7A)
+            || ($0.value >= 0x30 && $0.value <= 0x39)
+            || $0 == "-" || $0 == "_"
+        }) else {
+            return nil
+        }
+        let canonical = first.replacingOccurrences(of: "_", with: "-")
+        if let parsed = parseWriting(from: canonical) {
+            return parsed.tag
+        }
+        return canonical
+    }
+
+    private static func primarySubtag(_ tag: String) -> String {
+        String(tag.split(separator: "-", maxSplits: 1).first ?? "").lowercased()
     }
 
     /// Returns indices of `names` reordered so families drawing `writing` appear first in preference order,

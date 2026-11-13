@@ -54,12 +54,32 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var label: String?
     public var value: String?
     public var help: String?
+    public var placeholder: String?
+    public var range: A11yRange?
     public var frame: MotionRect
     public var isFocused: Bool
     public var isFocusable: Bool
     public var isSelected: Bool
+    public var selectedState: Bool?
     public var isExpanded: Bool?
     public var level: Int?
+    public var positionInSet: Int?
+    public var sizeOfSet: Int?
+    public var keyboardShortcut: String?
+    public var url: String?
+    public var activeDescendant: String?
+    public var sortAscending: Bool?
+    public var isDisabled: Bool
+    public var isReadOnly: Bool
+    public var isInvalid: Bool
+    public var toggled: A11yChecked?
+    public var liveRegion: LiveRegionPoliteness?
+    public var clipsChildren: Bool
+    public var scrollX: Float?
+    public var scrollY: Float?
+    public var scrollYMax: Float?
+    public var textSelection: [Int]?
+    public var characterCount: Int?
     public var isModal: Bool
     public var isSecure: Bool
     public var actions: [AccessibilityAction]
@@ -71,12 +91,32 @@ public struct AccessibilityNode: Sendable, Equatable {
         label: String? = nil,
         value: String? = nil,
         help: String? = nil,
+        placeholder: String? = nil,
+        range: A11yRange? = nil,
         frame: MotionRect = .zero,
         isFocused: Bool = false,
         isFocusable: Bool = false,
         isSelected: Bool = false,
+        selectedState: Bool? = nil,
         isExpanded: Bool? = nil,
         level: Int? = nil,
+        positionInSet: Int? = nil,
+        sizeOfSet: Int? = nil,
+        keyboardShortcut: String? = nil,
+        url: String? = nil,
+        activeDescendant: String? = nil,
+        sortAscending: Bool? = nil,
+        isDisabled: Bool = false,
+        isReadOnly: Bool = false,
+        isInvalid: Bool = false,
+        toggled: A11yChecked? = nil,
+        liveRegion: LiveRegionPoliteness? = nil,
+        clipsChildren: Bool = false,
+        scrollX: Float? = nil,
+        scrollY: Float? = nil,
+        scrollYMax: Float? = nil,
+        textSelection: [Int]? = nil,
+        characterCount: Int? = nil,
         isModal: Bool = false,
         isSecure: Bool = false,
         actions: [AccessibilityAction] = [],
@@ -87,12 +127,32 @@ public struct AccessibilityNode: Sendable, Equatable {
         self.label = label
         self.value = value
         self.help = help
+        self.placeholder = placeholder
+        self.range = range
         self.frame = frame
         self.isFocused = isFocused
         self.isFocusable = isFocusable
         self.isSelected = isSelected
+        self.selectedState = selectedState
         self.isExpanded = isExpanded
         self.level = level
+        self.positionInSet = positionInSet
+        self.sizeOfSet = sizeOfSet
+        self.keyboardShortcut = keyboardShortcut
+        self.url = url
+        self.activeDescendant = activeDescendant
+        self.sortAscending = sortAscending
+        self.isDisabled = isDisabled
+        self.isReadOnly = isReadOnly
+        self.isInvalid = isInvalid
+        self.toggled = toggled
+        self.liveRegion = liveRegion
+        self.clipsChildren = clipsChildren
+        self.scrollX = scrollX
+        self.scrollY = scrollY
+        self.scrollYMax = scrollYMax
+        self.textSelection = textSelection
+        self.characterCount = characterCount
         self.isModal = isModal
         self.isSecure = isSecure
         self.actions = actions
@@ -134,7 +194,7 @@ public enum AccessibilityTreeBuilder {
             actions.append(.decrement)
         }
 
-        var value: String? = element.a11ySelected
+        var value: String? = element.a11yValue ?? element.a11ySelected
         var isSecure = false
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
@@ -144,6 +204,8 @@ public enum AccessibilityTreeBuilder {
 
         let label = isSecure ? (element.a11yLabel ?? "Password") : (element.a11yLabel ?? element.plainText)
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
+        let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(element.role)
+        let selectedState: Bool? = (selectableRole || element.itemSelected) ? element.itemSelected : nil
 
         var projectedChildren: [AccessibilityNode] = []
         let childOrigin = Vec2(absRect.x, absRect.y)
@@ -167,13 +229,28 @@ public enum AccessibilityTreeBuilder {
             role: element.role,
             label: label,
             value: value,
-            help: element.a11yHelp,
+            help: element.a11yDescription ?? element.a11yHelp,
+            placeholder: element.placeholder,
+            range: element.a11yRange,
             frame: absRect,
             isFocused: isFocused,
             isFocusable: element.focusable,
             isSelected: element.itemSelected,
+            selectedState: selectedState,
             isExpanded: element.a11yExpanded,
             level: element.a11yLevel,
+            positionInSet: element.a11yPosInSet?.position,
+            sizeOfSet: element.a11yPosInSet?.size,
+            keyboardShortcut: element.a11yShortcutHint,
+            url: element.a11yHref,
+            activeDescendant: element.a11yActiveDescendant,
+            sortAscending: element.a11ySorted,
+            isDisabled: element.a11yDisabled,
+            isReadOnly: element.a11yReadOnly,
+            isInvalid: element.a11yInvalid,
+            toggled: element.a11yChecked,
+            liveRegion: element.a11yLive,
+            clipsChildren: element.layout.clipOverflow,
             isModal: element.isModal,
             isSecure: isSecure,
             actions: actions,

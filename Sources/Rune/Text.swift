@@ -1395,15 +1395,21 @@ public final class TextSystem: @unchecked Sendable {
         return languageTagOverride
     }
 
-    /// Locks this `TextSystem`'s language preference once (if not yet set) and clears cached measurements (`TextSystem::set_language`).
+    /// Shapes in `tag` from now on, dropping cached measurements. Returns `false` when already shaping in that language (`TextSystem::set_language`).
     @discardableResult
-    public func setLanguage(_ tag: String) -> Bool {
-        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let normalized = TextLanguageRegistry.parseWriting(from: trimmed)?.tag ?? trimmed
+    public func setLanguage(_ tag: String?) -> Bool {
+        let normalized: String?
+        if let tag {
+            guard let parsed = TextLanguageRegistry.normalizeTag(tag) else {
+                return false
+            }
+            normalized = parsed
+        } else {
+            normalized = nil
+        }
         lock.lock()
         defer { lock.unlock() }
-        if languageTagOverride != nil {
+        if languageTagOverride == normalized {
             return false
         }
         languageTagOverride = normalized
@@ -1472,8 +1478,9 @@ public final class TextSystem: @unchecked Sendable {
             lastObservedFontEpoch = globalEpoch
         }
         if lastObservedLanguageEpoch != langEpoch {
-            if languageTagOverride == nil {
-                languageTagOverride = TextLanguageRegistry.currentLanguageTag()
+            let globalTag = TextLanguageRegistry.currentLanguageTag()
+            if languageTagOverride != globalTag {
+                languageTagOverride = globalTag
                 measureCache.removeAll(keepingCapacity: true)
             }
             lastObservedLanguageEpoch = langEpoch
@@ -1644,7 +1651,7 @@ public final class TextSystem: @unchecked Sendable {
         CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), fullText as CFString)
         let fullLen = CFAttributedStringGetLength(attrStr)
         CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
-        if let langTag = language ?? TextLanguageRegistry.writingOfText(fullText)?.bcp47Tag {
+        if let langTag = TextLanguageRegistry.effectiveLanguageTag(for: fullText, chosen: language) {
             CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
         }
         if style.letterSpacing != 0 {

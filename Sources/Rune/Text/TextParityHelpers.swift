@@ -336,7 +336,10 @@ public enum TextCoreTextMatch {
     /// Coverage gamma exponent for non-Apple / non-smoothed text (`coverage_exponent`).
     public static func coverageExponent(mode: FontSmoothing, fill: [Float], apple: Bool, windows: Bool) -> Float {
         guard fill.count >= 4, fill[3] > 0 else { return 1.0 }
-        if apple || windows || mode.pipeline == .smoothed {
+        let resolved = (mode == .systemDefault) ? FontSmoothing.classic : mode
+        let directWrite = (resolved == .directWrite || resolved == .clearType) && windows
+        let chromium = resolved.isChromiumOutline
+        if (apple && !chromium) || directWrite || resolved == .on || resolved == .windfoil {
             return 1.0
         }
         let luma = ((0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2]) / fill[3]).clamped01()
@@ -345,6 +348,20 @@ public enum TextCoreTextMatch {
 }
 
 extension FontSmoothing {
+    /// Every mode in the order a setting lists them (`FontSmoothing::ALL`).
+    public static let all: [FontSmoothing] = [
+        .windfoil,
+        .windfoilChromium,
+        .slug,
+        .windfoilRgb,
+        .hintedGpu,
+        .hinted,
+        .directWrite,
+        .clearType,
+        .on,
+        .off,
+    ]
+
     public static var classic: FontSmoothing {
         #if os(macOS)
         return .on
@@ -353,14 +370,68 @@ extension FontSmoothing {
         #endif
     }
 
+    public var isOutlineMode: Bool {
+        switch self {
+        case .windfoil, .windfoilChromium, .slug, .hintedGpu, .hinted, .windfoilRgb:
+            return true
+        case .on, .off, .directWrite, .clearType, .systemDefault:
+            return false
+        }
+    }
+
+    public var isChromiumOutline: Bool {
+        switch self {
+        case .windfoilChromium, .slug, .hintedGpu, .hinted, .windfoilRgb:
+            return true
+        case .windfoil, .on, .off, .directWrite, .clearType, .systemDefault:
+            return false
+        }
+    }
+
+    public var isLCD: Bool {
+        self == .windfoilRgb || self == .clearType
+    }
+
+    public func drawn(lcdOK: Bool) -> FontSmoothing {
+        if !lcdOK {
+            if self == .windfoilRgb { return .windfoilChromium }
+            if self == .clearType { return .directWrite }
+        }
+        return self
+    }
+
     public var pipeline: ApplePipeline {
         isEnabled ? .smoothed : .unsmoothed
     }
 
-    public func support(outlinesAvailable: Bool = true, dualSourceSupported: Bool = true) -> SmoothingSupport {
-        switch self {
-        case .on, .off, .systemDefault:
-            _ = (outlinesAvailable, dualSourceSupported)
+    public func support(
+        outlinesAvailable: Bool = true,
+        dualSourceSupported: Bool = true,
+        isWindows: Bool = {
+            #if os(Windows)
+            return true
+            #else
+            return false
+            #endif
+        }()
+    ) -> SmoothingSupport {
+        let resolved = (self == .systemDefault) ? Self.classic : self
+        let outlinesOut = !outlinesAvailable
+        let noDual = !dualSourceSupported
+        switch resolved {
+        case .directWrite where !isWindows:
+            return .no("DirectWrite is Windows only")
+        case .clearType where !isWindows:
+            return .no("ClearType is Windows only")
+        case .clearType where noDual,
+             .windfoilRgb where noDual || outlinesOut:
+            return .fallback("This GPU can't blend subpixel text (dual-source blending), so it draws grayscale")
+        case .slug where outlinesOut:
+            return .no("Slug draws on the GPU, and this renderer can't build its shader")
+        default:
+            if outlinesOut && resolved.isOutlineMode {
+                return .fallback("This renderer can't build the outline shader: the CPU fills the same coverage, and moving text scales its masks")
+            }
             return .yes
         }
     }

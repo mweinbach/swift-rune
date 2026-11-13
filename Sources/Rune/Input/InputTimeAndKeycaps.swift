@@ -84,14 +84,20 @@ public struct Keycap: Equatable, Sendable {
         self.lastTime = lastTime
     }
 
-    /// Rendered pill text (appends ` ×N` on repeated chords and leading `…` on long typing bursts).
+    /// Rendered pill text (appends ` ×N` on repeated chords, `"␣"` on space-only bursts, and leading `…` on long typing bursts).
     public var label: String {
+        if typing {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty {
+                return String(repeating: "␣", count: min(text.count, Keycaps.maxTypedChars))
+            }
+            if text.count > Keycaps.maxTypedChars {
+                let suffix = String(text.suffix(Keycaps.maxTypedChars - 1))
+                return "…" + suffix
+            }
+            return text
+        }
         if count > 1 {
             return "\(text) ×\(count)"
-        }
-        if typing && text.count > 24 {
-            let suffix = String(text.suffix(23))
-            return "…" + suffix
         }
         return text
     }
@@ -99,8 +105,8 @@ public struct Keycap: Equatable, Sendable {
 
 /// Groups bursts of plain typing and repeats chords into a bounded 3-cap timeline (`Keycaps`).
 public struct Keycaps: Sendable {
-    public static let holdSeconds: Double = 2.0
-    public static let burstGapSeconds: Double = 0.75
+    public static let holdSeconds: Double = 1.5
+    public static let burstGapSeconds: Double = 1.0
     public static let maxShown: Int = 3
     public static let maxTypedChars: Int = 24
 
@@ -110,6 +116,9 @@ public struct Keycaps: Sendable {
     public init() {}
 
     public mutating func key(at t: Double, event: KeyEvent) {
+        if case .modifier(_, pressed: false) = event.key {
+            return
+        }
         let (label, typing) = Self.keyLabel(event)
         push(at: t, label: label, typing: typing)
     }

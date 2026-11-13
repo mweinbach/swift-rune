@@ -67,6 +67,7 @@ extension TextSystem {
 
     /// Moves visually up (`delta < 0`) or down (`delta > 0`) by visual lines, preserving `goalX` in points
     /// across wrapped lines (`rune::text::cursor::move_line`).
+    /// Returns offset `0` on the first line moving up, or `nil` when moving down past the last line.
     public func moveLine(
         in shaped: ShapedText,
         utf8Offset: Int,
@@ -74,14 +75,21 @@ extension TextSystem {
         goalX: Float? = nil,
         affinity: TextAffinity = .downstream,
         pixelScale: Float = 1.0
-    ) -> TextCursorMove {
+    ) -> TextCursorMove? {
         guard !shaped.lineStrings.isEmpty else {
-            return TextCursorMove(utf8Offset: 0, goalX: goalX, affinity: affinity)
+            return nil
         }
         let lineIdx = shaped.lineIndex(forUTF8Offset: utf8Offset, affinity: affinity)
         let currentRec = shaped.lineStrings[lineIdx]
         let targetX = goalX ?? xInLine(rec: currentRec, utf8Offset: utf8Offset, pixelScale: pixelScale)
-        let nextIdx = (lineIdx + delta).clamped(to: 0...(shaped.lineStrings.count - 1))
+        if delta < 0 && lineIdx == 0 {
+            return TextCursorMove(utf8Offset: 0, goalX: targetX, affinity: .downstream)
+        }
+        let rawNext = lineIdx + delta
+        if delta > 0 && rawNext >= shaped.lineStrings.count {
+            return nil
+        }
+        let nextIdx = rawNext.clamped(to: 0...(shaped.lineStrings.count - 1))
         let targetRec = shaped.lineStrings[nextIdx]
         let nextOffset = utf8OffsetOnLine(rec: targetRec, xPt: targetX, pixelScale: pixelScale)
         // Visual cursor landed at `nextOffset` on `nextIdx`; choose upstream if it hit the end of a soft-wrapped line.
@@ -104,9 +112,14 @@ extension TextSystem {
         let lineIdx = shaped.lineIndex(forUTF8Offset: utf8Offset, affinity: affinity)
         let rec = shaped.lineStrings[lineIdx]
         let lineStart = rec.utf8Start
-        let lineEnd = lineStart + rec.text.utf8.count
         if !toEnd {
             return TextCursorMove(utf8Offset: lineStart, goalX: nil, affinity: .downstream)
+        }
+        var lineEnd = lineStart + rec.text.utf8.count
+        if rec.text.hasSuffix("\r\n") && rec.text.utf8.count >= 2 {
+            lineEnd -= 2
+        } else if rec.text.hasSuffix("\n") && rec.text.utf8.count >= 1 {
+            lineEnd -= 1
         }
         let isSoftEnd = (lineIdx + 1 < shaped.lineStrings.count) && (shaped.lineStrings[lineIdx + 1].utf8Start == lineEnd)
         return TextCursorMove(utf8Offset: lineEnd, goalX: nil, affinity: isSoftEnd ? .upstream : .downstream)

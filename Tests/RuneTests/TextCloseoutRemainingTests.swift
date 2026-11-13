@@ -23,24 +23,32 @@ struct TextCloseoutRemainingTests {
 
         #expect(TextLanguageRegistry.writingOfText("こんにちは") == .japanese)
         #expect(TextLanguageRegistry.writingOfText("안녕하세요") == .korean)
+        #expect(TextLanguageRegistry.writingOfText("\u{A960}\u{D7B0}") == .korean)
         #expect(TextLanguageRegistry.writingOfText("中文汉字") == .simplifiedChinese)
+        #expect(TextLanguageRegistry.writingOfText("\u{20000}") == .simplifiedChinese)
+        #expect(TextLanguageRegistry.writingOfText("ㄅㄆㄇ") == .traditionalChinese)
         #expect(TextLanguageRegistry.writingOfText("hello") == nil)
+
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "ㄅㄆㄇ", chosen: "en-US") == "zh-Hant")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "zh-TW") == "zh-Hant")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "中文", chosen: "en-US") == "zh-Hans")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "こんにちは", chosen: "zh-CN") == "ja")
+        #expect(TextLanguageRegistry.effectiveLanguageTag(for: "hello", chosen: "fr-FR") == "fr-FR")
     }
 
     @Test
-    func textSystemChangesLanguageOnce() {
-        let ts = TextSystem()
-        #expect(ts.language == nil || ts.language == TextLanguageRegistry.currentLanguageTag())
+    func textSystemCanSwitchAndClearLanguage() {
         let fresh = TextSystem()
-        // If global registry happened to be empty, setLanguage works once and ignores subsequent set calls.
-        if fresh.language == nil {
-            #expect(fresh.setLanguage("ja,en-US") == true)
-            #expect(fresh.language == "ja")
-            #expect(fresh.setLanguage("ko") == false)
-            #expect(fresh.language == "ja")
-        } else {
-            #expect(fresh.setLanguage("") == false)
-        }
+        #expect(fresh.setLanguage("ja,en-US") == true)
+        #expect(fresh.language == "ja")
+        #expect(fresh.setLanguage("ja") == false)
+        #expect(fresh.setLanguage("ko") == true)
+        #expect(fresh.language == "ko")
+        #expect(fresh.setLanguage("") == false)
+        #expect(fresh.language == "ko")
+        #expect(fresh.setLanguage(nil) == true)
+        #expect(fresh.language == nil)
+        #expect(fresh.setLanguage(nil) == false)
     }
 
     // MARK: - text/trak.rs (3 Rust tests)
@@ -127,12 +135,44 @@ struct TextCloseoutRemainingTests {
         var hugeOffsets = good
         hugeOffsets[6] = 0xff; hugeOffsets[7] = 0xff
         #expect(Trak.parse(hugeOffsets, unitsPerEm: 2048) == nil)
+
+        var hugeSizeTable = good
+        hugeSizeTable[16] = 0xff; hugeSizeTable[17] = 0xff; hugeSizeTable[18] = 0xff; hugeSizeTable[19] = 0xff
+        #expect(Trak.parse(hugeSizeTable, unitsPerEm: 2048) == nil)
+
+        var hugeCounts = good
+        hugeCounts[12] = 0xff; hugeCounts[13] = 0xff; hugeCounts[14] = 0xff; hugeCounts[15] = 0xff
+        #expect(Trak.parse(hugeCounts, unitsPerEm: 2048) == nil)
+
+        // Track 0 points out of bounds -> 0 tracking
+        var badValues = good
+        let horiz = 12
+        let track0OffsetPos = horiz + 8 + 1 * 8 + 6
+        badValues[track0OffsetPos] = 0xff; badValues[track0OffsetPos + 1] = 0xff
+        let tBadVal = Trak.parse(badValues, unitsPerEm: 2048)
+        #expect(tBadVal?.sizes.allSatisfy { $0.units == 0 } == true)
+        #expect(tBadVal?.spacing(pixelSize: 28, pointSize: 14, enabled: true) == 0)
+
+        // Unused track (+1.0) points out of bounds -> track 0 preserved
+        var badUnused = good
+        let unusedOffsetPos = horiz + 8 + 2 * 8 + 6
+        badUnused[unusedOffsetPos] = 0xff; badUnused[unusedOffsetPos + 1] = 0xff
+        let tBadUnused = Trak.parse(badUnused, unitsPerEm: 2048)
+        #expect(tBadUnused?.sizes == [.init(pointSize: 12, units: 0), .init(pointSize: 24, units: 10)])
+
+        for i in 0..<good.count {
+            var corrupted = good
+            corrupted[i] = 0xff
+            if let t = Trak.parse(corrupted, unitsPerEm: 2048) {
+                #expect(t.spacing(pixelSize: 28, pointSize: 14, enabled: true).isFinite)
+            }
+        }
     }
 
     // MARK: - text/cursor.rs (visual moveLine, lineEdge, soft-wrap TextAffinity)
 
     @Test
-    func cursorVisualMoveLineLineEdgeAndAffinityAtSoftWrap() {
+    func cursorVisualMoveLineLineEdgeAndAffinityAtSoftWrap() throws {
         let ts = TextSystem()
         let style = TextStyle(size: 14, weight: 400, wrap: .wrap)
         let text = "Hello wonderful world of wrapping text"
@@ -148,14 +188,23 @@ struct TextCloseoutRemainingTests {
         }
 
         // Visual move down then up preserves goalX
-        let down = ts.moveLine(in: shaped, utf8Offset: 4, delta: 1, pixelScale: 1.0)
+        let down = try #require(ts.moveLine(in: shaped, utf8Offset: 4, delta: 1, pixelScale: 1.0))
         #expect(down.utf8Offset > 4)
-        let backUp = ts.moveLine(in: shaped, utf8Offset: down.utf8Offset, delta: -1, goalX: down.goalX, affinity: down.affinity, pixelScale: 1.0)
+        let backUp = try #require(ts.moveLine(in: shaped, utf8Offset: down.utf8Offset, delta: -1, goalX: down.goalX, affinity: down.affinity, pixelScale: 1.0))
         #expect(backUp.utf8Offset <= line0End)
+
+        // First line moving up clamps to start (0); past last line moving down returns nil (`cursor.rs:206-207`)
+        #expect(ts.moveLine(in: shaped, utf8Offset: 4, delta: -1, pixelScale: 1.0)?.utf8Offset == 0)
+        #expect(ts.moveLine(in: shaped, utf8Offset: text.utf8.count, delta: 1, pixelScale: 1.0) == nil)
 
         let home = ts.lineEdge(in: shaped, utf8Offset: down.utf8Offset, toEnd: false, affinity: down.affinity)
         let end = ts.lineEdge(in: shaped, utf8Offset: down.utf8Offset, toEnd: true, affinity: down.affinity)
         #expect(end.utf8Offset >= home.utf8Offset)
+
+        // Explicit newline: lineEdge(toEnd: true) steps before '\n'
+        let nlShaped = ts.shape(text: "abc\ndef", spans: nil, style: style, maxWidth: 400, pixelScale: 1.0, emitGlyphs: false)
+        let nlEnd = ts.lineEdge(in: nlShaped, utf8Offset: 1, toEnd: true, affinity: .downstream)
+        #expect(nlEnd.utf8Offset == 3)
     }
 
     // MARK: - text/line_metrics, underline, ltr_units, run, coretext_match, measure, icon
@@ -189,9 +238,29 @@ struct TextCloseoutRemainingTests {
         #expect(TextCoreTextMatch.browserDefault(platform: "MacIntel", touchPoints: 5) == .off)
         #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: true, windows: false) == 1.0)
         #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: false) > 1.0)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [1, 1, 1, 1], apple: false, windows: true) < 1.0)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .off, fill: [0, 0, 0, 1], apple: false, windows: true) > 1.0)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .directWrite, fill: [0, 0, 0, 1], apple: false, windows: true) == 1.0)
+        #expect(TextCoreTextMatch.coverageExponent(mode: .windfoilChromium, fill: [0, 0, 0, 1], apple: true, windows: false) > 1.0)
+        #expect(FontSmoothing.all.count == 10)
         #expect(FontSmoothing.on.pipeline == .smoothed)
         #expect(FontSmoothing.off.pipeline == .unsmoothed)
         #expect(FontSmoothing.on.support() == .yes)
+        #expect(FontSmoothing.windfoilRgb.support() == .yes)
+        #expect(FontSmoothing.windfoilRgb.isLCD && FontSmoothing.windfoilRgb.drawn(lcdOK: false) == .windfoilChromium)
+        #expect(FontSmoothing.clearType.drawn(lcdOK: false) == .directWrite)
+        #expect({
+            if case .no = FontSmoothing.slug.support(outlinesAvailable: false) { return true }
+            return false
+        }())
+        #expect({
+            if case .fallback = FontSmoothing.windfoilRgb.support(dualSourceSupported: false) { return true }
+            return false
+        }())
+        #expect({
+            if case .no = FontSmoothing.directWrite.support(isWindows: false) { return true }
+            return false
+        }())
 
         let ts = TextSystem()
         let run = TextRun("Hello")
@@ -227,6 +296,8 @@ struct TextCloseoutRemainingTests {
         }
         #expect(InputTime.sinceBoot(now: 100.0, uptime: 120.0, timestamp: 115.0) == 95.0)
 
+        #expect(Keycaps.holdSeconds == 1.5)
+        #expect(Keycaps.burstGapSeconds == 1.0)
         var kc = Keycaps()
         for (i, ch) in "Hi there".enumerated() {
             kc.key(at: 0.1 * Double(i), event: KeyEvent(key: .text(String(ch)), mods: Mods()))
@@ -236,8 +307,8 @@ struct TextCloseoutRemainingTests {
         kc.key(at: 1.0, event: KeyEvent(key: .text("x"), mods: Mods()))
         let expectedCmd = Keycaps.modGlyphs(Mods(cmd: true)) + "K"
         #expect(kc.visible(at: 1.0).map(\.label) == ["Hi there", expectedCmd, "x"])
-        kc.key(at: 2.1, event: KeyEvent(key: .text("y"), mods: Mods()))
-        #expect(kc.visible(at: 2.1).map(\.label) == [expectedCmd, "x", "y"])
+        kc.key(at: 2.3, event: KeyEvent(key: .text("y"), mods: Mods()))
+        #expect(kc.visible(at: 2.3).map(\.label) == [expectedCmd, "x", "y"])
         #expect(kc.visible(at: 4.2).isEmpty)
 
         var k2 = Keycaps()
@@ -246,7 +317,20 @@ struct TextCloseoutRemainingTests {
         }
         k2.key(at: 0.6, event: KeyEvent(key: .tab, mods: Mods(shift: true)))
         k2.key(at: 0.7, event: KeyEvent(key: .text(" "), mods: Mods(shift: true, ctrl: true, alt: true, cmd: true, logo: true)))
-        #expect(k2.visible(at: 0.7).map(\.label) == ["↓ ×3", "⇧⇥", "⌃⌥⇧⌘␣"])
+        k2.key(at: 0.8, event: KeyEvent(key: .modifier(.shiftLeft, pressed: false), mods: Mods()))
+        #expect(k2.visible(at: 0.8).map(\.label) == ["↓ ×3", "⇧⇥", "⌃⌥⇧⌘␣"])
+
+        var kSpace = Keycaps()
+        for i in 0..<3 {
+            kSpace.key(at: 0.1 * Double(i), event: KeyEvent(key: .text(" "), mods: Mods()))
+        }
+        #expect(kSpace.visible(at: 0.3).map(\.label) == ["␣␣␣"])
+
+        var kLong = Keycaps()
+        for (i, ch) in "abcdefghijklmnopqrstuvwxyz".enumerated() {
+            kLong.key(at: 0.05 * Double(i), event: KeyEvent(key: .text(String(ch)), mods: Mods()))
+        }
+        #expect(kLong.visible(at: 1.3).map(\.label) == ["…defghijklmnopqrstuvwxyz"])
         #expect(Keycaps.titleCase("ı") == "ı" && Keycaps.titleCase("ß") == "ß" && Keycaps.titleCase("capslock") == "Capslock")
         #expect(KeycapsCorner.parse("top-right") == .topRight)
         #expect(KeycapsCorner.parse("middle") == nil)
@@ -311,15 +395,81 @@ struct TextCloseoutRemainingTests {
             id: "root",
             role: .group,
             label: "Window",
+            isFocused: true,
+            isFocusable: true,
             children: [
-                AccessibilityNode(id: "pw", role: .textInput, label: "Password", value: "hunter2", isSecure: true)
+                AccessibilityNode(
+                    id: "pw",
+                    role: .textInput,
+                    label: "Password",
+                    value: "hunter2",
+                    placeholder: "Enter password",
+                    isFocusable: true,
+                    isDisabled: true,
+                    isReadOnly: true,
+                    isInvalid: true,
+                    characterCount: 7,
+                    isSecure: true
+                ),
+                AccessibilityNode(
+                    id: "txt",
+                    role: .text,
+                    value: "Static label"
+                ),
+                AccessibilityNode(
+                    id: "btn",
+                    role: .button,
+                    selectedState: false,
+                    toggled: .mixed,
+                    liveRegion: .polite,
+                    clipsChildren: true,
+                    children: [
+                        AccessibilityNode(id: "btn-lbl", role: .text, value: "Save Now")
+                    ]
+                ),
+                AccessibilityNode(
+                    id: "hdr",
+                    role: .heading,
+                    label: "Title",
+                    range: A11yRange(value: 5, min: 0, max: 10, step: nil),
+                    level: 0,
+                    positionInSet: 0,
+                    sizeOfSet: 3
+                ),
             ]
         )
         #expect(link.service(rootNode: root, windowTitle: "Window") == nil)
         link.activate()
         let full = link.service(rootNode: root, windowTitle: "Window")
-        #expect(full?.isFullTree == true && full?.updatedNodes.count == 2)
+        #expect(full?.isFullTree == true && full?.updatedNodes.count == 6)
         #expect(link.service(rootNode: root, windowTitle: "Window") == nil)
+
+        let rootDict = AccessibilityDump.dictionary(from: root, isRoot: true)
+        #expect(rootDict["states"] == nil) // Root never gets "focused"; "focusable" is never emitted.
+
+        let children = rootDict["children"] as? [[String: Any]] ?? []
+        #expect(children.count == 4)
+        let pwDict = children[0]
+        #expect(pwDict["value"] == nil)
+        #expect(pwDict["placeholder"] as? String == "Enter password")
+        #expect(pwDict["chars"] as? Int == 7)
+        let pwStates = pwDict["states"] as? [String] ?? []
+        #expect(pwStates == ["disabled", "read-only", "invalid"])
+
+        let txtDict = children[1]
+        #expect(txtDict["name"] as? String == "Static label")
+        #expect(txtDict["value"] == nil)
+
+        let btnDict = children[2]
+        #expect(btnDict["name"] as? String == "Save Now")
+        let btnStates = btnDict["states"] as? [String] ?? []
+        #expect(btnStates == ["mixed", "unselected", "live-polite", "clips"])
+
+        let hdrDict = children[3]
+        #expect(hdrDict["level"] as? Int == 1)
+        #expect(hdrDict["position"] as? Int == 1)
+        #expect(hdrDict["setSize"] as? Int == 3)
+
         let dump = AccessibilityDump.jsonString(from: root)
         #expect(!dump.contains("hunter2"))
     }
