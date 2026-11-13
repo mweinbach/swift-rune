@@ -595,13 +595,21 @@ public func measureFramePhase<T>(_ phase: FramePhase, _ body: () throws -> T) re
 public enum FontSmoothing: String, Sendable, Equatable, Codable {
     case on
     case off
+    case directWrite
+    case windfoil
+    case windfoilChromium
+    case slug
+    case hintedGpu
+    case hinted
+    case windfoilRgb
+    case clearType
     case systemDefault
 
     /// Resolved effective setting (`true` on macOS by default, `false` elsewhere).
     public var isEnabled: Bool {
         switch self {
-        case .on: return true
-        case .off: return false
+        case .on, .windfoil: return true
+        case .off, .directWrite, .windfoilChromium, .slug, .hintedGpu, .hinted, .windfoilRgb, .clearType: return false
         case .systemDefault:
             #if os(macOS)
             return true
