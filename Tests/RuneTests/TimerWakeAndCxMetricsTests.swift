@@ -7,10 +7,9 @@ struct TimerWakeAndCxMetricsTests {
 
     private static let timerPeriod = 0.02
 
-    @Test("Cx scroll/geometry metric helpers expose layout, scrollAtBottom, progress, remaining, canScroll")
+    @Test("Cx scroll/geometry metric helpers expose layoutRect, scrollAtBottom, progress, remaining, canScroll")
     func cxScrollAndGeometryMetrics() {
         var sawLayoutWidth: Float? = nil
-        var sawWindowWidth: Float? = nil
         var sawBottomMounted: Bool? = nil
         var sawBottomMissing: Bool? = true
         var sawProgress: Vec2 = .zero
@@ -32,7 +31,6 @@ struct TimerWakeAndCxMetricsTests {
         )
 
         sawLayoutWidth = cx.layoutRect(of: "scroller")?.width
-        sawWindowWidth = cx.windowLayoutWith("scroller") { $0.width }
         sawBottomMounted = cx.scrollAtBottom(of: "scroller")
         sawBottomMissing = cx.scrollAtBottom(of: "missing")
         sawProgress = cx.scrollProgress(of: "scroller")
@@ -40,8 +38,6 @@ struct TimerWakeAndCxMetricsTests {
         sawCanScroll = cx.canScroll(of: "scroller")
 
         #expect(sawLayoutWidth == 300)
-        #expect(sawWindowWidth == 300)
-        #expect(cx.windowLayout("scroller") == MotionRect.fromXYWH(10, 20, 300, 160))
         #expect(cx.layoutSize(of: "scroller") == Vec2(300, 160))
         #expect(sawBottomMounted == true)
         #expect(sawBottomMissing == nil)
@@ -93,30 +89,50 @@ struct TimerWakeAndCxMetricsTests {
         #expect(tw.rests)
         #expect(tw.polledAt == nil)
 
+        // Frame without due when idle -> stays idle, returns false
+        let fIdle = tw.framePolled(due: false)
+        #expect(!fIdle)
+        #expect(tw.state == .idle)
+
+        // Asked -> frame(due: false) -> Taken(polledAt: 1.5), returns true
         tw.restingWakeFrame(true, at: 1.5)
         #expect(tw.restingWake() == true)
         #expect(!tw.rests)
         #expect(tw.polledAt == 1.5)
-
-        #expect(tw.takeFrame() == true)
+        let fAsked = tw.framePolled(due: false)
+        #expect(fAsked)
         #expect(tw.restingWake() == false)
         #expect(tw.rests)
-        #expect(tw.polledAt == 1.5)
+        #expect(tw.takenPolledAt == 1.5)
 
-        #expect(tw.takeFrame() == false)
-        tw.resetToIdle()
-        #expect(tw.restingWake() == nil)
+        // Next frame after Taken -> resets to idle and returns false so frame polls
+        let fAfterTaken = tw.framePolled(due: false)
+        #expect(!fAfterTaken)
+        #expect(tw.state == .idle)
 
-        // Hidden poll consumes asked -> taken
+        // Asked -> frame(due: true) -> deadline came due, resets to idle and returns false
+        tw.restingWakeFrame(true, at: 1.8)
+        let fDue = tw.framePolled(due: true)
+        #expect(!fDue)
+        #expect(tw.state == .idle)
+
+        // Hidden poll when asked and not due -> cancels and returns true; when due -> pollAlone & false
         tw.restingWakeFrame(true, at: 2.0)
-        #expect(tw.pollHidden() == true)
-        #expect(tw.restingWake() == false)
-        #expect(tw.pollHidden() == false)
+        let hAsked = tw.pollHidden(due: false)
+        #expect(hAsked)
+        #expect(tw.state == .idle)
+        let hIdle = tw.pollHidden(due: false)
+        #expect(!hIdle)
 
-        // Cancel clears asked -> idle
+        // Cancel returns asked timestamp (or nil when not asked)
+        let cIdle = tw.cancelTimerFrame()
+        #expect(cIdle == nil)
         tw.restingWakeFrame(true, at: 3.0)
-        tw.cancelTimerFrame()
-        #expect(tw.restingWake() == nil)
+        let cAsked = tw.cancelTimerFrame()
+        #expect(cAsked == 3.0)
+        #expect(tw.state == .idle)
+        let cAfter = tw.cancelTimerFrame()
+        #expect(cAfter == nil)
         #expect(tw.rests)
     }
 
@@ -174,6 +190,18 @@ struct TimerWakeAndCxMetricsTests {
         coveredSched.advance(by: 0.005)
         _ = coveredSched.hiddenWake()
         #expect(coveredSched.pollCount == p1 + 2, "due second timer still polls while covered")
+
+        // 3. When a deadline comes due before the asked frame fires, that frame must poll again.
+        let dueSched = TimerWakeScheduler(clock: 0.0) { _, delays in
+            delays.append(Self.timerPeriod)
+            return true
+        }
+        dueSched.frame(dt: 0.0)
+        let p2 = dueSched.pollCount
+        #expect(dueSched.hostWake { _ in true })
+        dueSched.scheduleWakes(from: dueSched.clock, delays: [0.005])
+        dueSched.frame(dt: 0.01)
+        #expect(dueSched.pollCount == p2 + 2, "frame with newly due timer polls again")
         _ = shouldChange
     }
 }

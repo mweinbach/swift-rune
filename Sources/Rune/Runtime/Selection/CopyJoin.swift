@@ -48,8 +48,8 @@ public final class SelectionCoordinator {
         joinInputs.reserveCapacity(nonEmpty.count)
         for (node, rawRange) in nonEmpty {
             let utf8 = Array(node.text.utf8)
-            let lo = max(0, min(rawRange.lowerBound, utf8.count))
-            let hi = max(lo, min(rawRange.upperBound, utf8.count))
+            let lo = SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.lowerBound)
+            let hi = max(lo, SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.upperBound))
             guard lo < hi else { continue }
             let slice = String(decoding: utf8[lo..<hi], as: UTF8.self)
             let item = SelectedText(
@@ -82,9 +82,8 @@ public final class SelectionCoordinator {
         guard let node = nodes.first(where: { $0.isSelectable && ($0.key == key || $0.path == key) }) else {
             return nil
         }
-        let len = node.text.utf8.count
-        let a = max(0, min(range.lowerBound, len))
-        let b = max(a, min(range.upperBound, len))
+        let a = SelectionMath.floorCharBoundary(in: node.text, offset: range.lowerBound)
+        let b = max(a, SelectionMath.floorCharBoundary(in: node.text, offset: range.upperBound))
         guard a < b else {
             phase.clear()
             return nil
@@ -103,6 +102,53 @@ public final class SelectionCoordinator {
             pick.noteClick(groupPath: group)
         }
         return buildSelection(ranges: [(node, a..<b)], backward: false)
+    }
+
+    /// Programmatically selects all non-empty selectable text nodes under `key` (matching either a
+    /// single selectable text node, a container element, or a `selectionGroup`) (`Tx::select_all_text`).
+    @discardableResult
+    public func selectAllText(
+        key: String,
+        in nodes: [SelectableNodeSnapshot]
+    ) -> TextSelection? {
+        guard let targetIdx = nodes.firstIndex(where: { $0.key == key || $0.path == key }) else {
+            return nil
+        }
+        let targetPath = nodes[targetIdx].path
+        let byPath = Dictionary(uniqueKeysWithValues: nodes.enumerated().map { ($0.element.path, $0.offset) })
+        func isWithinTarget(_ idx: Int) -> Bool {
+            var cur: Int? = idx
+            while let i = cur {
+                if nodes[i].path == targetPath { return true }
+                cur = nodes[i].parentPath.flatMap { byPath[$0] }
+            }
+            return false
+        }
+        let selectedNodes = nodes.enumerated().compactMap { idx, node -> SelectableNodeSnapshot? in
+            guard node.isSelectable, !node.text.isEmpty, isWithinTarget(idx) else { return nil }
+            return node
+        }
+        guard let first = selectedNodes.first, let last = selectedNodes.last else {
+            phase.clear()
+            return nil
+        }
+        let far: SelectionFar? = (first.path == last.path)
+            ? nil
+            : SelectionFar(path: last.path, content: last.text)
+        phase.place(ActiveSelection(
+            path: first.path,
+            content: first.text,
+            anchor: 0,
+            focus: last.text.utf8.count,
+            origin: (0, last.text.utf8.count),
+            far: far
+        ))
+        if let firstIdx = nodes.firstIndex(of: first),
+           let group = SelectAllResolver.groupPath(forNodeAt: firstIdx, in: nodes) {
+            pick.noteClick(groupPath: group)
+        }
+        let ranges = selectedNodes.map { ($0, 0..<$0.text.utf8.count) }
+        return buildSelection(ranges: ranges, backward: false)
     }
 
     /// Resolves `Cmd+A` on `nodes`, updating `phase` and `pick` when a group is selected.
@@ -154,17 +200,16 @@ public final class SelectionCoordinator {
                 let n = nodes[idx]
                 guard n.isSelectable, SelectAllResolver.groupPath(forNodeAt: idx, in: nodes) == gPath else { continue }
                 let len = n.text.utf8.count
-                let lo = (idx == firstIdx) ? min(aOff, len) : 0
-                let hi = (idx == lastIdx) ? min(bOff, len) : len
+                let lo = (idx == firstIdx) ? SelectionMath.floorCharBoundary(in: n.text, offset: aOff) : 0
+                let hi = (idx == lastIdx) ? SelectionMath.floorCharBoundary(in: n.text, offset: bOff) : len
                 if lo < hi {
                     ranges.append((n, lo..<hi))
                 }
             }
             return buildSelection(ranges: ranges, backward: !forward)
         }
-        let len = nodes[anchorIdx].text.utf8.count
-        let a = min(sel.anchor, sel.focus).clamped(to: 0...len)
-        let b = max(sel.anchor, sel.focus).clamped(to: 0...len)
+        let a = SelectionMath.floorCharBoundary(in: nodes[anchorIdx].text, offset: min(sel.anchor, sel.focus))
+        let b = SelectionMath.floorCharBoundary(in: nodes[anchorIdx].text, offset: max(sel.anchor, sel.focus))
         guard a < b else { return nil }
         return buildSelection(ranges: [(nodes[anchorIdx], a..<b)], backward: sel.focus < sel.anchor)
     }

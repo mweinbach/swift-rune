@@ -14,6 +14,11 @@ struct SelectableTextTests {
         #expect(inactivePick.ink != nil)
         #expect(activePick.highlight != inactivePick.highlight)
 
+        let onlyInk = SelectionStyle(highlight: .srgb(0.2, 0.4, 0.9, 0.3)).ink(.black)
+        #expect(onlyInk.pick(active: true).ink == .black)
+        #expect(onlyInk.inactiveInk == nil)
+        #expect(onlyInk.pick(active: false).ink == nil)
+
         let custom = SelectionStyle(highlight: .srgb(1, 0, 0, 0.3))
             .ink(.black)
             .inactive(.srgb(0.5, 0.5, 0.5, 0.3), ink: .white)
@@ -188,5 +193,49 @@ struct SelectableTextTests {
         #expect(!SelectionMath.sameKeyedPath("#0/@msg-4/0", "#0/@msg-5/0"))
         #expect(SelectionMath.kept(then: "alpha beta", now: "alpha beta gamma", upto: 5))
         #expect(!SelectionMath.kept(then: "alpha beta", now: "axpha beta", upto: 5))
+
+        // Mid-UTF-8 clamping snaps to floorCharBoundary (never splits multi-byte codepoints into U+FFFD)
+        let utf8Nodes = [
+            SelectableNodeSnapshot(
+                path: "@root/@cafe",
+                key: "cafe",
+                parentPath: "@root",
+                isSelectable: true,
+                text: "café ok",
+                rect: MotionRect.fromXYWH(0, 0, 120, 20)
+            ),
+        ]
+        let utf8Coord = SelectionCoordinator()
+        let utf8Sel = utf8Coord.selectText(key: "cafe", range: 0..<4, in: utf8Nodes)
+        #expect(utf8Sel?.text == "caf")
+        #expect(utf8Sel?.texts.first?.range == 0..<3)
+
+        // Paragraph unit includes trailing newline; word unit steps back off trailing newline
+        #expect(SelectionMath.unitRange(in: "alpha\nbeta\n", at: 2, unit: .paragraph) == (0, 6))
+        #expect(SelectionMath.unitRange(in: "alpha\n", at: 6, unit: .word) == (0, 5))
+
+        // Punctuation and whitespace stay distinct (not merged)
+        #expect(SelectionMath.unitRange(in: "foo,  bar", at: 3, unit: .word) == (3, 4))
+        #expect(SelectionMath.unitRange(in: "foo,  bar", at: 4, unit: .word) == (4, 6))
+
+        // Partial-overlap unit extension keeps origin whole
+        #expect(SelectionMath.extendSelection(origin: (6, 10), at: (3, 8)) == (10, 3))
+        #expect(SelectionMath.extendSelection(origin: (6, 10), at: (8, 13)) == (6, 13))
+
+        // Tx.selectAllText / SelectionCoordinator.selectAllText on group, container, and lone text
+        var txAll = Tx()
+        txAll.selectAllText("r")
+        #expect(txAll.pendingSelectAllTextKey == "r")
+        let allTree = [
+            SelectableNodeSnapshot(path: "@root", key: "root"),
+            SelectableNodeSnapshot(path: "@root/@g", key: "g", parentPath: "@root", isSelectionGroup: true),
+            SelectableNodeSnapshot(path: "@root/@g/@r", key: "r", parentPath: "@root/@g"),
+            SelectableNodeSnapshot(path: "@root/@g/@r/@a", key: "a", parentPath: "@root/@g/@r", isSelectable: true, text: "first", rect: MotionRect.fromXYWH(0, 0, 100, 20)),
+            SelectableNodeSnapshot(path: "@root/@g/@r/@b", key: "b", parentPath: "@root/@g/@r", isSelectable: true, text: "second", rect: MotionRect.fromXYWH(0, 24, 100, 20)),
+            SelectableNodeSnapshot(path: "@root/@g/@outside", key: "outside", parentPath: "@root/@g", isSelectable: true, text: "other", rect: MotionRect.fromXYWH(0, 50, 100, 20)),
+        ]
+        #expect(utf8Coord.selectAllText(key: "r", in: allTree)?.text == "first\nsecond")
+        #expect(utf8Coord.selectAllText(key: "g", in: allTree)?.text == "first\nsecond\nother")
+        #expect(utf8Coord.selectAllText(key: "a", in: allTree)?.text == "first")
     }
 }

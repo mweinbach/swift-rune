@@ -42,11 +42,10 @@ public struct SelectionStyle: Hashable, Sendable {
         self.inactiveInk = nil
     }
 
-    /// Applies `color` as the selected-glyph ink for both active and inactive window states.
+    /// Applies `color` as the selected-glyph ink (`ink` sets the active window ink).
     public func ink(_ color: Color) -> SelectionStyle {
         var copy = self
         copy.activeInk = color
-        copy.inactiveInk = color
         return copy
     }
 

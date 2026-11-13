@@ -92,6 +92,7 @@ public struct SelectionMark: Equatable, Hashable, Sendable {
 
 public extension Tx {
     internal static let selectTextActionKey = "rune.selectText"
+    internal static let selectAllTextActionKey = "rune.selectAllText"
     internal static let clearTextSelectionActionKey = "rune.clearTextSelection"
     internal static let currentSelectionActionKey = "rune.currentTextSelection"
 
@@ -99,6 +100,14 @@ public extension Tx {
     mutating func selectText(_ key: String, range: Range<Int>) {
         let clamped = max(0, range.lowerBound)..<max(max(0, range.lowerBound), range.upperBound)
         runtimeActions[Self.selectTextActionKey] = (key: key, range: clamped)
+        runtimeActions.removeValue(forKey: Self.selectAllTextActionKey)
+        runtimeActions.removeValue(forKey: Self.clearTextSelectionActionKey)
+    }
+
+    /// Programmatically selects all selectable text under element/group keyed `key` (`Tx::select_all_text`).
+    mutating func selectAllText(_ key: String) {
+        runtimeActions[Self.selectAllTextActionKey] = key
+        runtimeActions.removeValue(forKey: Self.selectTextActionKey)
         runtimeActions.removeValue(forKey: Self.clearTextSelectionActionKey)
     }
 
@@ -106,6 +115,7 @@ public extension Tx {
     mutating func clearTextSelection() {
         runtimeActions[Self.clearTextSelectionActionKey] = true
         runtimeActions.removeValue(forKey: Self.selectTextActionKey)
+        runtimeActions.removeValue(forKey: Self.selectAllTextActionKey)
     }
 
     /// Current `TextSelection` snapshot exposed to handlers during event dispatch (`Tx::text_selection`).
@@ -115,6 +125,10 @@ public extension Tx {
 
     internal var pendingSelectTextRequest: (key: String, range: Range<Int>)? {
         runtimeActions[Self.selectTextActionKey] as? (key: String, range: Range<Int>)
+    }
+
+    internal var pendingSelectAllTextKey: String? {
+        runtimeActions[Self.selectAllTextActionKey] as? String
     }
 
     internal var clearTextSelectionRequested: Bool {

@@ -154,60 +154,116 @@ public enum SelectionMath {
         return ka.elementsEqual(kb)
     }
 
-    /// Returns `(start, end)` UTF-8 byte offsets of the `unit` surrounding UTF-8 offset `at`.
+    /// Largest valid UTF-8 scalar boundary at or before `offset` (`floor_char_boundary`).
+    public static func floorCharBoundary(in content: String, offset: Int) -> Int {
+        let utf8 = content.utf8
+        let len = utf8.count
+        var pos = max(0, min(offset, len))
+        if pos == 0 || pos == len { return pos }
+        var idx = utf8.index(utf8.startIndex, offsetBy: pos)
+        while pos > 0 && (utf8[idx] & 0xC0) == 0x80 {
+            idx = utf8.index(before: idx)
+            pos -= 1
+        }
+        return pos
+    }
+
+    /// Previous valid UTF-8 scalar boundary strictly before `offset` (clamped at 0).
+    public static func prevCharBoundary(in content: String, offset: Int) -> Int {
+        let i = floorCharBoundary(in: content, offset: offset)
+        guard i > 0 else { return 0 }
+        return floorCharBoundary(in: content, offset: i - 1)
+    }
+
+    /// Returns `(start, end)` UTF-8 byte offsets of the `unit` surrounding UTF-8 offset `at`
+    /// (`crates/rune/src/runtime/selection/selectable.rs:67-109`).
     public static func unitRange(in content: String, at utf8Offset: Int, unit: SelectionUnit) -> (Int, Int) {
-        let len = content.utf8.count
-        let clamped = max(0, min(utf8Offset, len))
+        let utf8 = content.utf8
+        let len = utf8.count
+        var i = floorCharBoundary(in: content, offset: utf8Offset)
+        if i > 0 && i == len && unit != .character {
+            i = prevCharBoundary(in: content, offset: i)
+        }
         switch unit {
         case .character:
-            return (clamped, clamped)
+            return (i, i)
         case .paragraph:
-            let bytes = Array(content.utf8)
-            var start = clamped
+            let bytes = Array(utf8)
+            var start = i
             while start > 0 && bytes[start - 1] != UInt8(ascii: "\n") {
                 start -= 1
             }
-            var end = clamped
+            var end = i
             while end < len && bytes[end] != UInt8(ascii: "\n") {
+                end += 1
+            }
+            if end < len && bytes[end] == UInt8(ascii: "\n") {
                 end += 1
             }
             return (start, end)
         case .word:
-            guard !content.isEmpty else { return (0, 0) }
-            let utf8Pos = content.utf8.index(content.utf8.startIndex, offsetBy: clamped)
-            let idx = utf8Pos.samePosition(in: content)
-                ?? content.indices.last(where: { $0 <= utf8Pos })
-                ?? content.startIndex
-            let safeIdx = min(idx, content.index(before: content.endIndex))
-            func isWordChar(_ ch: Character) -> Bool {
-                ch.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) || $0 == "_" }
+            guard len > 0 else { return (0, 0) }
+            let bytes = Array(utf8)
+            if i > 0 && i < len && (bytes[i] == UInt8(ascii: "\n") || bytes[i] == UInt8(ascii: "\r"))
+                && bytes[i - 1] != UInt8(ascii: "\n")
+            {
+                i = prevCharBoundary(in: content, offset: i)
+                if i > 0 && i < len && bytes[i] == UInt8(ascii: "\r") && bytes[i - 1] != UInt8(ascii: "\n") {
+                    i = prevCharBoundary(in: content, offset: i)
+                }
             }
-            let targetIsWord = isWordChar(content[safeIdx])
-            var lo = safeIdx
-            while lo > content.startIndex {
-                let prev = content.index(before: lo)
-                if isWordChar(content[prev]) != targetIsWord { break }
-                lo = prev
+
+            enum SpanKind { case word, whitespace, newline, punctuation }
+            func classify(_ scalar: Unicode.Scalar) -> SpanKind {
+                if scalar == "\n" || scalar == "\r" { return .newline }
+                if CharacterSet.whitespaces.contains(scalar) { return .whitespace }
+                if CharacterSet.alphanumerics.contains(scalar) || scalar == "_" { return .word }
+                return .punctuation
             }
-            var hi = content.index(after: safeIdx)
-            while hi < content.endIndex {
-                if isWordChar(content[hi]) != targetIsWord { break }
-                hi = content.index(after: hi)
+
+            var spanStart = 0
+            var spanKind: SpanKind? = nil
+            var byteCursor = 0
+            var foundTarget = false
+            for scalar in content.unicodeScalars {
+                let sLen = scalar.utf8.count
+                let nextCursor = byteCursor + sLen
+                let kind = classify(scalar)
+                if foundTarget {
+                    if kind != spanKind {
+                        return (spanStart, byteCursor)
+                    }
+                } else {
+                    let startsNewSpan: Bool
+                    if let current = spanKind {
+                        startsNewSpan = (kind != current) || kind == .punctuation || kind == .newline
+                    } else {
+                        startsNewSpan = false
+                    }
+                    if startsNewSpan {
+                        spanStart = byteCursor
+                    }
+                    spanKind = kind
+                    if i < nextCursor {
+                        if kind == .punctuation || kind == .newline {
+                            return (byteCursor, nextCursor)
+                        }
+                        foundTarget = true
+                    }
+                }
+                byteCursor = nextCursor
             }
-            return (
-                content.utf8.distance(from: content.startIndex, to: lo),
-                content.utf8.distance(from: content.startIndex, to: hi)
-            )
+            return foundTarget ? (spanStart, len) : (len, len)
         }
     }
 
-    /// Extends a single-text selection from `origin` to include `unitRange` while keeping `origin` whole.
+    /// Extends a single-text selection from `origin` to include `unitRange` while keeping `origin` whole
+    /// (`crates/rune/src/runtime/selection/selectable.rs:117-123`).
     public static func extendSelection(origin: (Int, Int), at unitRange: (Int, Int)) -> (anchor: Int, focus: Int) {
-        if unitRange.1 <= origin.0 {
+        if unitRange.0 < origin.0 {
             return (origin.1, unitRange.0)
-        } else if unitRange.0 >= origin.1 {
-            return (origin.0, unitRange.1)
+        } else {
+            return (origin.0, max(unitRange.1, origin.1))
         }
-        return (origin.0, origin.1)
     }
 }

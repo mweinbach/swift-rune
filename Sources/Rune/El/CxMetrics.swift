@@ -1,19 +1,9 @@
 import Foundation
 import RuneMotion
 
-/// Scroll and window-geometry metric accessors on `Cx` mirroring `crates/rune/src/runtime/cx.rs`,
-/// `runtime/layout_read.rs`, and `runtime/scroll/bottom.rs`.
+/// Scroll metric accessors on `Cx` mirroring `crates/rune/src/runtime/cx.rs`
+/// and `runtime/scroll/bottom.rs`.
 public extension Cx {
-    /// Laid-out rect of `key` in window points after ancestor scroll offsets (`cx.window_layout(key)`).
-    func windowLayout(_ key: String) -> MotionRect? {
-        layoutRect(of: key)
-    }
-
-    /// Derived value from `windowLayout(key)` (`cx.window_layout_with(key, f)`).
-    func windowLayoutWith<T: Equatable>(_ key: String, _ transform: (MotionRect) -> T) -> T? {
-        windowLayout(key).map(transform)
-    }
-
     /// Whether the scroll viewport keyed `key` is at or within `tolerance` points of its bottom,
     /// or `nil` when `key` is not mounted (`crates/rune/src/runtime/scroll/bottom.rs:332`).
     func scrollAtBottom(of key: String, tolerance: Float = 1.0) -> Bool? {
