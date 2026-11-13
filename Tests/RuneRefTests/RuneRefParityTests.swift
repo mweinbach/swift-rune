@@ -221,4 +221,127 @@ struct RuneRefParityTests {
         let unpackedRadii = OraclePrimitive.unpackClipRadii(radii)
         #expect(unpackedRadii == [4.0, 8.0, 12.0, 16.0])
     }
+
+    @Test("OracleShader fade ramp linear vs smoothstep matches upstream shader.rs")
+    func aNegativeFadeRampsLinearlyAndAPositiveOneEases() {
+        for (d, linear) in [
+            (Float(0.0), Float(0.0)),
+            (4.0, 0.25),
+            (8.0, 0.5),
+            (12.0, 0.75),
+            (16.0, 1.0),
+            (20.0, 1.0),
+        ] {
+            #expect(abs(OracleShader.ramp(d, -16.0) - linear) < 1e-6)
+        }
+        #expect(abs(OracleShader.ramp(4.0, 16.0) - 0.15625) < 1e-6)
+        #expect(OracleShader.ramp(8.0, 16.0) == OracleShader.ramp(8.0, -16.0))
+    }
+
+    @Test("OracleShader ringArc walks the centre line clockwise matching upstream shader.rs")
+    func ringArcWalksTheCentreLine() {
+        let cases: [((Float, Float), [Float], Float)] = [
+            ((40.0, 20.0), [10.0, 10.0, 10.0, 10.0], 2.0),
+            ((30.0, 30.0), [0.0, 6.0, 15.0, 3.0], 1.0),
+            ((50.0, 12.0), [6.0, 6.0, 6.0, 6.0], 0.5),
+            ((24.0, 18.0), [0.0, 0.0, 0.0, 0.0], 1.5),
+        ]
+        for (size, radii, bw) in cases {
+            let h = bw * 0.5
+            let rc = radii.map { max(0.0, min($0, min(size.0, size.1) * 0.5) - h) }
+            let (_, total) = OracleShader.ringArc((size.0 * 0.5, h), size, radii, bw)
+            let expected = 2.0 * (size.0 + size.1 - 2.0 * bw)
+                - (2.0 - Float.pi * 0.5) * rc.reduce(0, +)
+            #expect(abs(total - expected) < 1e-3)
+
+            var points: [(Float, Float)] = []
+            let steps = 400
+            for n in 0..<steps {
+                let angle = Float(n) / Float(steps) * (2.0 * Float.pi)
+                let dir = (sinf(angle), -cosf(angle))
+                var lo: Float = 0.0
+                var hi: Float = size.0 + size.1
+                for _ in 0..<60 {
+                    let mid = (lo + hi) * 0.5
+                    let q = (dir.0 * mid, dir.1 * mid)
+                    if OracleShader.sd(q, (size.0 * 0.5, size.1 * 0.5), radii) + h < 0.0 {
+                        lo = mid
+                    } else {
+                        hi = mid
+                    }
+                }
+                points.append((size.0 * 0.5 + dir.0 * lo, size.1 * 0.5 + dir.1 * lo))
+            }
+
+            var trip: Float = 0.0
+            for n in 1...steps {
+                let a = points[n - 1]
+                let b = points[n % steps]
+                let chord = sqrtf((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1))
+                var ds = (OracleShader.ringArc(b, size, radii, bw).0 - OracleShader.ringArc(a, size, radii, bw).0)
+                    .truncatingRemainder(dividingBy: total)
+                if ds < 0 { ds += total }
+                #expect(ds > chord - 1e-3 && ds < chord * 1.5 + 1e-3)
+                trip += ds
+            }
+            #expect(abs(trip - total) < 1e-2)
+        }
+    }
+
+    @Test("OracleShader dash pattern closes smoothly at the seam matching upstream shader.rs")
+    func dashPatternClosesAtTheSeam() {
+        for total: Float in [37.3, 100.0, 251.9, 3.0] {
+            for d: (Float, Float, Float) in [(4.0, 3.0, 0.0), (6.0, 2.5, 1.7), (10.0, 10.0, -4.0)] {
+                for n in 0..<50 {
+                    let s = Float(n) * 0.37
+                    #expect(abs(OracleShader.dashCov(s, total, d.0, d.1, d.2) - OracleShader.dashCov(s + total, total, d.0, d.1, d.2)) < 1e-3)
+                    #expect(abs(OracleShader.dashCov(s, total, d.0, d.1, d.2) - OracleShader.dashCov(s - total, total, d.0, d.1, d.2)) < 1e-3)
+                }
+            }
+        }
+        #expect(abs(OracleShader.dashCov(0.0, 100.0, 4.0, 3.0, 0.0) - 0.5) < 1e-4)
+        #expect(OracleShader.dashCov(1.0, 100.0, 4.0, 3.0, 0.0) == 1.0)
+        for n in 0..<50 {
+            let s = Float(n) * 1.3
+            #expect(abs(OracleShader.dashCov(s, 100.0, 4.0, 3.0, 7.0) - OracleShader.dashCov(s, 100.0, 4.0, 3.0, 0.0)) < 1e-3)
+        }
+    }
+
+    @Test("Oracle glyph rotation turns clockwise and clips on screen matching upstream reference.rs")
+    func glyphRotationTurnsClockwiseAndClipsOnScreen() throws {
+        func renderGlyph(angle: Float, clip: [Float]) throws -> OracleFrame {
+            var s = OracleGenerator.scene(records: [])
+            s.atlas.data = [UInt8](repeating: 0, count: s.atlas.data.count)
+            for y in 1..<5 {
+                for x in 1..<5 {
+                    s.atlas.data[y * 32 + x] = 255
+                }
+            }
+            var p = OracleGenerator.scene(records: [[UInt8](repeating: 0, count: 32)]).primitives[0]
+            p.rect = [20.0, 20.0, 16.0, 16.0]
+            p.radii = [0, 0, 0, 0]
+            p.fill = [1, 1, 1, 1]
+            p.params = [angle, 2.0, 0.0, 1.0]
+            p.uv = [1.0, 1.0, 0.0, 0.0]
+            p.clip = clip
+            s.primitives.append(p)
+            try s.validate()
+            var frame = OracleFrame(width: s.width, height: s.height, provenance: false)
+            frame.render(s)
+            return frame
+        }
+
+        func isLit(_ f: OracleFrame, _ x: Int, _ y: Int) -> Bool {
+            f.rgba[(y * 64 + x) * 4] == 255
+        }
+
+        let cw = try renderGlyph(angle: Float.pi * 0.5, clip: oracleNoClip)
+        let ccw = try renderGlyph(angle: -Float.pi * 0.5, clip: oracleNoClip)
+        #expect(cw.rgba != ccw.rgba)
+        #expect(isLit(cw, 34, 21) && !isLit(cw, 21, 34) && !isLit(cw, 21, 21))
+        #expect(isLit(ccw, 21, 34) && !isLit(ccw, 34, 21) && !isLit(ccw, 21, 21))
+
+        let clipped = try renderGlyph(angle: Float.pi * 0.5, clip: [28.0, oracleNoClip[1], oracleNoClip[2], oracleNoClip[3]])
+        #expect(isLit(clipped, 34, 21) && !isLit(clipped, 21, 34))
+    }
 }

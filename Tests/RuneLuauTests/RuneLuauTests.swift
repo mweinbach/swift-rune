@@ -296,7 +296,7 @@ struct RuneLuauTests {
         // Hot reload should preserve count = 1
         _ = try script.reload(sources)
         let el2 = script.renderUncached(name: "render", dark: true, DummyState.self)
-        let txt = findButton(el2, key: "count-text")
+        let txt = findButton(el2, key: "\(script.memoPrefix())hdr")
         #expect(txt?.plainText == "Count: 1")
     }
 
