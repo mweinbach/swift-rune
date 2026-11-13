@@ -518,6 +518,7 @@ extension Runtime {
         var blurMap: [NodeId: Float] = [:]
         var radiusMap: [NodeId: Corners] = [:]
         var fillMap: [NodeId: Color] = [:]
+        var borderMap: [NodeId: Color] = [:]
         var movingSet: Set<NodeId> = []
         var exitingIds: Set<NodeId> = []
 
@@ -529,6 +530,9 @@ extension Runtime {
             radiusMap[animNode.id] = animNode.corners
             if let mc = animNode.fill {
                 fillMap[animNode.id] = Color(mc)
+            }
+            if let mb = animNode.border {
+                borderMap[animNode.id] = Color(mb)
             }
             if animNode.isMoving { movingSet.insert(animNode.id) }
             if animNode.isExiting { exitingIds.insert(animNode.id) }
@@ -1221,6 +1225,8 @@ extension Runtime {
                 }
             }
 
+            let effBorderColor = borderMap[nid] ?? el.borderColor
+
             // Border & solid fill handling
             let fillPaintedByGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
             if let bGrad = borderGradSpec, bwPx > 0 {
@@ -1236,7 +1242,7 @@ extension Runtime {
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if let dash = el.dashedBorder, bwPx > 0 && el.borderColor.a > 0.001 {
+            } else if let dash = el.dashedBorder, bwPx > 0 && effBorderColor.a > 0.001 {
                 if hasSolidBg && !fillPaintedByGrad {
                     instances.append(RenderInstance(
                         rect: rectPx,
@@ -1250,7 +1256,7 @@ extension Runtime {
                     ))
                     marks.append(0)
                 }
-                let ec = premulSIMD4(el.borderColor, opacity: localOpacity, srgb: srgbBlend)
+                let ec = premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend)
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: shapeRadiiPx,
@@ -1262,7 +1268,7 @@ extension Runtime {
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if !fillPaintedByGrad && (hasSolidBg || (bwPx > 0 && el.borderColor.a > 0.001)) {
+            } else if !fillPaintedByGrad && (hasSolidBg || (bwPx > 0 && effBorderColor.a > 0.001)) {
                 let sidesVec: SIMD4<Float>
                 if let s = el.borderSides {
                     sidesVec = SIMD4<Float>(
@@ -1278,20 +1284,20 @@ extension Runtime {
                     rect: rectPx,
                     radii: shapeRadiiPx,
                     fill: premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend),
-                    border: bwPx > 0 ? premulSIMD4(el.borderColor, opacity: localOpacity, srgb: srgbBlend) : .zero,
+                    border: bwPx > 0 ? premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend) : .zero,
                     params: SIMD4<Float>(bwPx, KIND_RECT, softEdge, 1.0),
                     uv: sidesVec,
                     clip: activeClip,
                     fade: activeFade
                 ))
                 marks.append(0)
-            } else if fillPaintedByGrad && bwPx > 0 && el.borderColor.a > 0.001 && borderGradSpec == nil {
+            } else if fillPaintedByGrad && bwPx > 0 && effBorderColor.a > 0.001 && borderGradSpec == nil {
                 // Solid border atop multi-stop linear/radial gradient
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: radiiPx,
                     fill: .zero,
-                    border: premulSIMD4(el.borderColor, opacity: localOpacity, srgb: srgbBlend),
+                    border: premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend),
                     params: SIMD4<Float>(bwPx, KIND_RECT, softEdge, 1.0),
                     uv: .zero,
                     clip: activeClip,

@@ -2265,6 +2265,7 @@ public final class Runtime<State> {
                 border: el.borderColor.motionColor,
                 layoutAnim: layoutAnimSpec,
                 styleSpring: styleSp,
+                animateOffset: (el.styleSpring != nil || commitMotion != nil || el.layoutAnim != nil),
                 transition: specTransition
             ))
 

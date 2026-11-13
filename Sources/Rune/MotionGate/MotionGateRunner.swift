@@ -475,8 +475,8 @@ private enum MotionGateSampleHelper {
                     rotate: 0,
                     corners: Corners.all(e.radius),
                     blur: e.blur,
-                    fill: MotionColor(r: e.fill.r, g: e.fill.g, b: e.fill.b, a: e.fill.a),
-                    border: nil,
+                    fill: e.fill.motionColor,
+                    border: (rt.scene.get(fn.nodeId, Props.BORDER).map(Color.init) ?? fn.el.borderColor).motionColor,
                     presence: e.exiting ? 0.0 : 1.0,
                     isExiting: e.exiting,
                     isMoving: e.moving

@@ -234,6 +234,7 @@ public struct NodeSpec: Sendable, Equatable {
     public var border: MotionColor?
     public var layoutAnim: LayoutAnim?
     public var styleSpring: Spring?
+    public var animateOffset: Bool
     public var transition: Transition?
 
     /// Layout frame in parent space when used with `Scene.insert` (alias for `rect`).
@@ -257,6 +258,7 @@ public struct NodeSpec: Sendable, Equatable {
         self.border = nil
         self.layoutAnim = nil
         self.styleSpring = nil
+        self.animateOffset = true
         self.transition = .opacity
     }
 
@@ -274,6 +276,7 @@ public struct NodeSpec: Sendable, Equatable {
         border: MotionColor? = nil,
         layoutAnim: LayoutAnim? = nil,
         styleSpring: Spring? = nil,
+        animateOffset: Bool = true,
         transition: Transition? = nil
     ) {
         self.id = id
@@ -289,6 +292,7 @@ public struct NodeSpec: Sendable, Equatable {
         self.border = border
         self.layoutAnim = layoutAnim
         self.styleSpring = styleSpring
+        self.animateOffset = animateOffset
         self.transition = transition
     }
 
@@ -1773,7 +1777,13 @@ public struct Scene: Sendable {
                     animate(spec.id, Props.OPACITY, to: spec.opacity, anim: a)
                     animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: Curve.from(sp)))
                     animate(spec.id, Props.ROTATE, to: spec.rotate, anim: a)
-                    animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                    if spec.animateOffset {
+                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: Curve.from(sp)))
+                    } else if let la = spec.layoutAnim {
+                        animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: la.x.curve))
+                    } else {
+                        set(spec.id, Props.OFFSET, spec.offset)
+                    }
                     animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: Curve.from(sp)))
                     animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: Curve.from(sp)))
                     if let fill = spec.fill {
