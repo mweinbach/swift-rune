@@ -114,7 +114,7 @@ public struct Badge: Sendable {
             .bg(fill)
             .child(text(labelText).font(style).color(fg).noWrap().a11yHidden())
         if let borderColor {
-            badgeEl = badgeEl.border(1.0, borderColor)
+            badgeEl = badgeEl.border(0.5, borderColor)
         }
         return badgeEl
     }
@@ -156,12 +156,12 @@ public struct Divider: Sendable {
 /// Labelled form field wrapper with optional info icon, prefix, and suffix (`rune_kit::Field`).
 public struct Field<State> {
     public static var infoIcon: SVGIcon {
-        SVGIcon(
+        let d = "M13 13H3V3H13V13ZM6.46777 6.81641V7.81641H7.5791V11.3721H8.5791V6.81641H6.46777ZM7.30078 4.62891V5.62891H8.85645V4.62891H7.30078Z"
+        return SVGIcon(
             viewBox: 16,
-            paths: [
-                "M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2Zm0 1.2a4.8 4.8 0 1 0 0 9.6 4.8 4.8 0 0 0 0-9.6Zm0 3.7a.65.65 0 0 1 .65.65v3.1a.65.65 0 1 1-1.3 0v-3.1A.65.65 0 0 1 8 6.9Zm0-2.1a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5Z"
-            ],
-            strokeWidth: nil
+            paths: [d],
+            strokeWidth: nil,
+            body: "<path fill-rule=\"evenodd\" d=\"\(d)\" fill=\"currentColor\"/>"
         )
     }
 
@@ -216,20 +216,27 @@ public struct Field<State> {
         if let labelText {
             var labelRow: El<State> = row()
                 .key("label")
+                .wFull()
                 .minH(16)
                 .gap(4)
                 .centerY()
-                .a11yHidden()
-                .child(text(labelText).font(k.ty.textSmallMedium).color(c.stdText))
+                .child(text(labelText).key("text").font(k.ty.uiMedium.lh(16)).color(c.textBase))
             if hasInfo {
-                labelRow = labelRow.child(icon(Field<State>.infoIcon, size: 16).color(c.iconMuted))
+                labelRow = labelRow.child(
+                    icon(Field<State>.infoIcon, size: 16)
+                        .key("info")
+                        .color(c.iconMuted)
+                        .a11yHidden()
+                )
             }
-            out = out.child(labelRow)
+            out = out.child(labelRow.a11yHidden())
         }
         if let prefixText {
             out = out.child(
                 text(prefixText)
-                    .key("aside")
+                    .key("prefix")
+                    .wFull()
+                    .minH(11)
                     .font(k.ty.small.lh(11))
                     .color(c.textMuted)
                     .a11yHidden()
@@ -241,7 +248,9 @@ public struct Field<State> {
         if let suffixText {
             out = out.child(
                 text(suffixText)
-                    .key("aside")
+                    .key("suffix")
+                    .wFull()
+                    .minH(11)
                     .font(k.ty.small.lh(11))
                     .color(c.textMuted)
                     .a11yHidden()
@@ -297,6 +306,7 @@ public struct Card<State> {
 
     public func build(_ k: Kit) -> El<State> {
         let c = k.c
+        let accent = accentColor ?? c.iconBase
         var body: El<State> = col()
             .key("body")
             .grow(1)
@@ -305,12 +315,14 @@ public struct Card<State> {
             .pb(10)
             .pl(8)
             .pr(12)
-            .gap(8)
+        if titleText != nil {
+            body = body.gap(8)
+        }
 
         if let titleText {
             let leading: El<State> = {
                 if let titleIcon {
-                    return icon(titleIcon, size: 16).color(c.iconMuted)
+                    return icon(titleIcon, size: 14).color(accent)
                 }
                 return icon(k.glyph.dash, size: 14).color(c.textFaint)
             }()
@@ -320,14 +332,14 @@ public struct Card<State> {
                     .gap(8)
                     .centerY()
                     .child(row().size(16, 16).center().child(leading).a11yHidden())
-                    .child(text(titleText).font(k.ty.textSmallMedium).color(c.stdText).a11yHidden())
+                    .child(text(titleText).font(k.ty.bodyMedium).color(c.textBase))
             )
         }
         if let descriptionText {
             body = body.child(
                 text(descriptionText)
                     .key("description")
-                    .font(k.ty.small)
+                    .font(k.ty.body)
                     .color(c.textMuted)
                     .wrapText()
                     .wFull()
@@ -341,26 +353,25 @@ public struct Card<State> {
             body = body.child(row().key("actions").pl(indent).gap(8).children(actions))
         }
 
+        let rule: El<State> = el()
+            .key("rule")
+            .w(2)
+            .my(8)
+            .rounded(2)
+            .bg(accent)
+            .a11yHidden()
+
         var root: El<State> = row()
             .role(.group)
             .wFull()
             .itemsStretch()
             .rounded(k.radius.md)
+            .child(rule)
+            .child(body)
         if let titleText {
             root = root.label(titleText)
         }
-        if accentColor != nil || titleText != nil {
-            root = root.child(
-                el()
-                    .key("rule")
-                    .w(2)
-                    .my(8)
-                    .rounded(2)
-                    .bg(accentColor ?? c.borderWeak)
-                    .a11yHidden()
-            )
-        }
-        return root.child(body)
+        return root
     }
 }
 
@@ -430,47 +441,45 @@ public struct Collapsible<State> {
     public func build(_ k: Kit) -> El<State> {
         let c = k.c
         let enabled = !isDisabled && visualState != .disabled
-        let fill: Color = {
-            if !enabled { return isGhost ? .transparent : c.layer01 }
-            switch visualState {
-            case .pressed: return k.on(c.pressed, backdrop: isGhost ? c.page : c.layer01)
-            case .hover: return k.on(c.hover, backdrop: isGhost ? c.page : c.layer01)
-            default: return isGhost ? .transparent : c.layer01
-            }
-        }()
-
-        let showArrow = !isGhost || visualState == .hover || visualState == .pressed
-        let arrow: El<State> = icon(isOpen ? k.glyph.triangleDown : k.glyph.triangleRight, size: 14)
+        let showArrow = isOpen || visualState == .hover
+        let arrowIcon: El<State> = icon(isOpen ? k.glyph.triangleDown : k.glyph.triangleRight, size: 14)
             .color(c.iconWeaker)
+        let arrow: El<State> = row()
+            .key("arrow")
+            .size(24, 24)
+            .center()
             .opacity(showArrow ? 1.0 : 0.0)
+            .child(arrowIcon)
+
+        let labelRow: El<State> = row()
+            .gap(8)
+            .centerY()
+            .child(text(titleText).key("title").font(k.ty.textSmallMedium).color(c.stdText))
+            .child(arrow)
+            .a11yHidden()
 
         var trigger: El<State> = row()
             .key("trigger")
             .role(.button)
             .label(titleText)
             .expanded(isOpen)
+            .focusable(enabled)
+            .focusRing(2.0, offset: 0.0, c.borderFocus)
+            .disabled(!enabled)
             .wFull()
             .h(32)
-            .px(8)
             .centerY()
-            .justifyBetween()
-            .rounded(k.radius.md)
-            .bg(fill)
-            .child(text(titleText).font(k.ty.textSmallMedium).color(c.stdText).a11yHidden())
-            .child(row().key("arrow").size(24, 24).center().child(arrow).a11yHidden())
+            .child(labelRow)
 
-        if enabled {
-            trigger = k.interactive(trigger)
-                .focusRing(2.0, offset: 0.0, c.borderFocus)
-                .focusable(true)
-            if let onToggleHandler {
-                trigger = trigger.onClick(onToggleHandler)
-            }
-        } else {
-            trigger = trigger.disabled(true).opacity(0.5)
+        if enabled, let onToggleHandler {
+            trigger = trigger.onClick(onToggleHandler)
         }
 
-        var root: El<State> = col().wFull().child(trigger)
+        var root: El<State> = col()
+            .role(.group)
+            .wFull()
+            .rounded(k.radius.md)
+            .child(trigger)
         if isOpen {
             root = root.child(
                 col()
@@ -597,45 +606,35 @@ public struct Accordion<State> {
             let top: Float = (i == 0) ? k.radius.lg : 0.0
             let bottom: Float = (i == count - 1 && !sec.isExpanded) ? k.radius.lg : 0.0
 
-            let fill: Color = {
-                if !enabled { return c.layer01 }
-                switch sec.visualState {
-                case .pressed: return k.on(c.pressed, backdrop: c.layer01)
-                case .hover: return k.on(c.hover, backdrop: c.layer01)
-                default: return c.layer01
-                }
-            }()
-
-            let arrow: El<State> = icon(sec.isExpanded ? k.glyph.triangleDown : k.glyph.triangleRight, size: 14)
-                .color(c.iconWeaker)
             var trigger: El<State> = row()
                 .key("trigger")
                 .role(.button)
                 .label(sec.titleText)
                 .expanded(sec.isExpanded)
+                .focusable(enabled)
+                .focusRing(2.0, offset: -2.0, c.borderFocus)
+                .disabled(!enabled)
                 .h(32)
                 .px(12)
+                .py(8)
                 .centerY()
                 .justifyBetween()
                 .corners(top, top, bottom, bottom)
-                .bg(fill)
+                .bg(sec.visualState == .hover ? c.hover : c.bgBase)
                 .border(1.0, c.borderBase)
-                .mt(i > 0 ? -1.0 : 0.0)
-                .child(text(sec.titleText).font(k.ty.textSmallMedium).color(c.stdText).a11yHidden())
-                .child(row().key("arrow").size(24, 24).center().child(arrow).a11yHidden())
+                .child(text(sec.titleText).key("title").font(k.ty.textSmall).color(c.textBase).a11yHidden())
 
-            if enabled {
-                trigger = k.interactive(trigger)
-                    .focusRing(2.0, offset: 0.0, c.borderFocus)
-                    .focusable(true)
-                if let onToggle = sec.onToggleHandler {
-                    trigger = trigger.onClick(onToggle)
-                }
-            } else {
-                trigger = trigger.disabled(true).opacity(0.5)
+            if sec.visualState == .rest {
+                trigger = trigger.hover(c.hover)
+            }
+            if enabled, let onToggle = sec.onToggleHandler {
+                trigger = trigger.onClick(onToggle)
             }
 
             var itemEl: El<State> = col().key("item\(i)").itemsStretch().child(trigger)
+            if i > 0 {
+                itemEl = itemEl.mt(-1.0)
+            }
             if sec.isExpanded {
                 let b: Float = (i == count - 1) ? k.radius.lg : 0.0
                 let contentEl: El<State> = col()
@@ -651,7 +650,7 @@ public struct Accordion<State> {
                 itemEl = itemEl.child(
                     col()
                         .key("content-clip")
-                        .clip(true)
+                        .clipSoft(0.0)
                         .child(contentEl)
                 )
             }
@@ -672,24 +671,71 @@ private func applyTextFieldShell<State>(
 ) -> El<State> {
     let c = k.c
     let disabled = state == .disabled
-    let fill: Color = (state == .hover && !disabled) ? kitOver(c.hover, c.bgBase) : c.bgBase
+    let hover = state == .hover && !invalid && !focused && !disabled
     var out = element
         .rounded(k.radius.md)
-        .bg(fill)
-        .shadows(k.shadowLayers(k.elevation.effectiveInput()))
+        .bg(hover ? kitOver(c.hover, c.bgBase) : c.bgBase)
 
-    if !disabled {
-        if invalid {
-            out = out.border(1.0, c.danger.fg)
-        } else if focused {
-            out = out.border(1.0, c.borderFocus)
-        } else {
-            out = out.focusWithinRing(c.borderFocus, width: 1.0, offset: 0.0)
-        }
-    } else {
-        out = out.opacity(0.5)
+    if disabled {
+        return out
+            .shadows(k.shadowLayers(k.elevation.effectiveInput()))
+            .opacity(0.5)
     }
-    return out
+    if invalid {
+        return out.border(1.0, c.danger.fg)
+    }
+    if focused || state == .focus {
+        return out.border(1.0, c.borderFocus)
+    }
+    out = out.shadows(k.shadowLayers(k.elevation.effectiveInput()))
+    if state == .rest {
+        out = out.hover(c.hover)
+    }
+    return out.focusWithinRing(c.borderFocus, width: 1.0, offset: -1.0)
+}
+
+private func nearestCaretOffset(
+    edit: TextEdit,
+    local: Vec2,
+    elementSize: Vec2,
+    leftInset: Float,
+    rightInset: Float,
+    fontSize: Float,
+    multiline: Bool = false,
+    lineHeight: Float = 17.5,
+    topPadding: Float = 8.0
+) -> Int {
+    let end = edit.text.utf8.count
+    guard end > 0 else { return 0 }
+    if multiline {
+        let lines = edit.displayString.split(separator: "\n", omittingEmptySubsequences: false)
+        let lineCount = max(1, lines.count)
+        let textBottom = min(
+            max(topPadding + lineHeight, elementSize.y - topPadding),
+            topPadding + Float(lineCount) * lineHeight
+        )
+        if local.y > textBottom || local.x >= elementSize.x - rightInset {
+            return end
+        }
+        if local.x <= leftInset && local.y <= topPadding + lineHeight {
+            return 0
+        }
+        if local.y <= topPadding {
+            let firstLineWidth = Float(lines.first?.count ?? 0) * (fontSize * 0.55)
+            let lineEndX = min(max(leftInset, elementSize.x - rightInset), leftInset + firstLineWidth)
+            return local.x > (leftInset + lineEndX) * 0.5 ? end : 0
+        }
+        return (local.y - topPadding) >= (textBottom - local.y) ? end : 0
+    }
+    if local.x <= leftInset {
+        return 0
+    }
+    let estTextWidth = Float(edit.displayString.count) * (fontSize * 0.55)
+    let textEndX = min(max(leftInset, elementSize.x - rightInset), leftInset + estTextWidth)
+    if local.x >= textEndX {
+        return end
+    }
+    return local.x > (leftInset + textEndX) * 0.5 ? end : 0
 }
 
 private func resolvedInputKey<State>(
@@ -713,7 +759,7 @@ public struct TextInput<State> {
     public var isLarge: Bool = false
     public var styleOverride: TextStyle?
     public var heightOverride: Float?
-    public var widthOverride: Float? = 240.0
+    public var widthOverride: Float? = 280.0
     public var leadingIconSVG: SVGIcon?
     public var leadingIconSizeValue: Float = 16.0
     public var isInvalid: Bool = false
@@ -963,9 +1009,18 @@ public struct TextInput<State> {
 
         if !disabled {
             let kp = editKeyPath
+            let leftInset: Float = leadingIconSVG != nil ? (8.0 + leadingIconSizeValue + 6.0) : 8.0
+            let fontSize = style.size
             e = e.onPointerDown { s, press, tx in
                 var edit = s[keyPath: kp]
-                let offset = press.local.x > press.elementSize.x * 0.5 ? edit.text.utf8.count : 0
+                let offset = nearestCaretOffset(
+                    edit: edit,
+                    local: press.local,
+                    elementSize: press.elementSize,
+                    leftInset: leftInset,
+                    rightInset: 8.0,
+                    fontSize: fontSize
+                )
                 edit.setCursor(utf8Offset: offset, extendSelection: false)
                 s[keyPath: kp] = edit
                 tx.focus(inputKey)
@@ -1137,8 +1192,9 @@ public struct TextArea<State> {
                 .minH(Float(minRows) * line)
                 .maxH(maxBound)
                 .scrollY()
+                .animateLayout(k.motion.control)
                 .child(field.animateLayout(k.motion.control))
-            e = e.child(viewport)
+            e = e.animateLayout(k.motion.control).child(viewport)
         } else if let h = maxHeightValue {
             let maxInner = max(line, h - 16.0)
             let minInner = min(maxInner, max(Float(rowCount) * line, 80.0 - 16.0))
@@ -1163,9 +1219,20 @@ public struct TextArea<State> {
 
         if !disabled {
             let kp = editKeyPath
+            let fontSize = style.size
             e = e.onPointerDown { s, press, tx in
                 var edit = s[keyPath: kp]
-                let offset = press.local.x > press.elementSize.x * 0.5 ? edit.text.utf8.count : 0
+                let offset = nearestCaretOffset(
+                    edit: edit,
+                    local: press.local,
+                    elementSize: press.elementSize,
+                    leftInset: 8.0,
+                    rightInset: 8.0,
+                    fontSize: fontSize,
+                    multiline: true,
+                    lineHeight: line,
+                    topPadding: 8.0
+                )
                 edit.setCursor(utf8Offset: offset, extendSelection: false)
                 s[keyPath: kp] = edit
                 tx.focus(inputKey)
@@ -1327,9 +1394,20 @@ public struct TextField<State> {
 
         if !disabled {
             let kp = editKeyPath
+            let isMulti = isMultiline
             wrapper = wrapper.onPointerDown { s, press, tx in
                 var edit = s[keyPath: kp]
-                let offset = press.local.x > press.elementSize.x * 0.5 ? edit.text.utf8.count : 0
+                let offset = nearestCaretOffset(
+                    edit: edit,
+                    local: press.local,
+                    elementSize: press.elementSize,
+                    leftInset: 12.0,
+                    rightInset: 12.0,
+                    fontSize: 14.0,
+                    multiline: isMulti,
+                    lineHeight: 21.0,
+                    topPadding: isMulti ? 6.0 : 0.0
+                )
                 edit.setCursor(utf8Offset: offset, extendSelection: false)
                 s[keyPath: kp] = edit
                 tx.focus(inputKey)

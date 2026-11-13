@@ -3,6 +3,7 @@ import Testing
 @testable import RuneKit
 @testable import Rune
 @testable import RuneMotion
+@testable import RuneRef
 
 @Suite("RuneKit Inputs & Containers Parity Tests")
 struct InputsAndContainersTests {
@@ -68,13 +69,14 @@ struct InputsAndContainersTests {
         let one = composer.rect[3]
         #expect(abs(one - (line + 16.0)) < 0.5)
 
-        // Shift+Enter adds a line and grows toward 2 rows.
+        // Shift+Enter adds a line and grows toward 2 rows, springing on intermediate frames.
         _ = rt.keyDown(KeyEvent(key: .enter, mods: Mods(shift: true)), at: t)
         _ = rt.keyDown(KeyEvent(key: .text("second")), at: t)
-        t += 0.016
+        t += 1.0 / 60.0
         _ = rt.frame(at: t)
         let twoMid = rt.element(byKey: "composer")!
         #expect(abs((twoMid.target[3]) - (2.0 * line + 16.0)) < 0.5)
+        #expect(twoMid.rect[3] > one + 0.5 && twoMid.rect[3] < 2.0 * line + 16.0 - 0.5)
         for _ in 0..<60 {
             t += 1.0 / 60.0
             _ = rt.frame(at: t)
@@ -95,8 +97,16 @@ struct InputsAndContainersTests {
         }
         let capped = rt.element(byKey: "composer")!
         #expect(abs(capped.rect[3] - (4.0 * line + 16.0)) < 0.5)
+        let viewport = rt.element(byKey: "composer-scroll")!
         let inner = rt.element(byKey: "composer-input")!
         #expect(inner.target[3] > 6.5 * line)
+        #expect(viewport.rect[3] <= 4.0 * line + 0.5)
+        if let caret = inner.caret {
+            #expect(caret[3] > 0)
+            if inner.rect[1] < viewport.rect[1] - 0.5 {
+                #expect(caret[1] >= viewport.rect[1] - 0.5 && caret[1] + caret[3] <= viewport.rect[1] + viewport.rect[3] + 0.5)
+            }
+        }
 
         // Plain Enter submits, and Cmd+A + Backspace shrinks back to 1 row.
         _ = rt.keyDown(KeyEvent(key: .enter), at: t)
@@ -356,12 +366,24 @@ struct InputsAndContainersTests {
         }
 
         var t = 0.0
-        _ = rt.frame(at: t)
+        let scene0 = rt.frame(at: t)
         let plain = rt.element(byKey: "plain")!
         let boxed = rt.element(byKey: "boxed")!
+        func boxInkCount(in scene: RefScene, rect r: [Float]) -> Int {
+            scene.primitives.filter { p in
+                let cx = p.rect[0] + p.rect[2] * 0.5
+                let cy = p.rect[1] + p.rect[3] * 0.5
+                return cx >= r[0] && cx <= r[0] + r[2] &&
+                    cy >= r[1] && cy <= r[1] + r[3] &&
+                    p.rect[2] >= r[2] - 0.5
+            }.count
+        }
         #expect(plain.role == .textInput)
         #expect(plain.fill.a == 0.0)
         #expect(boxed.fill.a > 0.0)
+        #expect(boxInkCount(in: scene0, rect: plain.rect) == 0)
+        #expect(boxInkCount(in: scene0, rect: rt.element(byKey: "invalid")!.rect) == 0)
+        #expect(boxInkCount(in: scene0, rect: boxed.rect) > 0)
         #expect(rt.element(byKey: "plain-input")?.label == "Type a command")
         #expect(rt.element(byKey: "invalid-input")?.textColor == kit.c.danger.fg)
         #expect(abs((rt.element(byKey: "disabled")?.opacity ?? 1.0) - 0.5) < 0.01)
@@ -372,9 +394,17 @@ struct InputsAndContainersTests {
         #expect(abs((clearRect[0] + clearRect[2]) - (b[0] + b[2])) < 0.5)
         #expect(abs((clearRect[1] + clearRect[3] * 0.5) - bCY) < 0.5)
 
-        // Clicking padding focuses plain input and types cleanly; clear button runs onAction without blurring.
+        // Hovering over the plain field draws no box tint.
+        rt.pointerMove(to: Vec2(b[0] + 50.0, bCY), at: t)
+        t += 1.0 / 60.0
+        let hoverScene = rt.frame(at: t)
+        #expect(boxInkCount(in: hoverScene, rect: plain.rect) == 0)
+
+        // Clicking padding focuses plain input and types cleanly without drawing a focus outline; clear button runs onAction without blurring.
         click(rt, at: Vec2(b[0] + 1.0, b[1] + b[3] - 1.0), t: &t)
         #expect(rt.focusedKey == "plain-input")
+        let focusedScene = rt.frame(at: t)
+        #expect(boxInkCount(in: focusedScene, rect: plain.rect) == 0)
         _ = rt.keyDown(KeyEvent(key: .text("hi")), at: t)
         t += 0.016
         _ = rt.frame(at: t)
@@ -383,6 +413,59 @@ struct InputsAndContainersTests {
         click(rt, at: Vec2(clearRect[0] + 2.0, clearRect[1] + 2.0), t: &t)
         #expect(rt.state.actions == 1)
         #expect(rt.focusedKey == "plain-input")
+    }
+
+    @MainActor
+    @Test("Clicking empty space to right of short text or below TextArea lines on left half moves caret to end")
+    func nearestEndCaretOnShortTextAndBelowLines() {
+        struct S {
+            var short = TextEdit("hi")
+            var area = TextEdit("one", multiline: true)
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(360, 220), pixelScale: 1.0, systemDark: true) { _, _ in
+            col().p(12.0).gap(12.0)
+                .child(TextInput(key: "ti", \.short).build(kit))
+                .child(TextArea(key: "ta", \.area).build(kit))
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        let ti = rt.element(byKey: "ti")!
+        #expect(ti.rect[2] == 280.0)
+        // Left half (x = 90 < 140), yet well to the right of short "hi" -> caret moves to end (2..<2).
+        click(rt, at: Vec2(ti.rect[0] + 90.0, ti.rect[1] + 3.0), t: &t)
+        #expect(rt.focusedKey == "ti-input")
+        #expect(rt.state.short.selectedUTF8Range == 2..<2)
+
+        // Left half below the single line in TextArea -> caret moves to end (3..<3).
+        let ta = rt.element(byKey: "ta")!
+        click(rt, at: Vec2(ta.rect[0] + 24.0, ta.rect[1] + ta.rect[3] - 4.0), t: &t)
+        #expect(rt.focusedKey == "ta-input")
+        #expect(rt.state.area.selectedUTF8Range == 3..<3)
+    }
+
+    @Test("Secure TextArea autoGrow and small maxHeight cap do not disclose hidden lines")
+    func secureTextAreaGrowthAndCapDoNotDiscloseHiddenLines() {
+        let kit = Kit.neutral(dark: true)
+        func measure(_ secret: String) -> [(String, [Float], [Float], [Float]?)] {
+            var s = TextEdit(secret, multiline: true)
+            s.isSecure = true
+            let rt = Runtime<TextEdit>(state: s, viewport: Vec2(320, 300), pixelScale: 1.0, systemDark: true) { _, _ in
+                col()
+                    .child(TextArea<TextEdit>(key: "growing", \.self).secure().autoGrow(2, 6).build(kit))
+                    .child(TextArea<TextEdit>(key: "capped", \.self).secure().rows(8).maxHeight(40.0).build(kit))
+            }
+            _ = rt.frame(at: 0.0)
+            return rt.elements().map { ($0.path, $0.rect, $0.target, $0.caret) }
+        }
+        let short = measure("fictional")
+        let long = measure(String(repeating: "fictional\n", count: 100))
+        #expect(short.count == long.count)
+        for (a, b) in zip(short, long) {
+            #expect(a.0 == b.0 && a.1 == b.1 && a.2 == b.2 && a.3 == b.3)
+        }
+        let capped = short.first(where: { $0.0.hasSuffix("@capped") })!
+        #expect(capped.1[3] <= 40.5)
     }
 
     @MainActor
@@ -543,6 +626,8 @@ struct InputsAndContainersTests {
         let rt = Runtime<S>(state: S(), viewport: Vec2(400, 400), pixelScale: 1.0, systemDark: true) { _, _ in root }
         _ = rt.frame(at: 0.0)
         #expect(rt.element(byKey: "token-field")?.a11yDescription == "From your account page. Kept in the keychain")
+        #expect(rt.element(byKey: "prefix")?.key == "prefix")
+        #expect(rt.element(byKey: "suffix")?.key == "suffix")
         #expect(rt.element(byKey: "rule")?.rect[2] == 2.0)
         #expect(rt.element(byKey: "tf-input")?.a11yDescription == "Name is taken")
     }
