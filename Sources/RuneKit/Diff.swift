@@ -198,15 +198,21 @@ public enum DiffWords {
 
     @inline(__always)
     static func isWordScalar(_ s: UnicodeScalar) -> Bool {
-        if s == "_" { return true }
-        return s.properties.isAlphabetic || CharacterSet.decimalDigits.contains(s)
+        switch s.value {
+        case 0x61...0x7A, 0x41...0x5A, 0x30...0x39, 0x5F,
+             0xAD, 0xC0...0xD6, 0xD8...0xF6, 0xF8...0x2C6,
+             0x2C8...0x2D7, 0x2DE...0x2FF, 0x1E00...0x1EFF:
+            return true
+        default:
+            return false
+        }
     }
 
     @inline(__always)
     static func isJsSpace(_ s: UnicodeScalar) -> Bool {
         switch s.value {
         case 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0xA0, 0x1680,
-             0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+             0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF:
             return true
         default:
             return false
@@ -215,52 +221,69 @@ public enum DiffWords {
 
     /// Tokenizes a line into `jsdiff` `WordsWithSpace` tokens with UTF-8 byte offsets.
     public static func tokenize(_ line: String) -> [Token] {
+        enum Kind: Equatable { case word, space }
+        func kindOf(_ c: UnicodeScalar) -> Kind? {
+            if isWordScalar(c) { return .word }
+            if isJsSpace(c) && c.value != 0x0A && c.value != 0x0D { return .space }
+            return nil
+        }
+
         var result: [Token] = []
         let scalars = line.unicodeScalars
-        var i = scalars.startIndex
         let utf8View = line.utf8
+        var i = scalars.startIndex
+        var prevKind: Kind? = nil
 
         while i < scalars.endIndex {
             let start = i
             let ch = scalars[i]
-            if isWordScalar(ch) {
-                while i < scalars.endIndex && isWordScalar(scalars[i]) {
-                    i = scalars.index(after: i)
-                }
-            } else if isJsSpace(ch) {
-                while i < scalars.endIndex && isJsSpace(scalars[i]) {
-                    i = scalars.index(after: i)
-                }
-            } else {
-                i = scalars.index(after: i)
+            let next = scalars.index(after: i)
+            if ch.value == 0x0D && next < scalars.endIndex && scalars[next].value == 0x0A {
+                i = scalars.index(after: next)
+                let startOff = utf8View.distance(from: utf8View.startIndex, to: start.samePosition(in: utf8View) ?? utf8View.endIndex)
+                let endOff = utf8View.distance(from: utf8View.startIndex, to: i.samePosition(in: utf8View) ?? utf8View.endIndex)
+                result.append(Token(utf8Range: startOff..<endOff, text: String(scalars[start..<i])))
+                prevKind = nil
+                continue
             }
+            let k = kindOf(ch)
+            i = next
             let startOff = utf8View.distance(from: utf8View.startIndex, to: start.samePosition(in: utf8View) ?? utf8View.endIndex)
             let endOff = utf8View.distance(from: utf8View.startIndex, to: i.samePosition(in: utf8View) ?? utf8View.endIndex)
-            result.append(Token(utf8Range: startOff..<endOff, text: String(scalars[start..<i])))
+            if let k, prevKind == k, !result.isEmpty {
+                let prevLo = result[result.count - 1].utf8Range.lowerBound
+                result[result.count - 1].utf8Range = prevLo..<endOff
+                result[result.count - 1].text += String(scalars[start..<i])
+            } else {
+                result.append(Token(utf8Range: startOff..<endOff, text: String(scalars[start..<i])))
+            }
+            prevKind = k
         }
         return result
     }
 
-    /// Computes UTF-8 byte ranges in `old` (deleted) and `new` (inserted) that changed.
-    public static func changedRanges(old: String, new: String) -> (old: [Range<Int>], new: [Range<Int>]) {
-        if old.utf8.count > maxLineDiffLength || new.utf8.count > maxLineDiffLength {
-            return ([], [])
+    /// Single first-to-last changed byte range on each side (`diff::words::words`).
+    public static func words(old: String, new: String) -> (old: Range<Int>?, new: Range<Int>?) {
+        if old.utf16.count > maxLineDiffLength || new.utf16.count > maxLineDiffLength {
+            return (nil, nil)
         }
         let aTokens = tokenize(old)
         let bTokens = tokenize(new)
         let ops = Myers.diff(aTokens.map(\.text), bTokens.map(\.text))
 
-        var oldRanges: [Range<Int>] = []
-        var newRanges: [Range<Int>] = []
+        var oldRange: Range<Int>? = nil
+        var newRange: Range<Int>? = nil
         var ai = 0
         var bi = 0
 
-        func pushRange(_ list: inout [Range<Int>], _ range: Range<Int>) {
-            guard !range.isEmpty else { return }
-            if let last = list.last, last.upperBound == range.lowerBound {
-                list[list.count - 1] = last.lowerBound..<range.upperBound
+        func span(_ cur: inout Range<Int>?, toks: [Token], from: Int, to: Int) {
+            guard to > from else { return }
+            let lo = toks[from].utf8Range.lowerBound
+            let hi = toks[to - 1].utf8Range.upperBound
+            if let prev = cur {
+                cur = prev.lowerBound..<hi
             } else {
-                list.append(range)
+                cur = lo..<hi
             }
         }
 
@@ -270,22 +293,20 @@ public enum DiffWords {
                 ai += count
                 bi += count
             case .delete(let count):
-                if count > 0 {
-                    let lo = aTokens[ai].utf8Range.lowerBound
-                    let hi = aTokens[ai + count - 1].utf8Range.upperBound
-                    pushRange(&oldRanges, lo..<hi)
-                }
+                span(&oldRange, toks: aTokens, from: ai, to: ai + count)
                 ai += count
             case .insert(let count):
-                if count > 0 {
-                    let lo = bTokens[bi].utf8Range.lowerBound
-                    let hi = bTokens[bi + count - 1].utf8Range.upperBound
-                    pushRange(&newRanges, lo..<hi)
-                }
+                span(&newRange, toks: bTokens, from: bi, to: bi + count)
                 bi += count
             }
         }
-        return (oldRanges, newRanges)
+        return (oldRange, newRange)
+    }
+
+    /// Computes UTF-8 byte ranges in `old` (deleted) and `new` (inserted) matching Pierre `word-line` (at most 1 span per side).
+    public static func changedRanges(old: String, new: String) -> (old: [Range<Int>], new: [Range<Int>]) {
+        let (o, n) = words(old: old, new: new)
+        return (o.map { [$0] } ?? [], n.map { [$0] } ?? [])
     }
 
     /// Token-level diff returning sequential `(kind, text)` chunks for compatibility helpers.
@@ -341,6 +362,7 @@ enum DiffPairs {
 
     static func strippedUTF16(_ s: String) -> [UInt16] {
         var out: [UInt16] = []
+        out.reserveCapacity(s.utf16.count)
         for scalar in s.unicodeScalars where !DiffWords.isJsSpace(scalar) {
             for cu in scalar.utf16 {
                 out.append(cu)
@@ -349,122 +371,133 @@ enum DiffPairs {
         return out
     }
 
+    /// Common prefix + suffix share over longer length (`pairs.rs:similarity`).
     static func similarity(_ a: [UInt16], _ b: [UInt16]) -> Double {
-        if a.isEmpty && b.isEmpty { return 1.0 }
+        if a == b { return 1.0 }
         let maxLen = max(a.count, b.count)
-        if maxLen == 0 { return 1.0 }
         let minLen = min(a.count, b.count)
-        if maxLen - minLen > Int(ceil(Double(maxLen) * (1.0 - minGain))) + 1 {
-            return 0.0
+        if minLen == 0 { return 0.0 }
+        var prefix = 0
+        while prefix < minLen && a[prefix] == b[prefix] {
+            prefix += 1
         }
-        // Standard O(min(n, m)) Levenshtein distance
-        let (short, long) = a.count <= b.count ? (a, b) : (b, a)
-        var prev = Array(0...short.count)
-        var curr = [Int](repeating: 0, count: short.count + 1)
-        for (i, lc) in long.enumerated() {
-            curr[0] = i + 1
-            for (j, sc) in short.enumerated() {
-                let cost = (lc == sc) ? 0 : 1
-                curr[j + 1] = min(
-                    min(curr[j] + 1, prev[j + 1] + 1),
-                    prev[j] + cost
-                )
-            }
-            swap(&prev, &curr)
+        var suffix = 0
+        let maxSuffix = minLen - prefix
+        while suffix < maxSuffix && a[a.count - 1 - suffix] == b[b.count - 1 - suffix] {
+            suffix += 1
         }
-        let dist = prev[short.count]
-        return 1.0 - Double(dist) / Double(maxLen)
+        return Double(prefix + suffix) / Double(maxLen)
     }
 
-    static func pairLines(_ dels: [DiffLine], _ adds: [DiffLine]) -> [(Int, Int)] {
-        let n = dels.count
-        let m = adds.count
-        if n == 0 || m == 0 { return [] }
-        if n * m > maxComparisons {
-            let count = min(n, m)
-            return (0..<count).map { ($0, $0) }
+    /// Contiguous block alignment `(removedCount, addedCount)` (`pairs.rs:blocks`).
+    static func blocks(_ removed: [DiffLine], _ added: [DiffLine]) -> [(Int, Int)] {
+        let d = removed.count
+        let a = added.count
+        let pairs = min(d, a)
+        let surplus = abs(d - a)
+        if pairs == 0 || surplus == 0 || pairs * (surplus + 1) > maxComparisons {
+            return [(d, a)]
         }
+        let remKeys = removed.map { strippedUTF16($0.text) }
+        let addKeys = added.map { strippedUTF16($0.text) }
+        let longerAdded = a > d
+        var bestOffset = 0
+        var bestScore = -1.0
+        for offset in 0...surplus {
+            let sr = longerAdded ? 0 : offset
+            let sa = longerAdded ? offset : 0
+            var score = 0.0
+            for k in 0..<pairs {
+                score += similarity(remKeys[k + sr], addKeys[k + sa])
+            }
+            if offset == 0 {
+                bestOffset = 0
+                bestScore = score + Double(pairs) * minGain
+            } else if score > bestScore {
+                bestOffset = offset
+                bestScore = score
+            }
+        }
+        if bestOffset == 0 {
+            return [(d, a)]
+        }
+        let raw: [(Int, Int)] = longerAdded
+            ? [(0, bestOffset), (pairs, pairs), (0, a - pairs - bestOffset)]
+            : [(bestOffset, 0), (pairs, pairs), (d - pairs - bestOffset, 0)]
+        return raw.filter { $0.0 + $0.1 > 0 }
+    }
 
-        let delKeys = dels.map { strippedUTF16($0.text) }
-        let addKeys = adds.map { strippedUTF16($0.text) }
+    private static func pushRun(lines: inout [DiffLine], removed: inout [DiffLine], added: inout [DiffLine]) {
+        guard !removed.isEmpty || !added.isEmpty else { return }
+        let blockList = blocks(removed, added)
+        var rIdx = 0
+        var aIdx = 0
+        for (d, a) in blockList {
+            let start = lines.count
+            lines.append(contentsOf: removed[rIdx..<(rIdx + d)])
+            lines.append(contentsOf: added[aIdx..<(aIdx + a)])
+            rIdx += d
+            aIdx += a
+            for k in 0..<min(d, a) {
+                let i = start + k
+                let j = start + d + k
+                let (oldCh, newCh) = DiffWords.changedRanges(old: lines[i].text, new: lines[j].text)
+                lines[i].pair = j
+                lines[i].changes = oldCh
+                lines[j].pair = i
+                lines[j].changes = newCh
+            }
+        }
+        removed.removeAll(keepingCapacity: true)
+        added.removeAll(keepingCapacity: true)
+    }
 
-        var dp = [[Double]](repeating: [Double](repeating: 0, count: m + 1), count: n + 1)
-        for i in stride(from: n - 1, through: 0, by: -1) {
-            for j in stride(from: m - 1, through: 0, by: -1) {
-                var best = max(dp[i + 1][j], dp[i][j + 1])
-                let sim = similarity(delKeys[i], addKeys[j])
-                if sim >= minGain {
-                    best = max(best, sim + dp[i + 1][j + 1])
+    /// Reorders runs block-by-block and precomputes `pair` + `changes` on every `DiffHunk` (`pairs.rs:pair_lines`).
+    static func pairLines(_ hunks: inout [DiffHunk]) {
+        for hIdx in hunks.indices {
+            var newLines: [DiffLine] = []
+            newLines.reserveCapacity(hunks[hIdx].lines.count)
+            var rem: [DiffLine] = []
+            var add: [DiffLine] = []
+            for var l in hunks[hIdx].lines {
+                l.pair = nil
+                l.changes = []
+                switch l.kind {
+                case .deletion:
+                    rem.append(l)
+                case .addition:
+                    add.append(l)
+                case .context:
+                    pushRun(lines: &newLines, removed: &rem, added: &add)
+                    newLines.append(l)
                 }
-                dp[i][j] = best
             }
+            pushRun(lines: &newLines, removed: &rem, added: &add)
+            hunks[hIdx].lines = newLines
         }
-
-        var pairs: [(Int, Int)] = []
-        var i = 0
-        var j = 0
-        while i < n && j < m {
-            let sim = similarity(delKeys[i], addKeys[j])
-            if sim >= minGain && abs(dp[i][j] - (sim + dp[i + 1][j + 1])) < 1e-9 {
-                pairs.append((i, j))
-                i += 1
-                j += 1
-            } else if dp[i + 1][j] >= dp[i][j + 1] {
-                i += 1
-            } else {
-                j += 1
-            }
-        }
-        return pairs
     }
 
-    static func splitRows(for lines: [DiffLine]) -> [SplitRow] {
+    static func splitRows(for rawLines: [DiffLine]) -> [SplitRow] {
+        var lines = rawLines
+        // If any line has precomputed `pair`, trust them directly; otherwise compute pairing once.
+        let alreadyPaired = lines.contains(where: { $0.pair != nil })
+        if !alreadyPaired && lines.contains(where: { $0.kind == .deletion }) && lines.contains(where: { $0.kind == .addition }) {
+            var temp = [DiffHunk(oldStart: 1, oldCount: 0, newStart: 1, newCount: 0, lines: lines)]
+            pairLines(&temp)
+            lines = temp[0].lines
+        }
+
         var rows: [SplitRow] = []
-        var i = 0
-        while i < lines.count {
-            if lines[i].kind == .context {
-                rows.append(.only(lines[i]))
-                i += 1
+        rows.reserveCapacity(lines.count)
+        for l in lines {
+            switch (l.kind, l.pair) {
+            case (.addition, .some):
                 continue
-            }
-
-            var dels: [DiffLine] = []
-            var adds: [DiffLine] = []
-            while i < lines.count && lines[i].kind != .context {
-                if lines[i].kind == .deletion {
-                    dels.append(lines[i])
-                } else {
-                    adds.append(lines[i])
-                }
-                i += 1
-            }
-
-            let matches = pairLines(dels, adds)
-            var di = 0
-            var ai = 0
-            for (mi, mj) in matches {
-                while di < mi {
-                    rows.append(.only(dels[di]))
-                    di += 1
-                }
-                while ai < mj {
-                    rows.append(.only(adds[ai]))
-                    ai += 1
-                }
-                let delLine = dels[mi]
-                let addLine = adds[mj]
-                let changed = DiffWords.changedRanges(old: delLine.text, new: addLine.text)
-                rows.append(.pair(old: delLine, new: addLine, oldChanged: changed.old, newChanged: changed.new))
-                di += 1
-                ai += 1
-            }
-            while di < dels.count {
-                rows.append(.only(dels[di]))
-                di += 1
-            }
-            while ai < adds.count {
-                rows.append(.only(adds[ai]))
-                ai += 1
+            case (.deletion, .some(let j)) where j < lines.count:
+                let addedLine = lines[j]
+                rows.append(.pair(old: l, new: addedLine, oldChanged: l.changes, newChanged: addedLine.changes))
+            default:
+                rows.append(.only(l))
             }
         }
         return rows
@@ -503,6 +536,7 @@ public enum FileStatus: Sendable, Equatable, Hashable {
     case added
     case deleted
     case renamed(from: String)
+    case copied
 
     public var label: String {
         switch self {
@@ -510,6 +544,7 @@ public enum FileStatus: Sendable, Equatable, Hashable {
         case .added: "Added"
         case .deleted: "Deleted"
         case .renamed: "Renamed"
+        case .copied: "Copied"
         }
     }
 }
@@ -553,15 +588,29 @@ public struct DiffLine: Sendable, Equatable, Hashable {
     public var oldNumber: Int?
     public var newNumber: Int?
     public var text: String
+    public var noNewline: Bool
+    public var changes: [Range<Int>]
+    public var pair: Int?
 
     public var oldLine: UInt32? { oldNumber.map { UInt32($0) } }
     public var newLine: UInt32? { newNumber.map { UInt32($0) } }
 
-    public init(kind: DiffLineKind, oldNumber: Int?, newNumber: Int?, text: String) {
+    public init(
+        kind: DiffLineKind,
+        oldNumber: Int?,
+        newNumber: Int?,
+        text: String,
+        noNewline: Bool = false,
+        changes: [Range<Int>] = [],
+        pair: Int? = nil
+    ) {
         self.kind = kind
         self.oldNumber = oldNumber
         self.newNumber = newNumber
         self.text = text
+        self.noNewline = noNewline
+        self.changes = changes
+        self.pair = pair
     }
 
     public func lineNumber(for side: DiffSide) -> UInt32? {
@@ -637,11 +686,14 @@ public struct FileDiff: Sendable, Equatable {
     public var oldPath: String
     public var newPath: String
     public var status: FileStatus
+    public var similarity: UInt8?
+    public var oldMode: String?
+    public var newMode: String?
     public var hunks: [DiffHunk]
     public var isBinary: Bool
     public var source: DiffSource?
 
-    public var path: String { newPath.isEmpty ? oldPath : newPath }
+    public var path: String { newPath.isEmpty || newPath == "/dev/null" ? oldPath : newPath }
 
     public var additionsCount: Int {
         hunks.reduce(0) { $0 + $1.additionsCount }
@@ -661,7 +713,7 @@ public struct FileDiff: Sendable, Equatable {
         switch status {
         case .added: .new
         case .deleted: .old
-        case .modified, .renamed: nil
+        case .modified, .renamed, .copied: nil
         }
     }
 
@@ -699,6 +751,9 @@ public struct FileDiff: Sendable, Equatable {
         oldPath: String,
         newPath: String,
         status: FileStatus = .modified,
+        similarity: UInt8? = nil,
+        oldMode: String? = nil,
+        newMode: String? = nil,
         hunks: [DiffHunk],
         isBinary: Bool = false,
         source: DiffSource? = nil
@@ -706,6 +761,9 @@ public struct FileDiff: Sendable, Equatable {
         self.oldPath = oldPath
         self.newPath = newPath
         self.status = status
+        self.similarity = similarity
+        self.oldMode = oldMode
+        self.newMode = newMode
         self.hunks = hunks
         self.isBinary = isBinary
         self.source = source
@@ -730,7 +788,8 @@ public struct FileDiff: Sendable, Equatable {
 
         let (aIds, bIds) = intern(oldLines, newLines)
         let ops = Myers.diff(aIds, bIds)
-        let hunks = buildContextHunks(oldLines: oldLines, newLines: newLines, ops: ops, context: max(0, context))
+        var hunks = buildContextHunks(oldLines: oldLines, newLines: newLines, ops: ops, context: max(0, context))
+        DiffPairs.pairLines(&hunks)
 
         return FileDiff(
             oldPath: status == .added ? "/dev/null" : path,
@@ -796,170 +855,217 @@ public struct FileDiff: Sendable, Equatable {
 
     /// Parses a unified diff (`git diff` / `diff -u`) string into `FileDiff` values (`FileDiff::parse`).
     public static func parse(_ patch: String) -> [FileDiff] {
-        let rawLines = patch.replacingOccurrences(of: "\r\n", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
+        let lines: [String] = patch.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
+            raw.hasSuffix("\r") ? String(raw.dropLast()) : String(raw)
+        }
 
         var files: [FileDiff] = []
-        var curOld = ""
-        var curNew = ""
-        var curStatus: FileStatus = .modified
-        var curBinary = false
-        var curHunks: [DiffHunk] = []
-        var sawFile = false
+        var cur: FileDiff? = nil
+        var inHeader = false
 
-        var activeHunkHeader: String?
-        var activeSection: String?
-        var activeOldStart = 1
-        var activeOldCount = 0
-        var activeNewStart = 1
-        var activeNewCount = 0
-        var activeLines: [DiffLine] = []
-        var curOldNum = 1
-        var curNewNum = 1
-
-        func flushHunk() {
-            guard let hdr = activeHunkHeader else { return }
-            curHunks.append(DiffHunk(
-                header: hdr,
-                section: activeSection,
-                oldStart: activeOldStart,
-                oldCount: activeOldCount,
-                newStart: activeNewStart,
-                newCount: activeNewCount,
-                lines: activeLines
-            ))
-            activeHunkHeader = nil
-            activeSection = nil
-            activeLines = []
-        }
-
-        func flushFile() {
-            flushHunk()
-            guard sawFile else { return }
-            if curOld == "/dev/null" { curStatus = .added }
-            else if curNew == "/dev/null" { curStatus = .deleted }
-            files.append(FileDiff(
-                oldPath: curOld,
-                newPath: curNew,
-                status: curStatus,
-                hunks: curHunks,
-                isBinary: curBinary
-            ))
-            curOld = ""
-            curNew = ""
-            curStatus = .modified
-            curBinary = false
-            curHunks = []
-            sawFile = false
-        }
-
-        func stripGitPrefix(_ s: String) -> String {
-            var p = s.trimmingCharacters(in: .whitespaces)
-            if p.hasPrefix("\"") && p.hasSuffix("\"") && p.count >= 2 {
-                p = String(p.dropFirst().dropLast())
+        func flushCur() {
+            guard var f = cur else { return }
+            cur = nil
+            if f.status == .modified {
+                if f.oldPath == "/dev/null" {
+                    f.status = .added
+                } else if f.newPath == "/dev/null" {
+                    f.status = .deleted
+                } else if !f.oldPath.isEmpty && !f.newPath.isEmpty && f.oldPath != f.newPath {
+                    f.status = .renamed(from: f.oldPath)
+                }
             }
+            DiffPairs.pairLines(&f.hunks)
+            files.append(f)
+        }
+
+        func stripGitPrefix(_ raw: String) -> String {
+            let p = unquoteGitPath(raw)
             if p.hasPrefix("a/") || p.hasPrefix("b/") {
                 return String(p.dropFirst(2))
             }
             return p
         }
 
-        for line in rawLines {
-            if line.hasPrefix("diff --git ") {
-                flushFile()
-                sawFile = true
-                let rest = String(line.dropFirst("diff --git ".count))
-                let parts = parseGitDiffPaths(rest)
-                curOld = parts.old
-                curNew = parts.new
-                continue
+        func pathOf(_ raw: String) -> String {
+            let s: String = if raw.hasPrefix("\"") {
+                raw
+            } else {
+                raw.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? raw
             }
+            let trimmed = String(s.reversed().drop(while: { $0.isWhitespace }).reversed())
+            if trimmed == "/dev/null" {
+                return "/dev/null"
+            }
+            return stripGitPrefix(trimmed)
+        }
 
-            if !sawFile && line.hasPrefix("--- ") {
-                sawFile = true
+        func applyHeaderLine(_ f: inout FileDiff, _ l: String) {
+            func afterPrefix(_ p: String) -> String? {
+                guard l.hasPrefix(p) else { return nil }
+                return String(l.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
             }
-
-            if line.hasPrefix("new file mode") {
-                curStatus = .added
-                continue
-            }
-            if line.hasPrefix("deleted file mode") {
-                curStatus = .deleted
-                continue
-            }
-            if line.hasPrefix("rename from ") {
-                let from = String(line.dropFirst("rename from ".count))
-                curOld = from
-                curStatus = .renamed(from: from)
-                continue
-            }
-            if line.hasPrefix("rename to ") {
-                let to = String(line.dropFirst("rename to ".count))
-                curNew = to
-                continue
-            }
-            if (line.hasPrefix("Binary files ") && line.hasSuffix(" differ")) || line == "GIT binary patch" {
-                curBinary = true
-                continue
-            }
-            if line.hasPrefix("--- ") && activeHunkHeader == nil {
-                let pathPart = String(line.dropFirst(4)).split(separator: "\t", maxSplits: 1).first.map(String.init) ?? ""
-                if pathPart == "/dev/null" {
-                    curOld = "/dev/null"
-                    curStatus = .added
-                } else {
-                    curOld = stripGitPrefix(pathPart)
+            if let m = afterPrefix("old mode ") {
+                f.oldMode = m
+            } else if let m = afterPrefix("new mode ") {
+                f.newMode = m
+            } else if let m = afterPrefix("new file mode ") {
+                f.newMode = m
+                f.status = .added
+                f.oldPath = "/dev/null"
+            } else if let m = afterPrefix("deleted file mode ") {
+                f.oldMode = m
+                f.status = .deleted
+                f.newPath = "/dev/null"
+            } else if let p = afterPrefix("rename from ") {
+                let u = unquoteGitPath(p)
+                f.oldPath = u
+                f.status = .renamed(from: u)
+            } else if let p = afterPrefix("rename to ") {
+                f.newPath = unquoteGitPath(p)
+                if case .renamed = f.status {} else {
+                    f.status = .renamed(from: f.oldPath)
                 }
-                continue
-            }
-            if line.hasPrefix("+++ ") && activeHunkHeader == nil {
-                let pathPart = String(line.dropFirst(4)).split(separator: "\t", maxSplits: 1).first.map(String.init) ?? ""
-                if pathPart == "/dev/null" {
-                    curNew = "/dev/null"
-                    curStatus = .deleted
-                } else {
-                    curNew = stripGitPrefix(pathPart)
+            } else if let p = afterPrefix("copy from ") {
+                f.oldPath = unquoteGitPath(p)
+                f.status = .copied
+            } else if let p = afterPrefix("copy to ") {
+                f.newPath = unquoteGitPath(p)
+                f.status = .copied
+            } else if let s = afterPrefix("similarity index ") {
+                let digits = s.hasSuffix("%") ? String(s.dropLast()) : s
+                f.similarity = UInt8(digits)
+            } else if let rest = afterPrefix("index ") {
+                if let sp = rest.firstIndex(of: " ") {
+                    let mode = String(rest[rest.index(after: sp)...])
+                    if f.oldMode == nil { f.oldMode = mode }
+                    if f.newMode == nil { f.newMode = mode }
                 }
-                continue
-            }
-            if line.hasPrefix("@@ ") {
-                flushHunk()
-                sawFile = true
-                if let parsed = parseHunkHeader(line) {
-                    activeHunkHeader = line
-                    activeSection = parsed.section
-                    activeOldStart = parsed.oldStart
-                    activeOldCount = parsed.oldCount
-                    activeNewStart = parsed.newStart
-                    activeNewCount = parsed.newCount
-                    curOldNum = parsed.oldStart
-                    curNewNum = parsed.newStart
-                }
-                continue
-            }
-
-            guard activeHunkHeader != nil else { continue }
-            if line.hasPrefix("+") {
-                activeLines.append(DiffLine(kind: .addition, oldNumber: nil, newNumber: curNewNum, text: String(line.dropFirst())))
-                curNewNum += 1
-            } else if line.hasPrefix("-") {
-                activeLines.append(DiffLine(kind: .deletion, oldNumber: curOldNum, newNumber: nil, text: String(line.dropFirst())))
-                curOldNum += 1
-            } else if line.hasPrefix(" ") {
-                activeLines.append(DiffLine(kind: .context, oldNumber: curOldNum, newNumber: curNewNum, text: String(line.dropFirst())))
-                curOldNum += 1
-                curNewNum += 1
-            } else if line == "\\ No newline at end of file" {
-                continue
-            } else if !line.isEmpty {
-                // Treat bare unprefixed line inside hunk as context
-                activeLines.append(DiffLine(kind: .context, oldNumber: curOldNum, newNumber: curNewNum, text: line))
-                curOldNum += 1
-                curNewNum += 1
+            } else if l.hasPrefix("Binary files ") || l == "GIT binary patch" {
+                f.isBinary = true
             }
         }
-        flushFile()
+
+        func parseHunkBody(
+            header: String,
+            parsed: (oldStart: Int, oldCount: Int, newStart: Int, newCount: Int, section: String?),
+            startIndex: Int
+        ) -> (DiffHunk, Int) {
+            var oldNum = parsed.oldCount == 0 ? 0 : parsed.oldStart
+            var newNum = parsed.newCount == 0 ? 0 : parsed.newStart
+            if parsed.oldStart > 0 && parsed.oldCount == 0 { oldNum = parsed.oldStart }
+            if parsed.newStart > 0 && parsed.newCount == 0 { newNum = parsed.newStart }
+            var oldLeft = parsed.oldCount
+            var newLeft = parsed.newCount
+            var outLines: [DiffLine] = []
+            var idx = startIndex
+            while idx < lines.count {
+                let l = lines[idx]
+                if l.hasPrefix("\\") {
+                    if !outLines.isEmpty {
+                        outLines[outLines.count - 1].noNewline = true
+                    }
+                    idx += 1
+                    continue
+                }
+                if oldLeft == 0 && newLeft == 0 {
+                    break
+                }
+                let firstByte = l.utf8.first
+                let kind: DiffLineKind
+                let bodyText: String
+                if firstByte == UInt8(ascii: " ") {
+                    kind = .context
+                    bodyText = String(l.dropFirst())
+                } else if l.isEmpty && idx + 1 < lines.count {
+                    kind = .context
+                    bodyText = ""
+                } else if firstByte == UInt8(ascii: "-") && oldLeft > 0 {
+                    kind = .deletion
+                    bodyText = String(l.dropFirst())
+                } else if firstByte == UInt8(ascii: "+") && newLeft > 0 {
+                    kind = .addition
+                    bodyText = String(l.dropFirst())
+                } else {
+                    break
+                }
+
+                switch kind {
+                case .context:
+                    guard oldLeft > 0 && newLeft > 0 else {
+                        return (DiffHunk(header: header, section: parsed.section, oldStart: parsed.oldStart, oldCount: parsed.oldCount - oldLeft, newStart: parsed.newStart, newCount: parsed.newCount - newLeft, lines: outLines), idx)
+                    }
+                    oldLeft -= 1
+                    newLeft -= 1
+                    outLines.append(DiffLine(kind: .context, oldNumber: oldNum, newNumber: newNum, text: bodyText))
+                    oldNum += 1
+                    newNum += 1
+                case .deletion:
+                    oldLeft -= 1
+                    outLines.append(DiffLine(kind: .deletion, oldNumber: oldNum, newNumber: nil, text: bodyText))
+                    oldNum += 1
+                case .addition:
+                    newLeft -= 1
+                    outLines.append(DiffLine(kind: .addition, oldNumber: nil, newNumber: newNum, text: bodyText))
+                    newNum += 1
+                }
+                idx += 1
+            }
+            let hunk = DiffHunk(
+                header: header,
+                section: parsed.section,
+                oldStart: parsed.oldStart,
+                oldCount: parsed.oldCount - oldLeft,
+                newStart: parsed.newStart,
+                newCount: parsed.newCount - newLeft,
+                lines: outLines
+            )
+            return (hunk, idx)
+        }
+
+        var i = 0
+        while i < lines.count {
+            let l = lines[i]
+            if l.hasPrefix("diff --git ") {
+                flushCur()
+                let rest = String(l.dropFirst("diff --git ".count))
+                let parts = parseGitDiffPaths(rest)
+                cur = FileDiff(oldPath: parts.old, newPath: parts.new, hunks: [])
+                inHeader = true
+                i += 1
+                continue
+            }
+            if l.hasPrefix("--- "),
+               i + 1 < lines.count, lines[i + 1].hasPrefix("+++ "),
+               i + 2 < lines.count, lines[i + 2].hasPrefix("@@ ") {
+                let a = pathOf(String(l.dropFirst(4)))
+                let b = pathOf(String(lines[i + 1].dropFirst(4)))
+                if var f = cur, inHeader {
+                    f.oldPath = a
+                    f.newPath = b
+                    cur = f
+                } else {
+                    flushCur()
+                    cur = FileDiff(oldPath: a, newPath: b, hunks: [])
+                }
+                inHeader = false
+                i += 2
+                continue
+            }
+            if cur != nil {
+                if l.hasPrefix("@@ "), let parsed = parseHunkHeader(l) {
+                    inHeader = false
+                    let (hunk, nextIdx) = parseHunkBody(header: l, parsed: parsed, startIndex: i + 1)
+                    cur?.hunks.append(hunk)
+                    i = nextIdx
+                    continue
+                } else if inHeader {
+                    applyHeaderLine(&cur!, l)
+                }
+            }
+            i += 1
+        }
+        flushCur()
         return files
     }
 
@@ -1012,19 +1118,16 @@ public struct FileDiff: Sendable, Equatable {
     }
 
     private static func findSection(in lines: [String], before index: Int) -> String? {
-        let limit = max(0, index - 80)
-        var i = index - 1
-        while i >= limit {
-            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("fn ") || trimmed.hasPrefix("pub fn ") || trimmed.hasPrefix("async fn ") ||
-               trimmed.hasPrefix("func ") || trimmed.hasPrefix("public func ") || trimmed.hasPrefix("private func ") ||
-               trimmed.hasPrefix("def ") || trimmed.hasPrefix("async def ") ||
-               trimmed.hasPrefix("class ") || trimmed.hasPrefix("struct ") || trimmed.hasPrefix("enum ") ||
-               trimmed.hasPrefix("impl ") || trimmed.hasPrefix("protocol ") || trimmed.hasPrefix("# ") || trimmed.hasPrefix("## ") {
-                let singleLine = trimmed.split(separator: "\n").first.map(String.init) ?? trimmed
-                return singleLine.count > 80 ? String(singleLine.prefix(80)) : singleLine
+        let end = min(index, lines.count)
+        let start = max(0, end - 2000)
+        var i = end - 1
+        while i >= start {
+            let line = lines[i]
+            if let first = line.first, first.isLetter || first == "_" || first == "$" {
+                let trimmedEnd = String(line.reversed().drop(while: { $0.isWhitespace }).reversed())
+                return trimmedEnd.count > 80 ? String(trimmedEnd.prefix(80)) : trimmedEnd
             }
-            if i == 0 { break }
+            if i == start { break }
             i -= 1
         }
         return nil
@@ -1140,18 +1243,97 @@ public struct FileDiff: Sendable, Equatable {
         }
     }
 
+    private static func unquoteGitPath(_ p: String) -> String {
+        guard p.hasPrefix("\"") && p.hasSuffix("\"") && p.count >= 2 else { return p }
+        let inner = p.dropFirst().dropLast()
+        let raw = Array(inner.utf8)
+        var out: [UInt8] = []
+        out.reserveCapacity(raw.count)
+        var idx = 0
+        while idx < raw.count {
+            let c = raw[idx]
+            idx += 1
+            if c != UInt8(ascii: "\\") {
+                out.append(c)
+                continue
+            }
+            guard idx < raw.count else {
+                out.append(UInt8(ascii: "\\"))
+                break
+            }
+            let esc = raw[idx]
+            idx += 1
+            switch esc {
+            case UInt8(ascii: "n"): out.append(UInt8(ascii: "\n"))
+            case UInt8(ascii: "t"): out.append(UInt8(ascii: "\t"))
+            case UInt8(ascii: "r"): out.append(UInt8(ascii: "\r"))
+            case UInt8(ascii: "0")...UInt8(ascii: "7"):
+                var val = Int(esc - UInt8(ascii: "0"))
+                for _ in 0..<2 {
+                    if idx < raw.count, raw[idx] >= UInt8(ascii: "0"), raw[idx] <= UInt8(ascii: "7") {
+                        val = val * 8 + Int(raw[idx] - UInt8(ascii: "0"))
+                        idx += 1
+                    } else {
+                        break
+                    }
+                }
+                out.append(UInt8(truncatingIfNeeded: val))
+            default:
+                out.append(esc)
+            }
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    private static func quotedEnd(_ s: String) -> String.Index? {
+        var escaped = false
+        var idx = s.index(after: s.startIndex)
+        while idx < s.endIndex {
+            let ch = s[idx]
+            if escaped {
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                return s.index(after: idx)
+            }
+            idx = s.index(after: idx)
+        }
+        return nil
+    }
+
+    private static func stripAB(_ p: String) -> String {
+        let u = unquoteGitPath(p)
+        if u.hasPrefix("a/") || u.hasPrefix("b/") {
+            return String(u.dropFirst(2))
+        }
+        return u
+    }
+
     private static func parseGitDiffPaths(_ s: String) -> (old: String, new: String) {
-        // Handles `a/foo b/foo` and quoted paths `"a/foo bar" "b/foo bar"`
+        if s.hasPrefix("\""), let end = quotedEnd(s) {
+            let a = stripAB(String(s[..<end]))
+            let tail = String(s[end...]).trimmingCharacters(in: .whitespaces)
+            let b = stripAB(tail)
+            return (a, b)
+        }
+        let utf8 = Array(s.utf8)
+        let half = utf8.count / 2
+        if utf8.count % 2 == 1, utf8[half] == UInt8(ascii: " "),
+           let midIdx = s.utf8.index(s.utf8.startIndex, offsetBy: half, limitedBy: s.utf8.endIndex),
+           let nextIdx = s.utf8.index(after: midIdx) as String.Index? {
+            let left = String(s[..<midIdx])
+            let right = String(s[nextIdx...])
+            if left.hasPrefix("a/"), right.hasPrefix("b/"), left.dropFirst(2) == right.dropFirst(2) {
+                return (stripAB(left), stripAB(right))
+            }
+        }
         if let bRange = s.range(of: " b/") {
-            var old = String(s[..<bRange.lowerBound])
-            if old.hasPrefix("a/") { old = String(old.dropFirst(2)) }
-            let new = String(s[bRange.upperBound...])
+            let old = stripAB(String(s[..<bRange.lowerBound]))
+            let new = stripAB(String(s[s.index(after: bRange.lowerBound)...]))
             return (old, new)
         }
-        let parts = s.split(separator: " ", maxSplits: 1).map(String.init)
-        let o = parts.first.map { $0.hasPrefix("a/") ? String($0.dropFirst(2)) : $0 } ?? ""
-        let n = parts.dropFirst().first.map { $0.hasPrefix("b/") ? String($0.dropFirst(2)) : $0 } ?? o
-        return (o, n)
+        return ("", "")
     }
 
     private static func parseHunkHeader(_ line: String) -> (oldStart: Int, oldCount: Int, newStart: Int, newCount: Int, section: String?)? {
@@ -1245,13 +1427,15 @@ public struct DiffLineRange: Sendable, Equatable, Hashable {
 /// Inline review comment attached to a line (`crate::diff::state::Annotation`).
 public struct DiffAnnotation: Sendable, Equatable, Hashable {
     public var id: String
+    public var file: Int
     public var side: DiffSide
     public var line: UInt32
     public var author: String?
     public var body: String
 
-    public init(id: String, side: DiffSide, line: UInt32, author: String? = nil, body: String) {
+    public init(id: String, file: Int = 0, side: DiffSide, line: UInt32, author: String? = nil, body: String) {
         self.id = id
+        self.file = file
         self.side = side
         self.line = line
         self.author = author
@@ -1339,18 +1523,83 @@ private struct GapExpansion: Sendable, Equatable, Hashable {
     var bottom: Int = 0
 }
 
-/// Interactive diff state tracking mode, folding, gap expansion, annotations, and line selection (`crate::diff::state::DiffState`).
+private struct DiffFileUI: Sendable, Equatable, Hashable {
+    var collapsed: Bool = false
+    var expansions: [Int: GapExpansion] = [:]
+}
+
+private struct DiffCopyTracker: Sendable, Equatable, Hashable {
+    private(set) var side: DiffSide = .new
+    private(set) var enteredCell: String? = nil
+
+    mutating func step(side: DiffSide, cell: String, inside: Bool) -> Bool {
+        let prev = self.side
+        if inside {
+            enteredCell = cell
+            self.side = side
+        } else if enteredCell == cell {
+            enteredCell = nil
+        }
+        return self.side != prev
+    }
+}
+
+/// Interactive diff state tracking mode, multi-file folding, gap expansion, annotations, copy side, navigation, and line selection (`crate::diff::state::DiffState`).
 public struct DiffState: Sendable, Equatable {
-    public var diff: FileDiff
+    public var files: [FileDiff]
     public var mode: DiffMode
-    public var expanded: Bool
     public var wrap: Bool
     public var annotations: [DiffAnnotation]
     public var selection: LineSelectionState<DiffLineRef>
     public var hoveredRow: Int?
     public var copiedToastVisible: Bool
+    public var visibleFile: Int
 
-    private var gapExpansions: [Int: GapExpansion] = [:]
+    private var ui: [DiffFileUI]
+    private var copyTracker = DiffCopyTracker()
+
+    /// Compatibility accessor for the primary file (`files[0]`).
+    public var diff: FileDiff {
+        get { files.first ?? FileDiff(oldPath: "", newPath: "", hunks: []) }
+        set {
+            if files.isEmpty {
+                files = [newValue]
+                ui = [DiffFileUI()]
+            } else {
+                files[0] = newValue
+                if ui.isEmpty { ui = [DiffFileUI()] }
+            }
+        }
+    }
+
+    /// Compatibility accessor for the primary file's expanded state (`!collapsed(file: 0)`).
+    public var expanded: Bool {
+        get { !collapsed(file: 0) }
+        set { setCollapsed(file: 0, !newValue) }
+    }
+
+    /// Active copy side tracked from pointer hover over old/new code cells (`copy_side`).
+    public var copySide: DiffSide {
+        copyTracker.side
+    }
+
+    public init(
+        files: [FileDiff],
+        mode: DiffMode = .unified,
+        expanded: Bool = true,
+        wrap: Bool = false,
+        annotations: [DiffAnnotation] = []
+    ) {
+        self.files = files
+        self.ui = files.map { _ in DiffFileUI(collapsed: !expanded, expansions: [:]) }
+        self.mode = mode
+        self.wrap = wrap
+        self.annotations = annotations
+        self.selection = .idle(selected: nil)
+        self.hoveredRow = nil
+        self.copiedToastVisible = false
+        self.visibleFile = 0
+    }
 
     public init(
         diff: FileDiff,
@@ -1359,21 +1608,33 @@ public struct DiffState: Sendable, Equatable {
         wrap: Bool = false,
         annotations: [DiffAnnotation] = []
     ) {
-        self.diff = diff
-        self.mode = mode
-        self.expanded = expanded
-        self.wrap = wrap
-        self.annotations = annotations
+        self.init(files: [diff], mode: mode, expanded: expanded, wrap: wrap, annotations: annotations)
+    }
+
+    public mutating func setFiles(_ files: [FileDiff]) {
+        self.files = files
+        self.ui = files.map { _ in DiffFileUI() }
         self.selection = .idle(selected: nil)
         self.hoveredRow = nil
-        self.copiedToastVisible = false
+        self.visibleFile = 0
     }
 
     public mutating func setDiff(_ diff: FileDiff) {
-        self.diff = diff
-        self.gapExpansions = [:]
-        self.selection = .idle(selected: nil)
-        self.hoveredRow = nil
+        setFiles([diff])
+    }
+
+    public func fileIndex(path: String) -> Int? {
+        files.firstIndex { $0.path == path || $0.oldPath == path }
+    }
+
+    public func collapsed(file: Int) -> Bool {
+        guard files.indices.contains(file), ui.indices.contains(file) else { return false }
+        return ui[file].collapsed
+    }
+
+    public mutating func setCollapsed(file: Int, _ collapsed: Bool) {
+        guard files.indices.contains(file), ui.indices.contains(file) else { return }
+        ui[file].collapsed = collapsed
     }
 
     public mutating func setMode(_ mode: DiffMode) {
@@ -1381,28 +1642,57 @@ public struct DiffState: Sendable, Equatable {
     }
 
     public mutating func toggleExpanded() {
-        expanded.toggle()
+        setCollapsed(file: 0, !collapsed(file: 0))
     }
 
     public mutating func toggleWrap() {
         wrap.toggle()
     }
 
-    /// Expands a collapsed context gap in `up`, `down`, or `all` direction by `DiffLayout.expandStep`.
-    public mutating func expand(gapIndex: Int, direction: DiffExpand) {
-        let gaps = computeGaps()
+    /// Tracks pointer entering/leaving a code cell (`copy_side`). Returns true if copy side changed.
+    @discardableResult
+    public mutating func hoverText(side: DiffSide, cell: String, inside: Bool) -> Bool {
+        copyTracker.step(side: side, cell: cell, inside: inside)
+    }
+
+    /// Lines still hidden in `file`'s gap `gap`, or `nil` when the file is not expandable.
+    public func hidden(file: Int = 0, gap: Int) -> Int? {
+        guard files.indices.contains(file) else { return nil }
+        guard files[file].expandable else { return nil }
+        return computeGaps(file: file).first(where: { $0.index == gap })?.count ?? 0
+    }
+
+    /// Expands a collapsed context gap in `up`, `down`, or `all` direction (`state.rs:expand`).
+    public mutating func expand(file: Int = 0, gapIndex: Int, direction: DiffExpand) {
+        guard files.indices.contains(file), ui.indices.contains(file) else { return }
+        let fileDiff = files[file]
+        guard fileDiff.expandable else { return }
+        let gaps = computeGaps(file: file)
         guard let gap = gaps.first(where: { $0.index == gapIndex }) else { return }
-        var exp = gapExpansions[gapIndex, default: GapExpansion()]
         let remaining = gap.count
+        guard remaining > 0 else { return }
+
+        var exp = ui[file].expansions[gapIndex, default: GapExpansion()]
+        let last = (gapIndex == fileDiff.hunks.count)
         switch direction {
-        case .up:
-            exp.top += min(DiffLayout.expandStep, remaining)
-        case .down:
-            exp.bottom += min(DiffLayout.expandStep, remaining)
         case .all:
             exp.top += remaining
+        case .up:
+            if last {
+                exp.top += min(DiffLayout.expandStep, remaining)
+            } else {
+                // Gap 0 and middle gaps expand bottom edge upward toward hunk above
+                exp.bottom += min(DiffLayout.expandStep, remaining)
+            }
+        case .down:
+            exp.top += min(DiffLayout.expandStep, remaining)
         }
-        gapExpansions[gapIndex] = exp
+        ui[file].expansions[gapIndex] = exp
+    }
+
+    /// Convenience single-file wrapper preserved for callers.
+    public mutating func expand(gapIndex: Int, direction: DiffExpand) {
+        expand(file: 0, gapIndex: gapIndex, direction: direction)
     }
 
     /// Selects a single line or range on `side`.
@@ -1417,10 +1707,16 @@ public struct DiffState: Sendable, Equatable {
     }
 
     /// Copies the currently selected lines (`copySide`), or the entire diff side if nothing is selected.
-    public func copyText(side: DiffCopySide = .new) -> String {
+    public func copyText(side: DiffCopySide? = nil) -> String {
+        let resolved: DiffCopySide = side ?? {
+            switch copySide {
+            case .old: .old
+            case .new: .new
+            }
+        }()
         if let sel = selectedRange {
             var lines: [String] = []
-            for h in effectiveHunks() {
+            for h in effectiveHunks(file: visibleFile) {
                 for l in h.lines {
                     let matchesSel: Bool = switch sel.start.side {
                     case .old:
@@ -1429,17 +1725,18 @@ public struct DiffState: Sendable, Equatable {
                         l.newLine.map { $0 >= sel.start.line && $0 <= sel.end.line } ?? false
                     }
                     guard matchesSel else { continue }
-                    if matchesCopySide(l.kind, copySide: side) {
+                    if matchesCopySide(l.kind, copySide: resolved) {
                         lines.append(l.text)
                     }
                 }
             }
             return lines.joined(separator: "\n")
         }
-        switch side {
-        case .old: return diff.text(side: .old)
-        case .new: return diff.text(side: .new)
-        case .both: return diff.copyableText(includeRemoved: true)
+        let targetFile = files.indices.contains(visibleFile) ? files[visibleFile] : diff
+        switch resolved {
+        case .old: return targetFile.text(side: .old)
+        case .new: return targetFile.text(side: .new)
+        case .both: return targetFile.copyableText(includeRemoved: true)
         }
     }
 
@@ -1452,14 +1749,113 @@ public struct DiffState: Sendable, Equatable {
         }
     }
 
-    /// Returns gap descriptors between/around hunks accounting for expansions so far.
-    public func computeGaps() -> [DiffGap] {
-        guard !diff.hunks.isEmpty else { return [] }
+    private func fileYOffset(_ file: Int) -> Float {
+        var y: Float = 0
+        for idx in 0..<min(file, files.count) {
+            y += DiffLayout.headerHeight
+            if files[idx].isBinary {
+                y += DiffLayout.noteHeight
+            } else if !collapsed(file: idx) {
+                for r in rows(file: idx) {
+                    y += r.baseHeight
+                }
+            }
+        }
+        return y
+    }
+
+    public mutating func scrollToFile(_ file: Int, keyPrefix: String = "diff", tx: inout Tx) {
+        guard files.indices.contains(file) else { return }
+        visibleFile = file
+        let y = (files.count <= 1) ? Float(0) : fileYOffset(file)
+        tx.scrollTo("\(keyPrefix)-body", offset: Vec2(x: 0, y: y))
+    }
+
+    public mutating func scrollToLine(_ file: Int, at: DiffLineRef, keyPrefix: String = "diff", tx: inout Tx) {
+        guard files.indices.contains(file) else { return }
+        if collapsed(file: file) {
+            setCollapsed(file: file, false)
+        }
+        for gap in computeGaps(file: file) {
+            let start = (at.side == .old) ? gap.oldStart : gap.newStart
+            let end = (at.side == .old) ? gap.oldEnd : gap.newEnd
+            if Int(at.line) >= start && Int(at.line) < end {
+                expand(file: file, gapIndex: gap.index, direction: .all)
+                break
+            }
+        }
+        let rList = rows(file: file)
+        if let idx = rList.firstIndex(where: { $0.lineRef(for: mode, preferredSide: at.side) == at }) {
+            var y = (files.count <= 1) ? Float(0) : (fileYOffset(file) + DiffLayout.headerHeight)
+            for row in rList.prefix(idx) {
+                y += row.baseHeight
+            }
+            tx.scrollTo("\(keyPrefix)-body", offset: Vec2(x: 0, y: y))
+        }
+        visibleFile = file
+    }
+
+    @discardableResult
+    public mutating func nextHunk(forward: Bool, keyPrefix: String = "diff", tx: inout Tx) -> Bool {
+        guard !files.isEmpty else { return false }
+        let target = forward ? min(files.count - 1, visibleFile + (files[visibleFile].hunks.count <= 1 ? 1 : 0)) : max(0, visibleFile - (files[visibleFile].hunks.count <= 1 ? 1 : 0))
+        if files[target].hunks.isEmpty { return false }
+        scrollToFile(target, keyPrefix: keyPrefix, tx: &tx)
+        return true
+    }
+
+    @discardableResult
+    public mutating func nextFile(forward: Bool, keyPrefix: String = "diff", tx: inout Tx) -> Bool {
+        let target = forward ? visibleFile + 1 : visibleFile - 1
+        guard files.indices.contains(target) else { return false }
+        scrollToFile(target, keyPrefix: keyPrefix, tx: &tx)
+        return true
+    }
+
+    /// Keyboard navigation and copy/clear handler (`DiffState::key`).
+    public mutating func key(_ event: KeyEvent, keyPrefix: String = "diff", tx: inout Tx) -> Bool {
+        let mods = event.mods
+        let noCmdMods = !mods.cmd && !mods.ctrl && !mods.alt
+        switch event.key {
+        case .text("j") where noCmdMods:
+            return nextHunk(forward: true, keyPrefix: keyPrefix, tx: &tx)
+        case .text("k") where noCmdMods:
+            return nextHunk(forward: false, keyPrefix: keyPrefix, tx: &tx)
+        case .text("]") where noCmdMods:
+            return nextFile(forward: true, keyPrefix: keyPrefix, tx: &tx)
+        case .text("[") where noCmdMods:
+            return nextFile(forward: false, keyPrefix: keyPrefix, tx: &tx)
+        case .escape where selection.selected != nil:
+            select(nil)
+            return true
+        case .command("c"):
+            if selection.selected != nil {
+                tx.copyText(copyText())
+                return true
+            }
+            return false
+        case .text("c") where mods.primaryCommand:
+            if selection.selected != nil {
+                tx.copyText(copyText())
+                return true
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    /// Returns gap descriptors for `file` accounting for expansions so far.
+    public func computeGaps(file: Int = 0) -> [DiffGap] {
+        guard files.indices.contains(file) else { return [] }
+        let targetDiff = files[file]
+        guard !targetDiff.hunks.isEmpty else { return [] }
+        let expansions = ui.indices.contains(file) ? ui[file].expansions : [:]
         var gaps: [DiffGap] = []
-        let hunks = diff.hunks
+        let hunks = targetDiff.hunks
 
         // Leading gap (index 0) before hunk 0
-        let exp0 = gapExpansions[0, default: GapExpansion()]
+        let exp0 = expansions[0, default: GapExpansion()]
         let leadingOldEnd = max(1, hunks[0].oldStart - exp0.bottom)
         let leadingNewEnd = max(1, hunks[0].newStart - exp0.bottom)
         if leadingOldEnd > 1 + exp0.top || leadingNewEnd > 1 + exp0.top {
@@ -1479,7 +1875,7 @@ public struct DiffState: Sendable, Equatable {
             let prev = hunks[k]
             let next = hunks[k + 1]
             let idx = k + 1
-            let exp = gapExpansions[idx, default: GapExpansion()]
+            let exp = expansions[idx, default: GapExpansion()]
             let oStart = prev.oldStart + prev.oldCount + exp.top
             let oEnd = next.oldStart - exp.bottom
             let nStart = prev.newStart + prev.newCount + exp.top
@@ -1498,9 +1894,9 @@ public struct DiffState: Sendable, Equatable {
         }
 
         // Trailing gap (index hunks.count) if source has trailing lines
-        if let src = diff.source, let last = hunks.last {
+        if let src = targetDiff.source, let last = hunks.last {
             let idx = hunks.count
-            let exp = gapExpansions[idx, default: GapExpansion()]
+            let exp = expansions[idx, default: GapExpansion()]
             let oStart = last.oldStart + last.oldCount + exp.top
             let oEnd = src.oldLines.count + 1 - exp.bottom
             let nStart = last.newStart + last.newCount + exp.top
@@ -1521,11 +1917,12 @@ public struct DiffState: Sendable, Equatable {
     }
 
     private func contextLinesFromSource(
+        file: Int,
         oldStart1: Int,
         newStart1: Int,
         count: Int
     ) -> [DiffLine] {
-        guard count > 0, let src = diff.source else { return [] }
+        guard files.indices.contains(file), count > 0, let src = files[file].source else { return [] }
         var out: [DiffLine] = []
         out.reserveCapacity(count)
         for i in 0..<count {
@@ -1545,40 +1942,42 @@ public struct DiffState: Sendable, Equatable {
     }
 
     /// Returns hunks including lines expanded out of adjacent gaps.
-    public func effectiveHunks() -> [DiffHunk] {
-        guard !diff.hunks.isEmpty else { return [] }
-        let hunks = diff.hunks
+    public func effectiveHunks(file: Int = 0) -> [DiffHunk] {
+        guard files.indices.contains(file) else { return [] }
+        let targetDiff = files[file]
+        guard !targetDiff.hunks.isEmpty else { return [] }
+        let hunks = targetDiff.hunks
+        let expansions = ui.indices.contains(file) ? ui[file].expansions : [:]
         var result: [DiffHunk] = []
         for (k, h) in hunks.enumerated() {
             var lines = h.lines
-            // Prepend expanded bottom of gap `k` above this hunk
-            let gapAbove = gapExpansions[k, default: GapExpansion()]
-            if gapAbove.bottom > 0, diff.source != nil {
+            // Prepend expanded bottom of gap `k` (and top of gap 0 when .all opened it) above this hunk
+            let gapAbove = expansions[k, default: GapExpansion()]
+            if (gapAbove.bottom > 0 || (k == 0 && gapAbove.top > 0)), targetDiff.source != nil {
                 let prevEndOld = (k == 0) ? 1 : (hunks[k - 1].oldStart + hunks[k - 1].oldCount)
-                let prevEndNew = (k == 0) ? 1 : (hunks[k - 1].newStart + hunks[k - 1].newCount)
                 let avail = max(0, h.oldStart - prevEndOld)
-                let take = min(avail, gapAbove.bottom + gapAbove.top)
-                let bottomTake = min(avail, gapAbove.bottom)
-                if bottomTake > 0 {
+                let wanted = (k == 0) ? (gapAbove.bottom + gapAbove.top) : gapAbove.bottom
+                let take = min(avail, wanted)
+                if take > 0 {
                     let pre = contextLinesFromSource(
-                        oldStart1: h.oldStart - bottomTake,
-                        newStart1: h.newStart - bottomTake,
-                        count: bottomTake
+                        file: file,
+                        oldStart1: h.oldStart - take,
+                        newStart1: h.newStart - take,
+                        count: take
                     )
                     lines = pre + lines
                 }
-                _ = take
-                _ = prevEndNew
             }
 
             // Append expanded top of gap `k + 1` below this hunk
-            let gapBelow = gapExpansions[k + 1, default: GapExpansion()]
-            if gapBelow.top > 0, let src = diff.source {
+            let gapBelow = expansions[k + 1, default: GapExpansion()]
+            if gapBelow.top > 0, let src = targetDiff.source {
                 let nextOldStart = (k + 1 < hunks.count) ? hunks[k + 1].oldStart : (src.oldLines.count + 1)
                 let avail = max(0, nextOldStart - (h.oldStart + h.oldCount))
                 let topTake = min(avail, gapBelow.top)
                 if topTake > 0 {
                     let post = contextLinesFromSource(
+                        file: file,
                         oldStart1: h.oldStart + h.oldCount,
                         newStart1: h.newStart + h.newCount,
                         count: topTake
@@ -1601,16 +2000,16 @@ public struct DiffState: Sendable, Equatable {
     }
 
     /// Flattens hunks, gaps, intra-line diffs, and annotations into renderable `DiffRow` values.
-    public func rows() -> [DiffRow] {
-        guard expanded else { return [] }
-        let hunks = effectiveHunks()
+    public func rows(file: Int = 0) -> [DiffRow] {
+        guard files.indices.contains(file), !collapsed(file: file) else { return [] }
+        let hunks = effectiveHunks(file: file)
         guard !hunks.isEmpty else { return [] }
-        let gaps = computeGaps()
+        let gaps = computeGaps(file: file)
         let gapByIndex = Dictionary(uniqueKeysWithValues: gaps.map { ($0.index, $0) })
 
-        // Index annotations by (side, line)
+        // Index annotations by (side, line) for this file
         var annsByLine: [DiffLineRef: [DiffAnnotation]] = [:]
-        for ann in annotations {
+        for ann in annotations where ann.file == file {
             annsByLine[DiffLineRef(side: ann.side, line: ann.line), default: []].append(ann)
         }
 
@@ -1625,16 +2024,7 @@ public struct DiffState: Sendable, Equatable {
             }
         }
 
-        // Emit leading gap 0 if present (plus any top-expanded prefix lines)
         if let g0 = gapByIndex[0] {
-            let exp0 = gapExpansions[0, default: GapExpansion()]
-            if exp0.top > 0 {
-                let topLines = contextLinesFromSource(oldStart1: 1, newStart1: 1, count: exp0.top)
-                for l in topLines {
-                    out.append(mode == .unified ? .unified(l) : .splitOnly(l))
-                    appendAnnotations(forOld: l.oldLine, new: l.newLine)
-                }
-            }
             out.append(.gap(g0))
         }
 
@@ -1644,7 +2034,6 @@ public struct DiffState: Sendable, Equatable {
             }
             switch mode {
             case .unified:
-                // Compute intra-line highlights for paired deletion/addition runs even in unified view
                 let split = h.splitRows()
                 var intraOldByLine: [Int: [Range<Int>]] = [:]
                 var intraNewByLine: [Int: [Range<Int>]] = [:]
@@ -1806,6 +2195,10 @@ public struct DiffView<State>: Sendable {
     public var onCopyHandler: (@Sendable (inout State, String, inout Tx) -> Void)?
     public var onSelectHandler: (@Sendable (inout State, DiffLineRange?, inout Tx) -> Void)?
     public var onLineClickHandler: (@Sendable (inout State, DiffLineRef, inout Tx) -> Void)?
+    public var onCommentHandler: (@Sendable (inout State, DiffLineRange, inout Tx) -> Void)?
+    public var onVisibleFileHandler: (@Sendable (inout State, Int) -> Void)?
+    public var annotationBuilder: (@Sendable (State, DiffAnnotation) -> El<State>)?
+    public var headerActionsBuilder: (@Sendable (State, Int) -> El<State>)?
 
     public init(
         key: String,
@@ -1851,6 +2244,18 @@ public struct DiffView<State>: Sendable {
     public func onLineClick(_ fn: @escaping @Sendable (inout State, DiffLineRef, inout Tx) -> Void) -> Self {
         var c = self; c.onLineClickHandler = fn; return c
     }
+    public func onComment(_ fn: @escaping @Sendable (inout State, DiffLineRange, inout Tx) -> Void) -> Self {
+        var c = self; c.onCommentHandler = fn; return c
+    }
+    public func onVisibleFile(_ fn: @escaping @Sendable (inout State, Int) -> Void) -> Self {
+        var c = self; c.onVisibleFileHandler = fn; return c
+    }
+    public func annotation(_ fn: @escaping @Sendable (State, DiffAnnotation) -> El<State>) -> Self {
+        var c = self; c.annotationBuilder = fn; return c
+    }
+    public func headerActions(_ fn: @escaping @Sendable (State, Int) -> El<State>) -> Self {
+        var c = self; c.headerActionsBuilder = fn; return c
+    }
 
     /// Builds a read-only `El<State>` without evaluating any `State` value (`Kit.diffView` compatibility).
     public func buildReadOnly(diffState: DiffState, cx: Cx<State> = Cx<State>(viewport: .zero)) -> El<State> {
@@ -1858,7 +2263,7 @@ public struct DiffView<State>: Sendable {
         if let forcedMode {
             st.mode = forcedMode
         }
-        return renderContainer(diffState: st, cx: cx)
+        return renderContainer(hostState: nil, diffState: st, cx: cx)
     }
 
     public func build(state: State, cx: Cx<State>) -> El<State> {
@@ -1866,16 +2271,17 @@ public struct DiffView<State>: Sendable {
         if let forcedMode {
             diffState.mode = forcedMode
         }
-        return renderContainer(diffState: diffState, cx: cx)
+        return renderContainer(hostState: state, diffState: diffState, cx: cx)
     }
 
-    private func renderContainer(diffState st: DiffState, cx: Cx<State>) -> El<State> {
+    private func filePrefix(_ fileIndex: Int) -> String {
+        fileIndex == 0 ? key : "\(key)-f\(fileIndex)"
+    }
+
+    private func renderContainer(hostState: State?, diffState st: DiffState, cx: Cx<State>) -> El<State> {
         let k = kit
-        let diff = st.diff
+        let filesToRender = st.files.isEmpty ? [st.diff] : st.files
         let syntaxTheme = SyntaxTheme.fromKit(k)
-        let lang = diff.language
-        let gutterDigits = diff.columns
-        let gutterWidth = Float(gutterDigits) * 8.5 + 16
         let lineH = DiffLayout.lineHeight * look.lineHeightMultiplier
 
         let addColor = k.c.success.fg
@@ -1893,65 +2299,124 @@ public struct DiffView<State>: Sendable {
             .rounded(k.radius.md)
             .clip()
 
-        if look.showHeader {
-            container = container.child(buildHeader(state: st, addColor: addColor, delColor: delColor))
-        }
+        if filesToRender.count == 1 {
+            let fIdx = 0
+            let diff = filesToRender[0]
+            let lang = diff.language
+            let gutterDigits = diff.columns
+            let gutterWidth = Float(gutterDigits) * 8.5 + 16
 
-        if diff.isBinary {
-            return container.child(
-                El<State>(direction: .row)
-                    .px(12)
-                    .py(12)
-                    .child(text("Binary file changed — diff preview unavailable").font(k.ty.caption()).color(k.c.textMuted))
+            if look.showHeader {
+                container = container.child(buildHeader(hostState: hostState, fileIndex: fIdx, state: st, diff: diff, addColor: addColor, delColor: delColor))
+            }
+
+            if diff.isBinary {
+                return container.child(
+                    El<State>(direction: .row)
+                        .px(12)
+                        .py(12)
+                        .child(text("Binary file changed — diff preview unavailable").font(k.ty.caption()).color(k.c.textMuted))
+                )
+            }
+
+            if st.collapsed(file: fIdx) {
+                return container
+            }
+
+            let rows = st.rows(file: fIdx)
+            if rows.isEmpty {
+                return container.child(
+                    El<State>(direction: .row)
+                        .px(12)
+                        .py(10)
+                        .child(text("No changes").font(k.ty.caption()).color(k.c.textMuted))
+                )
+            }
+
+            let scrollY = cx.scrollOffset(of: "\(key)-body").y
+            let effectiveViewport = look.viewportHeight > 0 ? look.viewportHeight : cx.viewport.y
+            let win = st.visibleWindow(
+                for: rows,
+                scrollY: scrollY,
+                viewportHeight: effectiveViewport,
+                lineHeightMultiplier: look.lineHeightMultiplier
             )
+
+            var body = El<State>(direction: .column)
+                .key("\(key)-body")
+                .wFull()
+                .scrollXY()
+
+            if win.beforeHeight > 0 {
+                body = body.child(El<State>(direction: .row).key("\(key)-before").wFull().h(win.beforeHeight).shrink(0))
+            }
+
+            for rowIdx in win.range {
+                body = body.child(renderRow(
+                    hostState: hostState,
+                    fileIndex: fIdx,
+                    prefix: filePrefix(fIdx),
+                    rowIdx: rowIdx,
+                    rows: rows,
+                    st: st,
+                    lang: lang,
+                    syntaxTheme: syntaxTheme,
+                    gutterDigits: gutterDigits,
+                    gutterWidth: gutterWidth,
+                    lineH: lineH,
+                    addLineBg: addLineBg,
+                    delLineBg: delLineBg,
+                    addWordBg: addWordBg,
+                    delWordBg: delWordBg,
+                    selBg: selBg
+                ))
+            }
+
+            if win.afterHeight > 0 {
+                body = body.child(El<State>(direction: .row).key("\(key)-after").wFull().h(win.afterHeight).shrink(0))
+            }
+
+            return container.child(body)
         }
 
-        if !st.expanded {
-            return container
-        }
-
-        let rows = st.rows()
-        if rows.isEmpty {
-            return container.child(
-                El<State>(direction: .row)
-                    .px(12)
-                    .py(10)
-                    .child(text("No changes").font(k.ty.caption()).color(k.c.textMuted))
-            )
-        }
-
-        let scrollY = cx.scrollOffset(of: "\(key)-body").y
-        let effectiveViewport = look.viewportHeight > 0 ? look.viewportHeight : cx.viewport.y
-        let win = st.visibleWindow(
-            for: rows,
-            scrollY: scrollY,
-            viewportHeight: effectiveViewport,
-            lineHeightMultiplier: look.lineHeightMultiplier
-        )
-
-        var body = El<State>(direction: .column)
+        // Multi-file scroll stack
+        var stack = El<State>(direction: .column)
             .key("\(key)-body")
             .wFull()
             .scrollXY()
 
-        if win.beforeHeight > 0 {
-            body = body.child(El<State>(direction: .row).key("\(key)-before").wFull().h(win.beforeHeight).shrink(0))
-        }
+        for (fIdx, diff) in filesToRender.enumerated() {
+            let prefix = filePrefix(fIdx)
+            let lang = diff.language
+            let gutterDigits = diff.columns
+            let gutterWidth = Float(gutterDigits) * 8.5 + 16
 
-        for rowIdx in win.range {
-            let row = rows[rowIdx]
-            switch row {
-            case .gap(let gap):
-                body = body.child(buildGapRow(gap: gap, height: DiffLayout.gapHeight))
-            case .annotation(let ann):
-                body = body.child(buildAnnotationRow(ann))
-            case let .unified(line, intraOld, intraNew):
-                body = body.child(buildUnifiedRow(
+            if look.showHeader {
+                stack = stack.child(buildHeader(hostState: hostState, fileIndex: fIdx, state: st, diff: diff, addColor: addColor, delColor: delColor))
+            }
+            if diff.isBinary {
+                stack = stack.child(
+                    El<State>(direction: .row).key("\(prefix)-binary").px(12).py(12)
+                        .child(text("Binary file changed — diff preview unavailable").font(k.ty.caption()).color(k.c.textMuted))
+                )
+                continue
+            }
+            if st.collapsed(file: fIdx) { continue }
+            let rows = st.rows(file: fIdx)
+            if rows.isEmpty {
+                stack = stack.child(
+                    El<State>(direction: .row).key("\(prefix)-empty").px(12).py(10)
+                        .child(text("No changes").font(k.ty.caption()).color(k.c.textMuted))
+                )
+                continue
+            }
+            for rowIdx in rows.indices {
+                stack = stack.child(renderRow(
+                    hostState: hostState,
+                    fileIndex: fIdx,
+                    prefix: prefix,
                     rowIdx: rowIdx,
                     rows: rows,
-                    line: line,
-                    intraOld: intraOld,
-                    intraNew: intraNew,
                     st: st,
                     lang: lang,
                     syntaxTheme: syntaxTheme,
@@ -1962,58 +2427,103 @@ public struct DiffView<State>: Sendable {
                     delLineBg: delLineBg,
                     addWordBg: addWordBg,
                     delWordBg: delWordBg,
-                    selBg: selBg
-                ))
-            case let .splitPair(oldLine, newLine, oldChanged, newChanged):
-                body = body.child(buildSplitPairRow(
-                    rowIdx: rowIdx,
-                    rows: rows,
-                    oldLine: oldLine,
-                    newLine: newLine,
-                    oldChanged: oldChanged,
-                    newChanged: newChanged,
-                    st: st,
-                    lang: lang,
-                    syntaxTheme: syntaxTheme,
-                    gutterDigits: gutterDigits,
-                    gutterWidth: gutterWidth,
-                    lineH: lineH,
-                    addLineBg: addLineBg,
-                    delLineBg: delLineBg,
-                    addWordBg: addWordBg,
-                    delWordBg: delWordBg,
-                    selBg: selBg
-                ))
-            case .splitOnly(let line):
-                body = body.child(buildSplitOnlyRow(
-                    rowIdx: rowIdx,
-                    rows: rows,
-                    line: line,
-                    st: st,
-                    lang: lang,
-                    syntaxTheme: syntaxTheme,
-                    gutterDigits: gutterDigits,
-                    gutterWidth: gutterWidth,
-                    lineH: lineH,
-                    addLineBg: addLineBg,
-                    delLineBg: delLineBg,
                     selBg: selBg
                 ))
             }
         }
+        return container.child(stack)
+    }
 
-        if win.afterHeight > 0 {
-            body = body.child(El<State>(direction: .row).key("\(key)-after").wFull().h(win.afterHeight).shrink(0))
+    private func renderRow(
+        hostState: State?,
+        fileIndex: Int,
+        prefix: String,
+        rowIdx: Int,
+        rows: [DiffRow],
+        st: DiffState,
+        lang: String?,
+        syntaxTheme: SyntaxTheme,
+        gutterDigits: Int,
+        gutterWidth: Float,
+        lineH: Float,
+        addLineBg: Color,
+        delLineBg: Color,
+        addWordBg: Color,
+        delWordBg: Color,
+        selBg: Color
+    ) -> El<State> {
+        switch rows[rowIdx] {
+        case .gap(let gap):
+            let totalGutterW = 3 + (st.mode == .unified ? 2 * gutterWidth : gutterWidth)
+            return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW)
+        case .annotation(let ann):
+            return buildAnnotationRow(hostState: hostState, prefix: prefix, ann: ann)
+        case let .unified(line, intraOld, intraNew):
+            return buildUnifiedRow(
+                prefix: prefix,
+                rowIdx: rowIdx,
+                rows: rows,
+                line: line,
+                intraOld: intraOld,
+                intraNew: intraNew,
+                st: st,
+                lang: lang,
+                syntaxTheme: syntaxTheme,
+                gutterDigits: gutterDigits,
+                gutterWidth: gutterWidth,
+                lineH: lineH,
+                addLineBg: addLineBg,
+                delLineBg: delLineBg,
+                addWordBg: addWordBg,
+                delWordBg: delWordBg,
+                selBg: selBg
+            )
+        case let .splitPair(oldLine, newLine, oldChanged, newChanged):
+            return buildSplitPairRow(
+                prefix: prefix,
+                rowIdx: rowIdx,
+                rows: rows,
+                oldLine: oldLine,
+                newLine: newLine,
+                oldChanged: oldChanged,
+                newChanged: newChanged,
+                st: st,
+                lang: lang,
+                syntaxTheme: syntaxTheme,
+                gutterDigits: gutterDigits,
+                gutterWidth: gutterWidth,
+                lineH: lineH,
+                addLineBg: addLineBg,
+                delLineBg: delLineBg,
+                addWordBg: addWordBg,
+                delWordBg: delWordBg,
+                selBg: selBg
+            )
+        case .splitOnly(let line):
+            return buildSplitOnlyRow(
+                prefix: prefix,
+                rowIdx: rowIdx,
+                rows: rows,
+                line: line,
+                st: st,
+                lang: lang,
+                syntaxTheme: syntaxTheme,
+                gutterDigits: gutterDigits,
+                gutterWidth: gutterWidth,
+                lineH: lineH,
+                addLineBg: addLineBg,
+                delLineBg: delLineBg,
+                selBg: selBg
+            )
         }
-
-        return container.child(body)
     }
 
     // MARK: Header
 
-    private func buildHeader(state st: DiffState, addColor: Color, delColor: Color) -> El<State> {
+    private func buildHeader(hostState: State?, fileIndex: Int, state st: DiffState, diff: FileDiff, addColor: Color, delColor: Color) -> El<State> {
         let k = kit
-        let diff = st.diff
+        let prefix = filePrefix(fileIndex)
+        let collapsed = st.collapsed(file: fileIndex)
         let titleText: String = switch diff.status {
         case .renamed(let from): "\(from) → \(diff.newPath)"
         default: diff.path
@@ -2032,20 +2542,20 @@ public struct DiffView<State>: Sendable {
         case .added: k.c.success.fg
         case .deleted: k.c.danger.fg
         case .modified: k.c.warning.fg
-        case .renamed: k.c.textAccent
+        case .renamed, .copied: k.c.textAccent
         }
 
         let foldBtn = El<State>(direction: .row)
-            .key("\(key)-fold")
+            .key("\(prefix)-fold")
             .role(.button)
             .focusable()
             .itemsCenter()
             .gap(6)
-            .child(icon(st.expanded ? KitIcons.chevronDown : KitIcons.chevronRight, size: 14).color(k.c.textMuted))
+            .child(icon(collapsed ? KitIcons.chevronRight : KitIcons.chevronDown, size: 14).color(k.c.textMuted))
             .child(text(foldSummaryText).font(k.ty.uiMedium).color(k.c.textBase))
             .onClick { [get, set] s in
                 var d = get(s)
-                d.toggleExpanded()
+                d.setCollapsed(file: fileIndex, !d.collapsed(file: fileIndex))
                 set(&s, d)
             }
 
@@ -2064,7 +2574,7 @@ public struct DiffView<State>: Sendable {
 
         let modeLabel = (st.mode == .unified) ? "Split" : "Unified"
         let modeBtn = El<State>(direction: .row)
-            .key("\(key)-mode")
+            .key("\(prefix)-mode")
             .role(.button)
             .focusable()
             .px(8)
@@ -2080,7 +2590,7 @@ public struct DiffView<State>: Sendable {
             .child(text(modeLabel).font(k.ty.caption()).color(k.c.textMuted))
 
         let wrapBtn = El<State>(direction: .row)
-            .key("\(key)-wrap")
+            .key("\(prefix)-wrap")
             .role(.button)
             .focusable()
             .px(8)
@@ -2096,7 +2606,7 @@ public struct DiffView<State>: Sendable {
             .child(text("Wrap").font(k.ty.caption()).color(st.wrap ? k.c.textAccent : k.c.textMuted))
 
         let copyBtn = El<State>(direction: .row)
-            .key("\(key)-copy")
+            .key("\(prefix)-copy")
             .role(.button)
             .focusable()
             .px(8)
@@ -2108,7 +2618,7 @@ public struct DiffView<State>: Sendable {
             .itemsCenter()
             .onClick { [get, set, onCopyHandler] (s: inout State, tx: inout Tx) in
                 var d = get(s)
-                let txt = d.copyText(side: .new)
+                let txt = d.copyText()
                 d.copiedToastVisible = true
                 set(&s, d)
                 tx.copyText(txt)
@@ -2117,8 +2627,24 @@ public struct DiffView<State>: Sendable {
             .child(icon(st.copiedToastVisible ? KitIcons.check : KitIcons.copy, size: 12).color(k.c.textMuted))
             .child(text(st.copiedToastVisible ? "Copied" : "Copy").font(k.ty.caption()).color(k.c.textMuted))
 
+        var actionsRow = El<State>(direction: .row)
+            .gap(8)
+            .itemsCenter()
+            .child(stats)
+            .child(modeBtn)
+            .child(wrapBtn)
+            .child(copyBtn)
+        if let custom = headerActionsBuilder, let hostState {
+            actionsRow = actionsRow.child(
+                El<State>(direction: .row)
+                    .key("\(prefix)-actions")
+                    .itemsCenter()
+                    .child(custom(hostState, fileIndex))
+            )
+        }
+
         return El<State>(direction: .row)
-            .key("\(key)-header")
+            .key("\(prefix)-header")
             .stickyTop()
             .h(DiffLayout.headerHeight)
             .px(12)
@@ -2133,23 +2659,84 @@ public struct DiffView<State>: Sendable {
                     .child(foldBtn)
                     .child(statusBadge)
             )
-            .child(
-                El<State>(direction: .row)
-                    .gap(8)
-                    .itemsCenter()
-                    .child(stats)
-                    .child(modeBtn)
-                    .child(wrapBtn)
-                    .child(copyBtn)
-            )
+            .child(actionsRow)
     }
 
     // MARK: Gap & Annotation Rows
 
-    private func buildGapRow(gap: DiffGap, height: Float) -> El<State> {
+    private func buildGapRow(fileIndex: Int, prefix: String, gap: DiffGap, height: Float, gutterWidth: Float) -> El<State> {
         let k = kit
+        if look.foldRow == .lineInfo {
+            let hidden = gap.count
+            let labelStr = (hidden == 1) ? "1 unmodified line" : "\(hidden) unmodified lines"
+            let w = max(24, gutterWidth - 2)
+            let steps: [(DiffExpand, String, String)] = if gap.atStart {
+                [(.up, "\(prefix)-gap-\(gap.index)-up", "Show \(min(hidden, DiffLayout.expandStep)) more lines above")]
+            } else if gap.atEnd {
+                [(.down, "\(prefix)-gap-\(gap.index)-down", "Show \(min(hidden, DiffLayout.expandStep)) more lines below")]
+            } else if hidden <= DiffLayout.expandStep {
+                [(.all, "\(prefix)-gap-\(gap.index)-all", "Show \(hidden) hidden lines")]
+            } else {
+                [
+                    (.down, "\(prefix)-gap-\(gap.index)-down", "Show \(DiffLayout.expandStep) more lines below"),
+                    (.up, "\(prefix)-gap-\(gap.index)-up", "Show \(DiffLayout.expandStep) more lines above"),
+                ]
+            }
+            let btnH: Float = steps.count == 2 ? (height - 2) / 2 : height
+            var btnCol = El<State>(direction: .column).key("\(prefix)-gap-\(gap.index)-btns").w(w + 2).h(height).gap(2).bg(k.c.surfaceBase)
+            for (how, btnKey, a11yLabel) in steps {
+                let glyph = (how == .up) ? KitIcons.chevronUp : KitIcons.chevronDown
+                btnCol = btnCol.child(
+                    El<State>(direction: .row)
+                        .key(btnKey)
+                        .w(w).h(btnH)
+                        .itemsCenter().justifyCenter()
+                        .bg(k.c.layer01)
+                        .hover(k.c.surfaceHover)
+                        .role(.button)
+                        .label(a11yLabel)
+                        .child(icon(glyph, size: 12).color(k.c.textMuted))
+                        .onClick { [get, set] (s: inout State, _: inout Tx) in
+                            var d = get(s)
+                            d.expand(file: fileIndex, gapIndex: gap.index, direction: how)
+                            set(&s, d)
+                        }
+                )
+            }
+            let wordsBtn = El<State>(direction: .row)
+                .key("\(prefix)-gap-\(gap.index)-words")
+                .h(height)
+                .px(10)
+                .itemsCenter()
+                .role(.button)
+                .label(labelStr)
+                .onClick { [get, set] s in
+                    var d = get(s)
+                    if gap.atStart {
+                        d.expand(file: fileIndex, gapIndex: gap.index, direction: .up)
+                    } else if gap.atEnd {
+                        d.expand(file: fileIndex, gapIndex: gap.index, direction: .down)
+                    } else {
+                        d.expand(file: fileIndex, gapIndex: gap.index, direction: .down)
+                        d.expand(file: fileIndex, gapIndex: gap.index, direction: .up)
+                    }
+                    set(&s, d)
+                }
+                .child(text(labelStr).font(k.ty.caption()).color(k.c.textFaint))
+
+            return El<State>(direction: .row)
+                .key("\(prefix)-gap-\(gap.index)")
+                .wFull()
+                .h(height)
+                .itemsCenter()
+                .bg(k.c.layer01)
+                .borderSides(top: 1, bottom: 1, color: k.c.borderMuted)
+                .child(btnCol)
+                .child(wordsBtn)
+        }
+
         var bar = El<State>(direction: .row)
-            .key("\(key)-gap-\(gap.index)")
+            .key("\(prefix)-gap-\(gap.index)")
             .h(height)
             .px(12)
             .gap(8)
@@ -2158,21 +2745,21 @@ public struct DiffView<State>: Sendable {
             .borderSides(top: 1, bottom: 1, color: k.c.borderMuted)
 
         if gap.canStep && !gap.atStart {
-            bar = bar.child(gapActionButton(id: "\(key)-gap-\(gap.index)-down", label: "Expand 20 down") { [get, set] s in
+            bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-down", label: "Expand 20 down") { [get, set] s in
                 var d = get(s)
-                d.expand(gapIndex: gap.index, direction: .down)
+                d.expand(file: fileIndex, gapIndex: gap.index, direction: .down)
                 set(&s, d)
             })
         }
-        bar = bar.child(gapActionButton(id: "\(key)-gap-\(gap.index)-all", label: "Expand all (\(gap.count) lines)") { [get, set] s in
+        bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-all", label: "Expand all (\(gap.count) lines)") { [get, set] s in
             var d = get(s)
-            d.expand(gapIndex: gap.index, direction: .all)
+            d.expand(file: fileIndex, gapIndex: gap.index, direction: .all)
             set(&s, d)
         })
         if gap.canStep && !gap.atEnd {
-            bar = bar.child(gapActionButton(id: "\(key)-gap-\(gap.index)-up", label: "Expand 20 up") { [get, set] s in
+            bar = bar.child(gapActionButton(id: "\(prefix)-gap-\(gap.index)-up", label: "Expand 20 up") { [get, set] s in
                 var d = get(s)
-                d.expand(gapIndex: gap.index, direction: .up)
+                d.expand(file: fileIndex, gapIndex: gap.index, direction: .up)
                 set(&s, d)
             })
         }
@@ -2192,10 +2779,16 @@ public struct DiffView<State>: Sendable {
             .child(text(label).font(kit.ty.caption()).color(kit.c.textAccent))
     }
 
-    private func buildAnnotationRow(_ ann: DiffAnnotation) -> El<State> {
+    private func buildAnnotationRow(hostState: State?, prefix: String, ann: DiffAnnotation) -> El<State> {
+        if let custom = annotationBuilder, let hostState {
+            return El<State>(direction: .column)
+                .key("\(prefix)-note-\(ann.id)")
+                .wFull()
+                .child(custom(hostState, ann))
+        }
         let k = kit
         return El<State>(direction: .column)
-            .key("\(key)-note-\(ann.id)")
+            .key("\(prefix)-note-\(ann.id)")
             .minH(DiffLayout.noteHeight)
             .px(16)
             .py(6)
@@ -2228,20 +2821,69 @@ public struct DiffView<State>: Sendable {
         } else {
             String(repeating: " ", count: digits)
         }
-        var cell = El<State>(direction: .row)
-            .key(cellKey)
-            .w(width)
-            .h(lineH)
-            .px(6)
-            .itemsCenter()
-            .justifyEnd()
-            .bg(lineBg)
-            .shrink(0)
-            .child(text(labelStr).font(kit.ty.mono).color(kit.c.textFaint))
-
-        guard let n = number else { return cell }
+        guard let n = number else {
+            return text(labelStr)
+                .font(kit.ty.mono)
+                .color(kit.c.textFaint)
+                .key(cellKey)
+                .w(width)
+                .h(lineH)
+                .px(6)
+                .itemsCenter()
+                .justifyEnd()
+                .bg(lineBg)
+                .shrink(0)
+        }
         let point = DiffLineRef(side: side, line: UInt32(n))
         let mode = forcedMode
+
+        var cell: El<State>
+        if let onCommentHandler {
+            let plusBtn = El<State>(direction: .row)
+                .key("\(cellKey)-plus")
+                .w(14)
+                .h(14)
+                .itemsCenter()
+                .justifyCenter()
+                .rounded(kit.radius.sm)
+                .hover(kit.c.surfaceHover)
+                .role(.button)
+                .label("Add comment on line \(n)")
+                .child(icon(KitIcons.plus, size: 10).color(kit.c.textAccent))
+                .onClick { [get, onCommentHandler] (s: inout State, tx: inout Tx) in
+                    let d = get(s)
+                    let range: DiffLineRange = if let sel = d.selectedRange, sel.contains(point) {
+                        sel
+                    } else {
+                        DiffLineRange(start: point, end: point)
+                    }
+                    onCommentHandler(&s, range, &tx)
+                }
+            cell = El<State>(direction: .row)
+                .key(cellKey)
+                .w(width)
+                .h(lineH)
+                .px(6)
+                .gap(4)
+                .itemsCenter()
+                .justifyEnd()
+                .bg(lineBg)
+                .shrink(0)
+                .child(plusBtn)
+                .child(text(labelStr).font(kit.ty.mono).color(kit.c.textFaint))
+        } else {
+            cell = text(labelStr)
+                .font(kit.ty.mono)
+                .color(kit.c.textFaint)
+                .key(cellKey)
+                .w(width)
+                .h(lineH)
+                .px(6)
+                .itemsCenter()
+                .justifyEnd()
+                .bg(lineBg)
+                .shrink(0)
+        }
 
         cell = cell
             .onPointerDown { [get, set, onLineClickHandler] (s: inout State, press: PointerPress, tx: inout Tx) in
@@ -2289,9 +2931,68 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Unified & Split Rows
 
-    private func expandTabs(_ s: String) -> String {
-        guard s.contains("\t") else { return s }
-        return s.replacingOccurrences(of: "\t", with: String(repeating: " ", count: look.tabSize))
+    private func expandTabsWithOffsets(_ raw: String) -> (text: String, rawToExpanded: [Int]?) {
+        guard raw.contains("\t") else { return (raw, nil) }
+        let tabW = max(1, look.tabSize)
+        var out = String()
+        out.reserveCapacity(raw.utf8.count + 8)
+        var map = [Int](repeating: 0, count: raw.utf8.count + 1)
+        var rawByte = 0
+        var col = 0
+        for scalar in raw.unicodeScalars {
+            let sLen = scalar.utf8.count
+            for b in 0..<sLen {
+                map[rawByte + b] = out.utf8.count
+            }
+            rawByte += sLen
+            if scalar == "\t" {
+                let n = tabW - (col % tabW)
+                out.append(String(repeating: " ", count: n))
+                col += n
+            } else if scalar == "\n" || scalar == "\r" {
+                out.unicodeScalars.append(scalar)
+                col = 0
+            } else {
+                out.unicodeScalars.append(scalar)
+                col += 1
+            }
+        }
+        map[rawByte] = out.utf8.count
+        return (out, map)
+    }
+
+    private func insertSoftBreaks(_ s: String, enabled: Bool) -> String {
+        guard enabled else { return s }
+        var needs = false
+        for b in s.utf8 where b == UInt8(ascii: ".") || b == UInt8(ascii: "(") || b == UInt8(ascii: "[") || b == UInt8(ascii: "/") {
+            needs = true
+            break
+        }
+        guard needs else { return s }
+        var out = String()
+        out.reserveCapacity(s.utf8.count + 4)
+        for ch in s {
+            out.append(ch)
+            if ch == "." || ch == "(" || ch == "[" || ch == "/" {
+                out.append("\u{200B}")
+            }
+        }
+        return out
+    }
+
+    private func gutterBar(_ kind: DiffLineKind?, height: Float) -> El<State> {
+        let color: Color = switch kind {
+        case .addition: kit.c.success.fg
+        case .deletion: kit.c.danger.fg
+        case .context, nil: .transparent
+        }
+        return El<State>(direction: .row).w(3).h(height).shrink(0).bg(color)
+    }
+
+    private func noNewlineNote() -> El<State> {
+        El<State>(direction: .row)
+            .pb(2)
+            .child(text("No newline at end of file").font(kit.ty.caption()).color(kit.c.textFaint))
     }
 
     private func buildCodeSpans(
@@ -2299,9 +3000,10 @@ public struct DiffView<State>: Sendable {
         lang: String?,
         syntaxTheme: SyntaxTheme,
         changedRanges: [Range<Int>],
-        wordBg: Color
+        wordBg: Color,
+        wrap: Bool
     ) -> [TextSpan] {
-        let code = expandTabs(rawText)
+        let (code, offsetMap) = expandTabsWithOffsets(rawText)
         guard !code.isEmpty else {
             return [TextSpan(" ", color: kit.c.textBase, monospace: true)]
         }
@@ -2315,15 +3017,18 @@ public struct DiffView<State>: Sendable {
             cuts.insert(lo)
             cuts.insert(hi)
         }
-        // Only apply byte-offset intra-line word ranges when tabs weren't expanded or lengths match
-        let useWordRanges = (rawText == code)
-        if useWordRanges {
-            for r in changedRanges {
-                let lo = max(0, min(utf8Len, r.lowerBound))
-                let hi = max(lo, min(utf8Len, r.upperBound))
-                cuts.insert(lo)
-                cuts.insert(hi)
-            }
+        let mappedChanges: [Range<Int>] = changedRanges.compactMap { r in
+            let loRaw = max(0, min(rawText.utf8.count, r.lowerBound))
+            let hiRaw = max(loRaw, min(rawText.utf8.count, r.upperBound))
+            let lo = offsetMap?[loRaw] ?? loRaw
+            let hi = offsetMap?[hiRaw] ?? hiRaw
+            return lo < hi ? (lo..<hi) : nil
+        }
+        for r in mappedChanges {
+            let lo = max(0, min(utf8Len, r.lowerBound))
+            let hi = max(lo, min(utf8Len, r.upperBound))
+            cuts.insert(lo)
+            cuts.insert(hi)
         }
         let sorted = cuts.sorted()
         let utf8 = code.utf8
@@ -2337,11 +3042,11 @@ public struct DiffView<State>: Sendable {
             guard lo < hi else { continue }
             let startIdx = utf8.index(utf8.startIndex, offsetBy: lo)
             let endIdx = utf8.index(utf8.startIndex, offsetBy: hi)
-            let slice = String(decoding: utf8[startIdx..<endIdx], as: UTF8.self)
+            let slice = insertSoftBreaks(String(decoding: utf8[startIdx..<endIdx], as: UTF8.self), enabled: wrap)
 
             let color: Color = highlights.first(where: { $0.range.lowerBound <= lo && hi <= $0.range.upperBound })
                 .map { syntaxTheme.paint($0.paint) } ?? kit.c.textBase
-            let isWordChanged = useWordRanges && changedRanges.contains(where: { $0.lowerBound <= lo && hi <= $0.upperBound })
+            let isWordChanged = mappedChanges.contains(where: { $0.lowerBound <= lo && hi <= $0.upperBound })
 
             spans.append(TextSpan(
                 slice,
@@ -2351,6 +3056,46 @@ public struct DiffView<State>: Sendable {
             ))
         }
         return spans
+    }
+
+    private func codeBlock(
+        cellKey: String,
+        side: DiffSide,
+        line: DiffLine,
+        changed: [Range<Int>],
+        wordBg: Color,
+        lang: String?,
+        syntaxTheme: SyntaxTheme,
+        wrap: Bool,
+        pr: Float
+    ) -> El<State> {
+        let spans = buildCodeSpans(text: line.text, lang: lang, syntaxTheme: syntaxTheme, changedRanges: changed, wordBg: wordBg, wrap: wrap)
+        var codeEl: El<State> = rich(spans).font(kit.ty.mono)
+        if !wrap { codeEl = codeEl.noWrap() }
+        if !line.noNewline {
+            return codeEl
+                .key(cellKey)
+                .grow(1)
+                .pr(pr)
+                .onHover { [get, set] (s: inout State, inside: Bool, _: inout Tx) in
+                    var d = get(s)
+                    if d.hoverText(side: side, cell: cellKey, inside: inside) {
+                        set(&s, d)
+                    }
+                }
+        }
+        return El<State>(direction: .column)
+            .key(cellKey)
+            .grow(1)
+            .pr(pr)
+            .onHover { [get, set] (s: inout State, inside: Bool, _: inout Tx) in
+                var d = get(s)
+                if d.hoverText(side: side, cell: cellKey, inside: inside) {
+                    set(&s, d)
+                }
+            }
+            .child(codeEl)
+            .child(noNewlineNote())
     }
 
     private func isLineSelected(_ st: DiffState, side: DiffSide, line: DiffLine) -> Bool {
@@ -2365,6 +3110,7 @@ public struct DiffView<State>: Sendable {
     }
 
     private func buildUnifiedRow(
+        prefix: String,
         rowIdx: Int,
         rows: [DiffRow],
         line: DiffLine,
@@ -2404,26 +3150,33 @@ public struct DiffView<State>: Sendable {
 
         let changed = (line.kind == .deletion) ? intraOld : intraNew
         let wordBg = (line.kind == .deletion) ? delWordBg : addWordBg
-        let spans = buildCodeSpans(text: line.text, lang: lang, syntaxTheme: syntaxTheme, changedRanges: changed, wordBg: wordBg)
-
-        var codeEl: El<State> = rich(spans).font(kit.ty.mono)
-        if !st.wrap {
-            codeEl = codeEl.noWrap()
-        }
+        let codeEl = codeBlock(
+            cellKey: "\(prefix)-code-\(rowIdx)",
+            side: side,
+            line: line,
+            changed: changed,
+            wordBg: wordBg,
+            lang: lang,
+            syntaxTheme: syntaxTheme,
+            wrap: st.wrap,
+            pr: 12
+        )
 
         return El<State>(direction: .row)
-            .key("\(key)-row-\(rowIdx)")
+            .key("\(prefix)-row-\(rowIdx)")
             .wFull()
             .minH(lineH)
             .bg(rowBg)
             .itemsCenter()
-            .child(numberCell(cellKey: "\(key)-o-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: rowBg))
-            .child(numberCell(cellKey: "\(key)-n-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: rowBg))
-            .child(El<State>(direction: .row).w(18).h(lineH).itemsCenter().justifyCenter().shrink(0).child(text(sigil).font(kit.ty.mono).color(sigilColor)))
-            .child(El<State>(direction: .row).grow(1).pr(12).child(codeEl))
+            .child(gutterBar(line.kind, height: lineH))
+            .child(numberCell(cellKey: "\(prefix)-o-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: rowBg))
+            .child(numberCell(cellKey: "\(prefix)-n-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: rowBg))
+            .child(text(sigil).font(kit.ty.mono).color(sigilColor).w(18).h(lineH).itemsCenter().justifyCenter().shrink(0))
+            .child(codeEl)
     }
 
     private func buildSplitPairRow(
+        prefix: String,
         rowIdx: Int,
         rows: [DiffRow],
         oldLine: DiffLine,
@@ -2445,15 +3198,8 @@ public struct DiffView<State>: Sendable {
         let oldBg = isLineSelected(st, side: .old, line: oldLine) ? diffTintColor(delLineBg, hue: selBg, t: 0.45) : delLineBg
         let newBg = isLineSelected(st, side: .new, line: newLine) ? diffTintColor(addLineBg, hue: selBg, t: 0.45) : addLineBg
 
-        let oldSpans = buildCodeSpans(text: oldLine.text, lang: lang, syntaxTheme: syntaxTheme, changedRanges: oldChanged, wordBg: delWordBg)
-        let newSpans = buildCodeSpans(text: newLine.text, lang: lang, syntaxTheme: syntaxTheme, changedRanges: newChanged, wordBg: addWordBg)
-
-        var oldCode: El<State> = rich(oldSpans).font(kit.ty.mono)
-        var newCode: El<State> = rich(newSpans).font(kit.ty.mono)
-        if !st.wrap {
-            oldCode = oldCode.noWrap()
-            newCode = newCode.noWrap()
-        }
+        let oldCode = codeBlock(cellKey: "\(prefix)-scode-o-\(rowIdx)", side: .old, line: oldLine, changed: oldChanged, wordBg: delWordBg, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
+        let newCode = codeBlock(cellKey: "\(prefix)-scode-n-\(rowIdx)", side: .new, line: newLine, changed: newChanged, wordBg: addWordBg, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
 
         let leftPane = El<State>(direction: .row)
             .wFrac(0.5)
@@ -2461,27 +3207,30 @@ public struct DiffView<State>: Sendable {
             .bg(oldBg)
             .itemsCenter()
             .borderSides(right: 1, color: kit.c.borderMuted)
-            .child(numberCell(cellKey: "\(key)-so-\(rowIdx)", number: oldLine.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: oldBg))
-            .child(El<State>(direction: .row).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0).child(text("-").font(kit.ty.mono).color(kit.c.danger.fg)))
-            .child(El<State>(direction: .row).grow(1).pr(8).child(oldCode))
+            .child(gutterBar(.deletion, height: lineH))
+            .child(numberCell(cellKey: "\(prefix)-so-\(rowIdx)", number: oldLine.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: oldBg))
+            .child(text("-").font(kit.ty.mono).color(kit.c.danger.fg).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0))
+            .child(oldCode)
 
         let rightPane = El<State>(direction: .row)
             .wFrac(0.5)
             .minH(lineH)
             .bg(newBg)
             .itemsCenter()
-            .child(numberCell(cellKey: "\(key)-sn-\(rowIdx)", number: newLine.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: newBg))
-            .child(El<State>(direction: .row).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0).child(text("+").font(kit.ty.mono).color(kit.c.success.fg)))
-            .child(El<State>(direction: .row).grow(1).pr(8).child(newCode))
+            .child(gutterBar(.addition, height: lineH))
+            .child(numberCell(cellKey: "\(prefix)-sn-\(rowIdx)", number: newLine.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: newBg))
+            .child(text("+").font(kit.ty.mono).color(kit.c.success.fg).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0))
+            .child(newCode)
 
         return El<State>(direction: .row)
-            .key("\(key)-srow-\(rowIdx)")
+            .key("\(prefix)-srow-\(rowIdx)")
             .wFull()
             .child(leftPane)
             .child(rightPane)
     }
 
     private func buildSplitOnlyRow(
+        prefix: String,
         rowIdx: Int,
         rows: [DiffRow],
         line: DiffLine,
@@ -2495,10 +3244,6 @@ public struct DiffView<State>: Sendable {
         delLineBg: Color,
         selBg: Color
     ) -> El<State> {
-        let spans = buildCodeSpans(text: line.text, lang: lang, syntaxTheme: syntaxTheme, changedRanges: [], wordBg: .transparent)
-        var code: El<State> = rich(spans).font(kit.ty.mono)
-        if !st.wrap { code = code.noWrap() }
-
         let emptySide = { (sideKey: String, bg: Color) -> El<State> in
             El<State>(direction: .row)
                 .key(sideKey)
@@ -2511,38 +3256,46 @@ public struct DiffView<State>: Sendable {
         case .context:
             let lBg = isLineSelected(st, side: .old, line: line) ? diffTintColor(kit.c.surfaceBase, hue: selBg, t: 0.45) : kit.c.surfaceBase
             let rBg = isLineSelected(st, side: .new, line: line) ? diffTintColor(kit.c.surfaceBase, hue: selBg, t: 0.45) : kit.c.surfaceBase
+            let leftCode = codeBlock(cellKey: "\(prefix)-ccode-o-\(rowIdx)", side: .old, line: line, changed: [], wordBg: .transparent, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
+            let rightCode = codeBlock(cellKey: "\(prefix)-ccode-n-\(rowIdx)", side: .new, line: line, changed: [], wordBg: .transparent, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
             let leftPane = El<State>(direction: .row)
                 .wFrac(0.5).minH(lineH).bg(lBg).itemsCenter().borderSides(right: 1, color: kit.c.borderMuted)
-                .child(numberCell(cellKey: "\(key)-co-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: lBg))
+                .child(gutterBar(.context, height: lineH))
+                .child(numberCell(cellKey: "\(prefix)-co-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: lBg))
                 .child(El<State>(direction: .row).w(16).h(lineH).shrink(0))
-                .child(El<State>(direction: .row).grow(1).pr(8).child(code))
+                .child(leftCode)
             let rightPane = El<State>(direction: .row)
                 .wFrac(0.5).minH(lineH).bg(rBg).itemsCenter()
-                .child(numberCell(cellKey: "\(key)-cn-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: rBg))
+                .child(gutterBar(.context, height: lineH))
+                .child(numberCell(cellKey: "\(prefix)-cn-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: rBg))
                 .child(El<State>(direction: .row).w(16).h(lineH).shrink(0))
-                .child(El<State>(direction: .row).grow(1).pr(8).child(code))
-            return El<State>(direction: .row).key("\(key)-crow-\(rowIdx)").wFull().child(leftPane).child(rightPane)
+                .child(rightCode)
+            return El<State>(direction: .row).key("\(prefix)-crow-\(rowIdx)").wFull().child(leftPane).child(rightPane)
 
         case .deletion:
             let bg = isLineSelected(st, side: .old, line: line) ? diffTintColor(delLineBg, hue: selBg, t: 0.45) : delLineBg
+            let code = codeBlock(cellKey: "\(prefix)-dcode-\(rowIdx)", side: .old, line: line, changed: [], wordBg: .transparent, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
             let leftPane = El<State>(direction: .row)
                 .wFrac(0.5).minH(lineH).bg(bg).itemsCenter().borderSides(right: 1, color: kit.c.borderMuted)
-                .child(numberCell(cellKey: "\(key)-do-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: bg))
-                .child(El<State>(direction: .row).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0).child(text("-").font(kit.ty.mono).color(kit.c.danger.fg)))
-                .child(El<State>(direction: .row).grow(1).pr(8).child(code))
-            return El<State>(direction: .row).key("\(key)-drow-\(rowIdx)").wFull()
+                .child(gutterBar(.deletion, height: lineH))
+                .child(numberCell(cellKey: "\(prefix)-do-\(rowIdx)", number: line.oldNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .old, lineH: lineH, lineBg: bg))
+                .child(text("-").font(kit.ty.mono).color(kit.c.danger.fg).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0))
+                .child(code)
+            return El<State>(direction: .row).key("\(prefix)-drow-\(rowIdx)").wFull()
                 .child(leftPane)
-                .child(emptySide("\(key)-dempty-\(rowIdx)", kit.c.surfaceRaised))
+                .child(emptySide("\(prefix)-dempty-\(rowIdx)", kit.c.surfaceRaised))
 
         case .addition:
             let bg = isLineSelected(st, side: .new, line: line) ? diffTintColor(addLineBg, hue: selBg, t: 0.45) : addLineBg
+            let code = codeBlock(cellKey: "\(prefix)-acode-\(rowIdx)", side: .new, line: line, changed: [], wordBg: .transparent, lang: lang, syntaxTheme: syntaxTheme, wrap: st.wrap, pr: 8)
             let rightPane = El<State>(direction: .row)
                 .wFrac(0.5).minH(lineH).bg(bg).itemsCenter()
-                .child(numberCell(cellKey: "\(key)-an-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: bg))
-                .child(El<State>(direction: .row).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0).child(text("+").font(kit.ty.mono).color(kit.c.success.fg)))
-                .child(El<State>(direction: .row).grow(1).pr(8).child(code))
-            return El<State>(direction: .row).key("\(key)-arow-\(rowIdx)").wFull()
-                .child(emptySide("\(key)-aempty-\(rowIdx)", kit.c.surfaceRaised).borderSides(right: 1, color: kit.c.borderMuted))
+                .child(gutterBar(.addition, height: lineH))
+                .child(numberCell(cellKey: "\(prefix)-an-\(rowIdx)", number: line.newNumber, digits: gutterDigits, width: gutterWidth, rowIdx: rowIdx, rows: rows, side: .new, lineH: lineH, lineBg: bg))
+                .child(text("+").font(kit.ty.mono).color(kit.c.success.fg).w(16).h(lineH).itemsCenter().justifyCenter().shrink(0))
+                .child(code)
+            return El<State>(direction: .row).key("\(prefix)-arow-\(rowIdx)").wFull()
+                .child(emptySide("\(prefix)-aempty-\(rowIdx)", kit.c.surfaceRaised).borderSides(right: 1, color: kit.c.borderMuted))
                 .child(rightPane)
         }
     }

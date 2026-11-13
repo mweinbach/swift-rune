@@ -204,22 +204,38 @@ struct DiffParityTests {
 
     // MARK: - Word Diff & Split Pairs (`diff/words.rs` & `diff/pairs.rs`)
 
-    @Test("DiffWords isolates intra-line token edits and skips lines > 1000 bytes")
+    @Test("DiffWords isolates single contiguous intra-line span and skips lines > 1000 UTF-16 code units")
     func wordDiffAndLineLengthCap() {
         let ranges = DiffWords.changedRanges(
             old: "let answer = compute(foo, bar);",
             new: "let result = compute(foo, baz);"
         )
-        #expect(ranges.old.count == 2)
-        #expect(ranges.new.count == 2)
+        #expect(ranges.old.count == 1)
+        #expect(ranges.new.count == 1)
+
+        // Single-word Unicode identifier diff
+        let uni = DiffWords.words(old: "let α = 1;", new: "let β = 1;")
+        #expect(uni.old != nil && uni.new != nil)
+
+        // BOM (0xFEFF) acts as whitespace token
+        let bomOld = "\u{FEFF}let x = old;"
+        let bomNew = "\u{FEFF}let x = new;"
+        let bom = DiffWords.words(old: bomOld, new: bomNew)
+        #expect(bom.old != nil && bom.new != nil)
+
+        // Surrogate-pair UTF-16 length cap (> 1000 UTF-16 units)
+        let hugeEmojiOld = String(repeating: "😀", count: 501) // 1002 UTF-16 code units
+        let hugeEmojiNew = String(repeating: "🎉", count: 501)
+        let capped = DiffWords.changedRanges(old: hugeEmojiOld, new: hugeEmojiNew)
+        #expect(capped.old.isEmpty && capped.new.isEmpty)
 
         let hugeOld = String(repeating: "a", count: 1005)
         let hugeNew = String(repeating: "b", count: 1005)
-        let capped = DiffWords.changedRanges(old: hugeOld, new: hugeNew)
-        #expect(capped.old.isEmpty && capped.new.isEmpty)
+        let cappedAscii = DiffWords.changedRanges(old: hugeOld, new: hugeNew)
+        #expect(cappedAscii.old.isEmpty && cappedAscii.new.isEmpty)
     }
 
-    @Test("DiffHunk.splitRows pairs similar modified lines and separates unrelated edits")
+    @Test("DiffHunk.splitRows aligns contiguous blocks using Pierre similarity pairing")
     func splitRowsSimilarityPairing() {
         let old = """
         let count = items.len();
@@ -241,11 +257,32 @@ struct DiffParityTests {
         }
         #expect(hasPair)
 
+        // Contiguous block pairs min(2, 3) = 2 pairs and leaves 1 unmatched addition
         let unmatchedCount = rows.filter {
             if case .only(let l) = $0 { return l.kind != .context }
             return false
         }.count
-        #expect(unmatchedCount >= 2)
+        #expect(unmatchedCount == 1)
+
+        // Shifted alignment: when new has an inserted line before a matching line, sliding offset pairs the similar line
+        let shiftedOld = """
+        // old comment
+        let total = compute(alpha, beta, gamma);
+        """
+        let shiftedNew = """
+        // leading banner line that differs completely
+        let total = compute(alpha, delta, gamma);
+        // trailing extra
+        """
+        let shiftedDiff = FileDiff.between(old: shiftedOld, new: shiftedNew, path: "shifted.rs")
+        let shiftedRows = shiftedDiff.hunks[0].splitRows()
+        let alignedSimilar = shiftedRows.contains { row in
+            if case let .pair(o, n, _, _) = row {
+                return o.text.contains("compute") && n.text.contains("compute")
+            }
+            return false
+        }
+        #expect(alignedSimilar)
     }
 
     // MARK: - DiffState Gaps, Selection, Copy & Annotations (`diff/state.rs`)
@@ -517,5 +554,220 @@ struct DiffParityTests {
         rt.frame(at: 0)
         #expect(rt.element(byKey: "li-fold") != nil)
         #expect(rt.element(byKey: "bin") != nil)
+    }
+
+    // MARK: - Golden Tests Ported from `crates/rune-kit/tests/diff.rs`
+
+    @Test("a_patch_parses_renames_modes_binaries_and_missing_newlines (tests/diff.rs)")
+    func patchParsesRenamesModesBinariesAndMissingNewlines() {
+        let patch = """
+        diff --git a/old_name.rs b/new_name.rs
+        similarity index 90%
+        rename from old_name.rs
+        rename to new_name.rs
+        old mode 100644
+        new mode 100755
+        --- a/old_name.rs
+        +++ b/new_name.rs
+        @@ -1,2 +1,2 @@ fn greet()
+        -let greeting = "hi"
+        \\ No newline at end of file
+        +let greeting = "hello"
+        \\ No newline at end of file
+        diff --git a/copy_src.txt b/copy_dst.txt
+        similarity index 95%
+        copy from copy_src.txt
+        copy to copy_dst.txt
+        --- a/copy_src.txt
+        +++ b/copy_dst.txt
+        @@ -1 +1 @@
+        -old
+        +new
+        diff --git a/logo.png b/logo.png
+        new file mode 100644
+        index 0000000..1234567
+        GIT binary patch
+        literal 0
+        HcmV?d00001
+        diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"
+        deleted file mode 100644
+        --- "a/caf\\303\\251.txt"
+        +++ /dev/null
+        @@ -1 +0,0 @@
+        -espresso
+        """
+        let files = FileDiff.parse(patch)
+        #expect(files.count == 4)
+
+        let f0 = files[0]
+        #expect(f0.oldPath == "old_name.rs")
+        #expect(f0.newPath == "new_name.rs")
+        #expect(f0.status == .renamed(from: "old_name.rs"))
+        #expect(f0.similarity == 90)
+        #expect(f0.oldMode == "100644")
+        #expect(f0.newMode == "100755")
+        #expect(f0.hunks.first?.section == "fn greet()")
+        #expect(f0.hunks[0].lines[0].noNewline)
+        #expect(f0.hunks[0].lines[1].noNewline)
+        #expect(!f0.hunks[0].lines[0].changes.isEmpty)
+        #expect(f0.hunks[0].lines[0].pair == 1)
+        #expect(f0.hunks[0].lines[1].pair == 0)
+
+        let f1 = files[1]
+        #expect(f1.status == .copied)
+        #expect(f1.oldPath == "copy_src.txt")
+        #expect(f1.newPath == "copy_dst.txt")
+        #expect(f1.similarity == 95)
+
+        let f2 = files[2]
+        #expect(f2.isBinary)
+        #expect(f2.status == .added)
+        #expect(f2.newMode == "100644")
+
+        let f3 = files[3]
+        #expect(f3.status == .deleted)
+        #expect(f3.oldPath == "café.txt")
+    }
+
+    @Test("two_texts_diff_into_hunks_with_word_changes (tests/diff.rs)")
+    func twoTextsDiffIntoHunksWithWordChanges() {
+        let diff = FileDiff.fromTexts(
+            path: "sample.rs",
+            old: "alpha\nbeta one\ngamma",
+            new: "alpha\nbeta two\ngamma",
+            context: 1
+        )
+        #expect(diff.status == .modified)
+        #expect(diff.hunks.count == 1)
+        let lines = diff.hunks[0].lines
+        #expect(lines.count == 4)
+        #expect(lines[1].kind == .deletion && lines[1].pair == 2 && !lines[1].changes.isEmpty)
+        #expect(lines[2].kind == .addition && lines[2].pair == 1 && !lines[2].changes.isEmpty)
+    }
+
+    @Test("folded_ranges_open_twenty_lines_at_a_time (tests/diff.rs)")
+    func foldedRangesOpenTwentyLinesAtATime() {
+        let oldLines = (1...55).map { "line \($0)" }
+        var newLines = oldLines
+        newLines[49] = "line 50 edited"
+        let diff = FileDiff.fromTexts(
+            path: "long.txt",
+            old: oldLines.joined(separator: "\n"),
+            new: newLines.joined(separator: "\n"),
+            context: 3
+        )
+        var st = DiffState(diff: diff)
+        // Lines 1..46 are hidden in leading gap 0
+        #expect(st.hidden(file: 0, gap: 0) == 46)
+        st.expand(file: 0, gapIndex: 0, direction: .up)
+        #expect(st.hidden(file: 0, gap: 0) == 26)
+        #expect(st.effectiveHunks(file: 0)[0].lines.first?.text == "line 27")
+
+        let unexpandable = FileDiff.parse("""
+        diff --git a/a.txt b/a.txt
+        --- a/a.txt
+        +++ b/a.txt
+        @@ -50,2 +50,2 @@
+        -old
+        +new
+         ctx
+        """)[0]
+        let stPatch = DiffState(diff: unexpandable)
+        #expect(stPatch.hidden(file: 0, gap: 0) == nil)
+    }
+
+    @Test("Multi-file DiffState navigation, hover copySide, onComment, custom builders, and noNewline/wrap rendering")
+    @MainActor
+    func multiFileNavigationHoverCommentAndViewParity() {
+        let f1 = FileDiff.parse("""
+        diff --git a/first.swift b/first.swift
+        --- a/first.swift
+        +++ b/first.swift
+        @@ -1,2 +1,2 @@
+        -let a = foo.bar(1)
+        \\ No newline at end of file
+        +let a = foo.baz(2)
+        \\ No newline at end of file
+        """)[0]
+        let f2 = FileDiff.fromTexts(path: "second.swift", old: "x = 1", new: "x = 2")
+        var state = DiffState(
+            files: [f1, f2],
+            annotations: [
+                DiffAnnotation(id: "a1", file: 1, side: .new, line: 1, author: "rev", body: "check x")
+            ]
+        )
+        #expect(state.fileIndex(path: "second.swift") == 1)
+
+        var tx = Tx()
+        #expect(state.key(KeyEvent(key: .text("]")), tx: &tx))
+        #expect(state.visibleFile == 1)
+        #expect(!tx.scrollToRequests.isEmpty)
+        #expect(state.key(KeyEvent(key: .text("[")), tx: &tx))
+        #expect(state.visibleFile == 0)
+
+        state.select(DiffLineRange(
+            start: DiffLineRef(side: .old, line: 1),
+            end: DiffLineRef(side: .old, line: 1)
+        ))
+        let hoveredOld = state.hoverText(side: .old, cell: "c-old", inside: true)
+        #expect(hoveredOld)
+        #expect(state.copySide == .old)
+        let cmdCOld = state.key(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), tx: &tx)
+        #expect(cmdCOld)
+        #expect(tx.clipboardWrite?.text == "let a = foo.bar(1)")
+        let hoveredNew = state.hoverText(side: .new, cell: "c-new", inside: true)
+        #expect(hoveredNew)
+        #expect(state.copySide == .new)
+        state.select(DiffLineRange(
+            start: DiffLineRef(side: .new, line: 1),
+            end: DiffLineRef(side: .new, line: 1)
+        ))
+        let cmdCNew = state.key(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), tx: &tx)
+        #expect(cmdCNew)
+        #expect(tx.clipboardWrite?.text == "let a = foo.baz(2)")
+        let escCleared = state.key(KeyEvent(key: .escape), tx: &tx)
+        #expect(escCleared)
+        #expect(state.selectedRange == nil)
+
+        struct ViewHost: Sendable {
+            var diff: DiffState
+            var commented: DiffLineRange?
+        }
+        state.wrap = true
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(
+            state: ViewHost(diff: state),
+            viewport: Vec2(800, 600)
+        ) { hs, cx in
+            DiffView(key: "mv", kit: kit, state: \ViewHost.diff)
+                .onComment { s, range, _ in s.commented = range }
+                .annotation { _, ann in
+                    El<ViewHost>(direction: .row).key("custom-note-\(ann.id)").child(text(ann.body))
+                }
+                .headerActions { _, idx in
+                    El<ViewHost>(direction: .row).key("hdr-act-\(idx)").child(text("Extra"))
+                }
+                .build(state: hs, cx: cx)
+        }
+        rt.frame(at: 0)
+
+        #expect(rt.element(byKey: "mv-header") != nil)
+        #expect(rt.element(byKey: "mv-f1-header") != nil)
+        #expect(rt.element(byKey: "hdr-act-0") != nil)
+        #expect(rt.element(byKey: "custom-note-a1") != nil)
+
+        // Click '+' comment button in line 1 deletion cell
+        if let plus = rt.element(byKey: "mv-o-0-plus"), plus.rect.count == 4 {
+            let pt = Vec2(plus.rect[0] + plus.rect[2] * 0.5, plus.rect[1] + plus.rect[3] * 0.5)
+            rt.pointerDown(at: pt, at: 0.1)
+            rt.pointerUp(at: pt, at: 0.12)
+            rt.frame(at: 0.12)
+            #expect(rt.state.commented == DiffLineRange(
+                start: DiffLineRef(side: .old, line: 1),
+                end: DiffLineRef(side: .old, line: 1)
+            ))
+        } else {
+            Issue.record("Missing mv-o-0-plus comment button")
+        }
     }
 }
