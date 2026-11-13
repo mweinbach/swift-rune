@@ -14,7 +14,10 @@ import Metal
 @main
 enum RuneLightFrameBenchApp {
     static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
+        try run(args: Array(CommandLine.arguments.dropFirst()))
+    }
+
+    static func run(args: [String]) throws {
         let fast = args.contains("--fast")
         let snapPath: String? = {
             guard let i = args.firstIndex(of: "--snap"), i + 1 < args.count else { return nil }
