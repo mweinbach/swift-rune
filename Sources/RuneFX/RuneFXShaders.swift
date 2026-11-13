@@ -597,6 +597,149 @@ public enum RuneFXShaders: Sendable {
     """
 
     public static let pulseShader: String = commonPrelude + """
+    inline float shoot(float u) {
+        float x = clamp(u, 0.0, 1.0);
+        float m = 1.0 - x;
+        return 3.0 * m * m * x * (-0.12) + 3.0 * m * x * x * 1.0 + x * x * x;
+    }
+
+    inline float beat_env(float x) {
+        return select(exp(-x / 0.085), exp(-(x / 0.018) * (x / 0.018)), x < 0.0);
+    }
+
+    inline float2 ping_shot(Ctx c, Inst i, float age, float dur) {
+        float2 o = i.aux.xy;
+        float2 dir = normalize(i.aux.zw);
+        float travel = i.p2.x;
+        float head_r = i.p2.z;
+        if (age < 0.0) { return float2(0.0); }
+        float u = age / dur;
+        if (c.reduced) {
+            float2 dest = o + dir * travel;
+            float env = w_smoothstep(0.0, 0.2, age) * exp(-max(age - 0.2, 0.0) * 3.0);
+            return float2(env * gauss(length(c.p - dest), head_r * 3.0), 0.0);
+        }
+        float s_head = shoot(u);
+        float s_tail = shoot(u - i.p2.y);
+        float2 hpos = o + dir * travel * s_head;
+        float2 tpos = o + dir * travel * s_tail;
+        float2 sd = segdist(c.p, tpos, hpos);
+        float after = max(u - 1.0, 0.0);
+        float cool = exp(-after * 3.5);
+        float hr = head_r * (1.0 + 0.9 * (1.0 - cool));
+        float tailw = head_r * 0.55 * (0.35 + 0.65 * sd.y);
+        float tail = gauss(sd.x, tailw) * sd.y * sd.y * 0.8;
+        float dh = length(c.p - hpos);
+        float head = gauss(dh, hr) + 0.35 * bloom(dh - hr * 0.5, hr * 1.2, hr * 8.0);
+        float e = (head + tail) * cool;
+        float hot = gauss(dh, hr * 0.45) * cool * cool;
+        float fr = 26.0 * (1.0 - exp(-age * 7.0));
+        e += exp(-age * 10.0) * w_smoothstep(0.0, 0.03, age) * gauss(length(c.p - o) - fr, 2.0 + age * 6.0) * 0.5;
+        return float2(e, hot);
+    }
+
+    inline float4 shade_pulse(
+        VOut in,
+        const device Inst* insts,
+        constant Globals& g,
+        constant BackdropEncoding& enc
+    ) {
+        Inst i = insts[in.id];
+        Ctx c = make_ctx(i, in.px);
+        int n = int(i.p0.x + 0.5);
+        float period = max(i.p0.y, 0.05);
+        float reach = i.p0.z;
+        float width = i.p0.w;
+        float inten = i.p1.x;
+        float occl = select(1.0, i.p2.w, effective_blend_mode(i, enc) == 0u);
+        float outside = w_smoothstep(-c.aa, c.aa, c.d);
+        float e = 0.0;
+        float hotv = 0.0;
+
+        if (c.variant == 0) {
+            if (c.reduced) {
+                e = 0.35 * bloom(c.d, reach * 0.18, reach * 0.8);
+            } else {
+                for (int k = 0; k < n; k++) {
+                    float ph = fract(c.t / period + float(k) / float(n));
+                    float r = reach * (1.0 - pow(1.0 - ph, 2.2));
+                    float w = width * (1.0 + 2.2 * ph);
+                    float a = pow(1.0 - ph, 1.6) * w_smoothstep(0.0, 0.08, ph);
+                    float ring = gauss(c.d - r, w);
+                    float wash = w_smoothstep(r + w, r - w, c.d) * exp(-(r - c.d) / max(reach * 0.22, 1.0));
+                    e += a * (ring + 0.22 * wash);
+                }
+                e += 0.18 * bloom(c.d, reach * 0.1, reach * 0.6);
+            }
+            e *= outside;
+        } else if (c.variant == 1) {
+            float b = 0.5;
+            if (!c.reduced) { b = 0.5 - 0.5 * cos(TAU * c.t / period); b = b * b * (3.0 - 2.0 * b); }
+            float r = reach * (0.55 + 0.45 * b);
+            e = (0.45 + 0.55 * b) * bloom(c.d, r, r * 5.0) * outside;
+            hotv = 0.25 * b * gauss(max(c.d, 0.0), r * 0.25);
+        } else if (c.variant == 2) {
+            float beat = 0.3;
+            float ring = 0.0;
+            if (!c.reduced) {
+                float tp = c.t / period;
+                float kb = floor(tp);
+                beat = 0.0;
+                for (int k = -1; k < 3; k++) {
+                    float x = tp - (kb - float(k));
+                    beat += beat_env(x) + 0.62 * beat_env(x - 0.17);
+                    float age = x * period;
+                    if (age > 0.0) {
+                        float rr = reach * (1.0 - exp(-age * 4.5));
+                        ring += exp(-age * 3.2) * w_smoothstep(0.0, 0.03, age) * (1.0 - w_smoothstep(0.7, 1.3, age)) * gauss(c.d - rr, width * (1.0 + age * 3.0));
+                    }
+                }
+                float edge = reach + width * 16.0;
+                ring *= 1.0 - w_smoothstep(edge * 0.8, edge, c.d);
+            }
+            float r = reach * 0.22 * (1.0 + 0.35 * beat);
+            e = ((0.25 + 0.75 * beat) * bloom(c.d, r, reach) + 0.55 * ring) * outside;
+            hotv = 0.35 * beat * gauss(max(c.d, 0.0), r * 0.25) * outside;
+        } else if (c.variant == 3) {
+            float dur = max(i.p1.z, 0.05);
+            float age0 = c.t - i.p1.y;
+            int shots = 1;
+            float age = age0;
+            if (i.p1.w > 0.0 && age0 > 0.0) {
+                age = age0 - floor(age0 / i.p1.w) * i.p1.w;
+                shots = 3;
+            }
+            for (int k = 0; k < shots; k++) {
+                float a = age + float(k) * i.p1.w;
+                if (a > age0 + 1e-4 || a > dur * 2.2) { break; }
+                float2 pe = ping_shot(c, i, a, dur);
+                e += pe.x;
+                hotv += pe.y;
+            }
+        } else {
+            float dur = max(i.p1.z, 0.05);
+            float age = c.t - i.p1.y;
+            if (age >= 0.0 && age < dur) {
+                float u = age / dur;
+                float r = length(c.p - i.aux.xy);
+                float inside = w_smoothstep(c.aa, -c.aa, c.d);
+                if (c.reduced) {
+                    e = 0.06 * (1.0 - u) * w_smoothstep(0.0, 0.08, u) * inside;
+                } else {
+                    float rr = reach * (1.0 - pow(1.0 - u, 3.0));
+                    float w = width * (1.0 + 3.0 * u);
+                    float fade = pow(1.0 - u, 1.5);
+                    float ring = gauss(r - rr, w) * fade * 0.55;
+                    float fill = w_smoothstep(rr + w, rr - w * 3.0, r) * 0.05 * (1.0 - u) * (1.0 - u) * w_smoothstep(0.0, 0.05, u);
+                    e = (ring * 0.7 + fill) * inside;
+                    hotv = ring * 0.1 * inside;
+                }
+            }
+        }
+        float3 col = i.c0.rgb * e + i.c1.rgb * hotv;
+        return finish(float4(col * inten, (e + hotv) * occl * inten), in.px, g);
+    }
+
     fragment float4 fx_pulse_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
@@ -605,85 +748,169 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
-        float d = sd_shape(i, p);
-        int count = max(int(round(i.p0.x)), 1);
-        float period = max(i.p0.y, 0.05);
-        float reach = max(i.p0.z, 1.0);
-        float width = max(i.p0.w, 0.2);
-        float intensity = i.p1.x;
-        float t0 = i.p1.y;
-        float duration = max(i.p1.z, 0.05);
-        float rep = i.p1.w;
-        float occ = i.p2.w;
-        int variant = int(round(i.t.z));
-
-        float3 col = float3(0.0);
-        float alpha = 0.0;
-        float inside_mask = mix(1.0, smoothstep(-1.0, 1.0, d), occ);
-
-        if (variant == 0) {
-            for (int k = 0; k < count; k++) {
-                float phase = fract(i.t.x / period + float(k) / float(count));
-                float r = phase * reach;
-                float ring = exp(-pow((d - r) / width, 2.0));
-                float fade = (1.0 - phase) * (1.0 - phase) * smoothstep(0.0, 0.08, phase);
-                float e = ring * fade * intensity * inside_mask;
-                col += mix(i.c0.rgb, i.c1.rgb, ring * 0.5) * e;
-                alpha += e * 0.7;
-            }
-        } else if (variant == 1) {
-            float b = 0.5 + 0.5 * sin(6.28318530718 * i.t.x / period);
-            float r = reach * (0.4 + 0.6 * b);
-            float e = exp(-max(d, 0.0) / max(r, 1.0)) * (0.4 + 0.6 * b) * intensity * inside_mask;
-            col = mix(i.c0.rgb, i.c1.rgb, b * 0.4) * e;
-            alpha = clamp(e * 0.65, 0.0, 1.0);
-        } else if (variant == 2) {
-            float ph = fract(i.t.x / period);
-            float beat1 = exp(-pow((ph - 0.12) / 0.05, 2.0));
-            float beat2 = 0.7 * exp(-pow((ph - 0.28) / 0.06, 2.0));
-            float pulse = beat1 + beat2;
-            float ring = exp(-pow((d - ph * reach) / max(width * 2.0, 1.0), 2.0)) * (1.0 - ph);
-            float e = (pulse * exp(-max(d, 0.0) / max(reach * 0.4, 2.0)) + ring) * intensity * inside_mask;
-            col = mix(i.c0.rgb, i.c1.rgb, clamp(pulse, 0.0, 1.0)) * e;
-            alpha = clamp(e * 0.75, 0.0, 1.0);
-        } else if (variant == 3) {
-            float age = rep > 0.0 ? fmod(max(i.t.x - t0, 0.0), rep) : (i.t.x - t0);
-            float u = clamp(age / duration, 0.0, 2.2);
-            if (u >= 0.0 && u <= 2.2) {
-                float travel = i.p2.x;
-                float2 from = i.aux.xy;
-                float2 dir = i.aux.zw;
-                float prog = clamp(u, 0.0, 1.0);
-                float ease = 1.0 - pow(1.0 - prog, 3.0);
-                float2 head = from + dir * (travel * ease);
-                float hd = length(p - head);
-                float head_r = max(i.p2.z, 0.5);
-                float cool = u > 1.0 ? exp(-(u - 1.0) * 3.0) : 1.0;
-                float e = exp(-hd / (head_r * 2.5)) * cool * intensity;
-                col = mix(i.c0.rgb, i.c1.rgb, exp(-hd / head_r)) * e;
-                alpha = clamp(e, 0.0, 1.0);
-            }
-        } else {
-            float age = i.t.x - t0;
-            float u = clamp(age / duration, 0.0, 1.0);
-            float2 at = i.aux.xy;
-            float r = u * reach;
-            float dist = length(p - at);
-            float ring = exp(-pow((dist - r) / max(width * 3.0, 1.0), 2.0));
-            float mask = 1.0 - smoothstep(-0.5, 0.5, d);
-            float e = ring * (1.0 - u) * mask * intensity;
-            col = mix(i.c0.rgb, i.c1.rgb, ring * 0.6) * e;
-            alpha = clamp(e, 0.0, 1.0);
-        }
-
-        return fx_fs(finish(float4(col, clamp(alpha, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
+        return fx_fs(shade_pulse(in, insts, g, enc), insts[in.id], in.px, g, backdrop, samp, enc);
     }
     """
 
     public static let electricShader: String = commonPrelude + """
+    struct Bolt { float core; float halo; };
+
+    inline Bolt shade_bolt(float dist, float w, float gr) {
+        Bolt b;
+        b.core = gauss(dist, w);
+        float o = dist / gr;
+        b.halo = 0.35 / (1.0 + o * o) * (1.0 - w_smoothstep(gr * 2.5, gr * 5.0, dist)) + 0.65 * gauss(dist, gr * 0.6);
+        return b;
+    }
+
+    inline float lat(float dv, float a, float b, float step_len) {
+        float s = (b - a) / step_len;
+        float k = rsqrt(1.0 + min(s * s, 3.0));
+        return dv * mix(k, 1.0, w_smoothstep(1.5, 8.0, abs(dv)));
+    }
+
+    inline float3 fork_col(Inst i, float heat) {
+        return mix(mix(i.c2.rgb, i.c0.rgb, w_smoothstep(0.0, 0.5, heat)), i.c1.rgb, w_smoothstep(0.6, 1.0, heat));
+    }
+
+    inline float4 shade_electric(
+        VOut in,
+        constant Globals& g,
+        const device Inst* insts,
+        const device float4* data,
+        constant BackdropEncoding& enc
+    ) {
+        Inst i = insts[in.id];
+        Ctx c = make_ctx(i, in.px);
+        float w = max(i.p0.w, c.aa * 0.7);
+        float inten = i.p1.x;
+        float gr = max(i.p1.y, 1e-3);
+        float gap = i.p2.y;
+        uint first = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        uint nf = uint(i.xf.z);
+        uint ns = uint(i.xf.w);
+        uint q4 = n >> 2u;
+        float4 fl = data[first + 1u];
+        uint base = first + 2u;
+
+        float core = 0.0;
+        float halo = 0.0;
+        float3 fork_hot = float3(0.0);
+
+        if (c.variant == 0) {
+            float2 a = i.aux.xy;
+            float2 bb = i.aux.zw;
+            float L = max(length(bb - a), 1.0);
+            float2 dir = (bb - a) / L;
+            float2 nrm = float2(-dir.y, dir.x);
+            float2 rel = c.p - a;
+            float u = dot(rel, dir) / L;
+            float v = dot(rel, nrm);
+            float uc = clamp(u, 0.0, 1.0);
+            float fi = uc * float(n - 1u);
+            uint i0 = min(uint(fi), n - 2u);
+            float f = fi - float(i0);
+            float step_len = L / float(n - 1u);
+            for (uint k = 0u; k < ns; k++) {
+                uint sb = base + k * q4;
+                float d0 = dat1(data, sb, i0);
+                float d1 = dat1(data, sb, i0 + 1u);
+                float dd = length(float2((u - uc) * L, lat(v - mix(d0, d1, f), d0, d1, step_len)));
+                uint hb = base + (ns + k) * q4;
+                float dh = length(float2((u - uc) * L, v - mix(dat1(data, hb, i0), dat1(data, hb, i0 + 1u), f)));
+                float bw = select(w * 0.6, w, k == 0u);
+                Bolt bo = shade_bolt(dd, bw, gr);
+                bo.halo = 0.4 * shade_bolt(dh, bw, gr).halo + 0.6 * shade_bolt(dd, bw, gr * 0.3).halo;
+                float kb = select(0.32, 1.0, k == 0u) * fl[k];
+                core += bo.core * kb;
+                halo += bo.halo * kb;
+            }
+            halo += 0.6 * (gauss(length(c.p - a), gr * 0.8) + gauss(length(c.p - bb), gr * 0.8));
+            core += 0.5 * (gauss(length(c.p - a), w * 2.5) + gauss(length(c.p - bb), w * 2.5));
+            uint fb = base + 2u * ns * q4;
+            for (uint j = 0u; j < nf; j++) {
+                float4 h0 = data[fb];
+                float4 h1 = data[fb + 1u];
+                float2 o = h0.xy;
+                float2 fd = h0.zw;
+                float len = h1.x;
+                float2 fr = c.p - o;
+                float fu = dot(fr, fd) / len;
+                float fv = dot(fr, float2(-fd.y, fd.x));
+                float fuc = clamp(fu, 0.0, h1.y);
+                float ffi = fuc * 15.0;
+                uint j0 = min(uint(ffi), 14u);
+                float s0 = dat1(data, fb + 2u, j0);
+                float s1 = dat1(data, fb + 2u, j0 + 1u);
+                float fdist = length(float2((fu - fuc) * len, lat(fv - mix(s0, s1, ffi - float(j0)), s0, s1, len / 15.0)));
+                float taper = 1.0 - 0.7 * fuc;
+                Bolt bo = shade_bolt(fdist, w * 0.6 * taper, gr * 0.55);
+                fork_hot += fork_col(i, h1.w) * (bo.core * 1.1 + bo.halo * 0.45) * h1.z * taper;
+                fb += 6u;
+            }
+        } else {
+            float2 pr = rrect_perim(c.q, c.half_size, c.r);
+            float s = pr.x;
+            float total = pr.y;
+            bool calm = c.variant == 2;
+            float fi = s / total * float(n);
+            uint i0 = uint(floor(fi)) % n;
+            uint i1 = (i0 + 1u) % n;
+            float f = fi - floor(fi);
+            float step_len = total / float(n);
+            for (uint k = 0u; k < ns; k++) {
+                uint sb = base + k * q4;
+                float d0 = dat1(data, sb, i0);
+                float d1 = dat1(data, sb, i1);
+                float dd = abs(lat(c.d - gap - mix(d0, d1, f), d0, d1, step_len));
+                uint hb = base + (ns + k) * q4;
+                float dh = abs(c.d - gap - mix(dat1(data, hb, i0), dat1(data, hb, i1), f));
+                uint cb = base + (2u * ns + k) * q4;
+                float crawl = mix(dat1(data, cb, i0), dat1(data, cb, i1), f);
+                float bw = select(w * 0.6, w, k == 0u);
+                Bolt bo = shade_bolt(dd, bw, gr);
+                bo.halo = 0.4 * shade_bolt(dh, bw, gr).halo + 0.6 * shade_bolt(dd, bw, gr * 0.3).halo;
+                float kb = select(0.32, 1.0, k == 0u) * fl[k] * crawl;
+                core += bo.core * kb;
+                halo += bo.halo * kb;
+            }
+            if (calm) {
+                float sp = i.p0.z * 0.35;
+                float bu = fract(s / total - c.t * 0.07 * sp);
+                for (int k = 0; k < 3; k++) {
+                    float x = fract(bu - float(k) / 3.0 + 0.5) - 0.5;
+                    float bead = gauss(x * total, 18.0);
+                    halo += bead * gauss(c.d - gap, gr * 0.8) * 0.9;
+                    core += bead * gauss(c.d - gap, w * 1.5) * 0.6;
+                }
+            }
+            uint fb = base + 3u * ns * q4;
+            for (uint j = 0u; j < nf; j++) {
+                float4 h0 = data[fb];
+                float4 h1 = data[fb + 1u];
+                float len = h1.x;
+                float dsv = s - h0.x;
+                dsv -= total * round(dsv / total);
+                float fu = (c.d - gap - h0.z) / len;
+                float fuc = clamp(fu, 0.0, h1.y);
+                float ffi = fuc * 15.0;
+                uint j0 = min(uint(ffi), 14u);
+                float s0 = dat1(data, fb + 2u, j0);
+                float s1 = dat1(data, fb + 2u, j0 + 1u);
+                float fdist = length(float2((fu - fuc) * len, lat(dsv - mix(s0, s1, ffi - float(j0)), s0, s1, len / 15.0)));
+                float taper = 1.0 - 0.7 * fuc;
+                Bolt bo = shade_bolt(fdist, w * 0.6 * taper, gr * 0.55);
+                fork_hot += fork_col(i, h1.w) * (bo.core * 1.1 + bo.halo * 0.45) * h1.z * taper;
+                fb += 6u;
+            }
+        }
+        float occl = select(1.0, i.p2.w, effective_blend_mode(i, enc) == 0u);
+        float3 rgb = (i.c1.rgb * core * 1.3 + i.c0.rgb * halo * 0.75 + fork_hot) * inten;
+        float a = (core * 0.7 + halo * occl + lum(fork_hot) * 0.5) * inten;
+        return finish(float4(rgb, a), in.px, g);
+    }
+
     fragment float4 fx_electric_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
@@ -693,144 +920,408 @@ public enum RuneFXShaders: Sendable {
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
-        uint base = uint(i.xf.x);
-        uint n = max(uint(i.xf.y), 1u);
-        uint strands = max(uint(i.xf.w), 1u);
-        float4 bright = data[base + 1u];
-
-        float core_w = max(i.p0.w, 0.2);
-        float intensity = i.p1.x;
-        float glow_w = max(i.p1.y, 0.5);
-        float occ = i.p2.w;
-        int variant = int(round(i.t.z));
-
-        float dist = 1e5;
-        float halo_dist = 1e5;
-        float strand_k = bright.x;
-
-        if (variant == 0) {
-            float2 a = i.aux.xy;
-            float2 b = i.aux.zw;
-            float2 ab = b - a;
-            float len = max(length(ab), 1.0);
-            float2 dir = ab / len;
-            float2 nrm = float2(-dir.y, dir.x);
-            float u = clamp(dot(p - a, dir) / len, 0.0, 1.0);
-            float lat = dot(p - a, nrm);
-            uint idx = min(uint(u * float(n - 1u)), n - 1u);
-            uint stride_v4 = (n + 3u) >> 2u;
-            uint path_base = base + 2u;
-            uint halo_base = path_base + strands * stride_v4;
-            for (uint s = 0u; s < strands; s++) {
-                float off = dat1(data, path_base + s * stride_v4, idx);
-                float hoff = dat1(data, halo_base + s * stride_v4, idx);
-                dist = min(dist, abs(lat - off));
-                halo_dist = min(halo_dist, abs(lat - hoff));
-            }
-        } else {
-            float d = sd_shape(i, p) - i.p2.y;
-            float2 c = i.rect.xy + i.rect.zw * 0.5;
-            float ang = atan2(p.y - c.y, p.x - c.x);
-            float u = fract(ang / 6.28318530718);
-            uint idx = min(uint(u * float(n)), n - 1u);
-            uint stride_v4 = (n + 3u) >> 2u;
-            uint path_base = base + 2u;
-            uint halo_base = path_base + strands * stride_v4;
-            for (uint s = 0u; s < strands; s++) {
-                float off = dat1(data, path_base + s * stride_v4, idx);
-                float hoff = dat1(data, halo_base + s * stride_v4, idx);
-                dist = min(dist, abs(d - off));
-                halo_dist = min(halo_dist, abs(d - hoff));
-            }
-        }
-
-        float core_e = exp(-pow(dist / core_w, 2.0));
-        float halo_e = exp(-halo_dist / glow_w) * 0.65;
-        float inside = mix(1.0, smoothstep(-1.0, 1.5, sd_shape(i, p)), occ);
-        float e = (core_e * 1.4 + halo_e) * intensity * strand_k * inside;
-        float3 col = mix(i.c2.rgb, i.c0.rgb, clamp(halo_e * 1.5, 0.0, 1.0)) * halo_e * intensity * strand_k
-                   + i.c1.rgb * core_e * intensity * strand_k * 1.4;
-        return fx_fs(finish(float4(col * inside, clamp(e * 0.8, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
+        return fx_fs(shade_electric(in, g, insts, data, enc), insts[in.id], in.px, g, backdrop, samp, enc);
     }
     """
 
     public static let fireShader: String = commonPrelude + """
+    inline float3 fire_ramp(float T, float3 c0, float3 c1, float3 c2) {
+        float3 col = mix(float3(0.012, 0.009, 0.008), c0, w_smoothstep(0.04, 0.22, T));
+        col = mix(col, c1, w_smoothstep(0.2, 0.5, T));
+        col = mix(col, c2, w_smoothstep(0.45, 0.78, T));
+        col = mix(col, float3(1.0, 0.92, 0.74), w_smoothstep(0.8, 1.08, T));
+        return col;
+    }
+
+    inline float fbm4(float2 p0, uint seed) {
+        float2 p = p0; float a = 0.5; float s = 0.0;
+        for (uint o = 0u; o < 4u; o++) {
+            s += a * gnoise(p, seed + o * 131u);
+            p = rot_mul(p) * 2.03;
+            a *= 0.5;
+        }
+        return s / 0.9375;
+    }
+
+    inline float4 flames(Ctx c, Inst i, constant BackdropEncoding& enc) {
+        float H = i.p0.x;
+        float sc = max(i.p0.y, 1.0);
+        float tr = c.t * i.p0.z;
+        float2 nrm = sd_grad(c);
+        float up = clamp(-nrm.y, 0.0, 1.0);
+        float span = w_smoothstep(c.half_size.x + 2.0, c.half_size.x - c.r * 0.9 - 2.0, abs(c.q.x));
+        float hl = H * w_smoothstep(0.15, 0.95, up) * span;
+        if (hl < 0.5) { return float4(0.0); }
+        float y = c.d + 1.5;
+        float yn = y / hl;
+        if (yn > 1.6 || yn < -0.2) { return float4(0.0); }
+        float x = c.p.x / sc;
+        float fl = 1.0 + 0.2 * gnoise(float2(x * 0.45, c.t * 1.3), c.seed + 7u) + 0.07 * gnoise(float2(x * 1.1 + 9.0, c.t * 8.0), c.seed + 8u);
+        float yh = yn / max(fl, 0.4);
+        float2 sw = float2(0.0);
+        if (i.p3.x > 0.0) { sw = i.p3.x * float2(sin(y / sc * 0.7 + tr * 0.4), 0.0); }
+        float2 wq = float2(x * 0.7, y / sc * 0.45 - tr * 1.05);
+        float2 w = float2(gnoise(wq, c.seed), gnoise(wq + float2(3.7, 1.9), c.seed + 1u)) * i.p2.x * (0.2 + 0.8 * yh);
+        float n = fbm4(float2(x * 1.05, y / sc * 0.5 - tr * 1.6) + w + sw, c.seed + 2u);
+        float dens = (1.0 - yh) * 1.2 + n * 0.8 - 0.08;
+        float body = w_smoothstep(0.0, 0.06, dens) * w_smoothstep(-0.2, 0.05, yn);
+        float T = clamp(dens * (0.95 - 0.5 * yh), 0.0, 1.1);
+        float3 col = fire_ramp(T, i.c0.rgb, i.c1.rgb, i.c2.rgb);
+        float e = body * (0.3 + 0.75 * T * T);
+        float3 emis = col * e;
+        float smoke = w_smoothstep(-0.32, -0.02, dens) * (1.0 - body) * w_smoothstep(0.35, 0.9, yh) * 0.12;
+        float bg = i.p2.z * 0.22 * exp(-max(c.d, 0.0) / max(hl * 0.12, 1.0)) * w_smoothstep(-1.0, 0.5, c.d) * span;
+        emis += i.c1.rgb * bg;
+        float occl = select(1.0, i.p2.w, effective_blend_mode(i, enc) == 0u);
+        return float4(emis, body * occl + smoke);
+    }
+
+    inline float3 blackbody(float k) {
+        float t = k / 100.0;
+        float g = clamp((99.4708 * log(max(t, 1.0)) - 161.1196) / 255.0, 0.0, 1.0);
+        float b = select(clamp((138.5177 * log(max(t - 10.0, 1.0)) - 305.0448) / 255.0, 0.0, 1.0), 0.0, t <= 19.0);
+        return to_lin(float3(1.0, g, b));
+    }
+
+    inline float3 flame_light(float T, float gain) {
+        float x = max(T, 0.0);
+        float e = gain * x * x * x * w_smoothstep(0.08, 0.3, x);
+        return float3(1.0) - exp(-blackbody(1000.0 + 1700.0 * min(x, 1.3)) * e);
+    }
+
+    inline float4 sim_at(texture2d<float> source, sampler samp, float2 uv) {
+        float2 dim = float2(source.get_width(0), source.get_height(0));
+        float2 g = uv * dim - 0.5;
+        float2 i = floor(g);
+        float2 f = g - i;
+        float2 w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+        float2 w1 = (4.0 - 6.0 * f * f + 3.0 * f * f * f) / 6.0;
+        float2 w3 = f * f * f / 6.0;
+        float2 w2 = 1.0 - w0 - w1 - w3;
+        float2 s0 = w0 + w1;
+        float2 s1 = w2 + w3;
+        float2 o0 = (i - 0.5 + w1 / s0) / dim;
+        float2 o1 = (i + 1.5 + w3 / s1) / dim;
+        float4 a = source.sample(samp, float2(o0.x, o0.y), level(0.0));
+        float4 b = source.sample(samp, float2(o1.x, o0.y), level(0.0));
+        float4 c = source.sample(samp, float2(o0.x, o1.y), level(0.0));
+        float4 d = source.sample(samp, float2(o1.x, o1.y), level(0.0));
+        return mix(mix(a, b, s1.x), mix(c, d, s1.x), s1.y);
+    }
+
+    inline float4 sim_flames(Ctx c, Inst i, texture2d<float> source, sampler samp) {
+        float2 ext = i.aux.zw;
+        float2 uv = (c.p - i.aux.xy) / ext;
+        if (any(uv < float2(0.0)) || any(uv > float2(1.0))) { return float4(0.0); }
+        float4 s = sim_at(source, samp, uv);
+        float T = s.z;
+        float m = min(min(c.p.x - i.aux.x, i.aux.x + i.p3.y - c.p.x), c.p.y - i.aux.y);
+        float win = w_smoothstep(0.0, 18.0, m);
+        float3 rgb = flame_light(T, 6.0) * win;
+        float sm = s.w * win;
+        float a = 0.0;
+        if (sm > 0.002) {
+            a = (1.0 - exp(-sm * 1.2)) * i.p2.w * 1.6;
+            float lit = 0.0;
+            for (int k = 1; k < 5; k++) {
+                float tk = sim_at(source, samp, uv + float2(0.0, float(k) * 7.0 / ext.y)).z;
+                lit += tk * tk / float(k);
+            }
+            float3 warm = float3(1.0, 0.45, 0.18) * min(lit, 1.0) * 0.3;
+            rgb += a * (float3(0.11, 0.11, 0.115) + warm);
+        }
+        float vis = w_smoothstep(0.12, 0.35, T) * win;
+        return float4(rgb, min(a + vis * i.p2.w * 0.5, 1.0));
+    }
+
+    inline float4 plasma(Ctx c, Inst i) {
+        float sc = max(i.p0.y, 1.0);
+        float thick = max(i.p0.x * i.p2.y * 0.3, 2.5);
+        float2 pr = rrect_perim(c.q, c.half_size, c.r);
+        float u = pr.x / pr.y;
+        float d = c.d - thick * 0.45;
+        if (abs(d) > thick * 4.0) { return float4(0.0); }
+        float P = max(round(pr.y / (sc * 2.5)), 3.0);
+        float flow = c.t * i.p0.z * (0.35 + 0.25 * i.p3.x);
+        float warp = 0.6 * pgnoise(float2(u * P - flow * 0.6, c.t * 0.35), int(P), c.seed + 3u);
+        float r1 = 1.0 - abs(pgnoise(float2(u * P - flow * 1.4, d / sc * 3.2 + warp), int(P), c.seed));
+        float r2 = 1.0 - abs(pgnoise(float2(u * P * 2.0 + flow * 1.1, d / sc * 4.5 - warp - c.t * 0.6), int(P * 2.0), c.seed + 1u));
+        float fil = pow(r1, 10.0) + 0.45 * pow(r2, 12.0);
+        float breathe = 0.78 + 0.22 * pgnoise(float2(u * 3.0 - c.t * 0.25, c.t * 0.2), 3, c.seed + 5u);
+        float env = exp(-(d * d) / (thick * thick));
+        float halo = exp(-max(d, 0.0) / (thick * 0.9)) * w_smoothstep(-thick, 0.0, d);
+        float E = env * (0.18 + 1.2 * fil) * breathe;
+        float3 rgb = i.c0.rgb * halo * 0.28 + i.c1.rgb * E * 0.55 + i.c2.rgb * fil * env * breathe * 0.9
+                   + float3(1.0) * pow(fil, 3.0) * env * breathe * 0.35;
+        return float4(rgb, (E * 0.5 + halo * 0.1) * i.p2.w * 2.0);
+    }
+
+    inline float4 shade_fire(
+        VOut in,
+        constant Globals& g,
+        const device Inst* insts,
+        const device float4* data,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        Inst i = insts[in.id];
+        Ctx c = make_ctx(i, in.px);
+        float inten = i.p0.w;
+        float4 o = float4(0.0);
+        if (c.variant == 0) {
+            o = flames(c, i, enc);
+        } else if (c.variant == 1) {
+            o = plasma(c, i);
+        } else if (c.variant == 4) {
+            o = sim_flames(c, i, source, samp);
+        }
+        float3 emis = o.rgb;
+        float alpha = o.a;
+
+        uint ef = uint(i.xf.x);
+        uint en = uint(i.xf.y);
+        for (uint k = 0u; k < en; k++) {
+            float4 a = data[ef + k * 2u];
+            float4 b = data[ef + k * 2u + 1u];
+            float2 sd = segdist(c.p, a.xy - a.zw, a.xy);
+            float T = b.y;
+            float core = gauss(sd.x, b.x);
+            float halo = gauss(sd.x, b.x * 3.0) * 0.12;
+            emis += flame_light(0.45 + T * 0.75, 6.0) * (core * 1.4 + halo) * T;
+            alpha += core * T * 0.5;
+        }
+        return finish(float4(emis * inten, min(alpha, 1.0) * inten), in.px, g);
+    }
+
     fragment float4 fx_fire_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
         const device Inst* insts [[buffer(1)]],
         const device float4* data [[buffer(2)]],
         texture2d<float> backdrop [[texture(0)]],
+        texture2d<float> source [[texture(1)]],
         sampler samp [[sampler(0)]],
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
-        Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
-        float h = max(i.p0.x, 4.0);
-        float sc = max(i.p0.y, 2.0);
-        float speed = i.p0.z;
-        float intensity = i.p0.w;
-        float warp = i.p2.x;
-        float base_glow = i.p2.z;
-        float occ = i.p2.w;
-        float swirl = i.p3.x;
-        uint seed = uint(i.t.y);
-        float tm = i.t.x * speed;
-
-        float d = sd_shape(i, p);
-        float3 col = float3(0.0);
-        float alpha = 0.0;
-        int variant = int(round(i.t.z));
-
-        if (variant != 3) {
-            float y_up = variant == 1 ? max(d, 0.0) : max(i.rect.y - p.y, 0.0);
-            float u = clamp(y_up / h, 0.0, 1.0);
-            float2 np = p / sc + float2(swirl * sin(u * 3.14159 + tm), tm * 1.3);
-            float n1 = fbm(np, seed, 4);
-            float n2 = fbm(np * 1.7 + float2(n1 * warp, tm * 0.8), seed + 37u, 3);
-            float flame = clamp((1.0 - u) * 1.15 + n2 * 0.55 - 0.15, 0.0, 1.0);
-            float mask = variant == 1
-                ? smoothstep(h, 0.0, max(d, 0.0))
-                : smoothstep(-6.0, 0.0, p.x - i.rect.x) * smoothstep(-6.0, 0.0, (i.rect.x + i.rect.z) - p.x) * (1.0 - smoothstep(h * 0.7, h * 1.25, y_up));
-            float t_col = clamp(flame * mask + base_glow * exp(-max(d, 0.0) / 10.0) * 0.4, 0.0, 1.0);
-            float3 fc = t_col < 0.5 ? mix(i.c0.rgb, i.c1.rgb, t_col * 2.0) : mix(i.c1.rgb, i.c2.rgb, (t_col - 0.5) * 2.0);
-            float inside = mix(1.0, smoothstep(-1.0, 1.5, d), occ);
-            float e = t_col * intensity * inside;
-            col = fc * e;
-            alpha = clamp(e, 0.0, 1.0);
-        }
-
-        uint e_base = uint(i.xf.x);
-        uint e_count = uint(i.xf.y);
-        for (uint k = 0u; k < e_count; k++) {
-            float4 ep = data[e_base + k * 2u];
-            float4 es = data[e_base + k * 2u + 1u];
-            float2 pos = ep.xy;
-            float2 vel = ep.zw;
-            float sz = max(es.x, 0.25);
-            float temp = es.y;
-            float2 diff = p - pos;
-            float vlen = max(length(vel), 1e-4);
-            float2 vdir = vel / vlen;
-            float along = dot(diff, vdir);
-            float perp = length(diff - vdir * along);
-            float streak = clamp(along / max(vlen, sz), -1.0, 0.0);
-            float ed = length(float2(perp, max(along, 0.0) + max(-along - vlen, 0.0)));
-            float g_e = exp(-pow(ed / sz, 2.0)) * temp * intensity;
-            float3 ec = mix(i.c1.rgb, i.c2.rgb, clamp(temp, 0.0, 1.0));
-            col += ec * g_e * (1.0 + 0.3 * abs(streak));
-            alpha = max(alpha, clamp(g_e, 0.0, 1.0));
-        }
-
-        return fx_fs(finish(float4(col, alpha), in.px, g), i, in.px, g, backdrop, samp, enc);
+        return fx_fs(shade_fire(in, g, insts, data, source, samp, enc), insts[in.id], in.px, g, backdrop, samp, enc);
     }
     """
 
     public static let distortShader: String = commonPrelude + """
+    inline float3 frosted_glass(float3 c, float k) {
+        float l = lum(c);
+        float3 sat = max(mix(float3(l), c, 1.0 + 0.9 * k), float3(0.0));
+        float3 e = to_srgb(sat);
+        return to_lin(e * (1.0 - 0.32 * k) + float3(0.11 * k));
+    }
+
+    inline float lens_sd(Inst i, float2 q, float2 half_size, float r, float2 ctr) {
+        float da = sd_rrect(q, half_size, r);
+        if (i.p3.z <= 0.0) { return da; }
+        float2 cb = i.p3.xy + i.p3.zw * 0.5 - ctr;
+        float db = sd_rrect(q - cb, i.p3.zw * 0.5, i.p2.w);
+        return mix(smin(da, db, i.p2.z), db, i.shape.w);
+    }
+
+    inline float bend_at(float t) {
+        float u = clamp(1.0 - t, 0.0, 0.9999);
+        float pw = 3.0;
+        float slope = pow(u, pw - 1.0) * pow(max(1.0 - pow(u, pw), 1e-6), 1.0 / pw - 1.0);
+        float tilt = atan(min(slope, 1e4));
+        float bent = asin(sin(tilt) / 1.5);
+        return tan(tilt - bent);
+    }
+
+    inline float4 shade_distort(
+        VOut in,
+        Inst i,
+        constant Globals& g,
+        texture2d<float> backdrop,
+        sampler samp,
+        texture2d<float> blurred,
+        constant BackdropEncoding& enc
+    ) {
+        Ctx c = make_ctx(i, in.px);
+        float s = c.scale;
+
+        if (c.variant == 0) {
+            float H = i.p0.x;
+            float m;
+            if (i.p1.x > 0.5) {
+                m = w_smoothstep(c.aa, -c.aa * 8.0, c.d);
+            } else {
+                float above = i.rect.y - c.p.y;
+                float side = w_smoothstep(c.half_size.x + 2.0, c.half_size.x - c.r - 4.0, abs(c.q.x));
+                m = w_smoothstep(1.0, 1.0 + H * 0.3, above) * (1.0 - w_smoothstep(H * 0.45, H, above)) * side;
+            }
+            if (m <= 0.0) { return float4(0.0); }
+            float t = c.reduced ? 0.0 : c.t;
+            float2 q = c.p / max(i.p0.y, 1.0) + float2(0.0, t * i.p0.z);
+            float2 o = float2(fbm3(q, c.seed), fbm3(q * float2(1.0, 0.7) + float2(7.3, 2.1), c.seed + 5u)) * i.p0.w;
+            float4 col = bd(c.p + o * m, s, g, backdrop, samp, enc);
+            return float4(col.rgb, 1.0) * w_smoothstep(0.0, 0.02, m);
+        }
+        if (c.variant == 1) {
+            float age = c.t - i.p1.x;
+            float dur = max(i.p1.y, 0.05);
+            if (age < 0.0 || age > dur) { return float4(0.0); }
+            float u = age / dur;
+            float2 rel = c.p - i.aux.xy;
+            float r = length(rel);
+            float2 dir = rel / max(r, 1e-3);
+            float fade = (1.0 - u) * (1.0 - u);
+            if (c.reduced) {
+                float gl = gauss(r, i.p0.x * 0.25) * 0.12 * fade * w_smoothstep(0.0, 0.1, u);
+                return float4(bd(c.p, s, g, backdrop, samp, enc).rgb * gl, 0.0);
+            }
+            float R = i.p0.x * (1.0 - pow(1.0 - u, 2.6));
+            float w = i.p0.y * (1.0 + 1.5 * u);
+            float x = (r - R) / w;
+            float f = x * exp(-x * x) * 2.33;
+            float2 off = -dir * f * i.p0.z * fade;
+            float ca = i.p0.w * abs(f) * fade;
+            float rr = bd(c.p + off * (1.0 + ca), s, g, backdrop, samp, enc).r;
+            float gg = bd(c.p + off, s, g, backdrop, samp, enc).g;
+            float bb = bd(c.p + off * (1.0 - ca), s, g, backdrop, samp, enc).b;
+            float lit = max(-f, 0.0) * 0.12 * fade * lum(float3(rr, gg, bb));
+            float m = w_smoothstep(0.0, 0.01, abs(f) * fade);
+            return float4(float3(rr, gg, bb) + lit, 1.0) * m;
+        }
+        if (c.variant == 2) {
+            float d = lens_sd(i, c.q, c.half_size, c.r, c.c);
+            float presence = i.p1.x;
+            float e = 0.5;
+            float gx = lens_sd(i, c.q + float2(e, 0.0), c.half_size, c.r, c.c) - lens_sd(i, c.q - float2(e, 0.0), c.half_size, c.r, c.c);
+            float gy = lens_sd(i, c.q + float2(0.0, e), c.half_size, c.r, c.c) - lens_sd(i, c.q - float2(0.0, e), c.half_size, c.r, c.c);
+            float2 nrm = float2(gx, gy) / max(length(float2(gx, gy)), 1e-5);
+            float coverage = clamp(0.5 - d * s, 0.0, 1.0);
+            float sd = lens_sd(i, c.q - float2(0.0, 5.0 * presence), c.half_size, c.r, c.c);
+            float fall = exp(-pow(max(sd + 2.0, 0.0), 2.0) / (2.0 * 9.0 * 9.0));
+            float contact = exp(-pow(max(d, 0.0), 2.0) / 6.0);
+            float dark = min(i.p1.z * presence * (0.55 * fall + 0.45 * contact), 1.0) * (1.0 - coverage);
+            if (coverage <= 0.0) {
+                return float4(0.0, 0.0, 0.0, dark);
+            }
+            float depth = -d;
+            float bevel = max(i.p0.x, 0.5);
+            float tt = clamp(depth / bevel, 0.0, 1.0);
+            float bend = i.p0.y * bend_at(tt) * presence;
+            float mag = mix(1.0, i.p0.w, presence);
+            float2 ctr = c.c;
+            float2 inward = -nrm;
+            float dsp = i.p0.z;
+            float2 local = c.p - ctr;
+            float2 srcg = ctr + (local + inward * bend) / mag;
+            float2 srcr = ctr + (local + inward * bend * (1.0 - dsp)) / mag;
+            float2 srcb = ctr + (local + inward * bend * (1.0 + dsp)) / mag;
+            float3 col = float3(
+                bd(srcr, s, g, backdrop, samp, enc).r,
+                bd(srcg, s, g, backdrop, samp, enc).g,
+                bd(srcb, s, g, backdrop, samp, enc).b
+            );
+            float frost = i.p1.y;
+            if (frost > 0.0 && i.xf.x > 0.5) {
+                float3 blr = float3(
+                    bdb(srcr, s, g, blurred, samp, enc).r,
+                    bdb(srcg, s, g, blurred, samp, enc).g,
+                    bdb(srcb, s, g, blurred, samp, enc).b
+                );
+                col = mix(col, blr, i.xf.y);
+                float k = presence * w_smoothstep(0.0, 0.6, frost);
+                col = frosted_glass(col, k);
+                uint2 ip = uint2(in.px);
+                float n = u01(ip.x + pcg(ip.y + 7u)) - u01(ip.x * 7919u + pcg(ip.y + 31u));
+                col = to_lin(max(to_srgb(col) + float3(n * 1.6 / 255.0 * k), float3(0.0)));
+            } else {
+                float rim = bend / max(1.118 * i.p0.y, 1e-3);
+                float soften = min(pow(rim, 1.5) * 0.55, 1.0);
+                if (soften > 1e-3 || frost > 0.0) {
+                    float rad = mix(1.2, 10.0, frost);
+                    float j = ign(in.px) * TAU;
+                    float3 acc = float3(0.0);
+                    for (int k = 0; k < 8; k++) {
+                        float a = j + float(k) * 2.39996;
+                        float rr = rad * sqrt((float(k) + 0.5) / 8.0);
+                        acc += bd(srcg + float2(cos(a), sin(a)) * rr, s, g, backdrop, samp, enc).rgb;
+                    }
+                    acc /= 8.0;
+                    col = mix(col, acc, clamp(max(soften, frost), 0.0, 1.0));
+                }
+            }
+            col = mix(col, col * i.c0.rgb, i.p2.y * presence);
+            float la = i.p2.x;
+            float2 L = float2(cos(la), sin(la));
+            float facing = max(dot(nrm, L), 0.0);
+            float away = max(-dot(nrm, L), 0.0);
+            float sky = clamp(0.5 - 0.5 * c.q.y / c.half_size.y, 0.0, 1.0);
+            float rimk = i.p1.w;
+            float fres = pow(1.0 - tt, 3.0) * 0.05 * (0.25 + 0.75 * sky);
+            float line = gauss(depth - 0.75, 0.55);
+            float glow = gauss(depth - 1.4, 2.4);
+            float spec = line * (0.9 * pow(facing, 2.5) + 0.35 * pow(away, 3.0)) + glow * 0.1 * pow(facing, 4.0);
+            float inner = gauss(tt - 0.32, 0.18) * away * away * 0.06;
+            float edge = gauss(depth - 0.3, 0.45) * 0.12;
+            float light = (0.004 + fres + spec + inner + edge) * presence * rimk;
+            col = col * (1.0 - 0.04 * presence) + float3(light);
+            float3 base = bd(c.p, s, g, backdrop, samp, enc).rgb * (1.0 - dark);
+            return float4(mix(base, col, coverage), 1.0);
+        }
+        if (c.variant == 3) {
+            float feather = max(i.p1.w, c.aa);
+            float m = w_smoothstep(feather * 0.5, -feather * 0.5, c.d);
+            if (m <= 0.0) { return float4(0.0); }
+            float2 uv = c.q / c.half_size;
+            float k = i.p0.x;
+            float2 bu = uv * (1.0 + k * dot(uv, uv)) / (1.0 + k);
+            float inside = w_smoothstep(1.0, 0.985, max(abs(bu.x), abs(bu.y)));
+            float2 src = c.c + bu * c.half_size;
+            float ca = i.p0.w;
+            float3 col = float3(
+                bd(src + float2(ca, 0.0), s, g, backdrop, samp, enc).r,
+                bd(src, s, g, backdrop, samp, enc).g,
+                bd(src - float2(ca, 0.0), s, g, backdrop, samp, enc).b
+            );
+            float gw = 3.0;
+            float3 gl = (
+                bd(src + float2(gw, 0.0), s, g, backdrop, samp, enc).rgb +
+                bd(src - float2(gw, 0.0), s, g, backdrop, samp, enc).rgb +
+                bd(src + float2(0.0, gw), s, g, backdrop, samp, enc).rgb +
+                bd(src - float2(0.0, gw), s, g, backdrop, samp, enc).rgb
+            ) * 0.25;
+            col += gl * i.p1.y;
+            float per = max(i.p0.y, 3.0 * c.aa);
+            float sl = 0.5 + 0.5 * cos(TAU * (c.p.y - i.rect.y) / per);
+            col *= 1.0 - i.p0.z * (1.0 - sl);
+            uint col3 = uint(floor(in.px.x)) % 3u;
+            float3 grille = select(select(float3(0.94, 0.94, 1.0), float3(0.94, 1.0, 0.94), col3 == 1u), float3(1.0, 0.94, 0.94), col3 == 0u);
+            col *= grille;
+            float roll = c.reduced ? 0.0 : gauss(fract((c.p.y - i.rect.y) / i.rect.w - c.t * 0.12) - 0.5, 0.06) * i.p1.z;
+            col += float3(roll) * 0.06;
+            col *= 1.0 - i.p1.x * pow(dot(uv, uv) * 0.5, 1.5);
+            col *= inside;
+            return float4(col, 1.0) * m;
+        }
+        float feather = max(i.p0.w, c.aa);
+        float m = w_smoothstep(feather * 0.5, -feather * 0.5, c.d);
+        if (m <= 0.0) { return float4(0.0); }
+        float2 o = i.p0.xy;
+        float gx = 0.0;
+        if (i.p0.z > 0.0 && !c.reduced) {
+            float slice = floor((c.p.y - i.rect.y) / 6.0);
+            float fr = floor(c.t * 12.0);
+            uint hsl = hu(c.seed + as_type<uint>(int(slice)), as_type<uint>(int(fr)));
+            if (u01(hsl) < 0.12 * i.p0.z) { gx = (u01(hsl + 1u) - 0.5) * 16.0 * i.p0.z; }
+        }
+        float2 p = c.p + float2(gx, 0.0);
+        float3 col = float3(
+            bd(p + o, s, g, backdrop, samp, enc).r,
+            bd(p, s, g, backdrop, samp, enc).g,
+            bd(p - o, s, g, backdrop, samp, enc).b
+        );
+        return float4(col, 1.0) * m;
+    }
+
     fragment float4 fx_distort_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
@@ -841,87 +1332,8 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float scale = i.shape.y;
-        float2 p = px / scale;
-        int variant = int(round(i.t.z));
-
-        if (variant == 0) {
-            float h = max(i.p0.x, 1.0);
-            float sc = max(i.p0.y, 1.0);
-            float spd = i.p0.z;
-            float amt = i.p0.w;
-            uint seed = uint(i.t.y);
-            float2 np = p / sc + float2(0.0, i.t.x * spd);
-            float2 off = float2(fbm(np, seed, 3), fbm(np + float2(7.3, 2.1), seed + 19u, 3)) * amt;
-            float d = sd_shape(i, p);
-            float mask = i.p1.x > 0.5 ? (1.0 - smoothstep(-1.0, 1.0, d)) : smoothstep(h, 0.0, max(i.rect.y - p.y, 0.0));
-            float4 c = bd(p + off * mask, scale, g, backdrop, samp, enc);
-            return fx_fs(finish(float4(c.rgb * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else if (variant == 1) {
-            float2 at = i.aux.xy;
-            float reach = max(i.p0.x, 1.0);
-            float width = max(i.p0.y, 0.5);
-            float amt = i.p0.z;
-            float chroma = i.p0.w;
-            float u = clamp((i.t.x - i.p1.x) / max(i.p1.y, 0.05), 0.0, 1.0);
-            float2 diff = p - at;
-            float dist = max(length(diff), 1e-3);
-            float2 dir = diff / dist;
-            float r = u * reach;
-            float ring = exp(-pow((dist - r) / width, 2.0)) * (1.0 - u);
-            float2 off = dir * (ring * amt);
-            float cr = bd(p + off * (1.0 + chroma), scale, g, backdrop, samp, enc).r;
-            float cg = bd(p + off, scale, g, backdrop, samp, enc).g;
-            float cb = bd(p + off * (1.0 - chroma), scale, g, backdrop, samp, enc).b;
-            float a = clamp(ring * 1.2, 0.0, 1.0);
-            return fx_fs(finish(float4(float3(cr, cg, cb) * a, a), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else if (variant == 2) {
-            float d = sd_shape(i, p);
-            float bevel = max(i.p0.x, 0.5);
-            float depth = i.p0.y;
-            float disp = i.p0.z;
-            float mag = max(i.p0.w, 0.1);
-            float presence = i.p1.x;
-            float frost = clamp(i.p1.y, 0.0, 1.0);
-            float rim_s = i.p1.w;
-            float2 n = shape_normal(i, p);
-            float edge_k = clamp(1.0 + d / bevel, 0.0, 1.0);
-            float2 bend = n * (edge_k * edge_k * depth * presence);
-            float2 center = i.rect.xy + i.rect.zw * 0.5;
-            float2 sp = center + (p - center) / mix(1.0, mag, presence) - bend;
-            float3 sharp_rgb = float3(
-                bd(sp + n * (disp * edge_k * 8.0), scale, g, backdrop, samp, enc).r,
-                bd(sp, scale, g, backdrop, samp, enc).g,
-                bd(sp - n * (disp * edge_k * 8.0), scale, g, backdrop, samp, enc).b
-            );
-            float3 blur_rgb = bdb(sp, scale, g, blurred, samp, enc);
-            float3 glass_rgb = mix(sharp_rgb, blur_rgb, frost);
-            glass_rgb = mix(glass_rgb, i.c0.rgb, i.p2.y * presence);
-            float rim = exp(-abs(d) / 1.5) * rim_s * presence * 0.25;
-            float mask = 1.0 - smoothstep(-0.5, 0.5, d);
-            return fx_fs(finish(float4((glass_rgb + rim) * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else if (variant == 3) {
-            float2 center = i.rect.xy + i.rect.zw * 0.5;
-            float2 uv = (p - center) / max(i.rect.zw * 0.5, float2(1.0));
-            float r2 = dot(uv, uv);
-            float2 warped = center + uv * (1.0 + i.p0.x * r2) * (i.rect.zw * 0.5);
-            float ch = i.p0.w;
-            float cr = bd(warped + float2(ch, 0.0), scale, g, backdrop, samp, enc).r;
-            float cg = bd(warped, scale, g, backdrop, samp, enc).g;
-            float cb = bd(warped - float2(ch, 0.0), scale, g, backdrop, samp, enc).b;
-            float scan = 1.0 - i.p0.z * (0.5 + 0.5 * sin(px.y * 3.14159 / max(i.p0.y, 0.5)));
-            float vig = 1.0 - i.p1.x * 0.35 * r2;
-            float mask = 1.0 - smoothstep(-i.p1.w, 0.5, sd_shape(i, p));
-            return fx_fs(finish(float4(float3(cr, cg, cb) * scan * vig * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else {
-            float2 off = i.p0.xy;
-            float cr = bd(p + off, scale, g, backdrop, samp, enc).r;
-            float cg = bd(p, scale, g, backdrop, samp, enc).g;
-            float cb = bd(p - off, scale, g, backdrop, samp, enc).b;
-            float mask = 1.0 - smoothstep(-i.p0.w, 0.5, sd_shape(i, p));
-            return fx_fs(finish(float4(float3(cr, cg, cb) * mask, mask), in.px, g), i, in.px, g, backdrop, samp, enc);
-        }
+        float4 shaded = shade_distort(in, i, g, backdrop, samp, blurred, enc);
+        return fx_fs(shaded, i, in.px, g, backdrop, samp, enc);
     }
     """
 
@@ -948,10 +1360,9 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
+        float2 p = in.px / i.shape.y;
         uint first = uint(i.xf.x);
-        uint n = max(uint(i.xf.y), 1u);
+        uint n = uint(i.xf.y);
         float4 acc = float4(0.0);
 
         if (i.xf.z < 0.5) {
@@ -960,10 +1371,11 @@ public enum RuneFXShaders: Sendable {
                 acc += src_at(i, l.xy, source, samp) * l.z;
             }
         } else {
+            float j = 0.5;
             float2 b = i.aux.xy;
             float wsum = 0.0;
             for (uint k = 0u; k < n; k++) {
-                float o = (float(k) + 0.5) / float(n) - 0.5;
+                float o = (float(k) + j) / float(n) - 0.5;
                 float w = 1.0 - 4.0 * o * o * 0.85;
                 float3 l = pose_at(data, first, 0u, p - b * o);
                 acc += src_at(i, l.xy, source, samp) * (w * l.z);
@@ -977,6 +1389,110 @@ public enum RuneFXShaders: Sendable {
     """
 
     public static let extrasShader: String = commonPrelude + """
+    inline float extras_cover(Ctx c, float feather) {
+        return w_smoothstep(c.aa * 0.5, -max(feather, c.aa), c.d);
+    }
+
+    inline float4 shade_extras(
+        VOut in,
+        Inst i,
+        constant Globals& g,
+        const device float4* data,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        Ctx c = make_ctx(i, in.px);
+
+        if (c.variant == 0) {
+            float m;
+            if (i.p1.x > 0.5) {
+                m = source.sample(samp, (c.p - i.aux2.xy) / i.aux2.zw, level(0.0)).a;
+            } else {
+                m = extras_cover(c, max(i.p1.z, c.aa * 1.5));
+            }
+            if (m <= 0.0) { return float4(0.0); }
+            float ta = tan(i.p0.z);
+            float span = c.half_size.x + c.half_size.y * abs(ta) + i.p0.y * 2.5;
+            float x = c.q.x + c.q.y * ta;
+            float sheen;
+            if (c.reduced) {
+                sheen = 0.35 * (0.5 - 0.5 * cos(TAU * c.t / max(i.p0.x, 0.1)));
+            } else {
+                float ph = fract(c.t / max(i.p0.x, 0.1));
+                float travel = clamp(ph / max(1.0 - i.p1.y, 0.05), 0.0, 1.0);
+                float e = travel * travel * (3.0 - 2.0 * travel);
+                float xc = mix(-span, span, e);
+                sheen = gauss(x - xc, i.p0.y) + 0.35 * gauss(x - xc, i.p0.y * 2.6);
+            }
+            float3 base = i.c1.rgb * i.c1.a;
+            return finish(float4(base * m + i.c0.rgb * sheen * i.p0.w * m, i.c1.a * m + sheen * i.p0.w * m * 0.2), in.px, g);
+        }
+        if (c.variant == 1) {
+            uint f0 = uint(i.xf.x);
+            uint n = uint(i.xf.y);
+            float body = 0.0;
+            float hot = 0.0;
+            float halo = 0.0;
+            for (uint k = 0u; k < n; k++) {
+                float4 a = data[f0 + k * 2u];
+                float4 b = data[f0 + k * 2u + 1u];
+                float S = max(a.z, 0.01);
+                float env = a.w;
+                float2 rel = c.p - a.xy;
+                float r = length(rel);
+                if (r > S * 1.6) { continue; }
+                float2 l = float2(b.x * rel.x - b.y * rel.y, b.y * rel.x + b.x * rel.y);
+                float2 ax = max(abs(l) / S, float2(1e-6));
+                float gg = pow(pow(ax.x, 0.55) + pow(ax.y, 0.55), 1.0 / 0.55);
+                float w = c.aa * 0.75 / S;
+                float m = 1.0 - w_smoothstep(1.0 - w, 1.0 + w, gg);
+                body += env * m;
+                hot += env * m * (1.0 - gg) * (1.0 - gg);
+                halo += env * gauss(r, S * 0.32);
+            }
+            float3 tint = i.c0.rgb;
+            float3 col = mix(tint, float3(1.0), 0.3) * body + float3(1.0) * hot * 0.8 + tint * halo * 0.12;
+            return finish(float4(col * i.p0.w, min(body * 0.9 + halo * 0.05, 1.0) * i.p0.w), in.px, g);
+        }
+        if (c.variant == 2) {
+            float m = extras_cover(c, max(i.p0.w, c.aa));
+            if (m <= 0.0) { return float4(0.0); }
+            float sc = max(i.p0.x, 1.0);
+            float2 q = c.p / sc;
+            float t = c.reduced ? 0.0 : c.t * i.p0.y;
+            float uy = (c.p.y - i.rect.y) / i.rect.w;
+            float3 col = float3(0.0);
+            float3 cols[3] = { i.c0.rgb, i.c1.rgb, i.c2.rgb };
+            uint f0 = uint(i.xf.x);
+            uint ns = uint(i.xf.y);
+            float fx = clamp((c.p.x - i.rect.x) / i.rect.z, 0.0, 1.0) * float(ns - 1u);
+            uint x0 = min(uint(fx), ns - 2u);
+            float fr = fx - float(x0);
+            for (int k = 0; k < 3; k++) {
+                float fk = float(k);
+                uint yb = f0 + uint(k) * 2u * (ns >> 2u);
+                uint wb = yb + (ns >> 2u);
+                float wv = mix(dat1(data, wb, x0), dat1(data, wb, x0 + 1u), fr);
+                float yk = mix(dat1(data, yb, x0), dat1(data, yb, x0 + 1u), fr);
+                float band = gauss(uy - yk, 0.13 + 0.05 * fk);
+                float rays = 0.65 + 0.35 * gnoise(float2(q.x * 5.0 + wv * 3.0, t * 0.5 + fk), c.seed + 9u);
+                float hem = w_smoothstep(yk + 0.16, yk - 0.02, uy) * 0.5 + 0.5;
+                col += cols[k] * band * rays * hem;
+            }
+            float a = select(min(max(col.r, max(col.g, col.b)), 1.0), lum(col) * 0.4, effective_blend_mode(i, enc) == 0u);
+            return finish(float4(col * i.p0.z * m, a * i.p0.z * m), in.px, g);
+        }
+        float m = extras_cover(c, max(i.p0.z, c.aa));
+        if (m <= 0.0) { return float4(0.0); }
+        uint frame = (i.p0.y > 0.0 && !c.reduced) ? uint(floor(c.t * i.p0.y)) : 0u;
+        uint2 ip = uint2(in.px);
+        float n = u01(ip.x + pcg(ip.y + pcg(frame + c.seed))) + u01(ip.y * 7919u + pcg(ip.x + 17u + frame)) - 1.0;
+        float a = i.p0.x * m;
+        if (n >= 0.0) { return float4(float3(n * a), n * a); }
+        return float4(0.0, 0.0, 0.0, -n * a);
+    }
+
     fragment float4 fx_extras_fragment(
         VOut in [[stage_in]],
         constant Globals& g [[buffer(0)]],
@@ -988,84 +1504,565 @@ public enum RuneFXShaders: Sendable {
         constant BackdropEncoding& enc [[buffer(4)]]
     ) {
         Inst i = insts[in.id];
-        float2 px = recover_pixel(in);
-        float2 p = px / i.shape.y;
-        float d = sd_shape(i, p);
-        int variant = int(round(i.t.z));
-
-        if (variant == 0) {
-            float period = max(i.p0.x, 0.1);
-            float band = max(i.p0.y, 1.0);
-            float ang = i.p0.z;
-            float intensity = i.p0.w;
-            float2 dir = float2(cos(ang), sin(ang));
-            float2 c = i.rect.xy + i.rect.zw * 0.5;
-            float span = abs(dir.x) * i.rect.z + abs(dir.y) * i.rect.w + band * 2.0;
-            float cyc = period + i.p1.y;
-            float ph = fract(i.t.x / max(cyc, 0.1));
-            float sweep = (ph * cyc / period) * span - span * 0.5;
-            float dist = dot(p - c, dir) - sweep;
-            float hl = exp(-pow(dist / (band * 0.5), 2.0)) * (ph * cyc < period ? 1.0 : 0.0);
-            float mask = 1.0 - smoothstep(-max(i.p1.z, 0.5), 0.5, d);
-            if (i.p1.x > 0.5) {
-                float2 uv = (p - i.aux2.xy) / max(i.aux2.zw, float2(1.0));
-                mask *= source.sample(samp, uv, level(0.0)).a;
-            }
-            float3 col = mix(i.c1.rgb * i.c1.a, i.c0.rgb, hl * intensity);
-            float a = clamp((i.c1.a + hl * intensity) * mask, 0.0, 1.0);
-            return fx_fs(finish(float4(col * mask, a), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else if (variant == 1) {
-            uint base = uint(i.xf.x);
-            uint count = uint(i.xf.y);
-            float3 col = float3(0.0);
-            float a = 0.0;
-            for (uint k = 0u; k < count; k++) {
-                float4 sp = data[base + k * 2u];
-                float4 rot = data[base + k * 2u + 1u];
-                float2 q = p - sp.xy;
-                float2 r = float2(rot.x * q.x + rot.y * q.y, -rot.y * q.x + rot.x * q.y);
-                float sz = max(sp.z, 0.5);
-                float star = exp(-length(r) / (sz * 0.25)) + exp(-abs(r.x) / (sz * 0.08) - abs(r.y) / sz) + exp(-abs(r.y) / (sz * 0.08) - abs(r.x) / sz);
-                float e = star * sp.w * i.p0.w * 0.5;
-                col += i.c0.rgb * e;
-                a = max(a, clamp(e, 0.0, 1.0));
-            }
-            return fx_fs(finish(float4(col, a), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else if (variant == 2) {
-            uint base = uint(i.xf.x);
-            float u = clamp((p.x - i.rect.x) / max(i.rect.z, 1.0), 0.0, 1.0);
-            float v = clamp((p.y - i.rect.y) / max(i.rect.w, 1.0), 0.0, 1.0);
-            uint idx = min(uint(u * 63.0), 63u);
-            float3 col = float3(0.0);
-            float3 pal[3] = { i.c0.rgb, i.c1.rgb, i.c2.rgb };
-            for (uint k = 0u; k < 3u; k++) {
-                float y = dat1(data, base + k * 32u, idx);
-                float band = exp(-pow((v - y) / 0.16, 2.0));
-                col += pal[k] * band;
-            }
-            float mask = 1.0 - smoothstep(-max(i.p0.w, 1.0), 0.5, d);
-            float e = i.p0.z * mask;
-            return fx_fs(finish(float4(col * e, clamp(length(col) * e, 0.0, 1.0)), in.px, g), i, in.px, g, backdrop, samp, enc);
-        } else {
-            uint frame_t = i.p0.y > 0.0 ? uint(floor(i.t.x * i.p0.y)) : 0u;
-            uint2 ip = uint2(px);
-            float n = u01(hu(ip.x + frame_t * 131u, ip.y + frame_t * 977u)) - 0.5;
-            float mask = 1.0 - smoothstep(-max(i.p0.z, 0.5), 0.5, d);
-            float gval = n * i.p0.x * mask;
-            return fx_fs(finish(float4(float3(gval), abs(gval)), in.px, g), i, in.px, g, backdrop, samp, enc);
-        }
+        float4 shaded = shade_extras(in, i, g, data, source, samp, enc);
+        return fx_fs(shaded, i, in.px, g, backdrop, samp, enc);
     }
     """
 
     public static let fillShader: String = commonPrelude + """
-    inline float3 sample_stop_oklab(const device float4* data, uint base, uint count, float u) {
-        if (count <= 1u) { return data[base].rgb; }
-        float x = clamp(u, 0.0, 1.0) * float(count - 1u);
-        uint k = min(uint(floor(x)), count - 2u);
-        float f = x - float(k);
-        float3 c0 = data[base + k * 2u].rgb;
-        float3 c1 = data[base + (k + 1u) * 2u].rgb;
-        return mix(c0, c1, f);
+    inline float fill_mask(Ctx c, float border) {
+        float inside = clamp(0.5 - c.d * c.scale, 0.0, 1.0);
+        if (border <= 0.0) { return inside; }
+        return inside * clamp(0.5 + (c.d + border) * c.scale, 0.0, 1.0);
+    }
+
+    inline float2 rot2(float2 v, float a) {
+        float cs = cos(a);
+        float sn = sin(a);
+        return float2(cs * v.x - sn * v.y, sn * v.x + cs * v.y);
+    }
+
+    inline float3 stop_lin(const device float4* data, uint f0, uint k) {
+        return data[f0 + 2u * k].rgb;
+    }
+
+    inline float3 stop_lab(const device float4* data, uint f0, uint k) {
+        return data[f0 + 2u * k + 1u].rgb;
+    }
+
+    inline float2 stop_pt(const device float4* data, uint f0, uint k) {
+        return float2(data[f0 + 2u * k].w, data[f0 + 2u * k + 1u].w);
+    }
+
+    inline float3 oklab_to_lin(float3 c) {
+        float l = c.x + 0.39633778 * c.y + 0.21580376 * c.z;
+        float m = c.x - 0.10556135 * c.y - 0.06385417 * c.z;
+        float s = c.x - 0.08948418 * c.y - 1.29148555 * c.z;
+        float l3 = l * l * l;
+        float m3 = m * m * m;
+        float s3 = s * s * s;
+        return max(float3(
+            4.07674166 * l3 - 3.30771159 * m3 + 0.23096993 * s3,
+            -1.26843800 * l3 + 2.60975740 * m3 - 0.34131940 * s3,
+            -0.00419609 * l3 - 0.70341861 * m3 + 1.70761470 * s3
+        ), float3(0.0));
+    }
+
+    inline float3 palette_ramp(const device float4* data, uint f0, uint n, float x) {
+        if (n <= 1u) { return stop_lin(data, f0, 0u); }
+        float fx = clamp(x, 0.0, 1.0) * float(n - 1u);
+        uint k = min(uint(fx), n - 2u);
+        return oklab_to_lin(mix(stop_lab(data, f0, k), stop_lab(data, f0, k + 1u), fx - float(k)));
+    }
+
+    inline float3 ramp_loop(const device float4* data, uint f0, uint n, float x) {
+        if (n <= 1u) { return stop_lin(data, f0, 0u); }
+        float fx = fract(x) * float(n);
+        uint k = min(uint(fx), n - 1u);
+        return oklab_to_lin(mix(stop_lab(data, f0, k), stop_lab(data, f0, (k + 1u) % n), fx - float(k)));
+    }
+
+    inline float4 paint(float3 col, float m, Inst i, float2 px, constant Globals& g) {
+        float a = m * clamp(i.aux.y, 0.0, 1.0);
+        return finish(float4(col * a, a), px, g);
+    }
+
+    inline float tone_at(
+        Inst i,
+        Ctx c,
+        float2 p,
+        int kind,
+        float angle,
+        constant Globals& g,
+        texture2d<float> backdrop,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        float v;
+        float2 q = p - c.c;
+        if (kind == 0) {
+            float2 dir = float2(cos(angle), sin(angle));
+            float ext = abs(c.half_size.x * dir.x) + abs(c.half_size.y * dir.y);
+            v = dot(q, dir) / max(ext, 1e-3) * 0.5 + 0.5;
+        } else if (kind == 1) {
+            v = 1.0 - clamp(length(q / max(c.half_size, float2(1e-3))) / 1.3, 0.0, 1.0);
+        } else if (kind == 2) {
+            float t = c.t * i.p1.y;
+            v = 0.5 + 0.62 * fbm3(p / max(i.p1.x, 1.0) + float2(t * 0.31, t * 0.17), c.seed);
+        } else if (kind == 3) {
+            v = to_srgb(float3(lum(bd(p, c.scale, g, backdrop, samp, enc).rgb))).x;
+        } else {
+            float4 s = source.sample(samp, (p - i.aux2.xy) / max(i.aux2.zw, float2(1e-3)), level(0.0));
+            v = to_srgb(float3(lum(s.rgb))).x;
+        }
+        return clamp((v - 0.5) * i.p1.w + 0.5 + i.p1.z * 0.5, 0.0, 1.0);
+    }
+
+    inline float bayer(uint2 cell, uint bits) {
+        uint v = 0u;
+        for (uint b = 0u; b < bits; b++) {
+            uint x = (cell.x >> b) & 1u;
+            uint y = (cell.y >> b) & 1u;
+            uint sh = 2u * (bits - 1u - b);
+            v |= (((x ^ y) << 1u) | y) << sh;
+        }
+        return (float(v) + 0.5) / float(1u << (2u * bits));
+    }
+
+    inline float3 slab_tilt(Ctx c, float border, float bevel, float dome) {
+        float depth = -c.d;
+        float2 gv = sd_grad(c);
+        float2 tilt = float2(0.0);
+        float rim = 0.0;
+        if (border > 0.0) {
+            float x = clamp((depth - border * 0.5) / max(border * 0.5, 1e-3), -0.97, 0.97);
+            tilt = -gv * x / sqrt(1.0 - x * x);
+            rim = abs(x);
+        } else {
+            float bev = max(bevel, 0.5);
+            float x = clamp(1.0 - depth / bev, 0.0, 0.92);
+            tilt = gv * x / sqrt(1.0 - x * x);
+            rim = x;
+        }
+        float2 qn = c.q / max(c.half_size, float2(1.0));
+        tilt += float2(qn.x * 0.55, qn.y) * dome * select(0.8, 0.25, border > 0.0);
+        return float3(tilt, rim);
+    }
+
+    inline float flow_h(float2 u, float2 w, float t, uint seed) {
+        float2 p = u + w;
+        return gnoise(p + float2(0.0, t * 0.11), seed + 3u) + 0.5 * gnoise(rot_mul(p) * 2.03 - float2(t * 0.07, 0.0), seed + 17u);
+    }
+
+    inline float3 studio(float3 r, float contrast) {
+        float up = -r.y;
+        float e = up + 0.1;
+        float w = 0.014;
+        float sky = 0.2 + 0.6 * exp(-max(e, 0.0) * 3.2) + 0.45 * exp(-max(e, 0.0) * 24.0);
+        float key = w_smoothstep(0.80, 0.95, dot(r, normalize(float3(-0.3, -0.82, 0.5)))) * 2.4;
+        float strip = gauss(r.x - 0.6, 0.075) * w_smoothstep(-0.05, 0.2, e) * (1.0 - w_smoothstep(0.55, 0.9, up)) * 1.7;
+        float fill_l = gauss(r.x + 0.72, 0.045) * w_smoothstep(0.0, 0.25, e) * (1.0 - w_smoothstep(0.4, 0.8, up)) * 0.55;
+        float lights = (key + strip + fill_l) * contrast;
+        float fl = w_smoothstep(0.05, 1.0, -e);
+        float pool = 0.16 * gauss(r.x + 0.25, 0.35) * w_smoothstep(0.25, 0.9, -e);
+        float ground = (0.014 + 0.3 * fl * fl + pool + 0.05 * gauss(e + 0.06, 0.04)) / (contrast * contrast);
+        float h = w_smoothstep(-w, w, e);
+        float3 skyc = (sky * mix(1.0, 0.82, clamp(contrast - 1.0, 0.0, 1.0)) + lights) * float3(0.97, 0.99, 1.03);
+        float3 floorc = ground * float3(1.04, 1.0, 0.95);
+        return mix(floorc, skyc, h);
+    }
+
+    inline float3 shoulder(float3 c) {
+        float k = 0.78;
+        return select(c, k + (1.0 - k) * (1.0 - exp(-(c - k) / (1.0 - k))), c > float3(k));
+    }
+
+    inline float4 liquid_metal(Inst i, Ctx c, float m, float2 px, constant Globals& g) {
+        float flow = i.p0.x;
+        float sc = max(i.p0.y, 1.0);
+        float t = c.t * i.p0.z;
+        float3 slab = slab_tilt(c, i.aux.x, i.p0.w, i.p1.x);
+        float2 tilt = slab.xy;
+        float rim = slab.z;
+        float hgt = 0.0;
+        float bend = 0.0;
+        if (flow > 0.0) {
+            float2 u = select(c.p, c.q, i.p2.x > 0.5) / sc;
+            float2 wv = float2(
+                gnoise(u * 0.6 + float2(t * 0.05, 1.7), c.seed + 7u),
+                gnoise(u * 0.6 + float2(4.3, -t * 0.06), c.seed + 11u)
+            ) * 0.9;
+            float e = 0.04;
+            hgt = flow_h(u, wv, t, c.seed);
+            float hx = flow_h(u + float2(e, 0.0), wv, t, c.seed) - hgt;
+            float hy = flow_h(u + float2(0.0, e), wv, t, c.seed) - hgt;
+            float2 grad = float2(hx, hy) / e;
+            float k = flow * 0.42 * (1.0 - 0.6 * rim * rim);
+            tilt -= grad * k;
+            bend = length(grad) * k;
+        }
+        float3 n = normalize(float3(tilt, 1.0));
+        float3 r = float3(2.0 * n.z * n.xy, 2.0 * n.z * n.z - 1.0);
+        r = float3(rot2(r.xy, i.p1.y), r.z);
+        float contrast = max(i.p1.w, 0.1);
+        float3 env = studio(normalize(r), contrast) * i.c1.rgb;
+        float3 f0 = i.c0.rgb;
+        float cz = clamp(1.0 - n.z, 0.0, 1.0);
+        float cz2 = cz * cz;
+        float3 f = f0 + (float3(1.0) - f0) * (cz2 * cz2 * cz);
+        float ir = i.p1.z;
+        if (ir > 0.0) {
+            float ph = 1.6 * (1.0 - n.z) + 0.35 * hgt;
+            float3 film = 0.5 + 0.5 * cos(TAU * (float3(ph) + float3(0.0, 0.33, 0.67)));
+            float k = ir * clamp(w_smoothstep(0.04, 0.45, 1.0 - n.z) + bend * 0.8, 0.0, 1.0);
+            f *= mix(float3(1.0), 0.55 + 0.9 * film, k);
+        }
+        float3 col = shoulder(f * env);
+        return paint(col, m, i, px, g);
+    }
+
+    inline float4 plastic(Inst i, Ctx c, float m, float2 px, constant Globals& g) {
+        float3 slab = slab_tilt(c, i.aux.x, i.p0.z, i.p0.y);
+        float3 n = normalize(float3(slab.xy, 1.0));
+        float3 l = float3(rot2(float2(0.0, -1.0), i.p0.w) * 0.6428, 0.766);
+        float nl = dot(n, l);
+        float3 base = clamp(i.c0.rgb, float3(0.0), float3(1.0));
+        float shade = 0.4 + 0.7833 * max(nl, 0.0);
+        float3 col = mix(base * min(shade, 1.0), float3(1.0), clamp((shade - 1.0) * 0.6, 0.0, 1.0));
+        float rough = clamp(i.p0.x, 0.02, 1.0);
+        float a = min(rough * rough + 0.1, 1.0);
+        float a2 = a * a;
+        float3 h = normalize(l + float3(0.0, 0.0, 1.0));
+        float nh = max(dot(n, h), 0.0);
+        float dd = nh * nh * (a2 - 1.0) + 1.0;
+        float ndf = a2 / (PI * dd * dd);
+        float fh = 1.0 - h.z;
+        float spec = ndf * (0.04 + 0.96 * fh * fh * fh * fh * fh) * max(nl, 0.0) * 2.5;
+        float fz = 1.0 - clamp(n.z, 0.0, 1.0);
+        float sky = 0.55 + 0.45 * w_smoothstep(-0.5, 0.5, -n.y);
+        float edge = 0.96 * fz * fz * fz * fz * fz * sky * (1.0 - 0.5 * rough);
+        col += (float3(1.0) - col) * knee(spec + edge);
+        return paint(col, m, i, px, g);
+    }
+
+    inline float4 fluted(
+        Inst i,
+        Ctx c,
+        float m,
+        float2 px,
+        constant Globals& g,
+        texture2d<float> backdrop,
+        sampler samp,
+        texture2d<float> blurred,
+        constant BackdropEncoding& enc
+    ) {
+        float s = c.scale;
+        float rib = max(i.p0.x, 1.0);
+        float2 across = float2(cos(i.p0.y), sin(i.p0.y));
+        float u = dot(c.p - c.c, across) / rib;
+        float local = fract(u) - 0.5;
+        float x = local * 2.0;
+        float o = -x * (1.0 + 0.35 * x * x) * i.p0.z;
+        float dsp = i.p1.x * 0.3 * abs(x);
+        float2 srcg = c.p + across * o;
+        float2 srcr = c.p + across * o * (1.0 + dsp);
+        float2 srcb = c.p + across * o * (1.0 - dsp);
+        float3 col = float3(
+            bd(srcr, s, g, backdrop, samp, enc).r,
+            bd(srcg, s, g, backdrop, samp, enc).g,
+            bd(srcb, s, g, backdrop, samp, enc).b
+        );
+        float frost = i.p0.w;
+        if (frost > 0.0) {
+            if (i.xf.x > 0.5) {
+                float3 blr = float3(
+                    bdb(srcr, s, g, blurred, samp, enc).r,
+                    bdb(srcg, s, g, blurred, samp, enc).g,
+                    bdb(srcb, s, g, blurred, samp, enc).b
+                );
+                col = mix(col, blr, i.xf.y);
+            } else {
+                float2 along = float2(-across.y, across.x);
+                float j = ign(px) - 0.5;
+                float3 acc = float3(0.0);
+                for (int k = 0; k < 4; k++) {
+                    acc += bd(srcg + along * (float(k) - 1.5 + j) * 3.0 * frost, s, g, backdrop, samp, enc).rgb;
+                }
+                col = mix(col, acc * 0.25, frost);
+            }
+            float k = w_smoothstep(0.0, 0.6, frost);
+            float l = lum(col);
+            float3 sat = max(mix(float3(l), col, 1.0 + 0.5 * k), float3(0.0));
+            col = to_lin(to_srgb(sat) * (1.0 - 0.2 * k) + float3(0.07 * k));
+        }
+        col = mix(col, col * i.c0.rgb, i.p1.z);
+        float hl = i.p1.y;
+        float aa = c.aa / rib;
+        float groove = 1.0 - w_smoothstep(0.0, max(0.06, aa * 2.0), 0.5 - abs(local));
+        float sheen = gauss(local + 0.22, 0.13) * 0.1 + gauss(local + 0.34, 0.03) * 0.1;
+        float lip = gauss(local - 0.44, max(0.025, aa)) * 0.06;
+        float lift = 0.35 + 0.65 * sqrt(clamp(lum(col), 0.0, 1.0));
+        col = col * (1.0 - 0.28 * hl * groove) + float3((sheen + lip) * hl * lift);
+        float a = m * clamp(i.aux.y, 0.0, 1.0);
+        return float4(col * a, a);
+    }
+
+    inline float4 mesh_gradient(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        float2 uv = (c.p - i.rect.xy) / max(i.rect.zw, float2(1.0));
+        float t = c.t * i.p0.y;
+        float warp = i.p0.w;
+        if (warp > 0.0) {
+            uv += warp * 0.09 * float2(
+                gnoise(uv * 2.1 + float2(t * 0.11, 0.0), c.seed + 5u),
+                gnoise(uv * 2.1 + float2(3.7, -t * 0.09), c.seed + 9u)
+            );
+        }
+        float2 aspect = i.rect.zw / max(max(i.rect.z, i.rect.w), 1.0);
+        float sharp = clamp(i.p0.z, 0.1, 8.0);
+        float3 lab = float3(0.0);
+        float wsum = 0.0;
+        for (uint k = 0u; k < n; k++) {
+            float2 d = (uv - stop_pt(data, f0, k)) * aspect;
+            float w = pow(dot(d, d) + 0.004, -sharp);
+            lab += stop_lab(data, f0, k) * w;
+            wsum += w;
+        }
+        return paint(oklab_to_lin(lab / max(wsum, 1e-6)), m, i, px, g);
+    }
+
+    inline float4 dither_fill(
+        Inst i,
+        Ctx c,
+        float m,
+        constant Globals& g,
+        const device float4* data,
+        texture2d<float> backdrop,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        uint f0 = uint(i.xf.x);
+        uint n = max(uint(i.xf.y), 1u);
+        float pix = max(i.p0.z, 0.25);
+        float2 rel = c.p - i.rect.xy;
+        float2 cell = floor(rel / pix);
+        uint2 ci = as_type<uint2>(int2(cell));
+        float tone = tone_at(i, c, i.rect.xy + (cell + 0.5) * pix, int(i.p0.y + 0.5), i.p0.w, g, backdrop, source, samp, enc);
+        int pat = clamp(int(i.p0.x + 0.5), 1, 5);
+        float th;
+        if (pat <= 3) {
+            th = bayer(ci, uint(pat));
+        } else if (pat == 4) {
+            uint side = max(uint(i.xf.w), 1u);
+            th = dat1(data, uint(i.xf.z), (ci.y % side) * side + ci.x % side);
+        } else {
+            th = u01(ci.x * 7919u + pcg(ci.y + c.seed));
+        }
+        float lv = float(max(n, 2u) - 1u);
+        float v = tone * lv;
+        uint k = min(uint(floor(v) + select(0.0, 1.0, fract(v) > th)), n - 1u);
+        float a = m * clamp(i.aux.y, 0.0, 1.0);
+        return float4(stop_lin(data, f0, k) * a, a);
+    }
+
+    inline float4 grain_gradient(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        int kind = int(i.p0.x + 0.5);
+        float ang = i.p0.y;
+        float2 ctr = i.rect.xy + i.p0.zw * i.rect.zw;
+        float x;
+        if (kind == 0) {
+            float2 dir = float2(cos(ang), sin(ang));
+            float ext = abs(c.half_size.x * dir.x) + abs(c.half_size.y * dir.y);
+            x = dot(c.q, dir) / max(ext, 1e-3) * 0.5 + 0.5;
+        } else if (kind == 1) {
+            x = length(c.p - ctr) / max(length(c.half_size), 1e-3);
+        } else {
+            float2 d = c.p - ctr;
+            float th = select(0.0, atan2(d.y, d.x), any(d != float2(0.0)));
+            x = fract((th - ang) / TAU);
+        }
+        float amount = i.p1.x;
+        float size = max(i.p1.y, 0.25);
+        uint frame = i.p1.w > 0.0 ? uint(floor(c.t * i.p1.w)) : 0u;
+        uint2 gc = as_type<uint2>(int2(floor((c.p - i.rect.xy) / size)));
+        uint h = pcg(gc.x + pcg(gc.y + pcg(frame + c.seed * 977u)));
+        float nx = u01(h) + u01(h + 1u) - 1.0;
+        float3 col = (kind == 2) ? ramp_loop(data, f0, n, x + nx * amount * 0.2) : palette_ramp(data, f0, n, x + nx * amount * 0.2);
+        float nb = u01(h + 2u) + u01(h + 3u) - 1.0;
+        if (i.p1.z > 0.5) {
+            col *= 1.0 + nb * amount * 0.18;
+        } else {
+            float3 nc = float3(nb, u01(h + 4u) + u01(h + 5u) - 1.0, u01(h + 6u) + u01(h + 7u) - 1.0);
+            col *= float3(1.0) + nc * amount * 0.18;
+        }
+        return paint(col, m, i, px, g);
+    }
+
+    inline float4 metaballs(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint b0 = uint(i.xf.z);
+        uint nb = uint(i.xf.w);
+        float field = 0.0;
+        float2 grad = float2(0.0);
+        float3 lab = float3(0.0);
+        float rsum = 0.0;
+        for (uint k = 0u; k < nb; k++) {
+            float4 b = data[b0 + k];
+            float2 d = c.p - b.xy;
+            float r2 = b.z * b.z;
+            float dd = dot(d, d) + 1e-3;
+            float f = r2 / dd;
+            field += f;
+            grad += -2.0 * f / dd * d;
+            lab += stop_lab(data, f0, uint(b.w)) * f;
+            rsum += b.z * f;
+        }
+        float3 base = i.c0.rgb;
+        float3 col = select(base, oklab_to_lin(lab / max(field, 1e-6)), field > 1e-5);
+        float ravg = rsum / max(field, 1e-6);
+        float cov_m = select(0.0, clamp(0.5 + (field - 1.0) * ravg * 0.5 * c.scale, 0.0, 1.0), field > 1e-3);
+        float steep = 1.0 - w_smoothstep(1.0, 2.6, field);
+        float2 nxy = -grad / sqrt(dot(grad, grad) + 1e-6) * steep * 0.9;
+        float3 nrm = normalize(float3(nxy, 1.0));
+        float3 l = normalize(float3(-0.45, -0.6, 0.66));
+        float diff = max(dot(nrm, l), 0.0);
+        float spec = pow(max(dot(reflect(-l, nrm), float3(0.0, 0.0, 1.0)), 1e-4), 28.0);
+        float3 body = col * (0.6 + 0.5 * diff) + float3(spec * i.p0.w * 0.8);
+        float3 halo = col * w_smoothstep(0.25, 1.0, field) * 0.18;
+        return paint(mix(base + halo, body, cov_m), m, i, px, g);
+    }
+
+    inline float4 swirl_fill(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        float sc = max(i.p0.x, 1.0);
+        float t = c.t * i.p0.y;
+        float rr = length(c.q) / max(min(c.half_size.x, c.half_size.y), 1.0);
+        float2 q = rot2(c.q, i.p0.z * TAU * exp(-rr * rr * 0.8)) / sc;
+        float2 w1 = float2(
+            fbm3(q + float2(t * 0.1, 0.0), c.seed),
+            fbm3(q + float2(5.2, 1.3 - t * 0.08), c.seed + 3u)
+        );
+        float v = fbm3(q + w1 * i.p0.w * 1.5 + float2(0.0, t * 0.05), c.seed + 7u);
+        return paint(palette_ramp(data, f0, n, 0.5 + 0.75 * v), m, i, px, g);
+    }
+
+    inline float4 voronoi_fill(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        float sc = max(i.p0.x, 2.0);
+        float t = c.t * i.p0.y;
+        float t0 = fract(t * (1.0 / TAU)) * TAU;
+        float t1 = fract(t * (0.8 / TAU)) * TAU;
+        float2 p = (c.p - i.rect.xy) / sc;
+        float2 ip = floor(p);
+        float best = 8.0;
+        int2 bc = int2(0);
+        float2 bo = float2(0.0);
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                int2 cc = int2(ip) + int2(x, y);
+                float h = hcell(cc, c.seed);
+                float h2 = hcell(cc, c.seed + 1u);
+                float2 o = float2(0.5) + 0.38 * float2(sin(t0 + TAU * h), cos(t1 + TAU * h2));
+                float2 d = float2(cc) + o - p;
+                float dd = dot(d, d);
+                if (dd < best) { best = dd; bc = cc; bo = d; }
+            }
+        }
+        float edge = 8.0;
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                if (x == 0 && y == 0) { continue; }
+                int2 cc = bc + int2(x, y);
+                float h = hcell(cc, c.seed);
+                float h2 = hcell(cc, c.seed + 1u);
+                float2 o = float2(0.5) + 0.38 * float2(sin(t0 + TAU * h), cos(t1 + TAU * h2));
+                float2 d = float2(cc) + o - p;
+                float2 dv = d - bo;
+                if (dot(dv, dv) > 1e-6) { edge = min(edge, dot(0.5 * (bo + d), normalize(dv))); }
+            }
+        }
+        uint k = uint(hcell(bc, c.seed + 2u) * float(n)) % max(n, 1u);
+        float3 col = stop_lin(data, f0, k) * (1.0 - i.p0.w * 0.55 * clamp(best * 1.6, 0.0, 1.0));
+        float seam = i.p0.z * 0.5;
+        if (seam > 0.0) {
+            float e = clamp(0.5 + (edge * sc - seam) * c.scale, 0.0, 1.0);
+            col = mix(i.c0.rgb, col, e);
+        }
+        return paint(col, m, i, px, g);
+    }
+
+    inline float4 waves_fill(Inst i, Ctx c, float m, float2 px, constant Globals& g, const device float4* data) {
+        uint f0 = uint(i.xf.x);
+        uint n = uint(i.xf.y);
+        float ang = i.p0.w;
+        float2 dir = float2(-sin(ang), cos(ang));
+        float2 along = float2(cos(ang), sin(ang));
+        float ext = abs(c.half_size.x * dir.x) + abs(c.half_size.y * dir.y);
+        float ext2 = abs(c.half_size.x * along.x) + abs(c.half_size.y * along.y);
+        float v = dot(c.q, dir) / max(2.0 * ext, 1e-3) + 0.5;
+        float s = dot(c.q, along) / max(2.0 * ext2, 1e-3) + 0.5;
+        float aa = c.aa / max(2.0 * ext, 1e-3);
+        float soft = max(i.p1.x, aa);
+        float t = c.t * i.p0.z;
+        float3 col = stop_lin(data, f0, 0u);
+        for (uint k = 1u; k < n; k++) {
+            float fk = float(k);
+            float h = hcell(int2(int(k), 3), c.seed);
+            float fq = i.p0.y * (0.8 + 0.4 * h);
+            float ph1 = fract(t * 0.2 * (1.0 + 0.3 * fk) + h);
+            float ph2 = fract(-t * 0.13) * TAU + 1.7 * fk;
+            float y = fk / float(n) + i.p0.x * (0.7 * sin(TAU * (fq * s + ph1)) + 0.3 * sin(TAU * fq * 2.3 * s + ph2));
+            float shade = exp(-max(y - v, 0.0) / 0.025) * 0.18 * step(v, y);
+            col *= 1.0 - shade;
+            col = mix(col, stop_lin(data, f0, k), w_smoothstep(y - soft, y + soft, v));
+        }
+        return paint(col, m, i, px, g);
+    }
+
+    inline float4 halftone_fill(
+        Inst i,
+        Ctx c,
+        float m,
+        float2 px,
+        constant Globals& g,
+        texture2d<float> backdrop,
+        texture2d<float> source,
+        sampler samp,
+        constant BackdropEncoding& enc
+    ) {
+        float pitch = max(i.p0.z, 1.0);
+        float ang = i.p2.x;
+        float2 r = rot2(c.p - c.c, -ang) / pitch;
+        float2 base = floor(r - 0.5);
+        int kind = int(i.p0.y + 0.5);
+        float ink = 0.0;
+        for (int y = 0; y <= 1; y++) {
+            for (int x = 0; x <= 1; x++) {
+                float2 cc = base + float2(float(x), float(y)) + 0.5;
+                float2 w = c.c + rot2(cc * pitch, ang);
+                float cov_t = 1.0 - tone_at(i, c, w, kind, i.p0.w, g, backdrop, source, samp, enc);
+                float rad = sqrt(cov_t / PI) * 1.12;
+                float d = (length(r - cc) - rad) * pitch;
+                ink = max(ink, clamp(0.5 - d * c.scale, 0.0, 1.0));
+            }
+        }
+        return paint(mix(i.c1.rgb, i.c0.rgb, ink), m, i, px, g);
+    }
+
+    inline float4 shade_fill(
+        Inst i,
+        float2 px,
+        constant Globals& g,
+        const device float4* data,
+        texture2d<float> backdrop,
+        texture2d<float> source,
+        sampler samp,
+        texture2d<float> blurred,
+        constant BackdropEncoding& enc
+    ) {
+        Ctx c = make_ctx(i, px);
+        float m = fill_mask(c, i.aux.x);
+        if (m <= 0.0) { return float4(0.0); }
+        switch (c.variant) {
+            case 0: return liquid_metal(i, c, m, px, g);
+            case 1: return mesh_gradient(i, c, m, px, g, data);
+            case 2: return dither_fill(i, c, m, g, data, backdrop, source, samp, enc);
+            case 3: return grain_gradient(i, c, m, px, g, data);
+            case 4: return fluted(i, c, m, px, g, backdrop, samp, blurred, enc);
+            case 5: return metaballs(i, c, m, px, g, data);
+            case 6: return swirl_fill(i, c, m, px, g, data);
+            case 7: return voronoi_fill(i, c, m, px, g, data);
+            case 8: return waves_fill(i, c, m, px, g, data);
+            case 9: return halftone_fill(i, c, m, px, g, backdrop, source, samp, enc);
+            default: return plastic(i, c, m, px, g);
+        }
     }
 
     fragment float4 fx_fill_fragment(
@@ -1081,155 +2078,8 @@ public enum RuneFXShaders: Sendable {
     ) {
         Inst i = insts[in.id];
         float2 px = recover_pixel(in);
-        float scale = i.shape.y;
-        float2 p = px / scale;
-        float d = sd_shape(i, p);
-        float border = i.aux.x;
-        float intensity = i.aux.y;
-
-        float mask = 1.0 - smoothstep(-0.5, 0.5, d);
-        if (border > 0.0) {
-            mask *= smoothstep(-border - 0.5, -border + 0.5, d);
-        }
-        if (mask <= 0.0) { return float4(0.0); }
-
-        float2 uv = (p - i.rect.xy) / max(i.rect.zw, float2(1.0));
-        int variant = int(round(i.t.z));
-        uint seed = uint(i.t.y);
-        float3 col = float3(0.0);
-
-        if (variant == 0) {
-            float2 anchor_p = i.p2.x > 0.5 ? (p - i.rect.xy) : p;
-            float n = fbm(anchor_p / i.p0.y + float2(i.t.x * i.p0.z * 0.25), seed, 4) * i.p0.x;
-            float2 g2 = shape_normal(i, p) * clamp(1.0 + d / max(i.p0.w, 1.0), 0.0, 1.0);
-            float3 nrm = normalize(float3(g2 + n * 0.45 + (uv - 0.5) * i.p1.x, 1.0));
-            float h = clamp(0.5 + 0.5 * (nrm.y * cos(i.p1.y) - nrm.x * sin(i.p1.y)), 0.0, 1.0);
-            float studio = pow(smoothstep(0.35, 0.85, h), i.p1.w);
-            col = mix(i.c0.rgb * 0.15, i.c1.rgb * i.c0.rgb, studio);
-            col += i.p1.z * 0.25 * float3(sin(h * 12.0), sin(h * 12.0 + 2.1), sin(h * 12.0 + 4.2));
-        } else if (variant == 1) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 1u);
-            float2 q = uv + fbm(uv * 3.0 + float2(i.t.x * i.p0.y * 0.1), seed, 2) * i.p0.w * 0.2;
-            float3 acc = float3(0.0);
-            float wsum = 0.0;
-            for (uint k = 0u; k < count; k++) {
-                float4 c_x = data[base + k * 2u];
-                float4 l_y = data[base + k * 2u + 1u];
-                float2 pt = float2(c_x.w, l_y.w);
-                float w = exp(-length(q - pt) * i.p0.z * 2.5);
-                acc += c_x.rgb * w;
-                wsum += w;
-            }
-            col = acc / max(wsum, 1e-4);
-        } else if (variant == 2) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 2u);
-            float tone = clamp(dot(uv - 0.5, float2(cos(i.p0.w), sin(i.p0.w))) + 0.5, 0.0, 1.0);
-            if (int(round(i.p0.y)) == 3) {
-                tone = dot(bd(p, scale, g, backdrop, samp, enc).rgb, float3(0.2126, 0.7152, 0.0722));
-            } else if (int(round(i.p0.y)) == 2) {
-                tone = 0.5 + 0.5 * fbm(p / i.p1.x + float2(i.t.x * i.p1.y), seed, 3);
-            }
-            tone = clamp((tone - 0.5) * i.p1.w + 0.5 + i.p1.z, 0.0, 1.0);
-            uint2 dp = uint2(floor((p - i.rect.xy) / i.p0.z));
-            float thresh = u01(hu(dp.x, dp.y));
-            float idx_f = clamp(floor(tone * float(count - 1u) + thresh), 0.0, float(count - 1u));
-            col = data[base + uint(idx_f) * 2u].rgb;
-        } else if (variant == 3) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 1u);
-            float u = clamp(dot(uv - i.p0.zw, float2(cos(i.p0.y), sin(i.p0.y))) + 0.5, 0.0, 1.0);
-            uint ft = i.p1.w > 0.0 ? uint(floor(i.t.x * i.p1.w)) : 0u;
-            uint2 gp = uint2(floor(p / i.p1.y));
-            float grain = (u01(hu(gp.x + ft * 131u, gp.y + ft * 977u)) - 0.5) * i.p1.x;
-            col = sample_stop_oklab(data, base, count, u + grain * 0.25) + grain * 0.06;
-        } else if (variant == 4) {
-            float rib = max(i.p0.x, 1.0);
-            float ca = cos(i.p0.y), sa = sin(i.p0.y);
-            float x = (p.x - i.rect.x) * ca + (p.y - i.rect.y) * sa;
-            float ph = fract(x / rib) * 2.0 - 1.0;
-            float2 off = float2(ca, sa) * (-ph * i.p0.z);
-            float3 sharp = bd(p + off, scale, g, backdrop, samp, enc).rgb;
-            float3 blur = bdb(p + off, scale, g, blurred, samp, enc);
-            col = mix(sharp, blur, clamp(i.p0.w, 0.0, 1.0));
-            col = mix(col, i.c0.rgb, i.p1.z) + pow(max(1.0 - abs(ph), 0.0), 4.0) * i.p1.y * 0.15;
-        } else if (variant == 5) {
-            uint s_base = uint(i.xf.x);
-            uint m_base = uint(i.xf.z);
-            uint m_count = uint(i.xf.w);
-            float f = 0.0;
-            float3 acc = float3(0.0);
-            for (uint k = 0u; k < m_count; k++) {
-                float4 mb = data[m_base + k];
-                float dist = max(length(p - mb.xy), 1.0);
-                float w = (mb.z * mb.z) / (dist * dist);
-                f += w;
-                acc += data[s_base + uint(mb.w) * 2u].rgb * w;
-            }
-            float edge = smoothstep(0.95, 1.15, f);
-            col = mix(i.c0.rgb, acc / max(f, 1e-4), edge);
-        } else if (variant == 6) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 1u);
-            float2 q = (p - i.rect.xy - i.rect.zw * 0.5) / i.p0.x;
-            float r = length(q);
-            float ang = atan2(q.y, q.x) + i.p0.z * exp(-r) + i.t.x * i.p0.y;
-            float2 wq = float2(cos(ang), sin(ang)) * r;
-            float v = 0.5 + 0.5 * fbm(wq + fbm(wq, seed, 2) * i.p0.w, seed + 11u, 3);
-            col = sample_stop_oklab(data, base, count, v);
-        } else if (variant == 7) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 1u);
-            float2 q = p / i.p0.x;
-            int2 cell = int2(floor(q));
-            float2 f = fract(q);
-            float d1 = 8.0, d2 = 8.0;
-            uint best_h = 0u;
-            for (int y = -1; y <= 1; y++) {
-                for (int x = -1; x <= 1; x++) {
-                    int2 g2 = cell + int2(x, y);
-                    uint h = hu(uint(g2.x) ^ seed, uint(g2.y));
-                    float2 pt = float2(float(x), float(y)) + 0.5 + 0.35 * float2(sin(i.t.x * i.p0.y + u01(h) * 6.28), cos(i.t.x * i.p0.y + u01(h + 1u) * 6.28)) - f;
-                    float dd = length(pt);
-                    if (dd < d1) { d2 = d1; d1 = dd; best_h = h; } else if (dd < d2) { d2 = dd; }
-                }
-            }
-            float3 c = data[base + (best_h % count) * 2u].rgb;
-            float seam = 1.0 - smoothstep(0.0, i.p0.z / i.p0.x, d2 - d1);
-            col = mix(c * (1.0 - i.p0.w * d1 * 0.5), i.c0.rgb, seam);
-        } else if (variant == 8) {
-            uint base = uint(i.xf.x);
-            uint count = max(uint(i.xf.y), 2u);
-            float ca = cos(i.p0.w), sa = sin(i.p0.w);
-            float u = uv.x * ca + uv.y * sa;
-            float v = uv.y * ca - uv.x * sa;
-            col = data[base].rgb;
-            for (uint k = 1u; k < count; k++) {
-                float level = float(k) / float(count);
-                float w = sin(u * i.p0.y * 6.28318 + i.t.x * i.p0.z + float(k) * 1.7) * i.p0.x;
-                float edge = smoothstep(level + w - i.p1.x, level + w + i.p1.x, v);
-                col = mix(col, data[base + k * 2u].rgb, edge);
-            }
-        } else if (variant == 9) {
-            float cell = max(i.p0.z, 1.0);
-            float2 q = (p - i.rect.xy) / cell;
-            float2 f = fract(q) - 0.5;
-            float tone = clamp(1.0 - length(uv - 0.5) * 1.4, 0.0, 1.0);
-            float dot_m = 1.0 - smoothstep(tone * 0.48 - 0.05, tone * 0.48 + 0.05, length(f));
-            col = mix(i.c1.rgb, i.c0.rgb, dot_m);
-        } else {
-            float bevel = max(i.p0.z, 1.0);
-            float2 g2 = shape_normal(i, p) * clamp(1.0 + d / bevel, 0.0, 1.0);
-            float3 nrm = normalize(float3(g2 * i.p0.y, 1.0));
-            float3 ldir = normalize(float3(sin(i.p0.w), -cos(i.p0.w), 1.0));
-            float diff = max(dot(nrm, ldir), 0.0);
-            float3 hvec = normalize(ldir + float3(0.0, 0.0, 1.0));
-            float spec = pow(max(dot(nrm, hvec), 0.0), mix(128.0, 8.0, i.p0.x));
-            col = i.c0.rgb * (0.45 + 0.55 * diff) + spec * (1.0 - i.p0.x * 0.8);
-        }
-
-        return fx_fs(finish(float4(col * mask * intensity, mask * intensity), in.px, g), i, in.px, g, backdrop, samp, enc);
+        float4 shaded = shade_fill(i, px, g, data, backdrop, source, samp, blurred, enc);
+        return fx_fs(shaded, i, px, g, backdrop, samp, enc);
     }
     """
 
@@ -1350,6 +2200,280 @@ public enum RuneFXShaders: Sendable {
         float cooling;
         float smoke;
     };
+
+    struct FireSimUniform {
+        float4 dims;
+        float4 origin;
+        float4 shape;
+        float4 shape2;
+        float4 fire;
+        float4 fire2;
+    };
+
+    inline int2 fs_n(constant FireSimUniform& u) { return int2(u.dims.xy); }
+    inline bool fs_inside(constant FireSimUniform& u, int2 c) {
+        int2 sz = fs_n(u);
+        return c.x >= 0 && c.y >= 0 && c.x < sz.x && c.y < sz.y;
+    }
+    inline uint2 fs_cl(constant FireSimUniform& u, int2 c) {
+        return uint2(clamp(c, int2(0), fs_n(u) - 1));
+    }
+    inline float4 fs_ld(constant FireSimUniform& u, texture2d<float, access::read> s_in, int2 c) {
+        if (u.origin.w > 0.5) { return float4(0.0); }
+        return s_in.read(fs_cl(u, c));
+    }
+    inline float fs_la(constant FireSimUniform& u, texture2d<float, access::read> a_in, int2 c) {
+        return a_in.read(fs_cl(u, c)).r;
+    }
+    inline float fs_lb(constant FireSimUniform& u, texture2d<float, access::read> b_in, int2 c) {
+        return b_in.read(fs_cl(u, c)).r;
+    }
+    inline float2 fs_pos(constant FireSimUniform& u, int2 c) {
+        return u.origin.xy + (float2(c) + 0.5) * u.dims.z;
+    }
+
+    inline float fs_sd_rrect(constant FireSimUniform& u, float2 p) {
+        float r = min(u.shape2.x, min(u.shape.z, u.shape.w));
+        float2 q = abs(p - u.shape.xy) - u.shape.zw + r;
+        return length(max(q, float2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    }
+    inline bool fs_solid(constant FireSimUniform& u, int2 c) {
+        return fs_sd_rrect(u, fs_pos(u, c)) < -u.fire2.w - 1.0;
+    }
+
+    inline uint fs_pcg(uint v) {
+        uint s = v * 747796405u + 2891336453u;
+        uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+        return (w >> 22u) ^ w;
+    }
+    inline float fs_hash2(int2 c, uint seed) {
+        return float(fs_pcg(as_type<uint>(c.x) ^ fs_pcg(as_type<uint>(c.y) ^ fs_pcg(seed))) >> 8u) * (1.0 / 16777216.0);
+    }
+    inline float fs_vnoise(float2 p, uint seed) {
+        int2 i = int2(floor(p));
+        float2 f = fract(p);
+        float2 w = f * f * (3.0 - 2.0 * f);
+        float a = fs_hash2(i, seed);
+        float b = fs_hash2(i + int2(1, 0), seed);
+        float c = fs_hash2(i + int2(0, 1), seed);
+        float d = fs_hash2(i + int2(1, 1), seed);
+        return mix(mix(a, b, w.x), mix(c, d, w.x), w.y) * 2.0 - 1.0;
+    }
+
+    inline float fs_smoothstep(float a, float b, float x) {
+        return (a < b) ? smoothstep(a, b, x) : (a > b ? (1.0 - smoothstep(b, a, x)) : (x >= a ? 1.0 : 0.0));
+    }
+
+    inline float fs_emission(constant FireSimUniform& u, float x, float t, uint seed) {
+        float sp = max(u.shape2.w * 0.32, 3.5);
+        float fs = u.fire2.y;
+        float slow = fs_vnoise(float2(x / sp, t * 0.55 * fs), seed) * 0.7
+                   + fs_vnoise(float2(x / sp * 2.3 + 5.1, t * 1.1 * fs), seed + 1u) * 0.3;
+        float fast = fs_vnoise(float2(x / sp * 1.7 + 11.0, t * 6.0 * fs), seed + 2u);
+        float r = min(u.shape2.x, min(u.shape.z, u.shape.w));
+        float ends = 1.0 - fs_smoothstep(u.shape.z - r * 1.6, u.shape.z - r * 0.35, abs(x - u.shape.x));
+        return fs_smoothstep(-0.1, 0.4, slow + 0.25 * fast) * ends;
+    }
+
+    inline float fs_fuel_band(constant FireSimUniform& u, float2 p) {
+        float h = u.dims.z;
+        float d = fs_sd_rrect(u, p);
+        float2 e2 = float2(0.5 * h, 0.0);
+        float gx = fs_sd_rrect(u, p + e2) - fs_sd_rrect(u, p - e2);
+        float gy = fs_sd_rrect(u, p + e2.yx) - fs_sd_rrect(u, p - e2.yx);
+        float up = clamp(-gy / max(length(float2(gx, gy)), 1e-4), 0.0, 1.0);
+        float depth = u.fire2.w;
+        return fs_smoothstep(-depth - 1.5, -depth + 0.5, d)
+             * (1.0 - fs_smoothstep(0.0, h + 1.5, d))
+             * fs_smoothstep(0.35, 0.8, up);
+    }
+
+    kernel void curl(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> s_in [[texture(0)]],
+        texture2d<float, access::write> r_out [[texture(4)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float h = u.dims.z;
+        float w = (fs_ld(u, s_in, c + int2(1, 0)).y - fs_ld(u, s_in, c - int2(1, 0)).y
+                 - fs_ld(u, s_in, c + int2(0, 1)).x + fs_ld(u, s_in, c - int2(0, 1)).x) / (2.0 * h);
+        r_out.write(float4(w, 0.0, 0.0, 0.0), uint2(c));
+    }
+
+    kernel void forces(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> s_in [[texture(0)]],
+        texture2d<float, access::write> s_out [[texture(1)]],
+        texture2d<float, access::read> a_in [[texture(2)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float dt = u.dims.w;
+        float h = u.dims.z;
+        float t = u.origin.z;
+        uint seed = uint(u.shape2.y);
+        float4 s = fs_ld(u, s_in, c);
+        float2 v = s.xy;
+        float T = s.z;
+        float sm = s.w;
+        float2 p = fs_pos(u, c);
+
+        v.y -= dt * (u.fire.x * T - u.fire.x * 0.12 * sm);
+
+        if (u.origin.w < 0.5) {
+            float wl = abs(fs_la(u, a_in, c - int2(1, 0)));
+            float wr = abs(fs_la(u, a_in, c + int2(1, 0)));
+            float wu = abs(fs_la(u, a_in, c - int2(0, 1)));
+            float wd = abs(fs_la(u, a_in, c + int2(0, 1)));
+            float2 g = float2(wr - wl, wd - wu) / (2.0 * h);
+            float gl = length(g);
+            if (gl > 1e-4) {
+                g /= gl;
+                float w = fs_la(u, a_in, c);
+                float lift = clamp((u.shape.y - u.shape.w - p.y) / max(u.shape2.z * 0.4, 8.0), 0.15, 1.0);
+                v += dt * u.fire.w * lift * h * float2(g.y * w, -g.x * w);
+            }
+        }
+
+        float above = u.shape.y - u.shape.w - p.y;
+        float sway = fs_vnoise(float2(p.x / 90.0, t * 0.35 * u.fire2.y), seed + 9u)
+                   + 0.5 * fs_vnoise(float2(p.x / 30.0 + 3.0, p.y / 40.0 - t * 0.9 * u.fire2.y), seed + 10u);
+        v.x += dt * u.fire2.x * sway * clamp(above / 40.0, 0.0, 1.0);
+
+        float band = fs_fuel_band(u, p);
+        if (band > 0.0) {
+            float e = fs_emission(u, p.x, t, seed) * band;
+            T = max(T, e * (0.95 + 0.25 * fs_vnoise(float2(p.x / 3.0, t * 9.0), seed + 4u)));
+            v.y = mix(v.y, -u.shape2.z * (0.6 + 0.6 * e), e * 0.6);
+        }
+
+        float cool = 1.0 - exp(-dt * u.fire.y);
+        float lost = T * cool;
+        T -= lost;
+        sm += lost * u.fire.z * (1.0 - fs_smoothstep(0.25, 0.55, T));
+        sm *= exp(-dt * u.fire2.z);
+
+        if (fs_solid(u, c)) {
+            v = float2(0.0);
+            T *= 0.5;
+            sm = 0.0;
+        }
+        v.x *= exp(-dt * 7.0 * fs_smoothstep(0.1, 0.6, T));
+        float edge = min(min(float(c.x), float(fs_n(u).x - 1 - c.x)), float(c.y));
+        float fade = fs_smoothstep(0.0, 4.0, edge);
+        T *= fade;
+        sm *= fade;
+        s_out.write(float4(v, T, sm), uint2(c));
+    }
+
+    kernel void divergence(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> s_in [[texture(0)]],
+        texture2d<float, access::write> r_out [[texture(4)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float h = u.dims.z;
+        float l = select(s_in.read(fs_cl(u, c - int2(1, 0))).x, 0.0, fs_solid(u, c - int2(1, 0)));
+        float r = select(s_in.read(fs_cl(u, c + int2(1, 0))).x, 0.0, fs_solid(u, c + int2(1, 0)));
+        float t = select(s_in.read(fs_cl(u, c - int2(0, 1))).y, 0.0, fs_solid(u, c - int2(0, 1)));
+        float b = select(s_in.read(fs_cl(u, c + int2(0, 1))).y, 0.0, fs_solid(u, c + int2(0, 1)));
+        float src = fs_fuel_band(u, fs_pos(u, c)) * fs_emission(u, fs_pos(u, c).x, u.origin.z, uint(u.shape2.y)) * u.shape2.z * 0.2 / h;
+        r_out.write(float4((r - l + b - t) / (2.0 * h) - src, 0.0, 0.0, 0.0), uint2(c));
+    }
+
+    inline float fs_pn(constant FireSimUniform& u, texture2d<float, access::read> a_in, int2 c, float centre) {
+        if (c.y < 0) { return 0.0; }
+        if (!fs_inside(u, c) || fs_solid(u, c)) { return centre; }
+        return fs_la(u, a_in, c);
+    }
+
+    kernel void jacobi(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> a_in [[texture(2)]],
+        texture2d<float, access::read> b_in [[texture(3)]],
+        texture2d<float, access::write> r_out [[texture(4)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float h = u.dims.z;
+        float pc = fs_la(u, a_in, c);
+        float s = fs_pn(u, a_in, c - int2(1, 0), pc) + fs_pn(u, a_in, c + int2(1, 0), pc)
+                + fs_pn(u, a_in, c - int2(0, 1), pc) + fs_pn(u, a_in, c + int2(0, 1), pc);
+        r_out.write(float4((s - h * h * fs_lb(u, b_in, c)) * 0.25, 0.0, 0.0, 0.0), uint2(c));
+    }
+
+    kernel void project(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> s_in [[texture(0)]],
+        texture2d<float, access::write> s_out [[texture(1)]],
+        texture2d<float, access::read> a_in [[texture(2)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float h = u.dims.z;
+        float4 s = s_in.read(uint2(c));
+        float pc = fs_la(u, a_in, c);
+        float2 g = float2(
+            fs_pn(u, a_in, c + int2(1, 0), pc) - fs_pn(u, a_in, c - int2(1, 0), pc),
+            fs_pn(u, a_in, c + int2(0, 1), pc) - fs_pn(u, a_in, c - int2(0, 1), pc)
+        ) / (2.0 * h);
+        float2 v = s.xy - g;
+        if (fs_solid(u, c)) { v = float2(0.0); }
+        float vl = length(v);
+        float vmax = 2.0 * h / u.dims.w;
+        if (vl > vmax) { v *= vmax / vl; }
+        s_out.write(float4(v, s.z, s.w), uint2(c));
+    }
+
+    inline float4 fs_cr(float t) {
+        float t2 = t * t;
+        float t3 = t2 * t;
+        return float4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+    }
+
+    inline float4 fs_sample_cubic(constant FireSimUniform& u, texture2d<float, access::read> s_in, float2 p) {
+        float2 g = (p - u.origin.xy) / u.dims.z - 0.5;
+        int2 i0 = int2(floor(g));
+        float2 f = g - floor(g);
+        float4 wx = fs_cr(f.x);
+        float4 wy = fs_cr(f.y);
+        float4 acc = float4(0.0);
+        for (int y = 0; y < 4; y++) {
+            float4 row = float4(0.0);
+            for (int x = 0; x < 4; x++) {
+                row += wx[x] * s_in.read(fs_cl(u, i0 + int2(x - 1, y - 1)));
+            }
+            acc += wy[y] * row;
+        }
+        float4 q0 = s_in.read(fs_cl(u, i0));
+        float4 q1 = s_in.read(fs_cl(u, i0 + int2(1, 0)));
+        float4 q2 = s_in.read(fs_cl(u, i0 + int2(0, 1)));
+        float4 q3 = s_in.read(fs_cl(u, i0 + int2(1, 1)));
+        return clamp(acc, min(min(q0, q1), min(q2, q3)), max(max(q0, q1), max(q2, q3)));
+    }
+
+    kernel void advect(
+        constant FireSimUniform& u [[buffer(0)]],
+        texture2d<float, access::read> s_in [[texture(0)]],
+        texture2d<float, access::write> s_out [[texture(1)]],
+        uint2 id [[thread_position_in_grid]]
+    ) {
+        int2 c = int2(id);
+        if (!fs_inside(u, c)) { return; }
+        float2 p = fs_pos(u, c);
+        float2 v = s_in.read(uint2(c)).xy;
+        float2 mid = p - 0.5 * u.dims.w * v;
+        float2 vm = fs_sample_cubic(u, s_in, mid).xy;
+        float4 r = fs_sample_cubic(u, s_in, p - u.dims.w * vm);
+        s_out.write(float4(r.xy, max(r.z, 0.0), max(r.w, 0.0)), uint2(c));
+    }
 
     kernel void fx_firesim_step_kernel(
         texture2d<float, access::read> prev_field [[texture(0)]],
