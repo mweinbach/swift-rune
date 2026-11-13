@@ -24,6 +24,7 @@ final class RetainedLayoutCoordinator {
 
     private var store = RuneTaffy.LayoutStore()
     private var lastViewport: Vec2 = Vec2(-1, -1)
+    private var lastFitHeight: Bool = false
 
     var storageStats: RuneTaffy.StorageStats {
         store.storageStats()
@@ -34,15 +35,17 @@ final class RetainedLayoutCoordinator {
         state: State,
         viewport: Vec2,
         pixelScale: Float,
-        textSystem: TextSystem
+        textSystem: TextSystem,
+        fitHeight: Bool = false
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
         flat.reserveCapacity(32)
         var aspectFitIndices: [Int] = []
         var hasAnchoredFit = false
 
-        if lastViewport != viewport {
+        if lastViewport != viewport || lastFitHeight != fitHeight {
             lastViewport = viewport
+            lastFitHeight = fitHeight
             store.markAllDirty()
         }
 
@@ -170,7 +173,7 @@ final class RetainedLayoutCoordinator {
                 if style.width == .auto {
                     style.width = .points(viewport.x)
                 }
-                if style.height == .auto {
+                if !fitHeight && style.height == .auto {
                     style.height = .points(viewport.y)
                 }
             }
@@ -289,7 +292,7 @@ final class RetainedLayoutCoordinator {
 
         let available = RuneTaffy.Size<RuneTaffy.AvailableSpace>(
             width: .definite(viewport.x),
-            height: .definite(viewport.y)
+            height: fitHeight ? .maxContent : .definite(viewport.y)
         )
 
         let measureBoxes: [MeasureBox?] = flat.map { $0.measureFn.map { MeasureBox(fn: $0) } }

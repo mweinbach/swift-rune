@@ -94,6 +94,8 @@ public enum MacOSApp {
         runtime.onAppFileDrop = onFileDrop
         runtime.onFileDrop = onFileDropPhase
         runtime.tabVisitsControls = appBuilder.tabVisitsControlsEnabled
+        runtime.nativeHelp = true
+        runtime.fitHeight = appBuilder.isFitContentHeight
         runtime.setSystemContrast(SystemPreferences.current().contrast)
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
@@ -171,6 +173,22 @@ public enum MacOSApp {
             }
         )
 
+        let appShared = appBuilder.sharedHandle.shared
+        AppMenuBridge.markRunning(appShared, running: true, headless: false)
+        defer {
+            AppMenuBridge.markRunning(appShared, running: false, headless: false)
+            RuneNativeMenuHost.shared.clear()
+        }
+        if !appBuilder.menuItems.isEmpty {
+            do {
+                try AppMenuBridge.setMenu(appBuilder.menuItems, for: appShared)
+            } catch let err as MenuError {
+                AppMenuBridge.recordError(err, for: appShared)
+            } catch {
+                AppMenuBridge.recordError(.unsupported, for: appShared)
+            }
+        }
+
         let hostView = RuneMetalHostView(
             frame: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
             runtime: runtime,
@@ -178,11 +196,13 @@ public enum MacOSApp {
             timeScale: parsed.timeScale,
             respectSystemAppearance: respectSystemAppearance,
             compositor: appBuilder.compositorValue,
-            appShared: appBuilder.sharedHandle.shared,
+            appShared: appShared,
             reports: reports,
             surfaceMeter: meter,
             devStatsReceiver: appBuilder.devStatsReceiver,
             windowHandle: windowHandle,
+            minWindowSize: (minSz.x, minSz.y),
+            maxWindowSize: opts.maxSize.map { ($0.x, $0.y) },
             onReady: appBuilder.onReadyHook
         )
 
@@ -428,6 +448,11 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    private let toolTipOwner = MacOSToolTipOwner()
+    private let windowFrameDriver = MacOSWindowFrameDriver()
+    private let minWindowSize: (Float, Float)
+    private let maxWindowSize: (Float, Float)?
+    private var appliedMenuRevision: UInt64 = 0
 
     init(
         frame: NSRect,
@@ -441,6 +466,8 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         surfaceMeter: SurfaceMeter? = nil,
         devStatsReceiver: ((SurfaceStats) -> Void)? = nil,
         windowHandle: WindowHandle? = nil,
+        minWindowSize: (Float, Float) = (WindowOptions.defaultMinSize.x, WindowOptions.defaultMinSize.y),
+        maxWindowSize: (Float, Float)? = nil,
         onReady: ((WindowHandle) -> Void)? = nil
     ) {
         self.runtime = runtime
@@ -453,6 +480,8 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         self.surfaceMeter = surfaceMeter
         self.devStatsReceiver = devStatsReceiver
         self.windowHandle = windowHandle
+        self.minWindowSize = minWindowSize
+        self.maxWindowSize = maxWindowSize
         self.onReady = onReady
         super.init(frame: frame)
         self.wantsLayer = true
@@ -506,14 +535,21 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        runtime.pixelScale = Float(scale)
-        runtime.viewport = Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height)))
+        let newVP = Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height)))
+        if windowFrameDriver.isMoving || windowFrameDriver.takeJumpIfMatching(viewport: newVP) {
+            runtime.stepViewport(newVP, pixelScale: Float(scale))
+        } else {
+            runtime.setViewport(newVP, pixelScale: Float(scale))
+        }
         renderTick()
     }
 
     func stopTimer() {
         displayLinkDriver?.stop()
         displayLinkDriver = nil
+        if let w = window {
+            windowFrameDriver.landFrame(window: w)
+        }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -542,9 +578,18 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         let dt = Float(max(0.0, t - lastFrameTime))
         lastFrameTime = t
 
+        if let w = window {
+            let scale = Float(w.backingScaleFactor)
+            _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: runtime.windowResting) { [weak self] vp, sc in
+                self?.runtime.stepViewport(vp, pixelScale: sc)
+            }
+        }
+        runtime.windowResting = !(inLiveResize || windowFrameDriver.isMoving)
+
         if let drained = appShared?.applyStateUpdates(to: runtime, at: t) {
             applyDrainedRequests(drained)
         }
+        syncNativeMenus()
 
         let desiredFmt: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         if metalLayer.pixelFormat != desiredFmt {
@@ -600,7 +645,20 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
             return
         }
 
-        let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false)
+        if let frameReq = runtime.takeWindowFrameRequest(), let w = window {
+            let scale = Float(w.backingScaleFactor)
+            windowFrameDriver.applyRequest(
+                frameReq,
+                window: w,
+                now: t,
+                minSize: minWindowSize,
+                maxSize: maxWindowSize,
+                scale: scale
+            ) { [weak self] vp, sc in
+                self?.runtime.stepViewport(vp, pixelScale: sc)
+            }
+        }
+        let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false) || windowFrameDriver.isMoving
         if isAnim {
             restingGiveBackDone = false
         } else if !restingGiveBackDone {
@@ -719,6 +777,7 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
 
         if treeCommitted {
             didInitialA11ySync = true
+            toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
             let snapshot = runtime.accessibilitySnapshot()
             accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
@@ -728,6 +787,33 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
                     }
                 }
             }
+        }
+    }
+
+    private func syncNativeMenus() {
+        guard let appShared else { return }
+        let snap = AppMenuBridge.snapshot(for: appShared)
+        guard snap.revision != appliedMenuRevision else { return }
+        appliedMenuRevision = snap.revision
+        if snap.items.isEmpty {
+            RuneNativeMenuHost.shared.clear()
+            return
+        }
+        do {
+            try RuneNativeMenuHost.shared.apply(items: snap.items) { [weak self] itemId in
+                guard let self, let shared = self.appShared else { return }
+                let latest = AppMenuBridge.snapshot(for: shared).items
+                guard let item = latest.first(where: { !$0.isSeparator && $0.id == itemId }) else { return }
+                let action = item.action
+                self.runtime.update(at: self.nowSeconds()) { state, tx in
+                    action(&state, &tx)
+                }
+                self.requestRender()
+            }
+        } catch let err as MenuError {
+            AppMenuBridge.recordError(err, for: appShared)
+        } catch {
+            AppMenuBridge.recordError(.unsupported, for: appShared)
         }
     }
 

@@ -332,6 +332,9 @@ public struct AppWindowSpec<State> {
     public var onQuit: ((inout State, inout Tx) -> Void)?
     public var onReopen: ((inout State, Bool, inout Tx) -> Bool)?
     public var onOpenUrl: ((inout State, String, inout Tx) -> Void)?
+    public var fitContentHeight: Bool
+    public var menuItems: [NativeMenuItem<State>]
+    public var appShared: AppShared<State>?
     public var childWindows: [AnyWindowSpec]
     public var args: [String]?
     private let runAction: (@MainActor ([String]?) throws -> Void)?
@@ -357,6 +360,9 @@ public struct AppWindowSpec<State> {
         self.onQuit = app.onQuitHook
         self.onReopen = app.onReopenHook
         self.onOpenUrl = app.onOpenUrlHook
+        self.fitContentHeight = app.isFitContentHeight
+        self.menuItems = app.menuItems
+        self.appShared = app.sharedHandle.shared
         self.childWindows = []
         self.args = app.runOptions.arguments
         nonisolated(unsafe) let localApp = app
@@ -380,6 +386,9 @@ public struct AppWindowSpec<State> {
         self.onQuit = nil
         self.onReopen = nil
         self.onOpenUrl = nil
+        self.fitContentHeight = false
+        self.menuItems = []
+        self.appShared = nil
         self.childWindows = []
         self.args = nil
         self.runAction = nil

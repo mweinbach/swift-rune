@@ -756,12 +756,4 @@ extension Runtime {
         guard rewindRecorder != nil else { return }
         captureRewindFrame(at: currentTime)
     }
-
-    /// Updates viewport and pixelScale (`Runtime::set_viewport`).
-    public func setViewport(_ size: Vec2, pixelScale newScale: Float? = nil) {
-        viewport = size
-        if let newScale {
-            pixelScale = newScale
-        }
-    }
 }
