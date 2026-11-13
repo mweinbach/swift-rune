@@ -7628,7 +7628,7 @@ public final class Runtime<State> {
                 lifted.node,
                 inh: liftedInh,
                 ancestorOpacity: lifted.isFlight ? 1.0 : lifted.ancestorOpacity,
-                logicalOpacity: lifted.logicalOpacity,
+                logicalOpacity: lifted.isFlight ? 1.0 : lifted.logicalOpacity,
                 ancestorBlur: lifted.ancestorBlur,
                 inheritedExiting: lifted.inheritedExiting,
                 ancestorTurn: lifted.ancestorTurn,
