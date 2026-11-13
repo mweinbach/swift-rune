@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Rune
 @testable import RuneLuau
+import RuneMotion
 
 private struct LuauTestState {}
 
@@ -1326,7 +1327,7 @@ struct RuneLuauParityTests {
                             textAlign = "end",
                             revealOnHover = true,
                         }),
-                        ui.col({ key = "scx", scrollX = true, disabled = true }),
+                        ui.col({ key = "scx", dir = "rtl", scrollX = true, disabled = true }),
                         ui.col({ key = "scxy", scrollX = true, scrollY = true, stickBottom = true }),
                     }),
                     })
@@ -1349,7 +1350,9 @@ struct RuneLuauParityTests {
         #expect(el.focusable == true)
         let scx = findElement(root) { $0.keyId == "scx" }!
         #expect(scx.a11yDisabled == true)
-        #expect(el.styleSpring == Tok.Motion.INSTANT)
+        #expect(scx.explicitDir == .rtl)
+        #expect(el.hoverMotionSpec?.enter == Anim<Float>.instant)
+        #expect(el.hoverMotionSpec?.exit == Anim<Float>.instant)
         #expect(el.layout.flexGrow == 2)
         #expect(el.layout.flexShrink == 1)
         #expect(el.layout.padding.top == 10)
@@ -1360,7 +1363,10 @@ struct RuneLuauParityTests {
         #expect(el.shadows.map(\.blur) == [12, 2])
 
         let t1 = findElement(root) { $0.keyId == "t1" }!
+        #expect(t1.explicitDir == .rtl)
         #expect(t1.textStyle.direction == .rtl)
+        #expect(t1.isTruncateFadeEnabled == true)
+        #expect(t1.truncateFadeEm == 1.5)
         #expect(t1.textStyle.lineHeight == 20)
         #expect(t1.textStyle.letterSpacing == 1.5)
         #expect(t1.textStyle.family == .monospace)
@@ -1368,11 +1374,11 @@ struct RuneLuauParityTests {
         #expect(t1.groupOpacity?.rest == 0)
         #expect(t1.groupOpacity?.hovered == 1)
 
-        // Check fadeOut warning logged once
+        // All three El APIs are wired without warnings
         let logs = script.log
-        #expect(logs.contains { $0.level == .warn && $0.message.contains("fadeOut") })
-        #expect(!logs.contains { $0.message.contains("dir has no effect") })
-        #expect(!logs.contains { $0.message.contains("hoverTransition has no effect") })
+        #expect(!logs.contains { $0.message.contains("fadeOut") })
+        #expect(!logs.contains { $0.message.contains("dir only applies") })
+        #expect(!logs.contains { $0.message.contains("hoverTransition") })
     }
 }
 

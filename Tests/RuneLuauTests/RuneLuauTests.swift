@@ -191,7 +191,9 @@ struct RuneLuauTests {
             let sig = try host.signal("changed")
             let doubleFn = try host.asyncFunction("double") { args, completer in
                 let n = args.first?.coercedNumber ?? 0
-                completer.complete(.number(n * 2))
+                spawnBlocking {
+                    completer.complete(.number(n * 2))
+                }
             }
             let mod = LuauTable()
             mod.rawSet("changed", value: sig)
@@ -225,8 +227,14 @@ struct RuneLuauTests {
 
         script.fire("changed", args: [.integer(21)])
         var tx = Tx()
-        _ = script.poll(now: 0.01, tx: &tx) // completes async double
-        _ = script.poll(now: 0.06, tx: &tx) // wakes task.wait(0.05) -> fires sig(99)
+        for step in 0..<200 {
+            let now = Double(step + 1) * (1.0 / 120.0)
+            _ = script.poll(now: now, tx: &tx)
+            if case .list(let arr) = try script.query("getLog"), arr.count >= 2 {
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
 
         let log = try script.query("getLog")
         #expect(log == .list([.integer(42), .integer(99)]))

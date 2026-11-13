@@ -348,9 +348,18 @@ struct RunePerfUpstreamTests {
             _ = blockedRecorder?.record(FrameSample(window: 1, seq: UInt64(i), outcome: .skipped))
         }
         #expect(blockedRecorder?.droppedSamples == 744)
-        // Drop without calling shutdown() so deinit cancels the blocked flock wait cleanly.
+        // Drop without calling shutdown() so deinit cancels lock wait AND joins the writer thread before returning.
         blockedRecorder = nil
         #expect(!FileManager.default.fileExists(atPath: contendedDir.appendingPathComponent("perf.json").path))
+
+        // Drop without calling shutdown() on an unlocked recorder drains and writes perf.json on worker join.
+        let dropDir = dir.appendingPathComponent("drop-joins", isDirectory: true)
+        try FileManager.default.createDirectory(at: dropDir, withIntermediateDirectories: true)
+        do {
+            let dropRec = try PerfFileRecorder.start(config: PerfConfig(directory: dropDir, app: "drop-joins"))
+            #expect(dropRec.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 300.0, renderMs: 1.0)))
+        }
+        #expect(FileManager.default.fileExists(atPath: dropDir.appendingPathComponent("perf.json").path))
 
         // Release .perf.lock after contention and verify the 256 queued samples drain/flush cleanly to disk.
         let drainDir = dir.appendingPathComponent("drain-after-lock", isDirectory: true)
@@ -455,6 +464,15 @@ struct RunePerfUpstreamTests {
         alloc.recordAlloc(size: 4096)
         #expect(alloc.takeAllocatedBytes() == 4096)
         #expect(alloc.takeAllocatedBytes() == 0)
+        // Other thread's 1 MiB allocation is excluded from main thread's takeAllocatedBytes().
+        let otherGroup = DispatchGroup()
+        otherGroup.enter()
+        DispatchQueue.global().async {
+            alloc.recordAlloc(size: 1 << 20)
+            otherGroup.leave()
+        }
+        otherGroup.wait()
+        #expect(alloc.takeAllocatedBytes() == 0)
 
         let bigSize = ProcessCountingAllocator.bigBlockThreshold
         alloc.recordAlloc(size: bigSize)
@@ -469,16 +487,31 @@ struct RunePerfUpstreamTests {
         _ = isoAlloc.takeAllocatedBytes()
         let group = DispatchGroup()
         let q = DispatchQueue(label: "runeperf.thread-iso", attributes: .concurrent)
+        final class DeltaBox: @unchecked Sendable {
+            let lock = NSLock()
+            var values: [UInt64] = []
+        }
+        let deltaBox = DeltaBox()
         for _ in 0..<8 {
             group.enter()
             q.async {
+                isoAlloc.recordAlloc(size: 0)
+                let start = isoAlloc.threadAllocatedBytes() ?? 0
                 for _ in 0..<10_000 {
                     isoAlloc.recordAlloc(size: 128)
                 }
+                let delta = (isoAlloc.threadAllocatedBytes() ?? 0) - start
+                deltaBox.lock.lock()
+                deltaBox.values.append(delta)
+                deltaBox.lock.unlock()
                 group.leave()
             }
         }
         group.wait()
+        #expect(deltaBox.values.count == 8)
+        for delta in deltaBox.values {
+            #expect(delta == 1_280_000)
+        }
         #expect(isoAlloc.takeAllocatedBytes() == 0)
         #expect((isoAlloc.heap()?.liveBytes ?? 0) >= Int64(8 * 10_000 * 128))
 

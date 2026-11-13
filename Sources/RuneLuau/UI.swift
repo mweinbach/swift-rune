@@ -1,5 +1,6 @@
 import Foundation
 import Rune
+import RuneMotion
 
 /// Maps a colour token name to a `Color` for light or dark appearance.
 public typealias Palette = @Sendable (_ name: String, _ dark: Bool) -> Color?
@@ -469,7 +470,7 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         default: throw LuauRuntimeError(value: .string("ui.text needs a string, got \(first.typeName)"))
         }
         let content = try LuauUIBridge.interpolateText(template, values: Array(args.dropFirst(valueStartIdx)))
-        var el = Rune.text(content) as El<State>
+        var el = (Rune.text(content) as El<State>).dir(.auto)
         el = try LuauUIBridge.applyProps(layers, to: el, isText: true, env: env)
         return .userdata(LuauUserdata(payload: LuauElBox(el, renderEpoch: env.renderEpoch), typeTag: "El"))
     }
@@ -1127,9 +1128,9 @@ internal enum LuauUIBridge {
             case .nil, .bool(false):
                 continue
             case .string(let s):
-                result.append((Rune.text(s) as El<State>).font(env.baseTextStyle).color(env.defaultTextColor))
+                result.append((Rune.text(s) as El<State>).dir(.auto).font(env.baseTextStyle).color(env.defaultTextColor))
             case .number(let n):
-                result.append((Rune.text(LuauValue.formatNumber(n)) as El<State>).font(env.baseTextStyle).color(env.defaultTextColor))
+                result.append((Rune.text(LuauValue.formatNumber(n)) as El<State>).dir(.auto).font(env.baseTextStyle).color(env.defaultTextColor))
             case .userdata(let u):
                 guard let box = u.payload as? LuauElBox<State> else {
                     throw LuauRuntimeError(value: .string("child \(i) is a userdata, not a ui node"))
@@ -1222,7 +1223,7 @@ internal enum LuauUIBridge {
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
         var isSelectable = false
-        var hasDir = false
+        var fadeOut = false
     }
 
     private static func propNum(_ v: LuauValue, _ name: String) throws -> Float {
@@ -1475,20 +1476,24 @@ internal enum LuauUIBridge {
             }
             el = el.itemSelected(sel).selected(sel ? "true" : nil)
         case "fadeOut":
-            _ = try propFlag(v, k)
-            env.warnOnce("fadeOut has no effect on Swift El yet")
+            state.fadeOut = try propFlag(v, k)
         case "dir":
             switch try propStr(v, k) {
-            case "auto": state.textStyle.direction = nil
-            case "ltr": state.textStyle.direction = .ltr
-            case "rtl": state.textStyle.direction = .rtl
+            case "auto":
+                el = el.dir(.auto)
+                state.textStyle.direction = nil
+            case "ltr":
+                el = el.dir(.ltr)
+                state.textStyle.direction = .ltr
+            case "rtl":
+                el = el.dir(.rtl)
+                state.textStyle.direction = .rtl
             case let other: throw LuauRuntimeError(value: .string("dir must be auto, ltr or rtl, got \(other)"))
             }
-            state.hasDir = true
         case "hoverTransition":
             switch try propStr(v, k) {
             case "default": break
-            case "instant": el = el.animate(Tok.Motion.INSTANT)
+            case "instant": el = el.hoverMotion(Anim<Float>.instant, Anim<Float>.instant)
             case let other: throw LuauRuntimeError(value: .string("hoverTransition must be default or instant, got \(other)"))
             }
         case "hoverGroup":
@@ -1544,13 +1549,13 @@ internal enum LuauUIBridge {
         }
         if isText {
             el = el.font(state.textStyle).color(state.textColor ?? env.defaultTextColor)
+            if state.fadeOut {
+                el = el.truncateFade()
+            }
             if state.isSelectable {
                 el = el.selectable(true)
             }
         } else {
-            if state.hasDir {
-                env.warnOnce("dir only applies to text on Swift El; container RTL layout has no effect yet")
-            }
             if let c = state.textColor {
                 el = el.color(c)
             }
