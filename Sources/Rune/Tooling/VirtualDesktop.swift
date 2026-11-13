@@ -907,7 +907,7 @@ public final class DesktopWindow<State>: DesktopMember {
     }
 
     public func backdropDark() -> Bool? {
-        runtime.systemDark
+        runtime.backdropDark() ?? runtime.systemDark
     }
 
     public func treeJSON(at t: Double) -> [String: Any] {

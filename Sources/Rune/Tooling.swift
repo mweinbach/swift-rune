@@ -196,6 +196,12 @@ public struct ToolingArgs: Sendable, Equatable {
     public var realtime: Bool = false
     public var tracePath: String? = nil
     public var traceAll: Bool = false
+    public var isNative: Bool = false
+    public var keysCorner: KeycapsCorner? = nil
+    public var keysThemeDark: Bool? = nil
+    public var showPointer: Bool = false
+    public var firstPixels: Bool = false
+    public var desktopPath: String? = nil
     public var videoPath: String? = nil
     public var htmlPath: String? = nil
     public var htmlTemplatePath: String? = nil
@@ -207,16 +213,22 @@ public struct ToolingArgs: Sendable, Equatable {
     public var isHeadlessRequested: Bool {
         snapPath != nil
             || treePath != nil
-            || scriptArg != nil
-            || framesDir != nil
-            || outDir != nil
-            || frameCount != nil
-            || stripPath != nil
-            || videoPath != nil
-            || tracePath != nil
             || htmlPath != nil
+            || (!isNative && (
+                scriptArg != nil
+                    || tracePath != nil
+                    || frameCount != nil
+                    || durationOverride != nil
+                    || durationAuto
+                    || outDir != nil
+                    || framesDir != nil
+            ))
+            || videoPath != nil
+            || stripPath != nil
             || listScenes
+            || firstPixels
             || listWindows
+            || desktopPath != nil
     }
 
     public static func parseMarkTime(_ raw: String) -> ToolingMarkOffset? {
@@ -294,7 +306,10 @@ public struct ToolingArgs: Sendable, Equatable {
             case "--fps":
                 if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.fps = max(1, v); i += 1 }
             case "--scale":
-                if i + 1 < arguments.count, let v = Float(arguments[i + 1]) { out.pixelScale = max(0.5, v); i += 1 }
+                if i + 1 < arguments.count, let v = Float(arguments[i + 1]), v.isFinite && v > 0 {
+                    out.pixelScale = v
+                }
+                if i + 1 < arguments.count { i += 1 }
             case "--time-scale":
                 if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.timeScale = max(0.01, v); i += 1 }
             case "--duration":
@@ -378,6 +393,28 @@ public struct ToolingArgs: Sendable, Equatable {
                 out.chromeOverlay = true
             case "--realtime":
                 out.realtime = true
+            case "--native":
+                out.isNative = true
+            case "--keys":
+                if i + 1 < arguments.count, let corner = KeycapsCorner.parse(arguments[i + 1]) {
+                    out.keysCorner = corner
+                    i += 1
+                } else {
+                    out.keysCorner = .bottomLeft
+                }
+            case "--keys-theme":
+                if i + 1 < arguments.count {
+                    if let parsedTheme = Keycaps.parseTheme(arguments[i + 1]) {
+                        out.keysThemeDark = parsedTheme
+                    }
+                    i += 1
+                }
+            case "--pointer":
+                out.showPointer = true
+            case "--first-pixels":
+                out.firstPixels = true
+            case "--desktop":
+                if i + 1 < arguments.count { out.desktopPath = arguments[i + 1]; i += 1 }
             case "--trace":
                 if i + 1 < arguments.count { out.tracePath = arguments[i + 1]; i += 1 }
             case "--trace-all":
@@ -394,8 +431,10 @@ public struct ToolingArgs: Sendable, Equatable {
             case "--size":
                 if i + 1 < arguments.count {
                     let parts = arguments[i + 1].lowercased().split(separator: "x")
-                    if parts.count == 2, let w = Float(parts[0]), let h = Float(parts[1]) {
-                        out.viewportOverride = Vec2(max(1, w), max(1, h))
+                    if parts.count == 2,
+                       let w = Float(parts[0]), w.isFinite && w > 0,
+                       let h = Float(parts[1]), h.isFinite && h > 0 {
+                        out.viewportOverride = Vec2(w, h)
                     }
                     i += 1
                 }
@@ -426,26 +465,97 @@ public struct ToolingArgs: Sendable, Equatable {
         }
         return out
     }
+
+    /// Validated variant of `parse(_:)` that throws `ToolingError.invalidArgument` for invalid CLI flags (`args.rs`).
+    public static func parseChecked(_ arguments: [String]) throws -> ToolingArgs {
+        var i = 0
+        while i < arguments.count {
+            let arg = arguments[i]
+            func nextVal() throws -> String {
+                guard i + 1 < arguments.count else {
+                    throw ToolingError.invalidArgument("\(arg) needs a value")
+                }
+                i += 1
+                return arguments[i]
+            }
+            switch arg {
+            case "--size":
+                let v = try nextVal()
+                let parts = v.lowercased().split(separator: "x", omittingEmptySubsequences: false)
+                guard parts.count == 2,
+                      let w = Float(parts[0].trimmingCharacters(in: .whitespaces)), w.isFinite && w > 0,
+                      let h = Float(parts[1].trimmingCharacters(in: .whitespaces)), h.isFinite && h > 0 else {
+                    throw ToolingError.invalidArgument("--size is WxH, both above 0: \(v)")
+                }
+            case "--scale":
+                let v = try nextVal()
+                guard let s = Float(v.trimmingCharacters(in: .whitespaces)), s.isFinite && s > 0 else {
+                    throw ToolingError.invalidArgument("--scale is a number above 0: \(v)")
+                }
+            case "--keys-theme":
+                let v = try nextVal()
+                guard Keycaps.parseTheme(v) != nil else {
+                    throw ToolingError.invalidArgument("--keys-theme is auto, light or dark")
+                }
+            case "--scroll-bars":
+                let v = try nextVal().lowercased()
+                guard ["always", "when-scrolling", "whenscrolling", "automatic", "auto"].contains(v) else {
+                    throw ToolingError.invalidArgument("--scroll-bars is when-scrolling, always or automatic: \(v)")
+                }
+            case "--keys":
+                if i + 1 < arguments.count, KeycapsCorner.parse(arguments[i + 1]) != nil {
+                    i += 1
+                }
+            case "--playground":
+                if i + 1 < arguments.count, !arguments[i + 1].hasPrefix("-") {
+                    i += 1
+                }
+            case "--snap", "--tree", "--scene", "--script", "--frames", "--out", "--strip",
+                 "--cols", "--fps", "--time-scale", "--duration", "--at", "--start",
+                 "--crop", "--every", "--variant", "--window", "--trace", "--video",
+                 "--theme", "--desktop", "--html", "--html-template", "--html-widths":
+                _ = try nextVal()
+            default:
+                break
+            }
+            i += 1
+        }
+        let parsed = parse(arguments)
+        if parsed.playgroundVariant != nil && !parsed.hasPlayground {
+            throw ToolingError.invalidArgument("--variant needs --playground")
+        }
+        if parsed.cropKey != nil && parsed.snapPath == nil {
+            throw ToolingError.invalidArgument("--crop KEY needs --snap")
+        }
+        if parsed.wholeWindow && (!parsed.hasPlayground || parsed.snapPath == nil) {
+            throw ToolingError.invalidArgument("--whole-window needs --playground and --snap")
+        }
+        return parsed
+    }
 }
 
 /// Synthetic input event parsed from `--script` JSON.
-public struct ScriptStep: Sendable {
-    public enum Position: Sendable {
+public struct ScriptStep: Sendable, Equatable {
+    public enum Position: Sendable, Equatable {
         case key(String)
         case xy(Float, Float)
         case relative(Float, Float)
     }
 
-    public enum Action: Sendable {
+    public enum Action: Sendable, Equatable {
         case move
         case down(PointerButton, Mods)
         case up(PointerButton, Mods)
         case keyDown(KeyEvent)
+        case keyRepeat(KeyEvent)
         case keyUp(KeyEvent)
+        case physical(PhysicalInput)
+        case physicalKey(PhysicalInput, KeyEvent, Character?)
         case shortcut(Chord)
         case paste(ClipboardContent)
         case ime(Ime)
         case wheel(WheelEvent)
+        case magnify(MagnifyEvent)
         case fling(vx: Float, vy: Float)
         case resize(Vec2)
         case resizeDelta(dw: Float, dh: Float)
@@ -475,6 +585,7 @@ public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
     case ffmpegUnavailable
     case ffmpegFailed(status: Int32)
     case encoderError(message: String)
+    case invalidArgument(String)
 
     public var errorDescription: String? {
         switch self {
@@ -498,6 +609,8 @@ public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
         case .ffmpegFailed(let status):
             return "ffmpeg failed writing video (exit status \(status))"
         case .encoderError(let message):
+            return message
+        case .invalidArgument(let message):
             return message
         }
     }
@@ -536,6 +649,139 @@ public enum HeadlessRunner {
         public var chromeOverlaps: [String] = []
     }
 
+    private static func resolveScriptPosition(from e: [String: Any]) -> ScriptStep.Position {
+        if let k = e["key"] as? String {
+            return .key(k)
+        }
+        if let at = e["at"] as? [Any], at.count == 2,
+           let x = (at[0] as? NSNumber)?.floatValue,
+           let y = (at[1] as? NSNumber)?.floatValue {
+            return .xy(x, y)
+        }
+        if let x = (e["x"] as? NSNumber)?.floatValue, let y = (e["y"] as? NSNumber)?.floatValue {
+            return .xy(x, y)
+        }
+        return .relative(0, 0)
+    }
+
+    private static func parseScriptMods(from e: [String: Any]) -> Mods {
+        let cmd = (e["cmd"] as? Bool) ?? false
+        #if os(macOS)
+        let isMac = true
+        #else
+        let isMac = false
+        #endif
+        return Mods(
+            shift: (e["shift"] as? Bool) ?? false,
+            ctrl: ((e["ctrl"] as? Bool) ?? false) || (cmd && !isMac),
+            alt: (e["alt"] as? Bool) ?? false,
+            cmd: cmd,
+            logo: ((e["logo"] as? Bool) ?? false) || (cmd && isMac)
+        )
+    }
+
+    private static func parseScriptPaste(from dict: [String: Any]) -> ClipboardContent {
+        let txt = (dict["text"] as? String) ?? ""
+        let rawHTML = dict["html"] as? String
+        let html = rawHTML.map { RichClipboardPayload.sanitizeHTML($0) }
+        let rtf = dict["rtf"] as? String
+        var image: ClipboardImage? = nil
+        if let pngPath = dict["png"] as? String,
+           let raw = try? Data(contentsOf: URL(fileURLWithPath: pngPath)),
+           let decoded = ClipboardImage.decodeImageDataToRGBA(raw) {
+            image = ClipboardImage(width: UInt32(decoded.width), height: UInt32(decoded.height), pngData: raw)
+        }
+        return ClipboardContent(txt, html: html, rtf: rtf, image: image)
+    }
+
+    private static func physicalKeyCode(forName raw: String) -> PhysicalKeyCode? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count == 1, let ch = trimmed.first {
+            if let k = Key.named(String(ch)), let code = PhysicalKeyCode.from(k) {
+                return code
+            }
+            if ch == " " { return .space }
+        }
+        let lower = trimmed.lowercased()
+        switch lower {
+        case "enter", "return": return .enter
+        case "tab": return .tab
+        case "escape", "esc": return .escape
+        case "backspace": return .backspace
+        case "delete", "del": return .delete
+        case "space": return .space
+        case "left": return .arrowLeft
+        case "right": return .arrowRight
+        case "up": return .arrowUp
+        case "down": return .arrowDown
+        case "home": return .home
+        case "end": return .end
+        case "pageup": return .pageUp
+        case "pagedown": return .pageDown
+        case "minus": return .minus
+        case "equal": return .equal
+        case "bracketleft": return .bracketLeft
+        case "bracketright": return .bracketRight
+        case "backslash": return .backslash
+        case "semicolon": return .semicolon
+        case "quote": return .quote
+        case "backquote": return .backquote
+        case "comma": return .comma
+        case "period": return .period
+        case "slash": return .slash
+        default:
+            if lower.hasPrefix("f"), let n = Int(lower.dropFirst()), (1...24).contains(n) {
+                return PhysicalKeyCode.from(.f(UInt8(n)))
+            }
+            return Key.named(trimmed).flatMap(PhysicalKeyCode.from)
+        }
+    }
+
+    private static func parsePhysicalChord(_ raw: String) -> (code: PhysicalKeyCode, mods: Mods)? {
+        #if os(macOS)
+        let isMac = true
+        #else
+        let isMac = false
+        #endif
+        if let parsed = try? ParsedShortcut.parseOn(raw),
+           let code = physicalKeyCode(forName: parsed.keyName) {
+            let superHeld = (parsed.mods & ParsedShortcut.superBit) != 0
+            let ctrlHeld = (parsed.mods & ParsedShortcut.ctrlBit) != 0
+            let altHeld = (parsed.mods & ParsedShortcut.altBit) != 0
+            let shiftHeld = (parsed.mods & ParsedShortcut.shiftBit) != 0
+            let mods = Mods(
+                shift: shiftHeld,
+                ctrl: ctrlHeld || (!isMac && superHeld),
+                alt: altHeld,
+                cmd: superHeld,
+                logo: superHeld
+            )
+            return (code, mods)
+        }
+        if let code = physicalKeyCode(forName: raw) {
+            return (code, .none)
+        }
+        return nil
+    }
+
+    private static func scriptKeyBase(from e: [String: Any], name: String, mods: Mods) -> Character? {
+        if let base = e["base"] as? String {
+            return base.count == 1 ? base.first : nil
+        }
+        guard name.count == 1, !mods.shift, !mods.alt else { return nil }
+        return name.lowercased().first
+    }
+
+    private static func parseGesturePhase(_ raw: String?) -> GesturePhase {
+        switch raw?.lowercased() {
+        case "began": return .began
+        case "changed": return .changed
+        case "ended": return .ended
+        case "cancelled": return .cancelled
+        default: return .changed
+        }
+    }
+
     /// Parses a `--script` JSON array (or `{"events": [...]}` object) into sorted `ScriptStep`s.
     public static func parseScript(jsonData: Data) throws -> [ScriptStep] {
         let raw = try JSONSerialization.jsonObject(with: jsonData, options: [])
@@ -560,14 +806,20 @@ public enum HeadlessRunner {
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .shortcut(chord)))
                 continue
             }
+            if let physStr = e["physical"] as? String, let (code, physMods) = parsePhysicalChord(physStr) {
+                let rep = (e["repeat"] as? Bool) ?? false
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physical(.key(key: code, mods: physMods, pressed: true, repeat: rep))))
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physical(.key(key: code, mods: physMods, pressed: false, repeat: false))))
+                if physMods != .none {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physical(.modifiers(.none))))
+                }
+                continue
+            }
             if let pasteStr = e["paste"] as? String {
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(pasteStr))))
                 continue
             } else if let pasteObj = e["paste"] as? [String: Any] {
-                let txt = (pasteObj["text"] as? String) ?? ""
-                let html = pasteObj["html"] as? String
-                let rtf = pasteObj["rtf"] as? String
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt, html: html, rtf: rtf))))
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(parseScriptPaste(from: pasteObj))))
                 continue
             }
             if let reopen = e["reopen"] as? Bool, reopen {
@@ -582,36 +834,34 @@ public enum HeadlessRunner {
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .dragFilesLeave))
                 continue
             } else if let dragPaths = e["drag_files"] as? [String] {
-                let pos: ScriptStep.Position = (e["key"] as? String).map { .key($0) }
-                    ?? ((e["x"] as? NSNumber).flatMap { x in (e["y"] as? NSNumber).map { y in .xy(x.floatValue, y.floatValue) } })
-                    ?? .relative(0, 0)
+                let pos = resolveScriptPosition(from: e)
                 out.append(ScriptStep(t: t, position: pos, action: .dragFiles(dragPaths.map { URL(fileURLWithPath: $0) })))
+                continue
+            } else if let dragObj = e["drag_files"] as? [String: Any], let paths = dragObj["paths"] as? [String] {
+                let innerPos = resolveScriptPosition(from: dragObj)
+                let pos: ScriptStep.Position = if case .relative = innerPos { resolveScriptPosition(from: e) } else { innerPos }
+                out.append(ScriptStep(t: t, position: pos, action: .dragFiles(paths.map { URL(fileURLWithPath: $0) })))
                 continue
             }
             if let dropPaths = e["drop_files"] as? [String] {
-                let pos: ScriptStep.Position = (e["key"] as? String).map { .key($0) }
-                    ?? ((e["x"] as? NSNumber).flatMap { x in (e["y"] as? NSNumber).map { y in .xy(x.floatValue, y.floatValue) } })
-                    ?? .relative(0, 0)
+                let pos = resolveScriptPosition(from: e)
                 out.append(ScriptStep(t: t, position: pos, action: .dropFiles(dropPaths.map { URL(fileURLWithPath: $0) })))
+                continue
+            } else if let dropObj = e["drop_files"] as? [String: Any], let paths = dropObj["paths"] as? [String] {
+                let innerPos = resolveScriptPosition(from: dropObj)
+                let pos: ScriptStep.Position = if case .relative = innerPos { resolveScriptPosition(from: e) } else { innerPos }
+                let urls = paths.map { URL(fileURLWithPath: $0) }
+                if let hover = (dropObj["hover"] as? NSNumber)?.doubleValue, hover > 0 {
+                    out.append(ScriptStep(t: t, position: pos, action: .dragFiles(urls)))
+                    out.append(ScriptStep(t: t + hover, position: pos, action: .dropFiles(urls)))
+                } else {
+                    out.append(ScriptStep(t: t, position: pos, action: .dropFiles(urls)))
+                }
                 continue
             }
 
-            let pos: ScriptStep.Position
-            if let k = e["key"] as? String {
-                pos = .key(k)
-            } else if let x = (e["x"] as? NSNumber)?.floatValue, let y = (e["y"] as? NSNumber)?.floatValue {
-                pos = .xy(x, y)
-            } else {
-                pos = .relative(0, 0)
-            }
-
-            let mods = Mods(
-                shift: (e["shift"] as? Bool) ?? false,
-                ctrl: (e["ctrl"] as? Bool) ?? false,
-                alt: (e["alt"] as? Bool) ?? false,
-                cmd: (e["cmd"] as? Bool) ?? false,
-                logo: (e["logo"] as? Bool) ?? false
-            )
+            let pos = resolveScriptPosition(from: e)
+            let mods = parseScriptMods(from: e)
             let button = PointerButton(rawValue: (e["button"] as? String) ?? "primary") ?? .primary
             let ty = (e["type"] as? String) ?? "tap"
 
@@ -675,7 +925,7 @@ public enum HeadlessRunner {
                     out.append(ScriptStep(t: t + every * Double(k), position: .relative(0, 0), action: .keyDown(ev)))
                 }
 
-            case "key":
+            case "key", "key-up":
                 let name = (e["name"] as? String) ?? ""
                 let key: Key
                 if mods.cmd, name.count == 1, let c = name.lowercased().first {
@@ -685,7 +935,21 @@ public enum HeadlessRunner {
                 } else {
                     continue
                 }
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyDown(KeyEvent(key: key, mods: mods))))
+                let kev = KeyEvent(key: key, mods: mods)
+                let rep = (e["repeat"] as? Bool) ?? false
+                if let codeStr = e["code"] as? String, let phys = physicalKeyCode(forName: codeStr) {
+                    let base = scriptKeyBase(from: e, name: name, mods: mods)
+                    if ty == "key-up" {
+                        out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physicalKey(.key(key: phys, mods: mods, pressed: false, repeat: false), kev, base)))
+                    } else {
+                        out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physicalKey(.key(key: phys, mods: mods, pressed: true, repeat: rep), kev, base)))
+                        out.append(ScriptStep(t: t, position: .relative(0, 0), action: .physical(.key(key: phys, mods: mods, pressed: false, repeat: false))))
+                    }
+                } else if ty == "key-up" {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyUp(kev)))
+                } else {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: rep ? .keyRepeat(kev) : .keyDown(kev)))
+                }
 
             case "shortcut":
                 if let chordStr = e["chord"] as? String, let chord = Chord(parsing: chordStr) {
@@ -693,18 +957,7 @@ public enum HeadlessRunner {
                 }
 
             case "paste":
-                let txt = (e["text"] as? String) ?? ""
-                let html = e["html"] as? String
-                let rtf = e["rtf"] as? String
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt, html: html, rtf: rtf))))
-
-            case "key-up":
-                let name = (e["name"] as? String) ?? ""
-                if let named = Key.named(name) {
-                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyUp(KeyEvent(key: named, mods: mods))))
-                } else if mods.cmd, name.count == 1, let c = name.lowercased().first {
-                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyUp(KeyEvent(key: .command(c), mods: mods))))
-                }
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(parseScriptPaste(from: e))))
 
             case "ime":
                 if let commit = e["commit"] as? String {
@@ -734,7 +987,13 @@ public enum HeadlessRunner {
 
             case "drop_files", "drop-files":
                 if let paths = e["paths"] as? [String] {
-                    out.append(ScriptStep(t: t, position: pos, action: .dropFiles(paths.map { URL(fileURLWithPath: $0) })))
+                    let urls = paths.map { URL(fileURLWithPath: $0) }
+                    if let hover = (e["hover"] as? NSNumber)?.doubleValue, hover > 0 {
+                        out.append(ScriptStep(t: t, position: pos, action: .dragFiles(urls)))
+                        out.append(ScriptStep(t: t + hover, position: pos, action: .dropFiles(urls)))
+                    } else {
+                        out.append(ScriptStep(t: t, position: pos, action: .dropFiles(urls)))
+                    }
                 }
 
             case "menu-pick", "popup-pick":
@@ -753,10 +1012,19 @@ public enum HeadlessRunner {
             case "wheel":
                 let dx = (e["dx"] as? NSNumber)?.floatValue ?? 0
                 let dy = (e["dy"] as? NSNumber)?.floatValue ?? 0
+                let phase = parseGesturePhase(e["phase"] as? String)
                 if case .relative = pos {} else {
                     out.append(ScriptStep(t: t, position: pos, action: .move))
                 }
-                out.append(ScriptStep(t: t, position: pos, action: .wheel(WheelEvent(dx: dx, dy: dy, mods: mods))))
+                out.append(ScriptStep(t: t, position: pos, action: .wheel(WheelEvent(dx: dx, dy: dy, precise: true, phase: phase, mods: mods))))
+
+            case "magnify":
+                let delta = (e["delta"] as? NSNumber)?.floatValue ?? 0
+                let phase = parseGesturePhase(e["phase"] as? String)
+                if case .relative = pos {} else {
+                    out.append(ScriptStep(t: t, position: pos, action: .move))
+                }
+                out.append(ScriptStep(t: t, position: pos, action: .magnify(MagnifyEvent(delta: delta, phase: phase))))
 
             case "scroll":
                 let dx = (e["dx"] as? NSNumber)?.floatValue ?? 0
@@ -784,11 +1052,12 @@ public enum HeadlessRunner {
                 let vy = (e["v"] as? NSNumber)?.floatValue ?? (e["vy"] as? NSNumber)?.floatValue ?? 0
                 out.append(ScriptStep(t: t, position: pos, action: .fling(vx: vx, vy: vy)))
 
-            case "resize":
-                if e["dw"] != nil || e["dh"] != nil || (e["w"] == nil && e["h"] == nil) {
+            case "resize", "resize_delta":
+                if ty == "resize_delta" || e["dw"] != nil || e["dh"] != nil || (e["w"] == nil && e["h"] == nil) {
                     let dw = (e["dw"] as? NSNumber)?.floatValue ?? 0
                     let dh = (e["dh"] as? NSNumber)?.floatValue ?? 0
-                    let dur = max(0.01, (e["dur"] as? NSNumber)?.doubleValue ?? 0.3)
+                    let defaultDur: Double = (ty == "resize_delta") ? 0.01 : 0.3
+                    let dur = max(0.01, (e["dur"] as? NSNumber)?.doubleValue ?? defaultDur)
                     let steps = max(1, Int(ceil(dur * 120.0)))
                     for s in 0...steps {
                         let f = Float(s) / Float(steps)
@@ -828,30 +1097,35 @@ public enum HeadlessRunner {
         args: ToolingArgs,
         chrome: Chrome = .standard,
         windowKey: String = "main",
-        availableWindows: [String] = ["main"]
+        availableWindows: [String] = ["main"],
+        shortcutRegistry: ShortcutRegistry? = nil
     ) throws -> Output {
         try runWithHooks(
             spec: spec,
             args: args,
             chrome: chrome,
             windowKey: windowKey,
-            availableWindows: availableWindows
+            availableWindows: availableWindows,
+            shortcutRegistry: shortcutRegistry
         )
     }
 
     /// Runs `app` deterministically under `args` (including `compositor`, `setup`, `poll`, `AppHandle` updates, and frame reports).
     @discardableResult
-    public static func run<State>(_ app: App<State>, args: ToolingArgs) throws -> Output {
+    public static func run<State>(_ app: App<State>, args: ToolingArgs, shortcutRegistry: ShortcutRegistry? = nil) throws -> Output {
         var effectiveArgs = args
         if app.gpuBackendPreference == .software {
             effectiveArgs.forceCPU = true
         }
         let resolvedChrome = app.customTitlebar?.macChrome(app.chromeStyle) ?? app.chromeStyle
-        let reports = FrameReports<State>(
-            onFrameEncoded: app.onFrameEncodedHook,
-            onFrameDrawn: app.onFrameDrawnHook,
-            drawnInterval: 0.0
-        )
+        let reports: FrameReports<State>? = (app.onFrameEncodedHook != nil || app.onFrameDrawnHook != nil)
+            ? FrameReports<State>(
+                onFrameEncoded: app.onFrameEncodedHook,
+                onFrameDrawn: app.onFrameDrawnHook,
+                drawnInterval: 0.0,
+                windowKey: "main"
+            )
+            : nil
         return try runWithHooks(
             spec: app.intoSpec(),
             args: effectiveArgs,
@@ -865,6 +1139,7 @@ public enum HeadlessRunner {
             appShared: app.sharedHandle.shared,
             windowOptions: app.windowOptionsValue,
             menuItems: app.menuItems,
+            shortcutRegistry: shortcutRegistry,
             extraConfigure: { runtime, _ in
                 runtime.fontSmoothing = app.fontSmoothingMode
                 runtime.onFocus = app.onFocusHook
@@ -911,6 +1186,7 @@ public enum HeadlessRunner {
         appShared: AppShared<State>? = nil,
         windowOptions: WindowOptions? = nil,
         menuItems: [NativeMenuItem<State>] = [],
+        shortcutRegistry: ShortcutRegistry? = nil,
         extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
     ) throws -> Output {
         if args.listWindows {
@@ -956,6 +1232,32 @@ public enum HeadlessRunner {
 
         registerFonts(spec.fonts)
 
+        // Load script steps upfront so `HeadlessRun.current` is populated before `spec.makeState()`.
+        var steps: [ScriptStep] = []
+        if let scriptArg = args.scriptArg {
+            let data: Data
+            let trimmed = scriptArg.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("[") || trimmed.hasPrefix("{") {
+                data = Data(trimmed.utf8)
+            } else {
+                data = try Data(contentsOf: URL(fileURLWithPath: scriptArg))
+            }
+            steps = try parseScript(jsonData: data)
+        }
+
+        let initialPublishedRun = HeadlessRun(
+            scriptPath: args.scriptArg,
+            events: steps.map(Self.headlessEvent(from:)),
+            scale: args.pixelScale,
+            fps: Float(args.fps),
+            size: args.viewportOverride ?? spec.size,
+            start: args.startTime,
+            frames: args.frameCount ?? 1,
+            end: steps.last?.t ?? 0.0,
+            desktopPath: args.desktopPath
+        )
+        HeadlessRun.publish(initialPublishedRun)
+
         var initTx = Tx()
         let initialState = withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
             var s = spec.makeState()
@@ -983,6 +1285,10 @@ public enum HeadlessRunner {
         runtime.poll = spec.poll
         runtime.onAppFileDrop = spec.onFileDrop
         runtime.onFileDrop = spec.onFileDropPhase
+        runtime.shortcutRegistry = shortcutRegistry
+        if args.tracePath != nil {
+            runtime.traceChannels = [:]
+        }
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
         if let appShared {
@@ -1018,19 +1324,7 @@ public enum HeadlessRunner {
             runtime.setViewport(Vec2(fitted.0, fitted.1), pixelScale: args.pixelScale)
             vp = runtime.viewport
         }
-
-        // Load script steps if `--script` was passed (supports file path OR inline JSON string)
-        var steps: [ScriptStep] = []
-        if let scriptArg = args.scriptArg {
-            let data: Data
-            let trimmed = scriptArg.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("[") || trimmed.hasPrefix("{") {
-                data = Data(trimmed.utf8)
-            } else {
-                data = try Data(contentsOf: URL(fileURLWithPath: scriptArg))
-            }
-            steps = try parseScript(jsonData: data)
-        }
+        initialPublishedRun.size = vp
 
         let surfaceW = max(1, Int((vp.x * args.pixelScale).rounded()))
         let surfaceH = max(1, Int((vp.y * args.pixelScale).rounded()))
@@ -1060,7 +1354,7 @@ public enum HeadlessRunner {
         let devKey = DeviceKey(rawValue: 0)
         #endif
 
-        func renderAndReport(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?), at now: Double) throws -> Frame {
+        func renderAndReport(_ cap: (refScene: RefScene?, renderFrame: RenderFrame?), at now: Double, reportEncoded: Bool = true) throws -> Frame {
             let commitsBefore = runtime.viewCommitCount
             var rendered: Frame? = nil
             var drawCount = 0
@@ -1086,7 +1380,7 @@ public enum HeadlessRunner {
                 drawCount = 1
                 return try renderCaptured(cap)
             }()
-            if let reports {
+            if reportEncoded, let reports {
                 let primCount = cap.renderFrame?.instances.count ?? cap.refScene?.primitives.count ?? 0
                 let glyphCount: Int
                 if let rf = cap.renderFrame {
@@ -1107,7 +1401,11 @@ public enum HeadlessRunner {
                     animating: runtime.isAnimating,
                     compositorAnimating: compositor?.isAnimating ?? false,
                     drawCount: drawCount,
-                    compositorSummary: compositor?.summary()
+                    compositorSummary: compositor?.summary(),
+                    at: now,
+                    window: reports.windowKey ?? windowKey,
+                    started: now,
+                    refreshHz: args.fps
                 )
                 reports.record(encoded)
                 runtime.updateIf(at: now) { s, tx in
@@ -1178,9 +1476,24 @@ public enum HeadlessRunner {
             ToolingTraceWriter(path: $0, viewport: vp, fps: args.fps, scale: args.pixelScale, traceAll: args.traceAll)
         }
         let chromeLights: [[Float]]? = args.chromeOverlay ? chrome.trafficLightRects() : nil
-        func applyChromeOverlay(_ frame: Frame) -> Frame {
-            guard let lights = chromeLights else { return frame }
-            return Self.paintTrafficLights(frame, scale: args.pixelScale, lights: lights)
+        var screencastKeycaps = Keycaps()
+        var pointerRipples: [(x: Float, y: Float, t: Double)] = []
+        func applyChromeOverlay(_ frame: Frame, at simT: Double = runtime.currentTime) -> Frame {
+            var out = frame
+            if let lights = chromeLights {
+                out = Self.paintTrafficLights(out, scale: args.pixelScale, lights: lights)
+            }
+            if args.showPointer {
+                out = Self.paintPointerRipples(out, scale: args.pixelScale, presses: pointerRipples, at: simT)
+            }
+            if let corner = args.keysCorner {
+                let caps = screencastKeycaps.visible(at: simT)
+                if !caps.isEmpty {
+                    let darkCaps = args.keysThemeDark ?? runtime.backdropDark() ?? isDark
+                    out = Self.paintKeycapsOverlay(out, scale: args.pixelScale, caps: caps, corner: corner, dark: darkCaps)
+                }
+            }
+            return out
         }
 
         // Initial settled frame at t = 0 (or `--at` if specified)
@@ -1243,10 +1556,12 @@ public enum HeadlessRunner {
             || args.durationOverride != nil
             || args.durationAuto
             || args.frameCount != nil
+            || (resolvedAtTime ?? 0.0) > 0.0
             || dumpDir != nil
             || args.stripPath != nil
             || args.tracePath != nil
             || args.videoPath != nil
+        var reportedInLoop = false
 
         if needsLoop {
             let fps = max(1.0, args.fps)
@@ -1271,8 +1586,12 @@ public enum HeadlessRunner {
             let snapFrame = max(0, Int((snapT * fps).rounded()))
             let lastOutputFrame = targetOutputFrames.map { startFrame + max(1, $0) - 1 } ?? 0
             let lastFrame = max(snapFrame, lastOutputFrame)
+            initialPublishedRun.start = resolvedStartTime
+            initialPublishedRun.frames = targetOutputFrames ?? max(1, lastFrame + 1)
+            initialPublishedRun.end = endMarkOrTail
             let maxSimTime = Double(lastFrame) * dt + dt * 0.25
 
+            var simStep = 0
             var simTime: Double = 0.0
             var stepCursor = 0
             var anchorPos = Vec2(vp.x * 0.5, vp.y * 0.5)
@@ -1318,25 +1637,49 @@ public enum HeadlessRunner {
                     case .move:
                         runtime.pointerMove(to: resolvedPos, at: animNow)
                     case let .down(btn, mods):
+                        pointerRipples.append((resolvedPos.x, resolvedPos.y, simTime))
                         runtime.pointerDown(at: resolvedPos, button: btn, mods: mods, at: animNow)
                     case let .up(btn, mods):
                         runtime.pointerUp(at: resolvedPos, button: btn, mods: mods, at: animNow)
                     case .keyDown(let kev):
+                        screencastKeycaps.key(at: s.t, event: kev)
                         runtime.keyDown(kev, at: animNow)
-                    case .keyUp:
-                        break
+                    case .keyRepeat(let kev):
+                        screencastKeycaps.key(at: s.t, event: kev)
+                        runtime.keyDown(kev, isRepeat: true, at: animNow)
+                    case .keyUp(let kev):
+                        _ = runtime.keyUp(kev, at: animNow)
+                    case .physical(let phys):
+                        if case let .key(code, physMods, true, _) = phys {
+                            if let mappedKey = Self.keyForPhysicalCode(code, mods: physMods) {
+                                screencastKeycaps.key(at: s.t, event: KeyEvent(key: mappedKey, mods: physMods))
+                            }
+                        }
+                        _ = runtime.physicalInput(phys, at: animNow)
+                    case let .physicalKey(phys, fallback, baseChar):
+                        screencastKeycaps.key(at: s.t, event: fallback)
+                        _ = runtime.physicalInput(phys, fallbackKey: fallback, baseChar: baseChar, at: animNow)
                     case .shortcut(let chord):
-                        runtime.keyDown(KeyEvent(key: chord.key, mods: chord.mods), at: animNow)
+                        let sev = KeyEvent(key: chord.key, mods: chord.mods)
+                        screencastKeycaps.key(at: s.t, event: sev)
+                        if runtime.activeModalPath == nil, let registry = runtime.shortcutRegistry {
+                            if registry.dispatch(sev) != .unhandled {
+                                runtime.dirtyCommit(at: animNow)
+                            }
+                        }
                     case .paste(let clip):
                         runtime.paste(clip, at: animNow)
                     case .ime(let imeEv):
                         _ = runtime.dispatchIme(imeEv, at: animNow)
                     case .wheel(let wev):
                         runtime.wheel(wev, at: resolvedPos, now: animNow)
+                    case .magnify(let mev):
+                        runtime.magnify(mev, at: resolvedPos, now: animNow)
                     case let .fling(vx, vy):
                         runtime.fling(vx: vx, vy: vy, at: resolvedPos, now: animNow)
                     case .resize(let newVP):
                         windowFrameMove = nil
+                        scriptedResizeFrom = newVP
                         currentOuterFrame = [currentOuterFrame[0], currentOuterFrame[1], newVP.x, newVP.y]
                         runtime.setViewport(newVP, pixelScale: args.pixelScale)
                     case let .resizeDelta(dw, dh):
@@ -1407,7 +1750,9 @@ public enum HeadlessRunner {
                     let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
                     let needRender = needDump || needVideo || needStrip
                     if needRender {
-                        let baseFrame = applyChromeOverlay(try renderCaptured(lastCaptured))
+                        let renderedBase = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
+                        reportedInLoop = true
+                        let baseFrame = applyChromeOverlay(renderedBase, at: simTime)
                         if needVideo {
                             try videoEncoder?.writeFrame(baseFrame)
                         }
@@ -1425,8 +1770,14 @@ public enum HeadlessRunner {
                         if needStrip {
                             capturedStripFrames.append(f)
                         }
-                    } else if targetOutputFrames != nil {
-                        dumpedFrameCount += 1
+                    } else {
+                        if reports != nil {
+                            _ = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
+                            reportedInLoop = true
+                        }
+                        if targetOutputFrames != nil {
+                            dumpedFrameCount += 1
+                        }
                     }
                     frameIndex += 1
                 }
@@ -1443,14 +1794,21 @@ public enum HeadlessRunner {
                 if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {
                     break
                 }
-                simTime += dt
+                simStep += 1
+                simTime = Double(simStep) * dt
             }
         } else if args.realtime && !didFireReady {
             didFireReady = true
             onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = applyChromeOverlay(try renderAndReport(lastCaptured, at: runtime.currentTime))
+        var finalFrame = applyChromeOverlay(
+            try renderAndReport(lastCaptured, at: runtime.currentTime, reportEncoded: !reportedInLoop),
+            at: runtime.currentTime
+        )
+        if args.firstPixels {
+            FileHandle.standardError.write(Data("rune: first pixels \(finalFrame.width)x\(finalFrame.height)\n".utf8))
+        }
         if !args.cropRects.isEmpty {
             finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
         } else if let cropKey = args.cropKey {
@@ -1640,16 +1998,213 @@ public enum HeadlessRunner {
         }
         return overlaps
     }
+
+    internal static func headlessEvents(from steps: [ScriptStep]) -> [HeadlessTimedEvent] {
+        steps.map(headlessEvent(from:))
+    }
+
+    private static func headlessEvent(from step: ScriptStep) -> HeadlessTimedEvent {
+        let pos: HeadlessScriptPoint
+        switch step.position {
+        case .key(let k): pos = .key(k)
+        case .xy(let x, let y): pos = .xy(x, y)
+        case .relative(let dx, let dy): pos = .relative(dx, dy)
+        }
+        let ev: HeadlessScriptEvent
+        switch step.action {
+        case .move: ev = .pointer(.move)
+        case let .down(btn, mods): ev = .pointer(.down, button: btn, mods: mods)
+        case let .up(btn, mods): ev = .pointer(.up, button: btn, mods: mods)
+        case .keyDown(let kev), .keyRepeat(let kev): ev = .keyDown(kev)
+        case .keyUp(let kev): ev = .keyUp(kev)
+        case let .physicalKey(_, kev, _): ev = .keyDown(kev)
+        case let .physical(.key(code, mods, pressed, _)):
+            let k = keyForPhysicalCode(code, mods: mods) ?? .text("")
+            ev = pressed ? .keyDown(KeyEvent(key: k, mods: mods)) : .keyUp(KeyEvent(key: k, mods: mods))
+        case .physical: ev = .mark("physical")
+        case .shortcut(let chord): ev = .shortcut(chord.description)
+        case .paste(let c): ev = .paste(c.text)
+        case .ime: ev = .mark("ime")
+        case .wheel(let w): ev = .wheel(dx: w.dx, dy: w.dy, mods: w.mods)
+        case .magnify: ev = .mark("magnify")
+        case let .fling(vx, vy): ev = .fling(vx: vx, vy: vy)
+        case .resize(let sz): ev = .resize(sz)
+        case let .resizeDelta(dw, dh): ev = .resize(Vec2(dw, dh))
+        case .windowFocus(let foc): ev = .focus(foc)
+        case .mark(let m): ev = .mark(m)
+        case .reopen: ev = .reopen
+        case .openUrl(let u): ev = .openURL(u)
+        case .dragFiles(let urls):
+            let dropAt: Vec2 = if case let .xy(x, y) = step.position { Vec2(x, y) } else { .zero }
+            ev = .fileDrop(.entered(urls.map { DroppedFile(url: $0) }, at: dropAt))
+        case .dropFiles(let urls):
+            let dropAt: Vec2 = if case let .xy(x, y) = step.position { Vec2(x, y) } else { .zero }
+            ev = .fileDrop(.dropped(urls.map { DroppedFile(url: $0) }, at: dropAt))
+        case .dragFilesLeave: ev = .fileDrop(.exited)
+        case .popupPick(let id): ev = .popupMenu(id)
+        case .fileDialogAnswer(let u): ev = .fileDialog(u?.path)
+        }
+        return HeadlessTimedEvent(t: step.t, position: pos, event: ev)
+    }
+
+    private static func keyForPhysicalCode(_ code: PhysicalKeyCode, mods: Mods) -> Key? {
+        switch code {
+        case .space: return .space
+        case .enter: return .enter
+        case .tab: return .tab
+        case .escape: return .escape
+        case .backspace: return .backspace
+        case .delete: return .delete
+        case .arrowLeft: return .arrowLeft
+        case .arrowRight: return .arrowRight
+        case .arrowUp: return .arrowUp
+        case .arrowDown: return .arrowDown
+        case .home: return .home
+        case .end: return .end
+        case .pageUp: return .pageUp
+        case .pageDown: return .pageDown
+        case .f1: return .f(1); case .f2: return .f(2); case .f3: return .f(3); case .f4: return .f(4)
+        case .f5: return .f(5); case .f6: return .f(6); case .f7: return .f(7); case .f8: return .f(8)
+        case .f9: return .f(9); case .f10: return .f(10); case .f11: return .f(11); case .f12: return .f(12)
+        case .keyA: return mods.cmd ? .command("a") : .text("a")
+        case .digit0: return .text("0"); case .digit1: return .text("1"); case .digit2: return .text("2")
+        case .digit3: return .text("3"); case .digit4: return .text("4"); case .digit5: return .text("5")
+        case .digit6: return .text("6"); case .digit7: return .text("7"); case .digit8: return .text("8")
+        case .digit9: return .text("9")
+        default: return nil
+        }
+    }
+
+    private static func paintPointerRipples(
+        _ frame: Frame,
+        scale: Float,
+        presses: [(x: Float, y: Float, t: Double)],
+        at now: Double
+    ) -> Frame {
+        let active = presses.filter { now >= $0.t - 1e-6 && (now - $0.t) <= 0.35 }
+        guard !active.isEmpty else { return frame }
+        var px = frame.rgba
+        let w = frame.width
+        let h = frame.height
+        for p in active {
+            let age = Float(max(0.0, min(1.0, (now - p.t) / 0.35)))
+            let cx = p.x * scale
+            let cy = p.y * scale
+            let outerR = (8.0 + 18.0 * age) * scale
+            let innerR = max(0.0, outerR - 2.5 * scale)
+            let alpha = (1.0 - age) * 0.72
+            let minX = max(0, Int((cx - outerR - 1).rounded(.down)))
+            let maxX = min(w - 1, Int((cx + outerR + 1).rounded(.up)))
+            let minY = max(0, Int((cy - outerR - 1).rounded(.down)))
+            let maxY = min(h - 1, Int((cy + outerR + 1).rounded(.up)))
+            guard minX <= maxX, minY <= maxY else { continue }
+            for y in minY...maxY {
+                for x in minX...maxX {
+                    let dx = Float(x) + 0.5 - cx
+                    let dy = Float(y) + 0.5 - cy
+                    let dist = sqrt(dx * dx + dy * dy)
+                    if dist >= innerR && dist <= outerR {
+                        let edge = min(1.0, min(outerR - dist + 0.5, dist - innerR + 0.5))
+                        let a = max(0.0, min(1.0, alpha * edge))
+                        let idx = (y * w + x) * 4
+                        px[idx] = UInt8(max(0, min(255, Int((Float(px[idx]) * (1 - a) + 96.0 * a).rounded()))))
+                        px[idx + 1] = UInt8(max(0, min(255, Int((Float(px[idx + 1]) * (1 - a) + 178.0 * a).rounded()))))
+                        px[idx + 2] = UInt8(max(0, min(255, Int((Float(px[idx + 2]) * (1 - a) + 255.0 * a).rounded()))))
+                    }
+                }
+            }
+        }
+        return Frame(width: w, height: h, rgba: px)
+    }
+
+    private static func paintKeycapsOverlay(
+        _ frame: Frame,
+        scale: Float,
+        caps: [Keycap],
+        corner: KeycapsCorner,
+        dark: Bool
+    ) -> Frame {
+        guard !caps.isEmpty else { return frame }
+        var px = frame.rgba
+        let w = frame.width
+        let h = frame.height
+        let marginPx = Int((16.0 * scale).rounded())
+        let gapPx = Int((8.0 * scale).rounded())
+        let pillH = max(12, Int((26.0 * scale).rounded()))
+        let widths: [Int] = caps.map { cap in
+            max(Int((28.0 * scale).rounded()), Int((Float(cap.label.count * 10 + 18) * scale).rounded()))
+        }
+        let totalW = widths.reduce(0, +) + max(0, widths.count - 1) * gapPx
+        let startY: Int
+        switch corner {
+        case .topLeft, .top, .topRight:
+            startY = min(max(0, marginPx), max(0, h - pillH))
+        case .bottomLeft, .bottom, .bottomRight:
+            startY = max(0, h - marginPx - pillH)
+        }
+        var curX: Int
+        switch corner {
+        case .topLeft, .bottomLeft:
+            curX = min(max(0, marginPx), max(0, w - totalW))
+        case .top, .bottom:
+            curX = max(0, (w - totalW) / 2)
+        case .topRight, .bottomRight:
+            curX = max(0, w - marginPx - totalW)
+        }
+
+        let fill: [Float] = dark ? [24.0, 26.0, 32.0] : [245.0, 246.0, 250.0]
+        let border: [Float] = dark ? [88.0, 94.0, 110.0] : [188.0, 194.0, 208.0]
+        let ink: [Float] = dark ? [240.0, 243.0, 250.0] : [26.0, 28.0, 34.0]
+        let fillAlpha: Float = 0.88
+        for (idx, pillW) in widths.enumerated() {
+            let x0 = max(0, curX)
+            let x1 = min(w - 1, curX + pillW - 1)
+            let y0 = max(0, startY)
+            let y1 = min(h - 1, startY + pillH - 1)
+            if x0 <= x1 && y0 <= y1 {
+                for y in y0...y1 {
+                    for x in x0...x1 {
+                        let isBorder = (x == x0 || x == x1 || y == y0 || y == y1)
+                        let c = isBorder ? border : fill
+                        let pIdx = (y * w + x) * 4
+                        for k in 0..<3 {
+                            let blended = Float(px[pIdx + k]) * (1.0 - fillAlpha) + c[k] * fillAlpha
+                            px[pIdx + k] = UInt8(max(0, min(255, Int(blended.rounded()))))
+                        }
+                    }
+                }
+                let barY0 = min(y1, y0 + pillH / 2 - max(1, Int(scale.rounded())))
+                let barY1 = min(y1, y0 + pillH / 2 + max(1, Int(scale.rounded())))
+                let barX0 = min(x1, x0 + max(3, Int((6.0 * scale).rounded())))
+                let barX1 = max(barX0, x1 - max(3, Int((6.0 * scale).rounded())))
+                if barX0 <= barX1 && barY0 <= barY1 && idx < caps.count {
+                    for y in barY0...barY1 {
+                        for x in barX0...barX1 where ((x - barX0) / max(2, Int((2.0 * scale).rounded()))) % 2 == 0 {
+                            let pIdx = (y * w + x) * 4
+                            for k in 0..<3 {
+                                px[pIdx + k] = UInt8(max(0, min(255, Int(ink[k].rounded()))))
+                            }
+                        }
+                    }
+                }
+            }
+            curX += pillW + gapPx
+        }
+        return Frame(width: w, height: h, rgba: px)
+    }
 }
 
-private final class ToolingTraceWriter {
+internal final class ToolingTraceWriter {
     private let path: String
     private let traceAll: Bool
     private var lines: [String] = []
     private var ids: [String: UInt32] = [:]
-    private var described: [UInt32: (String, String)] = [:]
+    private var described: [UInt32: (String, String, String, String)] = [:]
     private var states: [UInt32: [Int]] = [:]
     private var scrolled: [UInt32: [Int]] = [:]
+    private var effects: [UInt32: [String]] = [:]
+    private var goals: [UInt32: [Int64]] = [:]
+    private var channels = TraceChannels()
 
     init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool) {
         self.path = path
@@ -1673,7 +2228,7 @@ private final class ToolingTraceWriter {
     func recordFrame<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double) {
         let els = runtime.elements()
         func isTraced(_ e: ElementInfo) -> Bool {
-            traceAll || e.key != nil
+            (traceAll || e.key != nil || e.traceName != nil) && !e.virtualExtent
         }
         func idFor(_ path: String) -> UInt32 {
             if let existing = ids[path] { return existing }
@@ -1682,6 +2237,7 @@ private final class ToolingTraceWriter {
             return next
         }
 
+        let blank = runtime.blankLeaves()
         var metas: [[String: Any]] = []
         var changed: [[Any]] = []
         var scrolledRows: [[Any]] = []
@@ -1689,15 +2245,21 @@ private final class ToolingTraceWriter {
 
         for e in els where isTraced(e) {
             let id = idFor(e.path)
-            let name = e.key ?? e.path
+            let name = e.traceName ?? e.path
+            let cls = e.traceNamespace?.className ?? "rune"
+            let host = e.traceNamespace?.host ?? "rune"
             seen.insert(id)
-            if described[id]?.0 != name || described[id]?.1 != e.role.rawValue {
-                described[id] = (name, e.role.rawValue)
+            if described[id] == nil
+                || described[id]?.0 != name
+                || described[id]?.1 != cls
+                || described[id]?.2 != host
+                || described[id]?.3 != e.role.rawValue {
+                described[id] = (name, cls, host, e.role.rawValue)
                 var meta: [String: Any] = [
                     "id": id,
-                    "cls": "rune",
+                    "cls": cls,
                     "nm": name,
-                    "host": "rune",
+                    "host": host,
                     "role": e.role.rawValue,
                 ]
                 if let pIdx = e.parentIndex, els.indices.contains(pIdx), isTraced(els[pIdx]) {
@@ -1705,10 +2267,24 @@ private final class ToolingTraceWriter {
                 }
                 metas.append(meta)
             }
+
+            let effNames = ["\(name).scale", "\(name).blur"]
+            channels.sample(name: effNames[0], kind: .position, value: e.scale)
+            channels.owner(name: effNames[0], owner: id, unit: "ratio")
+            channels.sample(name: effNames[1], kind: .position, value: e.blur)
+            channels.owner(name: effNames[1], owner: id, unit: "pt")
+            if let prevEff = effects.updateValue(effNames, forKey: id) {
+                for oldName in prevEff where !effNames.contains(oldName) {
+                    channels.remove(name: oldName)
+                }
+            }
+
             let r = e.rect.count == 4 ? e.rect : [Float](repeating: 0, count: 4)
             let v = e.visible.count == 4 ? e.visible : r
             let clipped = zip(r, v).contains { abs($0 - $1) > 0.5 }
-            let flags = (e.moving ? 1 : 0) | (clipped ? 4 : 0)
+            let flags = (e.moving ? Int(TraceFlags.animated) : 0)
+                | (clipped ? Int(TraceFlags.clipped) : 0)
+                | (blank.contains(e.path) ? Int(TraceFlags.blank) : 0)
             let q = [
                 Int((Double(r[0]) * 100.0).rounded()),
                 Int((Double(r[1]) * 100.0).rounded()),
@@ -1739,7 +2315,7 @@ private final class ToolingTraceWriter {
                 }
                 changed.append(row)
             }
-            let sc = e.scrolled.count == 2 ? e.scrolled : [0, 0]
+            let sc = e.carriedScrolled.count == 2 ? e.carriedScrolled : [0, 0]
             let qsc = [Int((Double(sc[0]) * 100.0).rounded()), Int((Double(sc[1]) * 100.0).rounded())]
             if (scrolled[id] ?? [0, 0]) != qsc {
                 scrolledRows.append([id, Self.r2(sc[0]), Self.r2(sc[1])])
@@ -1755,21 +2331,80 @@ private final class ToolingTraceWriter {
         for id in gone {
             states.removeValue(forKey: id)
             scrolled.removeValue(forKey: id)
+            if let oldNames = effects.removeValue(forKey: id) {
+                for n in oldNames {
+                    channels.remove(name: n)
+                }
+            }
         }
+
+        var retargetRows: [[Any]] = []
+        for (path, goal) in runtime.traceGoals() {
+            guard let id = ids[path], goal.count == 7 else { continue }
+            let q = goal.map { Int64((Double($0) * 10000.0).rounded()) }
+            if let old = goals.updateValue(q, forKey: id), old.count == 7 {
+                let scaleBit = (old[6] != q[6]) ? 15 : 0
+                let posBits = ((old[0] != q[0] || old[4] != q[4]) ? 1 : 0)
+                    | ((old[1] != q[1] || old[5] != q[5]) ? 2 : 0)
+                let ownBits = posBits | scaleBit | ((old[2] != q[2]) ? 4 : 0) | ((old[3] != q[3]) ? 8 : 0)
+                if ownBits != 0 {
+                    retargetRows.append([id, ownBits, posBits | scaleBit])
+                }
+            }
+        }
+        goals = goals.filter { seen.contains($0.key) }
+
+        let (edges, positionError) = runtime.scene.samplingError()
+        let retargetAudit = runtime.takeRetargetAudit()
+        let why = AnimSource.names(runtime.isAnimating ? runtime.animSources : 0)
 
         var line: [String: Any] = [
             "t": (tMs * 1000.0).rounded() / 1000.0,
             "n": 1,
             "quality": [
                 "cpu_ms": (cpuMs * 1000.0).rounded() / 1000.0,
+                "scene_edges": edges,
+                "position_error_px": Self.r3(positionError),
+                "retarget_lanes": retargetAudit.lanes,
+                "velocity_error_pt_s": Self.r3(retargetAudit.maxVelocityError),
                 "animating": runtime.isAnimating,
+                "why": why,
             ],
         ]
+        if runtime.pressedPath != nil {
+            line["k"] = 1
+        }
+        if !retargetRows.isEmpty {
+            line["retarget"] = retargetRows
+        }
+        let touched = runtime.touchedTracks()
+        if !touched.isEmpty {
+            line["tk"] = touched.map { (path, prop, active) -> [Any] in
+                let who: Any = ids[path] ?? path
+                return [who, prop, active ? 1 : 0]
+            }
+        }
+        if !runtime.traceEvents.isEmpty {
+            line["ev"] = runtime.traceEvents
+            runtime.traceEvents.removeAll()
+        }
         if !metas.isEmpty { line["m"] = metas }
         if !changed.isEmpty { line["e"] = changed }
         if !gone.isEmpty { line["g"] = gone }
         if !scrolledRows.isEmpty { line["sc"] = scrolledRows }
-        if let json = Self.encodeJSONLine(line) {
+
+        if let runtimeChannels = runtime.traceChannels {
+            for (name, sample) in runtimeChannels {
+                channels.sample(name: name, kind: sample.kind, value: sample.value)
+            }
+        }
+
+        if var json = Self.encodeJSONLine(line) {
+            if json.hasSuffix("}") {
+                json.removeLast()
+                channels.writeJSON(into: &json)
+                json.append("}")
+            }
             lines.append(json)
         }
     }
@@ -1790,7 +2425,7 @@ private final class ToolingTraceWriter {
     }
 
     private static func encodeJSONLine(_ obj: [String: Any]) -> String? {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys, .withoutEscapingSlashes]) else {
             return nil
         }
         return String(data: data, encoding: .utf8)

@@ -333,11 +333,20 @@ extension Tx {
 public final class AppMenuBridge: @unchecked Sendable {
     private static let shared = AppMenuBridge()
 
+    public static var defaultNativeSupported: Bool {
+        #if os(macOS)
+        return true
+        #else
+        return false
+        #endif
+    }
+
     private final class Box<State>: @unchecked Sendable {
         var items: [NativeMenuItem<State>] = []
         var revision: UInt64 = 0
         var isRunning: Bool = false
         var isHeadless: Bool = false
+        var nativeSupported: Bool = defaultNativeSupported
         var errors: [MenuError] = []
     }
 
@@ -356,12 +365,57 @@ public final class AppMenuBridge: @unchecked Sendable {
         return created
     }
 
-    public static func markRunning<State>(_ appShared: AppShared<State>, running: Bool, headless: Bool = false) {
+    public static func markRunning<State>(
+        _ appShared: AppShared<State>,
+        running: Bool,
+        headless: Bool = false,
+        nativeSupported: Bool = defaultNativeSupported
+    ) {
         shared.lock.lock()
         let b = shared.box(for: appShared)
         b.isRunning = running
         b.isHeadless = headless
+        b.nativeSupported = running ? nativeSupported : defaultNativeSupported
         shared.lock.unlock()
+    }
+
+    /// Attaches startup menu items for a run (`native_menu::Guard::attach`).
+    /// On unsupported native non-headless targets, retains initial items and records `.unsupported`.
+    public static func attach<State>(
+        _ items: [NativeMenuItem<State>],
+        to appShared: AppShared<State>,
+        headless: Bool = false,
+        nativeSupported: Bool = defaultNativeSupported
+    ) {
+        shared.lock.lock()
+        let b = shared.box(for: appShared)
+        b.isRunning = true
+        b.isHeadless = headless
+        b.nativeSupported = nativeSupported
+        if !items.isEmpty {
+            if !nativeSupported && !headless {
+                b.items = items
+                b.revision &+= 1
+                b.errors.append(.unsupported)
+                shared.lock.unlock()
+                return
+            }
+            shared.lock.unlock()
+            do {
+                try NativeMenuValidator.validate(items)
+                shared.lock.lock()
+                b.items = items
+                b.revision &+= 1
+                shared.lock.unlock()
+                appShared.wake()
+            } catch let err as MenuError {
+                recordError(err, for: appShared)
+            } catch {
+                recordError(.unsupported, for: appShared)
+            }
+        } else {
+            shared.lock.unlock()
+        }
     }
 
     public static func recordError<State>(_ error: MenuError, for appShared: AppShared<State>) {
@@ -371,18 +425,9 @@ public final class AppMenuBridge: @unchecked Sendable {
     }
 
     public static func setMenu<State>(_ items: [NativeMenuItem<State>], for appShared: AppShared<State>) throws {
-        #if os(macOS)
         shared.lock.lock()
         let b = shared.box(for: appShared)
-        guard b.isRunning else {
-            shared.lock.unlock()
-            throw MenuError.notRunning
-        }
-        shared.lock.unlock()
-        #else
-        shared.lock.lock()
-        let b = shared.box(for: appShared)
-        let allowed = b.isHeadless
+        let allowed = b.nativeSupported || b.isHeadless
         guard allowed else {
             shared.lock.unlock()
             throw MenuError.unsupported
@@ -392,7 +437,6 @@ public final class AppMenuBridge: @unchecked Sendable {
             throw MenuError.notRunning
         }
         shared.lock.unlock()
-        #endif
 
         try NativeMenuValidator.validate(items)
 
@@ -411,6 +455,48 @@ public final class AppMenuBridge: @unchecked Sendable {
         return (b.items, b.revision)
     }
 
+    /// Enqueues execution of a menu item by id or unique title (`native_menu::fire`).
+    /// Re-checks running status, menu revision, and enabled state when drained so menu
+    /// replacement, disabling, or shutdown before the next frame cancels stale actions.
+    public static func fire<State>(_ selector: String, for appShared: AppShared<State>) throws {
+        shared.lock.lock()
+        let b = shared.box(for: appShared)
+        let running = b.isRunning
+        let allowed = b.nativeSupported || b.isHeadless
+        let items = b.items
+        let capturedRevision = b.revision
+        shared.lock.unlock()
+
+        guard allowed else {
+            throw MenuError.unsupported
+        }
+        guard running else {
+            throw MenuError.notRunning
+        }
+
+        let idx = try NativeMenuValidator.lookupIndex(selector: selector, in: items)
+        let targetId = items[idx].id
+
+        appShared.enqueueUpdateIf { state, tx in
+            shared.lock.lock()
+            let box = shared.box(for: appShared)
+            let stillValid = box.isRunning && box.revision == capturedRevision
+            let action: ((inout State, inout Tx) -> Void)?
+            if stillValid,
+               let latest = box.items.first(where: { !$0.isSeparator && $0.id == targetId }),
+               latest.enabled {
+                action = latest.action
+            } else {
+                action = nil
+            }
+            shared.lock.unlock()
+
+            guard let action else { return false }
+            action(&state, &tx)
+            return true
+        }
+    }
+
     public static func takeMenuErrors<State>(for appShared: AppShared<State>) -> [MenuError] {
         shared.lock.lock()
         defer { shared.lock.unlock() }
@@ -425,6 +511,11 @@ extension AppHandle {
     /// Replaces all custom native menu items on a running `App`, preserving native defaults (`AppHandle::set_menu`).
     public func setMenu(_ items: [NativeMenuItem<State>]) throws {
         try AppMenuBridge.setMenu(items, for: shared)
+    }
+
+    /// Fires a custom native menu item by id or unique title on the next frame (`native_menu::fire`).
+    public func fireMenu(_ selector: String) throws {
+        try AppMenuBridge.fire(selector, for: shared)
     }
 
     /// Returns and clears deferred native menu installation errors (`AppHandle::take_menu_errors`).

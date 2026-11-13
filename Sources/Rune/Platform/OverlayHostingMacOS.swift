@@ -149,6 +149,7 @@ public final class RuneOverlayMetalView<State>: NSView {
     var onPointerExit: ((_ nowSeconds: Double) -> Void)?
     var onPointerDown: ((_ point: Vec2, _ button: PointerButton, _ mods: Mods, _ nowSeconds: Double) -> Void)?
     var onPointerUp: ((_ point: Vec2, _ button: PointerButton, _ mods: Mods, _ nowSeconds: Double) -> Void)?
+    var onPointerReleaseLost: ((_ point: Vec2, _ nowSeconds: Double) -> Void)?
     var onWheel: ((_ event: WheelEvent, _ point: Vec2, _ nowSeconds: Double) -> Void)?
     var onKeyDown: ((_ event: KeyEvent, _ nowSeconds: Double) -> Bool)?
     var onAppearanceChanged: ((_ isDark: Bool) -> Void)?
@@ -304,7 +305,11 @@ public final class RuneOverlayMetalView<State>: NSView {
         let now = nowSeconds()
         let m = RuneNSEventBridge.mods(for: event)
         if let lost = pointerState?.takeLostBeforePosition() {
-            onPointerUp?(lost, .primary, m, now)
+            if let onPointerReleaseLost {
+                onPointerReleaseLost(lost, now)
+            } else {
+                onPointerUp?(lost, .primary, m, now)
+            }
         }
         onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), m, now)
     }
@@ -317,7 +322,11 @@ public final class RuneOverlayMetalView<State>: NSView {
         let now = nowSeconds()
         let m = RuneNSEventBridge.mods(for: event)
         if let lost = pointerState?.takeLostBeforePosition() {
-            onPointerUp?(lost, .primary, m, now)
+            if let onPointerReleaseLost {
+                onPointerReleaseLost(lost, now)
+            } else {
+                onPointerUp?(lost, .primary, m, now)
+            }
         }
         onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), m, now)
     }
@@ -336,7 +345,11 @@ public final class RuneOverlayMetalView<State>: NSView {
         let local = RuneNSEventBridge.localPoint(in: self, from: event)
         let edge = pointerState?.takeEdge(down: true)
         if let lost = edge?.lostRelease {
-            onPointerUp?(lost, .primary, m, now)
+            if let onPointerReleaseLost {
+                onPointerReleaseLost(lost, now)
+            } else {
+                onPointerUp?(lost, .primary, m, now)
+            }
         }
         onPointerDown?(edge?.point ?? local, .primary, m, now)
         onSyncPassthrough?()
@@ -348,7 +361,11 @@ public final class RuneOverlayMetalView<State>: NSView {
         let local = RuneNSEventBridge.localPoint(in: self, from: event)
         let edge = pointerState?.takeEdge(down: false)
         if let lost = edge?.lostRelease {
-            onPointerUp?(lost, .primary, m, now)
+            if let onPointerReleaseLost {
+                onPointerReleaseLost(lost, now)
+            } else {
+                onPointerUp?(lost, .primary, m, now)
+            }
         }
         onPointerUp?(edge?.point ?? local, .primary, m, now)
         pointerState?.released()
@@ -895,7 +912,11 @@ public final class RuneOverlayMacOSHost<State> {
                 inside: inside
             )
             if let lost = pointerState.takeLostBeforePosition() {
-                view.onPointerUp?(lost, .primary, .none, view.nowSeconds())
+                if let onPointerReleaseLost = view.onPointerReleaseLost {
+                    onPointerReleaseLost(lost, view.nowSeconds())
+                } else {
+                    view.onPointerUp?(lost, .primary, .none, view.nowSeconds())
+                }
             }
             if let due = pointerState.deadline {
                 scheduleHoldDeadlineTimer(until: due)

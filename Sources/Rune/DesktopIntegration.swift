@@ -141,7 +141,7 @@ public struct RichClipboardPayload: Sendable, Equatable {
         customPayloads: [String: Data] = [:],
         isConcealed: Bool = false
     ) {
-        self.content = ClipboardContent(text, html: html, rtf: rtf)
+        self.content = ClipboardContent(text, html: html, rtf: rtf, image: image)
         self.image = image
         self.files = files
         self.customPayloads = customPayloads
@@ -3089,6 +3089,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             view: spec.view
         )
         rt.nativeOverlay = true
+        rt.modifierKeysEnabled = opts.modifierKeys
         rt.srgbBlend = opts.srgbBlend
         rt.clearColor = Color.transparent
         rt.setSystemContrast(prefs.contrast)
@@ -3238,6 +3239,10 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 self?.withLockedRuntime { rt in rt.pointerUp(at: pt, button: btn, mods: mods, at: now) }
                 view.renderFrame(settle: false, visible: true, drawing: true)
             }
+            view.onPointerReleaseLost = { [weak self] pt, now in
+                self?.withLockedRuntime { rt in rt.pointerReleaseLost(at: pt, at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
             view.onWheel = { [weak self] wev, pt, now in
                 self?.withLockedRuntime { rt in rt.wheel(wev, at: pt, now: now) }
                 view.renderFrame(settle: false, visible: true, drawing: true)
@@ -3352,6 +3357,9 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         lock.lock()
         let effects = overlayPresence.step(.hide(fadeSeconds: dur, now: now), release: releasePolicy)
         isVisible = false
+        if effects.contains(.stopDrawing) || !overlayPresence.isShown {
+            runtime.releaseHeldModifiers(at: now)
+        }
         for effect in effects {
             switch effect {
             case .stopDrawing:
@@ -3640,8 +3648,22 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         lock.unlock()
     }
 
+    public func setAccent(_ accent: SystemAccent) {
+        lock.lock()
+        if runtime.systemAccent() != accent {
+            runtime.setSystemAccent(accent)
+            runtime.markNeedsCommit(settle: false)
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
     public func deliverFocus(_ focused: Bool) {
         lock.lock()
+        if !focused {
+            runtime.releaseHeldModifiers(at: runtime.currentTime)
+        }
         if let focusHandler {
             var s = runtime.state
             var tx = Tx()

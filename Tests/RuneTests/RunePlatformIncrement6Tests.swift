@@ -429,7 +429,7 @@ struct RunePlatformIncrement6Tests {
         let traceLines = traceText.split(separator: "\n")
         #expect(traceLines.count == 3)
         #expect(traceLines[0].contains("\"type\":\"header\""))
-        #expect(traceLines[1].contains("\"overlap-btn\""))
+        #expect(traceLines[1].contains("/@root/@overlap-btn"))
 
         // `--video` rejects unsupported containers and encodes `.mp4` when `ffmpeg` is available
         let gifURL = tmpRoot.appendingPathComponent("bad.gif")

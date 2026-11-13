@@ -170,8 +170,14 @@ public final class CommitMeter {
             fix = "return true only when visible state changed; to act on where a scroll stops, wait until it has been still a moment (`Tx::wake_after`), and follow it frame by frame with `El::on_scroll_offset` and live values"
         case .read:
             let atPart = s.fileLine.map { " at \($0)" } ?? ""
-            who = "the view's layout read of \"\(subject)\"\(atPart) moved and"
-            fix = "read only what the view needs (`Cx::layout_size`, `Cx::layout_with`), or follow it with `El::on_layout_tx` and a live value"
+            let stripped = LayoutReadConstants.stripWindowPrefix(subject)
+            if stripped.scrolled {
+                who = "the view's `Cx::window_layout` read of \"\(stripped.key)\"\(atPart) moved and"
+                fix = "read `Cx::layout_size` or `Cx::layout` (unscrolled) unless the view needs where the element is in the window, and then only through `window_layout_with` and what it computes"
+            } else {
+                who = "the view's layout read of \"\(subject)\"\(atPart) moved and"
+                fix = "read only what the view needs (`Cx::layout_size`, `Cx::layout_with`), or follow it with `El::on_layout_tx` and a live value"
+            }
         case .handler(let name):
             who = "`\(name)` on \"\(subject)\"\(atSuffix)"
             fix = handlerFix(name)
@@ -213,7 +219,7 @@ public final class IdleMeter {
         }
     }
 
-    private enum WokeReason {
+    internal enum WokeReason: Equatable {
         case live(polled: Bool)
         case timer
         case timerLive
@@ -229,9 +235,19 @@ public final class IdleMeter {
         }
     }
 
-    private enum StreakState {
+    internal enum StreakState: Equatable {
         case watching
         case counting(from: Double, frames: UInt32, woke: WokeReason)
+    }
+
+    internal struct IdleReading {
+        var clock: Double
+        var quiet: Bool
+        var animating: Bool
+        var same: Bool?
+        var timer: Bool
+        var live: Bool
+        var polled: Bool
     }
 
     private struct Start {
@@ -313,21 +329,36 @@ public final class IdleMeter {
         live: Bool,
         polled: Bool
     ) -> (WokeReason, Double)? {
-        if !quiet || animating || same == false {
-            idleStreak = .watching
+        Self.stepIdleReading(
+            &idleStreak,
+            reading: IdleReading(
+                clock: clock,
+                quiet: quiet,
+                animating: animating,
+                same: same,
+                timer: timer,
+                live: live,
+                polled: polled
+            )
+        )
+    }
+
+    internal static func stepIdleReading(_ streak: inout StreakState, reading r: IdleReading) -> (WokeReason, Double)? {
+        if !r.quiet || r.animating || r.same == false {
+            streak = .watching
             return nil
         }
-        guard same != nil, (timer || live) else { return nil }
+        guard r.same != nil, (r.timer || r.live) else { return nil }
 
         let from: Double
         let prevFrames: UInt32
         let prevWoke: WokeReason?
-        if case let .counting(f, cnt, w) = idleStreak, !(clock - f > Self.idleSecondsThreshold) {
+        if case let .counting(f, cnt, w) = streak, !(r.clock - f > Self.idleSecondsThreshold) {
             from = f
             prevFrames = cnt
             prevWoke = w
         } else {
-            from = clock
+            from = r.clock
             prevFrames = 0
             prevWoke = nil
         }
@@ -348,9 +379,9 @@ public final class IdleMeter {
             (hadTimer, hadLive, hadPolled) = (false, false, false)
         }
 
-        let isTimer = timer || hadTimer
-        let isLive = live || hadLive
-        let isPolled = polled || hadPolled
+        let isTimer = r.timer || hadTimer
+        let isLive = r.live || hadLive
+        let isPolled = r.polled || hadPolled
         let nextWoke: WokeReason
         switch (isTimer, isLive, isPolled) {
         case (true, _, true): nextWoke = .timerPoll
@@ -360,9 +391,9 @@ public final class IdleMeter {
         }
 
         let nextFrames = prevFrames + 1
-        idleStreak = .counting(from: from, frames: nextFrames, woke: nextWoke)
+        streak = .counting(from: from, frames: nextFrames, woke: nextWoke)
         if nextFrames == Self.idleFramesThreshold {
-            return (nextWoke, clock - from)
+            return (nextWoke, r.clock - from)
         }
         return nil
     }
@@ -384,6 +415,19 @@ public enum PerfRunQ {
         #else
         return false
         #endif
+    }
+
+    /// Returns per-thread run-queue wait time (ms) where the OS exposes it; `nil` on Darwin.
+    public static func waitMs() -> Double? {
+        #if os(Linux)
+        if let raw = try? String(contentsOfFile: "/proc/thread-self/schedstat", encoding: .utf8) {
+            let parts = raw.split(whereSeparator: \.isWhitespace)
+            if parts.count >= 2, let waitNs = UInt64(parts[1]) {
+                return Double(waitNs) / 1_000_000.0
+            }
+        }
+        #endif
+        return nil
     }
 
     /// Computes blocked wall ms if the callback blocked rather than computed or waited in the run queue.
@@ -425,9 +469,79 @@ public enum PerfWarn {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var warnedSites: Set<String> = []
     nonisolated(unsafe) private static var capturedLog: [String] = []
+    nonisolated(unsafe) internal static var testEnabledOverride: Bool? = nil
 
     public static var isEnabled: Bool {
-        ProcessInfo.processInfo.environment["RUNE_PERF_WARN"] != "0"
+        if let override = testEnabledOverride {
+            return override
+        }
+        return ProcessInfo.processInfo.environment["RUNE_PERF_WARN"] != "0"
+    }
+
+    /// Returns the calling thread's user + system CPU time in milliseconds, when available.
+    public static func threadCpuMs() -> Double? {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS) || os(Linux)
+        return Rune.threadCpuMs()
+        #else
+        return nil
+        #endif
+    }
+
+    /// Times one app callback on the main thread and emits a single warning per site if blocked
+    /// on wall time rather than computing (`perf_warn::Stall`).
+    public struct Stall {
+        private let wallStartNs: UInt64?
+        private let cpuStartMs: Double?
+        private let waitStartMs: Double?
+
+        private init(wallStartNs: UInt64?, cpuStartMs: Double?, waitStartMs: Double?) {
+            self.wallStartNs = wallStartNs
+            self.cpuStartMs = cpuStartMs
+            self.waitStartMs = waitStartMs
+        }
+
+        public static func start() -> Stall {
+            guard PerfWarn.isEnabled, let cpu = PerfWarn.threadCpuMs() else {
+                return Stall(wallStartNs: nil, cpuStartMs: nil, waitStartMs: nil)
+            }
+            return Stall(
+                wallStartNs: DispatchTime.now().uptimeNanoseconds,
+                cpuStartMs: cpu,
+                waitStartMs: PerfRunQ.waitMs()
+            )
+        }
+
+        public func end(overloaded: Bool? = nil, _ what: () -> (site: String, name: String)) {
+            guard let wallStartNs, let cpuStartMs else { return }
+            let nowNs = DispatchTime.now().uptimeNanoseconds
+            let wallMs = Double(nowNs >= wallStartNs ? nowNs - wallStartNs : 0) / 1_000_000.0
+            guard wallMs > PerfRunQ.stallMs else { return }
+            let cpuMs = max(0.0, (PerfWarn.threadCpuMs() ?? cpuStartMs) - cpuStartMs)
+            let waitedMs = waitStartMs.flatMap { start in PerfRunQ.waitMs().map { max(0.0, $0 - start) } }
+            let isLoaded = overloaded ?? (waitedMs == nil && PerfRunQ.overloaded())
+            guard let blocked = PerfRunQ.blockedMs(wallMs: wallMs, cpuMs: cpuMs, waitMs: waitedMs, loaded: isLoaded) else {
+                return
+            }
+            let (site, name) = what()
+            PerfWarn.warnOnce(site: "stall \(site)") {
+                let queuedPart = (waitedMs.flatMap { $0 >= 1.0 ? $0 : nil }).map { String(format: ", waited %.0f ms for a core", $0) } ?? ""
+                return String(
+                    format: "%@ blocked %.0f ms (CPU %.0f ms%@) on the main thread: move IO off it with `rune::Latest` or a thread",
+                    name, blocked, cpuMs, queuedPart
+                )
+            }
+        }
+
+        public static func timed<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
+            let stall = Stall.start()
+            defer {
+                stall.end {
+                    let displayName = name.contains(" ") ? name : "`\(name)`"
+                    return (site: name, name: displayName)
+                }
+            }
+            return try body()
+        }
     }
 
     public static func warnOnce(site: String, message: () -> String) {
@@ -458,6 +572,7 @@ public enum PerfWarn {
         lock.lock()
         warnedSites.removeAll()
         capturedLog.removeAll()
+        testEnabledOverride = nil
         lock.unlock()
     }
 

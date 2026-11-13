@@ -198,13 +198,14 @@ public enum ToolingProcessArgs {
         "--snap", "--scene", "--playground", "--variant", "--crop", "--at", "--size", "--scale",
         "--theme", "--script", "--frames", "--out", "--every", "--fps", "--strip", "--cols",
         "--tree", "--trace", "--video", "--window", "--desktop", "--html", "--html-widths",
-        "--html-template", "--duration", "--start", "--keys", "--keys-theme", "--scroll-bars",
+        "--html-template", "--duration", "--start", "--keys-theme", "--scroll-bars",
+        "--time-scale", "--cpu-boot", "--cpu-boot-threads",
     ]
 
     private static let knownBoolFlags: Set<String> = [
         "--list-scenes", "--list-windows", "--whole-window", "--trace-all", "--chrome",
-        "--realtime", "--cpu", "--dark", "--light", "--reduced-motion", "--first-pixels",
-        "--pointer", "--help", "-h",
+        "--realtime", "--cpu", "--force-cpu", "--dark", "--light", "--reduced-motion",
+        "--first-pixels", "--native", "--pointer", "--help", "-h",
     ]
 
     /// Extracts unrecognised CLI arguments while mirroring `Args::parse_from`.
@@ -215,13 +216,25 @@ public enum ToolingProcessArgs {
         var i = 0
         while i < argv.count {
             let a = argv[i]
-            if knownValueFlags.contains(a) {
+            if a == "--keys" {
+                if i + 1 < argv.count, KeycapsCorner.parse(argv[i + 1]) != nil {
+                    i += 2
+                } else {
+                    i += 1
+                }
+            } else if a == "--playground" {
+                if i + 1 < argv.count, !argv[i + 1].hasPrefix("-") {
+                    i += 2
+                } else {
+                    i += 1
+                }
+            } else if knownValueFlags.contains(a) {
                 i += 2
             } else if knownBoolFlags.contains(a) {
                 i += 1
             } else if a.hasPrefix("--") && a.contains("=") {
                 let prefix = String(a.prefix(while: { $0 != "=" }))
-                if knownValueFlags.contains(prefix) {
+                if knownValueFlags.contains(prefix) || prefix == "--keys" || prefix == "--playground" {
                     i += 1
                 } else {
                     extra.append(a)
@@ -255,17 +268,7 @@ public enum ToolingProcessArgs {
     /// Whether the process (or supplied `argv`) asks for an offscreen/headless tooling run.
     public static func isHeadless(argv: [String]? = nil) -> Bool {
         let tokens = argv ?? Array(CommandLine.arguments.dropFirst())
-        if ToolingArgs.parse(tokens).isHeadlessRequested {
-            return true
-        }
-        let extraHeadlessFlags: Set<String> = [
-            "--out", "--frames", "--video", "--trace", "--html", "--desktop",
-            "--list-windows", "--keys", "--first-pixels",
-        ]
-        return tokens.contains { tok in
-            extraHeadlessFlags.contains(tok)
-                || extraHeadlessFlags.contains(where: { tok.hasPrefix("\($0)=") })
-        }
+        return ToolingArgs.parse(tokens).isHeadlessRequested
     }
 
     /// Resets cached extra args (for unit tests).
