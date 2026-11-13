@@ -304,36 +304,42 @@ enum TaffyBridge {
         return ts
     }
 
-    /// Upstream `unwrapped_width` (`runtime/commit.rs:195`): horizontal scroll content without a fixed
-    /// width takes `width: max-content; min-width: 100%` and never shrinks.
+    /// Upstream `unwrapped_width` (`runtime/commit.rs:195`, `flatten.rs:196`): horizontal scroll
+    /// content without a fixed width takes `width: max-content` and never shrinks. `.single` sets
+    /// `min-width: 100%` for `w.isAuto || wFull`; `.many` only sets it for `wFull` (`w == 100%`)
+    /// so multiple auto-width siblings don't expand to 100% each.
     static func applyScrollXChild(_ style: inout RuneTaffy.TaffyStyle, _ sx: ScrollXChild) {
+        let vertical: Bool
+        let setMinWidthFull: Bool
+        let w = style.size.width
+        let wFull = (w == .percent(1.0))
         switch sx {
-        case .single(let vertical), .many(let vertical):
-            let w = style.size.width
-            let wFull = (w == .percent(1.0))
-            if w.isAuto || wFull {
-                style.size.width = .maxContent
-                if style.minSize.width.isAuto {
-                    style.minSize.width = .percent(1.0)
-                }
+        case .single(let v):
+            vertical = v
+            setMinWidthFull = (w.isAuto || wFull)
+        case .many(let v):
+            vertical = v
+            setMinWidthFull = wFull
+        }
+        if w.isAuto || wFull {
+            style.size.width = .maxContent
+            if setMinWidthFull && style.minSize.width.isAuto {
+                style.minSize.width = .percent(1.0)
             }
-            style.flexShrink = 0.0
-            if vertical && style.alignSelf == nil {
-                style.alignSelf = .flexStart
-            }
+        }
+        style.flexShrink = 0.0
+        if vertical && style.alignSelf == nil {
+            style.alignSelf = .flexStart
         }
     }
 
     /// Upstream `fit_room` (`runtime/commit/flatten.rs:10`): first-pass room box for `aspect_fit`.
-    /// Cross axis stays `.auto` (so parent cross stretching and `maxSize` bounds still govern it)
-    /// while main axis takes `mainMax` (or `0` basis with `flexGrow = 1` so content never sizes the room).
+    /// Preserves `raw.maxSize` on both axes while setting `flexGrow = 1`, `flexShrink = 1`,
+    /// `flexBasis = 0` when `mainMax` is auto so content never sizes the room.
     static func fitRoomStyle(raw: RuneTaffy.TaffyStyle, parentRow: Bool) -> RuneTaffy.TaffyStyle {
         var s = raw
         let mainMax = parentRow ? raw.maxSize.width : raw.maxSize.height
-        s.size = RuneTaffy.Size(
-            width: parentRow ? mainMax : .auto,
-            height: parentRow ? .auto : mainMax
-        )
+        s.size = raw.maxSize
         s.minSize = RuneTaffy.Size(
             width: raw.minSize.width.isAuto ? .length(0) : raw.minSize.width,
             height: raw.minSize.height.isAuto ? .length(0) : raw.minSize.height

@@ -345,4 +345,29 @@ struct LayoutParityTests {
         #expect(approx(targetRect(rt, "fixed")[2], 60))
         #expect(approx(targetRect(rt, "shrunk")[2], 20))
     }
+
+    @Test("scroll_x: multiple auto-width siblings keep intrinsic widths")
+    func scrollXMultipleAutoWidthSiblingsKeepIntrinsicWidths() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 60), pixelScale: 1.0) { _, _ in
+            row().key("strip").size(200, 60).scrollX()
+                .child(row().key("a").child(el().size(30, 20)))
+                .child(row().key("b").child(el().size(45, 20)))
+        }
+        _ = rt.frame(at: 0)
+        let a = targetRect(rt, "a")
+        let b = targetRect(rt, "b")
+        #expect(approx(a[0], 0) && approx(a[2], 30))
+        #expect(approx(b[0], 30) && approx(b[2], 45))
+    }
+
+    @Test("aspect_fit: non-stretching parent preserves both maxW and maxH room bounds")
+    func aspectFitNonStretchingPreservesBothMaxBounds() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 200), pixelScale: 1.0) { _, _ in
+            col().wFull().hFull().itemsStart()
+                .child(el().key("fit").maxW(100).maxH(80).aspectFit(2))
+        }
+        _ = rt.frame(at: 0)
+        let r = targetRect(rt, "fit")
+        #expect(approx(r[2], 100) && approx(r[3], 50))
+    }
 }
