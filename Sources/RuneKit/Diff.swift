@@ -2306,10 +2306,14 @@ public struct DiffView<State>: Sendable {
 
         var container = El<State>(direction: .column)
             .key(key)
+            .wFull()
             .bg(k.c.surfaceBase)
             .border(1, k.c.borderMuted)
             .rounded(k.radius.md)
             .clip()
+        if look.viewportHeight == 0 && cx.viewport.y > 0 {
+            container = container.maxH(cx.viewport.y)
+        }
 
         if filesToRender.count == 1 {
             let fIdx = 0
@@ -2358,6 +2362,12 @@ public struct DiffView<State>: Sendable {
                 .key("\(key)-body")
                 .wFull()
                 .scrollXY()
+            if look.viewportHeight > 0 {
+                body = body.maxH(look.viewportHeight)
+            } else if cx.viewport.y > 0 {
+                let avail = max(0, cx.viewport.y - (look.showHeader ? DiffLayout.headerHeight : 0) - 2)
+                body = body.maxH(avail).shrink(1)
+            }
 
             if win.beforeHeight > 0 {
                 body = body.child(El<State>(direction: .row).key("\(key)-before").wFull().h(win.beforeHeight).shrink(0))
@@ -2396,34 +2406,80 @@ public struct DiffView<State>: Sendable {
             .key("\(key)-body")
             .wFull()
             .scrollXY()
+        if look.viewportHeight > 0 {
+            stack = stack.maxH(look.viewportHeight)
+        } else if cx.viewport.y > 0 {
+            stack = stack.maxH(max(0, cx.viewport.y - 2)).shrink(1)
+        }
 
         for (fIdx, diff) in filesToRender.enumerated() {
             let prefix = filePrefix(fIdx)
             let lang = diff.language
             let gutterDigits = diff.columns
             let gutterWidth = Float(gutterDigits) * 8.5 + 16
+            let headerW: Float? = cx.viewport.x > 2 ? (cx.viewport.x - 2) : nil
 
-            if look.showHeader {
-                stack = stack.child(buildHeader(hostState: hostState, fileIndex: fIdx, state: st, diff: diff, addColor: addColor, delColor: delColor))
-            }
             if diff.isBinary {
-                stack = stack.child(
+                var fileSection = El<State>(direction: .column).minWFrac(1.0).shrink(0)
+                if look.showHeader {
+                    fileSection = fileSection.child(
+                        El<State>(direction: .column)
+                            .wFull()
+                            .shrink(0)
+                            .stickyTop()
+                            .child(buildHeader(hostState: hostState, fileIndex: fIdx, state: st, diff: diff, addColor: addColor, delColor: delColor, fixedWidth: headerW))
+                    )
+                }
+                fileSection = fileSection.child(
                     El<State>(direction: .row).key("\(prefix)-binary").px(12).py(12)
                         .child(text("Binary file changed — diff preview unavailable").font(k.ty.caption()).color(k.c.textMuted))
                 )
+                stack = stack.child(fileSection)
                 continue
             }
-            if st.collapsed(file: fIdx) { continue }
-            let rows = st.rows(file: fIdx)
+            let rows = st.collapsed(file: fIdx) ? [] : st.rows(file: fIdx)
+            let maxCols: Int = st.wrap ? 0 : rows.reduce(0) { best, row in
+                switch row {
+                case let .unified(line, _, _): return max(best, line.text.count)
+                case let .splitPair(o, n, _, _): return max(best, o.text.count + n.text.count)
+                case let .splitOnly(line): return max(best, line.text.count)
+                case .gap, .annotation: return best
+                }
+            }
+            let contentMinW: Float = maxCols > 0 ? (Float(maxCols) * 7.5 + 2 * gutterWidth + 60) : 0
+
+            var fileSection = El<State>(direction: .column)
+                .minWFrac(1.0)
+                .shrink(0)
+            if contentMinW > (headerW ?? 0) {
+                fileSection = fileSection.minW(contentMinW)
+            }
+            if look.showHeader {
+                var headerWrap = El<State>(direction: .column)
+                    .wFull()
+                    .shrink(0)
+                    .stickyTop()
+                if contentMinW > (headerW ?? 0) {
+                    headerWrap = headerWrap.minW(contentMinW)
+                }
+                fileSection = fileSection.child(
+                    headerWrap.child(buildHeader(hostState: hostState, fileIndex: fIdx, state: st, diff: diff, addColor: addColor, delColor: delColor, fixedWidth: headerW, stickyLeft: true))
+                )
+            }
+            if st.collapsed(file: fIdx) {
+                stack = stack.child(fileSection)
+                continue
+            }
             if rows.isEmpty {
-                stack = stack.child(
+                fileSection = fileSection.child(
                     El<State>(direction: .row).key("\(prefix)-empty").px(12).py(10)
                         .child(text("No changes").font(k.ty.caption()).color(k.c.textMuted))
                 )
+                stack = stack.child(fileSection)
                 continue
             }
             for rowIdx in rows.indices {
-                stack = stack.child(renderRow(
+                fileSection = fileSection.child(renderRow(
                     hostState: hostState,
                     fileIndex: fIdx,
                     prefix: prefix,
@@ -2442,6 +2498,7 @@ public struct DiffView<State>: Sendable {
                     selBg: selBg
                 ))
             }
+            stack = stack.child(fileSection)
         }
         return container.child(stack)
     }
@@ -2532,7 +2589,7 @@ public struct DiffView<State>: Sendable {
 
     // MARK: Header
 
-    private func buildHeader(hostState: State?, fileIndex: Int, state st: DiffState, diff: FileDiff, addColor: Color, delColor: Color) -> El<State> {
+    private func buildHeader(hostState: State?, fileIndex: Int, state st: DiffState, diff: FileDiff, addColor: Color, delColor: Color, fixedWidth: Float? = nil, stickyLeft: Bool = false) -> El<State> {
         let k = kit
         let prefix = filePrefix(fileIndex)
         let collapsed = st.collapsed(file: fileIndex)
@@ -2656,12 +2713,11 @@ public struct DiffView<State>: Sendable {
         }
 
         let headerLabel = "\(diff.path), \(diff.additionsCount) added, \(diff.deletionsCount) removed"
-        return El<State>(direction: .row)
+        var hdr = El<State>(direction: .row)
             .key("\(prefix)-header")
             .role(.heading)
             .label(headerLabel)
-            .stickyTop()
-            .stickyLeft(0)
+            .shrink(0)
             .h(DiffLayout.headerHeight)
             .px(12)
             .itemsCenter()
@@ -2676,6 +2732,8 @@ public struct DiffView<State>: Sendable {
                     .child(statusBadge)
             )
             .child(actionsRow)
+        if stickyLeft { hdr = hdr.stickyLeft(0) }
+        return if let fixedWidth { hdr.w(fixedWidth) } else { hdr.wFull() }
     }
 
     // MARK: Gap & Annotation Rows

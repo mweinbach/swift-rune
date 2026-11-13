@@ -1039,7 +1039,7 @@ struct DiffParityTests {
         #expect(DiffViewHelpers.rowLabel(ctx, side: .new) == "unchanged line 11: keep")
     }
 
-    @Test("tests/diff.rs: note coords in unified & split (#175)")
+    @Test("tests/diff.rs: stacked note coords in unified & split (#175)")
     @MainActor
     func diffRuntimeNoteCoordsParity() {
         struct AppState: Sendable {
@@ -1048,168 +1048,406 @@ struct DiffParityTests {
         }
 
         let kit = Kit.neutral(dark: false)
-        let oldText = (1...20).map { "func line\($0)() -> Int { return \($0) }" }.joined(separator: "\n")
-        var newLines = (1...20).map { "func line\($0)() -> Int { return \($0) }" }
-        newLines[1] = "func line2Changed() -> Int { return 999 }"
-        let fileDiff = FileDiff.fromTexts(path: "Sources/Demo.swift", old: oldText, new: newLines.joined(separator: "\n"), context: 3)
+        let numberedOld = (1...30).map { "let value_\($0) = compute(\($0));" }.joined(separator: "\n")
+        var numberedNewArr = (1...30).map { "let value_\($0) = compute(\($0));" }
+        numberedNewArr[9] = "let value_10 = compute(10) + 1;"
+        let fileDiff = FileDiff.fromTexts(path: "a.rs", old: numberedOld, new: numberedNewArr.joined(separator: "\n"))
+        let rows = DiffState(diff: fileDiff).rows(file: 0)
+        let r9Idx = rows.firstIndex(where: { $0.lineRef(for: .unified)?.line == 9 })!
+        let r10NewIdx = rows.firstIndex(where: { if case let .unified(l, _, _) = $0 { return l.kind == .addition && l.newNumber == 10 }; return false })!
+        let r11Idx = rows.firstIndex(where: { $0.lineRef(for: .unified)?.line == 11 })!
 
-        for mode in [DiffMode.unified, DiffMode.split] {
-            let st = AppState(
-                diff: DiffState(
-                    diff: fileDiff,
-                    mode: mode,
-                    annotations: [DiffAnnotation(id: "note-1", file: 0, side: .new, line: 2, author: "rev", body: "Check name")]
-                )
+        let unifiedState = AppState(
+            diff: DiffState(
+                diff: fileDiff,
+                mode: .unified,
+                annotations: [
+                    DiffAnnotation(id: "c1", file: 0, side: .new, line: 10, body: "c1"),
+                    DiffAnnotation(id: "c2", file: 0, side: .new, line: 10, body: "c2"),
+                ]
             )
-            let rt = Runtime<AppState>(
-                state: st,
-                viewport: Vec2(720, 420),
-                view: { s, cx in
-                    DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
-                        .viewportHeight(360)
-                        .annotation { _, a in
-                            El<AppState>(direction: .row).key("custom-note-\(a.id)").h(88)
-                                .child(text(a.body))
-                        }
-                        .onLineClick { st, ref, _ in
-                            st.toggledNote.toggle()
-                            if st.toggledNote {
-                                st.diff.annotations.append(DiffAnnotation(id: "note-clicked", file: 0, side: ref.side, line: ref.line, body: "Added"))
-                            } else {
-                                st.diff.annotations.removeAll { $0.id == "note-clicked" }
-                            }
-                        }
-                        .build(state: s, cx: cx)
-                }
-            )
-            _ = rt.frame(at: 0.01)
-            let noteEl = rt.element(byKey: "custom-note-note-1")
-            #expect(noteEl != nil)
-            let targetKey = (mode == .unified) ? "dv-n-2" : "dv-sn-1"
-            let cell = rt.element(byKey: targetKey)
-            #expect(cell != nil)
-            if let noteRect = noteEl?.rect, noteRect.count == 4,
-               let cellRect = cell?.rect, cellRect.count == 4 {
-                #expect(noteRect[1] >= cellRect[1])
-                if mode == .split {
-                    // Split mode right-side note sits on the right half (`x >= cellRect[0] - 10`)
-                    #expect(noteRect[0] >= 350)
-                }
-                let pt = Vec2(cellRect[0] + cellRect[2] * 0.5, cellRect[1] + cellRect[3] * 0.5)
-                rt.pointerDown(at: pt, at: 0.02)
-                rt.pointerUp(at: pt, at: 0.03)
-                _ = rt.frame(at: 0.04)
-                #expect(rt.state.toggledNote == true)
-                #expect(rt.element(byKey: "custom-note-note-clicked") != nil)
-            }
-        }
-    }
-
-    @Test("tests/diff.rs: virtualization with tall notes (#176), drag/escape (#178, #180), sticky header & gutter (#179, #181), labels & hunks (#182), PerfWarn (#184-#185)")
-    @MainActor
-    func diffRuntimeVirtualDragStickyAndPerfWarnParity() {
-        struct AppState: Sendable {
-            var diff: DiffState
-            var selected: DiffLineRange? = nil
-        }
-
-        let kit = Kit.neutral(dark: false)
-        let oldText = (1...80).map { "func line\($0)() -> Int { return \($0) }" }.joined(separator: "\n")
-        var newLines = (1...80).map { "func line\($0)() -> Int { return \($0) }" }
-        newLines[0] = "// changed header line that is super super wide so horizontal scrolling can be exercised thoroughly in runtime viewports"
-        newLines[1] = "func line2Changed() -> Int { return 999 }"
-        newLines[75] = "func line76() -> Int { return -1 }"
-
-        PerfWarn.resetForTesting()
-        let bigDiff = FileDiff.fromTexts(
-            path: "Sources/Big.swift",
-            old: oldText,
-            new: newLines.joined(separator: "\n"),
-            context: 60
         )
         let rt = Runtime<AppState>(
-            state: AppState(diff: DiffState(
-                diff: bigDiff,
-                annotations: [DiffAnnotation(id: "tall", file: 0, side: .new, line: 4, body: "Tall note")]
-            )),
-            viewport: Vec2(360, 320),
-            onKey: { state, ev, tx in
-                state.diff.key(ev, keyPrefix: "dv", tx: &tx)
-            },
+            state: unifiedState,
+            viewport: Vec2(900, 1200),
             view: { s, cx in
-                El<AppState>(direction: .column).wFull().hFull()
-                    .child(
-                        DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
-                            .viewportHeight(220)
-                            .annotation { _, a in
-                                El<AppState>(direction: .row).key("tall-\(a.id)").h(110).child(text(a.body))
-                            }
-                            .onSelect { state, range, _ in
-                                state.selected = range
-                            }
-                            .build(state: s, cx: cx)
-                    )
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .viewportHeight(1100)
+                    .onLineClick { st, ref, _ in
+                        st.toggledNote.toggle()
+                        if st.toggledNote {
+                            st.diff.annotations.append(DiffAnnotation(id: "clicked", file: 0, side: ref.side, line: ref.line, body: "Added"))
+                        } else {
+                            st.diff.annotations.removeAll { $0.id == "clicked" }
+                        }
+                    }
+                    .build(state: s, cx: cx)
             }
         )
         _ = rt.frame(at: 0.01)
 
-        // #176: virtualization skips bottom rows out of viewport
-        #expect(rt.element(byKey: "dv-row-0") != nil)
-        #expect(rt.element(byKey: "dv-row-75") == nil)
-        let tall = rt.element(byKey: "tall-tall")
-        #expect(tall != nil)
-        #expect(abs((tall?.rect[3] ?? 0) - 110) < 2)
+        // Note rows inserted after row indices: compute indices with annotations present
+        let uRows = rt.state.diff.rows(file: 0)
+        let uLine10Idx = uRows.firstIndex(where: { if case let .unified(l, _, _) = $0 { return l.kind == .addition && l.newNumber == 10 }; return false }) ?? r10NewIdx
+        let uLine9Idx = uRows.firstIndex(where: { $0.lineRef(for: .unified)?.line == 9 }) ?? r9Idx
+        let uLine11Idx = uRows.firstIndex(where: { $0.lineRef(for: .unified)?.line == 11 }) ?? r11Idx
 
-        // #182: accessible heading label + row labels
-        let heading = rt.elements().first(where: { $0.role == .heading })
-        #expect(heading?.label?.contains("Sources/Big.swift") == true)
-        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("removed line ") == true }))
-        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("added line ") == true }))
-        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("unchanged line ") == true }))
-
-        // #180 & #178: press line 2, drag to line 4, Escape during drag cancels without firing onSelect
-        if let n1 = rt.element(byKey: "dv-n-1"), let n3 = rt.element(byKey: "dv-n-3"),
-           n1.rect.count == 4, n3.rect.count == 4 {
-            let p1 = Vec2(n1.rect[0] + n1.rect[2] * 0.5, n1.rect[1] + n1.rect[3] * 0.5)
-            let p3 = Vec2(n3.rect[0] + n3.rect[2] * 0.5, n3.rect[1] + n3.rect[3] * 0.5)
-            rt.pointerMove(to: p1, at: 0.05)
-            rt.pointerDown(at: p1, at: 0.06)
-            rt.pointerMove(to: p3, at: 0.07)
-            _ = rt.keyDown(KeyEvent(key: .escape), at: 0.08)
-            rt.pointerUp(at: p3, at: 0.09)
-            _ = rt.frame(at: 0.10)
-            #expect(rt.state.selected == nil)
-            #expect(rt.state.diff.selectedRange == nil)
+        let line10 = rt.element(byKey: "dv-row-\(uLine10Idx)")
+        let line9 = rt.element(byKey: "dv-row-\(uLine9Idx)")
+        let line11 = rt.element(byKey: "dv-row-\(uLine11Idx)")
+        let c1 = rt.element(byKey: "dv-note-c1")
+        let c2 = rt.element(byKey: "dv-note-c2")
+        #expect(line10 != nil && line9 != nil && line11 != nil && c1 != nil && c2 != nil)
+        if let line10, let line9, let line11, let c1, let c2 {
+            #expect(line10.rect[3] == 20.0)
+            #expect(abs(line9.rect[2] - 898.0) <= 2.5)
+            #expect(abs(c1.rect[1] - (line10.rect[1] + line10.rect[3])) < 0.5)
+            #expect(abs(c2.rect[1] - (c1.rect[1] + c1.rect[3])) < 0.5)
+            #expect(abs(line11.rect[1] - (c2.rect[1] + c2.rect[3])) < 0.5)
         }
 
-        // #179 & #181: horizontal scroll keeps header & unified gutter pinned at left edge (`stickyLeft(0)`) & press still selects
-        if let body = rt.element(byKey: "dv-body"), body.rect.count == 4 {
-            let hdrBefore = rt.element(byKey: "dv-header")?.rect[0]
-            let center = Vec2(body.rect[0] + body.rect[2] * 0.5, body.rect[1] + 60)
-            rt.wheel(WheelEvent(dx: -120, dy: 0), at: center, now: 0.12)
-            _ = rt.frame(at: 0.13)
-            if let hdrAfter = rt.element(byKey: "dv-header")?.rect[0], let hdrBefore {
-                #expect(abs(hdrAfter - hdrBefore) < 2.0)
+        // Split mode: annotation sits directly under the split pair row and on the right half
+        rt.update(at: 0.02) { s, _ in s.diff.setMode(.split) }
+        _ = rt.frame(at: 0.03)
+        let sRows = rt.state.diff.rows(file: 0)
+        let sPairIdx = sRows.firstIndex(where: { if case let .splitPair(_, n, _, _) = $0 { return n.newNumber == 10 }; return false })!
+        let sRow = rt.element(byKey: "dv-srow-\(sPairIdx)")
+        let sC1 = rt.element(byKey: "dv-note-c1")
+        #expect(sRow != nil && sC1 != nil)
+        if let sRow, let sC1 {
+            #expect(abs(sC1.rect[1] - (sRow.rect[1] + sRow.rect[3])) < 0.5)
+            // note container fills row width, with right-half child inside (`subview at x >= 449`)
+            let rightHalf = rt.elements().first(where: { $0.path.hasPrefix(sC1.path + "/") && $0.rect[0] >= 445.0 })
+            #expect(rightHalf != nil)
+            if let sn = rt.element(byKey: "dv-sn-\(sPairIdx)") {
+                let pt = Vec2(sn.rect[0] + sn.rect[2] * 0.5, sn.rect[1] + sn.rect[3] * 0.5)
+                rt.pointerDown(at: pt, at: 0.04)
+                rt.pointerUp(at: pt, at: 0.05)
+                _ = rt.frame(at: 0.06)
+                #expect(rt.state.toggledNote == true)
+                #expect(rt.element(byKey: "dv-note-clicked") != nil)
             }
-            let gutter = rt.element(byKey: "dv-gutter-1")
-            #expect(gutter != nil)
-            if let g = gutter, let b = rt.element(byKey: "dv-body") {
-                #expect(abs(g.rect[0] - b.rect[0]) < 2.0)
+        }
+    }
+
+    @Test("tests/diff.rs: 4000-line/40-note virtualization (#176), gutter drag/plus/Escape (#178, #180), sticky header/actions/resize (#179), stuck gutter (#181), labels & 3-file nav (#182), PerfWarn (#184-#185)")
+    @MainActor
+    func diffRuntimeVirtualDragStickyAndPerfWarnParity() {
+        struct AppState: Sendable {
+            var diff: DiffState
+            var selections: [DiffLineRange?] = []
+            var comments: [DiffLineRange] = []
+            var actions: [Int] = []
+        }
+
+        let kit = Kit.neutral(dark: false)
+
+        // 1. #176: 4000-line diff with 40 annotations builds < 100 initial rows, scrolls to bottom & back to top
+        func makeNumbered(_ total: Int, every: Int) -> (String, String) {
+            let old = (1...total).map { "let value_\($0) = compute(\($0));" }.joined(separator: "\n")
+            let new = (1...total).map { i in
+                (i % every == 0) ? "let value_\(i) = compute(\(i)) + 1;" : "let value_\(i) = compute(\(i));"
+            }.joined(separator: "\n")
+            return (old, new)
+        }
+        let (bigOld, bigNew) = makeNumbered(4000, every: 3)
+        let bigFile = FileDiff.fromTexts(path: "long.rs", old: bigOld, new: bigNew, context: 4000)
+        let bigAnns = (1...40).map { i in
+            DiffAnnotation(id: "n\(i)", file: 0, side: .new, line: UInt32(i * 99), author: "rev", body: "n\(i)")
+        }
+        let vRT = Runtime<AppState>(
+            state: AppState(diff: DiffState(diff: bigFile, annotations: bigAnns)),
+            viewport: Vec2(800, 650),
+            view: { s, cx in
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .viewportHeight(600)
+                    .build(state: s, cx: cx)
             }
-            if let cell = rt.element(byKey: "dv-o-0"), cell.rect.count == 4 {
-                let pt = Vec2(cell.rect[0] + cell.rect[2] * 0.5, cell.rect[1] + cell.rect[3] * 0.5)
-                rt.pointerDown(at: pt, at: 0.14)
-                rt.pointerUp(at: pt, at: 0.15)
-                _ = rt.frame(at: 0.16)
-                #expect(rt.state.selected != nil)
+        )
+        var vt = 0.01
+        _ = vRT.frame(at: vt)
+        let initBuiltRows = vRT.elements().filter { ($0.key ?? "").hasPrefix("dv-row-") }.count
+        #expect(initBuiltRows > 0 && initBuiltRows < 100)
+        let vTotalRows = vRT.state.diff.rows(file: 0).count
+        let lastRowKey = "dv-row-\(vTotalRows - 1)"
+        #expect(vRT.element(byKey: lastRowKey) == nil)
+        for _ in 0..<40 {
+            vRT.wheel(WheelEvent(dx: 0, dy: -100_000), at: Vec2(400, 300), now: vt)
+            vt += 1.0 / 120.0
+            _ = vRT.frame(at: vt)
+        }
+        for _ in 0..<120 { vt += 1.0 / 120.0; _ = vRT.frame(at: vt) }
+        if let vBody = vRT.element(byKey: "dv-body"), let lastRow = vRT.element(byKey: lastRowKey) {
+            #expect(abs((lastRow.rect[1] + lastRow.rect[3]) - (vBody.rect[1] + vBody.rect[3])) < 4.0)
+        } else {
+            Issue.record("Expected bottom row \(lastRowKey) after scrolling 4000-line diff")
+        }
+        let bottomBuiltRows = vRT.elements().filter { ($0.key ?? "").hasPrefix("dv-row-") }.count
+        #expect(bottomBuiltRows < 160)
+        if let note40 = vRT.element(byKey: "dv-note-n40"),
+           let idx3960 = vRT.state.diff.rows(file: 0).firstIndex(where: { if case let .unified(l, _, _) = $0 { return l.kind == .addition && l.newNumber == 3960 }; return false }),
+           let line3960 = vRT.element(byKey: "dv-row-\(idx3960)") {
+            #expect(abs(note40.rect[1] - (line3960.rect[1] + line3960.rect[3])) < 0.5)
+        }
+        for _ in 0..<40 {
+            vRT.wheel(WheelEvent(dx: 0, dy: 100_000), at: Vec2(400, 300), now: vt)
+            vt += 1.0 / 120.0
+            _ = vRT.frame(at: vt)
+        }
+        for _ in 0..<120 { vt += 1.0 / 120.0; _ = vRT.frame(at: vt) }
+        if let vBody = vRT.element(byKey: "dv-body"), let row0 = vRT.element(byKey: "dv-row-0") {
+            #expect(abs(row0.rect[1] - vBody.rect[1]) < 2.0)
+        }
+
+        // 2. #178 & #180: line numbers select, drag 3->5, '+' comments selection vs single line, Escape clears & cancels drag
+        let (selOld, selNew) = makeNumbered(20, every: 5)
+        let selDiff = FileDiff.fromTexts(path: "a.rs", old: selOld, new: selNew, context: 20)
+        let selRT = Runtime<AppState>(
+            state: AppState(diff: DiffState(diff: selDiff)),
+            viewport: Vec2(800, 900),
+            onKey: { st, ev, tx in st.diff.key(ev, keyPrefix: "dv", tx: &tx) },
+            view: { s, cx in
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .viewportHeight(840)
+                    .onSelect { st, r, _ in st.selections.append(r) }
+                    .onComment { st, r, _ in st.comments.append(r) }
+                    .build(state: s, cx: cx)
+            }
+        )
+        let selRows = selRT.state.diff.rows(file: 0)
+        func rowIdx(line: Int, additionPreferred: Bool = false) -> Int {
+            if additionPreferred,
+               let idx = selRows.firstIndex(where: { if case let .unified(l, _, _) = $0 { return l.kind == .addition && l.newNumber == line }; return false }) {
+                return idx
+            }
+            return selRows.firstIndex(where: { $0.lineRef(for: .unified)?.line == UInt32(line) })!
+        }
+        var st = 0.01
+        _ = selRT.frame(at: st)
+        let r3 = rowIdx(line: 3)
+        let r4 = rowIdx(line: 4)
+        let r5 = rowIdx(line: 5, additionPreferred: true)
+        let r9 = rowIdx(line: 9)
+        if let n3 = selRT.element(byKey: "dv-n-\(r3)"), let n5 = selRT.element(byKey: "dv-n-\(r5)") {
+            let p3 = Vec2(n3.rect[0] + n3.rect[2] * 0.5, n3.rect[1] + 10)
+            selRT.pointerDown(at: p3, at: st); st += 0.01
+            selRT.pointerUp(at: p3, at: st); st += 0.01
+            _ = selRT.frame(at: st)
+            let three = DiffLineRange(start: DiffLineRef(side: .new, line: 3), end: DiffLineRef(side: .new, line: 3))
+            #expect(selRT.state.diff.selectedRange == three)
+            #expect(selRT.state.selections == [three])
+
+            // Drag line 3 -> line 5
+            let x = n3.rect[0] + n3.rect[2] * 0.5
+            let y0 = n3.rect[1] + 10
+            let y1 = n5.rect[1] + 10
+            selRT.pointerDown(at: Vec2(x, y0), at: st); st += 0.01
+            for step in 1...6 {
+                selRT.pointerMove(to: Vec2(x, y0 + (y1 - y0) * Float(step) / 6.0), at: st); st += 0.01
+                _ = selRT.frame(at: st)
+            }
+            selRT.pointerUp(at: Vec2(x, y1), at: st); st += 0.01
+            _ = selRT.frame(at: st)
+            let range35 = DiffLineRange(start: DiffLineRef(side: .new, line: 3), end: DiffLineRef(side: .new, line: 5))
+            #expect(selRT.state.diff.selectedRange == range35)
+            #expect(selRT.state.selections.last == .some(range35))
+
+            // '+' on selected line 4 comments on range35; on line 9 comments on line 9 alone
+            if let p4 = selRT.element(byKey: "dv-n-\(r4)-plus") {
+                let c4 = Vec2(p4.rect[0] + p4.rect[2] * 0.5, p4.rect[1] + p4.rect[3] * 0.5)
+                selRT.pointerDown(at: c4, at: st); selRT.pointerUp(at: c4, at: st + 0.01); st += 0.02
+                _ = selRT.frame(at: st)
+                #expect(selRT.state.comments == [range35])
+            }
+            if let p9 = selRT.element(byKey: "dv-n-\(r9)-plus") {
+                let c9 = Vec2(p9.rect[0] + p9.rect[2] * 0.5, p9.rect[1] + p9.rect[3] * 0.5)
+                selRT.pointerDown(at: c9, at: st); selRT.pointerUp(at: c9, at: st + 0.01); st += 0.02
+                _ = selRT.frame(at: st)
+                let nine = DiffLineRange(start: DiffLineRef(side: .new, line: 9), end: DiffLineRef(side: .new, line: 9))
+                #expect(selRT.state.comments.count == 2 && selRT.state.comments[1] == nine)
+            }
+
+            // Escape clears selection
+            _ = selRT.keyDown(KeyEvent(key: .escape), at: st); st += 0.01
+            _ = selRT.frame(at: st)
+            #expect(selRT.state.diff.selectedRange == nil)
+
+            // #180: cancelling a gutter drag restores selection without notifying onSelect on pointerUp
+            let click3 = Vec2(n3.rect[0] + n3.rect[2] * 0.5, n3.rect[1] + 10)
+            selRT.pointerDown(at: click3, at: st); selRT.pointerUp(at: click3, at: st + 0.01); st += 0.02
+            _ = selRT.frame(at: st)
+            let originalSel = selRT.state.diff.selectedRange
+            let prevCount = selRT.state.selections.count
+            if let n4 = selRT.element(byKey: "dv-n-\(r4)") {
+                let dx = n4.rect[0] + n4.rect[2] * 0.5
+                let dy = n4.rect[1] + 10
+                selRT.pointerDown(at: Vec2(dx, dy), at: st); st += 0.01
+                selRT.pointerMove(to: Vec2(dx, dy + 40), at: st); st += 0.01
+                _ = selRT.frame(at: st)
+                _ = selRT.keyDown(KeyEvent(key: .escape), at: st); st += 0.01
+                _ = selRT.frame(at: st)
+                #expect(selRT.state.diff.selectedRange == originalSel)
+                #expect(selRT.state.selections.count == prevCount)
+                selRT.pointerUp(at: Vec2(dx, dy + 40), at: st); st += 0.01
+                _ = selRT.frame(at: st)
+                #expect(selRT.state.selections.count == prevCount)
             }
         }
 
-        // #184-#185: hovering across lines & scrolling emits zero PerfWarn warnings
+        // 3. #179: header spans viewport across resizes [800, 450, 600], horizontal scroll keeps header/actions fixed & clickable, vertical sticky header
+        let longLine = String(repeating: "x", count: 400)
+        func wideSource(_ suffix: String) -> String {
+            (0..<60).map { i in (i == 1) ? longLine : "let v\(i) = \(i % 2)\(suffix);" }.joined(separator: "\n")
+        }
+        let wideFiles = (0..<2).map { i in
+            FileDiff.fromTexts(path: "dir/f\(i).rs", old: wideSource(""), new: wideSource("+1"), context: 60)
+        }
+        let hdrRT = Runtime<AppState>(
+            state: AppState(diff: DiffState(files: wideFiles)),
+            viewport: Vec2(600, 400),
+            pixelScale: 2.0,
+            view: { s, cx in
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .headerActions { _, idx in
+                        El<AppState>(direction: .row)
+                            .key("act-\(idx)")
+                            .px(6).py(2)
+                            .onClick { st in st.actions.append(idx) }
+                            .child(text("Act"))
+                    }
+                    .build(state: s, cx: cx)
+            }
+        )
+        var ht = 0.0
+        _ = hdrRT.frame(at: ht)
+        func verifyHeader(width w: Float) {
+            if let hdr = hdrRT.element(byKey: "dv-header"),
+               let act = hdrRT.element(byKey: "dv-actions") {
+                #expect(abs(hdr.rect[0] - 1.0) <= 2.0 && abs(hdr.rect[2] - (w - 2.0)) <= 2.5)
+                #expect(act.rect[0] >= -0.5 && act.rect[0] + act.rect[2] <= w + 0.5 && act.rect[2] > 0)
+            } else {
+                Issue.record("Missing header/actions at width \(w)")
+            }
+        }
+        verifyHeader(width: 600)
+        for _ in 0..<2 {
+            hdrRT.wheel(WheelEvent(dx: -250, dy: 0), at: Vec2(300, 200), now: ht); ht += 0.01
+            _ = hdrRT.frame(at: ht)
+        }
+        for _ in 0..<60 { ht += 1.0 / 60.0; _ = hdrRT.frame(at: ht) }
+        verifyHeader(width: 600)
+        let scrolledCode = hdrRT.element(byKey: "dv-code-2")?.rect[0] ?? 0
+        #expect(scrolledCode < -100)
+        if let act = hdrRT.element(byKey: "dv-actions") {
+            let p = Vec2(act.rect[0] + act.rect[2] * 0.5, act.rect[1] + act.rect[3] * 0.5)
+            hdrRT.pointerDown(at: p, at: ht); hdrRT.pointerUp(at: p, at: ht + 0.01); ht += 0.02
+            _ = hdrRT.frame(at: ht)
+            #expect(hdrRT.state.actions == [0])
+        }
+        for w in [Float(800), Float(450), Float(600)] {
+            hdrRT.setViewport(Vec2(w, 400), pixelScale: 2.0)
+            _ = hdrRT.frame(at: ht); ht += 0.01
+            verifyHeader(width: w)
+        }
+        hdrRT.wheel(WheelEvent(dx: 0, dy: -150), at: Vec2(300, 200), now: ht); ht += 0.01
+        for _ in 0..<60 { ht += 1.0 / 60.0; _ = hdrRT.frame(at: ht) }
+        if let stickyHdr = hdrRT.element(byKey: "dv-header"), let act = hdrRT.element(byKey: "dv-actions") {
+            #expect(stickyHdr.stuck > 0)
+            #expect(abs(stickyHdr.rect[1] - 1.0) <= 2.0)
+            let p = Vec2(act.rect[0] + act.rect[2] * 0.5, act.rect[1] + act.rect[3] * 0.5)
+            hdrRT.pointerDown(at: p, at: ht); hdrRT.pointerUp(at: p, at: ht + 0.01); ht += 0.02
+            _ = hdrRT.frame(at: ht)
+            #expect(hdrRT.state.actions == [0, 0])
+        }
+
+        // 4. #181: unified gutters stay stuck at left edge while code scrolls sideways, press doesn't select scrolled code, drag across vertical scroll selects range
+        let gDiff = FileDiff.fromTexts(path: "a.rs", old: wideSource(""), new: wideSource("+1"), context: 30)
+        let gRT = Runtime<AppState>(
+            state: AppState(diff: DiffState(diff: gDiff)),
+            viewport: Vec2(600, 400),
+            view: { s, cx in
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .viewportHeight(350)
+                    .build(state: s, cx: cx)
+            }
+        )
+        var gt = 0.0
+        _ = gRT.frame(at: gt)
+        let codeBeforeX = gRT.element(byKey: "dv-code-6")?.rect[0] ?? 0
+        for _ in 0..<2 {
+            gRT.wheel(WheelEvent(dx: -250, dy: 0), at: Vec2(300, 200), now: gt); gt += 0.01
+            _ = gRT.frame(at: gt)
+        }
+        for _ in 0..<60 { gt += 1.0 / 60.0; _ = gRT.frame(at: gt) }
+        let codeAfterX = gRT.element(byKey: "dv-code-6")?.rect[0] ?? 0
+        #expect(codeAfterX < codeBeforeX - 100)
+        if let g6 = gRT.element(byKey: "dv-gutter-6"), let bdy = gRT.element(byKey: "dv-body") {
+            #expect(abs(g6.rect[0] - bdy.rect[0]) < 2.0)
+            #expect(g6.stuck > 100.0)
+        }
+        if let no6 = gRT.element(byKey: "dv-o-6") {
+            let p = Vec2(no6.rect[0] + no6.rect[2] * 0.5, no6.rect[1] + no6.rect[3] * 0.5)
+            gRT.pointerDown(at: p, at: gt); gRT.pointerUp(at: p, at: gt + 0.01); gt += 0.02
+            _ = gRT.frame(at: gt)
+            #expect(gRT.state.diff.selectedRange != nil)
+            #expect(gRT.selectedText() == nil)
+        }
+        if let g4 = gRT.element(byKey: "dv-o-4"), g4.rect.count == 4 {
+            let x = g4.rect[0] + g4.rect[2] * 0.5
+            let y0 = g4.rect[1] + 10
+            gRT.pointerDown(at: Vec2(x, y0), at: gt); gt += 0.01
+            _ = gRT.frame(at: gt)
+            gRT.wheel(WheelEvent(dx: 0, dy: -80), at: Vec2(300, 200), now: gt); gt += 0.01
+            for _ in 0..<60 { gt += 1.0 / 60.0; _ = gRT.frame(at: gt) }
+            if let g10 = gRT.element(byKey: "dv-o-10") {
+                let y1 = g10.rect[1] + 10
+                gRT.pointerMove(to: Vec2(x, y1), at: gt); gt += 0.01
+                _ = gRT.frame(at: gt)
+                gRT.pointerUp(at: Vec2(x, y1), at: gt); gt += 0.01
+                _ = gRT.frame(at: gt)
+                let sel = gRT.state.diff.selectedRange
+                #expect(sel != nil && sel?.start.line != sel?.end.line)
+            }
+        }
+
+        // 5. #182: 3-file a11y labels (`heading`, `added/removed/unchanged line`) + `]`, `j`, `[` navigation
+        let (navOld, navNew) = makeNumbered(200, every: 50)
+        let navFiles = (0..<3).map { i in FileDiff.fromTexts(path: "f\(i).rs", old: navOld, new: navNew, context: 3) }
+        let navRT = Runtime<AppState>(
+            state: AppState(diff: DiffState(files: navFiles)),
+            viewport: Vec2(800, 400),
+            onKey: { st, ev, tx in st.diff.key(ev, keyPrefix: "dv", tx: &tx) },
+            view: { s, cx in
+                DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .build(state: s, cx: cx)
+            }
+        )
+        var nt = 0.01
+        _ = navRT.frame(at: nt)
+        let navEls = navRT.elements()
+        #expect(navEls.contains(where: { $0.role == .heading && $0.label == "f0.rs, 4 added, 4 removed" }))
+        #expect(navEls.contains(where: { $0.label == "added line 50: let value_50 = compute(50) + 1;" }))
+        #expect(navEls.contains(where: { $0.label == "removed line 50: let value_50 = compute(50);" }))
+        #expect(navEls.contains(where: { $0.label == "unchanged line 49: let value_49 = compute(49);" }))
+        _ = navRT.keyDown(KeyEvent(key: .text("]")), at: nt); nt += 0.01
+        for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
+        #expect(navRT.state.diff.visibleFile == 1)
+        if let f1Hdr = navRT.element(byKey: "dv-f1-header") {
+            #expect(f1Hdr.rect[1] <= 2.0)
+        }
+        _ = navRT.keyDown(KeyEvent(key: .text("j")), at: nt); nt += 0.01
+        for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
+        #expect(navRT.state.diff.visibleFile == 1)
+        _ = navRT.keyDown(KeyEvent(key: .text("[")), at: nt); nt += 0.01
+        for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
+        #expect(navRT.state.diff.visibleFile == 0)
+
+        // 6. #184-#185: hovering across lines & scrolling emits zero PerfWarn warnings (note: Rust liveOnly structural view-equality probe isn't in Swift Runtime)
+        PerfWarn.resetForTesting()
         for rowIdx in 0..<8 {
-            if let codeEl = rt.element(byKey: "dv-code-\(rowIdx)"), codeEl.rect.count == 4 {
-                rt.pointerMove(to: Vec2(codeEl.rect[0] + 20, codeEl.rect[1] + 10), at: 0.20 + Double(rowIdx) * 0.01)
-                _ = rt.frame(at: 0.205 + Double(rowIdx) * 0.01)
+            if let codeEl = gRT.element(byKey: "dv-code-\(rowIdx)"), codeEl.rect.count == 4 {
+                gRT.pointerMove(to: Vec2(codeEl.rect[0] + 20, codeEl.rect[1] + 10), at: gt + Double(rowIdx) * 0.01)
+                _ = gRT.frame(at: gt + 0.005 + Double(rowIdx) * 0.01)
             }
         }
         #expect(PerfWarn.takeTestLog(resetSites: true).isEmpty)
