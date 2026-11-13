@@ -111,6 +111,10 @@ public extension AccessibilityTreeBuilder {
                     if !currentText.isEmpty && (prev == nil || currentText != prevText) {
                         announcements.append(AccessibilityAnnouncement(text: currentText, politeness: .assertive))
                     }
+                } else if let live = node.liveRegion {
+                    if !currentText.isEmpty && (prev == nil || currentText != prevText || prev?.liveRegion != live) {
+                        announcements.append(AccessibilityAnnouncement(text: currentText, politeness: live))
+                    }
                 }
             }
             for child in node.children {
