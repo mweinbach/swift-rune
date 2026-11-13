@@ -85,6 +85,7 @@ public struct WindowTitlebar<State> {
             .itemsCenter()
             .justifyBetween()
             .bg(fillColor ?? k.c.bgDeep)
+            .windowDrag()
         if hasBottomBorder {
             bar = bar.borderSides(bottom: 1.0, color: k.c.borderMuted)
         }
@@ -175,6 +176,7 @@ public struct Toolbar<State> {
             .itemsCenter()
             .justifyBetween()
             .bg(fillColor ?? k.c.page)
+            .windowDrag()
         if let titleText, !titleText.isEmpty {
             bar = bar.label(titleText)
         }
@@ -878,6 +880,9 @@ public struct SplitView<State> {
                 .child(effectiveToolbar)
                 .child(bodyEl)
             mainCol = mainCol.p(frameInsetValue).child(panel)
+            if frameInsetValue > 0 {
+                mainCol = mainCol.windowDrag()
+            }
         } else {
             mainCol = mainCol.child(bodyEl)
         }

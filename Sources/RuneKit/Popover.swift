@@ -234,11 +234,19 @@ public enum PopoverAnchor {
         gap: Float = 4.0,
         at point: (x: Float, y: Float)? = nil,
         window: Vec2? = nil,
-        estimatedSize: (Float, Float) = (260.0, 200.0)
+        estimatedSize: (Float, Float) = (260.0, 200.0),
+        instant: Bool = true
     ) -> El<State> {
-        let styled = content
-            .animate(k.motion.overlay)
+        let fade = Transition.asymmetric(insertion: .identity, removal: .opacity)
+            .springs(SpringPair(enter: MotionTokens.INSTANT, exit: Spring(duration: 0.25, bounce: 0.0)))
+        var styled = content
+            .transition(fade)
+            .motionIntent(.cut)
+            .tokenMotion(k.motion.overlay)
             .z(60)
+        if instant {
+            styled = styled.instantChanges()
+        }
         if let point {
             let win = window ?? Vec2(800, 600)
             let rect = anchorRect(
@@ -251,7 +259,10 @@ public enum PopoverAnchor {
             return styled.absolute(x: rect[0], y: rect[1])
         }
         let (side, align) = placement.split()
-        return styled.anchoredFit(anchorKey, side: side.runeSide, align: align.runeAlign, gap: gap)
+        if side == .top || side == .bottom {
+            return styled.anchoredFit(anchorKey, side: side.runeSide, align: align.runeAlign, gap: gap)
+        }
+        return styled.anchored(anchorKey, side: side.runeSide, align: align.runeAlign, gap: gap)
     }
 }
 

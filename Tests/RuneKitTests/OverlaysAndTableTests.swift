@@ -987,6 +987,50 @@ struct OverlaysAndTableTests {
         #expect(rt.elements().first { $0.key == "file-menu" } == nil)
     }
 
+    @Test("Menu open, submenu open, and close pass MotionGate (tests/menu_open.rs)")
+    func menuOpenMotionGate() throws {
+        // #204: Nested menu + submenu MotionGate exceeds Swift Testing's 512KB Debug worker stack.
+        final class ReportBox: @unchecked Sendable { var report: MotionGateReport? }
+        let box = ReportBox()
+        let sem = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            defer { sem.signal() }
+            struct MState { var open = false; var sub = false }
+            let cells = MotionGateGate.run([(
+                "menu/open-submenu-close",
+                {
+                    let k = Kit.neutral(dark: true)
+                    let rt = Runtime(state: MState(), viewport: Vec2(400, 300), systemDark: true) { s, cx in
+                        var layer: [El<MState>] = []
+                        let body = Menu<MState>("file")
+                            .trigger(text("File"))
+                            .item(MenuItem<MState>("Copy"))
+                            .item(MenuItem<MState>("More").submenu([.item(MenuItem<MState>("Deeper"))], open: s.sub))
+                            .open(s.open)
+                            .build(kit: k, layer: &layer, cx: cx)
+                        return RuneKit.root(col().wFull().hFull().child(body), layer)
+                    }
+                    let run = MotionGateRun(rt, hz: 120.0)
+                    run.idle(0.5)
+                    run.step()
+                    run.act("open") { rt in rt.update { s, _ in s.open = true } }
+                    run.play(0.1)
+                    run.act("submenu") { rt in rt.update { s, _ in s.sub = true } }
+                    run.play(0.1)
+                    run.act("close") { rt in rt.update { s, _ in s.open = false; s.sub = false } }
+                    run.play(1.0)
+                    return run.rec
+                }
+            )])
+            box.report = MotionGateGate.report(cells)
+        }
+        thread.stackSize = 4 * 1024 * 1024
+        thread.start()
+        sem.wait()
+        let report = try #require(box.report)
+        #expect(report.failing == 0, "\(report.text)")
+    }
+
     @Test("Described MenuItem grows to show second description line and Menu opens submenus")
     func menuDescriptionAndSubmenu() throws {
         // #204: Nested menu + description + submenu exceeds Swift Testing's 512KB Debug worker stack.

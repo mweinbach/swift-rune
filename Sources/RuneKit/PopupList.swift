@@ -500,7 +500,15 @@ public struct PopupList<State> {
         }
         let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
         layer.append(
-            PopoverAnchor.anchored(k, surface, anchor: anchorKey, placement: placementValue, gap: gutterValue, window: cx?.viewport)
+            PopoverAnchor.anchored(
+                k,
+                surface,
+                anchor: anchorKey,
+                placement: placementValue,
+                gap: gutterValue,
+                window: cx?.viewport,
+                instant: !shouldAnimateFiltering
+            )
         )
     }
 

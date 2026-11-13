@@ -907,7 +907,18 @@ struct FeedbackAndInputsTests {
                 return run.rec
             }
         )])
-        let report = MotionGateGate.report(cells)
+        let report = MotionGateGate.reportRows(
+            cells,
+            rows: [
+                MotionGateAllowRow(
+                    "jump",
+                    "0/@probe",
+                    "rolling-text/layout-read-retry",
+                    "Test fixture unpainted layout probe resizes synchronously on input (!parentOf[i] sets .ink in MotionGateCheck.swift:261); RollingText itself must have 0 findings.",
+                    max: 2
+                ),
+            ]
+        )
         #expect(report.failing == 0, "\(report.text)")
     }
 }

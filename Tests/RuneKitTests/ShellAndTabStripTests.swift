@@ -446,9 +446,30 @@ struct ShellAndTabStripTests {
         #expect(rt.state.tabs.map(\.id) == ["p1", "a", "c"])
     }
 
+    @Test("WindowTitlebar and Toolbar expose windowDrag bare regions with Cx.titlebarInset")
+    func windowTitlebarAndToolbarWindowDragRegions() {
+        struct S { var tapped = 0 }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(640, 240), systemDark: false) { _, cx in
+            let inset = cx.titlebarInset()
+            return col().sizeFull()
+                .child(
+                    WindowTitlebar<S>.fromInsets(ChromeInsets(leading: inset, trailing: 12, top: 44), title: "Work")
+                        .trailing(el().key("btn").size(28, 24).onClick { s, _ in s.tapped += 1 })
+                        .build(kit)
+                )
+                .child(Toolbar<S>(title: "Session").build(kit))
+        }
+        rt.setTitlebarInset(74)
+        rt.frame(at: 0.0)
+        #expect(rt.isBareTitlebarDragRegion(at: Vec2(320, 20)))
+        #expect(rt.isBareTitlebarDragRegion(at: Vec2(320, 68)))
+        #expect(!rt.isBareTitlebarDragRegion(at: Vec2(605, 22)))
+    }
+
     @Test(
-        "WindowTitlebar emits OS windowDrag and double-click zoom actions",
-        .disabled("Blocked on @el: El.windowDrag, TitlebarAction, and Cx.titlebarInset() are not in main yet")
+        "WindowTitlebar emits OS TitlebarAction on pointer down and double-click zoom",
+        .disabled("Blocked on @el: Runtime.takeTitlebarAction() / TitlebarAction not in main yet")
     )
     func windowTitlebarPlatformActionsBlockedOnEl() {}
 
