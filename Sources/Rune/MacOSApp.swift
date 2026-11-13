@@ -10,80 +10,215 @@ import QuartzCore
 public enum MacOSApp {
     @MainActor
     public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs) throws {
+        var wrapped = App<State>(
+            title: spec.title,
+            size: spec.size,
+            minSize: spec.minSize,
+            dark: spec.dark,
+            state: spec.makeState(),
+            view: spec.view
+        )
+        wrapped.scenes = spec.scenes
+        wrapped.fontData = spec.fonts
+        wrapped.fontFamilies = spec.families
+        wrapped.setupHook = spec.setup
+        wrapped.pollHook = spec.poll
+        wrapped.onKeyHook = spec.onKey
+        wrapped.srgbBlendEnabled = spec.srgbBlend
+        try run(wrapped, parsed: parsed)
+    }
+
+    @MainActor
+    public static func run<State>(_ appBuilder: App<State>, parsed: ToolingArgs) throws {
+        HeadlessRunner.registerFonts(appBuilder.fontData)
+
+        var initialState = appBuilder.makeState()
+        var initTx = Tx()
+        if let sceneName = parsed.sceneName, let applyScene = appBuilder.scenes[sceneName] {
+            applyScene(&initialState, &initTx)
+        }
+
+        let vp = parsed.viewportOverride ?? appBuilder.size
         let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        app.setActivationPolicy(appBuilder.isAccessory ? .accessory : .regular)
 
-        var state = spec.makeState()
-        if let sceneName = parsed.sceneName, let apply = spec.scenes[sceneName] {
-            var tx = Tx()
-            apply(&state, &tx)
-        }
-
-        let vp = parsed.viewportOverride ?? spec.size
-        let respectSystemAppearance = (parsed.darkOverride == nil && spec.dark == nil)
-        let sysDark: Bool
-        if let d = parsed.darkOverride ?? spec.dark {
-            sysDark = d
-        } else {
-            let name = app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
-            sysDark = (name == .darkAqua)
-        }
+        let respectSystemAppearance = (parsed.darkOverride == nil && appBuilder.dark == nil)
+        let sysDark: Bool = {
+            if let d = parsed.darkOverride { return d }
+            if let d = appBuilder.dark { return d }
+            return app.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }()
 
         let waker = Waker()
         let runtime = Runtime<State>(
-            state: state,
+            state: initialState,
             viewport: vp,
             pixelScale: Float(NSScreen.main?.backingScaleFactor ?? 2.0),
             systemDark: sysDark,
             reducedMotion: parsed.reducedMotion || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
             waker: waker,
-            onKey: spec.onKey,
-            view: spec.view
+            onKey: appBuilder.onKeyHook,
+            view: appBuilder.view
         )
-        runtime.windowTitle = spec.title
+        runtime.windowTitle = appBuilder.title
+        runtime.srgbBlend = appBuilder.srgbBlendEnabled
+        runtime.fontSmoothing = appBuilder.fontSmoothingMode
+        runtime.poll = appBuilder.pollHook
+        runtime.onFocus = appBuilder.onFocusHook
+        runtime.onModifiers = appBuilder.onModifiersHook
+        runtime.onVisibility = appBuilder.onVisibilityHook
+        runtime.onIme = appBuilder.onImeHook
+        runtime.onClose = appBuilder.onCloseHook
+        runtime.onQuit = appBuilder.onQuitHook
+        runtime.turnScope = appBuilder.turnScopeHook
+        runtime.onReopen = appBuilder.onReopenHook
+        runtime.onOpenUrl = appBuilder.onOpenUrlHook
+        runtime.tabVisitsControls = appBuilder.tabVisitsControlsEnabled
+        runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         let renderer = try MetalRenderer()
+        let reports = (appBuilder.onFrameEncodedHook != nil || appBuilder.onFrameDrawnHook != nil)
+            ? FrameReports<State>(onFrameEncoded: appBuilder.onFrameEncodedHook, onFrameDrawn: appBuilder.onFrameDrawnHook)
+            : nil
+        let meter = appBuilder.devStatsReceiver != nil ? SurfaceMeter(name: appBuilder.title) : nil
+
+        var mask: NSWindow.StyleMask = [.titled]
+        let opts = appBuilder.windowOptionsValue
+        if opts.closable { mask.insert(.closable) }
+        if opts.minimizable { mask.insert(.miniaturizable) }
+        if opts.resizable { mask.insert(.resizable) }
+        if appBuilder.chromeStyle == .borderless {
+            mask = [.borderless]
+        } else if appBuilder.chromeStyle == .titlebarIntegrated || appBuilder.customTitlebar != nil || appBuilder.macosWindowValue.fullSizeContentView {
+            mask.insert(.fullSizeContentView)
+        }
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
+            styleMask: mask,
+            backing: .buffered,
+            defer: false
+        )
+        window.title = appBuilder.title
+        if let minSz = appBuilder.minSize ?? opts.minSize {
+            window.contentMinSize = NSSize(width: CGFloat(minSz.x), height: CGFloat(minSz.y))
+        }
+        if let maxSz = opts.maxSize {
+            window.contentMaxSize = NSSize(width: CGFloat(maxSz.x), height: CGFloat(maxSz.y))
+        }
+        window.hasShadow = opts.hasShadow
+        if opts.alwaysOnTop || appBuilder.macosWindowValue.floatingLevel {
+            window.level = .floating
+        }
+        if appBuilder.customTitlebar != nil || appBuilder.chromeStyle == .titlebarIntegrated || appBuilder.macosWindowValue.titlebarAppearsTransparent {
+            window.titlebarAppearsTransparent = true
+        }
+        if appBuilder.customTitlebar != nil || appBuilder.macosWindowValue.hidesTitle {
+            window.titleVisibility = .hidden
+        }
+        window.isMovableByWindowBackground = appBuilder.macosWindowValue.movableByWindowBackground
+
+        let windowHandle = WindowHandle(
+            title: appBuilder.title,
+            isVisible: true,
+            onClose: { [weak window] in Task { @MainActor in window?.close() } },
+            onMinimize: { [weak window] in Task { @MainActor in window?.miniaturize(nil) } },
+            onFocus: { [weak window] in Task { @MainActor in window?.makeKeyAndOrderFront(nil) } },
+            onShow: { [weak window] in Task { @MainActor in window?.orderFront(nil) } },
+            onHide: { [weak window] in Task { @MainActor in window?.orderOut(nil) } },
+            onSetTitle: { [weak window] newTitle in Task { @MainActor in window?.title = newTitle } },
+            onSetPosition: { [weak window] pt in
+                Task { @MainActor in
+                    window?.setFrameOrigin(NSPoint(x: CGFloat(pt.x), y: CGFloat(pt.y)))
+                }
+            },
+            onPlace: { [weak window] req in
+                Task { @MainActor in
+                    guard let w = window else { return }
+                    if let sz = req.size {
+                        w.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
+                    }
+                    if let pos = req.position {
+                        w.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                    }
+                    if req.activate {
+                        NSApplication.shared.activate(ignoringOtherApps: true)
+                        w.makeKeyAndOrderFront(nil)
+                    } else {
+                        w.orderFront(nil)
+                    }
+                }
+            }
+        )
+
         let hostView = RuneMetalHostView(
             frame: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
             runtime: runtime,
             renderer: renderer,
             timeScale: parsed.timeScale,
-            respectSystemAppearance: respectSystemAppearance
+            respectSystemAppearance: respectSystemAppearance,
+            compositor: appBuilder.compositorValue,
+            appShared: appBuilder.sharedHandle.shared,
+            reports: reports,
+            surfaceMeter: meter,
+            devStatsReceiver: appBuilder.devStatsReceiver,
+            windowHandle: windowHandle,
+            onReady: appBuilder.onReadyHook
         )
 
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
         let delegate = RuneAppDelegate(
-            onFocusChange: { focused in
-                runtime.windowFocused = focused
-                hostView.requestRender()
+            keepRunning: appBuilder.keepsRunning,
+            onFocusChange: { [weak hostView] focused in
+                runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
+                hostView?.requestRender()
+            },
+            onShouldClose: { [weak hostView] in
+                runtime.dispatchClose(at: hostView?.currentElapsedTime() ?? 0.0)
             },
             onClose: {
                 hostView.stopTimer()
+                appBuilder.sharedHandle.shared.setVisible(false)
+            },
+            onTerminate: {
+                runtime.dispatchQuit(at: hostView.currentElapsedTime())
+            },
+            onReopen: { hasVisible in
+                runtime.dispatchReopen(hasVisibleWindows: hasVisible, at: hostView.currentElapsedTime())
+            },
+            onOpenUrl: { url in
+                runtime.dispatchOpenUrl(url, at: hostView.currentElapsedTime())
             }
         )
         app.delegate = delegate
         window.delegate = delegate
-        window.title = spec.title
-        if let minSz = spec.minSize {
-            window.contentMinSize = NSSize(width: CGFloat(minSz.x), height: CGFloat(minSz.y))
-        }
         window.contentView = hostView
         window.center()
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(hostView)
+
+        appBuilder.sharedHandle.shared.setWaker(waker)
+        appBuilder.sharedHandle.shared.setVisible(true)
+        appBuilder.onWindowHook?(windowHandle)
 
         waker.setCallback { [weak hostView] in
             DispatchQueue.main.async {
                 hostView?.requestRender()
             }
         }
+        appBuilder.setupHook?(waker)
 
-        app.activate(ignoringOtherApps: true)
+        if appBuilder.isOpenInactive {
+            window.orderFront(nil)
+        } else {
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(hostView)
+            app.activate(ignoringOtherApps: true)
+        }
+        if appBuilder.openAs.isMaximized {
+            window.zoom(nil)
+        }
+        if appBuilder.openAs.isFullScreen {
+            window.toggleFullScreen(nil)
+        }
+
         withExtendedLifetime(delegate) {
             app.run()
         }
@@ -92,16 +227,52 @@ public enum MacOSApp {
 
 @MainActor
 private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private let keepRunning: Bool
     private let onFocusChange: (Bool) -> Void
+    private let onShouldClose: () -> Bool
     private let onClose: () -> Void
+    private let onTerminate: () -> Void
+    private let onReopen: (Bool) -> Bool
+    private let onOpenUrl: (String) -> Void
 
-    init(onFocusChange: @escaping (Bool) -> Void, onClose: @escaping () -> Void) {
+    init(
+        keepRunning: Bool = false,
+        onFocusChange: @escaping (Bool) -> Void,
+        onShouldClose: @escaping () -> Bool = { true },
+        onClose: @escaping () -> Void,
+        onTerminate: @escaping () -> Void = {},
+        onReopen: @escaping (Bool) -> Bool = { _ in false },
+        onOpenUrl: @escaping (String) -> Void = { _ in }
+    ) {
+        self.keepRunning = keepRunning
         self.onFocusChange = onFocusChange
+        self.onShouldClose = onShouldClose
         self.onClose = onClose
+        self.onTerminate = onTerminate
+        self.onReopen = onReopen
+        self.onOpenUrl = onOpenUrl
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        !keepRunning
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        !onReopen(flag)
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            onOpenUrl(url.absoluteString)
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onTerminate()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onShouldClose()
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -125,18 +296,47 @@ private final class RuneMetalHostView<State>: NSView {
     private let startTime = CACurrentMediaTime()
     private let timeScale: Double
     private let respectSystemAppearance: Bool
+    private let compositor: AnyCompositor<State>?
+    private let appShared: AppShared<State>?
+    private let reports: FrameReports<State>?
+    private let surfaceMeter: SurfaceMeter?
+    private let devStatsReceiver: ((SurfaceStats) -> Void)?
+    private let windowHandle: WindowHandle?
+    private let onReady: ((WindowHandle) -> Void)?
+    private var didFireReady: Bool = false
+    private var lastFrameTime: Double = 0.0
     private var animTimer: Timer?
     private var trackingAreaRef: NSTrackingArea?
 
-    init(frame: NSRect, runtime: Runtime<State>, renderer: MetalRenderer, timeScale: Double, respectSystemAppearance: Bool) {
+    init(
+        frame: NSRect,
+        runtime: Runtime<State>,
+        renderer: MetalRenderer,
+        timeScale: Double,
+        respectSystemAppearance: Bool,
+        compositor: AnyCompositor<State>? = nil,
+        appShared: AppShared<State>? = nil,
+        reports: FrameReports<State>? = nil,
+        surfaceMeter: SurfaceMeter? = nil,
+        devStatsReceiver: ((SurfaceStats) -> Void)? = nil,
+        windowHandle: WindowHandle? = nil,
+        onReady: ((WindowHandle) -> Void)? = nil
+    ) {
         self.runtime = runtime
         self.renderer = renderer
         self.timeScale = timeScale
         self.respectSystemAppearance = respectSystemAppearance
+        self.compositor = compositor
+        self.appShared = appShared
+        self.reports = reports
+        self.surfaceMeter = surfaceMeter
+        self.devStatsReceiver = devStatsReceiver
+        self.windowHandle = windowHandle
+        self.onReady = onReady
         super.init(frame: frame)
         self.wantsLayer = true
         metalLayer.device = renderer.device
-        metalLayer.pixelFormat = .bgra8Unorm_srgb
+        metalLayer.pixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         metalLayer.framebufferOnly = false
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.layer = metalLayer
@@ -206,21 +406,114 @@ private final class RuneMetalHostView<State>: NSView {
         (CACurrentMediaTime() - startTime) * timeScale
     }
 
+    fileprivate func currentElapsedTime() -> Double {
+        nowSeconds()
+    }
+
     private func renderTick() {
         guard bounds.width > 0 && bounds.height > 0 else { return }
         let t = nowSeconds()
+        let dt = Float(max(0.0, t - lastFrameTime))
+        lastFrameTime = t
+
+        if let drained = appShared?.applyStateUpdates(to: runtime, at: t) {
+            applyDrainedRequests(drained)
+        }
+
+        let desiredFmt: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+        if metalLayer.pixelFormat != desiredFmt {
+            metalLayer.pixelFormat = desiredFmt
+        }
+
+        let commitsBefore = runtime.viewCommitCount
+        let updateStart = CACurrentMediaTime()
         let refScene = runtime.frame(at: t)
+        let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+
         if let title = runtime.windowTitle, window?.title != title {
             window?.title = title
+        }
+        if runtime.closeWindowRequested {
+            runtime.clearShellRequests()
+            window?.performClose(nil)
+            return
+        }
+        if runtime.minimizeRequested {
+            runtime.clearShellRequests()
+            window?.miniaturize(nil)
         }
         if runtime.quitRequested {
             NSApplication.shared.terminate(nil)
             return
         }
+
+        let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false)
+        surfaceMeter?.setPacing(isAnim ? .paced : .idle)
+        _ = surfaceMeter?.redraw(paced: animTimer != nil)
+
+        var drawCount = 0
         if let drawable = metalLayer.nextDrawable() {
-            renderer.render(scene: refScene, to: drawable)
+            if let comp = compositor, let cmdBuf = renderer.commandQueue.makeCommandBuffer() {
+                let compFrame = CompositorFrame<State>(
+                    deviceKey: DeviceKey(rawValue: renderer.device.registryID),
+                    pixelSize: (Int(metalLayer.drawableSize.width), Int(metalLayer.drawableSize.height)),
+                    dt: dt,
+                    updateMilliseconds: updateMs,
+                    srgbBlend: runtime.srgbBlend,
+                    runtime: runtime,
+                    device: renderer.device,
+                    commandQueue: renderer.commandQueue,
+                    commandBuffer: cmdBuf,
+                    targetTexture: drawable.texture,
+                    pixelFormat: desiredFmt,
+                    renderer: renderer,
+                    drawUI: { [renderer] in
+                        drawCount += 1
+                        renderer.renderScene(refScene, into: drawable.texture, commandBuffer: cmdBuf)
+                    }
+                )
+                comp.render(frame: compFrame)
+                if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
+                    compFrame.drawUI()
+                }
+                cmdBuf.present(drawable)
+                cmdBuf.commit()
+            } else {
+                drawCount = 1
+                renderer.render(scene: refScene, to: drawable)
+            }
+            _ = surfaceMeter?.presented()
+            if !didFireReady {
+                didFireReady = true
+                if let wh = windowHandle {
+                    onReady?(wh)
+                }
+            }
+            if let reports {
+                let encoded = FrameEncoded(
+                    outcome: .drawn,
+                    frameMs: (CACurrentMediaTime() - updateStart) * 1000.0,
+                    updateMs: updateMs,
+                    encodeMs: 0.0,
+                    committed: runtime.viewCommitCount != commitsBefore,
+                    primitives: refScene.primitives.count,
+                    glyphs: refScene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) },
+                    animating: runtime.isAnimating,
+                    compositorAnimating: compositor?.isAnimating ?? false,
+                    drawCount: drawCount,
+                    compositorSummary: compositor?.summary()
+                )
+                reports.record(encoded)
+                _ = runtime.updateIf(at: t) { s, tx in
+                    reports.flush(state: &s, tx: &tx, at: t)
+                }
+            }
         }
-        if runtime.isAnimating {
+        if let stats = surfaceMeter?.currentStats() {
+            devStatsReceiver?(stats)
+        }
+
+        if isAnim {
             if animTimer == nil {
                 let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
                     Task { @MainActor in
@@ -232,6 +525,58 @@ private final class RuneMetalHostView<State>: NSView {
             }
         } else {
             stopTimer()
+        }
+    }
+
+    private func applyDrainedRequests(_ req: AppDrainedRequests<State>) {
+        if req.quit {
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        switch req.window {
+        case .close:
+            window?.performClose(nil)
+            return
+        case .open, .show:
+            if let pos = req.position {
+                window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+            }
+            if let place = req.place {
+                if let sz = place.size {
+                    window?.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
+                }
+                if let pos = place.position {
+                    window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                }
+            }
+            window?.orderFront(nil)
+            appShared?.setVisible(true)
+        case .hide:
+            window?.orderOut(nil)
+            appShared?.setVisible(false)
+        case .none:
+            if let pos = req.position {
+                window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+            }
+            if let place = req.place {
+                if let sz = place.size {
+                    window?.setContentSize(NSSize(width: CGFloat(sz.x), height: CGFloat(sz.y)))
+                }
+                if let pos = place.position {
+                    window?.setFrameOrigin(NSPoint(x: CGFloat(pos.x), y: CGFloat(pos.y)))
+                }
+            }
+        }
+        switch req.activation {
+        case .activate:
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+        case .focus:
+            window?.makeKeyAndOrderFront(nil)
+        case .minimize:
+            window?.miniaturize(nil)
+        case .none:
+            break
         }
     }
 

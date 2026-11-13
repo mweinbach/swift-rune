@@ -57,6 +57,34 @@ public enum RuneApp {
         _ = try HeadlessRunner.run(spec, args: parsed)
         #endif
     }
+
+    @MainActor
+    public static func run<State>(_ app: App<State>, arguments: [String]? = nil) throws {
+        let parsed = (arguments ?? app.runOptions.arguments).map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
+        if parsed.isHeadlessRequested || app.isWindowless {
+            _ = try HeadlessRunner.run(app, args: parsed)
+            return
+        }
+
+        ReadySignal.runStarts()
+        defer { ReadySignal.clear() }
+
+        #if os(macOS)
+        try MacOSApp.run(app, parsed: parsed)
+        #elseif canImport(UIKit) && !os(watchOS)
+        try IOSApp.run(app.intoSpec(), parsed: parsed)
+        #elseif os(Windows)
+        try Win32App.run(app.intoSpec(), parsed: parsed)
+        #elseif os(Linux)
+        try LinuxApp.run(app.intoSpec(), parsed: parsed)
+        #elseif os(Android)
+        try AndroidApp.run(app.intoSpec(), parsed: parsed)
+        #elseif os(WASI)
+        try WebApp.run(app.intoSpec(), parsed: parsed)
+        #else
+        _ = try HeadlessRunner.run(app, args: parsed)
+        #endif
+    }
 }
 
 // MARK: - 1. SystemAccent (platform/accent.rs)
