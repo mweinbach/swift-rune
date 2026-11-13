@@ -1043,6 +1043,11 @@ public struct Menu<State> {
             .onPointerDown { _, _, _ in }
         if let closeHandler {
             surface = surface
+                .modalTx(clickOutside: false) { s, tx in
+                    closeHandler(&s, &tx)
+                    tx.focus(returnKey)
+                }
+                .focusReturn(returnKey)
                 .onKey { s, ev, tx in
                     if ev.key == .escape {
                         closeHandler(&s, &tx)

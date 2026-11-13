@@ -25,9 +25,9 @@ struct ShellAndTabStripTests {
         pane.releaseGrip()
         #expect(!pane.isResizing)
 
-        // Reset restores defaultWidth and opens
+        // Reset restores defaultWidth without forcing collapsed pane open
         pane.resetWidth()
-        #expect(pane.isOpen && pane.width == 240)
+        #expect(pane.isCollapsed && pane.width == 240)
 
         // Negative growth (inspector on trailing side)
         var inspector = PaneState(width: 300).range(min: 200, max: 500)
@@ -60,39 +60,57 @@ struct ShellAndTabStripTests {
     func motionPeekIconsAndShortcut() {
         #expect(KitIcons.sidebar.paths.count == 2)
         #expect(KitIcons.inspector.paths.count == 2)
+        let customMotion = PaneMotion().scaleWithWidth(reference: 240, min: 0.1, max: 0.4).fadeTail(0.3).reducedMotionFade(0.12)
+        #expect(customMotion.spring(forWidth: 240, kit: Kit.neutral(dark: false)).duration >= 0.1)
         #expect(PaneMotion.slide.spring(reducedMotion: false) != nil)
         #expect(PaneMotion.instant.spring(reducedMotion: false) == nil)
         #expect(PaneMotion.slide.spring(reducedMotion: true) == nil)
         #expect(SidebarPeek.off.isEnabled == false)
+        let customPeek = SidebarPeek().edge(20, delay: 0.04).toggleDelay(0.08).below(38).hold(margin: 14, grace: 0.2)
+        #expect(customPeek.isEnabled && customPeek.edgeWidth == 20 && customPeek.belowY == 38 && customPeek.holdMargin == 14)
         #expect(SidebarPeek.hover.isEnabled && SidebarPeek.hover.edgeWidth == 16)
 
-        #expect(isSidebarToggle(.text("b"), mods: Mods(cmd: true), macOS: true))
+        #expect(!isSidebarToggle(.text("b"), mods: Mods(cmd: true), macOS: true))
+        #expect(isSidebarToggle(.text("b"), mods: Mods(shift: true, cmd: true), macOS: true))
         #expect(!isSidebarToggle(.text("b"), mods: Mods(ctrl: true), macOS: true))
-        #expect(isSidebarToggle(.text("b"), mods: Mods(ctrl: true), macOS: false))
-        #expect(!isSidebarToggle(.text("b"), mods: Mods(shift: true, cmd: true), macOS: true))
+        #expect(isSidebarToggle(.text("b"), mods: Mods(shift: true, ctrl: true), macOS: false))
+        #expect(isSidebarToggle(.text("s"), mods: Mods(ctrl: true, cmd: true), macOS: true))
+        #expect(!isSidebarToggle(.text("s"), mods: Mods(ctrl: true, cmd: true), macOS: false))
     }
 
     // MARK: - Reorder (`shell/reorder.rs`, `tests/reorder.rs`)
 
-    @Test("Reorder enforces 4pt slop, swaps on midpoint crossings, and catches lost release")
+    @Test("Reorder enforces 4pt slop, tracks pitch/shifts, emits on drop, and catches lost release")
     func reorderStateMachine() {
-        var reorder = Reorder<String>()
+        var reorder = Reorder<String>().gap(4.0)
         reorder.press(id: "a", index: 0, at: Vec2(40, 10))
         #expect(reorder.isHeld && !reorder.isDragging)
+        #expect(reorder.dragging() == nil && reorder.target() == nil)
 
         // Movement within 4pt slop stays not-dragging
         #expect(reorder.drag(to: Vec2(40, 13), rowHeight: 28, count: 4) == nil)
         #expect(!reorder.isDragging && reorder.offsetY == 0)
 
-        // Crossing slop starts drag; crossing 14pt midpoint swaps index 0 -> 1
-        let swap1 = reorder.drag(to: Vec2(40, 26), rowHeight: 28, count: 4)
-        #expect(swap1?.from == 0 && swap1?.to == 1)
+        // Crossing slop starts drag; pitch = 28 + 4 = 32; 20pt moves target 0 -> 1 and shifts sibling 1 by -32
+        _ = reorder.drag(to: Vec2(40, 30), rowHeight: 28, count: 4)
         #expect(reorder.isDragging && reorder.draggingId == "a")
-        #expect(reorder.currentIndex == 1)
+        #expect(reorder.dragging() == 0 && reorder.target() == 1)
+        #expect(reorder.shift(forIndex: 0) == 20)
+        #expect(reorder.shift(forIndex: 1) == -32)
+        #expect(reorder.shift(forIndex: 2) == 0)
 
-        // Moving back across midpoint returns 1 -> 0
-        let swapBack = reorder.drag(to: Vec2(40, 10), rowHeight: 28, count: 4)
-        #expect(swapBack?.from == 1 && swapBack?.to == 0)
+        // Drop commits (0, 1)
+        var dropReorder = Reorder<String>().gap(4.0)
+        dropReorder.press(id: "a", index: 0, at: Vec2(40, 10))
+        _ = dropReorder.drag(to: Vec2(40, 42), rowHeight: 28, count: 4)
+        let committed = dropReorder.end(cancelled: false)
+        #expect(committed?.from == 0 && committed?.to == 1)
+
+        // Cancelled drop emits nil
+        var cancelReorder = Reorder<String>().gap(4.0)
+        cancelReorder.press(id: "a", index: 0, at: Vec2(40, 10))
+        _ = cancelReorder.drag(to: Vec2(40, 42), rowHeight: 28, count: 4)
+        #expect(cancelReorder.end(cancelled: true) == nil)
 
         // Pointer lost-release cancels cleanly
         let firstReorderMoveLost = reorder.pointerMoved(to: Vec2(90, 90))
@@ -280,14 +298,17 @@ struct ShellAndTabStripTests {
 
     @Test("TabOverflow, TabDragState slop/tearOut/widthLock/shift & TabAutoScroll match upstream")
     func tabDragStateAndOverflowUnit() {
-        #expect(TabDensity.default(for: .horizontal) == .comfortable)
+        #expect(TabDensity.default(for: .horizontal) == .full)
         #expect(TabDensity.default(for: .vertical) == .compact)
+        #expect(TabOverflow.densityFor(44) == .iconOnly)
+        #expect(TabOverflow.densityFor(64) == .compact)
+        #expect(TabOverflow.densityFor(65) == .full)
 
         let shrinkW = TabOverflow.horizontalDefault.tabWidth(available: 500, unpinnedCount: 2, pinnedCount: 1)
-        #expect(shrinkW == 220) // (500 - 36 - 4)/2 = 230 clamped to maxWidth 220
+        #expect(shrinkW == 224) // (500 - 36 - 4)/2 = 230 clamped to maxWidth 224
 
-        let scrollFloorW = TabOverflow.horizontalDefault.tabWidth(available: 200, unpinnedCount: 5, pinnedCount: 0)
-        #expect(scrollFloorW == 100)
+        let scrollFloorW = TabOverflow.horizontalDefault.tabWidth(available: 200, unpinnedCount: 8, pinnedCount: 0)
+        #expect(scrollFloorW == 28) // (200 - 14)/8 = 23.25 clamped to minWidth 28
 
         var drag = TabDragState()
         drag.press(id: "t1", index: 0, at: Vec2(50, 20), tabWidth: 140)
@@ -331,6 +352,27 @@ struct ShellAndTabStripTests {
         #expect(torn == .tornOut(TabTearOut(id: "t2", index: 1, windowPoint: Vec2(150, 90))))
         freeDrag.handOff()
         #expect(freeDrag.handedOff && !freeDrag.isTornOut && freeDrag.widthLock == nil)
+
+        // Lone tab cannot tear out unless TearOutSpec.lone == true
+        var loneBlocked = TabDragState()
+        loneBlocked.press(id: "only", index: 0, at: Vec2(50, 15))
+        _ = loneBlocked.follow(
+            to: Vec2(50, 90),
+            count: 1,
+            tearOut: TearOutSpec(threshold: 36, allowPinned: false, lone: false, stripBounds: MotionRect.fromXYWH(0, 0, 400, 34)),
+            isPinned: false
+        )
+        #expect(!loneBlocked.isTornOut)
+
+        var loneAllowed = TabDragState()
+        loneAllowed.press(id: "only", index: 0, at: Vec2(50, 15))
+        _ = loneAllowed.follow(
+            to: Vec2(50, 90),
+            count: 1,
+            tearOut: TearOutSpec(threshold: 36, allowPinned: false, lone: true, stripBounds: MotionRect.fromXYWH(0, 0, 400, 34)),
+            isPinned: false
+        )
+        #expect(loneAllowed.isTornOut)
 
         // TabAutoScroll scrolls smoothly near edge zones and stays clamped
         let nextScroll = TabAutoScroll.step(pointerAlong: 295, viewportStart: 0, viewportEnd: 300, scrollOffset: 10, maxScroll: 200, dt: 0.05)
@@ -410,9 +452,42 @@ struct ShellAndTabStripTests {
     )
     func windowTitlebarPlatformActionsBlockedOnEl() {}
 
-    @Test(
-        "TabStrip arrow navigation inside FocusGroup preserves single Tab stop",
-        .disabled("Blocked on @el: focusGroup single-Tab-stop and focusReturn are not in main yet")
-    )
-    func tabStripFocusGroupBlockedOnEl() {}
+    @Test("TabStrip exposes Tab role group, single Tab stop re-entry, and ArrowLeft/Right focus roving")
+    func tabStripFocusGroup() throws {
+        struct S { var selected = "b" }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(480, 120), systemDark: false) { s, _ in
+            col().gap(8).children([
+                TabStrip<S>(
+                    key: "fg-strip",
+                    tabs: [
+                        StripTabItem(id: "a", title: "One"),
+                        StripTabItem(id: "b", title: "Two"),
+                        StripTabItem(id: "c", title: "Three"),
+                    ],
+                    selected: s.selected
+                )
+                .label("Workspace tabs")
+                .onSelect { st, id, _ in st.selected = id }
+                .build(s, kit: kit),
+                kit.button(key: "after-tabs", "After") { _, _ in },
+            ])
+        }
+        rt.frame(at: 0.0)
+        rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.focusedKey == "fg-strip-tab-b")
+        rt.keyDown(KeyEvent(key: .arrowRight), at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "fg-strip-tab-c")
+        rt.keyDown(KeyEvent(key: .arrowLeft), at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.focusedKey == "fg-strip-tab-b")
+        rt.keyDown(KeyEvent(key: .tab), at: 0.07)
+        rt.frame(at: 0.08)
+        #expect(rt.focusedKey == "after-tabs")
+        let trackEl = try #require(rt.element(byKey: "fg-strip-track"))
+        #expect(trackEl.role == .tabList)
+        #expect(trackEl.label == "Workspace tabs")
+    }
 }

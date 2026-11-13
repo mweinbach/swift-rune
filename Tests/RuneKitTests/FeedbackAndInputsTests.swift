@@ -694,4 +694,78 @@ struct FeedbackAndInputsTests {
         #expect(kUpHandled)
         #expect(rec.phase.finishingKey == nil)
     }
+
+    @Test("ShortcutRecorder onPhysicalInput handles modifiers, keyDown/keyUp swallowing, repeat, Escape & Backspace")
+    func shortcutRecorderPhysicalInputRuntime() throws {
+        struct S {
+            var recorder = ShortcutRecorderState(shortcut: ShortcutChord(key: "j", modifiers: [.command]))
+            var committed: [ShortcutChord?] = []
+            var rejectNext = false
+        }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(320, 140), systemDark: false) { s, _ in
+            kit.shortcutRecorder(
+                key: "phys-rec",
+                \.recorder,
+                in: s,
+                label: "Quick open",
+                onChange: { st, chord in
+                    if st.rejectNext {
+                        st.rejectNext = false
+                        return .conflict
+                    }
+                    st.committed.append(chord)
+                    return nil
+                }
+            )
+        }
+        rt.frame(at: 0.0)
+
+        // Click to enter recording mode
+        let recRect = try #require(rt.element(byKey: "phys-rec")).rect
+        let pt = Vec2(recRect[0] + 20, recRect[1] + 12)
+        rt.pointerDown(at: pt, at: 0.01)
+        rt.pointerUp(at: pt, at: 0.02)
+        rt.frame(at: 0.03)
+        #expect(rt.state.recorder.isRecording)
+
+        // Modifiers update held keycaps live; Escape cancels without changing stored chord
+        _ = rt.physicalInput(.modifiers(Mods(cmd: true)), at: 0.04)
+        rt.frame(at: 0.05)
+        #expect(rt.state.recorder.keycaps == ["⌘"])
+        _ = rt.physicalInput(.key(key: .escape, mods: Mods(), pressed: true, repeat: false), at: 0.06)
+        rt.frame(at: 0.07)
+        #expect(!rt.state.recorder.isRecording)
+        #expect(rt.state.recorder.shortcut == ShortcutChord(key: "j", modifiers: [.command]))
+
+        // Re-begin, refuse bare key 'k', keep recording, clear error on Cmd modifier press, accept Cmd+K, swallow repeat & release
+        rt.pointerDown(at: pt, at: 0.08)
+        rt.pointerUp(at: pt, at: 0.09)
+        rt.frame(at: 0.10)
+        _ = rt.physicalInput(.key(key: .keyK, mods: Mods(), pressed: true, repeat: false), at: 0.11)
+        _ = rt.physicalInput(.key(key: .keyK, mods: Mods(), pressed: false, repeat: false), at: 0.12)
+        #expect(rt.state.recorder.isRecording && rt.state.recorder.error == .missingModifier)
+
+        _ = rt.physicalInput(.modifiers(Mods(cmd: true)), at: 0.13)
+        #expect(rt.state.recorder.error == nil)
+
+        let handledDown = rt.physicalInput(.key(key: .keyK, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.14)
+        #expect(handledDown)
+        #expect(!rt.state.recorder.isRecording)
+        #expect(rt.state.recorder.shortcut == ShortcutChord(key: "k", modifiers: [.command]))
+
+        // Repeat + keyUp for finishing key 'k' remain swallowed without clearing/re-triggering
+        #expect(rt.physicalInput(.key(key: .keyK, mods: Mods(cmd: true), pressed: true, repeat: true), at: 0.15))
+        #expect(rt.physicalInput(.key(key: .keyK, mods: Mods(), pressed: false, repeat: false), at: 0.16))
+        #expect(rt.state.recorder.shortcut == ShortcutChord(key: "k", modifiers: [.command]))
+
+        // Re-begin and Backspace clears shortcut
+        rt.pointerDown(at: pt, at: 0.17)
+        rt.pointerUp(at: pt, at: 0.18)
+        rt.frame(at: 0.19)
+        _ = rt.physicalInput(.key(key: .backspace, mods: Mods(), pressed: true, repeat: false), at: 0.20)
+        _ = rt.physicalInput(.key(key: .backspace, mods: Mods(), pressed: false, repeat: false), at: 0.21)
+        #expect(rt.state.recorder.shortcut == nil)
+        #expect(rt.state.committed.last ?? ShortcutChord(key: "x", modifiers: [.command]) == nil)
+    }
 }

@@ -799,4 +799,22 @@ extension Kit {
         }
         return region.build()
     }
+
+    public func toast<State>(
+        key: String,
+        message: String,
+        tone: BadgeTone = .neutral,
+        actionLabel: String,
+        onAction: @escaping (inout State, inout Tx) -> Void,
+        onDismiss: ((inout State) -> Void)? = nil
+    ) -> El<State> {
+        Toast<State>(
+            key: key,
+            message: message,
+            variant: tone,
+            actionLabel: actionLabel,
+            onAction: onAction,
+            onDismiss: onDismiss.map { handler in { s, _ in handler(&s) } }
+        ).build(using: self)
+    }
 }

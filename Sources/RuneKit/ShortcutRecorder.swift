@@ -410,12 +410,28 @@ public struct ShortcutRecorder<State> {
         if !disabled {
             elTree = elTree
                 .focusable(true)
+                .onPhysicalInput { s, ev, tx in
+                    guard let mapped = Self.mapPhysicalInput(ev) else { return false }
+                    var recCopy = s[keyPath: stateKeyPath]
+                    let wasRecording = recCopy.isRecording
+                    let handled = recCopy.handleWithValidator(
+                        mapped,
+                        allowUnmodified: allowUnmodified
+                    ) { chord in
+                        onChange?(&s, chord)
+                    }
+                    s[keyPath: stateKeyPath] = recCopy
+                    if wasRecording && !recCopy.isRecording {
+                        tx.blur()
+                    }
+                    return handled
+                }
                 .onKey { s, ev, tx in
                     guard let event = Self.mapKeyEvent(ev) else { return false }
                     var recCopy = s[keyPath: stateKeyPath]
                     let wasRecording = recCopy.isRecording
                     if case .capturing(let err, let ref, _) = recCopy.phase {
-                        // El.onKey only delivers keyDown until El.onPhysicalInput lands.
+                        // El.onKey only delivers keyDown (never keyUp).
                         recCopy.phase = .capturing(error: err, refused: ref, finishing: nil)
                     }
                     let handled = recCopy.handleWithValidator(
@@ -432,6 +448,142 @@ public struct ShortcutRecorder<State> {
                 }
         }
         return elTree
+    }
+
+    static func mapModifiers(_ mods: Mods) -> ShortcutModifiers {
+        var out: ShortcutModifiers = []
+        if mods.cmd { out.insert(.command) }
+        if mods.ctrl { out.insert(.control) }
+        if mods.alt { out.insert(.option) }
+        if mods.shift { out.insert(.shift) }
+        return out
+    }
+
+    static func mapPhysicalInput(_ ev: PhysicalInput) -> ShortcutInputEvent? {
+        switch ev {
+        case .focusLost:
+            return .focusLost
+        case .modifiers(let mods):
+            return .modifiersChanged(mapModifiers(mods))
+        case let .key(code, mods, pressed, isRepeat):
+            guard let name = mapPhysicalKeyCode(code) else { return nil }
+            if pressed {
+                return .keyDown(key: name, modifiers: mapModifiers(mods), isRepeat: isRepeat)
+            }
+            return .keyUp(name)
+        }
+    }
+
+    static func mapPhysicalKeyCode(_ code: PhysicalKeyCode) -> String? {
+        switch code {
+        case .keyA: "a"
+        case .keyB: "b"
+        case .keyC: "c"
+        case .keyD: "d"
+        case .keyE: "e"
+        case .keyF: "f"
+        case .keyG: "g"
+        case .keyH: "h"
+        case .keyI: "i"
+        case .keyJ: "j"
+        case .keyK: "k"
+        case .keyL: "l"
+        case .keyM: "m"
+        case .keyN: "n"
+        case .keyO: "o"
+        case .keyP: "p"
+        case .keyQ: "q"
+        case .keyR: "r"
+        case .keyS: "s"
+        case .keyT: "t"
+        case .keyU: "u"
+        case .keyV: "v"
+        case .keyW: "w"
+        case .keyX: "x"
+        case .keyY: "y"
+        case .keyZ: "z"
+        case .digit0: "0"
+        case .digit1: "1"
+        case .digit2: "2"
+        case .digit3: "3"
+        case .digit4: "4"
+        case .digit5: "5"
+        case .digit6: "6"
+        case .digit7: "7"
+        case .digit8: "8"
+        case .digit9: "9"
+        case .escape: "escape"
+        case .enter, .numpadEnter: "return"
+        case .tab: "tab"
+        case .backspace: "backspace"
+        case .delete: "delete"
+        case .space: "space"
+        case .insert: "insert"
+        case .minus: "-"
+        case .equal: "="
+        case .bracketLeft: "["
+        case .bracketRight: "]"
+        case .backslash: "\\"
+        case .semicolon: ";"
+        case .quote: "'"
+        case .backquote: "`"
+        case .comma: ","
+        case .period: "."
+        case .slash: "/"
+        case .capsLock: "capslock"
+        case .shiftLeft, .shiftRight: "shift"
+        case .controlLeft, .controlRight: "control"
+        case .altLeft, .altRight: "option"
+        case .superLeft, .superRight: "command"
+        case .fn: "fn"
+        case .arrowLeft: "left"
+        case .arrowRight: "right"
+        case .arrowUp: "up"
+        case .arrowDown: "down"
+        case .home: "home"
+        case .end: "end"
+        case .pageUp: "pageUp"
+        case .pageDown: "pageDown"
+        case .f1: "F1"
+        case .f2: "F2"
+        case .f3: "F3"
+        case .f4: "F4"
+        case .f5: "F5"
+        case .f6: "F6"
+        case .f7: "F7"
+        case .f8: "F8"
+        case .f9: "F9"
+        case .f10: "F10"
+        case .f11: "F11"
+        case .f12: "F12"
+        case .f13: "F13"
+        case .f14: "F14"
+        case .f15: "F15"
+        case .f16: "F16"
+        case .f17: "F17"
+        case .f18: "F18"
+        case .f19: "F19"
+        case .f20: "F20"
+        case .f21: "F21"
+        case .f22: "F22"
+        case .f23: "F23"
+        case .f24: "F24"
+        case .numpad0: "0"
+        case .numpad1: "1"
+        case .numpad2: "2"
+        case .numpad3: "3"
+        case .numpad4: "4"
+        case .numpad5: "5"
+        case .numpad6: "6"
+        case .numpad7: "7"
+        case .numpad8: "8"
+        case .numpad9: "9"
+        case .numpadAdd: "+"
+        case .numpadSubtract: "-"
+        case .numpadMultiply: "*"
+        case .numpadDivide: "/"
+        case .numpadDecimal: "."
+        }
     }
 
     static func mapKeyEvent(_ ev: KeyEvent) -> ShortcutInputEvent? {

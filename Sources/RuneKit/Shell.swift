@@ -207,36 +207,198 @@ public struct PaneState: Sendable, Equatable {
     }
 
     /// How `SplitView` slides a collapsible pane in and out (`rune_kit::shell::PaneMotion`).
-    public enum PaneMotion: Sendable, Equatable {
-        case slide
-        case snap
-        case instant
+    public struct PaneMotion: Sendable, Equatable {
+        public var springOverride: Spring?
+        public var scaleReference: Float?
+        public var scaleMin: Float
+        public var scaleMax: Float
+        public var fadeTailFraction: Float?
+        public var reducedFadeSeconds: Float
+
+        public static let slide = PaneMotion()
+        public static let snap = PaneMotion(springOverride: MotionTokens.SNAP)
+        public static let instant = PaneMotion(springOverride: Spring.none)
+
+        public init(
+            springOverride: Spring? = nil,
+            scaleReference: Float? = nil,
+            scaleMin: Float = 0.001,
+            scaleMax: Float = 1.0,
+            fadeTailFraction: Float? = nil,
+            reducedFadeSeconds: Float = 0.0
+        ) {
+            self.springOverride = springOverride
+            self.scaleReference = scaleReference
+            self.scaleMin = scaleMin
+            self.scaleMax = scaleMax
+            self.fadeTailFraction = fadeTailFraction
+            self.reducedFadeSeconds = max(0.0, reducedFadeSeconds)
+        }
+
+        public func spring(_ s: Spring) -> Self {
+            var c = self
+            c.springOverride = s
+            return c
+        }
+
+        public func scaleWithWidth(reference: Float, min minSeconds: Float, max maxSeconds: Float) -> Self {
+            let clampedMin = max(0.001, minSeconds)
+            var c = self
+            c.scaleReference = max(1.0, reference)
+            c.scaleMin = clampedMin
+            c.scaleMax = max(clampedMin, maxSeconds)
+            return c
+        }
+
+        public func fadeTail(_ fraction: Float) -> Self {
+            var c = self
+            c.fadeTailFraction = fraction.clamped(to: 0.001...1.0)
+            return c
+        }
+
+        public func reducedMotionFade(_ seconds: Float) -> Self {
+            var c = self
+            c.reducedFadeSeconds = max(0.0, seconds)
+            return c
+        }
+
+        public func spring(forWidth width: Float, kit k: Kit) -> Spring {
+            let base = springOverride ?? k.motion.disclosure
+            guard let ref = scaleReference else { return base }
+            let scaled = base.duration * sqrt(max(0.0, width) / ref)
+            return base.withDuration(scaled.clamped(to: scaleMin...scaleMax))
+        }
 
         public func spring(reducedMotion: Bool) -> Spring? {
             if reducedMotion { return nil }
-            switch self {
-            case .slide: return MotionTokens.SETTLE
-            case .snap: return MotionTokens.SNAP
-            case .instant: return nil
+            let resolved = springOverride ?? MotionTokens.SETTLE
+            if resolved == Spring.none || resolved.duration <= 0 {
+                return nil
             }
+            return resolved
+        }
+
+        public func fade(spring: Spring, open: Bool, reducedMotion: Bool) -> Anim<Float> {
+            if reducedMotion {
+                return reducedFadeSeconds > 0
+                    ? Anim<Float>.tween(duration: reducedFadeSeconds, easing: .easeInOut)
+                    : .instant
+            }
+            if let fraction = fadeTailFraction {
+                return Self.tailFade(spring: spring, fraction: fraction, open: open)
+            }
+            if open {
+                return Anim<Float>.tween(duration: spring.duration * 0.5, easing: .easeOut)
+            }
+            return Anim<Float>.tween(duration: spring.duration * 0.35, easing: .easeIn)
+        }
+
+        private static func tailFade(spring: Spring, fraction: Float, open: Bool) -> Anim<Float> {
+            let step: Float = 1.0 / 480.0
+            if open {
+                var t: Float = 0.0
+                var x: Float = 0.0
+                while x < fraction && t < 4.0 {
+                    t += step
+                    x = spring.sample(from: 0.0, velocity: 0.0, target: 1.0, at: t).position
+                }
+                return Anim<Float>.tween(duration: max(t, step), easing: .easeIn)
+            }
+            var t: Float = 0.0
+            while spring.sample(from: 1.0, velocity: 0.0, target: 0.0, at: t).position > fraction && t < 4.0 {
+                t += step
+            }
+            var lo = max(0.0, t - step)
+            var hi = t
+            for _ in 0..<24 {
+                let mid = (lo + hi) * 0.5
+                if spring.sample(from: 1.0, velocity: 0.0, target: 0.0, at: mid).position > fraction {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+            let v = spring.sample(from: 1.0, velocity: 0.0, target: 0.0, at: hi).velocity
+            return Anim<Float>(spring: spring, delay: hi, velocityRule: .uniform(v / fraction))
         }
     }
 
     /// Hover-peek configuration for a closed sidebar (`rune_kit::shell::SidebarPeek`).
-    public enum SidebarPeek: Sendable, Equatable {
-        case off
-        case edge(width: Float = 16)
+    public struct SidebarPeek: Sendable, Equatable {
+        public var edgeWidth: Float
+        public var edgeDelaySeconds: Double
+        public var toggleDelaySeconds: Double
+        public var belowY: Float?
+        public var holdMargin: Float
+        public var holdGraceSeconds: Double
+        public var springOverride: Spring?
+        public var reducedFadeSeconds: Float
 
-        public static let hover = SidebarPeek.edge(width: 16)
+        public static let off = SidebarPeek().edge(0, delay: 0)
+        public static let hover = SidebarPeek()
 
-        public var isEnabled: Bool {
-            if case .edge(let w) = self { return w > 0 }
-            return false
+        public static func edge(width: Float = 16) -> SidebarPeek {
+            SidebarPeek().edge(width, delay: 0.05)
         }
 
-        public var edgeWidth: Float {
-            if case .edge(let w) = self { return max(0, w) }
-            return 0
+        public init(
+            edgeWidth: Float = 16.0,
+            edgeDelaySeconds: Double = 0.05,
+            toggleDelaySeconds: Double = 0.10,
+            belowY: Float? = nil,
+            holdMargin: Float = 12.0,
+            holdGraceSeconds: Double = 0.15,
+            springOverride: Spring? = nil,
+            reducedFadeSeconds: Float = 0.15
+        ) {
+            self.edgeWidth = max(0.0, edgeWidth)
+            self.edgeDelaySeconds = max(0.0, edgeDelaySeconds)
+            self.toggleDelaySeconds = max(0.0, toggleDelaySeconds)
+            self.belowY = belowY.map { max(0.0, $0) }
+            self.holdMargin = max(0.0, holdMargin)
+            self.holdGraceSeconds = max(0.0, holdGraceSeconds)
+            self.springOverride = springOverride
+            self.reducedFadeSeconds = max(0.0, reducedFadeSeconds)
+        }
+
+        public var isEnabled: Bool { edgeWidth > 0 }
+
+        public func edge(_ width: Float, delay: Double) -> Self {
+            var c = self
+            c.edgeWidth = max(0.0, width)
+            c.edgeDelaySeconds = max(0.0, delay)
+            return c
+        }
+
+        public func toggleDelay(_ delay: Double) -> Self {
+            var c = self
+            c.toggleDelaySeconds = max(0.0, delay)
+            return c
+        }
+
+        public func below(_ y: Float) -> Self {
+            var c = self
+            c.belowY = max(0.0, y)
+            return c
+        }
+
+        public func hold(margin: Float, grace: Double) -> Self {
+            var c = self
+            c.holdMargin = max(0.0, margin)
+            c.holdGraceSeconds = max(0.0, grace)
+            return c
+        }
+
+        public func spring(_ s: Spring) -> Self {
+            var c = self
+            c.springOverride = s
+            return c
+        }
+
+        public func reducedMotionFade(_ seconds: Float) -> Self {
+            var c = self
+            c.reducedFadeSeconds = max(0.0, seconds)
+            return c
         }
     }
 
@@ -421,7 +583,6 @@ public struct PaneState: Sendable, Equatable {
 
     public mutating func resetWidth() {
         setWidth(defaultAskedWidth)
-        setOpen(true)
     }
 
     public mutating func resetToDefaultWidth() {
@@ -440,16 +601,19 @@ public struct PaneState: Sendable, Equatable {
 public typealias PaneMotion = PaneState.PaneMotion
 public typealias SidebarPeek = PaneState.SidebarPeek
 
-/// Returns `true` when `(key, mods)` matches the standard sidebar toggle shortcut (`Cmd+B` on
-/// Apple platforms, `Ctrl+B` elsewhere).
+/// Returns `true` when `(key, mods)` matches the standard sidebar toggle shortcut (`Shift+Cmd+B` or
+/// `Ctrl+Cmd+S` on macOS, `Ctrl+Shift+B` off macOS).
 public func isSidebarToggle(_ key: Key, mods: Mods, macOS: Bool = true) -> Bool {
-    let primary = macOS ? (mods.cmd && !mods.ctrl) : (mods.ctrl && !mods.cmd)
-    guard primary && !mods.alt && !mods.shift && !mods.logo else { return false }
+    guard !mods.alt && !mods.logo else { return false }
+    let letter: String
     switch key {
-    case .text(let s): return s.lowercased() == "b"
-    case .command(let ch): return String(ch).lowercased() == "b"
+    case .text(let s): letter = s.lowercased()
+    case .command(let ch): letter = String(ch).lowercased()
     default: return false
     }
+    let shiftB = letter == "b" && mods.shift && (macOS ? (mods.cmd && !mods.ctrl) : (mods.ctrl && !mods.cmd))
+    let ctrlS = macOS && letter == "s" && mods.cmd && mods.ctrl && !mods.shift
+    return shiftB || ctrlS
 }
 
 /// Drag-to-reorder state machine for vertical lists such as `SidebarRow` (`rune_kit::shell::Reorder`).
@@ -463,17 +627,39 @@ public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
         public var pressY: Float
         public var anchorY: Float
         public var lastY: Float
+        public var pitch: Float
         public var crossedSlop: Bool
     }
 
     private var grip: Grip<Held> = .idle
+    public private(set) var rowGap: Float = 0.0
 
     public init() {}
+
+    /// Points between the rows (the list's gap), so a row steps aside by its height plus this (`Reorder::gap`).
+    public func gap(_ points: Float) -> Self {
+        var c = self
+        c.rowGap = max(0.0, points)
+        return c
+    }
 
     public var isHeld: Bool { grip.isHeld }
     public var isDragging: Bool { grip.data?.crossedSlop ?? false }
     public var activeId: ID? { grip.data?.id }
     public var currentIndex: Int? { grip.data?.currentIndex }
+
+    /// The row being dragged, by its index before the drag (`Reorder::dragging`).
+    public func dragging() -> Int? {
+        guard let h = grip.data, h.crossedSlop else { return nil }
+        return h.startIndex
+    }
+
+    /// Where the dragged row would land if dropped now (`Reorder::target`).
+    public func target() -> Int? {
+        guard let h = grip.data, h.crossedSlop else { return nil }
+        return h.currentIndex
+    }
+
     public var draggingId: ID? {
         guard let h = grip.data, h.crossedSlop else { return nil }
         return h.id
@@ -490,6 +676,23 @@ public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
         return offsetY
     }
 
+    /// How far row `index` sits from its place: the dragged row with the pointer, and the rows
+    /// between its place and its target a step toward the gap it left (`Reorder::shift`).
+    public func shift(forIndex index: Int) -> Float {
+        guard let h = grip.data, h.crossedSlop else { return 0 }
+        let from = h.startIndex
+        let to = h.currentIndex
+        let dy = h.lastY - h.anchorY
+        if index == from {
+            return dy
+        } else if from < index && index <= to {
+            return -h.pitch
+        } else if to <= index && index < from {
+            return h.pitch
+        }
+        return 0
+    }
+
     public mutating func press(id: ID, index: Int, at point: Vec2) {
         grip.press(
             Held(
@@ -499,14 +702,16 @@ public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
                 pressY: point.y,
                 anchorY: point.y,
                 lastY: point.y,
+                pitch: 28.0 + rowGap,
                 crossedSlop: false
             ),
             at: point
         )
     }
 
-    /// Advances the drag to `point`, returning a `(from, to)` swap if the midpoint of an adjacent
-    /// slot (`rowHeight`) is crossed.
+    /// Advances the drag to `point`, updating the target landing slot via `pitch = max(1, rowHeight + rowGap)`.
+    /// Returns the landing `(from, to)` delta when the target slot changes, while deferring the committed list
+    /// reorder to `end(cancelled:)`.
     @discardableResult
     public mutating func drag(
         to point: Vec2,
@@ -514,6 +719,8 @@ public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
         count: Int
     ) -> (from: Int, to: Int)? {
         guard var held = grip.moved(to: point), count > 0, rowHeight > 0 else { return nil }
+        let pitch = max(1.0, rowHeight + rowGap)
+        held.pitch = pitch
         held.lastY = point.y
         if !held.crossedSlop {
             if abs(point.y - held.pressY) < Self.slop {
@@ -522,24 +729,25 @@ public struct Reorder<ID: Hashable & Sendable>: Sendable, Equatable {
             }
             held.crossedSlop = true
         }
-        let deltaSlots = ((point.y - held.anchorY) / rowHeight).rounded()
-        let nextIdx = (held.currentIndex + Int(deltaSlots)).clamped(to: 0...(count - 1))
-        if nextIdx != held.currentIndex {
-            let from = held.currentIndex
-            held.anchorY += Float(nextIdx - from) * rowHeight
-            held.currentIndex = nextIdx
-            grip.hold(held)
-            return (from: from, to: nextIdx)
-        }
+        let deltaSlots = ((point.y - held.anchorY) / pitch).rounded()
+        let nextIdx = (held.startIndex + Int(deltaSlots)).clamped(to: 0...(count - 1))
+        let prevTarget = held.currentIndex
+        held.currentIndex = nextIdx
         grip.hold(held)
+        if nextIdx != prevTarget {
+            return (from: prevTarget, to: nextIdx)
+        }
         return nil
     }
 
+    /// Ends the drag and returns `(from, to)` for a non-cancelled drop that moves a row (`Reorder::end`).
     @discardableResult
-    public mutating func end() -> Bool {
-        let wasDragging = isDragging
-        grip.release()
-        return wasDragging
+    public mutating func end(cancelled: Bool = false) -> (from: Int, to: Int)? {
+        guard let held = grip.release() else { return nil }
+        if !cancelled && held.crossedSlop && held.startIndex != held.currentIndex {
+            return (from: held.startIndex, to: held.currentIndex)
+        }
+        return nil
     }
 
     @discardableResult

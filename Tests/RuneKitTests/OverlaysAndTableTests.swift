@@ -65,10 +65,7 @@ struct OverlaysAndTableTests {
         #expect(rightClamped[2] == 392)
     }
 
-    @Test(
-        "Popover close restores trigger focus before exit finishes",
-        .disabled("Blocked on @el: El.focusReturn(_:) restore trigger focus when inner button closes Popover")
-    )
+    @Test("Popover close restores trigger focus before exit finishes")
     func popoverCloseRestoresTriggerFocus() {
         struct S { var open = false }
         let k = Kit.neutral(dark: true)
@@ -488,7 +485,7 @@ struct OverlaysAndTableTests {
 
     @Test(
         "Combobox opening takes focus, clears prior preedit, and reveals offscreen selection",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
+        .disabled("Blocked on @el: El.onInputKey & El.revealSelected in gap/el d94ec08 (pending merge to main)")
     )
     func comboboxOpeningTakesFocusAndRevealsOffscreenSelection() throws {
         var s = ComboApp()
@@ -522,7 +519,7 @@ struct OverlaysAndTableTests {
 
     @Test(
         "Combobox loops skipping disabled, virtualizes rows, and handles IME/Escape/Scrim focus",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
+        .disabled("Blocked on @el: El.onInputKey & El.revealSelected in gap/el d94ec08 (pending merge to main)")
     )
     func comboboxLoopsSkipsDisabledAndReturnsFocus() throws {
         let rt = makeComboRuntime()
@@ -762,10 +759,7 @@ struct OverlaysAndTableTests {
         }
     }
 
-    @Test(
-        "Select portal inside Dialog accepts an option outside the panel (tests/dialog_select.rs)",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
-    )
+    @Test("Select portal inside Dialog accepts an option outside the panel (tests/dialog_select.rs)")
     func selectPortalInsideDialogAcceptsOptionOutsidePanel() throws {
         struct S { var dialog = true; var select = false; var value = "First" }
         let k = Kit.neutral(dark: true)
@@ -932,10 +926,7 @@ struct OverlaysAndTableTests {
 
     // MARK: - Menu, ContextMenu & List (context_menu.rs, menu_description.rs, menu_open.rs, list_keyboard.rs)
 
-    @Test(
-        "Context menu opens at pointer inside viewport and closes on item click",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
-    )
+    @Test("Context menu opens at pointer inside viewport and closes on item click")
     func contextMenuOpensAtPointerAndStaysInsideViewport() {
         struct S { var point: PointerPress? = nil }
         let k = Kit.neutral(dark: true)
@@ -966,10 +957,7 @@ struct OverlaysAndTableTests {
         #expect(rt.state.point == nil)
     }
 
-    @Test(
-        "Menus and submenus open on the next frame and fade only on close (tests/menu_open.rs)",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
-    )
+    @Test("Menus and submenus open on the next frame and fade only on close (tests/menu_open.rs)")
     func menusAndSubmenusOpenOnNextFrameAndFadeOnlyOnClose() throws {
         struct MState { var open = false; var sub = false }
         let k = Kit.neutral(dark: true)
@@ -999,11 +987,27 @@ struct OverlaysAndTableTests {
         #expect(rt.elements().first { $0.key == "file-menu" } == nil)
     }
 
-    @Test(
-        "Described MenuItem grows to show second description line and Menu opens submenus",
-        .disabled("Blocked on @el: 512KB worker-thread SIGBUS in Runtime.walk fixed in gap/el (#204)")
-    )
+    @Test("Described MenuItem grows to show second description line and Menu opens submenus")
     func menuDescriptionAndSubmenu() throws {
+        // #204: Nested menu + description + submenu exceeds Swift Testing's 512KB Debug worker stack.
+        final class ErrorBox: @unchecked Sendable { var error: Error? }
+        let box = ErrorBox()
+        let sem = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            defer { sem.signal() }
+            do {
+                try Self.runMenuDescriptionAndSubmenu()
+            } catch {
+                box.error = error
+            }
+        }
+        thread.stackSize = 4 * 1024 * 1024
+        thread.start()
+        sem.wait()
+        if let err = box.error { throw err }
+    }
+
+    private static func runMenuDescriptionAndSubmenu() throws {
         struct S { var open = true; var sub = false }
         let k = Kit.neutral(dark: true)
         let rt = Runtime(state: S(), viewport: Vec2(480, 320), systemDark: true) { s, cx in
@@ -1086,10 +1090,7 @@ struct OverlaysAndTableTests {
         #expect(plainRt.elements().first(where: \.focused) == nil)
     }
 
-    @Test(
-        "List focusGroup acts as one tab stop and re-enters on selected item",
-        .disabled("Blocked on @el: focusGroup single-tab-stop and .itemSelected re-entry in Runtime.advanceTabFocus")
-    )
+    @Test("List focusGroup acts as one tab stop and re-enters on selected item")
     func listFocusGroupSingleTabStopReentry() {
         struct S { var picked: Int? = nil }
         let k = Kit.neutral(dark: true)

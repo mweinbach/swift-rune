@@ -432,17 +432,23 @@ public struct Popover<State> {
                 }
             let anchoredSurface = PopoverAnchor.anchored(
                 k,
-                PopoverAnchor.raised(k, content, radius: k.radius.md),
+                content,
                 anchor: anchorKey,
                 placement: placementValue,
                 gap: gutterValue,
                 window: cx?.viewport
             )
-            layer.append(PopoverAnchor.modalOverlay(key: key, z: 60, scrim: scrimEl, content: anchoredSurface))
+            let raisedSurface = PopoverAnchor.raised(k, anchoredSurface, radius: k.radius.md)
+                .focusReturn(returnKey)
+            layer.append(
+                PopoverAnchor.modalOverlay(key: key, z: 60, scrim: scrimEl, content: raisedSurface)
+                    .focusReturn(returnKey)
+            )
         } else {
             let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
             layer.append(
                 PopoverAnchor.anchored(k, surface, anchor: anchorKey, placement: placementValue, gap: gutterValue, window: cx?.viewport)
+                    .focusReturn(returnKey)
             )
         }
         return triggerWrap

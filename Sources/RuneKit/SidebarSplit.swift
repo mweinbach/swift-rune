@@ -6,16 +6,21 @@ import RuneMotion
 
 /// Compact desktop window titlebar (`rune_kit::shell::WindowTitlebar`).
 public struct WindowTitlebar<State> {
-    public static var defaultHeight: Float { 38.0 }
+    public static var defaultHeight: Float { 44.0 }
 
     private var keyId: String
     private var titleText: String?
     private var subtitleText: String?
     private var leadingEl: El<State>?
     private var centerEl: El<State>?
+    private var tabsEl: El<State>?
     private var trailingEl: El<State>?
     private var insets: ChromeInsets
     private var heightOverride: Float?
+    private var topPaddingValue: Float = 0.0
+    private var leadingPaddingValue: Float = 14.0
+    private var trailingPaddingValue: Float = 12.0
+    private var gapValue: Float = 6.0
     private var hasBottomBorder: Bool = true
     private var fillColor: Color?
 
@@ -28,7 +33,7 @@ public struct WindowTitlebar<State> {
     public static func fromInsets(_ insets: ChromeInsets, key: String = "window-titlebar", title: String? = nil, fallback: Float = defaultHeight) -> WindowTitlebar<State> {
         var bar = WindowTitlebar(key: key, title: title)
         bar.insets = insets
-        bar.heightOverride = max(fallback, insets.top)
+        bar.heightOverride = max(insets.height > 0 ? insets.height : fallback, insets.top)
         return bar
     }
 
@@ -36,9 +41,14 @@ public struct WindowTitlebar<State> {
     public func subtitle(_ value: String?) -> Self { var c = self; c.subtitleText = value; return c }
     public func leading(_ element: El<State>?) -> Self { var c = self; c.leadingEl = element; return c }
     public func center(_ element: El<State>?) -> Self { var c = self; c.centerEl = element; return c }
+    public func tabs(_ element: El<State>?) -> Self { var c = self; c.tabsEl = element; return c }
     public func trailing(_ element: El<State>?) -> Self { var c = self; c.trailingEl = element; return c }
     public func insets(_ chrome: ChromeInsets) -> Self { var c = self; c.insets = chrome; return c }
     public func height(_ h: Float) -> Self { var c = self; c.heightOverride = max(1, h); return c }
+    public func topPadding(_ points: Float) -> Self { var c = self; c.topPaddingValue = max(0, points); return c }
+    public func leadingPadding(_ points: Float) -> Self { var c = self; c.leadingPaddingValue = max(0, points); return c }
+    public func trailingPadding(_ points: Float) -> Self { var c = self; c.trailingPaddingValue = max(0, points); return c }
+    public func gap(_ points: Float) -> Self { var c = self; c.gapValue = max(0, points); return c }
     public func borderBottom(_ show: Bool) -> Self { var c = self; c.hasBottomBorder = show; return c }
     public func bg(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
 
@@ -49,9 +59,9 @@ public struct WindowTitlebar<State> {
     public func build(_ k: Kit) -> El<State> {
         var leftSlot: El<State> = row()
             .key("\(keyId)-leading")
-            .gap(8)
+            .gap(gapValue)
             .itemsCenter()
-            .pl(max(12, insets.leading))
+            .pl(insets.leading + leadingPaddingValue)
         if let leadingEl {
             leftSlot = leftSlot.child(leadingEl)
         }
@@ -66,23 +76,38 @@ public struct WindowTitlebar<State> {
 
         var bar: El<State> = row()
             .key(keyId)
+            // Blocked on @el: upstream uses `.role("toolbar")`, not in ElementRole yet.
+            .role(.group)
             .wFull()
             .h(effectiveHeight)
+            .pt(topPaddingValue)
+            .gap(gapValue)
             .itemsCenter()
             .justifyBetween()
-            .bg(fillColor ?? k.c.page)
+            .bg(fillColor ?? k.c.bgDeep)
         if hasBottomBorder {
             bar = bar.borderSides(bottom: 1.0, color: k.c.borderMuted)
         }
         bar = bar.child(leftSlot)
-        if let centerEl {
+        if let tabsEl {
+            bar = bar.child(
+                row()
+                    .key("\(keyId)-tabs")
+                    .grow(1)
+                    .shrink()
+                    .minW(0)
+                    .hFull()
+                    .itemsCenter()
+                    .child(tabsEl)
+            )
+        } else if let centerEl {
             bar = bar.child(row().key("\(keyId)-center").itemsCenter().child(centerEl))
         }
         var rightSlot: El<State> = row()
             .key("\(keyId)-trailing")
-            .gap(6)
+            .gap(gapValue)
             .itemsCenter()
-            .pr(max(12, insets.trailing))
+            .pr(insets.trailing + trailingPaddingValue)
         if let trailingEl {
             rightSlot = rightSlot.child(trailingEl)
         }
@@ -399,30 +424,36 @@ public struct SidebarRow<State> {
                 state[keyPath: keyPath].press(id: id, index: index, at: press.window)
             },
             onDrag: { state, drag, _ in
-                if let swap = state[keyPath: keyPath].drag(to: drag.window, rowHeight: rowHeight, count: count) {
-                    onSwap(&state, swap.from, swap.to)
-                }
+                _ = state[keyPath: keyPath].drag(to: drag.window, rowHeight: rowHeight, count: count)
             },
-            onEnd: { state, _, _ in
-                state[keyPath: keyPath].end()
+            onEnd: { state, cancelled, _ in
+                if let move = state[keyPath: keyPath].end(cancelled: cancelled) {
+                    onSwap(&state, move.from, move.to)
+                }
             }
         )
         return c
     }
 
-    public func reorderState(_ state: Reorder<some Hashable & Sendable>, id: some Hashable & Sendable) -> Self {
+    public func reorderState(_ state: Reorder<some Hashable & Sendable>, id: some Hashable & Sendable, index: Int? = nil) -> Self {
         var c = self
-        let typedOffset = (state.activeId.map { AnyHashable($0) } == AnyHashable(id)) ? state.offsetY : 0
-        let dragging = state.isDragging && (state.activeId.map { AnyHashable($0) } == AnyHashable(id))
+        let isDragged = state.isDragging && (state.activeId.map { AnyHashable($0) } == AnyHashable(id))
+        let typedOffset: Float = if let index {
+            state.shift(forIndex: index)
+        } else if state.activeId.map({ AnyHashable($0) }) == AnyHashable(id) {
+            state.offsetY
+        } else {
+            0
+        }
         if var handlers = c.dragReorderHandlers {
             handlers.offsetY = typedOffset
-            handlers.isDragging = dragging
+            handlers.isDragging = isDragged
             handlers.isHeld = state.isHeld
             c.dragReorderHandlers = handlers
-        } else if dragging || typedOffset != 0 {
+        } else if isDragged || typedOffset != 0 {
             c.dragReorderHandlers = DragHandlers(
                 offsetY: typedOffset,
-                isDragging: dragging,
+                isDragging: isDragged,
                 isHeld: state.isHeld,
                 onDown: { _, _, _ in },
                 onDrag: { _, _, _ in },
@@ -819,7 +850,7 @@ public struct SplitView<State> {
                 let sbKeyPath = sidebarCfg.keyPath
                 let edgeTrigger: El<State> = el()
                     .key("\(keyId)-peek-edge")
-                    .pin(top: titlebarInsetValue.top, bottom: 0, left: 0)
+                    .pin(top: sidebarPeekValue.belowY ?? titlebarInsetValue.top, bottom: 0, left: 0)
                     .w(sidebarPeekValue.edgeWidth)
                     .z(34)
                     .onHover { s, hovering, _ in

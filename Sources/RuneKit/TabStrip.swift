@@ -10,33 +10,58 @@ public enum TabOrientation: Sendable, Equatable, Hashable {
 }
 
 public enum TabDensity: Sendable, Equatable, Hashable {
+    case full
     case compact
-    case comfortable
-    case spacious
+    case iconOnly
+
+    public static let comfortable = TabDensity.full
+    public static let spacious = TabDensity.full
 
     public var height: Float {
         switch self {
+        case .full: return 34.0
         case .compact: return 28.0
-        case .comfortable: return 34.0
-        case .spacious: return 40.0
+        case .iconOnly: return 28.0
         }
     }
 
     public static func `default`(for orientation: TabOrientation) -> TabDensity {
         switch orientation {
-        case .horizontal: return .comfortable
+        case .horizontal: return .full
         case .vertical: return .compact
         }
     }
 }
 
 public enum TabOverflow: Sendable, Equatable {
-    case scroll
+    case scroll(fadeWidth: Float = 16.0)
     case shrink(minWidth: Float = 88.0, maxWidth: Float = 200.0)
-    case shrinkThenScroll(minWidth: Float = 100.0, maxWidth: Float = 220.0, pinnedWidth: Float = 36.0)
+    case shrinkThenScroll(
+        minWidth: Float = 28.0,
+        maxWidth: Float = 224.0,
+        pinnedWidth: Float = 36.0,
+        fadeWidth: Float = 24.0
+    )
 
     public static let horizontalDefault = TabOverflow.shrinkThenScroll()
-    public static let verticalDefault = TabOverflow.scroll
+    public static let verticalDefault = TabOverflow.scroll()
+
+    public static func densityFor(_ width: Float) -> TabDensity {
+        if width <= 44.0 {
+            return .iconOnly
+        } else if width <= 64.0 {
+            return .compact
+        }
+        return .full
+    }
+
+    public var fadeWidth: Float {
+        switch self {
+        case .scroll(let fadeWidth): return fadeWidth
+        case .shrink: return 0.0
+        case .shrinkThenScroll(_, _, _, let fadeWidth): return fadeWidth
+        }
+    }
 
     public func tabWidth(
         available: Float,
@@ -52,13 +77,10 @@ public enum TabOverflow: Sendable, Equatable {
             let totalGap = Float(max(0, unpinnedCount + pinnedCount - 1)) * gap
             let usable = max(0, available - totalGap - Float(pinnedCount) * 36.0)
             return (usable / Float(unpinnedCount)).clamped(to: minW...max(minW, maxW))
-        case .shrinkThenScroll(let minW, let maxW, let pinnedW):
+        case .shrinkThenScroll(let minW, let maxW, let pinnedW, _):
             let totalGap = Float(max(0, unpinnedCount + pinnedCount - 1)) * gap
             let usable = max(0, available - totalGap - Float(pinnedCount) * pinnedW)
             let raw = usable / Float(unpinnedCount)
-            if raw < minW {
-                return minW // Overflow transitions to horizontal scroll at minWidth
-            }
             return raw.clamped(to: minW...max(minW, maxW))
         }
     }
@@ -109,11 +131,13 @@ public struct TabTearMove: Sendable, Equatable {
 public struct TearOutSpec: Sendable, Equatable {
     public var threshold: Float
     public var allowPinned: Bool
+    public var lone: Bool
     public var stripBounds: MotionRect?
 
-    public init(threshold: Float = 36.0, allowPinned: Bool = false, stripBounds: MotionRect? = nil) {
+    public init(threshold: Float = 36.0, allowPinned: Bool = false, lone: Bool = false, stripBounds: MotionRect? = nil) {
         self.threshold = max(4.0, threshold)
         self.allowPinned = allowPinned
+        self.lone = lone
         self.stripBounds = stripBounds
     }
 }
@@ -262,7 +286,7 @@ public struct TabDragState: Sendable, Equatable {
                 phase = .pressing(id: id, index: idx, start: start, current: windowPoint)
                 return .none
             }
-            if let tearOut, (!isPinned || tearOut.allowPinned) {
+            if let tearOut, (count > 1 || tearOut.lone), (!isPinned || tearOut.allowPinned) {
                 let outsideStrip: Bool
                 if let bounds = tearOut.stripBounds {
                     let expanded = MotionRect(
@@ -333,7 +357,7 @@ public struct TabDragState: Sendable, Equatable {
         tearOut: TearOutSpec?,
         isPinned: Bool
     ) -> DragOutcome {
-        if let tearOut, (!isPinned || tearOut.allowPinned), let bounds = tearOut.stripBounds {
+        if let tearOut, (count > 1 || tearOut.lone), (!isPinned || tearOut.allowPinned), let bounds = tearOut.stripBounds {
             let expanded = MotionRect(
                 left: bounds.left - tearOut.threshold,
                 top: bounds.top - tearOut.threshold,
@@ -508,6 +532,7 @@ public struct TabStrip<State> {
     private var leadingEl: El<State>? = nil
     private var trailingEl: El<State>? = nil
     private var availableWidth: Float? = nil
+    private var accessibleLabel: String? = nil
     private var onSelectFn: ((inout State, String, inout Tx) -> Void)? = nil
     private var onCloseFn: ((inout State, String, inout Tx) -> Void)? = nil
     private var onReorderFn: ((inout State, TabReorder, inout Tx) -> Void)? = nil
@@ -518,6 +543,8 @@ public struct TabStrip<State> {
         self.items = tabs
         self.selectedId = selected
     }
+
+    public func label(_ value: String) -> Self { var c = self; c.accessibleLabel = value; return c }
 
     public func orientation(_ value: TabOrientation) -> Self { var c = self; c.orientation = value; return c }
     public func density(_ value: TabDensity) -> Self { var c = self; c.density = value; return c }
@@ -599,6 +626,8 @@ public struct TabStrip<State> {
                 .role(.tab)
                 .label(item.title)
                 .selected(isSelected ? "true" : "false")
+                .itemSelected(isSelected)
+                .positionInSet(index + 1, size: tabBarCount)
                 .h(tabH)
                 .px(item.isPinned ? 8 : 10)
                 .gap(6)
@@ -771,7 +800,7 @@ public struct TabStrip<State> {
                 }
             }
 
-            return tab
+            return tab.role(.tab)
         }
 
         // Assemble strip children with separator suppression next to active/hovered/selected tabs
@@ -798,10 +827,14 @@ public struct TabStrip<State> {
             }
         }
 
+        let listLabel = accessibleLabel ?? "Tabs"
         var track: El<State>
         if orientation == .horizontal {
             track = row()
                 .key("\(keyId)-track")
+                .role(.tabList)
+                .label(listLabel)
+                .focusGroup(true)
                 .grow(1)
                 .minW(0)
                 .gap(2)
@@ -813,6 +846,9 @@ public struct TabStrip<State> {
         } else {
             track = col()
                 .key("\(keyId)-track")
+                .role(.tabList)
+                .label(listLabel)
+                .focusGroup(true)
                 .wFull()
                 .grow(1)
                 .minH(0)
