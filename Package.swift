@@ -74,6 +74,13 @@ let package = Package(
         .executable(name: "rune-sticky", targets: ["RuneSticky"]),
         .executable(name: "rune-expressive-press", targets: ["RuneExpressivePress"]),
         .executable(name: "rune-motion-curves", targets: ["RuneMotionCurves"]),
+        .executable(name: "rune-fx-first-glow", targets: ["RuneFxFirstGlow"]),
+        .executable(name: "rune-fx-gallery", targets: ["RuneFxGallery"]),
+        .executable(name: "rune-light-shader-first-use", targets: ["RuneLightShaderFirstUse"]),
+        .executable(name: "rune-light-frame-bench", targets: ["RuneLightFrameBench"]),
+        .executable(name: "rune-light-demos", targets: ["RuneLightDemos"]),
+        .executable(name: "rune-light-live", targets: ["RuneLightLive"]),
+        .executable(name: "rune-light-reel", targets: ["RuneLightReel"]),
     ],
     targets: [
         .target(
@@ -402,6 +409,41 @@ let package = Package(
             name: "RuneMotionCurves",
             dependencies: ["RuneMotion"],
             path: "Sources/Examples/RuneMotionCurves"
+        ),
+        .executableTarget(
+            name: "RuneFxFirstGlow",
+            dependencies: ["RuneFX", "RuneRef"],
+            path: "Sources/Examples/RuneFxFirstGlow"
+        ),
+        .executableTarget(
+            name: "RuneFxGallery",
+            dependencies: ["RuneFX", "RuneRef"],
+            path: "Sources/Examples/RuneFxGallery"
+        ),
+        .executableTarget(
+            name: "RuneLightShaderFirstUse",
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
+            path: "Sources/Examples/RuneLightShaderFirstUse"
+        ),
+        .executableTarget(
+            name: "RuneLightFrameBench",
+            dependencies: ["RuneFX", "RuneLight", "RuneRef"],
+            path: "Sources/Examples/RuneLightFrameBench"
+        ),
+        .executableTarget(
+            name: "RuneLightDemos",
+            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef"],
+            path: "Sources/Examples/RuneLightDemos"
+        ),
+        .executableTarget(
+            name: "RuneLightLive",
+            dependencies: ["Rune", "RuneLight", "RuneMotion", "RuneRef"],
+            path: "Sources/Examples/RuneLightLive"
+        ),
+        .executableTarget(
+            name: "RuneLightReel",
+            dependencies: ["Rune", "RuneFX", "RuneLight", "RuneRef"],
+            path: "Sources/Examples/RuneLightReel"
         ),
         .testTarget(
             name: "RuneMotionTests",

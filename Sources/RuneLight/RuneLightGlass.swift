@@ -160,6 +160,15 @@ public final class GlassRenderer: @unchecked Sendable {
     private var pyramidTexture: MTLTexture?
     private var pyramidLevelViews: [MTLTexture] = []
 
+    internal var resourceIdentities: (uniform: ObjectIdentifier, glass: ObjectIdentifier, lights: ObjectIdentifier, pyramid: ObjectIdentifier?) {
+        (
+            ObjectIdentifier(uniformBuffer),
+            ObjectIdentifier(glassBuffer),
+            ObjectIdentifier(lightsBuffer),
+            pyramidTexture.map { ObjectIdentifier($0) }
+        )
+    }
+
     public init(device: MTLDevice? = MTLCreateSystemDefaultDevice(), pixelFormat: MTLPixelFormat = .rgba16Float) throws {
         guard let device else { throw LightRendererError.metalUnavailable }
         self.device = device

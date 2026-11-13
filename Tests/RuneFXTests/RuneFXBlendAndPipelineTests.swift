@@ -482,4 +482,364 @@ struct RuneFXBlendAndPipelineTests {
         #expect(graph.stats.culledOffscreen == 1)
         #expect(graph.stats.drawn == 0)
     }
+
+    #if canImport(Metal)
+    @Test func fxBlendModesOverCreamPaperAndFallbackWithoutBackdrop() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+
+        let warmGlow = Fx.glow(GlowParams(
+            color: rgb(0xc85a14),
+            core: rgb(0xe88c28),
+            radius: 10.0,
+            intensity: 1.15,
+            inner: 0.8,
+            hot: 0.35,
+            reach: 2.5
+        )).on(.rounded(x: 32, y: 32, w: 32, h: 32, radius: 10)).at(0.5)
+
+        let creamSrgb = (Double(0xfa) / 255.0, Double(0xf7) / 255.0, Double(0xf2) / 255.0)
+        let creamLin = (Double(srgbDecode(Float(creamSrgb.0))), Double(srgbDecode(Float(creamSrgb.1))), Double(srgbDecode(Float(creamSrgb.2))))
+
+        for srgb in [false, true] {
+            let format: MTLPixelFormat = srgb ? .rgba8Unorm : .rgba8Unorm_srgb
+            let fx = try FxRenderer(device: device, pixelFormat: format)
+            fx.setSrgbBlend(srgb)
+            let clear: (Double, Double, Double, Double) = srgb
+                ? (creamSrgb.0, creamSrgb.1, creamSrgb.2, 1.0)
+                : (creamLin.0, creamLin.1, creamLin.2, 1.0)
+
+            let bd = try makeTexture(device: device, width: 96, height: 96, format: format)
+            let clearCmd = try #require(queue.makeCommandBuffer())
+            let bdRpd = MTLRenderPassDescriptor()
+            bdRpd.colorAttachments[0].texture = bd
+            bdRpd.colorAttachments[0].loadAction = .clear
+            bdRpd.colorAttachments[0].clearColor = MTLClearColor(red: clear.0, green: clear.1, blue: clear.2, alpha: 1.0)
+            bdRpd.colorAttachments[0].storeAction = .store
+            clearCmd.makeRenderCommandEncoder(descriptor: bdRpd)?.endEncoding()
+            clearCmd.commit()
+            clearCmd.waitUntilCompleted()
+
+            let normal = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .normal, srgb: srgb, backdrop: bd)
+            let multiply = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .multiply, srgb: srgb, backdrop: bd)
+            let screen = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .screen, srgb: srgb, backdrop: bd)
+            let overlay = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .overlay, srgb: srgb, backdrop: bd)
+            let softLight = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .softLight, srgb: srgb, backdrop: bd)
+
+            func px(_ buf: [UInt8], _ x: Int, _ y: Int) -> [UInt8] {
+                let i = (y * 96 + x) * 4
+                return [buf[i], buf[i + 1], buf[i + 2]]
+            }
+
+            for out in [normal, multiply, screen, overlay, softLight] {
+                let corner = px(out, 2, 2)
+                #expect(abs(Int(corner[0]) - 0xfa) <= 2 && abs(Int(corner[1]) - 0xf7) <= 2 && abs(Int(corner[2]) - 0xf2) <= 2)
+            }
+
+            let rimNorm = px(normal, 32, 48)
+            let rimMul = px(multiply, 32, 48)
+            let rimScr = px(screen, 32, 48)
+            let rimOvl = px(overlay, 32, 48)
+            let rimSoft = px(softLight, 32, 48)
+
+            #expect(Int(rimMul[2]) + 40 < Int(rimNorm[2]) && Int(rimMul[1]) + 20 < Int(rimNorm[1]))
+            #expect(rimMul[0] > rimMul[1] && rimMul[1] > rimMul[2])
+            #expect(rimScr[0] >= 0xf8 && rimScr[1] >= rimMul[1] && rimScr[2] >= rimMul[2])
+            #expect(rimOvl != rimNorm && rimSoft != rimNorm && rimOvl != rimSoft)
+
+            let mulNoBd = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .multiply, srgb: srgb, backdrop: nil)
+            let ovlNoBd = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .overlay, srgb: srgb, backdrop: nil)
+            let softNoBd = try renderBlendCase(device: device, queue: queue, fx: fx, format: format, clear: clear, layers: [warmGlow], mode: .softLight, srgb: srgb, backdrop: nil)
+            #expect(mulNoBd == normal)
+            #expect(ovlNoBd == normal)
+            #expect(softNoBd == normal)
+        }
+    }
+
+    @Test func inLayerGlowGrainSlotScalePlasticAndBackdropParity() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+
+        // 1. fills_match_across_blend_modes_when_opaque & plastic_matches_across_blend_modes
+        let fxLin = try FxRenderer(device: device, pixelFormat: .rgba8Unorm_srgb)
+        fxLin.setSrgbBlend(false)
+        let fxGam = try FxRenderer(device: device, pixelFormat: .rgba8Unorm)
+        fxGam.setSrgbBlend(true)
+
+        let card = FxShape.rounded(x: 16, y: 16, w: 64, h: 64, radius: 0)
+        let bgLin = Double(srgbDecode(32.0 / 255.0))
+        for fillLayer in [
+            Fx.fill(FillParams(.meshGradient(.dusk()))).on(card).at(0.5),
+            Fx.fill(FillParams(.plastic(PlasticParams(color: rgb(0xffd60a), roughness: 0.45)))).on(card),
+        ] {
+            let lin = try renderBlendCase(device: device, queue: queue, fx: fxLin, format: .rgba8Unorm_srgb, clear: (bgLin, bgLin, bgLin, 1), layers: [fillLayer], mode: .normal, srgb: false, backdrop: nil)
+            let gam = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (32.0 / 255.0, 32.0 / 255.0, 32.0 / 255.0, 1), layers: [fillLayer], mode: .normal, srgb: true, backdrop: nil)
+            let worst = zip(lin, gam).map { abs(Int($0) - Int($1)) }.max() ?? 0
+            #expect(worst <= 4)
+        }
+
+        // 2. faint_occlusion_keeps_the_glow_lit_in_gamma_blend
+        let clearGlow = Fx.glow(GlowParams(color: rgb(0x4fc3ff), radius: 12, intensity: 1.0, occlusion: 0.0)).on(.rounded(x: 32, y: 32, w: 32, h: 32, radius: 8))
+        let faintGlow = Fx.glow(GlowParams(color: rgb(0x4fc3ff), radius: 12, intensity: 1.0, occlusion: 0.002)).on(.rounded(x: 32, y: 32, w: 32, h: 32, radius: 8))
+        let clearPx = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0, 0, 0, 1), layers: [clearGlow], mode: .normal, srgb: true, backdrop: nil)
+        let faintPx = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0, 0, 0, 1), layers: [faintGlow], mode: .normal, srgb: true, backdrop: nil)
+        var lit = 0
+        for (x, y) in [(28, 48), (24, 48), (48, 27), (48, 22), (68, 48), (28, 28)] {
+            let idx = (y * 96 + x) * 4
+            if clearPx[idx] > 24 || clearPx[idx + 1] > 24 || clearPx[idx + 2] > 24 { lit += 1 }
+            for c in 0..<3 {
+                #expect(abs(Int(clearPx[idx + c]) - Int(faintPx[idx + c])) <= 6)
+            }
+        }
+        #expect(lit >= 3)
+
+        // 3. grain_is_symmetric_in_both_blend_modes
+        let grain = Fx.grain(GrainParams(amount: 0.06)).on(.rounded(x: 0, y: 0, w: 96, h: 96, radius: 0))
+        let grainZero = Fx.grain(GrainParams(amount: 0.0)).on(.rounded(x: 0, y: 0, w: 96, h: 96, radius: 0))
+        let gImg = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0.5, 0.5, 0.5, 1), layers: [grain], mode: .normal, srgb: true, backdrop: nil)
+        let gBase = try renderBlendCase(device: device, queue: queue, fx: fxGam, format: .rgba8Unorm, clear: (0.5, 0.5, 0.5, 1), layers: [grainZero], mode: .normal, srgb: true, backdrop: nil)
+        var up = 0.0
+        var down = 0.0
+        for p in 0..<(96 * 96) {
+            let v = Double(gImg[p * 4]) / 255.0
+            let b = Double(gBase[p * 4]) / 255.0
+            if v > b { up += (v - b) / max(1.0 - b, 1e-4) } else { down += (b - v) / max(b, 1e-4) }
+        }
+        up /= Double(96 * 96)
+        down /= Double(96 * 96)
+        #expect(up > 0.005 && down > 0.005)
+        #expect(abs(up - down) <= 0.15 * (up + down) / 2.0)
+
+        // 4. slot_scale_scales_effect_lengths_and_radii_without_bleed
+        let ring6 = Fx.fill(FillParams(.meshGradient(.dusk())).border(6.0)).on(.rounded(x: 8, y: 8, w: 32, h: 32, radius: 8))
+        let ring12 = Fx.fill(FillParams(.meshGradient(.dusk())).border(12.0)).on(.rounded(x: 16, y: 16, w: 64, h: 64, radius: 16))
+        let zoomedTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba8Unorm_srgb)
+        fxLin.prepare(
+            frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [ring6]),
+            slots: [FxSlot().scale(2.0)]
+        )
+        let cmdZ = try #require(queue.makeCommandBuffer())
+        let rpdZ = MTLRenderPassDescriptor()
+        rpdZ.colorAttachments[0].texture = zoomedTarget
+        rpdZ.colorAttachments[0].loadAction = .clear
+        rpdZ.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rpdZ.colorAttachments[0].storeAction = .store
+        let encZ = try #require(cmdZ.makeRenderCommandEncoder(descriptor: rpdZ))
+        try fxLin.drawLayer(encoder: encZ, layer: 0)
+        encZ.endEncoding()
+        cmdZ.commit()
+        cmdZ.waitUntilCompleted()
+        let zoomed = readRGBA8(from: zoomedTarget)
+        let direct = try renderBlendCase(device: device, queue: queue, fx: fxLin, format: .rgba8Unorm_srgb, clear: (0, 0, 0, 1), layers: [ring12], mode: .normal, srgb: false, backdrop: nil)
+        let ringPxIdx = (48 * 96 + 22) * 4
+        #expect(zoomed[ringPxIdx] > 40 || zoomed[ringPxIdx + 1] > 40 || zoomed[ringPxIdx + 2] > 40)
+        let centerIdx = (48 * 96 + 48) * 4
+        #expect(zoomed[centerIdx] == 0 && zoomed[centerIdx + 1] == 0 && zoomed[centerIdx + 2] == 0)
+        let directRingIdx = (48 * 96 + 22) * 4
+        #expect(abs(Int(zoomed[directRingIdx]) - Int(direct[directRingIdx])) <= 4)
+
+        // 5. backdrop_slot_in_an_isolated_layer_reads_and_blurs_that_layers_target
+        let isoTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        let isoBd = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        let isoCmd = try #require(queue.makeCommandBuffer())
+        // Left half bright cyan (0, 0.9, 1, 1), right half black (0, 0, 0, 1)
+        var bdBytes = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        for y in 0..<96 {
+            for x in 0..<96 {
+                let idx = (y * 96 + x) * 4
+                let cyan = x < 48
+                bdBytes[idx + 0] = Float16(0.0).bitPattern
+                bdBytes[idx + 1] = Float16(cyan ? 0.9 : 0.0).bitPattern
+                bdBytes[idx + 2] = Float16(cyan ? 1.0 : 0.0).bitPattern
+                bdBytes[idx + 3] = Float16(1.0).bitPattern
+            }
+        }
+        bdBytes.withUnsafeBytes { raw in
+            isoBd.replace(region: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: 96 * 8)
+        }
+        let frostLayer = Fx.lens(LensParams(depth: 0.0, magnification: 1.0, frost: 0.85, shadow: 0.0, rim: 0.0)).on(.rounded(x: 16, y: 16, w: 64, h: 64, radius: 8))
+        fxLin.addFormat(.rgba16Float)
+        fxLin.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [frostLayer], backdrop: isoBd))
+        _ = try fxLin.blurBackdrop(commandBuffer: isoCmd, backdrop: isoBd, layer: 0)
+        let isoRpd = MTLRenderPassDescriptor()
+        isoRpd.colorAttachments[0].texture = isoTarget
+        isoRpd.colorAttachments[0].loadAction = .clear
+        isoRpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        isoRpd.colorAttachments[0].storeAction = .store
+        let isoEnc = try #require(isoCmd.makeRenderCommandEncoder(descriptor: isoRpd))
+        try fxLin.drawLayer(encoder: isoEnc, format: .rgba16Float, origin: .zero, layer: 0)
+        isoEnc.endEncoding()
+        isoCmd.commit()
+        isoCmd.waitUntilCompleted()
+        #expect(isoCmd.status == .completed)
+        var outWords = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        outWords.withUnsafeMutableBytes { raw in
+            isoTarget.getBytes(raw.baseAddress!, bytesPerRow: 96 * 8, from: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0)
+        }
+        // Sample just to the right of x=48 at (52, 48): frosted lens blurs cyan from x<48 into x=52!
+        let blurSampleG = Float(Float16(bitPattern: outWords[(48 * 96 + 52) * 4 + 1]))
+        let blurSampleB = Float(Float16(bitPattern: outWords[(48 * 96 + 52) * 4 + 2]))
+        #expect(blurSampleG > 0.05 && blurSampleB > 0.05)
+    }
+
+    @Test
+    func inLayerClipFadeStackedGlassAndOriginParity() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+        let fx = try FxRenderer(device: device, pixelFormat: .rgba8Unorm_srgb, options: FxOptions(dither: false, srgbBlend: false))
+        fx.addFormat(.rgba16Float)
+
+        // 1. fill_under_a_rounded_scroll_container_clips_without_a_layer & fill_in_a_faded_rounded_layer_matches_the_plain_fill_faded
+        let orangeFill = Fx.fill(FillParams(.plastic(PlasticParams(color: rgb(0xeb6e28), roughness: 0.6))))
+            .on(.rounded(x: 16, y: 16, w: 64, h: 64, radius: 0))
+        let bottomFadeBits = UInt32(Float16(16.0).bitPattern) << 16
+        let radius24Bits = Float(24.0).bitPattern
+        let clipSlot = FxSlot().clip(
+            SIMD4<Float>(16, 16, 80, 80),
+            fade: SIMD4<UInt32>(0, bottomFadeBits, 0, radius24Bits)
+        )
+        let plainOut = try renderBlendCase(device: device, queue: queue, fx: fx, format: .rgba8Unorm_srgb, clear: (0.125, 0.125, 0.125, 1), layers: [orangeFill], mode: .normal, srgb: false, backdrop: nil)
+        let clippedTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba8Unorm_srgb)
+        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [orangeFill]), slots: [clipSlot])
+        let clipCmd = try #require(queue.makeCommandBuffer())
+        let clipRpd = MTLRenderPassDescriptor()
+        clipRpd.colorAttachments[0].texture = clippedTarget
+        clipRpd.colorAttachments[0].loadAction = .clear
+        clipRpd.colorAttachments[0].clearColor = MTLClearColor(red: 0.125, green: 0.125, blue: 0.125, alpha: 1)
+        clipRpd.colorAttachments[0].storeAction = .store
+        let clipEnc = try #require(clipCmd.makeRenderCommandEncoder(descriptor: clipRpd))
+        try fx.drawLayer(encoder: clipEnc, format: .rgba8Unorm_srgb, origin: .zero, layer: 0)
+        clipEnc.endEncoding()
+        clipCmd.commit()
+        clipCmd.waitUntilCompleted()
+        let clippedOut = readRGBA8(from: clippedTarget)
+        let cornerIdx = (17 * 96 + 17) * 4
+        #expect(abs(Int(clippedOut[cornerIdx]) - 99) <= 6) // linear clear 0.125 encodes to ~99 in sRGB
+        let centerIdx = (48 * 96 + 48) * 4
+        #expect(abs(Int(clippedOut[centerIdx]) - Int(plainOut[centerIdx])) <= 4)
+        let midFadeIdx = (72 * 96 + 48) * 4
+        #expect(clippedOut[midFadeIdx] < plainOut[midFadeIdx] - 15)
+        #expect(clippedOut[midFadeIdx] > 40)
+
+        let isoFillTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [orangeFill]), slots: [clipSlot])
+        let isoCmd = try #require(queue.makeCommandBuffer())
+        let isoRpd = MTLRenderPassDescriptor()
+        isoRpd.colorAttachments[0].texture = isoFillTarget
+        isoRpd.colorAttachments[0].loadAction = .clear
+        isoRpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        isoRpd.colorAttachments[0].storeAction = .store
+        let isoEnc = try #require(isoCmd.makeRenderCommandEncoder(descriptor: isoRpd))
+        try fx.drawLayer(encoder: isoEnc, format: .rgba16Float, origin: .zero, layer: 0)
+        isoEnc.endEncoding()
+        isoCmd.commit()
+        isoCmd.waitUntilCompleted()
+        var isoHalf = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        isoHalf.withUnsafeMutableBytes { raw in
+            isoFillTarget.getBytes(raw.baseAddress!, bytesPerRow: 96 * 8, from: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0)
+        }
+        #expect(Float(Float16(bitPattern: isoHalf[cornerIdx + 3])) < 0.05)
+        #expect(Float(Float16(bitPattern: isoHalf[centerIdx])) > 0.5)
+
+        // 2. backdrop_slots_blur_background_and_stack_glass_over_glass_in_painter_order
+        let sceneTex = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        var sceneHalf = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        for y in 0..<96 {
+            for x in 0..<96 {
+                let idx = (y * 96 + x) * 4
+                let cyan = x < 48
+                sceneHalf[idx + 0] = Float16(0.0).bitPattern
+                sceneHalf[idx + 1] = Float16(cyan ? 0.9 : 0.0).bitPattern
+                sceneHalf[idx + 2] = Float16(cyan ? 1.0 : 0.0).bitPattern
+                sceneHalf[idx + 3] = Float16(1.0).bitPattern
+            }
+        }
+        sceneHalf.withUnsafeBytes { raw in
+            sceneTex.replace(region: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: 96 * 8)
+        }
+        let glass1 = Fx.lens(LensParams(depth: 0.0, magnification: 1.0, frost: 0.85, shadow: 0.0, rim: 0.0)).on(.rounded(x: 16, y: 16, w: 64, h: 64, radius: 8))
+        let glass2 = Fx.fill(FillParams(.flutedGlass(FlutedGlassParams(refraction: 0.0, frost: 0.85, dispersion: 0.0, highlight: 0.0)))).on(.rounded(x: 24, y: 24, w: 56, h: 48, radius: 8))
+        let outOne = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        let cmdGlass = try #require(queue.makeCommandBuffer())
+        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [glass1], backdrop: sceneTex))
+        _ = try fx.blurBackdrop(commandBuffer: cmdGlass, backdrop: sceneTex, layer: 0)
+        let rpdOne = MTLRenderPassDescriptor()
+        rpdOne.colorAttachments[0].texture = outOne
+        rpdOne.colorAttachments[0].loadAction = .clear
+        rpdOne.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rpdOne.colorAttachments[0].storeAction = .store
+        let encOne = try #require(cmdGlass.makeRenderCommandEncoder(descriptor: rpdOne))
+        try fx.drawLayer(encoder: encOne, format: .rgba16Float, origin: .zero, layer: 0)
+        encOne.endEncoding()
+        cmdGlass.commit()
+        cmdGlass.waitUntilCompleted()
+        var oneWords = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        oneWords.withUnsafeMutableBytes { raw in
+            outOne.getBytes(raw.baseAddress!, bytesPerRow: 96 * 8, from: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0)
+        }
+        // Now paint an intermediate red bar into a copy of sceneTex (x = 40..<56, y = 32..<64) and stack glass2 on top
+        var stackedBdWords = oneWords
+        for y in 32..<64 {
+            for x in 40..<56 {
+                let idx = (y * 96 + x) * 4
+                stackedBdWords[idx + 0] = Float16(1.0).bitPattern
+                stackedBdWords[idx + 1] = Float16(0.1).bitPattern
+                stackedBdWords[idx + 2] = Float16(0.2).bitPattern
+                stackedBdWords[idx + 3] = Float16(1.0).bitPattern
+            }
+        }
+        stackedBdWords.withUnsafeBytes { raw in
+            sceneTex.replace(region: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: 96 * 8)
+        }
+        let outTwo = try makeTexture(device: device, width: 96, height: 96, format: .rgba16Float)
+        let cmdGlass2 = try #require(queue.makeCommandBuffer())
+        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [glass2], backdrop: sceneTex))
+        _ = try fx.blurBackdrop(commandBuffer: cmdGlass2, backdrop: sceneTex, layer: 0)
+        let rpdTwo = MTLRenderPassDescriptor()
+        rpdTwo.colorAttachments[0].texture = outTwo
+        rpdTwo.colorAttachments[0].loadAction = .clear
+        rpdTwo.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rpdTwo.colorAttachments[0].storeAction = .store
+        let encTwo = try #require(cmdGlass2.makeRenderCommandEncoder(descriptor: rpdTwo))
+        try fx.drawLayer(encoder: encTwo, format: .rgba16Float, origin: .zero, layer: 0)
+        encTwo.endEncoding()
+        cmdGlass2.commit()
+        cmdGlass2.waitUntilCompleted()
+        var twoWords = [UInt16](repeating: 0, count: 96 * 96 * 4)
+        twoWords.withUnsafeMutableBytes { raw in
+            outTwo.getBytes(raw.baseAddress!, bytesPerRow: 96 * 8, from: MTLRegionMake2D(0, 0, 96, 96), mipmapLevel: 0)
+        }
+        let oneR60 = Float(Float16(bitPattern: oneWords[(48 * 96 + 60) * 4]))
+        let twoR60 = Float(Float16(bitPattern: twoWords[(48 * 96 + 60) * 4]))
+        #expect(twoR60 > oneR60 + 0.05)
+
+        // 3. backdrop_origin_tracks_fractional_scale_scroll_live_offset_and_nested_layers + negative_layer_origins_copy_the_visible_region_at_all_window_edges
+        let shiftedLayer = Fx.fill(FillParams(.plastic(PlasticParams(color: rgb(0x00e5ff), roughness: 0.5))))
+            .on(.rounded(x: 20, y: 20, w: 32, h: 32, radius: 0))
+        fx.prepare(frame: FxFrame(viewport: SIMD2<UInt32>(96, 96), scale: 1.0, layers: [shiftedLayer]))
+        let fracTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba8Unorm_srgb)
+        let negTarget = try makeTexture(device: device, width: 96, height: 96, format: .rgba8Unorm_srgb)
+        let cmdShift = try #require(queue.makeCommandBuffer())
+        for (target, origin) in [(fracTarget, SIMD2<Float>(8.25, 8.75)), (negTarget, SIMD2<Float>(-8.25, -9.75))] {
+            let rpd = MTLRenderPassDescriptor()
+            rpd.colorAttachments[0].texture = target
+            rpd.colorAttachments[0].loadAction = .clear
+            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            rpd.colorAttachments[0].storeAction = .store
+            let enc = try #require(cmdShift.makeRenderCommandEncoder(descriptor: rpd))
+            try fx.drawLayer(encoder: enc, format: .rgba8Unorm_srgb, origin: origin, layer: 0)
+            enc.endEncoding()
+        }
+        cmdShift.commit()
+        cmdShift.waitUntilCompleted()
+        let fracPx = readRGBA8(from: fracTarget)
+        let negPx = readRGBA8(from: negTarget)
+        // Rect [20, 52) shifted by origin +8.25 lands at [11.75, 43.75) in texture space: (14, 14) is inside, (48, 48) is outside.
+        #expect(fracPx[(14 * 96 + 14) * 4 + 2] > 200)
+        #expect(fracPx[(48 * 96 + 48) * 4 + 2] < 10)
+        // Rect [20, 52) shifted by origin -8.25,-9.75 lands at [28.25..60.25, 29.75..61.75): (56, 56) is inside, (24, 24) is outside.
+        #expect(negPx[(56 * 96 + 56) * 4 + 2] > 200)
+        #expect(negPx[(24 * 96 + 24) * 4 + 2] < 10)
+    }
+    #endif
 }
