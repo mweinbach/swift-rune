@@ -110,22 +110,31 @@ public enum SelectAllResolver {
         if nodes.contains(where: { $0.isFocusedTextInput }) {
             return .handledByFocusedInput
         }
-        let liveGroups = nodes.filter { $0.isSelectionGroup && !groupTexts(groupPath: $0.path, in: nodes).isEmpty }
-        let chosenGroup: SelectableNodeSnapshot?
-        if let remembered = pick.lastGroupPath,
-           let matched = liveGroups.first(where: { $0.path == remembered }) {
-            chosenGroup = matched
+        var liveUnits: [String] = []
+        var seenUnits: Set<String> = []
+        for idx in nodes.indices where nodes[idx].isSelectable {
+            let unit = groupPath(forNodeAt: idx, in: nodes) ?? nodes[idx].path
+            if seenUnits.insert(unit).inserted {
+                liveUnits.append(unit)
+            }
+        }
+        let chosenUnit: String?
+        if let remembered = pick.lastGroupPath, liveUnits.contains(remembered) {
+            chosenUnit = remembered
         } else {
-            if liveGroups.count != 1 {
-                if pick.lastGroupPath != nil && !liveGroups.contains(where: { $0.path == pick.lastGroupPath }) {
+            if liveUnits.count != 1 {
+                if pick.lastGroupPath != nil && !liveUnits.contains(where: { $0 == pick.lastGroupPath }) {
                     pick.clear()
                 }
                 return .none
             }
-            chosenGroup = liveGroups.first
+            chosenUnit = liveUnits.first
         }
-        guard let group = chosenGroup else { return .none }
-        let texts = groupTexts(groupPath: group.path, in: nodes)
+        guard let unit = chosenUnit else { return .none }
+        let isGroup = nodes.contains { $0.path == unit && $0.isSelectionGroup }
+        let texts: [SelectableNodeSnapshot] = isGroup
+            ? groupTexts(groupPath: unit, in: nodes)
+            : nodes.filter { $0.path == unit && $0.isSelectable }
         let entries: [CopyJoin.Entry] = texts.compactMap { node in
             let utf8Count = node.text.utf8.count
             guard utf8Count > 0 else { return nil }
@@ -141,7 +150,7 @@ public enum SelectAllResolver {
         }
         let joined = CopyJoin.join(entries)
         return .selectGroup(
-            groupPath: group.path,
+            groupPath: unit,
             nodePaths: texts.map(\.path),
             joinedText: joined
         )

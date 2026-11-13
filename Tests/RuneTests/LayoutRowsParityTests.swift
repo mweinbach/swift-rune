@@ -337,6 +337,91 @@ struct LayoutRowsParityTests {
         #expect(rt.elements().allSatisfy { $0.key != "row" })
     }
 
+    @Test("streaming_fill_and_width_rewrap_land_on_completion")
+    func streamingFillAndWidthRewrapLandOnCompletion() {
+        struct StreamState {
+            var text: String
+            var streaming: Bool
+        }
+
+        let rt = Runtime<StreamState>(
+            state: StreamState(text: "one", streaming: true),
+            viewport: Vec2(180.0, 500.0),
+            pixelScale: 2.0,
+            systemDark: true
+        ) { s, _ in
+            var txt: El<StreamState> = text(s.text).wrapText().wFull()
+            txt.runtimeExtras["shell.revealWordFade"] = Float(0.18)
+            return col().wFull().growth(GrowthSpec.default).child(
+                col().key("row").wFull().streaming(s.streaming).child(txt)
+            )
+        }
+
+        func rowEntry() -> Runtime<StreamState>.RuntimeGrowthEntry {
+            rt.growthRows.first { $0.key.contains("@row") }!.value
+        }
+
+        var t = 0.0
+        _ = rt.frame(at: t)
+        rt.update(at: t) { s, _ in
+            s.text = "one two three four five six seven eight nine ten eleven"
+        }
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        let full = rowEntry().naturalHeight
+        #expect(rowEntry().track.target < full, "new line is held back while filling")
+
+        for _ in 0..<240 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+        }
+        #expect(!rt.isAnimating, "partial line at rest must stop ticking")
+        let oldH = rowEntry().track.h
+
+        rt.setViewport(Vec2(600.0, 500.0), pixelScale: 2.0)
+        rt.update(at: t) { s, _ in
+            s.text += " twelve"
+        }
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        #expect(rowEntry().track.target == oldH, "rewrap waits for stable width")
+
+        for _ in 0..<15 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+        }
+        #expect(rowEntry().track.target < oldH, "width change may shrink a streaming row")
+        #expect(rowEntry().track.h > rowEntry().track.target, "rewrapped height eases instead of snapping")
+
+        rt.update(at: t) { s, _ in
+            s.text = "one two"
+        }
+        _ = rt.frame(at: t)
+        #expect(rowEntry().track.target < rowEntry().track.h, "streaming may still shrink inside the 400 ms rewrap window")
+
+        for _ in 0..<120 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+        }
+        let landed = rowEntry().track.h
+        rt.update(at: t) { s, _ in
+            s.text = "o"
+        }
+        _ = rt.frame(at: t)
+        #expect(rowEntry().track.target == landed, "streaming cannot shrink after the rewrap window")
+
+        rt.update(at: t) { s, _ in
+            s.streaming = false
+        }
+        for _ in 0..<240 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+        }
+        #expect(!rt.isAnimating)
+        let rowNode = rt.flatNodes.first { $0.key == "row" }!
+        #expect(rowEntry().track.h == rowNode.targetRect.height)
+    }
+
     @Test("retained_layout_matches_fresh_tree_across_edits")
     func retainedLayoutMatchesFreshTreeAcrossEdits() {
         func buildSeedView(_ seed: Int, _: inout Cx<Int>) -> El<Int> {

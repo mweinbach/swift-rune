@@ -248,12 +248,11 @@ internal extension Runtime {
         let rect = presentedRectByPath[node.path] ?? node.targetRect
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
-        let wrapWidth = (innerW / max(1e-4, sc.x)) + 0.5
-        let shaped = textSystem.shape(
-            text: displayText,
-            spans: node.el.richSpans,
-            pills: node.el.pillChips,
-            style: node.el.textStyle,
+        let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: displayText, isSecure: false)
+        let isClamped = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
+        let wrapWidth = isClamped ? (innerW / max(1e-4, sc.x)) : ((innerW / max(1e-4, sc.x)) + 0.5)
+        let shaped = resolvedText.shape(
+            using: textSystem,
             maxWidth: wrapWidth,
             pixelScale: pixelScale,
             emitGlyphs: false
@@ -261,7 +260,8 @@ internal extension Runtime {
         let unturned = hitGeometryByPath[node.path]?.turn?.unturn(windowPos) ?? windowPos
         let localX = (unturned.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(1e-4, sc.x)
         let localY = (unturned.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(1e-4, sc.y)
-        let raw = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
+        let drawnRaw = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
+        let raw = shaped.elided?.contentOffset(forDrawn: drawnRaw) ?? drawnRaw
         return SelectionMath.floorCharBoundary(in: displayText, offset: raw)
     }
 
@@ -339,9 +339,7 @@ internal extension Runtime {
         let snaps = selectableSnapshots()
         let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path })
         let sGroup = sSnapIdx.flatMap { SelectAllResolver.groupPath(forNodeAt: $0, in: snaps) }
-        if let sGroup {
-            selectionState.coordinator.pick.noteClick(groupPath: sGroup)
-        }
+        selectionState.coordinator.pick.noteClick(groupPath: sGroup ?? sNode.path)
         let interactiveTakesDrag: Bool = {
             guard let h = hitInteractiveNode?.el.handlers else { return false }
             return h.onDrag != nil || h.dragOut != nil || hitInteractiveNode?.el.attachedDragOutItem != nil
@@ -441,9 +439,9 @@ internal extension Runtime {
                 origin: word
             ))
             let snaps = selectableSnapshots()
-            if let sIdx = snaps.firstIndex(where: { $0.path == sNode.path }),
-               let sGroup = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) {
-                selectionState.coordinator.pick.noteClick(groupPath: sGroup)
+            if let sIdx = snaps.firstIndex(where: { $0.path == sNode.path }) {
+                let sUnit = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) ?? sNode.path
+                selectionState.coordinator.pick.noteClick(groupPath: sUnit)
             }
             dirtyCommit(at: now)
             dispatchSelectionChanges(at: now)
@@ -656,7 +654,8 @@ internal extension Runtime {
               !range.isEmpty else {
             return nil
         }
-        let lineRects = textSystem.selectionRects(in: shaped, utf8Range: range, pixelScale: pxScale)
+        let drawnRange = shaped.elided?.selectionRange(range) ?? range
+        let lineRects = textSystem.selectionRects(in: shaped, utf8Range: drawnRange, pixelScale: pxScale)
         guard !lineRects.isEmpty else { return nil }
         let style = resolvedSelectionStyle(for: snap)
         let picked = style?.pick(active: windowFocused)

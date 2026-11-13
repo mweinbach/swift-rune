@@ -212,6 +212,7 @@ struct AnchoredGrowParityTests {
                 let pill = el().key("pill")
                     .size(s.capW, 28.0)
                     .offset(6.0, -4.0)
+                    .raise()
                     .transition(
                         Transition.offset(x: 0.0, y: 10.0)
                             .combined(with: Transition.scale(0.8, anchor: Vec2(1.0, 1.0)))

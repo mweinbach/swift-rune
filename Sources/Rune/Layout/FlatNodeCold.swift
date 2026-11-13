@@ -23,6 +23,7 @@ internal final class FlatNodeCold<State> {
     var enclosingHScrollIndex: Int?
     var flow: Flow
     var mirroredInRtl: Bool
+    var elided: TextElision?
 
     init(
         el: El<State>,
@@ -43,7 +44,8 @@ internal final class FlatNodeCold<State> {
         enclosingVScrollIndex: Int?,
         enclosingHScrollIndex: Int?,
         flow: Flow = .ltr,
-        mirroredInRtl: Bool = false
+        mirroredInRtl: Bool = false,
+        elided: TextElision? = nil
     ) {
         self.el = el
         self.unscrolledRect = unscrolledRect
@@ -64,6 +66,7 @@ internal final class FlatNodeCold<State> {
         self.enclosingHScrollIndex = enclosingHScrollIndex
         self.flow = flow
         self.mirroredInRtl = mirroredInRtl
+        self.elided = elided
     }
 
     func copy() -> FlatNodeCold<State> {
@@ -86,7 +89,8 @@ internal final class FlatNodeCold<State> {
             enclosingVScrollIndex: enclosingVScrollIndex,
             enclosingHScrollIndex: enclosingHScrollIndex,
             flow: flow,
-            mirroredInRtl: mirroredInRtl
+            mirroredInRtl: mirroredInRtl,
+            elided: elided
         )
     }
 }

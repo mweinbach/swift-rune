@@ -241,6 +241,10 @@ public final class Runtime<State> {
             get { cold.mirroredInRtl }
             set { ensureUniqueCold(); cold.mirroredInRtl = newValue }
         }
+        var elided: TextElision? {
+            get { cold.elided }
+            set { ensureUniqueCold(); cold.elided = newValue }
+        }
         var isSticky: Bool { cold.el.stickyConfig?.edge != nil }
 
         init(
@@ -270,7 +274,8 @@ public final class Runtime<State> {
             enclosingVScrollIndex: Int? = nil,
             enclosingHScrollIndex: Int? = nil,
             flow: Flow = .ltr,
-            mirroredInRtl: Bool = false
+            mirroredInRtl: Bool = false,
+            elided: TextElision? = nil
         ) {
             self.index = index
             self.parentIndex = parentIndex
@@ -299,7 +304,8 @@ public final class Runtime<State> {
                 enclosingVScrollIndex: enclosingVScrollIndex,
                 enclosingHScrollIndex: enclosingHScrollIndex,
                 flow: flow,
-                mirroredInRtl: mirroredInRtl
+                mirroredInRtl: mirroredInRtl,
+                elided: elided
             )
         }
     }
@@ -758,6 +764,7 @@ public final class Runtime<State> {
         var edge: StreamEdge
         var spring: Spring
         var foldLimit: Float
+        var naturalHeight: Float = 0
         var lastFirstChildTop: Float? = nil
         var contentSlide: (was: Float, dy: Float)? = nil
     }
@@ -2385,6 +2392,27 @@ public final class Runtime<State> {
                 childClipFades.append(cfSpec)
             }
 
+            var nodeElided: TextElision? = nil
+            if el.children.isEmpty,
+               el.handlers.editLens == nil,
+               !el.isTruncateFadeEnabled,
+               el.advanceInRun == nil,
+               (el.textStyle.maxLines > 0 || el.textStyle.wrap == .ellipsis),
+               (el.richSpans != nil || el.liveText != nil || el.plainText != nil) {
+                let resolvedText = ElDisplayResolver.resolveText(
+                    el: el,
+                    rawText: el.liveText?.get() ?? el.plainText,
+                    isSecure: el.isSecure
+                )
+                let innerW = max(0, localRect.width - el.layout.padding.left - el.layout.padding.right)
+                nodeElided = resolvedText.shape(
+                    using: textSystem,
+                    maxWidth: innerW,
+                    pixelScale: pixelScale,
+                    emitGlyphs: false
+                ).elided
+            }
+
             let myIndex = newFlat.count
             let flat = FlatNode(
                 index: myIndex,
@@ -2413,7 +2441,8 @@ public final class Runtime<State> {
                 enclosingVScrollIndex: item.enclosingVScrollIndex,
                 enclosingHScrollIndex: item.enclosingHScrollIndex,
                 flow: nodeFlow,
-                mirroredInRtl: mirrorDir && el.mirrorInRtl
+                mirroredInRtl: mirrorDir && el.mirrorInRtl,
+                elided: nodeElided
             )
             newFlat.append(flat)
             let parentCommitSticky: Vec2 = (el.anchor != nil && !flat.isSticky)
@@ -2536,11 +2565,10 @@ public final class Runtime<State> {
                     layoutAnimSpec = .widthLeads(styleSp ?? MotionTokens.SETTLE)
                 }
             }
-            let entersAtOnce = commitCut || commitKind.snaps || reducedMotion || (ancestorInstant && childInstant)
-            var specTransition: Transition? = ancestorInstant
+            let specTransition: Transition? = ancestorInstant
                 ? nil
                 : (el.transition ?? (reducedMotion && item.parentHasGrowth ? Transition.opacity : nil))
-            var specSnapMount: Bool = entersAtOnce
+            var specSnapMount: Bool = commitCut || commitKind.snaps || (ancestorInstant && childInstant) || (reducedMotion && specTransition == nil)
             var specRect = targetRect
             var specOpacity = el.opacity
             var specScale = effectiveScale
@@ -3171,8 +3199,7 @@ public final class Runtime<State> {
             }
         }
 
-        let preCommitNodes = flatNodes
-        let childExitOverrides = collectChildExitOverrides(prevNodes: preCommitNodes, newById: pass.byId, cut: cut)
+        let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut)
 
         for s in liveSubscriptions {
@@ -3228,7 +3255,7 @@ public final class Runtime<State> {
         }
 
         virtualInputs = pass.virtualExpansion.virtualInputs
-        reconcilePrunedHoverWithin(prevNodes: preCommitNodes, newByPath: pass.byPath, cut: cut, at: now)
+        reconcilePrunedHoverWithin(prevNodes: prevFlatNodesSnapshot, newByPath: pass.byPath, cut: cut, at: now)
 
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
         reconcileFocusAfterCommit(
@@ -5848,7 +5875,10 @@ public final class Runtime<State> {
                         rawText: paintedLabelValue,
                         isSecure: nodeIsSecure
                     )
-                    let wrapWidth = (innerW / max(1e-4, scaleVec.x)) + 0.5
+                    let isClampedOrEllipsis = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
+                    let wrapWidth = isClampedOrEllipsis
+                        ? (innerW / max(1e-4, scaleVec.x))
+                        : ((innerW / max(1e-4, scaleVec.x)) + 0.5)
                     let shaped = resolvedText.shape(
                         using: textSystem,
                         maxWidth: wrapWidth,
@@ -5856,6 +5886,7 @@ public final class Runtime<State> {
                         emitGlyphs: true,
                         glidePx: glidePx
                     )
+                    let elided = shaped.elided
                     let innerH = max(0, (snappedEdgesPx[3] - snappedEdgesPx[1]) / pxScale - (el.layout.padding.top + el.layout.padding.bottom) * scaleVec.y)
                     let fadeRes = resolvedText.truncateFade
                         ? ElDisplayResolver.truncateFadeParams(
@@ -5891,6 +5922,7 @@ public final class Runtime<State> {
                         el: el,
                         text: resolvedText.displayedText,
                         shaped: shaped,
+                        elided: elided,
                         textOriginX: textOriginX,
                         textOriginY: textOriginY,
                         scaleVec: scaleVec,
@@ -5931,8 +5963,15 @@ public final class Runtime<State> {
                     if !ringHls.isEmpty {
                         combinedHighlights.append(contentsOf: ringHls)
                     }
-                    if !combinedHighlights.isEmpty && !resolvedText.displayedText.isEmpty {
-                        let txtLen = resolvedText.displayedText.utf8.count
+                    let drawnHighlightText = elided != nil ? shaped.drawnText : resolvedText.displayedText
+                    if let elided, !combinedHighlights.isEmpty {
+                        combinedHighlights = elided.mapHighlights(
+                            combinedHighlights,
+                            contentLength: resolvedText.displayedText.utf8.count
+                        )
+                    }
+                    if !combinedHighlights.isEmpty && !drawnHighlightText.isEmpty {
+                        let txtLen = drawnHighlightText.utf8.count
                         for h in combinedHighlights {
                             guard let fg = h.fg else { continue }
                             let a = min(h.byteRange.lowerBound, txtLen)
@@ -5945,7 +5984,7 @@ public final class Runtime<State> {
                         }
                         let quads = TextHighlightPainter.quads(
                             highlights: combinedHighlights,
-                            in: resolvedText.displayedText,
+                            in: drawnHighlightText,
                             shaped: shaped,
                             textSystem: textSystem,
                             pixelScale: pxScale,

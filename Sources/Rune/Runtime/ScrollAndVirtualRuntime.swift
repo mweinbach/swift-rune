@@ -409,6 +409,25 @@ extension Runtime {
             return max(0, vpRect.bottom - rowRect.top)
         }
 
+        func findLastRevealWrappedText(
+            in el: El<State>,
+            res: LayoutEngine.ResultNode
+        ) -> (el: El<State>, res: LayoutEngine.ResultNode)? {
+            var found: (el: El<State>, res: LayoutEngine.ResultNode)? = nil
+            if el.plainText != nil || el.richSpans != nil || el.liveText != nil {
+                if let wf = el.runtimeExtras["shell.revealWordFade"] as? Float, wf >= 0 {
+                    found = (el, res)
+                }
+            }
+            let count = min(el.children.count, res.children.count)
+            for i in 0..<count {
+                if let sub = findLastRevealWrappedText(in: el.children[i], res: res.children[i]) {
+                    found = sub
+                }
+            }
+            return found
+        }
+
         func walk(
             el: El<State>,
             res: LayoutEngine.ResultNode,
@@ -443,7 +462,8 @@ extension Runtime {
             if !isVirtualSpacer && (inGrowthSpec != nil || el.foldGlideSpec != nil) {
                 let gKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
                 seenGrowthKeys.insert(gKey)
-                let naturalH = res.layout.localRect.height
+                let unlaggedH = res.layout.localRect.height
+                var naturalH = unlaggedH
                 let edge: StreamEdge = el.growthSpec?.edge ?? inGrowthSpec?.edge ?? .feather
                 let spring: Spring = el.growthSpec?.spring ?? inGrowthSpec?.spring ?? Growth.spring
                 let limit = el.foldGlideSpec != nil ? foldLimit(path: path, enclosingScrollPath: enclosingScrollPath) : .infinity
@@ -452,6 +472,35 @@ extension Runtime {
                 let whole = el.isArrivesWhole && !streaming
                 let firstChildTop = res.children.first?.layout.localRect.y
 
+                if streaming && growthRows[gKey] != nil && !settleAll {
+                    if let (tEl, tRes) = findLastRevealWrappedText(in: el, res: res) {
+                        let resolved = ElDisplayResolver.resolveText(
+                            el: tEl,
+                            rawText: tEl.liveText?.get() ?? tEl.plainText,
+                            isSecure: tEl.isSecure
+                        )
+                        if resolved.style.wrap == .wrap {
+                            let innerW = max(0, tRes.layout.localRect.width - tEl.layout.padding.left - tEl.layout.padding.right)
+                            let scale = max(1.0, pixelScale)
+                            let shaped = resolved.shape(
+                                using: textSystem,
+                                maxWidth: innerW > 0 ? innerW : nil,
+                                pixelScale: scale,
+                                emitGlyphs: false
+                            )
+                            let lag = TextLineMetrics.streamHeightLag(
+                                lineCount: shaped.lineCount,
+                                lineHeightPx: shaped.lineHeight * scale,
+                                lineAdvancePx: shaped.lastLineAdvancePx,
+                                hangingAdvancePx: shaped.hangingAdvancePx,
+                                widthPx: innerW * scale,
+                                scale: scale
+                            )
+                            naturalH = max(0, unlaggedH - lag)
+                        }
+                    }
+                }
+
                 if var existing = growthRows[gKey] {
                     let prevTarget = existing.track.target
                     let prevH = existing.track.h
@@ -459,6 +508,7 @@ extension Runtime {
                     existing.edge = edge
                     existing.spring = spring
                     existing.foldLimit = limit
+                    existing.naturalHeight = unlaggedH
                     existing.track.setKind(streaming: streaming, whole: whole, glide: glideArg)
                     if settleAll || (snaps && el.foldGlideSpec == nil && !streaming && !whole) {
                         existing.track = existing.track.restarted(at: naturalH)
@@ -505,9 +555,10 @@ extension Runtime {
                     growthRows[gKey] = existing
                     if existing.track.moving {
                         result.activeCount += 1
-                        if abs(existing.track.h - existing.track.target) > 0.1 || existing.track.isShuttingFold {
-                            result.needsClampedRelayout = true
-                        }
+                    }
+                    let hasStreamingLagClamp = streaming && existing.track.h < unlaggedH - 0.1
+                    if (existing.track.moving && (abs(existing.track.h - existing.track.target) > 0.1 || existing.track.isShuttingFold)) || hasStreamingLagClamp {
+                        result.needsClampedRelayout = true
                     }
                 } else {
                     let startsFromZero = !settleAll
@@ -529,6 +580,7 @@ extension Runtime {
                         edge: edge,
                         spring: spring,
                         foldLimit: limit,
+                        naturalHeight: unlaggedH,
                         lastFirstChildTop: firstChildTop,
                         contentSlide: nil
                     )
@@ -587,25 +639,30 @@ extension Runtime {
             let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer")
             if !isVirtualSpacer && (inGrowthSpec != nil || el.foldGlideSpec != nil) {
                 let gKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
-                if let entry = growthRows[gKey], entry.track.moving {
+                if let entry = growthRows[gKey] {
                     let t = entry.track
                     let diff = abs(t.h - t.target)
+                    let hasStreamingLagClamp = el.isStreaming && t.h < entry.naturalHeight - 0.1
                     let clampCollapse = (el.foldGlideSpec != nil && t.h > t.target + 0.1) || t.isShuttingFold
-                    if t.h < t.target - 0.1 || clampCollapse || diff > 0.1 {
-                        out.layout.height = .points(max(0, t.h))
-                        out.layout.maxHeight = .points(max(0, t.h))
-                        out.layout.clipOverflow = true
-                    }
-                    let featherH: Float
-                    if t.mask > 0.5 {
-                        featherH = t.mask
-                    } else if let fg = el.foldGlideSpec?.feather, diff > 0.25 {
-                        featherH = fg
-                    } else {
-                        featherH = 0
-                    }
-                    if featherH > 0.5 {
-                        out = out.clipFadeLinear(bottom: min(featherH, max(1, t.h)))
+                    if t.moving || hasStreamingLagClamp {
+                        if t.h < t.target - 0.1 || hasStreamingLagClamp || clampCollapse || diff > 0.1 {
+                            out.layout.height = .points(max(0, t.h))
+                            out.layout.maxHeight = .points(max(0, t.h))
+                            out.layout.clipOverflow = true
+                        }
+                        if t.moving {
+                            let featherH: Float
+                            if t.mask > 0.5 {
+                                featherH = t.mask
+                            } else if let fg = el.foldGlideSpec?.feather, diff > 0.25 {
+                                featherH = fg
+                            } else {
+                                featherH = 0
+                            }
+                            if featherH > 0.5 {
+                                out = out.clipFadeLinear(bottom: min(featherH, max(1, t.h)))
+                            }
+                        }
                     }
                 }
             }
