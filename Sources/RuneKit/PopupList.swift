@@ -1,6 +1,8 @@
 import Foundation
 import Rune
 
+// MARK: - Legacy PopupListItem / PopupListState / Kit.popupList (kept for compatibility)
+
 /// One row item in a `PopupList` (`rune_kit::popup_list::PopupItem`).
 public struct PopupListItem: Sendable, Equatable, Hashable {
     public var id: String
@@ -82,7 +84,7 @@ public struct PopupListState: Sendable, Equatable {
 }
 
 extension Kit {
-    /// Keyboard-navigable filterable popup listbox (`rune_kit::popup_list::PopupList`).
+    /// Keyboard-navigable filterable popup listbox (`Kit::popup_list`).
     public func popupList<State>(
         key: String = "popup-list",
         items: [PopupListItem],
@@ -150,5 +152,416 @@ extension Kit {
             .border(1.0, c.borderBase)
             .clip(true)
             .child(listCol)
+    }
+}
+
+// MARK: - Parity PopupItem & PopupList (`rune_kit::popup_list`)
+
+/// One row in a `PopupList` (`rune_kit::popup_list::PopupItem`).
+public struct PopupItem<State> {
+    public let id: String
+    public let label: String
+    public var descriptionText: String?
+    public var leadingEl: El<State>?
+    public var trailingEl: El<State>?
+    public var isDisabled: Bool = false
+
+    public init(_ id: String, _ label: String) {
+        self.id = id
+        self.label = label
+    }
+
+    public init(_ item: PopupListItem) {
+        self.id = item.id
+        self.label = item.label
+        self.descriptionText = item.description
+        self.isDisabled = item.disabled
+    }
+
+    public func description(_ text: String) -> PopupItem<State> {
+        var copy = self
+        copy.descriptionText = text.isEmpty ? nil : text
+        return copy
+    }
+
+    public func leading(_ el: El<State>) -> PopupItem<State> {
+        var copy = self
+        copy.leadingEl = el
+        return copy
+    }
+
+    public func trailing(_ el: El<State>) -> PopupItem<State> {
+        var copy = self
+        copy.trailingEl = el
+        return copy
+    }
+
+    public func disabled(_ on: Bool = true) -> PopupItem<State> {
+        var copy = self
+        copy.isDisabled = on
+        return copy
+    }
+}
+
+/// Anchored, virtualised popup listbox driven by an outside field or `Combobox`
+/// (`rune_kit::popup_list::PopupList`).
+public struct PopupList<State> {
+    public static var rowHeight: Float { 28.0 }
+
+    private let key: String
+    private var anchorKey: String
+    private var isOpen: Bool = true
+    private var placementValue: Placement = .topStart
+    private var gutterValue: Float = 4.0
+    private var widthValue: Float = 260.0
+    private var maxHeightValue: Float = 240.0
+    private var paddingValue: Float = 4.0
+    private var rowRadiusValue: Float = 4.0
+    private var itemList: [PopupItem<State>] = []
+    private var shouldAnimateFiltering: Bool = false
+    private var activeIdx: Int?
+    private var trackedScrollYValue: Float = 0.0
+    private var preferTrackedScroll: Bool = false
+    private var emptyText: String = "No results"
+    private var a11yLabel: String?
+    private var onActiveHandler: ((inout State, Int) -> Void)?
+    private var onChooseHandler: ((inout State, String, inout Tx) -> Void)?
+    private var onCloseHandler: ((inout State) -> Void)?
+
+    public init(_ key: String, anchor: String) {
+        self.key = key
+        self.anchorKey = anchor
+    }
+
+    public func anchor(_ anchor: String) -> PopupList<State> {
+        var copy = self
+        copy.anchorKey = anchor
+        return copy
+    }
+
+    public func anchored(_ anchor: String, side: Side, align: Align, gap: Float) -> PopupList<State> {
+        var copy = self
+        copy.anchorKey = anchor
+        copy.placementValue = Self.placement(side: side, align: align)
+        copy.gutterValue = gap
+        return copy
+    }
+
+    public func placement(_ p: Placement) -> PopupList<State> {
+        var copy = self
+        copy.placementValue = p
+        return copy
+    }
+
+    public func side(_ s: Side) -> PopupList<State> {
+        var copy = self
+        let (_, a) = copy.placementValue.split()
+        copy.placementValue = Self.placement(side: s, align: a)
+        return copy
+    }
+
+    public func align(_ a: Align) -> PopupList<State> {
+        var copy = self
+        let (s, _) = copy.placementValue.split()
+        copy.placementValue = Self.placement(side: s, align: a)
+        return copy
+    }
+
+    public func offset(_ gap: Float) -> PopupList<State> {
+        gutter(gap)
+    }
+
+    public func gutter(_ gap: Float) -> PopupList<State> {
+        var copy = self
+        copy.gutterValue = gap
+        return copy
+    }
+
+    public func open(_ on: Bool) -> PopupList<State> {
+        var copy = self
+        copy.isOpen = on
+        return copy
+    }
+
+    public func width(_ w: Float) -> PopupList<State> {
+        var copy = self
+        copy.widthValue = w
+        return copy
+    }
+
+    public func maxHeight(_ h: Float) -> PopupList<State> {
+        var copy = self
+        copy.maxHeightValue = h
+        return copy
+    }
+
+    public func padding(_ p: Float) -> PopupList<State> {
+        var copy = self
+        copy.paddingValue = p
+        return copy
+    }
+
+    public func rowRadius(_ r: Float) -> PopupList<State> {
+        var copy = self
+        copy.rowRadiusValue = r
+        return copy
+    }
+
+    public func items(_ items: [PopupItem<State>]) -> PopupList<State> {
+        var copy = self
+        copy.itemList = items
+        return copy
+    }
+
+    public func item(_ item: PopupItem<State>) -> PopupList<State> {
+        var copy = self
+        copy.itemList.append(item)
+        return copy
+    }
+
+    public func animateFiltering(_ on: Bool) -> PopupList<State> {
+        var copy = self
+        copy.shouldAnimateFiltering = on
+        return copy
+    }
+
+    public func active(_ i: Int?) -> PopupList<State> {
+        var copy = self
+        copy.activeIdx = i
+        return copy
+    }
+
+    public func scrollOffset(_ y: Float) -> PopupList<State> {
+        var copy = self
+        copy.trackedScrollYValue = max(0, y)
+        return copy
+    }
+
+    public func preferTrackedScroll(_ on: Bool = true) -> PopupList<State> {
+        var copy = self
+        copy.preferTrackedScroll = on
+        return copy
+    }
+
+    public func emptyMessage(_ text: String) -> PopupList<State> {
+        var copy = self
+        copy.emptyText = text
+        return copy
+    }
+
+    public func label(_ l: String) -> PopupList<State> {
+        var copy = self
+        copy.a11yLabel = l
+        return copy
+    }
+
+    public func onActive(_ f: @escaping (inout State, Int) -> Void) -> PopupList<State> {
+        var copy = self
+        copy.onActiveHandler = f
+        return copy
+    }
+
+    public func onChoose(_ f: @escaping (inout State, String, inout Tx) -> Void) -> PopupList<State> {
+        var copy = self
+        copy.onChooseHandler = f
+        return copy
+    }
+
+    public func onClose(_ f: @escaping (inout State) -> Void) -> PopupList<State> {
+        var copy = self
+        copy.onCloseHandler = f
+        return copy
+    }
+
+    public func buildList(kit k: Kit, cx: Cx<State>? = nil) -> El<State> {
+        let validActive: Int? = activeIdx.flatMap { i in
+            (i >= 0 && i < itemList.count && !itemList[i].isDisabled) ? i : nil
+        }
+
+        let rh = Self.rowHeight
+        let viewportKey = "\(key)-viewport"
+        let naturalVpH = min(Float(itemList.count) * rh, maxHeightValue)
+        let measuredVpH = cx?.layoutSize(viewportKey)?[1]
+        let renderVpH = (measuredVpH ?? 0) > 0 ? min(measuredVpH!, naturalVpH) : naturalVpH
+        let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
+        let scrollY = preferTrackedScroll ? trackedScrollYValue : max(trackedScrollYValue, cxScrollY)
+        let overscan: Float = 265.0
+        let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
+        let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(renderVpH, rh) + overscan) / rh)))
+        let safeStart = min(start, end)
+        let beforeH = Float(safeStart) * rh
+        let afterH = Float(max(0, itemList.count - end)) * rh
+
+        var rows: El<State> = col().key("\(key)-rows").wFull().shrink(0.0)
+        let extraActiveBefore = validActive.flatMap { $0 < safeStart ? $0 : nil }
+        let extraActiveAfter = validActive.flatMap { $0 >= end ? $0 : nil }
+
+        let weakColor = k.c.textWeak.a > 0 ? k.c.textWeak : k.c.textMuted
+        func makeItemRow(_ i: Int) -> El<State> {
+            let option = itemList[i]
+            let optID = option.id
+            let isActive = validActive == i
+            var itemRow: El<State> = row()
+                .key("\(key)-option-\(optID)")
+                .role(.option)
+                .label(option.label)
+                .itemSelected(isActive)
+                .revealSelected(isActive)
+                .positionInSet(i + 1, size: itemList.count)
+                .disabled(option.isDisabled)
+                .wFull()
+                .h(rh)
+                .shrink(0.0)
+                .px(8.0)
+                .gap(8.0)
+                .itemsCenter()
+                .rounded(rowRadiusValue)
+                .transition(Transition.opacity)
+                .bg(isActive ? k.c.hover : .transparent)
+
+            if let desc = option.descriptionText {
+                itemRow = itemRow.description(desc)
+            }
+            if let lead = option.leadingEl {
+                itemRow = itemRow.child(lead.a11yHidden())
+            }
+            if let desc = option.descriptionText {
+                itemRow = itemRow
+                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).shrink(1.0).ellipsis().a11yHidden())
+                    .child(text(desc).key("description").font(k.ty.uiCompact).color(weakColor).grow(1.0).shrink(1.0).ellipsis().a11yHidden())
+            } else {
+                itemRow = itemRow
+                    .child(text(option.label).font(k.ty.uiCompact).color(k.c.textBase).grow(1.0).shrink(1.0).ellipsis().a11yHidden())
+            }
+            if let trail = option.trailingEl {
+                itemRow = itemRow.child(trail.a11yHidden())
+            }
+
+            if option.isDisabled {
+                itemRow = itemRow.opacity(0.5).inert(true)
+            } else {
+                if let onActive = onActiveHandler {
+                    itemRow = itemRow.onHover { s, hovering, _ in
+                        if hovering { onActive(&s, i) }
+                    }
+                }
+                if let onChoose = onChooseHandler {
+                    itemRow = itemRow.onClick { s, tx in
+                        onChoose(&s, optID, &tx)
+                    }
+                    .focusable(false)
+                }
+            }
+            return itemRow
+        }
+
+        if let activeIdx = extraActiveBefore {
+            let headH = Float(activeIdx) * rh
+            if headH > 0 {
+                rows = rows.child(el().key("\(key)-before-head").wFull().h(headH).shrink(0.0))
+            }
+            rows = rows.child(makeItemRow(activeIdx))
+            let midH = Float(max(0, safeStart - activeIdx - 1)) * rh
+            if midH > 0 {
+                rows = rows.child(el().key("\(key)-before-tail").wFull().h(midH).shrink(0.0))
+            }
+        } else if beforeH > 0 {
+            rows = rows.child(el().key("\(key)-before").wFull().h(beforeH).shrink(0.0))
+        }
+
+        for i in safeStart..<end {
+            rows = rows.child(makeItemRow(i))
+        }
+
+        if let activeIdx = extraActiveAfter {
+            let midH = Float(max(0, activeIdx - end)) * rh
+            if midH > 0 {
+                rows = rows.child(el().key("\(key)-after-head").wFull().h(midH).shrink(0.0))
+            }
+            rows = rows.child(makeItemRow(activeIdx))
+            let tailH = Float(max(0, itemList.count - activeIdx - 1)) * rh
+            if tailH > 0 {
+                rows = rows.child(el().key("\(key)-after-tail").wFull().h(tailH).shrink(0.0))
+            }
+        } else if afterH > 0 {
+            rows = rows.child(el().key("\(key)-after").wFull().h(afterH).shrink(0.0))
+        }
+
+        let isEmpty = itemList.isEmpty
+        var viewport: El<State> = col()
+            .key(viewportKey)
+            .role(.listbox)
+            .wFull()
+            .shrink(1.0)
+            .h(naturalVpH)
+            .minH(isEmpty ? 0.0 : rh)
+            .clipSoft(0.0)
+            .scrollY()
+            .child(rows)
+        if let a11yLabel {
+            viewport = viewport.label(a11yLabel)
+        }
+
+        let emptyEl: El<State> = row()
+            .key("empty")
+            .h(isEmpty ? rh : 0.0)
+            .px(8.0)
+            .itemsCenter()
+            .clip(true)
+            .opacity(isEmpty ? 1.0 : 0.0)
+            .child(text(emptyText).font(k.ty.uiCompact).color(weakColor))
+
+        return col()
+            .key("list")
+            .wFull()
+            .shrink(1.0)
+            .minH(0.0)
+            .onPointerDown { _, _, _ in }
+            .child(viewport)
+            .child(emptyEl)
+    }
+
+    public func build(kit k: Kit, layer: inout [El<State>], cx: Cx<State>? = nil) {
+        guard isOpen else { return }
+        if let close = onCloseHandler {
+            layer.append(PopoverAnchor.scrim(key: "\(key)-scrim", onClose: close))
+        }
+        let list = buildList(kit: k, cx: cx)
+        var content: El<State> = col()
+            .key("\(key)-content")
+            .w(widthValue)
+            .p(paddingValue)
+            .child(list)
+        if shouldAnimateFiltering {
+            content = content.animate(k.motion.overlay)
+        } else {
+            content = content.instantChanges()
+        }
+        let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
+        layer.append(
+            PopoverAnchor.anchored(
+                k,
+                surface,
+                anchor: anchorKey,
+                placement: placementValue,
+                gap: gutterValue,
+                window: cx?.viewport,
+                instant: !shouldAnimateFiltering
+            )
+        )
+    }
+
+    private static func placement(side: Side, align: Align) -> Placement {
+        switch (side, align) {
+        case (.top, .center): .top
+        case (.top, .start): .topStart
+        case (.top, .end): .topEnd
+        case (.bottom, .center): .bottom
+        case (.bottom, .start): .bottomStart
+        case (.bottom, .end): .bottomEnd
+        case (.left, _): .left
+        case (.right, .start): .rightStart
+        case (.right, _): .right
+        }
     }
 }

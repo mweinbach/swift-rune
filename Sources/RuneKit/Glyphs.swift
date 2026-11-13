@@ -93,6 +93,26 @@ extension KitIcons {
         strokeWidth: 1.0
     )
 
+    /// Window sidebar toggle icon (`rune_kit::shell::SIDEBAR`).
+    public static let sidebar = SVGIcon(
+        viewBox: 16,
+        paths: [
+            "M4 3H12A2 2 0 0 1 14 5V11A2 2 0 0 1 12 13H4A2 2 0 0 1 2 11V5A2 2 0 0 1 4 3Z",
+            "M6 3.5V12.5",
+        ],
+        strokeWidth: 1.0
+    )
+
+    /// Window inspector toggle icon (`rune_kit::shell::INSPECTOR`).
+    public static let inspector = SVGIcon(
+        viewBox: 16,
+        paths: [
+            "M4 3H12A2 2 0 0 1 14 5V11A2 2 0 0 1 12 13H4A2 2 0 0 1 2 11V5A2 2 0 0 1 4 3Z",
+            "M10 3.5V12.5",
+        ],
+        strokeWidth: 1.0
+    )
+
     /// All 28 built-in glyphs matching `rune_kit::glyphs` (`tests/glyphs.rs`).
     public static let allBuiltIn: [SVGIcon] = [
         check, checkSmall, chevronDown, chevronUp, caretRight, triangleDown, triangleRight,

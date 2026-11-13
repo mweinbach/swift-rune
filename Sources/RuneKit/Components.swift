@@ -265,25 +265,15 @@ extension Kit {
 
     // MARK: - RollingText (`rune_kit::rolling_text`)
 
-    /// Keyed status/counter text with smooth layout animation (`Kit::rolling_text`).
+    /// Keyed status/counter text with per-grapheme LCS diffing (`Kit::rolling_text`).
     public func rollingText<State>(
         key: String,
         _ value: String,
         font: TextStyle? = nil,
         color: Color? = nil
     ) -> El<State> {
-        row()
-            .key(key)
-            .clip(true)
-            .animateLayout(motion.control)
-            .child(
-                text(value)
-                    .key("\(key)-val-\(value)")
-                    .font(font ?? ty.uiMedium)
-                    .color(color ?? c.textBase)
-                    .noWrap()
-                    .transition(Transition.push(from: .bottom).spring(motion.control))
-            )
+        RollingText<State>(key: key, value: value, font: font, color: color, kit: self)
+            .build()
     }
 
     // MARK: - SearchField (`rune_kit::search`)
@@ -408,24 +398,26 @@ extension Kit {
         trackHeight: Float
     ) -> El<State> {
         let clampedContent = contentFraction.clamped(to: 0.05...1.0)
-        let thumbH = max(20.0, trackHeight * clampedContent)
-        let travel = max(0.0, trackHeight - thumbH)
-        let thumbY = scrollFraction.clamped(to: 0...1) * travel
-
-        return el()
+        let contentH = trackHeight / clampedContent
+        let maxScroll = max(0, contentH - trackHeight)
+        let metrics = ScrollAxisMetrics(
+            offset: scrollFraction.clamped(to: 0...1) * maxScroll,
+            content: contentH,
+            viewport: trackHeight
+        )
+        let style = KitScrollBarStyle.fromKit(self)
             .key(key)
-            .w(6)
-            .h(trackHeight)
-            .pill()
-            .bg(c.layer02.alpha(0.5))
-            .child(
-                el()
-                    .key("\(key)-thumb")
-                    .w(6)
-                    .h(thumbH)
-                    .pill()
-                    .bg(c.borderStrong)
-                    .absolute(x: 0, y: thumbY)
-            )
+            .thumbKey("\(key)-thumb")
+            .trackInsets(start: 0, end: 0)
+            .edgeInset(0)
+            .strip(6)
+            .width(6)
+            .hoverWidth(6)
+            .minThumb(ScrollBarMetrics.minThumbLength)
+            .track(c.layer02.alpha(0.5))
+            .thumb(c.borderStrong)
+            .thumbHover(c.borderStrong)
+            .alwaysVisible(true)
+        return styledScrollBar(style, metrics: metrics)
     }
 }

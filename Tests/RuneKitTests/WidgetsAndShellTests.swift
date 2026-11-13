@@ -80,6 +80,7 @@ struct WidgetsAndShellTests {
         rec.handle(.keyDown(key: "k", modifiers: [], isRepeat: false))
         #expect(rec.error == .missingModifier)
         #expect(rec.isRecording)
+        rec.handle(.keyUp("k"))
 
         // Valid chord commits and exits recording
         rec.handle(.keyDown(key: "k", modifiers: [.command, .shift], isRepeat: false))
