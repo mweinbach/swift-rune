@@ -4,6 +4,8 @@ import Testing
 
 #if os(macOS) && canImport(AppKit)
 import AppKit
+import CoreGraphics
+import Metal
 #endif
 
 @Suite("Platform Increment 7: MacOS Bridges, Cursor, IME, KeyMap, Popup & Tray Parity")
@@ -248,6 +250,132 @@ struct RunePlatformIncrement7Tests {
         a11yHost.update(tree: node, parentView: dummyView) { _, _ in }
         #expect(a11yHost.accessibilityChildren().count == 1)
         #expect(a11yHost.accessibilityFocusedUIElement() != nil)
+    }
+
+    @Test("RuneMetalHostView forwards otherMouse, keyUp (with IME guard), gestures, clipboard, and syncPlatformBridges (#497)")
+    @MainActor
+    func runeMetalHostViewForwardingHooks() throws {
+        _ = NSApplication.shared
+        guard MTLCreateSystemDefaultDevice() != nil else { return }
+        let renderer = try MetalRenderer()
+
+        struct S {
+            var edit = TextEdit("hello")
+            var downButtons: [PointerButton] = []
+            var clickButtons: [PointerButton] = []
+            var keyUps: [String] = []
+            var magnifyDeltas: [(Float, GesturePhase)] = []
+            var rotateDegrees: [(Float, GesturePhase)] = []
+            var smartMagnifyPts: [Vec2] = []
+        }
+
+        let rt = Runtime<S>(state: S(), viewport: Vec2(200, 200)) { _, _ in
+            El<S>(direction: .column)
+                .key("root")
+                .w(200).h(200)
+                .pointerButtons([PointerButton.middle, .back, .forward])
+                .onPointerDown { st, _, tx in st.downButtons.append(tx.button) }
+                .onClick { st, tx in st.clickButtons.append(tx.button) }
+                .onKeyUp { st, ev, _ in
+                    if case .text(let s) = ev.key { st.keyUps.append(s) }
+                    return true
+                }
+                .onMagnify { st, ev, _ in
+                    st.magnifyDeltas.append((ev.delta, ev.phase))
+                    return true
+                }
+                .onRotate { st, ev, _ in
+                    st.rotateDegrees.append((ev.degrees, ev.phase))
+                    return true
+                }
+                .onSmartMagnify { st, x, y, _ in
+                    st.smartMagnifyPts.append(Vec2(x, y))
+                    return true
+                }
+                .children([
+                    textInput(key: "input", \S.edit)
+                        .w(180).h(40)
+                ])
+        }
+        _ = rt.frame(at: 0.0)
+
+        let hostView = RuneMetalHostView(
+            frame: NSRect(x: 0, y: 0, width: 200, height: 200),
+            runtime: rt,
+            renderer: renderer,
+            timeScale: 1.0,
+            respectSystemAppearance: false
+        )
+        #expect(rt.boundClipboard === Clipboard.shared)
+
+        // 1. otherMouseDown / otherMouseUp map buttonNumber -> PointerButton (.middle=2, .back=3, .forward=4)
+        let mainDisplayHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let cgPt = CGPoint(x: 100, y: max(0, mainDisplayHeight - 100))
+        for btnNum in [2, 3, 4] {
+            if let cgDown = CGEvent(
+                mouseEventSource: nil,
+                mouseType: .otherMouseDown,
+                mouseCursorPosition: cgPt,
+                mouseButton: CGMouseButton(rawValue: UInt32(btnNum))!
+            ), let nsDown = NSEvent(cgEvent: cgDown),
+               let cgUp = CGEvent(
+                   mouseEventSource: nil,
+                   mouseType: .otherMouseUp,
+                   mouseCursorPosition: cgPt,
+                   mouseButton: CGMouseButton(rawValue: UInt32(btnNum))!
+               ), let nsUp = NSEvent(cgEvent: cgUp) {
+                hostView.otherMouseDown(with: nsDown)
+                hostView.otherMouseUp(with: nsUp)
+            }
+        }
+        #expect(rt.state.downButtons == [.middle, .back, .forward])
+        #expect(rt.state.clickButtons == [.middle, .back, .forward])
+
+        // 2. keyUp forwards when IME has no marked text, and is suppressed while marked text is open
+        rt.update(at: 0.1) { _, tx in tx.focus("input") }
+        _ = rt.frame(at: 0.1)
+        let keyUpEvent = NSEvent.keyEvent(
+            with: .keyUp,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            characters: "a",
+            charactersIgnoringModifiers: "a",
+            isARepeat: false,
+            keyCode: 0
+        )!
+        hostView.setMarkedText("ka", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+        hostView.keyUp(with: keyUpEvent)
+        #expect(rt.state.keyUps.isEmpty)
+
+        hostView.unmarkText()
+        hostView.keyUp(with: keyUpEvent)
+        #expect(rt.state.keyUps == ["a"])
+
+        // 3. Gesture forwarding & phase mapping
+        #expect(RuneMetalHostView<S>.gesturePhase(from: .began) == .began)
+        #expect(RuneMetalHostView<S>.gesturePhase(from: .mayBegin) == .began)
+        #expect(RuneMetalHostView<S>.gesturePhase(from: .changed) == .changed)
+        #expect(RuneMetalHostView<S>.gesturePhase(from: .ended) == .ended)
+        #expect(RuneMetalHostView<S>.gesturePhase(from: .cancelled) == .cancelled)
+
+        #expect(hostView.dispatchMagnify(delta: 0.25, at: Vec2(100, 120), phase: .changed))
+        #expect(hostView.dispatchRotate(degrees: 30.0, at: Vec2(100, 120), phase: .ended))
+        #expect(hostView.dispatchSmartMagnify(at: Vec2(100, 120)))
+        #expect(rt.state.magnifyDeltas.count == 1)
+        #expect(rt.state.magnifyDeltas[0].0 == 0.25)
+        #expect(rt.state.magnifyDeltas[0].1 == .changed)
+        #expect(rt.state.rotateDegrees.count == 1)
+        #expect(rt.state.rotateDegrees[0].0 == 30.0)
+        #expect(rt.state.rotateDegrees[0].1 == .ended)
+        #expect(rt.state.smartMagnifyPts == [Vec2(100, 120)])
+
+        // 4. syncPlatformBridges updates spellWatch and keeps detached secureInputClaim inactive
+        hostView.syncPlatformBridges(treeCommitted: true)
+        #expect(hostView.spellWatch.path == "/@root/@input")
+        #expect(hostView.secureInputClaim.isActive == false)
     }
     #endif
 }

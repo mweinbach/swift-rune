@@ -430,7 +430,7 @@ private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
 }
 
 @MainActor
-private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClient {
+internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClient {
     private let runtime: Runtime<State>
     private let renderer: MetalRenderer
     private let metalLayer = CAMetalLayer()
@@ -469,6 +469,8 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
     private let maxWindowSize: (Float, Float)?
     private var appliedMenuRevision: UInt64 = 0
     private let fnKeyMonitor = FnKeyMonitor()
+    internal let secureInputClaim = SecureInputClaim(touchOS: true)
+    internal var spellWatch = SpellPauseWatch(path: "")
 
     init(
         frame: NSRect,
@@ -508,6 +510,9 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         self.layer = metalLayer
         MacOSMetalLayerSurface.pinContentsTopLeft(metalLayer)
         registerForDraggedTypes(MacOSDropReader.draggedTypes)
+        if runtime.boundClipboard == nil {
+            runtime.useClipboard(.shared)
+        }
     }
 
     @available(*, unavailable)
@@ -778,7 +783,7 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         }
     }
 
-    private func syncPlatformBridges(treeCommitted: Bool) {
+    internal func syncPlatformBridges(treeCommitted: Bool) {
         let focused = window?.isKeyWindow ?? true
         let imeAllowed = runtime.hasFocusedTextInput && !runtime.hasSecureFocus && focused
         let cancelIme = runtime.consumeImeReset()
@@ -789,6 +794,8 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
             cancelExisting: cancelIme,
             in: self
         )
+        runtime.syncSecureInput(secureInputClaim, windowFocused: window?.isKeyWindow ?? false)
+        _ = runtime.spellCheckWhenSettled(watch: &spellWatch, at: nowSeconds())
 
         MacOSHostViewHelper.applyCursor(runtime.currentCursor(), previous: &lastAppliedCursor, in: self)
 
@@ -944,13 +951,72 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        runtime.pointerDown(at: localPoint(for: event), button: .middle, mods: mods(for: event), at: nowSeconds())
+        runtime.pointerDown(
+            at: localPoint(for: event),
+            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+            mods: mods(for: event),
+            at: nowSeconds()
+        )
         renderTick()
     }
 
     override func otherMouseUp(with event: NSEvent) {
-        runtime.pointerUp(at: localPoint(for: event), button: .middle, mods: mods(for: event), at: nowSeconds())
+        runtime.pointerUp(
+            at: localPoint(for: event),
+            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+            mods: mods(for: event),
+            at: nowSeconds()
+        )
         renderTick()
+    }
+
+    internal static func gesturePhase(from phase: NSEvent.Phase) -> GesturePhase {
+        if phase.contains(.began) || phase.contains(.mayBegin) { return .began }
+        if phase.contains(.ended) { return .ended }
+        if phase.contains(.cancelled) { return .cancelled }
+        return .changed
+    }
+
+    @discardableResult
+    internal func dispatchMagnify(delta: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
+        let handled = runtime.magnify(MagnifyEvent(delta: delta, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        renderTick()
+        return handled
+    }
+
+    @discardableResult
+    internal func dispatchRotate(degrees: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
+        let handled = runtime.rotate(RotateEvent(degrees: degrees, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        renderTick()
+        return handled
+    }
+
+    @discardableResult
+    internal func dispatchSmartMagnify(at pt: Vec2) -> Bool {
+        let handled = runtime.smartMagnify(at: pt, now: nowSeconds())
+        renderTick()
+        return handled
+    }
+
+    override func magnify(with event: NSEvent) {
+        _ = dispatchMagnify(
+            delta: Float(event.magnification),
+            at: localPoint(for: event),
+            phase: Self.gesturePhase(from: event.phase)
+        )
+    }
+
+    override func rotate(with event: NSEvent) {
+        // NSEvent.rotation and RotateEvent.degrees are both positive counterclockwise.
+        _ = dispatchRotate(
+            degrees: Float(event.rotation),
+            at: localPoint(for: event),
+            phase: Self.gesturePhase(from: event.phase)
+        )
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        _ = dispatchSmartMagnify(at: localPoint(for: event))
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -992,6 +1058,15 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
             }
         }
         _ = dispatchNativeKeyEvent(event)
+    }
+
+    override func keyUp(with event: NSEvent) {
+        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus && textInputBridge.hasMarkedText() {
+            return
+        }
+        guard let kev = makeKeyEvent(from: event) else { return }
+        _ = runtime.keyUp(kev, at: nowSeconds())
+        renderTick()
     }
 
     override func viewDidMoveToWindow() {
