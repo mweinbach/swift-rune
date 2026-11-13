@@ -295,7 +295,7 @@ struct RuneCoreParityTests {
         let beforeCursor = String(decoding: emojiLines.text.utf8.prefix(emojiLines.cursor), as: UTF8.self)
         #expect(beforeCursor == "👨‍👩‍👧‍👦ab")
 
-        // Secure revealed state
+        // Secure revealed state: display shows text, copy/cut/undo/IME remain blocked (crates/rune/src/edit/input.rs:300-302)
         var sec = TextEdit("secret", multiline: false)
         sec.isSecure = true
         sec.selectAll()
@@ -303,7 +303,8 @@ struct RuneCoreParityTests {
         #expect(sec.copy() == nil)
         sec.isRevealed = true
         #expect(sec.displayString == "secret")
-        #expect(sec.copy() == "secret")
+        #expect(sec.copy() == nil)
+        #expect(sec.cut() == nil)
 
         // Chord logo modifier matching
         let winChord = Chord(parsing: "super+space")

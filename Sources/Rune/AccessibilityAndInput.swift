@@ -61,6 +61,7 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var isExpanded: Bool?
     public var level: Int?
     public var isModal: Bool
+    public var isSecure: Bool
     public var actions: [AccessibilityAction]
     public var children: [AccessibilityNode]
 
@@ -77,6 +78,7 @@ public struct AccessibilityNode: Sendable, Equatable {
         isExpanded: Bool? = nil,
         level: Int? = nil,
         isModal: Bool = false,
+        isSecure: Bool = false,
         actions: [AccessibilityAction] = [],
         children: [AccessibilityNode] = []
     ) {
@@ -92,6 +94,7 @@ public struct AccessibilityNode: Sendable, Equatable {
         self.isExpanded = isExpanded
         self.level = level
         self.isModal = isModal
+        self.isSecure = isSecure
         self.actions = actions
         self.children = children
     }
@@ -132,14 +135,14 @@ public enum AccessibilityTreeBuilder {
         }
 
         var value: String? = element.a11ySelected
+        var isSecure = false
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
-            value = edit.isSecure && !edit.isRevealed
-                ? String(repeating: "•", count: edit.text.count)
-                : edit.text
+            isSecure = edit.isSecure
+            value = edit.isSecure ? nil : edit.text
         }
 
-        let label = element.a11yLabel ?? element.plainText
+        let label = isSecure ? (element.a11yLabel ?? "Password") : (element.a11yLabel ?? element.plainText)
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
 
         var projectedChildren: [AccessibilityNode] = []
@@ -172,6 +175,7 @@ public enum AccessibilityTreeBuilder {
             isExpanded: element.a11yExpanded,
             level: element.a11yLevel,
             isModal: element.isModal,
+            isSecure: isSecure,
             actions: actions,
             children: projectedChildren
         )
@@ -249,6 +253,9 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         super.init()
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
+        if node.isSecure {
+            setAccessibilitySubrole(.secureTextField)
+        }
         if let parent {
             setAccessibilityParent(parent)
         }
@@ -256,7 +263,7 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         if let label = node.label {
             setAccessibilityLabel(label)
         }
-        if let value = node.value {
+        if !node.isSecure, let value = node.value {
             setAccessibilityValue(value)
         }
         if let help = node.help {
@@ -660,11 +667,14 @@ public final class SpellChecker: @unchecked Sendable {
         "es-419": "Latin American Spanish",
         "es-ES": "European Spanish",
         "es-MX": "Mexican Spanish",
+        "fa-AF": "Dari",
         "fr-CA": "Canadian French",
         "fr-CH": "Swiss French",
         "nl-BE": "Flemish",
         "pt-BR": "Brazilian Portuguese",
         "pt-PT": "European Portuguese",
+        "ro-MD": "Moldovan Romanian",
+        "sw-CD": "Congo Swahili",
         "zh-Hans": "Simplified Chinese",
         "zh-Hant": "Traditional Chinese"
     ]
@@ -795,6 +805,7 @@ public struct ShortcutSequence: Sendable, Hashable {
         case .escape: return macOSSymbols ? "⎋" : "Esc"
         case .backspace: return macOSSymbols ? "⌫" : "Backspace"
         case .delete: return macOSSymbols ? "⌦" : "Delete"
+        case .insert: return "Insert"
         case .space: return macOSSymbols ? "Space" : "Space"
         case .arrowLeft: return macOSSymbols ? "←" : "Left"
         case .arrowRight: return macOSSymbols ? "→" : "Right"
@@ -805,6 +816,11 @@ public struct ShortcutSequence: Sendable, Hashable {
         case .pageUp: return macOSSymbols ? "⇞" : "PageUp"
         case .pageDown: return macOSSymbols ? "⇟" : "PageDown"
         case .f(let n): return "F\(n)"
+        case .contextMenu: return "Menu"
+        case .printScreen: return "Print Screen"
+        case .scrollLock: return "Scroll Lock"
+        case .pause: return "Pause"
+        case .modifier: return ""
         }
     }
 }
@@ -815,6 +831,8 @@ public enum ShortcutError: Error, Sendable, Equatable {
     case invalidAccelerator(String)
     case unknownId(String)
     case unmodifiedDisallowed
+    case alreadyInUse(owner: String?)
+    case rejectedByOS(String)
 }
 
 /// Outcome of dispatching a `KeyEvent` through `ShortcutRegistry`.
@@ -836,7 +854,7 @@ public final class ShortcutRegistry: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [Entry] = []
-    private var pendingChords: [Chord] = []
+    private var pendingEvents: [KeyEvent] = []
     public var allowUnmodifiedGlobal: Bool = false
 
     public init() {}
@@ -900,7 +918,7 @@ public final class ShortcutRegistry: @unchecked Sendable {
     public func resetPendingSequence() {
         lock.lock()
         defer { lock.unlock() }
-        pendingChords.removeAll()
+        pendingEvents.removeAll()
     }
 
     /// Dispatches `event` against active scopes (in priority order), advancing or completing multi-chord sequences.
@@ -908,8 +926,13 @@ public final class ShortcutRegistry: @unchecked Sendable {
         _ event: KeyEvent,
         activeScopes: [ShortcutScope] = [.global]
     ) -> ShortcutDispatchResult {
+        // Standalone modifier key press/release never advances or cancels a multi-chord sequence.
+        if case .modifier = event.key {
+            return .unhandled
+        }
+
         lock.lock()
-        let candidateChords = pendingChords + [Chord(mods: event.mods, key: event.key)]
+        let candidateEvents = pendingEvents + [event]
 
         var matchedEntry: Entry? = nil
         var hasPrefixMatch = false
@@ -917,13 +940,13 @@ public final class ShortcutRegistry: @unchecked Sendable {
         for scope in activeScopes {
             for entry in entries where entry.scope == scope {
                 let target = entry.sequence.chords
-                if target.count == candidateChords.count &&
-                    zip(target, candidateChords).allSatisfy({ $0.matches(KeyEvent(key: $1.key, mods: $1.mods)) }) {
+                if target.count == candidateEvents.count &&
+                    zip(target, candidateEvents).allSatisfy({ $0.matches($1) }) {
                     matchedEntry = entry
                     break
                 }
-                if target.count > candidateChords.count &&
-                    zip(target.prefix(candidateChords.count), candidateChords).allSatisfy({ $0.matches(KeyEvent(key: $1.key, mods: $1.mods)) }) {
+                if target.count > candidateEvents.count &&
+                    zip(target.prefix(candidateEvents.count), candidateEvents).allSatisfy({ $0.matches($1) }) {
                     hasPrefixMatch = true
                 }
             }
@@ -931,19 +954,19 @@ public final class ShortcutRegistry: @unchecked Sendable {
         }
 
         if let matched = matchedEntry {
-            pendingChords.removeAll()
+            pendingEvents.removeAll()
             lock.unlock()
             matched.handler()
             return .handled(id: matched.id)
         }
 
         if hasPrefixMatch {
-            pendingChords = candidateChords
+            pendingEvents = candidateEvents
             lock.unlock()
             return .pendingChord
         }
 
-        pendingChords.removeAll()
+        pendingEvents.removeAll()
         lock.unlock()
         return .unhandled
     }

@@ -40,6 +40,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var family: FontFamily
     public var align: TextAlign
     public var wrap: TextWrap
+    public var fontSmoothing: FontSmoothing
 
     public init(
         size: Float = 14.0,
@@ -49,7 +50,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
         italic: Bool = false,
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
-        wrap: TextWrap = .wrap
+        wrap: TextWrap = .noWrap,
+        fontSmoothing: FontSmoothing = .systemDefault
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -59,6 +61,13 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.family = family
         self.align = align
         self.wrap = wrap
+        self.fontSmoothing = fontSmoothing
+    }
+
+    public func smoothing(_ mode: FontSmoothing) -> TextStyle {
+        var copy = self
+        copy.fontSmoothing = mode
+        return copy
     }
 
     public func lh(_ h: Float) -> TextStyle {
@@ -97,6 +106,12 @@ public struct TextStyle: Sendable, Hashable, Codable {
         return copy
     }
 
+    public func wrapped(_ on: Bool = true) -> TextStyle {
+        var copy = self
+        copy.wrap = on ? .wrap : .noWrap
+        return copy
+    }
+
     public func noWrap() -> TextStyle {
         var copy = self
         copy.wrap = .noWrap
@@ -122,7 +137,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
     }
 
     public var resolvedLineHeight: Float {
-        lineHeight ?? (size * 1.35).rounded(.toNearestOrEven)
+        if let lh = lineHeight, lh > 0 { return lh }
+        return size * 1.25
     }
 }
 
@@ -158,16 +174,33 @@ public struct TextSpan: Sendable, Hashable {
     }
 }
 
-/// Vector SVG path icon definition (`M/L/H/V/C/Q/Z` in a square `viewBox`, typically `16` or `24`).
+/// Vector SVG path icon definition (`M/L/H/V/C/Q/Z` or SVG body in a square `viewBox`, typically `16` or `24`).
 public struct SVGIcon: Sendable, Hashable {
     public var viewBox: Float
     public var paths: [String]
     public var strokeWidth: Float?
+    /// Optional raw SVG body markup (multi-color paths/shapes/gradients, `currentColor`, groups, transforms).
+    public var body: String?
 
-    public init(viewBox: Float = 24.0, paths: [String], strokeWidth: Float? = 2.0) {
+    public init(viewBox: Float = 24.0, paths: [String], strokeWidth: Float? = 2.0, body: String? = nil) {
         self.viewBox = max(1, viewBox)
         self.paths = paths
         self.strokeWidth = strokeWidth
+        self.body = body
+    }
+
+    public init(viewBox: Float = 24.0, body: String) {
+        self.viewBox = max(1, viewBox)
+        self.paths = []
+        self.strokeWidth = nil
+        self.body = body
+    }
+
+    /// True when the icon's SVG body declares its own colors (`fill="#..."`, `stroke="#..."`, `stop-color="#..."`).
+    public var isColorIcon: Bool {
+        guard let body else { return false }
+        return body.contains("fill=\"#") || body.contains("stroke=\"#") || body.contains("stop-color=\"#") ||
+            body.contains("fill='#") || body.contains("stroke='#") || body.contains("stop-color='#")
     }
 }
 
@@ -175,9 +208,23 @@ public struct SVGIcon: Sendable, Hashable {
 public struct PositionedGlyph: Sendable, Equatable {
     /// Quad `[x, y, width, height]` in logical points relative to the text box origin.
     public var rect: SIMD4<Float>
-    /// Normalized `[u0, v0, u1, v1]` in `GlyphAtlas`.
+    /// Normalized `[u0, v0, u1, v1]` in `GlyphAtlas` (`.zero` for RGBA color glyphs).
     public var uv: SIMD4<Float>
     public var color: Color?
+    /// Non-nil index into `GlyphAtlas.colorGlyph(_:)` for RGBA color/emoji glyphs (`#807`).
+    public var colorGlyphIndex: UInt32?
+
+    public init(
+        rect: SIMD4<Float>,
+        uv: SIMD4<Float>,
+        color: Color? = nil,
+        colorGlyphIndex: UInt32? = nil
+    ) {
+        self.rect = rect
+        self.uv = uv
+        self.color = color
+        self.colorGlyphIndex = colorGlyphIndex
+    }
 }
 
 /// Shaped multi-line text result with metrics, glyph quads, and caret lookup helpers.
@@ -190,11 +237,10 @@ public struct ShapedText: @unchecked Sendable {
     public var underlines: [SIMD4<Float>]
     public var strikethroughs: [SIMD4<Float>] = []
     public var backgrounds: [(SIMD4<Float>, Color)]
-    #if canImport(CoreText)
-    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)]
-    #else
-    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])]
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    fileprivate var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
     #endif
+    fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
 }
 
 /// Shelf-packed R8 coverage atlas for CoreText glyphs and rasterized SVG icons.
@@ -206,12 +252,37 @@ public final class GlyphAtlas: @unchecked Sendable {
         public var bearingPx: SIMD2<Float>
     }
 
+    /// Cached RGBA8 color glyph bitmap (`#807`, Apple Color Emoji / COLR / CBDT / sbix).
+    public struct ColorGlyphEntry: Sendable, Equatable {
+        public var index: UInt32
+        public var pixelSize: SIMD2<Int>
+        public var bearingPx: SIMD2<Float>
+        public var rgba: Data
+
+        public init(index: UInt32 = 0, pixelSize: SIMD2<Int>, bearingPx: SIMD2<Float>, rgba: Data) {
+            self.index = index
+            self.pixelSize = pixelSize
+            self.bearingPx = bearingPx
+            self.rgba = rgba
+        }
+    }
+
+    /// Upstream CPU byte budget for cached RGBA color glyphs (`atlas.rs:52`, `COLOR_GLYPH_BUDGET`).
+    public static let colorGlyphBudgetBytes: Int = 16 * 1024 * 1024
+
     #if canImport(CoreText) && canImport(CoreGraphics)
     private struct GlyphKey: Hashable {
         var fontHash: CFHashCode
         var glyphID: CGGlyph
         var sizePx10: Int
         var subpixelBin: UInt8
+        var smoothing: FontSmoothing
+    }
+
+    private struct ColorGlyphKey: Hashable {
+        var fontHash: CFHashCode
+        var glyphID: CGGlyph
+        var sizePx10: Int
     }
     #endif
 
@@ -220,6 +291,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         var sizePx10: Int
         var bold: Bool
         var italic: Bool
+        var smoothing: FontSmoothing
     }
 
     private struct IconKey: Hashable {
@@ -230,35 +302,188 @@ public final class GlyphAtlas: @unchecked Sendable {
     private let lock = NSLock()
     public private(set) var atlas: R8Atlas
     public private(set) var generation: UInt64 = 1
+    public let maxCachedEntries: Int
+    public let maxColorGlyphBytes: Int
+    public let maxAtlasDimension: Int = 4096
+    private let targetWidth: Int
+    private let targetHeight: Int
+    private var backingAllocated: Bool = false
     private var shelfX: Int = 1
     private var shelfY: Int = 1
     private var shelfHeight: Int = 0
+    private var accessCounter: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
-    private var glyphCache: [GlyphKey: Entry] = [:]
+    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64)] = [:]
+    private var colorGlyphByIndex: [UInt32: ColorGlyphEntry] = [:]
+    private var colorGlyphBytes: Int = 0
+    private var nextColorGlyphIndex: UInt32 = 1
     #endif
-    private var portableGlyphCache: [PortableGlyphKey: Entry] = [:]
-    private var iconCache: [IconKey: Entry] = [:]
+    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
 
-    public init(width: Int = 1024, height: Int = 1024) {
-        self.atlas = R8Atlas(width: width, height: height)
+    /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
+    public convenience init(width: Int = 1024, height: Int = 1024, maxCachedEntries: Int = 4096) {
+        self.init(
+            width: width,
+            height: height,
+            maxCachedEntries: maxCachedEntries,
+            colorGlyphBudget: GlyphAtlas.colorGlyphBudgetBytes
+        )
+    }
+
+    /// Initializes the atlas with an explicit color-glyph CPU memory budget (`#807`, default 16 MiB).
+    public init(
+        width: Int = 1024,
+        height: Int = 1024,
+        maxCachedEntries: Int = 4096,
+        colorGlyphBudget: Int
+    ) {
+        self.targetWidth = max(1, width)
+        self.targetHeight = max(1, height)
+        self.atlas = R8Atlas(width: 1, height: 1)
+        self.maxCachedEntries = max(1, maxCachedEntries)
+        self.maxColorGlyphBytes = max(0, colorGlyphBudget)
+    }
+
+    /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
+    public var currentColorGlyphBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphBytes
+        #else
+        return 0
+        #endif
+    }
+
+    /// Number of currently cached RGBA color glyphs (`#807`).
+    public var colorGlyphEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphCache.count
+        #else
+        return 0
+        #endif
+    }
+
+    /// Looks up a previously emitted color glyph bitmap by its `PositionedGlyph.colorGlyphIndex` (`#807`).
+    public func colorGlyph(_ index: UInt32) -> ColorGlyphEntry? {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphByIndex[index]
+        #else
+        return nil
+        #endif
+    }
+
+    /// True once at least one mask/glyph/icon has triggered CPU backing allocation (`#830`).
+    public var hasAllocatedBacking: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return backingAllocated
+    }
+
+    /// Allocated CPU backing size in bytes (`0` for measure-only `TextSystem`s, `#830`).
+    public var allocatedBackingBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return backingAllocated ? atlas.texels.count : 0
+    }
+
+    /// Total cached entries across R8 glyph/icon and RGBA color-glyph tables.
+    public var cachedEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        var total = portableGlyphCache.count + iconCache.count
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        total += glyphCache.count + colorGlyphCache.count
+        #endif
+        return total
+    }
+
+    /// Fast cross-launch font identity hash (`#807`: byte length, first/last 64 KiB, and SFNT `head` table).
+    public static func fontIdentityHash(_ fontBytes: Data) -> UInt64 {
+        let edgeBytes = 64 * 1024
+        var h: UInt64 = 0xcbf29ce484222325
+        @inline(__always)
+        func mixBytes(_ ptr: UnsafeBufferPointer<UInt8>) {
+            for b in ptr {
+                h ^= UInt64(b)
+                h &*= 0x100000001b3
+            }
+        }
+        @inline(__always)
+        func mixUInt64(_ v: UInt64) {
+            var val = v
+            for _ in 0..<8 {
+                h ^= val & 0xFF
+                h &*= 0x100000001b3
+                val >>= 8
+            }
+        }
+
+        mixUInt64(UInt64(fontBytes.count))
+        let frontLen = min(fontBytes.count, edgeBytes)
+        let backStart = fontBytes.count > edgeBytes ? (fontBytes.count - edgeBytes) : 0
+        fontBytes.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            if frontLen > 0 {
+                mixBytes(UnsafeBufferPointer(start: bytes.baseAddress, count: frontLen))
+            }
+            if backStart < fontBytes.count {
+                mixBytes(UnsafeBufferPointer(start: bytes.baseAddress?.advanced(by: backStart), count: fontBytes.count - backStart))
+            }
+            // SFNT table directory (`numTables` at offset 4, 16-byte records starting at offset 12).
+            if bytes.count >= 12 {
+                let numTables = (Int(bytes[4]) << 8) | Int(bytes[5])
+                let maxRecords = min(numTables, (bytes.count - 12) / 16)
+                for i in 0..<maxRecords {
+                    let rec = 12 + i * 16
+                    // Tag "head" = 0x68 0x65 0x61 0x64
+                    if bytes[rec] == 0x68 && bytes[rec + 1] == 0x65 && bytes[rec + 2] == 0x61 && bytes[rec + 3] == 0x64 {
+                        let offset = (Int(bytes[rec + 8]) << 24)
+                            | (Int(bytes[rec + 9]) << 16)
+                            | (Int(bytes[rec + 10]) << 8)
+                            | Int(bytes[rec + 11])
+                        let length = (Int(bytes[rec + 12]) << 24)
+                            | (Int(bytes[rec + 13]) << 16)
+                            | (Int(bytes[rec + 14]) << 8)
+                            | Int(bytes[rec + 15])
+                        if offset >= 0, length > 0, offset + length <= bytes.count {
+                            mixBytes(UnsafeBufferPointer(start: bytes.baseAddress?.advanced(by: offset), count: length))
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return h
     }
 
     public func rasterizePortableGlyph(
         scalar: UnicodeScalar,
         fontSizePx: Float,
         bold: Bool = false,
-        italic: Bool = false
+        italic: Bool = false,
+        smoothing: FontSmoothing = .systemDefault
     ) -> Entry {
         let key = PortableGlyphKey(
             scalar: scalar.value,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
             bold: bold,
-            italic: italic
+            italic: italic,
+            smoothing: smoothing
         )
         lock.lock()
-        if let cached = portableGlyphCache[key] {
+        if var cached = portableGlyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            portableGlyphCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -269,31 +494,133 @@ public final class GlyphAtlas: @unchecked Sendable {
             italic: italic
         )
         lock.lock()
-        let uv = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap)
+        guard let uv = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap) else {
+            lock.unlock()
+            return Entry(uv: .zero, pixelSize: SIMD2<Int>(r.width, r.height), bearingPx: SIMD2<Float>(0, r.bearingY))
+        }
         let entry = Entry(
             uv: uv,
             pixelSize: SIMD2<Int>(r.width, r.height),
             bearingPx: SIMD2<Float>(0, r.bearingY)
         )
-        portableGlyphCache[key] = entry
+        accessCounter &+= 1
+        portableGlyphCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
-    func rasterizeGlyph(font: CTFont, glyph: CGGlyph, fontSizePx: Float, subpixelX: Float = 0) -> Entry? {
+    /// True when `font` contains color outline/bitmap tables (`COLR`, `CBDT`, `sbix`) or color traits (`#807`).
+    public static func isColorFont(_ font: CTFont) -> Bool {
+        if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) {
+            return true
+        }
+        // "COLR" (0x434F4C52), "CBDT" (0x43424454), "sbix" (0x73626978)
+        let opt = CTFontTableOptions(rawValue: 0)
+        return CTFontCopyTable(font, CTFontTableTag(0x434F4C52), opt) != nil
+            || CTFontCopyTable(font, CTFontTableTag(0x43424454), opt) != nil
+            || CTFontCopyTable(font, CTFontTableTag(0x73626978), opt) != nil
+    }
+
+    func rasterizeColorGlyph(font: CTFont, glyph: CGGlyph, fontSizePx: Float) -> ColorGlyphEntry? {
+        let key = ColorGlyphKey(
+            fontHash: CFHash(font),
+            glyphID: glyph,
+            sizePx10: Int((fontSizePx * 10.0).rounded())
+        )
+        lock.lock()
+        if var cached = colorGlyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            colorGlyphCache[key] = cached
+            lock.unlock()
+            return cached.entry
+        }
+        lock.unlock()
+
+        var g = glyph
+        var bbox = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .default, &g, &bbox, 1)
+        if bbox.isEmpty || bbox.width <= 0 || bbox.height <= 0 {
+            return nil
+        }
+
+        let pad = 2
+        let minX = Int(floor(bbox.minX)) - pad
+        let minY = Int(floor(bbox.minY)) - pad
+        let maxX = Int(ceil(bbox.maxX)) + pad
+        let maxY = Int(ceil(bbox.maxY)) + pad
+        let bw = max(1, maxX - minX)
+        let bh = max(1, maxY - minY)
+
+        var rgba = Data(count: bw * bh * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let bi = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let drawn = rgba.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: bw,
+                      height: bh,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bw * 4,
+                      space: cs,
+                      bitmapInfo: bi.rawValue
+                  ) else {
+                return false
+            }
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            var pos = CGPoint(x: CGFloat(-minX), y: CGFloat(-minY))
+            CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
+            return true
+        }
+        guard drawn else { return nil }
+
+        lock.lock()
+        let idx = nextColorGlyphIndex == 0 ? 1 : nextColorGlyphIndex
+        nextColorGlyphIndex = idx &+ 1
+        if nextColorGlyphIndex == 0 { nextColorGlyphIndex = 1 }
+        let entry = ColorGlyphEntry(
+            index: idx,
+            pixelSize: SIMD2<Int>(bw, bh),
+            bearingPx: SIMD2<Float>(Float(minX), Float(-maxY)),
+            rgba: rgba
+        )
+        accessCounter &+= 1
+        colorGlyphCache[key] = (entry, accessCounter)
+        colorGlyphByIndex[idx] = entry
+        colorGlyphBytes += rgba.count
+        evictColorGlyphBudgetLocked(preserving: key)
+        evictLRUIfNeededLocked()
+        lock.unlock()
+        return entry
+    }
+
+    func rasterizeGlyph(
+        font: CTFont,
+        glyph: CGGlyph,
+        fontSizePx: Float,
+        subpixelX: Float = 0,
+        smoothing: FontSmoothing = .systemDefault
+    ) -> Entry? {
         let bin = UInt8(((subpixelX - floorf(subpixelX)) * 4.0).rounded()) & 3
         let subShift = Float(bin) * 0.25
         let key = GlyphKey(
             fontHash: CFHash(font),
             glyphID: glyph,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
-            subpixelBin: bin
+            subpixelBin: bin,
+            smoothing: smoothing
         )
         lock.lock()
-        if let cached = glyphCache[key] {
+        if var cached = glyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            glyphCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -303,7 +630,9 @@ public final class GlyphAtlas: @unchecked Sendable {
         if bbox.isEmpty || bbox.width <= 0.01 || bbox.height <= 0.01 {
             let empty = Entry(uv: .zero, pixelSize: .zero, bearingPx: .zero)
             lock.lock()
-            glyphCache[key] = empty
+            accessCounter &+= 1
+            glyphCache[key] = (empty, accessCounter)
+            evictLRUIfNeededLocked()
             lock.unlock()
             return empty
         }
@@ -330,10 +659,11 @@ public final class GlyphAtlas: @unchecked Sendable {
             return nil
         }
 
+        let allowFontSmoothing = smoothing.isEnabled
         ctx.setAllowsAntialiasing(true)
         ctx.setShouldAntialias(true)
-        ctx.setAllowsFontSmoothing(false)
-        ctx.setShouldSmoothFonts(false)
+        ctx.setAllowsFontSmoothing(allowFontSmoothing)
+        ctx.setShouldSmoothFonts(allowFontSmoothing)
         ctx.setAllowsFontSubpixelPositioning(true)
         ctx.setShouldSubpixelPositionFonts(true)
         ctx.setFillColor(gray: 1.0, alpha: 1.0)
@@ -342,14 +672,19 @@ public final class GlyphAtlas: @unchecked Sendable {
         CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
 
         lock.lock()
-        let uv = allocateAndBlit(width: bw, height: bh, bitmap: bitmap)
+        guard let uv = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
+            lock.unlock()
+            return nil
+        }
         // CoreGraphics row 0 in `bitmap` is the TOP row (`y = maxY` above baseline)!
         let entry = Entry(
             uv: uv,
             pixelSize: SIMD2<Int>(bw, bh),
             bearingPx: SIMD2<Float>(Float(minX) - subShift, Float(-maxY))
         )
-        glyphCache[key] = entry
+        accessCounter &+= 1
+        glyphCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
@@ -359,9 +694,12 @@ public final class GlyphAtlas: @unchecked Sendable {
         let px = max(4, pixelSize)
         let key = IconKey(icon: icon, pixelSize: px)
         lock.lock()
-        if let cached = iconCache[key] {
+        if var cached = iconCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            iconCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -398,22 +736,52 @@ public final class GlyphAtlas: @unchecked Sendable {
                     ctx.fillPath()
                 }
             }
+            if icon.paths.isEmpty, let body = icon.body {
+                SVGIconRenderer.drawMonochromeBody(body, in: ctx)
+            }
         }
         #else
-        let bitmap = PortableSVGRasterizer.rasterize(icon, pixelSize: px)
+        let resolvedIcon: SVGIcon
+        if icon.paths.isEmpty, let body = icon.body {
+            resolvedIcon = SVGIcon(
+                viewBox: icon.viewBox,
+                paths: SVGIconRenderer.extractPathStrings(fromBody: body),
+                strokeWidth: icon.strokeWidth
+            )
+        } else {
+            resolvedIcon = icon
+        }
+        let bitmap = PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px)
         #endif
 
         lock.lock()
-        let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap)
+        guard let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
+            lock.unlock()
+            return Entry(uv: .zero, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
+        }
         let entry = Entry(uv: uv, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
-        iconCache[key] = entry
+        accessCounter &+= 1
+        iconCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
 
-    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float> {
-        if bw + 2 > atlas.width {
-            growAtlas(minWidth: bw + 4, minHeight: atlas.height)
+    private func ensureBackingLocked() {
+        if !backingAllocated {
+            atlas = R8Atlas(width: targetWidth, height: targetHeight)
+            backingAllocated = true
+        }
+    }
+
+    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float>? {
+        guard bw > 0, bh > 0 else { return nil }
+        ensureBackingLocked()
+        if bw + 2 > atlas.width || bh + 2 > atlas.height {
+            growAtlas(minWidth: max(atlas.width, bw + 4), minHeight: max(atlas.height, bh + 4))
+        }
+        guard bw + 2 <= atlas.width && bh + 2 <= atlas.height else {
+            return nil
         }
         if shelfX + bw + 1 >= atlas.width {
             shelfX = 1
@@ -421,7 +789,14 @@ public final class GlyphAtlas: @unchecked Sendable {
             shelfHeight = 0
         }
         if shelfY + bh + 1 >= atlas.height {
-            growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
+            if atlas.height >= maxAtlasDimension {
+                resetShelfLocked()
+            } else {
+                growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
+            }
+        }
+        guard shelfX + bw + 1 <= atlas.width && shelfY + bh + 1 <= atlas.height else {
+            return nil
         }
 
         let dstX = shelfX
@@ -447,57 +822,156 @@ public final class GlyphAtlas: @unchecked Sendable {
         )
     }
 
+    private func resetShelfLocked() {
+        shelfX = 1
+        shelfY = 1
+        shelfHeight = 0
+        if !atlas.texels.isEmpty {
+            atlas.texels.withUnsafeMutableBytes { raw in
+                if let base = raw.baseAddress {
+                    memset(base, 0, raw.count)
+                }
+            }
+        }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        glyphCache.removeAll()
+        #endif
+        portableGlyphCache.removeAll()
+        iconCache.removeAll()
+        generation &+= 1
+    }
+
+    private func evictLRUIfNeededLocked() {
+        var total = portableGlyphCache.count + iconCache.count
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        total += glyphCache.count + colorGlyphCache.count
+        #endif
+        while total > maxCachedEntries {
+            enum Victim {
+                case portable(PortableGlyphKey, UInt64)
+                case icon(IconKey, UInt64)
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                case glyph(GlyphKey, UInt64)
+                case color(ColorGlyphKey, UInt64)
+                #endif
+                var seq: UInt64 {
+                    switch self {
+                    case .portable(_, let s), .icon(_, let s): return s
+                    #if canImport(CoreText) && canImport(CoreGraphics)
+                    case .glyph(_, let s), .color(_, let s): return s
+                    #endif
+                    }
+                }
+            }
+            var oldest: Victim?
+            for (k, v) in portableGlyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .portable(k, v.lastUsed) }
+            }
+            for (k, v) in iconCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .icon(k, v.lastUsed) }
+            }
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            for (k, v) in glyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .glyph(k, v.lastUsed) }
+            }
+            for (k, v) in colorGlyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .color(k, v.lastUsed) }
+            }
+            #endif
+            guard let victim = oldest else { break }
+            switch victim {
+            case .portable(let k, _): portableGlyphCache.removeValue(forKey: k)
+            case .icon(let k, _): iconCache.removeValue(forKey: k)
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            case .glyph(let k, _): glyphCache.removeValue(forKey: k)
+            case .color(let k, _):
+                if let removed = colorGlyphCache.removeValue(forKey: k) {
+                    colorGlyphByIndex.removeValue(forKey: removed.entry.index)
+                    colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
+                }
+            #endif
+            }
+            total -= 1
+        }
+    }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private func evictColorGlyphBudgetLocked(preserving keepKey: ColorGlyphKey) {
+        while colorGlyphBytes > maxColorGlyphBytes {
+            var oldestKey: ColorGlyphKey?
+            var oldestSeq: UInt64 = .max
+            for (k, v) in colorGlyphCache where k != keepKey {
+                if oldestKey == nil || v.lastUsed < oldestSeq {
+                    oldestKey = k
+                    oldestSeq = v.lastUsed
+                }
+            }
+            guard let victim = oldestKey, let removed = colorGlyphCache.removeValue(forKey: victim) else {
+                break
+            }
+            colorGlyphByIndex.removeValue(forKey: removed.entry.index)
+            colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
+        }
+    }
+    #endif
+
     private func growAtlas(minWidth: Int, minHeight: Int) {
         let oldW = atlas.width
         let oldH = atlas.height
-        let newW = minWidth > oldW ? max(oldW * 2, minWidth) : oldW
-        let newH = minHeight > oldH ? max(oldH * 2, minHeight) : oldH
-        var newTexels = Array<UInt8>(repeating: 0, count: newW * newH)
-        if newW == oldW {
-            newTexels.replaceSubrange(0..<atlas.texels.count, with: atlas.texels)
+        let newW = min(maxAtlasDimension, minWidth > oldW ? max(oldW * 2, minWidth) : oldW)
+        let newH = min(maxAtlasDimension, minHeight > oldH ? max(oldH * 2, minHeight) : oldH)
+        if atlas.texels.isEmpty {
+            atlas = R8Atlas(width: newW, height: newH, texels: [])
         } else {
-            for r in 0..<oldH {
-                let srcOff = r * oldW
-                let dstOff = r * newW
-                newTexels.replaceSubrange(dstOff..<(dstOff + oldW), with: atlas.texels[srcOff..<(srcOff + oldW)])
+            var newTexels = Array<UInt8>(repeating: 0, count: newW * newH)
+            if newW == oldW {
+                newTexels.replaceSubrange(0..<atlas.texels.count, with: atlas.texels)
+            } else {
+                for r in 0..<oldH {
+                    let srcOff = r * oldW
+                    let dstOff = r * newW
+                    newTexels.replaceSubrange(dstOff..<(dstOff + oldW), with: atlas.texels[srcOff..<(srcOff + oldW)])
+                }
             }
+            atlas = R8Atlas(width: newW, height: newH, texels: newTexels)
         }
         let wRatio = Float(oldW) / Float(newW)
         let hRatio = Float(oldH) / Float(newH)
-        atlas = R8Atlas(width: newW, height: newH, texels: newTexels)
         #if canImport(CoreText) && canImport(CoreGraphics)
         for (k, var v) in glyphCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             glyphCache[k] = v
         }
         #endif
         for (k, var v) in portableGlyphCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             portableGlyphCache[k] = v
         }
         for (k, var v) in iconCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             iconCache[k] = v
         }
         generation &+= 1
     }
 
     #if canImport(CoreGraphics)
-    private static func parseSVGPath(_ d: String) -> CGPath {
+    internal static func parseSVGPath(_ d: String) -> CGPath {
         let path = CGMutablePath()
         var tokens: [String] = []
         var cur = ""
         for ch in d {
-            if ch.isLetter {
+            if (ch == "e" || ch == "E"), !cur.isEmpty, cur != "-", cur != "." {
+                cur.append(ch)
+            } else if ch.isLetter {
                 if !cur.isEmpty { tokens.append(cur); cur = "" }
                 tokens.append(String(ch))
             } else if ch == "," || ch.isWhitespace {
@@ -505,6 +979,9 @@ public final class GlyphAtlas: @unchecked Sendable {
             } else if ch == "-" && !cur.isEmpty && cur.last != "e" && cur.last != "E" {
                 tokens.append(cur)
                 cur = "-"
+            } else if ch == "." && cur.contains(".") && cur.last != "e" && cur.last != "E" {
+                tokens.append(cur)
+                cur = "."
             } else {
                 cur.append(ch)
             }
@@ -530,6 +1007,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
 
         while idx < tokens.count {
+            let startIdx = idx
             let tok = tokens[idx]
             if tok.count == 1, let first = tok.first, first.isLetter {
                 cmd = first
@@ -541,53 +1019,54 @@ public final class GlyphAtlas: @unchecked Sendable {
                     continue
                 }
             }
+            var parsed = true
             switch cmd {
             case "M":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 cx = x; cy = y; sx = x; sy = y
                 path.move(to: CGPoint(x: cx, y: cy))
                 prevCmd = "M"
                 cmd = "L"
             case "m":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 cx += dx; cy += dy; sx = cx; sy = cy
                 path.move(to: CGPoint(x: cx, y: cy))
                 prevCmd = "m"
                 cmd = "l"
             case "L":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 cx = x; cy = y
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "l":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 cx += dx; cy += dy
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "H":
-                guard let x = nextNum() else { break }
+                guard let x = nextNum() else { parsed = false; break }
                 cx = x
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "h":
-                guard let dx = nextNum() else { break }
+                guard let dx = nextNum() else { parsed = false; break }
                 cx += dx
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "V":
-                guard let y = nextNum() else { break }
+                guard let y = nextNum() else { parsed = false; break }
                 cy = y
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "v":
-                guard let dy = nextNum() else { break }
+                guard let dy = nextNum() else { parsed = false; break }
                 cy += dy
                 path.addLine(to: CGPoint(x: cx, y: cy))
                 prevCmd = cmd
             case "C":
                 guard let x1 = nextNum(), let y1 = nextNum(),
                       let x2 = nextNum(), let y2 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 path.addCurve(to: CGPoint(x: x, y: y), control1: CGPoint(x: x1, y: y1), control2: CGPoint(x: x2, y: y2))
                 lastC2X = x2; lastC2Y = y2
                 cx = x; cy = y
@@ -595,7 +1074,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             case "c":
                 guard let dx1 = nextNum(), let dy1 = nextNum(),
                       let dx2 = nextNum(), let dy2 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let x2 = cx + dx2, y2 = cy + dy2
                 path.addCurve(
                     to: CGPoint(x: cx + dx, y: cy + dy),
@@ -607,7 +1086,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "S":
                 guard let x2 = nextNum(), let y2 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 let isCubicPrev = (prevCmd == "C" || prevCmd == "c" || prevCmd == "S" || prevCmd == "s")
                 let x1 = isCubicPrev ? (2 * cx - lastC2X) : cx
                 let y1 = isCubicPrev ? (2 * cy - lastC2Y) : cy
@@ -617,7 +1096,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "s":
                 guard let dx2 = nextNum(), let dy2 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let isCubicPrev = (prevCmd == "C" || prevCmd == "c" || prevCmd == "S" || prevCmd == "s")
                 let x1 = isCubicPrev ? (2 * cx - lastC2X) : cx
                 let y1 = isCubicPrev ? (2 * cy - lastC2Y) : cy
@@ -628,21 +1107,21 @@ public final class GlyphAtlas: @unchecked Sendable {
                 prevCmd = cmd
             case "Q":
                 guard let x1 = nextNum(), let y1 = nextNum(),
-                      let x = nextNum(), let y = nextNum() else { break }
+                      let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 path.addQuadCurve(to: CGPoint(x: x, y: y), control: CGPoint(x: x1, y: y1))
                 lastQX = x1; lastQY = y1
                 cx = x; cy = y
                 prevCmd = cmd
             case "q":
                 guard let dx1 = nextNum(), let dy1 = nextNum(),
-                      let dx = nextNum(), let dy = nextNum() else { break }
+                      let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let qx = cx + dx1, qy = cy + dy1
                 path.addQuadCurve(to: CGPoint(x: cx + dx, y: cy + dy), control: CGPoint(x: qx, y: qy))
                 lastQX = qx; lastQY = qy
                 cx += dx; cy += dy
                 prevCmd = cmd
             case "T":
-                guard let x = nextNum(), let y = nextNum() else { break }
+                guard let x = nextNum(), let y = nextNum() else { parsed = false; break }
                 let isQuadPrev = (prevCmd == "Q" || prevCmd == "q" || prevCmd == "T" || prevCmd == "t")
                 let qx = isQuadPrev ? (2 * cx - lastQX) : cx
                 let qy = isQuadPrev ? (2 * cy - lastQY) : cy
@@ -651,7 +1130,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 cx = x; cy = y
                 prevCmd = cmd
             case "t":
-                guard let dx = nextNum(), let dy = nextNum() else { break }
+                guard let dx = nextNum(), let dy = nextNum() else { parsed = false; break }
                 let isQuadPrev = (prevCmd == "Q" || prevCmd == "q" || prevCmd == "T" || prevCmd == "t")
                 let qx = isQuadPrev ? (2 * cx - lastQX) : cx
                 let qy = isQuadPrev ? (2 * cy - lastQY) : cy
@@ -663,7 +1142,7 @@ public final class GlyphAtlas: @unchecked Sendable {
                 guard let rxRaw = nextNum(), let ryRaw = nextNum(),
                       let rotDeg = nextNum(),
                       let largeArc = nextNum(), let sweep = nextNum(),
-                      let xArg = nextNum(), let yArg = nextNum() else { break }
+                      let xArg = nextNum(), let yArg = nextNum() else { parsed = false; break }
                 let ex = (cmd == "a") ? cx + xArg : xArg
                 let ey = (cmd == "a") ? cy + yArg : yArg
                 Self.addSVGArc(
@@ -679,6 +1158,9 @@ public final class GlyphAtlas: @unchecked Sendable {
                 cx = ex; cy = ey
                 prevCmd = cmd
             default:
+                idx += 1
+            }
+            if !parsed && idx == startIdx {
                 idx += 1
             }
         }
@@ -797,6 +1279,10 @@ public final class TextSystem: @unchecked Sendable {
 
     private let lock = NSLock()
     public let glyphAtlas: GlyphAtlas
+    public let colorIcons = ColorIconRasterizer()
+    private var sansFamilyOverride: String = ""
+    private var monoFamilyOverride: String = ""
+    private var lastObservedFontEpoch: UInt64 = fontEpoch()
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
@@ -804,11 +1290,108 @@ public final class TextSystem: @unchecked Sendable {
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
         self.glyphAtlas = glyphAtlas
+        let (sans, mono) = FontFamiliesRegistry.currentFamilies()
+        self.sansFamilyOverride = sans
+        self.monoFamilyOverride = mono
+    }
+
+    /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
+    public var currentFontEpoch: UInt64 {
+        syncGlobalFamiliesIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        return lastObservedFontEpoch
+    }
+
+    /// Looks up a cached RGBA color glyph bitmap emitted during `shape(...)` (`#807`).
+    public func colorGlyph(_ index: UInt32) -> GlyphAtlas.ColorGlyphEntry? {
+        glyphAtlas.colorGlyph(index)
+    }
+
+    /// CSS font family lists backing `.systemUI` (`sans`) and `.monospace` (`mono`).
+    public func families() -> (sans: String, mono: String) {
+        syncGlobalFamiliesIfNeeded()
+        lock.lock()
+        defer { lock.unlock() }
+        return (sansFamilyOverride, monoFamilyOverride)
+    }
+
+    /// Updates `sans` and `mono` family slots (`TextSystem::set_families`). Drops cached shapes/fonts when changed.
+    @discardableResult
+    public func setFamilies(sans: String, mono: String) -> Bool {
+        lock.lock()
+        let unchanged = (sansFamilyOverride == sans && monoFamilyOverride == mono)
+        if unchanged {
+            lock.unlock()
+            return false
+        }
+        sansFamilyOverride = sans
+        monoFamilyOverride = mono
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        fontCache.removeAll(keepingCapacity: true)
+        #endif
+        measureCache.removeAll(keepingCapacity: true)
+        lock.unlock()
+
+        FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
+        let newEpoch = fontEpoch()
+        lock.lock()
+        lastObservedFontEpoch = newEpoch
+        lock.unlock()
+        return true
+    }
+
+    private func syncGlobalFamiliesIfNeeded() {
+        let globalEpoch = fontEpoch()
+        lock.lock()
+        if lastObservedFontEpoch != globalEpoch {
+            let (sans, mono) = FontFamiliesRegistry.currentFamilies()
+            sansFamilyOverride = sans
+            monoFamilyOverride = mono
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            fontCache.removeAll(keepingCapacity: true)
+            #endif
+            measureCache.removeAll(keepingCapacity: true)
+            lastObservedFontEpoch = globalEpoch
+        }
+        lock.unlock()
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
 
+    private static func coreTextWeight(for cssWeight: Float) -> CGFloat {
+        let stops: [(Float, CGFloat)] = [
+            (100, -0.80), (200, -0.60), (300, -0.40), (400, 0.0),
+            (500, 0.23), (600, 0.30), (700, 0.40), (800, 0.56), (900, 0.62),
+        ]
+        let clamped = min(max(cssWeight, 100), 900)
+        for i in 0..<(stops.count - 1) {
+            let (w0, c0) = stops[i]
+            let (w1, c1) = stops[i + 1]
+            if clamped <= w1 {
+                let t = CGFloat((clamped - w0) / (w1 - w0))
+                return c0 + (c1 - c0) * t
+            }
+        }
+        return 0.62
+    }
+
+    private static func firstMatchingFont(in cssList: String, sizePx: CGFloat) -> CTFont? {
+        for raw in cssList.split(separator: ",") {
+            let name = raw.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'")))
+            guard !name.isEmpty else { continue }
+            let font = CTFontCreateWithName(name as CFString, sizePx, nil)
+            let resolvedName = CTFontCopyFamilyName(font) as String
+            if resolvedName.caseInsensitiveCompare(name) == .orderedSame ||
+                (CTFontCopyPostScriptName(font) as String).caseInsensitiveCompare(name) == .orderedSame {
+                return font
+            }
+        }
+        return nil
+    }
+
     private func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
+        syncGlobalFamiliesIfNeeded()
         let sizePx = style.size * pixelScale
         let key = FontKey(
             family: style.family,
@@ -821,10 +1404,11 @@ public final class TextSystem: @unchecked Sendable {
             lock.unlock()
             return cached
         }
+        let sansList = sansFamilyOverride
+        let monoList = monoFamilyOverride
         lock.unlock()
 
-        // Map CSS weight [100...900] to CoreText weight trait [-0.8...+0.6]
-        let ctWeight: CGFloat = CGFloat((style.weight - 400.0) / 500.0 * 0.6)
+        let ctWeight = Self.coreTextWeight(for: style.weight)
         var traits: [CFString: Any] = [
             kCTFontWeightTrait: ctWeight,
         ]
@@ -835,10 +1419,12 @@ public final class TextSystem: @unchecked Sendable {
         let baseFont: CTFont
         switch style.family {
         case .systemUI:
-            baseFont = CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
+            baseFont = (!sansList.isEmpty ? Self.firstMatchingFont(in: sansList, sizePx: CGFloat(sizePx)) : nil)
+                ?? CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("SFProText-Regular" as CFString, CGFloat(sizePx), nil)
         case .monospace:
-            baseFont = CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
+            baseFont = (!monoList.isEmpty ? Self.firstMatchingFont(in: monoList, sizePx: CGFloat(sizePx)) : nil)
+                ?? CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("Menlo-Regular" as CFString, CGFloat(sizePx), nil)
         case .custom(let name):
             baseFont = CTFontCreateWithName(name as CFString, CGFloat(sizePx), nil)
@@ -856,19 +1442,24 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     /// Fast cached measurement of plain `text` constrained to `maxWidth` logical points.
+    /// When `maxWidth` is non-nil and `style.wrap == .noWrap`, wraps at `maxWidth` per upstream `text::measure`.
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
         if text.isEmpty {
             return Vec2(0, style.resolvedLineHeight)
         }
+        var effectiveStyle = style
+        if maxWidth != nil && effectiveStyle.wrap == .noWrap {
+            effectiveStyle.wrap = .wrap
+        }
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
-        let key = MeasureKey(text: text, style: style, maxWidthHalfPt: maxWKey, scale100: Int((pixelScale * 100).rounded()))
+        let key = MeasureKey(text: text, style: effectiveStyle, maxWidthHalfPt: maxWKey, scale100: Int((pixelScale * 100).rounded()))
         lock.lock()
         if let cached = measureCache[key] {
             lock.unlock()
             return cached
         }
         lock.unlock()
-        let shaped = shape(text: text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
+        let shaped = shape(text: text, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
         if measureCache.count > 4096 {
             measureCache.removeAll(keepingCapacity: true)
@@ -1102,6 +1693,7 @@ public final class TextSystem: @unchecked Sendable {
                 let attrs = CTRunGetAttributes(run) as NSDictionary
                 let runFont = (attrs[kCTFontAttributeName] as! CTFont)
                 let runFontSizePx = Float(CTFontGetSize(runFont))
+                let runIsColor = GlyphAtlas.isColorFont(runFont)
                 let runColor: Color? = (attrs[spanColorKey] as? Int).flatMap { idx in
                     (0..<spanPalette.count).contains(idx) ? spanPalette[idx] : nil
                 }
@@ -1111,23 +1703,45 @@ public final class TextSystem: @unchecked Sendable {
                 CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
                 CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
 
+                let invS = 1.0 / scale
                 for i in 0..<glyphCount {
                     let gxPx = alignOffsetPx + Float(positions[i].x)
                     let gyPx = baselineYPx - Float(positions[i].y)
                     let floorX = floorf(gxPx)
                     let subX = gxPx - floorX
+                    if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
+                        font: runFont,
+                        glyph: glyphs[i],
+                        fontSizePx: runFontSizePx
+                    ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
+                        let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
+                        let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                        glyphsOut.append(PositionedGlyph(
+                            rect: SIMD4<Float>(
+                                quadXPx * invS,
+                                quadYPx * invS,
+                                Float(colorEntry.pixelSize.x) * invS,
+                                Float(colorEntry.pixelSize.y) * invS
+                            ),
+                            uv: .zero,
+                            color: runColor,
+                            colorGlyphIndex: colorEntry.index
+                        ))
+                        continue
+                    }
+
                     guard let entry = glyphAtlas.rasterizeGlyph(
                         font: runFont,
                         glyph: glyphs[i],
                         fontSizePx: runFontSizePx,
-                        subpixelX: subX
+                        subpixelX: subX,
+                        smoothing: style.fontSmoothing
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
 
                     let quadXPx = floorX + subX + entry.bearingPx.x
                     let quadYPx = gyPx + entry.bearingPx.y
-                    let invS = 1.0 / scale
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,
@@ -1250,9 +1864,114 @@ public final class TextSystem: @unchecked Sendable {
     }
     #else
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
+        measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale)
+    }
+
+    public func shape(
+        text: String,
+        spans: [TextSpan]? = nil,
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true
+    ) -> ShapedText {
+        shapePortable(text: text, spans: spans, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+    }
+
+    public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
+        caretRectPortable(in: shaped, utf8Offset: utf8Offset, pixelScale: pixelScale)
+    }
+
+    public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
+        hitTestUTF8OffsetPortable(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
+    }
+
+    public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+        selectionRectsPortable(in: shaped, utf8Range: utf8Range, pixelScale: pixelScale)
+    }
+    #endif
+
+    /// Visual wrapped line ranges `(utf8Start, utf8End, originY, originX)` for soft-wrap caret motion.
+    public func visualLines(in shaped: ShapedText) -> [(utf8Start: Int, utf8End: Int, originY: Float, originX: Float)] {
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if !shaped.lineStrings.isEmpty {
+            return shaped.lineStrings.map { ($0.utf8Start, $0.utf8Start + $0.text.utf8.count, $0.originY, $0.originX) }
+        }
+        #endif
+        return shaped.portableLines.map { ($0.utf8Start, $0.utf8Start + $0.text.utf8.count, $0.originY, $0.originX) }
+    }
+
+    /// Computes which visual line index owns `(utf8Offset, upstream)` in a soft-wrapped `ShapedText`.
+    public func visualLineIndex(in shaped: ShapedText, utf8Offset: Int, upstream: Bool) -> Int {
+        let lines = visualLines(in: shaped)
+        guard !lines.isEmpty else { return 0 }
+        for i in lines.indices {
+            let l = lines[i]
+            if upstream {
+                if utf8Offset <= l.utf8End { return i }
+            } else {
+                // Downstream prefers the next wrapped line when sitting on a soft-wrap boundary,
+                // unless this line ends in an explicit `\n` or is the last line.
+                let isLast = (i == lines.count - 1)
+                if isLast { return i }
+                if utf8Offset < l.utf8End { return i }
+                if utf8Offset == l.utf8End {
+                    let nextStart = lines[i + 1].utf8Start
+                    if nextStart > l.utf8End {
+                        // Hard break (`\n`) separates line `i` and line `i + 1`, so `utf8End` belongs to line `i`.
+                        return i
+                    }
+                    // Soft-wrap boundary: upstream keeps end of `i`, downstream belongs to `i + 1`.
+                }
+            }
+        }
+        return lines.count - 1
+    }
+
+    /// Caret rect honoring soft-wrap upstream/downstream affinity at line boundaries.
+    public func caretRect(in shaped: ShapedText, utf8Offset: Int, upstream: Bool, pixelScale: Float) -> SIMD4<Float> {
+        let lines = visualLines(in: shaped)
+        guard !lines.isEmpty else {
+            return SIMD4<Float>(0, 0, 1.5, shaped.lineHeight)
+        }
+        let lineIdx = visualLineIndex(in: shaped, utf8Offset: utf8Offset, upstream: upstream)
+        let rec = lines[lineIdx]
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        if lineIdx < shaped.lineStrings.count {
+            let ctRec = shaped.lineStrings[lineIdx]
+            let scale = max(pixelScale, 1.0)
+            let localUTF8 = (utf8Offset - ctRec.utf8Start).clamped(to: 0...ctRec.text.utf8.count)
+            let localUTF16 = String(decoding: ctRec.text.utf8.prefix(localUTF8), as: UTF8.self).utf16.count
+            var xPt = ctRec.originX
+            if let ctLine = ctRec.ctLine {
+                xPt += Float(CTLineGetOffsetForStringIndex(ctLine, localUTF16, nil)) / scale
+            }
+            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineHeight)
+        }
+        #endif
+        if lineIdx < shaped.portableLines.count {
+            let pRec = shaped.portableLines[lineIdx]
+            let localUTF8 = (utf8Offset - pRec.utf8Start).clamped(to: 0...pRec.text.utf8.count)
+            let charIdx = String(decoding: pRec.text.utf8.prefix(localUTF8), as: UTF8.self).count
+            let xPt = pRec.originX + pRec.charOffsets[min(charIdx, pRec.charOffsets.count - 1)]
+            return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineHeight)
+        }
+        return caretRect(in: shaped, utf8Offset: utf8Offset, pixelScale: pixelScale)
+    }
+
+    // MARK: - Portable (Headless / Linux / Windows / Android / Web) Text Shaping
+
+    internal func measurePortable(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
+        if text.isEmpty {
+            return Vec2(0, style.resolvedLineHeight)
+        }
+        var effectiveStyle = style
+        if maxWidth != nil && effectiveStyle.wrap == .noWrap {
+            effectiveStyle.wrap = .wrap
+        }
         let key = MeasureKey(
             text: text,
-            style: style,
+            style: effectiveStyle,
             maxWidthHalfPt: maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1,
             scale100: Int((pixelScale * 100.0).rounded())
         )
@@ -1263,34 +1982,73 @@ public final class TextSystem: @unchecked Sendable {
         }
         lock.unlock()
 
-        let shaped = shape(text, style: style, spans: [], maxWidth: maxWidth, pixelScale: pixelScale)
+        let shaped = shapePortable(text: text, spans: nil, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
         lock.lock()
+        if measureCache.count > 4096 {
+            measureCache.removeAll(keepingCapacity: true)
+        }
         measureCache[key] = shaped.size
         lock.unlock()
         return shaped.size
     }
 
-    public func shape(
-        _ text: String,
+    internal func shapePortable(
+        text: String,
+        spans: [TextSpan]? = nil,
         style: TextStyle,
-        spans: [TextSpan] = [],
-        maxWidth: Float? = nil,
-        pixelScale: Float = 2.0
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true
     ) -> ShapedText {
         let scale = max(1.0, pixelScale)
         let invS = 1.0 / scale
         let lineH = style.resolvedLineHeight
-        let mono = (style.family == .mono)
-        let bold = style.weight >= 600.0
+        let fullText = spans.map { $0.map(\.text).joined() } ?? text
 
-        func scalarAdvance(_ scalar: UnicodeScalar) -> Float {
-            PortableGlyphFont.advanceRatio(for: scalar, mono: mono) * style.size + style.letterSpacing
+        if fullText.isEmpty {
+            return ShapedText(
+                size: Vec2(0, lineH),
+                lineCount: 1,
+                lineHeight: lineH,
+                glyphs: [],
+                underlines: [],
+                strikethroughs: [],
+                backgrounds: [],
+                portableLines: [(0, "", 0, 0, [0])]
+            )
         }
 
-        // Split into raw lines on '\n' and wrap if requested.
+        // Map contiguous span UTF-8 byte ranges for per-character attributes.
+        var spanEntries: [(utf8Range: Range<Int>, span: TextSpan)] = []
+        if let spans {
+            var utf8Cursor = 0
+            for span in spans {
+                let byteCount = span.text.utf8.count
+                if byteCount > 0 {
+                    spanEntries.append((utf8Cursor..<(utf8Cursor + byteCount), span))
+                    utf8Cursor += byteCount
+                }
+            }
+        }
+
+        func spanAt(utf8Offset: Int) -> TextSpan? {
+            spanEntries.last { $0.utf8Range.contains(utf8Offset) }?.span
+        }
+
+        func charAdvance(_ ch: Character, atUTF8 utf8Offset: Int) -> Float {
+            let match = spanAt(utf8Offset: utf8Offset)
+            let isMono = match?.monospace == true || style.family == .monospace
+            let count = ch.unicodeScalars.count
+            let scalarSum = ch.unicodeScalars.reduce(Float(0)) { acc, scalar in
+                acc + PortableGlyphFont.advanceRatio(for: scalar, mono: isMono) * style.size
+            }
+            return scalarSum + (count > 0 ? style.letterSpacing : 0)
+        }
+
+        // Split into raw lines on '\n' and wrap/ellipsis if requested.
         var lines: [(utf8Start: Int, text: String, width: Float)] = []
         var cursorUTF8 = 0
-        let rawParagraphs = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let rawParagraphs = fullText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         for (pIdx, para) in rawParagraphs.enumerated() {
             if para.isEmpty {
                 lines.append((cursorUTF8, "", 0))
@@ -1298,8 +2056,10 @@ public final class TextSystem: @unchecked Sendable {
                 var current = ""
                 var curW: Float = 0
                 var lineStart = cursorUTF8
+                var charUTF8 = cursorUTF8
                 for ch in para {
-                    let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                    let chBytes = String(ch).utf8.count
+                    let chW = charAdvance(ch, atUTF8: charUTF8)
                     if !current.isEmpty && curW + chW > maxW {
                         lines.append((lineStart, current, curW))
                         lineStart += current.utf8.count
@@ -1309,6 +2069,7 @@ public final class TextSystem: @unchecked Sendable {
                         current.append(ch)
                         curW += chW
                     }
+                    charUTF8 += chBytes
                 }
                 if !current.isEmpty {
                     lines.append((lineStart, current, curW))
@@ -1316,16 +2077,19 @@ public final class TextSystem: @unchecked Sendable {
             } else if style.wrap == .ellipsis, let maxW = maxWidth, maxW > 0 {
                 var current = ""
                 var curW: Float = 0
-                let ellW = scalarAdvance("…")
+                let ellW = charAdvance("…", atUTF8: cursorUTF8)
                 var truncated = false
+                var charUTF8 = cursorUTF8
                 for ch in para {
-                    let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                    let chBytes = String(ch).utf8.count
+                    let chW = charAdvance(ch, atUTF8: charUTF8)
                     if curW + chW + ellW > maxW {
                         truncated = true
                         break
                     }
                     current.append(ch)
                     curW += chW
+                    charUTF8 += chBytes
                 }
                 if truncated {
                     current.append("…")
@@ -1333,7 +2097,12 @@ public final class TextSystem: @unchecked Sendable {
                 }
                 lines.append((cursorUTF8, current, curW))
             } else {
-                let w = para.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                var w: Float = 0
+                var charUTF8 = cursorUTF8
+                for ch in para {
+                    w += charAdvance(ch, atUTF8: charUTF8)
+                    charUTF8 += String(ch).utf8.count
+                }
                 lines.append((cursorUTF8, para, w))
             }
             cursorUTF8 += para.utf8.count
@@ -1346,7 +2115,7 @@ public final class TextSystem: @unchecked Sendable {
         }
 
         let maxLineW = lines.map(\.width).max() ?? 0
-        let totalW = maxWidth.map { style.align == .left ? min($0, maxLineW) : $0 } ?? maxLineW
+        let totalW = maxWidth.map { style.align == .leading ? min($0, maxLineW) : $0 } ?? maxLineW
         let totalH = Float(lines.count) * lineH
 
         var glyphs: [PositionedGlyph] = []
@@ -1360,9 +2129,9 @@ public final class TextSystem: @unchecked Sendable {
             let originY = Float(idx) * lineH
             let originX: Float
             switch style.align {
-            case .left: originX = 0
+            case .leading: originX = 0
             case .center: originX = max(0, (totalW - item.width) * 0.5)
-            case .right: originX = max(0, totalW - item.width)
+            case .trailing: originX = max(0, totalW - item.width)
             }
 
             var charOffsets: [Float] = [0]
@@ -1372,11 +2141,11 @@ public final class TextSystem: @unchecked Sendable {
                 let chStart = bytePos
                 let chBytes = String(ch).utf8.count
                 bytePos += chBytes
-                let spanMatch = spans.last { $0.utf8Range.contains(chStart) }
-                let spanBold = spanMatch?.bold ?? bold
-                let spanItalic = spanMatch?.italic ?? style.italic
+                let spanMatch = spanAt(utf8Offset: chStart)
+                let spanBold = (spanMatch?.weight ?? style.weight) >= 600.0
+                let spanItalic = (spanMatch?.italic == true) || style.italic
                 let spanColor = spanMatch?.color
-                let chW = ch.unicodeScalars.reduce(Float(0)) { $0 + scalarAdvance($1) }
+                let chW = charAdvance(ch, atUTF8: chStart)
 
                 if let bg = spanMatch?.background {
                     backgrounds.append((SIMD4<Float>(originX + penX, originY, chW, lineH), bg))
@@ -1388,22 +2157,24 @@ public final class TextSystem: @unchecked Sendable {
                     strikethroughs.append(SIMD4<Float>(originX + penX, originY + lineH * 0.52, chW, 1.0))
                 }
 
-                for scalar in ch.unicodeScalars where scalar.value > 0x20 {
-                    let entry = glyphAtlas.rasterizePortableGlyph(
-                        scalar: scalar,
-                        fontSizePx: style.size * scale,
-                        bold: spanBold,
-                        italic: spanItalic
-                    )
-                    let gx = originX + penX + entry.bearingPx.x * invS
-                    let gy = originY + baselineOffset + entry.bearingPx.y * invS
-                    let gw = Float(entry.pixelSize.x) * invS
-                    let gh = Float(entry.pixelSize.y) * invS
-                    glyphs.append(PositionedGlyph(
-                        rect: SIMD4<Float>(gx, gy, gw, gh),
-                        uv: entry.uv,
-                        color: spanColor
-                    ))
+                if emitGlyphs {
+                    for scalar in ch.unicodeScalars where scalar.value > 0x20 {
+                        let entry = glyphAtlas.rasterizePortableGlyph(
+                            scalar: scalar,
+                            fontSizePx: style.size * scale,
+                            bold: spanBold,
+                            italic: spanItalic
+                        )
+                        let gx = originX + penX + entry.bearingPx.x * invS
+                        let gy = originY + baselineOffset + entry.bearingPx.y * invS
+                        let gw = Float(entry.pixelSize.x) * invS
+                        let gh = Float(entry.pixelSize.y) * invS
+                        glyphs.append(PositionedGlyph(
+                            rect: SIMD4<Float>(gx, gy, gw, gh),
+                            uv: entry.uv,
+                            color: spanColor
+                        ))
+                    }
                 }
                 penX += chW
                 for _ in 0..<chBytes {
@@ -1421,29 +2192,29 @@ public final class TextSystem: @unchecked Sendable {
             underlines: underlines,
             strikethroughs: strikethroughs,
             backgrounds: backgrounds,
-            lineStrings: lineRecords
+            portableLines: lineRecords
         )
     }
 
-    public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
+    internal func caretRectPortable(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {
         let clamped = max(0, utf8Offset)
-        for rec in shaped.lineStrings {
+        for rec in shaped.portableLines {
             let lineEnd = rec.utf8Start + rec.text.utf8.count
             if clamped <= lineEnd {
                 let local = max(0, min(rec.charOffsets.count - 1, clamped - rec.utf8Start))
                 return SIMD4<Float>(rec.originX + rec.charOffsets[local], rec.originY, 1.5, shaped.lineHeight)
             }
         }
-        if let last = shaped.lineStrings.last {
+        if let last = shaped.portableLines.last {
             return SIMD4<Float>(last.originX + (last.charOffsets.last ?? 0), last.originY, 1.5, shaped.lineHeight)
         }
         return SIMD4<Float>(0, 0, 1.5, shaped.lineHeight)
     }
 
-    public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
-        guard !shaped.lineStrings.isEmpty else { return 0 }
-        let lineIdx = max(0, min(shaped.lineStrings.count - 1, Int(floor(localY / max(1.0, shaped.lineHeight)))))
-        let rec = shaped.lineStrings[lineIdx]
+    internal func hitTestUTF8OffsetPortable(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
+        guard !shaped.portableLines.isEmpty else { return 0 }
+        let lineIdx = max(0, min(shaped.portableLines.count - 1, Int(floor(max(0, localY) / max(1.0, shaped.lineHeight)))))
+        let rec = shaped.portableLines[lineIdx]
         let relX = max(0, localX - rec.originX)
         var bestIdx = 0
         var bestDist = Float.greatestFiniteMagnitude
@@ -1457,9 +2228,9 @@ public final class TextSystem: @unchecked Sendable {
         return rec.utf8Start + bestIdx
     }
 
-    public func selectionRects(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
+    internal func selectionRectsPortable(in shaped: ShapedText, utf8Range: Range<Int>, pixelScale: Float) -> [SIMD4<Float>] {
         var rects: [SIMD4<Float>] = []
-        for rec in shaped.lineStrings {
+        for rec in shaped.portableLines {
             let lineStart = rec.utf8Start
             let lineEnd = lineStart + rec.text.utf8.count
             let lo = max(utf8Range.lowerBound, lineStart)
@@ -1478,5 +2249,4 @@ public final class TextSystem: @unchecked Sendable {
         }
         return rects
     }
-    #endif
 }

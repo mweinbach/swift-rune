@@ -110,7 +110,12 @@ final class RetainedLayoutCoordinator {
                 hasher.combine(textStyle)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let fn: (Float?) -> Vec2 = { maxW in
-                    textSystem.measure(txt, style: textStyle, maxWidth: maxW, pixelScale: scale)
+                    textSystem.measure(
+                        txt,
+                        style: textStyle,
+                        maxWidth: textStyle.wrap == .noWrap ? nil : maxW,
+                        pixelScale: scale
+                    )
                 }
                 return (fn, isSecure ? 0 : h, isSecure)
             } else if let (_, iconSize) = el.iconPayload {

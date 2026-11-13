@@ -55,6 +55,12 @@ public enum RuneKitShortcutRecorderApp {
         case .pageUp: return "PageUp"
         case .pageDown: return "PageDown"
         case .f(let n): return "F\(n)"
+        case .insert: return "Insert"
+        case .contextMenu: return "Menu"
+        case .printScreen: return "PrintScreen"
+        case .scrollLock: return "ScrollLock"
+        case .pause: return "Pause"
+        case .modifier: return nil
         }
     }
 

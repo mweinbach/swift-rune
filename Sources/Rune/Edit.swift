@@ -43,6 +43,7 @@ public enum Key: Sendable, Hashable {
     case escape
     case backspace
     case delete
+    case insert
     case space
     case arrowLeft
     case arrowRight
@@ -53,33 +54,15 @@ public enum Key: Sendable, Hashable {
     case pageUp
     case pageDown
     case f(UInt8)
+    case contextMenu
+    case printScreen
+    case scrollLock
+    case pause
+    case modifier(ModifierKey, pressed: Bool)
 
     public static func named(_ raw: String) -> Key? {
-        switch raw.lowercased() {
-        case "enter", "return": return .enter
-        case "tab": return .tab
-        case "esc", "escape": return .escape
-        case "backspace": return .backspace
-        case "delete", "del": return .delete
-        case "space", " ": return .space
-        case "left", "arrowleft": return .arrowLeft
-        case "right", "arrowright": return .arrowRight
-        case "up", "arrowup": return .arrowUp
-        case "down", "arrowdown": return .arrowDown
-        case "home": return .home
-        case "end": return .end
-        case "pageup", "pgup": return .pageUp
-        case "pagedown", "pgdn": return .pageDown
-        case "plus": return .text("+")
-        default:
-            if raw.lowercased().hasPrefix("f"), let num = UInt8(raw.dropFirst()), (1...24).contains(num) {
-                return .f(num)
-            }
-            if raw.count == 1 {
-                return .text(raw)
-            }
-            return nil
-        }
+        guard let ck = ChordTable.chordKey(named: raw) else { return nil }
+        return ChordTable.key(from: ck, hasPrimary: false)
     }
 }
 
@@ -98,107 +81,242 @@ public struct KeyEvent: Sendable, Hashable {
 public struct Chord: Sendable, Hashable, CustomStringConvertible {
     public var mods: Mods
     public var key: Key
+    internal let chordModBits: UInt8
+    public let chordKey: ChordKey
+
+    public static func == (lhs: Chord, rhs: Chord) -> Bool {
+        lhs.chordModBits == rhs.chordModBits && lhs.chordKey == rhs.chordKey
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(chordModBits)
+        hasher.combine(chordKey)
+    }
 
     public init(mods: Mods = .none, key: Key) {
+        self.chordModBits = ChordBits.bitsFromMods(mods)
+        self.chordKey = ChordTable.chordKey(from: key) ?? .escape
         self.mods = mods
         self.key = key
     }
 
-    public init?(parsing spec: String) {
+    public init(chordMods: [ChordMod], key chordKey: ChordKey) {
+        let bits = chordMods.reduce(UInt8(0)) { $0 | $1.bit }
+        self.chordModBits = bits
+        self.chordKey = chordKey
+        let resolvedMods = ChordBits.modsFromBits(bits, platform: .current)
+        self.mods = resolvedMods
+        let hasPrimary = (ChordBits.fold(bits, platform: .current) & ChordBits.primary) != 0
+        self.key = ChordTable.key(from: chordKey, hasPrimary: hasPrimary)
+    }
+
+    /// Strictly parses a chord string (`"mod+shift+t"`, `"cmd+s"`, `"mod++"`, `"super+space"`), throwing `ChordError` on invalid input.
+    public static func parse(_ spec: String) throws -> Chord {
         let trimmed = spec.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        let parts = trimmed.split(separator: "+").map { String($0).trimmingCharacters(in: .whitespaces) }
-        guard let last = parts.last else { return nil }
+        guard !trimmed.isEmpty else { throw ChordError.empty }
 
-        var mods = Mods()
-        for p in parts.dropLast() {
-            switch p.lowercased() {
-            case "shift":
-                mods.shift = true
-            case "ctrl", "control":
-                mods.ctrl = true
-            case "alt", "opt", "option":
-                mods.alt = true
-            case "cmd", "command", "meta":
-                mods.cmd = true
-            case "super", "win", "logo":
-                mods.logo = true
-            case "mod":
-                #if os(macOS) || os(iOS)
-                mods.cmd = true
-                #else
-                mods.ctrl = true
-                #endif
-            default:
-                return nil
+        let modifierTokens: [String]
+        let keyToken: String
+        if trimmed == "+" {
+            modifierTokens = []
+            keyToken = "+"
+        } else if trimmed.hasSuffix("+") {
+            let beforeFinalPlus = trimmed.dropLast().trimmingCharacters(in: .whitespaces)
+            guard beforeFinalPlus.hasSuffix("+") else {
+                throw ChordError.trailingPlus
             }
-        }
-
-        let parsedKey: Key
-        if mods.cmd, last.count == 1, let ch = last.lowercased().first {
-            parsedKey = .command(ch)
-        } else if let k = Key.named(last) {
-            if case .text(let s) = k, s.count == 1 {
-                parsedKey = .text(s.lowercased())
-            } else {
-                parsedKey = k
+            let modsPart = String(beforeFinalPlus.dropLast())
+            if modsPart.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw ChordError.unknownModifier("")
             }
+            modifierTokens = modsPart.split(separator: "+", omittingEmptySubsequences: false).map {
+                String($0).trimmingCharacters(in: .whitespaces)
+            }
+            keyToken = "+"
         } else {
-            return nil
+            let parts = trimmed.split(separator: "+", omittingEmptySubsequences: false).map {
+                String($0).trimmingCharacters(in: .whitespaces)
+            }
+            guard let last = parts.last, !last.isEmpty else { throw ChordError.noKey }
+            modifierTokens = Array(parts.dropLast())
+            keyToken = last
         }
 
-        self.mods = mods
-        self.key = parsedKey
+        var bits: UInt8 = 0
+        for p in modifierTokens {
+            guard !p.isEmpty else { throw ChordError.unknownModifier("") }
+            guard let cm = ChordTable.modifierNamed(p) else {
+                throw ChordError.unknownModifier(p)
+            }
+            guard (bits & cm.bit) == 0 else {
+                throw ChordError.duplicateModifier(p)
+            }
+            bits |= cm.bit
+        }
+
+        guard var parsedChordKey = ChordTable.chordKey(named: keyToken) else {
+            throw ChordError.unknownKey(keyToken)
+        }
+        // Per upstream chord.rs:135-136: only '{' and '}' fold unconditionally to Shift + '[' / ']'.
+        if case .char(let ch) = parsedChordKey, ch == "{" || ch == "}" {
+            parsedChordKey = (ch == "{") ? .char("[") : .char("]")
+            bits |= ChordBits.shift
+        }
+
+        var modsList: [ChordMod] = []
+        if (bits & ChordBits.primary) != 0 { modsList.append(.primary) }
+        if (bits & ChordBits.ctrl) != 0 { modsList.append(.ctrl) }
+        if (bits & ChordBits.alt) != 0 { modsList.append(.alt) }
+        if (bits & ChordBits.shift) != 0 { modsList.append(.shift) }
+        if (bits & ChordBits.super) != 0 { modsList.append(.super) }
+        return Chord(chordMods: modsList, key: parsedChordKey)
+    }
+
+    public init?(parsing spec: String) {
+        guard let parsed = try? Chord.parse(spec) else { return nil }
+        self = parsed
     }
 
     public func matches(_ ev: KeyEvent) -> Bool {
-        guard ev.mods.shift == mods.shift &&
-              ev.mods.ctrl == mods.ctrl &&
-              ev.mods.alt == mods.alt &&
-              ev.mods.cmd == mods.cmd &&
-              ev.mods.logo == mods.logo else {
-            return false
+        matches(ev, on: .current)
+    }
+
+    public func matches(_ ev: KeyEvent, on platform: KeyPlatform) -> Bool {
+        let want = ChordBits.fold(chordModBits, platform: platform)
+        let got = ChordBits.held(ev.mods, platform: platform)
+        guard let gotKey = ChordTable.chordKey(from: ev.key) else { return false }
+        if want == got && gotKey == chordKey {
+            return true
         }
-        switch (key, ev.key) {
-        case let (.command(a), .command(b)):
-            return a == Character(b.lowercased())
-        case let (.command(a), .text(b)):
-            return b.count == 1 && Character(b.lowercased()) == a
-        case let (.text(a), .command(b)):
-            return a.count == 1 && Character(a.lowercased()) == Character(b.lowercased())
-        case let (.text(a), .text(b)):
-            return a.lowercased() == b.lowercased()
-        default:
-            return key == ev.key
+        // Fallback 1 (chord.rs:214): Shift+[ / Shift+{ — event carries Shift and typed a US shifted char.
+        if want == got, ev.mods.shift, case .char(let typed) = gotKey,
+           let unshifted = ChordTable.usUnshifted(typed), .char(unshifted) == chordKey {
+            return true
         }
+        // Fallback 2 (chord.rs:219): OS delivered Shift alongside non-alphanumeric shifted char (e.g. mod+plus vs Shift+=).
+        if (want | ChordBits.shift) == got,
+           case .char(let ch) = chordKey,
+           !ch.isLetter, !ch.isNumber,
+           gotKey == .char(ch) {
+            return true
+        }
+        return false
+    }
+
+    public func sameKeys(_ other: Chord, on platform: KeyPlatform = .current) -> Bool {
+        ChordBits.fold(chordModBits, platform: platform) == ChordBits.fold(other.chordModBits, platform: platform)
+            && chordKey == other.chordKey
+    }
+
+    public func mods(on platform: KeyPlatform = .current) -> [ChordMod] {
+        let bits = ChordBits.fold(chordModBits, platform: platform)
+        let order: [ChordMod] = platform.isMac
+            ? [.ctrl, .alt, .shift, .primary, .super]
+            : [.primary, .ctrl, .alt, .shift, .super]
+        return order.filter { (bits & $0.bit) != 0 }
+    }
+
+    public func keycaps(on platform: KeyPlatform = .current) -> [String] {
+        var caps: [String] = mods(on: platform).map { mod in
+            switch (mod, platform) {
+            case (.primary, .mac): return "⌘"
+            case (.ctrl, .mac): return "⌃"
+            case (.alt, .mac): return "⌥"
+            case (.shift, .mac): return "⇧"
+            case (.super, .mac): return "⌘"
+            case (.primary, _), (.ctrl, _): return "Ctrl"
+            case (.alt, _): return "Alt"
+            case (.shift, _): return "Shift"
+            case (.super, .windows): return "Win"
+            case (.super, .linux): return "Super"
+            }
+        }
+        caps.append(Self.keycapString(chordKey, platform: platform))
+        return caps
+    }
+
+    public func label(on platform: KeyPlatform = .current) -> String {
+        keycaps(on: platform).joined(separator: platform.isMac ? "" : "+")
+    }
+
+    public var canonicalString: String {
+        var parts: [String] = []
+        if (chordModBits & ChordBits.primary) != 0 { parts.append("mod") }
+        if (chordModBits & ChordBits.ctrl) != 0 { parts.append("ctrl") }
+        if (chordModBits & ChordBits.alt) != 0 { parts.append("alt") }
+        if (chordModBits & ChordBits.shift) != 0 { parts.append("shift") }
+        if (chordModBits & ChordBits.super) != 0 { parts.append("super") }
+        parts.append(Self.canonicalKeyToken(chordKey))
+        return parts.joined(separator: "+")
     }
 
     public var description: String {
         var parts: [String] = []
-        if mods.ctrl { parts.append("Ctrl") }
-        if mods.alt { parts.append("Alt") }
-        if mods.shift { parts.append("Shift") }
-        if mods.cmd { parts.append("Cmd") }
-        switch key {
-        case .text(let s): parts.append(s.uppercased())
-        case .command(let c): parts.append(String(c).uppercased())
-        case .enter: parts.append("Enter")
-        case .tab: parts.append("Tab")
-        case .escape: parts.append("Esc")
-        case .backspace: parts.append("Backspace")
-        case .delete: parts.append("Delete")
-        case .space: parts.append("Space")
-        case .arrowLeft: parts.append("Left")
-        case .arrowRight: parts.append("Right")
-        case .arrowUp: parts.append("Up")
-        case .arrowDown: parts.append("Down")
-        case .home: parts.append("Home")
-        case .end: parts.append("End")
-        case .pageUp: parts.append("PageUp")
-        case .pageDown: parts.append("PageDown")
-        case .f(let n): parts.append("F\(n)")
+        let active = mods(on: .current)
+        if active.contains(.ctrl) { parts.append("Ctrl") }
+        if active.contains(.alt) { parts.append("Alt") }
+        if active.contains(.shift) { parts.append("Shift") }
+        if active.contains(.primary) || active.contains(.super) {
+            #if os(macOS) || os(iOS)
+            parts.append("Cmd")
+            #else
+            parts.append(active.contains(.super) ? "Super" : "Ctrl")
+            #endif
         }
+        parts.append(Self.keycapString(chordKey, platform: .linux))
         return parts.joined(separator: "+")
+    }
+
+    private static func canonicalKeyToken(_ ck: ChordKey) -> String {
+        switch ck {
+        case .char(let c): return ChordTable.charToken(c)
+        case .enter: return "enter"
+        case .tab: return "tab"
+        case .escape: return "escape"
+        case .backspace: return "backspace"
+        case .delete: return "delete"
+        case .insert: return "insert"
+        case .home: return "home"
+        case .end: return "end"
+        case .pageUp: return "pageup"
+        case .pageDown: return "pagedown"
+        case .arrowLeft: return "left"
+        case .arrowRight: return "right"
+        case .arrowUp: return "up"
+        case .arrowDown: return "down"
+        case .function(let n): return "f\(n)"
+        case .contextMenu: return "contextmenu"
+        case .printScreen: return "printscreen"
+        case .scrollLock: return "scrolllock"
+        case .pause: return "pause"
+        }
+    }
+
+    private static func keycapString(_ ck: ChordKey, platform: KeyPlatform) -> String {
+        let mac = platform.isMac
+        switch ck {
+        case .char(" "): return "Space"
+        case .char(let c): return String(c).uppercased()
+        case .enter: return mac ? "↩" : "Enter"
+        case .tab: return mac ? "⇥" : "Tab"
+        case .escape: return mac ? "⎋" : "Esc"
+        case .backspace: return mac ? "⌫" : "Backspace"
+        case .delete: return mac ? "⌦" : "Delete"
+        case .insert: return "Insert"
+        case .home: return mac ? "↖" : "Home"
+        case .end: return mac ? "↘" : "End"
+        case .pageUp: return mac ? "⇞" : (platform == .linux ? "PageUp" : "Page Up")
+        case .pageDown: return mac ? "⇟" : (platform == .linux ? "PageDown" : "Page Down")
+        case .arrowLeft: return mac ? "←" : "Left"
+        case .arrowRight: return mac ? "→" : "Right"
+        case .arrowUp: return mac ? "↑" : "Up"
+        case .arrowDown: return mac ? "↓" : "Down"
+        case .function(let n): return "F\(n)"
+        case .contextMenu: return "Menu"
+        case .printScreen: return "Print Screen"
+        case .scrollLock: return "Scroll Lock"
+        case .pause: return "Pause"
+        }
     }
 }
 
@@ -261,12 +379,72 @@ public struct TextMark: Sendable, Equatable {
 /// Caret and selection anchor are stored as UTF-8 byte offsets snapped strictly to extended
 /// grapheme cluster (`Character`) boundaries, so ZWJ emoji, flags, and combining accents never split.
 public struct TextEdit: Sendable, Equatable {
-    private struct Snapshot: Sendable, Equatable {
+    /// Coalescing behavior of an edit within the open typing run (`crates/rune/src/edit/history.rs`).
+    public enum EditKind: Sendable, Equatable {
+        case text
+        case lineBreak
+        case delete
+        case deleteRun
+        case other
+    }
+
+    private enum HistoryRun: Equatable {
+        case closed
+        case inserting
+        case deleting
+    }
+
+    private enum HistoryRecord: Equatable {
+        case join
+        case push
+    }
+
+    private enum UndoGroupState {
+        case closed
+        case open(Snapshot)
+        case unrecorded
+
+        var isOpen: Bool {
+            if case .closed = self { return false }
+            return true
+        }
+    }
+
+    internal struct Snapshot: Sendable, Equatable {
         var text: String
         var cursor: Int
         var anchor: Int
         var marks: [TextMark]
+        var richMarks: [RichMarkRange]
+        var blocks: [Block]
+        var softBreaks: [Int]
+
+        func sameDocument(as other: Snapshot) -> Bool {
+            text == other.text &&
+            marks == other.marks &&
+            richMarks == other.richMarks &&
+            blocks == other.blocks &&
+            softBreaks == other.softBreaks
+        }
+
+        var byteCost: Int {
+            text.utf8.count
+                + marks.count * MemoryLayout<TextMark>.stride
+                + richMarks.count * MemoryLayout<RichMarkRange>.stride
+                + blocks.count * MemoryLayout<Block>.stride
+                + softBreaks.count * MemoryLayout<Int>.stride
+        }
     }
+
+    private struct UndoChange: Sendable {
+        var before: Snapshot
+        var after: Snapshot
+        var byteCost: Int { before.byteCost + after.byteCost }
+    }
+
+    public static let maxHistorySteps = 128
+    public static let maxHistoryBytes = 1024 * 1024
+    public static let multilineSecureMask = "••••••••••••"
 
     public private(set) var text: String
     /// Active caret position in UTF-8 bytes (`0...text.utf8.count`).
@@ -274,15 +452,60 @@ public struct TextEdit: Sendable, Equatable {
     /// Selection anchor in UTF-8 bytes (`anchor == cursor` when collapsed).
     public private(set) var anchor: Int
     public var multiline: Bool
-    public var isSecure: Bool = false
+    public var isSecure: Bool = false {
+        didSet {
+            if isSecure && !oldValue {
+                undoStack.removeAll()
+                redoStack.removeAll()
+                historyBytes = 0
+                historyRun = .closed
+                if undoGroupState.isOpen {
+                    undoGroupState = .unrecorded
+                }
+                marks.removeAll()
+                richMarks.removeAll()
+                blocks.removeAll()
+                softBreaks.removeAll()
+                typingStyle = .inherited
+                preedit = nil
+                preeditClauses.removeAll()
+            }
+        }
+    }
     public var isRevealed: Bool = false
     public var spellcheckEnabled: Bool = false
     public var marks: [TextMark] = []
+    public internal(set) var richMarks: [RichMarkRange] = []
+    public internal(set) var blocks: [Block] = [.paragraph]
+    public internal(set) var softBreaks: [Int] = []
+    public var allowedRichMarks: RichMark.AllowMask? = nil {
+        didSet { syncRichInvariants() }
+    }
+    public var allowedBlocks: Block.AllowMask? = nil {
+        didSet { syncRichInvariants() }
+    }
+    public var isRichEnabled: Bool = false
+    internal var typingStyle: TypingStyle = .inherited
+    public internal(set) var caretColumn: CaretColumn = .free
+    public internal(set) var caretAffinity: TextAffinity = .downstream
     /// Optional open IME composition `(preeditText, cursorRangeInBytes)`.
-    public var preedit: (text: String, cursor: Range<Int>?)? = nil
+    public var preedit: (text: String, cursor: Range<Int>?)? = nil {
+        didSet {
+            if preedit == nil && !preeditClauses.isEmpty {
+                preeditClauses.removeAll()
+            }
+        }
+    }
+    /// Platform-supplied IME clauses for the open preedit composition (`rune::edit::Clause`).
+    public var preeditClauses: [ImeClause] = []
+    /// Set when the last key press in `handleKey` requested blurring focus (e.g. non-composing Escape).
+    public private(set) var didRequestBlur: Bool = false
 
-    private var undoStack: [Snapshot] = []
-    private var redoStack: [Snapshot] = []
+    private var undoStack: [UndoChange] = []
+    private var redoStack: [UndoChange] = []
+    private var historyBytes: Int = 0
+    private var historyRun: HistoryRun = .closed
+    private var undoGroupState: UndoGroupState = .closed
 
     public static func == (lhs: TextEdit, rhs: TextEdit) -> Bool {
         lhs.text == rhs.text &&
@@ -292,8 +515,12 @@ public struct TextEdit: Sendable, Equatable {
         lhs.isSecure == rhs.isSecure &&
         lhs.isRevealed == rhs.isRevealed &&
         lhs.marks == rhs.marks &&
+        lhs.richMarks == rhs.richMarks &&
+        lhs.blocks == rhs.blocks &&
+        lhs.softBreaks == rhs.softBreaks &&
         lhs.preedit?.text == rhs.preedit?.text &&
-        lhs.preedit?.cursor == rhs.preedit?.cursor
+        lhs.preedit?.cursor == rhs.preedit?.cursor &&
+        lhs.preeditClauses == rhs.preeditClauses
     }
 
     public init(_ initial: String = "", multiline: Bool = false) {
@@ -303,6 +530,8 @@ public struct TextEdit: Sendable, Equatable {
         self.cursor = end
         self.anchor = end
         self.multiline = multiline
+        let lineCount = 1 + cleaned.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
+        self.blocks = Array(repeating: .paragraph, count: lineCount)
     }
 
     public var hasSelection: Bool { cursor != anchor }
@@ -321,101 +550,197 @@ public struct TextEdit: Sendable, Equatable {
 
     /// Replaces the entire text and places the caret at the end.
     public mutating func setText(_ newText: String, recordUndo: Bool = false) {
-        if recordUndo { pushUndo() }
+        let before = recordUndo ? captureUndoBaseline() : nil
         let cleaned = multiline ? newText : newText.replacingOccurrences(of: "\n", with: " ")
         text = cleaned
         let end = cleaned.utf8.count
         cursor = end
         anchor = end
         marks.removeAll()
+        richMarks.removeAll()
+        let lineCount = isSecure ? 0 : 1 + cleaned.utf8.reduce(0) { $0 + ($1 == 0x0A ? 1 : 0) }
+        blocks = Array(repeating: .paragraph, count: lineCount)
+        softBreaks.removeAll()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
         preedit = nil
+        if recordUndo {
+            recordUndoChange(before: before, kind: .other)
+        }
     }
 
     public mutating func clear() {
         setText("", recordUndo: false)
-        undoStack.removeAll()
-        redoStack.removeAll()
+        clearHistory()
     }
 
     public mutating func selectAll() {
+        breakHistoryGroup()
         anchor = 0
         cursor = text.utf8.count
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
     }
 
     public mutating func collapseSelectionToStart() {
+        breakHistoryGroup()
         let pos = min(cursor, anchor)
         cursor = pos
         anchor = pos
+        snapToPills()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
     }
 
     public mutating func collapseSelectionToEnd() {
+        breakHistoryGroup()
         let pos = max(cursor, anchor)
         cursor = pos
         anchor = pos
+        snapToPills()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
     }
 
     public mutating func setCursor(utf8Offset: Int, extendSelection: Bool = false) {
+        breakHistoryGroup()
         let snapped = snapToGraphemeBoundary(utf8Offset)
         cursor = snapped
         if !extendSelection {
             anchor = snapped
         }
+        snapToPills()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
     }
 
     public mutating func selectWord(atUTF8Offset offset: Int) {
+        breakHistoryGroup()
         let snapped = snapToGraphemeBoundary(offset)
         let left = prevWordBoundary(from: snapped == text.utf8.count ? snapped : nextGraphemeBoundary(from: snapped))
         let right = nextWordBoundary(from: left)
         anchor = left
         cursor = right
+        snapToPills()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
     }
 
     /// Inserts `inserted` at the current caret or replaces any active selection.
     public mutating func insert(_ inserted: String) {
-        let filtered = multiline ? inserted : inserted.replacingOccurrences(of: "\r\n", with: " ").replacingOccurrences(of: "\n", with: " ")
-        guard !filtered.isEmpty || hasSelection else { return }
-        pushUndo()
-        let range = selectedUTF8Range
-        let startIdx = stringIndex(forUTF8Offset: range.lowerBound)
-        let endIdx = stringIndex(forUTF8Offset: range.upperBound)
-        text.replaceSubrange(startIdx..<endIdx, with: filtered)
-        adjustMarks(replacedRange: range, newLength: filtered.utf8.count)
-        let newCursor = range.lowerBound + filtered.utf8.count
-        cursor = newCursor
-        anchor = newCursor
-        preedit = nil
+        insert(inserted, kind: .other)
     }
 
-    /// Deletes one extended grapheme cluster backward (or the active selection, or previous word when `word == true`).
+    internal mutating func insert(_ inserted: String, kind: EditKind) {
+        let filtered = sanitizeInput(inserted)
+        let rawRange = selectedUTF8Range
+        let covered = coverPills(rawRange.lowerBound, rawRange.upperBound)
+        let range = covered.0..<covered.1
+        guard !filtered.isEmpty || !range.isEmpty else { return }
+        let insertedMarks: [RichMark] = typingStyle.takeAt(anchor: anchor, cursor: cursor)
+            ?? inheritedRichMarks(at: range.lowerBound)
+        let before = captureUndoBaseline()
+        let newLen = filtered.utf8.count
+        applyRichReplace(range: range, replacement: filtered, insertedMarks: insertedMarks, newLineBlock: nil, markNewLinesSoft: false)
+        adjustMarks(replacedRange: range, newLength: newLen)
+        let newCursor = range.lowerBound + newLen
+        cursor = newCursor
+        anchor = newCursor
+        caretColumn = .free
+        caretAffinity = .downstream
+        preedit = nil
+        recordUndoChange(before: before, kind: kind)
+    }
+
+    /// Deletes backward (or the active selection, or previous word when `word == true`).
+    /// For un-selected clusters, deletes one scalar (so accents/Vowel signs peel cleanly) unless CR LF or emoji sequence.
     public mutating func backspace(word: Bool = false) {
+        backspace(word: word, line: false, kind: .other)
+    }
+
+    internal mutating func backspace(word: Bool, line: Bool, kind: EditKind) {
         if hasSelection {
-            insert("")
+            insert("", kind: kind)
             return
         }
+        if !line && !word && !isSecure {
+            syncRichInvariants()
+            let lineIdx = lineIndexOfUTF8(cursor)
+            let lineRange = lineRangeUTF8(of: lineIdx)
+            let blk = lineIdx < blocks.count ? blocks[lineIdx] : .paragraph
+            let isSoft = softBreaks.contains(lineIdx)
+            if cursor == lineRange.lowerBound && !isSoft && blk != .paragraph {
+                switch blk {
+                case .bullet(let lvl):
+                    setBlock(lvl > 0 ? .bullet(lvl - 1) : .paragraph)
+                    return
+                case .numbered(let lvl):
+                    setBlock(lvl > 0 ? .numbered(lvl - 1) : .paragraph)
+                    return
+                case .quote, .code:
+                    if cursor == 0 || lineRange.isEmpty {
+                        setBlock(.paragraph)
+                        return
+                    }
+                case .paragraph:
+                    break
+                }
+            }
+        }
         guard cursor > 0 else { return }
-        pushUndo()
-        let target = word ? prevWordBoundary(from: cursor) : prevGraphemeBoundary(from: cursor)
-        let startIdx = stringIndex(forUTF8Offset: target)
-        let endIdx = stringIndex(forUTF8Offset: cursor)
-        text.removeSubrange(startIdx..<endIdx)
-        adjustMarks(replacedRange: target..<cursor, newLength: 0)
-        cursor = target
-        anchor = target
+        let target: Int
+        if line {
+            target = (isSecure && !isRevealed) ? 0 : lineStart(for: cursor)
+        } else if let pillStart = pillBefore(cursor) {
+            target = pillStart
+        } else {
+            target = word ? prevWordBoundary(from: cursor) : prevBackspaceBoundary(from: cursor)
+        }
+        let covered = coverPills(target, cursor)
+        let range = covered.0..<covered.1
+        let before = captureUndoBaseline()
+        applyRichReplace(range: range, replacement: "", insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+        adjustMarks(replacedRange: range, newLength: 0)
+        cursor = snapToGraphemeBoundary(range.lowerBound)
+        anchor = cursor
+        caretColumn = .free
+        caretAffinity = .downstream
+        recordUndoChange(before: before, kind: kind)
     }
 
     /// Deletes one extended grapheme cluster forward (or the active selection, or next word when `word == true`).
     public mutating func deleteForward(word: Bool = false) {
+        deleteForward(word: word, kind: .other)
+    }
+
+    internal mutating func deleteForward(word: Bool, kind: EditKind) {
         if hasSelection {
-            insert("")
+            insert("", kind: kind)
             return
         }
         guard cursor < text.utf8.count else { return }
-        pushUndo()
-        let target = word ? nextWordBoundary(from: cursor) : nextGraphemeBoundary(from: cursor)
-        let startIdx = stringIndex(forUTF8Offset: cursor)
-        let endIdx = stringIndex(forUTF8Offset: target)
-        text.removeSubrange(startIdx..<endIdx)
-        adjustMarks(replacedRange: cursor..<target, newLength: 0)
+        let target: Int
+        if let pillEnd = pillAfter(cursor) {
+            target = pillEnd
+        } else {
+            target = word ? nextWordBoundary(from: cursor) : nextGraphemeBoundary(from: cursor)
+        }
+        let covered = coverPills(cursor, target)
+        let range = covered.0..<covered.1
+        let before = captureUndoBaseline()
+        applyRichReplace(range: range, replacement: "", insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+        adjustMarks(replacedRange: range, newLength: 0)
+        cursor = snapToGraphemeBoundary(range.lowerBound)
+        anchor = cursor
+        caretColumn = .free
+        caretAffinity = .downstream
+        recordUndoChange(before: before, kind: kind)
     }
 
     public mutating func moveLeft(extend: Bool = false, word: Bool = false, toLineBoundary: Bool = false) {
@@ -428,6 +753,8 @@ public struct TextEdit: Sendable, Equatable {
             nextPos = lineStart(for: cursor)
         } else if word {
             nextPos = prevWordBoundary(from: cursor)
+        } else if let pillStart = pillBefore(cursor) {
+            nextPos = pillStart
         } else {
             nextPos = prevGraphemeBoundary(from: cursor)
         }
@@ -444,6 +771,8 @@ public struct TextEdit: Sendable, Equatable {
             nextPos = lineEnd(for: cursor)
         } else if word {
             nextPos = nextWordBoundary(from: cursor)
+        } else if let pillEnd = pillAfter(cursor) {
+            nextPos = pillEnd
         } else {
             nextPos = nextGraphemeBoundary(from: cursor)
         }
@@ -486,12 +815,12 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     public func copy() -> String? {
-        guard (!isSecure || isRevealed) && hasSelection else { return nil }
+        guard !isSecure && hasSelection else { return nil }
         return selectedText
     }
 
     public mutating func cut() -> String? {
-        guard (!isSecure || isRevealed) && hasSelection else { return nil }
+        guard !isSecure && hasSelection else { return nil }
         let out = selectedText
         insert("")
         return out
@@ -501,47 +830,336 @@ public struct TextEdit: Sendable, Equatable {
         insert(pasted)
     }
 
+    /// Replaces any revealed secret with bullet masks and hides the field again (`TextEdit::conceal`).
+    public mutating func conceal() {
+        isRevealed = false
+        guard isSecure else { return }
+        text = displayString
+        let end = text.utf8.count
+        cursor = end
+        anchor = end
+        marks.removeAll()
+        richMarks.removeAll()
+        blocks.removeAll()
+        softBreaks.removeAll()
+        typingStyle = .inherited
+        preedit = nil
+        undoStack.removeAll()
+        redoStack.removeAll()
+    }
+
+    private var isRecordingHistory: Bool {
+        !isSecure && !undoGroupState.isOpen
+    }
+
+    /// Drops the undo and redo stacks while keeping the document and selection (`history.rs:153`).
+    public mutating func clearHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        historyBytes = 0
+        historyRun = .closed
+        if undoGroupState.isOpen {
+            syncRichInvariants()
+            undoGroupState = isSecure ? .unrecorded : .open(makeSnapshot())
+        }
+    }
+
+    /// Ends the current typing coalescing run (on pointer selection, focus change, or non-typing command).
+    public mutating func breakHistoryGroup() {
+        historyRun = .closed
+    }
+
+    /// Runs `body`, coalescing all document mutations inside it into one undo step (`history.rs:259`).
+    public mutating func undoGroup<R>(_ body: (inout TextEdit) -> R) -> R {
+        if undoGroupState.isOpen {
+            return body(&self)
+        }
+        syncRichInvariants()
+        breakHistoryGroup()
+        undoGroupState = isSecure ? .unrecorded : .open(makeSnapshot())
+        let result = body(&self)
+        let baseline: Snapshot?
+        switch undoGroupState {
+        case .open(let snap): baseline = snap
+        case .closed, .unrecorded: baseline = nil
+        }
+        undoGroupState = .closed
+        syncRichInvariants()
+        breakHistoryGroup()
+        recordUndoChange(before: baseline, kind: .other)
+        return result
+    }
+
     @discardableResult
     public mutating func undo() -> Bool {
-        guard let prev = undoStack.popLast() else { return false }
-        redoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
-        text = prev.text
-        cursor = prev.cursor
-        anchor = prev.anchor
-        marks = prev.marks
-        preedit = nil
+        guard isRecordingHistory else { return false }
+        breakHistoryGroup()
+        if preedit != nil {
+            cancelPreedit()
+            return true
+        }
+        guard let change = undoStack.popLast() else { return false }
+        historyBytes = max(0, historyBytes - change.byteCost)
+        if text != change.after.text {
+            undoStack.removeAll()
+            redoStack.removeAll()
+            historyBytes = 0
+            return false
+        }
+        restoreSnapshot(change.before)
+        redoStack.append(change)
+        historyBytes += change.byteCost
         return true
     }
 
     @discardableResult
     public mutating func redo() -> Bool {
-        guard let next = redoStack.popLast() else { return false }
-        undoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
-        text = next.text
-        cursor = next.cursor
-        anchor = next.anchor
-        marks = next.marks
-        preedit = nil
+        guard isRecordingHistory else { return false }
+        breakHistoryGroup()
+        if preedit != nil {
+            cancelPreedit()
+            return true
+        }
+        guard let change = redoStack.popLast() else { return false }
+        historyBytes = max(0, historyBytes - change.byteCost)
+        if text != change.before.text {
+            undoStack.removeAll()
+            redoStack.removeAll()
+            historyBytes = 0
+            return false
+        }
+        restoreSnapshot(change.after)
+        undoStack.append(change)
+        historyBytes += change.byteCost
         return true
+    }
+
+    private mutating func restoreSnapshot(_ snap: Snapshot) {
+        text = snap.text
+        cursor = snap.cursor
+        anchor = snap.anchor
+        marks = snap.marks
+        richMarks = snap.richMarks
+        blocks = snap.blocks
+        softBreaks = snap.softBreaks
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
+        preedit = nil
+        preeditClauses.removeAll()
+        syncRichInvariants()
+    }
+
+    internal func makeSnapshot() -> Snapshot {
+        Snapshot(
+            text: text,
+            cursor: cursor,
+            anchor: anchor,
+            marks: marks,
+            richMarks: richMarks,
+            blocks: blocks,
+            softBreaks: softBreaks
+        )
+    }
+
+    internal func captureUndoBaseline() -> Snapshot? {
+        isRecordingHistory ? makeSnapshot() : nil
+    }
+
+    private static func stepHistory(
+        run: inout HistoryRun,
+        kind: EditKind,
+        intoEmpty: Bool
+    ) -> HistoryRecord {
+        let record: HistoryRecord
+        let next: HistoryRun
+        switch (run, kind) {
+        case (_, .other):
+            (record, next) = (.push, .closed)
+        case (_, .deleteRun), (.closed, .delete), (.inserting, .delete):
+            (record, next) = (.push, .deleting)
+        case (.deleting, .delete):
+            (record, next) = (.join, .deleting)
+        case (.closed, .text), (.closed, .lineBreak):
+            (record, next) = (.push, .inserting)
+        case (.inserting, .text), (.inserting, .lineBreak), (.deleting, .text), (.deleting, .lineBreak):
+            (record, next) = (.join, .inserting)
+        }
+        run = (kind == .text && intoEmpty) ? .closed : next
+        return record
+    }
+
+    internal mutating func recordUndoChange(before: Snapshot?, kind: EditKind = .other) {
+        guard let before, isRecordingHistory else { return }
+        let after = makeSnapshot()
+        guard !before.sameDocument(as: after) else { return }
+
+        let expectedText = redoStack.last?.before.text ?? undoStack.last?.after.text
+        if let expectedText, expectedText != before.text {
+            undoStack.removeAll()
+            redoStack.removeAll()
+            historyBytes = 0
+            historyRun = .closed
+        }
+
+        if !redoStack.isEmpty {
+            let redoCost = redoStack.reduce(0) { $0 + $1.byteCost }
+            historyBytes = max(0, historyBytes - redoCost)
+            redoStack.removeAll()
+        }
+
+        let rec = Self.stepHistory(
+            run: &historyRun,
+            kind: kind,
+            intoEmpty: isRichEnabled && before.text.isEmpty
+        )
+        if rec == .join,
+           before.anchor == before.cursor,
+           let last = undoStack.last,
+           last.after == before {
+            let idx = undoStack.count - 1
+            historyBytes = max(0, historyBytes - last.byteCost)
+            undoStack[idx].after = after
+            historyBytes += undoStack[idx].byteCost
+        } else {
+            let change = UndoChange(before: before, after: after)
+            historyBytes += change.byteCost
+            undoStack.append(change)
+        }
+
+        while undoStack.count > Self.maxHistorySteps || historyBytes > Self.maxHistoryBytes {
+            guard !undoStack.isEmpty else { break }
+            let dropped = undoStack.removeFirst()
+            historyBytes = max(0, historyBytes - dropped.byteCost)
+        }
+    }
+
+    internal mutating func pushUndoSnapshot(_ before: Snapshot, kind: EditKind = .other) {
+        recordUndoChange(before: before, kind: kind)
     }
 
     // MARK: - IME Preedit
 
-    public mutating func setPreedit(_ preeditText: String, cursor cursorRange: Range<Int>? = nil) {
+    public mutating func setPreedit(
+        _ preeditText: String,
+        cursor cursorRange: Range<Int>? = nil,
+        clauses: [ImeClause] = []
+    ) {
+        guard !isSecure else {
+            preedit = nil
+            preeditClauses.removeAll()
+            return
+        }
         if preeditText.isEmpty {
             preedit = nil
+            preeditClauses.removeAll()
         } else {
-            preedit = (preeditText, cursorRange)
+            let validUTF8 = Self.utf8ScalarBoundarySet(in: preeditText)
+            let clampedCursor = cursorRange.map { r in
+                let lo = min(max(0, r.lowerBound), preeditText.utf8.count)
+                let hi = min(max(lo, r.upperBound), preeditText.utf8.count)
+                return lo..<hi
+            }
+            let fits: (ImeClause) -> Bool = { c in
+                c.utf8Range.lowerBound < c.utf8Range.upperBound &&
+                c.utf8Range.upperBound <= preeditText.utf8.count &&
+                validUTF8.contains(c.utf8Range.lowerBound) &&
+                validUTF8.contains(c.utf8Range.upperBound)
+            }
+            preedit = (preeditText, clampedCursor)
+            preeditClauses = clauses.allSatisfy(fits) ? clauses : []
         }
     }
 
     public mutating func commitPreedit(_ committed: String) {
         preedit = nil
-        insert(committed)
+        preeditClauses.removeAll()
+        guard !isSecure else { return }
+        insert(committed, kind: .other)
     }
 
     public mutating func cancelPreedit() {
         preedit = nil
+        preeditClauses.removeAll()
+    }
+
+    /// Commits any open preedit text if present (`Event::Finish` in `edit/ime.rs`), returning whether committed.
+    @discardableResult
+    public mutating func finishPreedit() -> Bool {
+        guard let active = preedit, !active.text.isEmpty else {
+            preedit = nil
+            preeditClauses.removeAll()
+            return false
+        }
+        let committed = active.text
+        commitPreedit(committed)
+        return true
+    }
+
+    /// Returns effective IME clauses for the active preedit (`Composition::clauses` in `edit/ime.rs`).
+    public func effectivePreeditClauses() -> [ImeClause] {
+        guard let active = preedit, !active.text.isEmpty else { return [] }
+        if !preeditClauses.isEmpty { return preeditClauses }
+        let len = active.text.utf8.count
+        if let c = active.cursor, c.lowerBound < c.upperBound, c.upperBound <= len {
+            return [
+                ImeClause(utf8Range: 0..<c.lowerBound, isTarget: false),
+                ImeClause(utf8Range: c.lowerBound..<c.upperBound, isTarget: true),
+                ImeClause(utf8Range: c.upperBound..<len, isTarget: false),
+            ].filter { !$0.utf8Range.isEmpty }
+        }
+        return [ImeClause(utf8Range: 0..<len, isTarget: false)]
+    }
+
+    /// Publishes surrounding paragraph context (at most `maxContextBytes` per side) for IME reconversion.
+    /// Always returns `nil` when `isSecure == true`.
+    public func imeTextSnapshot(maxContextBytes: Int = 1024) -> ImeText? {
+        guard !isSecure else { return nil }
+        return ImeUTF16Bridge.imeTextSlice(
+            text: text,
+            selectionUTF8: selectedUTF8Range,
+            maxContextBytes: maxContextBytes
+        )
+    }
+
+    /// Applies an OS `ImeEvent` (`rune::edit::ime::step`).
+    @discardableResult
+    public mutating func applyIme(_ event: ImeEvent) -> EditOutcome {
+        switch event {
+        case let .preedit(str, cursorUTF8, clauses):
+            setPreedit(str, cursor: cursorUTF8, clauses: clauses)
+            return .navigation
+        case let .commit(str):
+            if isSecure {
+                preedit = nil
+                preeditClauses.removeAll()
+                insert(str)
+                return .modified
+            }
+            let prev = text
+            commitPreedit(str)
+            return text != prev ? .modified : .navigation
+        case let .select(range):
+            guard preedit == nil, !isSecure else { return .ignored }
+            let start = snapToGraphemeBoundary(range.lowerBound)
+            let end = snapToGraphemeBoundary(range.upperBound)
+            anchor = start
+            cursor = end
+            return .navigation
+        case .enabled, .disabled:
+            return .ignored
+        }
+    }
+
+    private static func utf8ScalarBoundarySet(in s: String) -> Set<Int> {
+        var set = Set<Int>()
+        var offset = 0
+        set.insert(0)
+        for scalar in s.unicodeScalars {
+            offset += scalar.utf8.count
+            set.insert(offset)
+        }
+        return set
     }
 
     public enum EditOutcome: Sendable, Equatable {
@@ -552,31 +1170,159 @@ public struct TextEdit: Sendable, Equatable {
         case copy(String)
     }
 
+    /// Returns the inline mark mapped from a formatting shortcut chord (`b`/`i`/`u`) if allowed (`input.rs:274`).
+    public func formatChord(_ ev: KeyEvent) -> RichMark? {
+        guard isRichEnabled && !isSecure else { return nil }
+        guard ev.mods.primaryCommand && ev.mods.primaryAlone && !ev.mods.shift else { return nil }
+        let mark: RichMark
+        if ev.isCommand("b") {
+            mark = .bold
+        } else if ev.isCommand("i") {
+            mark = .italic
+        } else if ev.isCommand("u") {
+            mark = .underline
+        } else {
+            return nil
+        }
+        return allowsRichMark(mark) ? mark : nil
+    }
+
+    private func atEndOfTrailingBlock() -> Bool {
+        let n = text.utf8.count
+        return !isSecure
+            && multiline
+            && preedit == nil
+            && anchor == n
+            && cursor == n
+            && (blocks.last == .code || blocks.last == .quote)
+    }
+
+    private mutating func leaveTrailingBlock() {
+        syncRichInvariants()
+        breakHistoryGroup()
+        let before = captureUndoBaseline()
+        let n = text.utf8.count
+        typingStyle = .inherited
+        applyRichReplace(
+            range: n..<n,
+            replacement: "\n",
+            insertedMarks: [],
+            newLineBlock: .paragraph,
+            markNewLinesSoft: false
+        )
+        let newCursor = n + 1
+        cursor = newCursor
+        anchor = newCursor
+        caretColumn = .free
+        caretAffinity = .downstream
+        recordUndoChange(before: before, kind: .other)
+    }
+
+    private mutating func insertNewline(blockForNewLine: Block, soft: Bool) {
+        guard !isSecure && multiline else { return }
+        syncRichInvariants()
+        let before = captureUndoBaseline()
+        let covered = coverPills(selectedUTF8Range.lowerBound, selectedUTF8Range.upperBound)
+        let range = covered.0..<covered.1
+        let insertedMarks = typingStyle.takeAt(anchor: anchor, cursor: cursor)
+            ?? inheritedRichMarks(at: range.lowerBound)
+        applyRichReplace(
+            range: range,
+            replacement: "\n",
+            insertedMarks: insertedMarks,
+            newLineBlock: blockForNewLine,
+            markNewLinesSoft: soft
+        )
+        adjustMarks(replacedRange: range, newLength: 1)
+        let newCursor = range.lowerBound + 1
+        cursor = newCursor
+        anchor = newCursor
+        caretColumn = .free
+        caretAffinity = .downstream
+        recordUndoChange(before: before, kind: .lineBreak)
+    }
+
     /// Processes a keyboard `KeyEvent`, returning how the editor responded.
     public mutating func handleKey(_ ev: KeyEvent) -> EditOutcome {
+        didRequestBlur = false
         let shift = ev.mods.shift
-        let primary = ev.mods.primaryCommand
         let alt = ev.mods.alt
 
-        if primary {
-            switch ev.key {
-            case .command("a"), .text("a"), .text("A"):
+        if let ctrlLetter = ev.controlBinding {
+            switch ctrlLetter {
+            case "a":
+                moveLeft(extend: shift, toLineBoundary: true)
+                return .navigation
+            case "e":
+                moveRight(extend: shift, toLineBoundary: true)
+                return .navigation
+            case "b":
+                moveLeft(extend: shift)
+                return .navigation
+            case "f":
+                moveRight(extend: shift)
+                return .navigation
+            case "p":
+                moveUp(extend: shift)
+                return .navigation
+            case "n":
+                moveDown(extend: shift)
+                return .navigation
+            case "d":
+                let before = text
+                deleteForward(word: false, kind: .delete)
+                return text != before ? .modified : .navigation
+            case "h":
+                let beforeText = text
+                let beforeBlocks = blocks
+                backspace(word: false, line: false, kind: .delete)
+                return (text != beforeText || blocks != beforeBlocks) ? .modified : .navigation
+            case "k":
+                breakHistoryGroup()
+                let end = lineEnd(for: cursor)
+                if cursor < end || hasSelection {
+                    if !hasSelection { anchor = end }
+                    insert("", kind: .deleteRun)
+                    return .modified
+                }
+                return .ignored
+            default:
+                break
+            }
+        }
+
+        if ev.mods.primaryCommand && ev.mods.primaryAlone {
+            breakHistoryGroup()
+            if ev.isCommand("a") {
                 selectAll()
                 return .navigation
-            case .command("z"), .text("z"), .text("Z"):
+            }
+            if ev.isCommand("z") {
                 if shift {
                     return redo() ? .modified : .ignored
                 } else {
                     return undo() ? .modified : .ignored
                 }
-            case .command("y"), .text("y"), .text("Y"):
+            }
+            if ev.isCommand("y") {
                 return redo() ? .modified : .ignored
-            case .command("c"), .text("c"), .text("C"):
+            }
+            if ev.isCommand("b") || ev.isCommand("i") || ev.isCommand("u") {
+                if let mark = formatChord(ev) {
+                    toggleMark(mark)
+                    return .modified
+                }
+                return .ignored
+            }
+            if ev.isCommand("c") {
                 if let copied = copy() { return .copy(copied) }
                 return .ignored
-            case .command("x"), .text("x"), .text("X"):
+            }
+            if ev.isCommand("x") {
                 if let cutStr = cut() { return .copy(cutStr) }
                 return .ignored
+            }
+            switch ev.key {
             case .arrowLeft:
                 moveLeft(extend: shift, toLineBoundary: true)
                 return .navigation
@@ -592,17 +1338,28 @@ public struct TextEdit: Sendable, Equatable {
             case .backspace:
                 let start = lineStart(for: cursor)
                 if start < cursor || hasSelection {
-                    if !hasSelection { anchor = start }
-                    insert("")
+                    backspace(word: false, line: true, kind: .deleteRun)
                     return .modified
                 }
                 return .ignored
             case .delete:
                 let end = lineEnd(for: cursor)
                 if cursor < end || hasSelection {
-                    if !hasSelection { anchor = end }
-                    insert("")
+                    let before = captureUndoBaseline()
+                    let r = hasSelection ? selectedUTF8Range : cursor..<end
+                    let covered = coverPills(r.lowerBound, r.upperBound)
+                    let range = covered.0..<covered.1
+                    applyRichReplace(range: range, replacement: "", insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+                    adjustMarks(replacedRange: range, newLength: 0)
+                    cursor = snapToGraphemeBoundary(range.lowerBound)
+                    anchor = cursor
+                    recordUndoChange(before: before, kind: .deleteRun)
                     return .modified
+                }
+                return .ignored
+            case .enter:
+                if multiline && isSecure {
+                    return .submit
                 }
                 return .ignored
             default:
@@ -610,15 +1367,30 @@ public struct TextEdit: Sendable, Equatable {
             }
         }
 
+        // AltGr / extra modifiers alongside Cmd other than Shift leave primary commands untouched.
+        if ev.mods.primaryCommand {
+            return .ignored
+        }
+
+        switch ev.key {
+        case .text, .space, .backspace, .delete, .enter:
+            break
+        default:
+            breakHistoryGroup()
+        }
+
         switch ev.key {
         case .backspace:
-            let before = text
-            backspace(word: alt || ev.mods.ctrl)
-            return text != before ? .modified : .navigation
+            let beforeText = text
+            let beforeBlocks = blocks
+            let isWord = alt || ev.mods.ctrl
+            backspace(word: isWord, line: false, kind: isWord ? .deleteRun : .delete)
+            return (text != beforeText || blocks != beforeBlocks) ? .modified : .navigation
 
         case .delete:
             let before = text
-            deleteForward(word: alt || ev.mods.ctrl)
+            let isWord = alt || ev.mods.ctrl
+            deleteForward(word: isWord, kind: isWord ? .deleteRun : .delete)
             return text != before ? .modified : .navigation
 
         case .arrowLeft:
@@ -626,6 +1398,10 @@ public struct TextEdit: Sendable, Equatable {
             return .navigation
 
         case .arrowRight:
+            if !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
+                leaveTrailingBlock()
+                return .modified
+            }
             moveRight(extend: shift, word: alt || ev.mods.ctrl)
             return .navigation
 
@@ -634,6 +1410,10 @@ public struct TextEdit: Sendable, Equatable {
             return .navigation
 
         case .arrowDown:
+            if !shift && !alt && !ev.mods.ctrl && atEndOfTrailingBlock() {
+                leaveTrailingBlock()
+                return .modified
+            }
             moveDown(extend: shift)
             return .navigation
 
@@ -646,29 +1426,85 @@ public struct TextEdit: Sendable, Equatable {
             return .navigation
 
         case .enter:
-            if multiline && !ev.mods.ctrl {
-                insert("\n")
+            if preedit != nil {
+                return .ignored
+            }
+            if !multiline {
+                return .submit
+            }
+            if isSecure {
+                if ev.mods.ctrl || ev.mods.cmd {
+                    return .submit
+                }
+                insert("\n", kind: .lineBreak)
                 return .modified
             }
-            return .submit
+            syncRichInvariants()
+            let r = selectedUTF8Range
+            let lineIdx = lineIndexOfUTF8(r.lowerBound)
+            let blk = lineIdx < blocks.count ? blocks[lineIdx] : .paragraph
+            let lineRange = lineRangeUTF8(of: lineIdx)
+            if shift && isRichEnabled {
+                insertNewline(blockForNewLine: blk, soft: true)
+                return .modified
+            }
+            if shift || alt {
+                insertNewline(blockForNewLine: blk, soft: false)
+                return .modified
+            }
+            switch blk {
+            case .code:
+                let nextNotCode = (lineIdx + 1 >= blocks.count) || blocks[lineIdx + 1] != .code
+                if r.isEmpty && lineRange.isEmpty && nextNotCode {
+                    setBlock(.paragraph)
+                } else {
+                    insertNewline(blockForNewLine: .code, soft: false)
+                }
+                return .modified
+            case .bullet, .numbered, .quote:
+                if r.isEmpty && lineRange.isEmpty {
+                    setBlock(.paragraph)
+                } else {
+                    insertNewline(blockForNewLine: blk, soft: false)
+                }
+                return .modified
+            case .paragraph:
+                return .submit
+            }
+
+        case .tab:
+            if !isSecure && multiline && !ev.mods.cmd && !alt && !ev.mods.ctrl {
+                if activeBlock == .code && !shift {
+                    insert("\t", kind: .text)
+                    return .modified
+                }
+                if shift {
+                    if outdentList() { return .modified }
+                } else {
+                    if indentList() { return .modified }
+                }
+            }
+            return .ignored
 
         case .escape:
             if preedit != nil {
                 cancelPreedit()
                 return .modified
             }
+            didRequestBlur = true
             return .ignored
 
         case .space:
             if !ev.mods.ctrl {
-                insert(" ")
+                insert(" ", kind: .text)
                 return .modified
             }
             return .ignored
 
         case .text(let s):
             if !ev.mods.ctrl {
-                insert(s)
+                let kind: EditKind = s.contains(where: { $0 == "\n" || $0 == "\r" }) ? .lineBreak : .text
+                insert(s, kind: kind)
                 return .modified
             }
             return .ignored
@@ -678,12 +1514,13 @@ public struct TextEdit: Sendable, Equatable {
         }
     }
 
-    /// Masked display string (`•` per grapheme cluster when `isSecure && !isRevealed` is true).
+    /// Masked display string (`"••••••••••••"` for hidden multi-line, `•` per scalar for hidden single-line).
     public var displayString: String {
-        if isSecure && !isRevealed {
-            return String(repeating: "•", count: text.count)
+        guard isSecure && !isRevealed else { return text }
+        if multiline {
+            return Self.multilineSecureMask
         }
-        return text
+        return String(repeating: "•", count: text.unicodeScalars.count)
     }
 
     // MARK: - Grapheme & Word Boundary Helpers
@@ -725,23 +1562,91 @@ public struct TextEdit: Sendable, Equatable {
         c.isLetter || c.isNumber || c == "_"
     }
 
+    private func sanitizeInput(_ s: String) -> String {
+        if multiline {
+            return s.replacingOccurrences(of: "\r\n", with: "\n")
+                .replacingOccurrences(of: "\r", with: "\n")
+        }
+        return s.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\u{2028}", with: " ")
+    }
+
+    private func prevBackspaceBoundary(from offset: Int) -> Int {
+        let start = prevGraphemeBoundary(from: offset)
+        let lo = stringIndex(forUTF8Offset: start)
+        let hi = stringIndex(forUTF8Offset: offset)
+        let cluster = text[lo..<hi]
+        if cluster == "\r\n" {
+            return start
+        }
+        let isEmojiSeq = cluster.unicodeScalars.contains { scalar in
+            let v = scalar.value
+            return v == 0xFE0F
+                || v == 0x20E3
+                || (0x1F3FB...0x1F3FF).contains(v)
+                || (0x1F1E6...0x1F1FF).contains(v)
+                || (0xE0020...0xE007F).contains(v)
+        } || (cluster.unicodeScalars.contains { $0.value == 0x200D } && cluster.unicodeScalars.contains {
+            $0.properties.isEmojiPresentation || $0.properties.isEmoji
+        })
+        if isEmojiSeq {
+            return start
+        }
+        guard offset > 0 else { return 0 }
+        let scalarIdx = text.unicodeScalars.index(before: hi)
+        return text.utf8.distance(from: text.utf8.startIndex, to: scalarIdx)
+    }
+
     private func prevWordBoundary(from offset: Int) -> Int {
-        var idx = stringIndex(forUTF8Offset: offset)
+        if isSecure && !isRevealed { return 0 }
+        let clamped = snapToGraphemeBoundary(offset)
+        if let pillStart = pillBefore(clamped) {
+            return pillStart
+        }
+        var idx = stringIndex(forUTF8Offset: clamped)
         while idx > text.startIndex && !isWordChar(text[text.index(before: idx)]) {
             idx = text.index(before: idx)
+            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+            // Upstream r378: after stepping back over trailing punctuation (e.g. "hi @noah!"),
+            // stop at the pill's trailing edge before taking the pill whole on the next step.
+            if pillBefore(pos) != nil {
+                return pos
+            }
         }
         while idx > text.startIndex && isWordChar(text[text.index(before: idx)]) {
-            idx = text.index(before: idx)
+            let prev = text.index(before: idx)
+            let prevPos = text.utf8.distance(from: text.utf8.startIndex, to: prev.samePosition(in: text.utf8)!)
+            if pillAround(prevPos) != nil || pillBefore(prevPos) != nil {
+                let curPos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+                return pillAround(curPos)?.1 ?? curPos
+            }
+            idx = prev
         }
         return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
     }
 
     private func nextWordBoundary(from offset: Int) -> Int {
-        var idx = stringIndex(forUTF8Offset: offset)
+        if isSecure && !isRevealed { return text.utf8.count }
+        let clamped = snapToGraphemeBoundary(offset)
+        if let pillEnd = pillAfter(clamped) {
+            return pillEnd
+        }
+        var idx = stringIndex(forUTF8Offset: clamped)
         while idx < text.endIndex && !isWordChar(text[idx]) {
             idx = text.index(after: idx)
+            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+            if let pillEnd = pillAfter(pos) {
+                return pillEnd
+            }
         }
         while idx < text.endIndex && isWordChar(text[idx]) {
+            let pos = text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
+            if pillAfter(pos) != nil {
+                return pos
+            }
             idx = text.index(after: idx)
         }
         return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
@@ -783,7 +1688,7 @@ public struct TextEdit: Sendable, Equatable {
         return text.utf8.distance(from: text.utf8.startIndex, to: idx.samePosition(in: text.utf8)!)
     }
 
-    private mutating func adjustMarks(replacedRange: Range<Int>, newLength: Int) {
+    internal mutating func adjustMarks(replacedRange: Range<Int>, newLength: Int) {
         guard !marks.isEmpty else { return }
         let delta = newLength - replacedRange.count
         var updated: [TextMark] = []
@@ -807,12 +1712,40 @@ public struct TextEdit: Sendable, Equatable {
         marks = updated
     }
 
-    private mutating func pushUndo() {
-        undoStack.append(Snapshot(text: text, cursor: cursor, anchor: anchor, marks: marks))
-        if undoStack.count > 128 {
-            undoStack.removeFirst()
+    internal mutating func setSelectionRaw(anchor newAnchor: Int, cursor newCursor: Int) {
+        self.anchor = newAnchor
+        self.cursor = newCursor
+    }
+
+    internal func lineRangeUTF8(of lineIndex: Int) -> Range<Int> {
+        let start = lineStart(for: 0) // keep helper structure clear
+        _ = start
+        var cur = 0
+        var lineLo = 0
+        for (i, b) in text.utf8.enumerated() {
+            if b == 0x0A {
+                if cur == lineIndex { return lineLo..<i }
+                lineLo = i + 1
+                cur += 1
+            }
         }
-        redoStack.removeAll()
+        if cur == lineIndex { return lineLo..<text.utf8.count }
+        return text.utf8.count..<text.utf8.count
+    }
+
+    internal func lineIndexOfUTF8(_ byteOffset: Int) -> Int {
+        let clamped = min(max(0, byteOffset), text.utf8.count)
+        var count = 0
+        var i = 0
+        for b in text.utf8 {
+            if i >= clamped { break }
+            if b == 0x0A { count += 1 }
+            i += 1
+        }
+        return count
+    }
+    internal mutating func setTextStorageRaw(_ newText: String) {
+        self.text = newText
     }
 }
 
@@ -844,7 +1777,7 @@ extension TextEdit {
     public mutating func replaceUTF8Range(_ range: Range<Int>, with replacement: String) {
         let lo = max(0, min(text.utf8.count, range.lowerBound))
         let hi = max(lo, min(text.utf8.count, range.upperBound))
-        pushUndo()
+        let before = captureUndoBaseline()
         let startIdx = stringIndex(forUTF8Offset: lo)
         let endIdx = stringIndex(forUTF8Offset: hi)
         text.replaceSubrange(startIdx..<endIdx, with: replacement)
@@ -852,5 +1785,6 @@ extension TextEdit {
         cursor = newCursor
         anchor = newCursor
         adjustMarks(replacedRange: lo..<hi, newLength: replacement.utf8.count)
+        recordUndoChange(before: before, kind: .other)
     }
 }

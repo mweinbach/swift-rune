@@ -101,47 +101,9 @@ public struct DecodedImage: Sendable, Equatable {
         return frames.last
     }
 
-    /// Generates a full linear-light box-filtered mipmap chain from a base RGBA8 image.
+    /// Generates a full linear-light area-resampled mipmap chain from an RGBA8 image.
     public static func generateMipChain(width: UInt32, height: UInt32, rgba: Data) -> [ImageMipLevel] {
-        guard width > 0, height > 0, rgba.count == Int(width) * Int(height) * 4 else { return [] }
-        var levels: [ImageMipLevel] = [ImageMipLevel(width: width, height: height, rgba: rgba)]
-        var curW = Int(width)
-        var curH = Int(height)
-        var curData = rgba
-
-        while curW > 1 || curH > 1 {
-            let nextW = max(1, curW / 2)
-            let nextH = max(1, curH / 2)
-            var nextData = Data(count: nextW * nextH * 4)
-            curData.withUnsafeBytes { srcRaw in
-                nextData.withUnsafeMutableBytes { dstRaw in
-                    let src = srcRaw.bindMemory(to: UInt8.self)
-                    let dst = dstRaw.bindMemory(to: UInt8.self)
-                    for y in 0..<nextH {
-                        let sy0 = min(y * 2, curH - 1)
-                        let sy1 = min(y * 2 + 1, curH - 1)
-                        for x in 0..<nextW {
-                            let sx0 = min(x * 2, curW - 1)
-                            let sx1 = min(x * 2 + 1, curW - 1)
-                            let i00 = (sy0 * curW + sx0) * 4
-                            let i10 = (sy0 * curW + sx1) * 4
-                            let i01 = (sy1 * curW + sx0) * 4
-                            let i11 = (sy1 * curW + sx1) * 4
-                            let o = (y * nextW + x) * 4
-                            for c in 0..<4 {
-                                let sum = Int(src[i00 + c]) + Int(src[i10 + c]) + Int(src[i01 + c]) + Int(src[i11 + c])
-                                dst[o + c] = UInt8((sum + 2) / 4)
-                            }
-                        }
-                    }
-                }
-            }
-            levels.append(ImageMipLevel(width: UInt32(nextW), height: UInt32(nextH), rgba: nextData))
-            curW = nextW
-            curH = nextH
-            curData = nextData
-        }
-        return levels
+        LinearMipGenerator.generateChain(width: width, height: height, straightRGBA: rgba)
     }
 
     /// Decodes encoded image bytes (PNG, JPEG, WebP, HEIC, AVIF, GIF, APNG) via `CGImageSource`.
@@ -190,8 +152,17 @@ public struct DecodedImage: Sendable, Equatable {
             let w = img.width
             let h = img.height
             guard w > 0, h > 0 else { throw ImageError("invalid zero-sized frame") }
+            guard w <= LinearMipGenerator.maxDecodeDimension,
+                  h <= LinearMipGenerator.maxDecodeDimension else {
+                throw ImageError("image dimensions \(w)x\(h) exceed \(LinearMipGenerator.maxDecodeDimension)px cap")
+            }
+            let (pixelCount, overflow1) = w.multipliedReportingOverflow(by: h)
+            let (byteCount, overflow2) = pixelCount.multipliedReportingOverflow(by: 4)
+            guard !overflow1, !overflow2, byteCount <= LinearMipGenerator.maxDecodedBytes else {
+                throw ImageError("decoded image buffer exceeds 256 MiB cap")
+            }
 
-            var rgba = Data(count: w * h * 4)
+            var rgba = Data(count: byteCount)
             let cs = CGColorSpaceCreateDeviceRGB()
             let bi = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
             let drawn = rgba.withUnsafeMutableBytes { ptr -> Bool in
@@ -228,6 +199,15 @@ public struct DecodedImage: Sendable, Equatable {
         )
         #else
         if let decoded = try? PortablePNG.decode(data) {
+            guard decoded.width > 0, decoded.height > 0,
+                  decoded.width <= LinearMipGenerator.maxDecodeDimension,
+                  decoded.height <= LinearMipGenerator.maxDecodeDimension else {
+                throw ImageError("image dimensions \(decoded.width)x\(decoded.height) exceed limits")
+            }
+            let byteCount = decoded.width * decoded.height * 4
+            guard byteCount <= LinearMipGenerator.maxDecodedBytes else {
+                throw ImageError("decoded image buffer exceeds 256 MiB cap")
+            }
             let w = UInt32(decoded.width)
             let h = UInt32(decoded.height)
             let rgbaData = Data(decoded.rgba)
