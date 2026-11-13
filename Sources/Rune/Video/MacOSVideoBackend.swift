@@ -6,14 +6,15 @@ import CoreVideo
 #endif
 
 /// Native video/audio player driving a `NativeSurface` (`rune::Player`).
-public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
+public final class Player: @unchecked Sendable, SurfaceVideoAttachment, CustomStringConvertible, CustomDebugStringConvertible {
     public static let parkedPlayerLimit: Int = 4
     public static let posterMaxDimension: CGFloat = 1920.0
     public static let audioTickSeconds: Double = 0.05
 
-    private final class Inner: @unchecked Sendable {
+    private final class Inner: @unchecked Sendable, SurfaceVideoAttachment, HeadlessVideoDriver {
         let lock = NSLock()
         let key: UInt64
+        weak var surface: NativeSurface?
         var request: MediaRequest
         var meta: VideoMeta
         var orient: Orient = .up
@@ -29,6 +30,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         var turnState: VideoTurnState = VideoTurnState()
         var lastTurnSeekGen: UInt64 = 0
         var hasLoadedMeta: Bool = false
+        var didAttemptHeadlessAudioProbe: Bool = false
         var lastNotifiedState: PlayerState? = .loading
         var placeholderPushed: Bool = false
 
@@ -44,6 +46,8 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         var isParked: Bool = false
         var lastParkedUsedAt: ContinuousClock.Instant = .now
         #endif
+
+        var videoKey: UInt64 { key }
 
         init(key: UInt64, request: MediaRequest) {
             self.key = key
@@ -62,6 +66,55 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
                 self.seekGen = seek.generation
             }
         }
+
+        deinit {
+            VideoHeadless.unregister(self)
+            #if os(macOS)
+            lock.lock()
+            let timer = audioTimer
+            audioTimer = nil
+            statusObs = nil
+            let obs = endObserver
+            endObserver = nil
+            let avp = avPlayer
+            avPlayer = nil
+            lock.unlock()
+            timer?.cancel()
+            if let obs { NotificationCenter.default.removeObserver(obs) }
+            avp?.pause()
+            #endif
+        }
+
+        func snapshot() -> VideoSnapshot {
+            lock.lock()
+            defer { lock.unlock() }
+            return VideoSnapshot(
+                kind: meta.kind == .audio ? .audio : .video,
+                state: state,
+                time: currentTime,
+                duration: meta.duration,
+                size: meta.size,
+                rate: request.rate,
+                looping: request.looping,
+                muted: request.muted
+            )
+        }
+
+        func pull(clock: Double, wake: (@Sendable () -> Void)?) -> VideoPullResult {
+            Player.pullInner(self, surface: surface, clock: clock, wake: wake)
+        }
+
+        func advanceHeadless(to now: Double) {
+            Player.advanceHeadlessInner(self, surface: surface, to: now)
+        }
+
+        func resetHeadlessClock() {
+            lock.lock()
+            if lastHeadlessClock != nil {
+                lastHeadlessClock = 0.0
+            }
+            lock.unlock()
+        }
     }
 
     private let inner: Inner
@@ -69,9 +122,29 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
 
     public var videoKey: UInt64 { inner.key }
 
+    public var description: String {
+        inner.lock.lock()
+        let kind = inner.meta.kind
+        let src = inner.request.source
+        let st = inner.state
+        let t = inner.currentTime
+        let headerNames = inner.request.headers.map(\.name)
+        inner.lock.unlock()
+        return "Player(kind: \(kind), source: \(src), state: \(st), time: \(t), headers: \(headerNames))"
+    }
+
+    public var debugDescription: String {
+        description
+    }
+
     // Global LRU registry for parked players so memory stays bounded (`PARKED_PLAYERS = 4`).
     private static let parkedLock = NSLock()
     private nonisolated(unsafe) static var parkedPlayers: [ObjectIdentifier: WeakPlayer] = [:]
+    private static let heldScratchThreadKey = "rune.video.parkedHeldScratch"
+    private static let keptHookThreadKey = "rune.video.parkedKeptHook"
+    private final class HeldScratch {
+        var players: [Player] = []
+    }
     private final class WeakPlayer {
         weak var player: Player?
         var touchedAt: ContinuousClock.Instant
@@ -85,8 +158,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         let key = UInt64.random(in: 1...UInt64.max)
         self.inner = Inner(key: key, request: request)
         self.surface = NativeSurface(id: key)
-        self.surface.withVideo(self)
-        VideoHeadless.register(self)
+        self.inner.surface = self.surface
+        self.surface.withVideo(self.inner)
+        VideoHeadless.register(self.inner)
         probeAndInitialize()
     }
 
@@ -182,24 +256,6 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     public static func request(_ urlString: String) -> MediaRequest {
         let url = URL(string: urlString) ?? URL(fileURLWithPath: urlString)
         return MediaRequest(source: .url(url), kind: .video)
-    }
-
-    deinit {
-        VideoHeadless.unregister(self)
-        #if os(macOS)
-        inner.lock.lock()
-        let timer = inner.audioTimer
-        inner.audioTimer = nil
-        inner.statusObs = nil
-        let obs = inner.endObserver
-        inner.endObserver = nil
-        let avp = inner.avPlayer
-        inner.avPlayer = nil
-        inner.lock.unlock()
-        timer?.cancel()
-        if let obs { NotificationCenter.default.removeObserver(obs) }
-        avp?.pause()
-        #endif
     }
 
     // MARK: - Playback Controls
@@ -314,8 +370,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         let effects = inner.machine.apply(.setLooping(looping), at: currentClockLocked())
         if case .ended = inner.state, looping {
             inner.state = .playing
+            inner.request.playing = true
             inner.currentTime = 0.0
             inner.lastDecodedTime = nil
+            if !MediaPlaybackGate.isEnabled {
+                inner.lastHeadlessClock = VideoHeadless.virtualClock
+            }
             restartNeeded = true
         }
         if effects.contains(where: { if case .restart = $0 { return true }; return false }) {
@@ -352,11 +412,20 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
 
     /// Registers a state-change waker (`Player::set_waker`). Fires immediately once if already loaded or failed.
     public func setWaker(_ callback: (@Sendable () -> Void)?) {
+        if callback != nil {
+            inner.lock.lock()
+            inner.lastNotifiedState = .loading
+            inner.lock.unlock()
+        }
         inner.waker.set(callback)
         settleStateWaker()
     }
 
     internal func settleStateWaker() {
+        Self.settleStateWakerInner(inner)
+    }
+
+    private static func settleStateWakerInner(_ inner: Inner) {
         inner.lock.lock()
         let cur = inner.state
         let changed = (cur != inner.lastNotifiedState)
@@ -426,6 +495,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
 
     /// Whether the loaded clip has an audio track (`Player::has_sound`), or `nil` while loading.
     public var hasSound: Bool? {
+        openHeadlessAudioIfNeeded()
         inner.lock.lock()
         defer { inner.lock.unlock() }
         return inner.hasLoadedMeta ? inner.meta.hasSound : nil
@@ -434,18 +504,21 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     // MARK: - Inspection
 
     public var state: PlayerState {
+        openHeadlessAudioIfNeeded()
         inner.lock.lock()
         defer { inner.lock.unlock() }
         return inner.state
     }
 
     public var time: Double {
+        openHeadlessAudioIfNeeded()
         inner.lock.lock()
         defer { inner.lock.unlock() }
         return inner.currentTime
     }
 
     public var duration: Double? {
+        openHeadlessAudioIfNeeded()
         inner.lock.lock()
         defer { inner.lock.unlock() }
         return inner.meta.duration
@@ -499,33 +572,39 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     }
 
     public func snapshot() -> VideoSnapshot {
-        inner.lock.lock()
-        defer { inner.lock.unlock() }
-        return VideoSnapshot(
-            kind: inner.meta.kind == .audio ? .audio : .video,
-            state: inner.state,
-            time: inner.currentTime,
-            duration: inner.meta.duration,
-            size: inner.meta.size,
-            rate: inner.request.rate,
-            looping: inner.request.looping,
-            muted: inner.request.muted
-        )
+        openHeadlessAudioIfNeeded()
+        return inner.snapshot()
     }
 
     // MARK: - `SurfaceVideoAttachment` & Pull
 
     public func pull(clock: Double, wake: (@Sendable () -> Void)?) -> VideoPullResult {
+        if MediaPlaybackGate.isEnabled {
+            if let wake { inner.waker.set(wake) }
+            driveLiveOnPull()
+            return Self.finalizePull(inner, surface: surface)
+        }
+        return Self.pullInner(inner, surface: surface, clock: clock, wake: wake)
+    }
+
+    private static func pullInner(
+        _ inner: Inner,
+        surface: NativeSurface?,
+        clock: Double,
+        wake: (@Sendable () -> Void)?
+    ) -> VideoPullResult {
         if let wake {
             inner.waker.set(wake)
         }
 
-        if MediaPlaybackGate.isEnabled {
-            driveLiveOnPull()
-        } else {
-            advanceHeadless(to: clock)
+        if !MediaPlaybackGate.isEnabled {
+            advanceHeadlessInner(inner, surface: surface, to: clock)
         }
 
+        return finalizePull(inner, surface: surface)
+    }
+
+    private static func finalizePull(_ inner: Inner, surface: NativeSurface?) -> VideoPullResult {
         var needPlaceholder = false
         inner.lock.lock()
         let active: Bool
@@ -534,17 +613,17 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
             active = true
         case .failed:
             active = false
-            if !inner.placeholderPushed && surface.currentFrame() == nil {
+            if !inner.placeholderPushed && (surface?.currentFrame() == nil) {
                 inner.placeholderPushed = true
                 needPlaceholder = true
             }
         case .ready, .ended:
             active = inner.machine.settle.isWaiting
         }
-        let gen = inner.generation &+ surface.generation
+        let gen = inner.generation &+ (surface?.generation ?? 0)
         inner.lock.unlock()
 
-        if needPlaceholder {
+        if needPlaceholder, let surface {
             pushVideoPlaceholder(onto: surface)
         }
         return VideoPullResult(active: active, generation: gen, due: nil)
@@ -620,7 +699,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         }
 
         if source.isFile && url.isFileURL && !FileManager.default.fileExists(atPath: url.path) {
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.02) { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.02) { [weak self] in
                 guard let self else { return }
                 // Avoid overwriting if already opened/failed via test hooks
                 self.inner.lock.lock()
@@ -690,6 +769,9 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
                 let vTracks = try await asset.loadTracks(withMediaType: .video)
                 let aTracks = try await asset.loadTracks(withMediaType: .audio)
                 box.hasAudio = !aTracks.isEmpty
+                if requestedKind == .audio && aTracks.isEmpty {
+                    throw NativeSurfaceError.importFailed("media has no playable audio track")
+                }
                 if let vt = vTracks.first {
                     box.videoTrack = vt
                     box.naturalSize = try await vt.load(.naturalSize)
@@ -766,7 +848,95 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     }
     #endif
 
+    private func openHeadlessAudioIfNeeded() {
+        #if os(macOS)
+        guard !MediaPlaybackGate.isEnabled else { return }
+        inner.lock.lock()
+        let shouldProbe = (inner.meta.kind == .audio)
+            && !inner.hasLoadedMeta
+            && inner.machine.failed == nil
+            && !inner.didAttemptHeadlessAudioProbe
+            && !inner.request.source.isFile
+        let asset = inner.asset
+        if shouldProbe {
+            inner.didAttemptHeadlessAudioProbe = true
+        }
+        inner.lock.unlock()
+        guard shouldProbe, let asset else { return }
+        do {
+            try loadAssetMetadataSynchronously(asset, requestedKind: .audio)
+        } catch {
+            markFailed("\(error)")
+        }
+        #endif
+    }
+
     // MARK: - Test & State Helpers
+
+    internal var sharedTokenForTest: AnyObject { inner }
+
+    internal func setEndedForTest(at timeSeconds: Double) {
+        inner.lock.lock()
+        inner.currentTime = timeSeconds
+        inner.state = .ended
+        inner.request.playing = false
+        inner.machine.time = timeSeconds
+        inner.machine.ended = true
+        inner.machine.playing = false
+        inner.generation &+= 1
+        inner.lock.unlock()
+        settleStateWaker()
+    }
+
+    internal func clearSurfaceForPreloadTest() {
+        inner.lock.lock()
+        inner.lastDecodedTime = nil
+        inner.lock.unlock()
+        surface.clear()
+    }
+
+    internal func preloadPosterDirectForTest() {
+        #if os(macOS)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            self.inner.lock.lock()
+            let t = self.inner.currentTime
+            let needDecode = self.inner.meta.kind == .video && self.surface.currentFrame() == nil
+            self.inner.lock.unlock()
+            if needDecode {
+                self.decodeHeadlessFrame(at: t)
+            }
+        }
+        #endif
+    }
+
+    internal static func parkedLockFreeForTest() -> Bool {
+        if parkedLock.try() {
+            parkedLock.unlock()
+            return true
+        }
+        return false
+    }
+
+    internal static func onKeptForTest(_ hook: (@Sendable () -> Void)?) {
+        if let hook {
+            Thread.current.threadDictionary[keptHookThreadKey] = hook
+        } else {
+            Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+        }
+    }
+
+    internal static func heldCapacityForTest() -> Int {
+        (Thread.current.threadDictionary[heldScratchThreadKey] as? HeldScratch)?.players.capacity ?? 0
+    }
+
+    internal static func resetParkedForTest() {
+        parkedLock.lock()
+        parkedPlayers.removeAll()
+        parkedLock.unlock()
+        Thread.current.threadDictionary.removeObject(forKey: heldScratchThreadKey)
+        Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+    }
 
     internal func openMetadataForTest(_ meta: VideoMeta) {
         inner.lock.lock()
@@ -819,8 +989,12 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     }
 
     internal func advanceHeadless(to now: Double) {
+        Self.advanceHeadlessInner(inner, surface: surface, to: now)
+    }
+
+    private static func advanceHeadlessInner(_ inner: Inner, surface: NativeSurface?, to now: Double) {
         var decodeAt: Double? = nil
-        var shouldWake = false
+        var shouldSettleWaker = false
 
         inner.lock.lock()
         if case .failed = inner.state {
@@ -830,8 +1004,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
         if inner.request.playing {
             if case .ready = inner.state {
                 inner.state = .playing
+                shouldSettleWaker = true
             }
-            let prevClock = inner.lastHeadlessClock ?? now
+            let prevClock: Double
+            if let prev = inner.lastHeadlessClock {
+                prevClock = prev > now ? 0.0 : prev
+            } else {
+                prevClock = now
+            }
             inner.lastHeadlessClock = now
             let dt = max(0.0, now - prevClock)
             var nextTime = inner.currentTime + dt * Double(inner.request.rate)
@@ -844,13 +1024,14 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
                         inner.currentTime = dur
                         inner.state = .ended
                         inner.request.playing = false
-                        shouldWake = true
+                        inner.machine.ended = true
+                        inner.machine.playing = false
+                        shouldSettleWaker = true
                     }
                 }
             }
             if case .playing = inner.state {
                 inner.currentTime = nextTime
-                shouldWake = true
             }
             if inner.meta.kind == .video {
                 let t = inner.currentTime
@@ -860,21 +1041,25 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
             }
         } else {
             inner.lastHeadlessClock = nil
-            if inner.meta.kind == .video && surface.currentFrame() == nil && inner.lastDecodedTime == nil {
+            if inner.meta.kind == .video && (surface?.currentFrame() == nil) && inner.lastDecodedTime == nil {
                 decodeAt = inner.currentTime
             }
         }
         inner.lock.unlock()
 
-        if let t = decodeAt {
-            decodeHeadlessFrame(at: t)
+        if let t = decodeAt, let surface {
+            decodeHeadlessFrameInner(inner, surface: surface, at: t)
         }
-        if shouldWake {
-            inner.waker.wake()
+        if shouldSettleWaker {
+            settleStateWakerInner(inner)
         }
     }
 
     private func decodeHeadlessFrame(at timeSeconds: Double) {
+        Self.decodeHeadlessFrameInner(inner, surface: surface, at: timeSeconds)
+    }
+
+    private static func decodeHeadlessFrameInner(_ inner: Inner, surface: NativeSurface, at timeSeconds: Double) {
         #if os(macOS)
         inner.lock.lock()
         guard let asset = inner.asset, inner.meta.kind == .video else {
@@ -900,7 +1085,7 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     }
 
     #if os(macOS)
-    private func readCVPixelBuffer(from asset: AVURLAsset, at timeSeconds: Double) -> CVPixelBuffer? {
+    private static func readCVPixelBuffer(from asset: AVURLAsset, at timeSeconds: Double) -> CVPixelBuffer? {
         guard let reader = try? AVAssetReader(asset: asset) else { return nil }
         // Load tracks safely via blocking helper or cached track
         final class TrackBox: @unchecked Sendable { var track: AVAssetTrack? }
@@ -943,6 +1128,10 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
     }
 
     private func generateCGImageFrame(from asset: AVURLAsset, at timeSeconds: Double, applyTransform: Bool = false) -> ByteFrame? {
+        Self.generateCGImageFrame(from: asset, at: timeSeconds, applyTransform: applyTransform)
+    }
+
+    private static func generateCGImageFrame(from asset: AVURLAsset, at timeSeconds: Double, applyTransform: Bool = false) -> ByteFrame? {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = applyTransform
         gen.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
@@ -1271,21 +1460,69 @@ public final class Player: @unchecked Sendable, SurfaceVideoAttachment {
 
     @discardableResult
     private static func parkPlayerReturningEvicted(_ player: Player) -> [Player] {
+        let heldScratch: HeldScratch
+        if let existingScratch = Thread.current.threadDictionary[heldScratchThreadKey] as? HeldScratch {
+            heldScratch = existingScratch
+        } else {
+            let fresh = HeldScratch()
+            Thread.current.threadDictionary[heldScratchThreadKey] = fresh
+            heldScratch = fresh
+        }
+        heldScratch.players.removeAll(keepingCapacity: true)
+
+        let keptHook = Thread.current.threadDictionary[keptHookThreadKey] as? (@Sendable () -> Void)
+        if keptHook != nil {
+            Thread.current.threadDictionary.removeObject(forKey: keptHookThreadKey)
+        }
+
         var evicted: [Player] = []
         parkedLock.lock()
-        parkedPlayers = parkedPlayers.filter { $0.value.player != nil }
-        // Keep playing clips out of eviction eligibility and respect LRU limit for paused clips
-        parkedPlayers[ObjectIdentifier(player)] = WeakPlayer(player)
-        let pausedEntries = parkedPlayers.filter { $0.value.player?.isPlaying != true }
-        if pausedEntries.count > parkedPlayerLimit {
-            let sorted = pausedEntries.sorted { $0.value.touchedAt < $1.value.touchedAt }
-            let overflow = sorted.count - parkedPlayerLimit
-            for (k, box) in sorted.prefix(overflow) {
-                if let p = box.player { evicted.append(p) }
+        var deadKeys: [ObjectIdentifier] = []
+        var livePaused: [(ObjectIdentifier, Player, ContinuousClock.Instant)] = []
+        for (k, box) in parkedPlayers {
+            if let p = box.player {
+                heldScratch.players.append(p)
+                if !p.isPlaying {
+                    livePaused.append((k, p, box.touchedAt))
+                }
+            } else {
+                deadKeys.append(k)
+            }
+        }
+        for k in deadKeys {
+            parkedPlayers.removeValue(forKey: k)
+        }
+        keptHook?()
+
+        let playerId = ObjectIdentifier(player)
+        let nowInstant = ContinuousClock.Instant.now
+        if let existing = parkedPlayers[playerId] {
+            existing.touchedAt = nowInstant
+            if let idx = livePaused.firstIndex(where: { $0.0 == playerId }) {
+                livePaused[idx].2 = nowInstant
+            }
+        } else {
+            parkedPlayers[playerId] = WeakPlayer(player)
+            heldScratch.players.append(player)
+            if !player.isPlaying {
+                livePaused.append((playerId, player, nowInstant))
+            }
+        }
+
+        if livePaused.count > parkedPlayerLimit {
+            livePaused.sort { $0.2 < $1.2 }
+            let overflow = livePaused.count - parkedPlayerLimit
+            for i in 0..<overflow {
+                let (k, p, _) = livePaused[i]
+                evicted.append(p)
                 parkedPlayers.removeValue(forKey: k)
             }
         }
         parkedLock.unlock()
+
+        // Drop upgraded strong references OUTSIDE `parkedLock` while keeping capacity warm.
+        livePaused.removeAll(keepingCapacity: false)
+        heldScratch.players.removeAll(keepingCapacity: true)
 
         for p in evicted {
             p.dropAVPlayer()

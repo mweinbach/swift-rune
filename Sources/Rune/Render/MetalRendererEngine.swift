@@ -243,6 +243,7 @@ internal final class RenderFrameEngine {
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
+        layersPool.preparePlan(instances: frame.instances, viewport: viewport)
 
         let glyphTex = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
         let imageTex = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: frame.imageRevision)
@@ -574,6 +575,9 @@ internal final class RenderFrameEngine {
                     radiiOverride: finished.cacheNodeId != nil ? .zero : scopeInst.radii,
                     clearIndex: i
                 )
+                if finished.cacheNodeId == nil, compositedSource !== finished.texture {
+                    layersPool.recycleTarget(compositedSource)
+                }
                 i += 1
                 continue
             }
@@ -599,9 +603,11 @@ internal final class RenderFrameEngine {
 
                 let mark = i < frame.marks.count ? frame.marks[i] : effectMark(inst)
                 let wantsBackdrop = inst.params.x >= 0.5 && (hook != nil || backdropHook != nil)
+                let canCopyBackdrop = cur.isLayer
+                    || (cur.texture.storageMode != .memoryless && cur.texture.usage.contains(.shaderRead))
 
                 var backdropSnap: MTLTexture?
-                if wantsBackdrop {
+                if wantsBackdrop && canCopyBackdrop {
                     let vw = max(1, Int(globals.viewport.x))
                     let vh = max(1, Int(globals.viewport.y))
                     if let snap = layersPool.acquireTarget(device: device, width: vw, height: vh, format: cur.format, label: "rune.effect.backdrop") {
@@ -936,6 +942,10 @@ extension MetalRenderer {
 
     public var gpuTracker: GpuDeviceTracker {
         renderEngine.gpuLoss
+    }
+
+    public var layersPool: LayersPool {
+        renderEngine.layersPool
     }
 }
 #endif

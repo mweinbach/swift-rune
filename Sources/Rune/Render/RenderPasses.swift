@@ -371,7 +371,7 @@ public final class GPUSpringBindings {
     public func updateNode(index: Int, node: GPUSpringNode) {
         guard index >= 0 && index < nodes.count else { return }
         nodes[index] = node
-        settleAt = max(settleAt, node.settleAt())
+        settleAt = nodes.reduce(0.0) { max($0, $1.settleAt()) }
         if let buf = nodesBuffer {
             let offset = index * MemoryLayout<GPUSpringNode>.stride
             if offset + MemoryLayout<GPUSpringNode>.stride <= buf.length {
@@ -461,11 +461,20 @@ public final class LayersPool {
 
     public private(set) var cacheBudgetBytes: Int = Int(DEFAULT_LAYER_CACHE_BUDGET)
     public private(set) var frameNumber: UInt64 = 0
+    public private(set) var peakBytes: UInt64 = 0
+    public var planner = LayerPlanner()
+
+    public var spareCount: Int { spare.count }
+    public var retainedCount: Int { retained.count }
+    public var inUseCount: Int { inUse.count }
 
     private var retained: [UInt64: RetainedEntry] = [:]
     private var spare: [LayerTextureSlot] = []
     private var inUse: [LayerTextureSlot] = []
+    private var extraInUseBytes: Int = 0
     private var trackers: [WeakTracker] = []
+    private var planSlotHeld: [LayerHeld?] = []
+    private var lastLayerCount: Int = 0
 
     private var retainedHits: UInt64 = 0
     private var retainedMisses: UInt64 = 0
@@ -494,14 +503,132 @@ public final class LayersPool {
         evictRetainedToBudget()
     }
 
+    private func updatePeakBytes() {
+        let inUseTotal = inUse.reduce(0) { $0 + $1.byteSize }
+        let retainedTotal = retained.values.reduce(0) { $0 + $1.slot.byteSize }
+        let total = UInt64(max(0, inUseTotal + retainedTotal + extraInUseBytes))
+        if total > peakBytes {
+            peakBytes = total
+        }
+    }
+
     public func beginFrame() {
         frameNumber &+= 1
         lastFrameExtraPasses = 0
         releaseInUse()
+        let retainedTotal = retained.values.reduce(0) { $0 + $1.slot.byteSize }
+        peakBytes = UInt64(max(0, retainedTotal))
     }
 
     public func endFrame() {
         releaseInUse()
+    }
+
+    public func preparePlan(instances: [RenderInstance], viewport: SIMD2<Float>) {
+        // Parse KIND_LAYER..KIND_LAYER_END tree from instance stream to drive LayerPlanner state.
+        var scopes: [LayerPlanScope] = []
+        var stack: [Int] = []
+        let win = SIMD4<Float>(0, 0, viewport.x, viewport.y)
+        for (idx, inst) in instances.enumerated() {
+            let kind = Float(Int(inst.params.y.rounded()))
+            if kind == KIND_LAYER {
+                let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
+                let pad: Float = sigma > 0 ? ceilf(min(sigma * 3.0, 96.0)) : 0
+                let ox = floorf(inst.rect.x - pad)
+                let oy = floorf(inst.rect.y - pad)
+                let x1 = ceilf(inst.rect.x + inst.rect.z + pad)
+                let y1 = ceilf(inst.rect.y + inst.rect.w + pad)
+                let isCached = inst.params.w >= 0.5
+                let cacheKey: (UInt64, UInt64)? = isCached
+                    ? (unpackFloat4ToU64(inst.radii), unpackFloat4ToU64(inst.uv))
+                    : nil
+                let additive = inst.params.x >= 0.5
+                let scope = LayerPlanScope(
+                    begin: UInt32(idx),
+                    end: UInt32(idx + 1),
+                    parent: stack.last,
+                    edges: SIMD4<Float>(ox, oy, x1, y1),
+                    vis: win,
+                    clip: inst.clip,
+                    fade: .zero,
+                    opacity: inst.fill.w,
+                    blend: additive ? .plusLighter : .sourceOver,
+                    blur: sigma,
+                    cache: cacheKey,
+                    planned: inst.fill.w <= 0 ? .hidden : .inline
+                )
+                let sIdx = scopes.count
+                scopes.append(scope)
+                stack.append(sIdx)
+            } else if kind == KIND_LAYER_END, let openIdx = stack.popLast() {
+                scopes[openIdx].end = UInt32(idx)
+            }
+        }
+
+        if scopes.isEmpty {
+            if lastLayerCount > 0 {
+                planner.settle(len: 0, retained: retained.count, spare: spare.count)
+            }
+            planSlotHeld.removeAll(keepingCapacity: true)
+            lastLayerCount = 0
+            return
+        }
+
+        // Sync slot model & snapshot retained/spare metadata without allocating textures.
+        for sIdx in planSlotHeld.indices {
+            if planSlotHeld[sIdx]?.cache != nil {
+                planSlotHeld[sIdx] = nil
+            }
+        }
+        while planSlotHeld.count > scopes.count {
+            planSlotHeld.removeLast()
+        }
+        while planSlotHeld.count < scopes.count {
+            planSlotHeld.append(nil)
+        }
+
+        let retainedHeld: [LayerHeld] = retained.map { entry in
+            let w = UInt32(entry.value.slot.width)
+            let h = UInt32(entry.value.slot.height)
+            return LayerHeld(
+                size: SIMD2<UInt32>(w, h),
+                bytes: UInt64(entry.value.slot.byteSize),
+                cache: (entry.key, entry.value.signature),
+                lastUsed: entry.value.slot.lastUsedFrame
+            )
+        }
+        let spareHeld: [LayerHeld] = spare.map { slot in
+            LayerHeld(
+                size: SIMD2<UInt32>(UInt32(slot.width), UInt32(slot.height)),
+                bytes: UInt64(slot.byteSize),
+                cache: nil,
+                lastUsed: slot.lastUsedFrame
+            )
+        }
+        let snap = LayerPoolSnapshot(slots: planSlotHeld, retained: retainedHeld, spare: spareHeld)
+        planner.decide(
+            plan: scopes,
+            pools: snap,
+            budget: UInt64(cacheBudgetBytes),
+            isolate: true,
+            maxDim: UInt32(LayerPoolLimits.maxDimension)
+        )
+        for (i, disp) in planner.dispositions.enumerated() {
+            switch disp {
+            case .render(let r, let c):
+                let b = LayerPlannerConstants.bucketOf(r).bucket
+                planSlotHeld[i] = LayerHeld(size: b, cache: c, lastUsed: frameNumber)
+            case .cached(let r, let c):
+                let b = LayerPlannerConstants.bucketOf(r).bucket
+                planSlotHeld[i] = LayerHeld(size: b, cache: c, lastUsed: frameNumber)
+            case .inline, .skip:
+                planSlotHeld[i] = nil
+            }
+        }
+        if scopes.count < lastLayerCount {
+            planner.settle(len: scopes.count, retained: retained.count, spare: spare.count)
+        }
+        lastLayerCount = scopes.count
     }
 
     public func releaseInUse() {
@@ -528,6 +655,7 @@ public final class LayersPool {
             var slot = spare.remove(at: idx)
             slot.lastUsedFrame = frameNumber
             inUse.append(slot)
+            updatePeakBytes()
             return slot.texture
         }
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -543,6 +671,7 @@ public final class LayersPool {
         allocations &+= 1
         let slot = LayerTextureSlot(texture: tex, lastUsedFrame: frameNumber)
         inUse.append(slot)
+        updatePeakBytes()
         return tex
     }
 
@@ -556,7 +685,11 @@ public final class LayersPool {
         let w = min(max(width, 1), LayerPoolLimits.maxDimension)
         let h = min(max(height, 1), LayerPoolLimits.maxDimension)
         if let idx = spare.firstIndex(where: { $0.width == w && $0.height == h && $0.texture.pixelFormat == format }) {
-            return spare.remove(at: idx).texture
+            let tex = spare.remove(at: idx).texture
+            extraInUseBytes += w * h * 8
+            updatePeakBytes()
+            extraInUseBytes -= w * h * 8
+            return tex
         }
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: format,
@@ -569,6 +702,9 @@ public final class LayersPool {
         guard let tex = device.makeTexture(descriptor: desc) else { return nil }
         tex.label = "rune.layer.retained"
         allocations &+= 1
+        extraInUseBytes += w * h * 8
+        updatePeakBytes()
+        extraInUseBytes -= w * h * 8
         return tex
     }
 
@@ -769,8 +905,10 @@ public final class LayerBlurPipeline {
     private let pipelinePrefilterAdditive: MTLRenderPipelineState
     private let pipelineResampleAdditive: MTLRenderPipelineState
     private let linearSampler: MTLSamplerState
+    private let pixelFormat: MTLPixelFormat
 
     public init(device: MTLDevice, pixelFormat: MTLPixelFormat = .rgba16Float) throws {
+        self.pixelFormat = pixelFormat
         let library = try ShaderLibraryCache.load(
             named: "layer_blur",
             source: RenderShaders.layerBlurMSL,
@@ -836,6 +974,8 @@ public final class LayerBlurPipeline {
             uniforms[2 + idx] = SIMD4<Float>(tap.x, tap.y, 0, 0)
         }
 
+        let canWriteSource = source.usage.contains(.renderTarget) && source.pixelFormat == pixelFormat
+        var reducedTex: MTLTexture?
         var hInput: MTLTexture = source
         if isReduced {
             guard let reduced = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.prefilter") else {
@@ -850,10 +990,12 @@ public final class LayerBlurPipeline {
                 target: reduced,
                 uniforms: &uniforms
             )
+            reducedTex = reduced
             hInput = reduced
         }
 
         guard let ping = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.ping") else {
+            if let r = reducedTex { pool.recycleTarget(r) }
             return nil
         }
         uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 0, Float(kernel.taps.count))
@@ -869,8 +1011,17 @@ public final class LayerBlurPipeline {
         for (idx, tap) in kernel.verticalTaps.prefix(LayerBlurConstants.maxTaps).enumerated() {
             uniforms[2 + idx] = SIMD4<Float>(tap.x, tap.y, 0, 0)
         }
-        guard let pong = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.pong") else {
-            return nil
+        let pong: MTLTexture
+        if let reduced = reducedTex {
+            pong = reduced
+        } else if canWriteSource {
+            pong = source
+        } else {
+            guard let allocPong = pool.acquireTarget(device: device, width: rw, height: rh, format: source.pixelFormat, label: "rune.lblur.pong") else {
+                pool.recycleTarget(ping)
+                return nil
+            }
+            pong = allocPong
         }
         uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 1, Float(kernel.verticalTaps.count))
         uniforms[1] = SIMD4<Float>(1, 1, 0, 0)
@@ -881,12 +1032,20 @@ public final class LayerBlurPipeline {
             target: pong,
             uniforms: &uniforms
         )
+        pool.recycleTarget(ping)
 
         if !isReduced {
             return pong
         }
-        guard let finalTex = pool.acquireTarget(device: device, width: w, height: h, format: source.pixelFormat, label: "rune.lblur.final") else {
-            return nil
+        let finalTex: MTLTexture
+        if canWriteSource {
+            finalTex = source
+        } else {
+            guard let allocFinal = pool.acquireTarget(device: device, width: w, height: h, format: source.pixelFormat, label: "rune.lblur.final") else {
+                pool.recycleTarget(pong)
+                return nil
+            }
+            finalTex = allocFinal
         }
         uniforms[0] = SIMD4<Float>(Float(rw), Float(rh), 3, 0)
         uniforms[1] = SIMD4<Float>(1.0 / kernel.reductionScale.x, 1.0 / kernel.reductionScale.y, 0, 0)
@@ -897,6 +1056,7 @@ public final class LayerBlurPipeline {
             target: finalTex,
             uniforms: &uniforms
         )
+        pool.recycleTarget(pong)
         return finalTex
     }
 

@@ -73,6 +73,7 @@ private final class RuntimeMotionTelemetry: @unchecked Sendable {
     var loopTracks: [String: (LoopTrack, LoopSpec)] = [:]
     var seqStarts: [String: (Double, MotionSequence)] = [:]
     var cachedGrid: (Int, MotionGateGrid)? = nil
+    var lastScrollOffsets: [String: Vec2] = [:]
 
     static func of<S>(_ rt: Runtime<S>) -> RuntimeMotionTelemetry {
         let id = ObjectIdentifier(rt)
@@ -125,8 +126,9 @@ public final class MotionGateRun<S>: @unchecked Sendable {
         self.rt = rt
         let tel = RuntimeMotionTelemetry.of(rt)
         tel.virtualTime = 0.0
-        _ = rt.renderFrame(at: 0.0)
+        _ = rt.frame(at: 0.0)
         tel.lastCommitCount = rt.viewCommitCount
+        tel.lastScrollOffsets = rt.scrollOffsets
         self.rec = MotionGateRecording(size: (rt.viewport.x, rt.viewport.y), hz: hz)
         self.dt = 1.0 / hz
     }
@@ -144,22 +146,41 @@ public final class MotionGateRun<S>: @unchecked Sendable {
         let tel = RuntimeMotionTelemetry.of(rt)
         for _ in 0..<steps {
             tel.virtualTime += dt
-            _ = rt.renderFrame(at: tel.virtualTime)
+            _ = rt.frame(at: tel.virtualTime)
         }
         tel.lastCommitCount = rt.viewCommitCount
+        tel.lastScrollOffsets = rt.scrollOffsets
     }
 
     public func step() {
+        step(suppressDirtyCommit: false)
+    }
+
+    private func step(suppressDirtyCommit: Bool) {
         let tel = RuntimeMotionTelemetry.of(rt)
         let commitsBefore = rt.viewCommitCount
         let playedBefore = rt.playgroundPlayedKeys
+        let scrollBefore = rt.scrollOffsets
         tel.virtualTime += dt
+        let originalPoll = rt.poll
+        if let pollFn = originalPoll {
+            rt.poll = { state, now, tx in
+                let changed = pollFn(&state, now, &tx)
+                if changed {
+                    tel.commitWhy |= CommitWhy.poll
+                }
+                return changed
+            }
+        }
         _ = rt.renderFrame(at: tel.virtualTime)
+        if originalPoll != nil {
+            rt.poll = originalPoll
+        }
         if rt.playgroundPlayedKeys > playedBefore {
             rec.input("play.press")
             tel.commitWhy |= CommitWhy.input
         }
-        if rt.viewCommitCount > commitsBefore && tel.commitWhy == 0 {
+        if rt.viewCommitCount > commitsBefore && tel.commitWhy == 0 && !suppressDirtyCommit && rt.scrollOffsets == scrollBefore {
             tel.commitWhy |= CommitWhy.dirty
         }
         tel.lastCommitCount = rt.viewCommitCount
@@ -180,10 +201,15 @@ public final class MotionGateRun<S>: @unchecked Sendable {
 
     public func act(_ what: String, _ f: (Runtime<S>) -> Void) {
         let tel = RuntimeMotionTelemetry.of(rt)
+        let commitsBefore = rt.viewCommitCount
+        let scrollBefore = rt.scrollOffsets
         rec.input(what)
-        tel.commitWhy |= CommitWhy.input
         f(rt)
-        step()
+        let pureScroll = (rt.scrollOffsets != scrollBefore) && (rt.viewCommitCount == commitsBefore)
+        if !pureScroll {
+            tel.commitWhy |= CommitWhy.input
+        }
+        step(suppressDirtyCommit: pureScroll)
     }
 
     public func actUpdate(_ what: String, _ body: (_ state: inout S, _ tx: inout Tx) -> Void) {
@@ -245,10 +271,21 @@ private enum MotionGateSampleHelper {
         let tel = RuntimeMotionTelemetry.of(rt)
         let why = tel.commitWhy
         tel.commitWhy = 0
-        rec.commits(scrolling: false, why: why)
 
-        let els = rt.elements()
-        let now = tel.virtualTime
+        let curScrollOffsets = rt.scrollOffsets
+        var movedScrollPaths = Set<String>()
+        for (path, cur) in curScrollOffsets where tel.lastScrollOffsets[path] != cur {
+            movedScrollPaths.insert(path)
+        }
+        for (path, _) in tel.lastScrollOffsets where curScrollOffsets[path] == nil {
+            movedScrollPaths.insert(path)
+        }
+        let anyScrollChanged = !movedScrollPaths.isEmpty
+        tel.lastScrollOffsets = curScrollOffsets
+        rec.commits(scrolling: anyScrollChanged, why: why)
+
+        var els = rt.elements()
+        let now = rt.currentTime
 
         var elByPath: [String: El<S>] = [:]
         elByPath.reserveCapacity(rt.flatNodes.count + rt.exitingSnapshots.count)
@@ -257,6 +294,30 @@ private enum MotionGateSampleHelper {
         }
         for n in rt.flatNodes {
             elByPath[n.path] = n.el
+        }
+
+        // Accumulate ancestor scroll offsets (in window points, matching each ancestor's scale)
+        // and ancestor scrolling state onto descendants (`runtime/elements.rs`).
+        var ancScrolling = Array(repeating: false, count: els.count)
+        for i in 0..<els.count {
+            var acc = Vec2.zero
+            var scrolling = false
+            var cur = els[i].parentIndex
+            var hops = 0
+            while let p = cur, p >= 0, p < els.count, hops <= els.count {
+                let pPath = els[p].path
+                if let so = curScrollOffsets[pPath] {
+                    let scale = nodeByPath[pPath]?.inheritedScale ?? 1.0
+                    acc = Vec2(acc.x + so.x * scale, acc.y + so.y * scale)
+                }
+                if movedScrollPaths.contains(pPath) {
+                    scrolling = true
+                }
+                cur = els[p].parentIndex
+                hops += 1
+            }
+            ancScrolling[i] = scrolling
+            els[i].scrolled = [acc.x, acc.y]
         }
 
         // Clean stale loop/sequence entries
@@ -323,7 +384,7 @@ private enum MotionGateSampleHelper {
             }
 
             let meta = ElementMotionMeta(
-                scrolling: false,
+                scrolling: ancScrolling[i],
                 inGrowingRow: (el?.runtimeExtras[MotionGateExtraKey.growingRow] as? Bool) ?? false,
                 revealing: (el?.runtimeExtras[MotionGateExtraKey.revealing] as? Bool) ?? false,
                 liveIntent: totalIntent,
@@ -379,10 +440,54 @@ private enum MotionGateSampleHelper {
         if let gridOverride {
             grid = gridOverride
         } else {
-            let rf = rt.renderFrame(at: now)
+            let savedElements = rt.lastElements
+            let savedRects = rt.presentedRectByPath
+            let savedScales = rt.presentedScaleByPath
+            let savedSurfaces = rt.surfaces
+            var exitByPath: [String: Runtime<S>.FlatNode] = [:]
+            for (_, snap) in rt.exitingSnapshots {
+                exitByPath[snap.path] = snap
+            }
+            var presentedNodes: [Presented] = []
+            presentedNodes.reserveCapacity(els.count)
+            for e in els {
+                guard let fn = e.exiting ? (exitByPath[e.path] ?? nodeByPath[e.path]) : nodeByPath[e.path] else {
+                    continue
+                }
+                let rect = MotionRect(
+                    left: e.rect[0] - fn.el.offset.x,
+                    top: e.rect[1] - fn.el.offset.y,
+                    right: (e.rect[0] - fn.el.offset.x) + e.rect[2],
+                    bottom: (e.rect[1] - fn.el.offset.y) + e.rect[3]
+                )
+                let pScale = (e.scale.isFinite && e.scale > 0) ? e.scale : 1.0
+                presentedNodes.append(Presented(
+                    id: fn.nodeId,
+                    parent: nil,
+                    rect: rect,
+                    targetRect: fn.targetRect,
+                    revealClip: nil,
+                    opacity: e.opacity,
+                    scale: Vec2(pScale, pScale),
+                    rotate: 0,
+                    corners: Corners.all(e.radius),
+                    blur: e.blur,
+                    fill: MotionColor(r: e.fill.r, g: e.fill.g, b: e.fill.b, a: e.fill.a),
+                    border: nil,
+                    presence: e.exiting ? 0.0 : 1.0,
+                    isExiting: e.exiting,
+                    isMoving: e.moving
+                ))
+            }
+            let synthFrameOut = FrameOutput(changed: [], exited: [], events: [], animating: rt.isAnimating, nodes: presentedNodes)
+            let rf = rt.buildRenderFrame(frameOut: synthFrameOut, now: rt.currentTime)
+            rt.lastElements = savedElements
+            rt.presentedRectByPath = savedRects
+            rt.presentedScaleByPath = savedScales
+            rt.surfaces = savedSurfaces
             grid = MotionGateGrid.rasterize(rf.instances, size: rec.size, scale: rt.pixelScale)
         }
         rec.setGrid(grid)
-        rec.tips.append(nil)
+        rec.tips.append(rt.helpTooltip().map { [$0.rect.x, $0.rect.y, $0.rect.z, $0.rect.w] })
     }
 }

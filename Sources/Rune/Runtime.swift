@@ -4505,6 +4505,7 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + paintMargin
             )
             let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0 && onScreenForEmit
+            let surfaceVisible = shouldEmit && visibleRect.width > 0 && visibleRect.height > 0
             unseenPresence.recordPaintedNode(
                 id: p.id,
                 inView: isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
@@ -4553,7 +4554,7 @@ public final class Runtime<State> {
                 if let vsnap = surf.videoSnapshot() {
                     newVideoSnaps[snap.path] = vsnap
                 }
-                if !shouldEmit {
+                if !surfaceVisible {
                     newVideoSig = VideoSignature.foldUnpulled(newVideoSig, surface: surf)
                 }
             }
@@ -4659,7 +4660,7 @@ public final class Runtime<State> {
                 }
 
                 let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
-                if let (surf, fit) = el.surfacePayload {
+                if let (surf, fit) = el.surfacePayload, surfaceVisible {
                     if hasFill && el.gradient == nil {
                         primitives.append(attachFade(.roundedRect(
                             rect: devRect,
