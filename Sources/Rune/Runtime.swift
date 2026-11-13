@@ -1867,7 +1867,16 @@ public final class Runtime<State> {
         ) else {
             return nil
         }
-        let result = buildMeasureResult(
+        let hadVirtuals = !activeVirtualPaths.isEmpty
+        let savedVirtuals = hadVirtuals ? virtualLists : [:]
+        let savedScrollOffsets = hadVirtuals ? scrollOffsets : [:]
+        let savedScrollMaxExtents = hadVirtuals ? scrollMaxExtents : [:]
+        let savedScrollViewportSizes = hadVirtuals ? scrollViewportSizes : [:]
+        let savedScrollContentSizes = hadVirtuals ? scrollContentSizes : [:]
+        let savedWasPinned = hadVirtuals ? wasPinnedToBottom : []
+        let savedGrowthRows = hadVirtuals ? growthRows : [:]
+        let savedReleasedEnterDelays = hadVirtuals ? releasedEnterDelays : []
+        var result = buildMeasureResult(
             rootEl: viewPass.rootEl,
             passHelpLook: viewPass.helpLook,
             collector: collector,
@@ -1879,6 +1888,30 @@ public final class Runtime<State> {
             commitCut: commitCut,
             prevMountedIds: prevMountedIds
         )
+        if hadVirtuals && prepareVirtualRemeasureAfterFullPass(
+            result,
+            savedVirtuals: savedVirtuals,
+            savedScrollOffsets: savedScrollOffsets,
+            savedScrollMaxExtents: savedScrollMaxExtents,
+            savedScrollViewportSizes: savedScrollViewportSizes,
+            savedScrollContentSizes: savedScrollContentSizes,
+            savedWasPinned: savedWasPinned,
+            savedGrowthRows: savedGrowthRows
+        ) {
+            releasedEnterDelays = savedReleasedEnterDelays
+            result = buildMeasureResult(
+                rootEl: viewPass.rootEl,
+                passHelpLook: viewPass.helpLook,
+                collector: collector,
+                at: now,
+                cut: cut,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitCut: commitCut,
+                prevMountedIds: prevMountedIds
+            )
+        }
         result.viewRootEl = viewPass.rootEl
         return result
     }

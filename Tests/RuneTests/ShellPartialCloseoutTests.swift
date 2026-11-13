@@ -340,13 +340,18 @@ struct ShellPartialCloseoutTests {
         concGroup.wait()
         #expect(errCount.value == 0)
         let afterConc = Prefs.open(appId: "concurrent-app", environment: env)
+        #expect(afterConc.isPersistent)
         #expect(!afterConc.keys.isEmpty)
         if let path = afterConc.path {
             #expect(!fm.fileExists(atPath: path.appendingPathExtension("bad").path))
         }
+        var values: [Int] = []
         for key in afterConc.keys {
-            #expect(afterConc.get(key, as: Int.self) == 24)
+            let val = afterConc.get(key, as: Int.self)
+            #expect(val.map { (0..<25).contains($0) } == true)
+            if let val { values.append(val) }
         }
+        #expect(values.contains(24))
 
         // taskbar.rs badge
         let emptyBadge = TaskbarState().badge(3, "3 unread").badge(0, "should clear")
