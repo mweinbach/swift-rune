@@ -307,18 +307,11 @@ public final class Runtime<State> {
     /// Whether a layout/view re-evaluation commit is currently pending.
     public var hasPendingCommit: Bool { needsCommit }
 
-    /// Presented hit-test boxes (in logical points) for non-inert interactive elements, used by `OverlayInput.regions`.
+    /// Presented hit-test boxes (in logical points) for non-inert `.hit()` elements, used by `OverlayInput.regions`.
     public func overlayInteractiveRegions() -> [MotionRect] {
         var regions: [MotionRect] = []
         for node in flatNodes {
-            if node.effectiveInert { continue }
-            let h = node.el.handlers
-            let interactive = h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
-                h.onSecondaryClick != nil || h.onPointerDown != nil || h.onDrag != nil ||
-                h.onWheel != nil || h.onHover != nil || h.editLens != nil ||
-                node.el.focusable || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
-                !node.el.layout.scrollAxes.isEmpty
-            guard interactive else { continue }
+            if node.effectiveInert || !node.el.isHit { continue }
             let infoRect = presentedRectByPath[node.path] ?? node.targetRect
             let hitBox = intersectRects(node.clipRect, infoRect)
             if hitBox.width > 0 && hitBox.height > 0 {
@@ -1520,6 +1513,21 @@ public final class Runtime<State> {
                 applyTx(tx, at: now)
             }
             dirtyCommit(at: now)
+        }
+
+        if let moveHit = hitTest(at: pos, predicate: { $0.el.handlers.onPointerMove != nil }),
+           let onMove = moveHit.node.el.handlers.onPointerMove {
+            let press = PointerPress(
+                window: pos,
+                local: Vec2(pos.x - moveHit.rect.x, pos.y - moveHit.rect.y),
+                elementSize: Vec2(moveHit.rect.width, moveHit.rect.height),
+                button: .primary,
+                mods: mods,
+                clicks: 0
+            )
+            var tx = Tx()
+            onMove(&state, press, &tx)
+            applyTx(tx, at: now)
         }
     }
 

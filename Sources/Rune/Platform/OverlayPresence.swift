@@ -622,3 +622,409 @@ public enum OverlayGeometry {
         )
     }
 }
+
+// MARK: - Overlay Press Capture & Lost-Release State Machine (`platform/macos/hold.rs`, `pointer.rs`)
+
+public struct OverlayHoldClick: Equatable, Sendable {
+    public var down: Bool
+    public var at: Vec2
+    public var ends: Vec2?
+
+    public init(down: Bool, at: Vec2, ends: Vec2? = nil) {
+        self.down = down
+        self.at = at
+        self.ends = ends
+    }
+
+    public static func up(_ at: Vec2) -> OverlayHoldClick {
+        OverlayHoldClick(down: false, at: at, ends: nil)
+    }
+}
+
+public enum OverlayHoldEvent: Equatable, Sendable {
+    case seen(down: Bool, at: Vec2, over: Bool)
+    case dispatched(down: Bool)
+    case positioning
+    case released
+    case sampled(buttonDown: Bool, now: Double, at: Vec2)
+    case viewLost(last: Vec2?)
+    case stopped
+}
+
+public enum OverlayHoldEffect: Equatable, Sendable {
+    case deliver(Vec2)
+    case releaseLost(Vec2)
+}
+
+public enum OverlayHoldState: Equatable, Sendable {
+    case free(ups: [Vec2])
+    case pressed(clicks: [OverlayHoldClick], at: Vec2)
+    case releasing(clicks: [OverlayHoldClick], since: Double, at: Vec2)
+    case rebound(clicks: [OverlayHoldClick], at: Vec2)
+}
+
+/// Overlay press capture & lost-release state machine (`crates/rune/src/platform/macos/hold.rs`).
+public struct OverlayHold: Equatable, Sendable {
+    public static let queuedUpGraceSeconds: Double = 2.0
+    public static let unseenUpGraceSeconds: Double = 0.100
+
+    public var state: OverlayHoldState
+
+    public init(state: OverlayHoldState = .free(ups: [])) {
+        self.state = state
+    }
+
+    public var isCaptured: Bool {
+        if case .free = state { return false }
+        return true
+    }
+
+    public var deadline: Double? {
+        guard case let .releasing(clicks, since, _) = state else { return nil }
+        let hasQueuedUp = clicks.contains { !$0.down }
+        return since + (hasQueuedUp ? Self.queuedUpGraceSeconds : Self.unseenUpGraceSeconds)
+    }
+
+    public var isAheadOfClicks: Bool {
+        switch state {
+        case .free:
+            return false
+        case .releasing, .rebound:
+            return true
+        case let .pressed(clicks, _):
+            return !clicks.isEmpty
+        }
+    }
+
+    public var hasQueuedClicks: Bool {
+        switch state {
+        case let .free(ups):
+            return !ups.isEmpty
+        case let .pressed(clicks, _), let .releasing(clicks, _, _), let .rebound(clicks, _):
+            return !clicks.isEmpty
+        }
+    }
+
+    public var isButtonUp: Bool {
+        switch state {
+        case let .free(ups):
+            return !ups.isEmpty
+        case .releasing, .rebound:
+            return true
+        case let .pressed(clicks, _):
+            return clicks.first.map { !$0.down } ?? false
+        }
+    }
+
+    private var clicks: [OverlayHoldClick] {
+        switch state {
+        case let .free(ups):
+            return ups.map { OverlayHoldClick.up($0) }
+        case let .pressed(c, _), let .releasing(c, _, _), let .rebound(c, _):
+            return c
+        }
+    }
+
+    private var hasQueuedDown: Bool {
+        switch state {
+        case .free:
+            return false
+        case let .pressed(c, _), let .releasing(c, _, _), let .rebound(c, _):
+            return c.contains { $0.down }
+        }
+    }
+
+    private var lostPoint: Vec2? {
+        let rose: Vec2
+        let list: [OverlayHoldClick]
+        switch state {
+        case .free:
+            return nil
+        case let .pressed(c, at), let .releasing(c, _, at), let .rebound(c, at):
+            list = c
+            rose = at
+        }
+        if let first = list.first {
+            return (first.down ? first.ends : first.at) ?? rose
+        }
+        return rose
+    }
+
+    private var lostBefore: Vec2? {
+        let rose: Vec2
+        let list: [OverlayHoldClick]
+        switch state {
+        case .free:
+            return nil
+        case let .pressed(c, at), let .releasing(c, _, at), let .rebound(c, at):
+            list = c
+            rose = at
+        }
+        return (list.last?.down ?? true) ? rose : nil
+    }
+
+    @discardableResult
+    public mutating func step(_ event: OverlayHoldEvent) -> [OverlayHoldEffect] {
+        switch event {
+        case let .seen(down, at, over):
+            switch state {
+            case .free where !over:
+                return []
+            case .free(var ups) where !down:
+                ups.append(at)
+                state = .free(ups: ups)
+                return []
+            case .pressed(var c, let prevAt) where !down:
+                c.append(.up(at))
+                state = .pressed(clicks: c, at: prevAt)
+                return []
+            case .releasing(var c, let since, let prevAt) where !down:
+                c.append(.up(at))
+                state = .releasing(clicks: c, since: since, at: prevAt)
+                return []
+            case .rebound(var c, let prevAt) where !down:
+                c.append(.up(at))
+                state = .rebound(clicks: c, at: prevAt)
+                return []
+            default:
+                let ends = lostBefore
+                var list = clicks
+                list.append(OverlayHoldClick(down: true, at: at, ends: ends))
+                state = .pressed(clicks: list, at: at)
+                return []
+            }
+
+        case let .dispatched(down):
+            let popped: OverlayHoldClick?
+            switch state {
+            case .free(var ups) where !down && !ups.isEmpty:
+                popped = .up(ups.removeFirst())
+                state = .free(ups: ups)
+            case .pressed(var c, let at) where c.first?.down == down:
+                popped = c.removeFirst()
+                state = .pressed(clicks: c, at: at)
+            case .releasing(var c, let since, let at) where c.first?.down == down:
+                popped = c.removeFirst()
+                state = .releasing(clicks: c, since: since, at: at)
+            case .rebound(var c, let at) where c.first?.down == down:
+                popped = c.removeFirst()
+                state = .rebound(clicks: c, at: at)
+            default:
+                popped = nil
+            }
+            guard let click = popped else { return [] }
+            var effects: [OverlayHoldEffect] = []
+            if let ends = click.ends {
+                effects.append(.releaseLost(ends))
+            }
+            effects.append(.deliver(click.at))
+            return effects
+
+        case .positioning:
+            var ends: Vec2? = nil
+            switch state {
+            case .free:
+                break
+            case .pressed(var c, let at):
+                if !c.isEmpty {
+                    ends = c[0].ends
+                    c[0].ends = nil
+                    state = .pressed(clicks: c, at: at)
+                }
+            case .releasing(var c, let since, let at):
+                if !c.isEmpty {
+                    ends = c[0].ends
+                    c[0].ends = nil
+                    state = .releasing(clicks: c, since: since, at: at)
+                }
+            case .rebound(var c, let at):
+                if !c.isEmpty {
+                    ends = c[0].ends
+                    c[0].ends = nil
+                    state = .rebound(clicks: c, at: at)
+                }
+            }
+            return ends.map { [.releaseLost($0)] } ?? []
+
+        case .released:
+            if !hasQueuedDown {
+                let ups = clicks.map(\.at)
+                state = .free(ups: ups)
+            }
+            return []
+
+        case let .sampled(buttonDown, now, at):
+            return stepSampled(buttonDown: buttonDown, now: now, point: at)
+
+        case let .viewLost(last):
+            let lost = lostPoint ?? last
+            state = .free(ups: [])
+            return lost.map { [.releaseLost($0)] } ?? []
+
+        case .stopped:
+            state = .free(ups: [])
+            return []
+        }
+    }
+
+    private mutating func stepSampled(buttonDown: Bool, now: Double, point: Vec2) -> [OverlayHoldEffect] {
+        let due = deadline
+        switch state {
+        case .free:
+            return []
+        case let .pressed(c, _) where buttonDown:
+            state = .pressed(clicks: c, at: point)
+            return []
+        case .rebound where buttonDown:
+            return []
+        case let .pressed(c, _):
+            state = .releasing(clicks: c, since: now, at: point)
+            return []
+        case let .rebound(c, at):
+            state = .releasing(clicks: c, since: now, at: at)
+            return []
+        case let .releasing(c, _, at) where buttonDown:
+            state = .rebound(clicks: c, at: at)
+            return []
+        case .releasing:
+            if let due, now < due {
+                return []
+            }
+            let lost = lostPoint
+            state = .free(ups: [])
+            return lost.map { [.releaseLost($0)] } ?? []
+        }
+    }
+}
+
+/// Overlay pointer capture state pairing `OverlayInput` hit regions with `OverlayHold` (`platform/macos/pointer.rs`).
+public final class OverlayPointerState {
+    public var input: OverlayInput
+    public var interactive: Bool
+    public var regions: [MotionRect]
+    public var followPointer: Bool
+    public private(set) var hold = OverlayHold()
+    public private(set) var matched: Bool = false
+    public private(set) var last: Vec2? = nil
+    public private(set) var inside: Bool = false
+    public private(set) var displayId: UInt32? = nil
+    public private(set) var pending: Vec2? = nil
+    public private(set) var recoveredRelease: Vec2? = nil
+
+    public init(input: OverlayInput = .legacy, interactive: Bool = true, regions: [MotionRect] = [], followPointer: Bool = false) {
+        self.input = input
+        self.interactive = interactive
+        self.regions = regions
+        self.followPointer = followPointer
+    }
+
+    public var resolvedInput: OverlayInput {
+        input.resolved(interactive: interactive)
+    }
+
+    public var isCaptured: Bool {
+        hold.isCaptured
+    }
+
+    public var deadline: Double? {
+        hold.deadline
+    }
+
+    public func over(_ point: Vec2) -> Bool {
+        switch resolvedInput {
+        case .all:
+            return true
+        case .regions:
+            return regions.contains { rect in
+                point.x >= rect.x &&
+                    point.y >= rect.y &&
+                    point.x < rect.x + rect.width &&
+                    point.y < rect.y + rect.height
+            }
+        case .none, .legacy:
+            return false
+        }
+    }
+
+    public func hit(_ point: Vec2) -> Bool {
+        isCaptured || over(point)
+    }
+
+    private func apply(_ event: OverlayHoldEvent) -> Vec2? {
+        var delivered: Vec2? = nil
+        for effect in hold.step(event) {
+            switch effect {
+            case let .deliver(pt):
+                delivered = pt
+            case let .releaseLost(pt):
+                if recoveredRelease == nil {
+                    recoveredRelease = pt
+                }
+            }
+        }
+        return delivered
+    }
+
+    public func recordClick(down: Bool, at point: Vec2) {
+        _ = apply(.seen(down: down, at: point, over: over(point)))
+    }
+
+    public func takeEdge(down: Bool) -> (lostRelease: Vec2?, point: Vec2?) {
+        let pt = apply(.dispatched(down: down))
+        if down {
+            matched = (pt != nil) && !hold.hasQueuedClicks
+        }
+        let lost = recoveredRelease
+        recoveredRelease = nil
+        return (lost, pt)
+    }
+
+    public func takeLostBeforePosition() -> Vec2? {
+        _ = apply(.positioning)
+        let lost = recoveredRelease
+        recoveredRelease = nil
+        return lost
+    }
+
+    public func takePosition() -> Vec2? {
+        if hold.isAheadOfClicks { return nil }
+        let p = pending
+        pending = nil
+        return p
+    }
+
+    @discardableResult
+    public func read(buttons: UInt, now: Double, at point: Vec2, inside: Bool, displayChanged: Bool = false) -> Bool {
+        _ = apply(.sampled(buttonDown: (buttons & 1) != 0, now: now, at: point))
+        let wasInside = self.inside
+        self.inside = inside
+        let prevLast = last
+        last = point
+        if !(inside || wasInside || isCaptured || displayChanged) || prevLast == point {
+            return false
+        }
+        pending = point
+        return true
+    }
+
+    public func released() {
+        _ = apply(.released)
+    }
+
+    public var isButtonUp: Bool {
+        matched && hold.isButtonUp
+    }
+
+    public func viewLost() {
+        _ = apply(.viewLost(last: last))
+    }
+
+    public func stopped() {
+        _ = hold.step(.stopped)
+        pending = nil
+        last = nil
+        inside = false
+        recoveredRelease = nil
+        matched = false
+    }
+}

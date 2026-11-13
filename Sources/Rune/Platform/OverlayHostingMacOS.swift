@@ -119,6 +119,10 @@ public final class RuneOverlayPanel: NSPanel {
         false
     }
 
+    override public func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+
     override public var occlusionState: NSWindow.OcclusionState {
         if drawsOccludedOverride {
             return .visible
@@ -150,6 +154,9 @@ public final class RuneOverlayMetalView<State>: NSView {
     var onAppearanceChanged: ((_ isDark: Bool) -> Void)?
     var onNeedsResyncGeometry: ((_ width: Float, _ height: Float, _ scale: Float) -> Void)?
     var onFailure: ((_ message: String) -> Void)?
+    weak var pointerState: OverlayPointerState?
+    var onRegionsUpdated: (([MotionRect]) -> Void)?
+    var onSyncPassthrough: (() -> Void)?
 
     public init(frame: NSRect, srgbBlend: Bool = true) {
         super.init(frame: frame)
@@ -263,6 +270,8 @@ public final class RuneOverlayMetalView<State>: NSView {
 
         let result = eval(nowSeconds(), settle)
         hitTester.regions = result.regions
+        pointerState?.regions = result.regions
+        onRegionsUpdated?(result.regions)
 
         if let renderer, bounds.width > 0, bounds.height > 0, let drawable = metalLayer.nextDrawable() {
             renderer.render(scene: result.scene, to: drawable)
@@ -287,7 +296,12 @@ public final class RuneOverlayMetalView<State>: NSView {
     }
 
     override public func mouseMoved(with event: NSEvent) {
-        onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), RuneNSEventBridge.mods(for: event), nowSeconds())
+        let now = nowSeconds()
+        let m = RuneNSEventBridge.mods(for: event)
+        if let lost = pointerState?.takeLostBeforePosition() {
+            onPointerUp?(lost, .primary, m, now)
+        }
+        onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), m, now)
     }
 
     override public func mouseExited(with event: NSEvent) {
@@ -295,7 +309,12 @@ public final class RuneOverlayMetalView<State>: NSView {
     }
 
     override public func mouseDragged(with event: NSEvent) {
-        onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), RuneNSEventBridge.mods(for: event), nowSeconds())
+        let now = nowSeconds()
+        let m = RuneNSEventBridge.mods(for: event)
+        if let lost = pointerState?.takeLostBeforePosition() {
+            onPointerUp?(lost, .primary, m, now)
+        }
+        onPointerMove?(RuneNSEventBridge.localPoint(in: self, from: event), m, now)
     }
 
     override public func rightMouseDragged(with event: NSEvent) {
@@ -307,21 +326,28 @@ public final class RuneOverlayMetalView<State>: NSView {
     }
 
     override public func mouseDown(with event: NSEvent) {
-        onPointerDown?(
-            RuneNSEventBridge.localPoint(in: self, from: event),
-            .primary,
-            RuneNSEventBridge.mods(for: event),
-            nowSeconds()
-        )
+        let now = nowSeconds()
+        let m = RuneNSEventBridge.mods(for: event)
+        let local = RuneNSEventBridge.localPoint(in: self, from: event)
+        let edge = pointerState?.takeEdge(down: true)
+        if let lost = edge?.lostRelease {
+            onPointerUp?(lost, .primary, m, now)
+        }
+        onPointerDown?(edge?.point ?? local, .primary, m, now)
+        onSyncPassthrough?()
     }
 
     override public func mouseUp(with event: NSEvent) {
-        onPointerUp?(
-            RuneNSEventBridge.localPoint(in: self, from: event),
-            .primary,
-            RuneNSEventBridge.mods(for: event),
-            nowSeconds()
-        )
+        let now = nowSeconds()
+        let m = RuneNSEventBridge.mods(for: event)
+        let local = RuneNSEventBridge.localPoint(in: self, from: event)
+        let edge = pointerState?.takeEdge(down: false)
+        if let lost = edge?.lostRelease {
+            onPointerUp?(lost, .primary, m, now)
+        }
+        onPointerUp?(edge?.point ?? local, .primary, m, now)
+        pointerState?.released()
+        onSyncPassthrough?()
     }
 
     override public func rightMouseDown(with event: NSEvent) {
@@ -390,8 +416,10 @@ public final class RuneOverlayMacOSHost<State> {
     public private(set) var lastDisplayId: UInt32?
     public private(set) var capabilities: OverlayCapabilities
     public private(set) var surfaceDescription: String?
+    public let pointerState = OverlayPointerState()
 
     private var frameTimer: Timer?
+    private var holdDeadlineTimer: Timer?
     private nonisolated(unsafe) var globalMouseMonitor: Any?
     private nonisolated(unsafe) var localMouseMonitor: Any?
 
@@ -402,6 +430,8 @@ public final class RuneOverlayMacOSHost<State> {
     public var onCreated: ((OverlayCreated) -> Void)?
     public var onFailure: ((String) -> Void)?
     public var onSurfaceSnapshot: ((OverlaySurfaceSnapshot) -> Void)?
+    public var onFadeCompleted: ((_ visible: Bool, _ ordered: Bool) -> Void)?
+    public var onPanelStateChanged: ((_ windowNumber: UInt32?, _ capabilities: OverlayCapabilities) -> Void)?
     public var configureView: ((RuneOverlayMetalView<State>) -> Void)?
     public var shouldKeepDrawing: (() -> Bool)?
 
@@ -464,7 +494,7 @@ public final class RuneOverlayMacOSHost<State> {
         p.isOpaque = false
         p.backgroundColor = .clear
         p.hasShadow = false
-        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
         p.level = NSWindow.Level(rawValue: resolvedMacOSLevel())
         p.isReleasedWhenClosed = false
         p.sharingType = presence.isExcluded ? .none : .readOnly
@@ -476,6 +506,17 @@ public final class RuneOverlayMacOSHost<State> {
         view.includeModifierKeys = options.modifierKeys
         view.hitTester.input = options.input
         view.hitTester.interactive = options.interactive
+        view.pointerState = pointerState
+        pointerState.input = options.input
+        pointerState.interactive = options.interactive
+        pointerState.followPointer = options.followPointer
+        view.onRegionsUpdated = { [weak self] _ in
+            self?.syncMousePassthrough()
+        }
+        view.onSyncPassthrough = { [weak self] in
+            self?.syncMousePassthrough()
+            self?.installMouseMonitorsIfNeeded()
+        }
         view.onFailure = { [weak self] msg in
             self?.onFailure?(msg)
         }
@@ -495,6 +536,7 @@ public final class RuneOverlayMacOSHost<State> {
             globalPointer: .supported
         )
         onCreated?(OverlayCreated(windowNumber: windowNumber, capabilities: capabilities))
+        onPanelStateChanged?(windowNumber, capabilities)
         syncMousePassthrough()
         return (p, view)
     }
@@ -543,17 +585,18 @@ public final class RuneOverlayMacOSHost<State> {
     public func releasePanel() {
         stopFrameLoop()
         removeMouseMonitors()
+        pointerState.stopped()
         metalView?.releaseGpuResources()
+        panel?.allowsKeyFocus = (options.keyPolicy == .activating)
         panel?.orderOut(nil)
         panel?.contentView = nil
         panel = nil
         metalView = nil
+        onPanelStateChanged?(nil, capabilities)
     }
 
     public func requestKeys() {
-        guard options.keyPolicy != .nonActivating || options.keyPolicy == .nonActivating else { return }
-        if options.keyPolicy == .none { return }
-        guard let panel else { return }
+        guard options.keyPolicy != .none, let panel else { return }
         panel.allowsKeyFocus = true
         panel.makeKey()
     }
@@ -561,6 +604,7 @@ public final class RuneOverlayMacOSHost<State> {
     public func setCaptureExclusion(_ exclude: Bool) {
         carryOut(presence.step(.request(exclude: exclude)))
         capabilities.captureExclusion = exclude ? .requested : .supported
+        onPanelStateChanged?(windowNumber, capabilities)
     }
 
     public func setMacosLevel(_ level: Int) {
@@ -572,6 +616,12 @@ public final class RuneOverlayMacOSHost<State> {
         self.overlayPlacement = placement
         self.resolvedPlacementSize = placement.size
         self.options = options
+        if let panel {
+            panel.allowsKeyFocus = (options.keyPolicy == .activating)
+        }
+        pointerState.input = options.input
+        pointerState.interactive = options.interactive
+        pointerState.followPointer = options.followPointer
         if let view = metalView {
             view.includeModifierKeys = options.modifierKeys
             view.hitTester.input = options.input
@@ -609,7 +659,8 @@ public final class RuneOverlayMacOSHost<State> {
             let frame = panel.frame
             let localX = Float(mouse.x - frame.origin.x)
             let localY = Float(frame.origin.y + frame.size.height - mouse.y)
-            let hit = frame.contains(mouse) && view.hitTester.shouldIntercept(at: Vec2(localX, localY))
+            let inside = frame.contains(mouse)
+            let hit = (inside || pointerState.isCaptured) && pointerState.hit(Vec2(localX, localY))
             panel.ignoresMouseEvents = !hit
         }
     }
@@ -692,6 +743,8 @@ public final class RuneOverlayMacOSHost<State> {
                 }
             case .orderOut:
                 panel.orderOut(nil)
+                panel.allowsKeyFocus = (options.keyPolicy == .activating)
+                pointerState.stopped()
             case let .setAlpha(alpha):
                 panel.alphaValue = CGFloat(alpha)
             case .ignoreMouse:
@@ -736,7 +789,10 @@ public final class RuneOverlayMacOSHost<State> {
                 guard let self else { return }
                 let followUp = self.presence.step(.fadeEnded(fence: fence))
                 self.carryOut(followUp)
+                self.onFadeCompleted?(self.presence.isVisible, self.presence.isOrdered)
                 if !self.presence.isOrdered {
+                    self.panel?.allowsKeyFocus = (self.options.keyPolicy == .activating)
+                    self.pointerState.stopped()
                     self.stopFrameLoop()
                     if self.releaseWhenHidden {
                         self.releasePanel()
@@ -747,22 +803,42 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     private func installMouseMonitorsIfNeeded() {
-        let needsRegionsMonitor = metalView?.hitTester.resolvedInput == .regions
+        let needsRegionsMonitor = pointerState.resolvedInput == .regions || pointerState.isCaptured
         let needsFollow = options.followPointer && options.display == .underPointer
         guard needsRegionsMonitor || needsFollow else {
             removeMouseMonitors()
             return
         }
+        let mask: NSEvent.EventTypeMask = [
+            .mouseMoved,
+            .leftMouseDragged,
+            .rightMouseDragged,
+            .otherMouseDragged,
+            .leftMouseDown,
+            .leftMouseUp,
+        ]
         if localMouseMonitor == nil {
-            localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+                let eventType = event.type
+                let isTargetWindow = event.window === self?.panel
+                let locationInWindow = event.locationInWindow
                 Task { @MainActor [weak self] in
-                    self?.handlePointerSample()
+                    guard let self else { return }
+                    if isTargetWindow && (eventType == .leftMouseDown || eventType == .leftMouseUp),
+                       let panel = self.panel {
+                        let local = Vec2(
+                            Float(locationInWindow.x),
+                            Float(panel.frame.size.height - locationInWindow.y)
+                        )
+                        self.pointerState.recordClick(down: eventType == .leftMouseDown, at: local)
+                    }
+                    self.handlePointerSample()
                 }
                 return event
             }
         }
         if globalMouseMonitor == nil {
-            globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+            globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.handlePointerSample()
                 }
@@ -771,6 +847,8 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     private func removeMouseMonitors() {
+        holdDeadlineTimer?.invalidate()
+        holdDeadlineTimer = nil
         if let monitor = localMouseMonitor {
             NSEvent.removeMonitor(monitor)
             localMouseMonitor = nil
@@ -785,7 +863,45 @@ public final class RuneOverlayMacOSHost<State> {
         if options.followPointer && options.display == .underPointer {
             placePanel()
         }
+        if let panel, let view = metalView, presence.isVisible {
+            let mouse = NSEvent.mouseLocation
+            let frame = panel.frame
+            let local = Vec2(
+                Float(mouse.x - frame.origin.x),
+                Float(frame.origin.y + frame.size.height - mouse.y)
+            )
+            let inside = Self.containsAppKitPoint(frame, point: mouse)
+            let now = CACurrentMediaTime()
+            _ = pointerState.read(
+                buttons: UInt(NSEvent.pressedMouseButtons),
+                now: now,
+                at: local,
+                inside: inside
+            )
+            if let lost = pointerState.takeLostBeforePosition() {
+                view.onPointerUp?(lost, .primary, .none, view.nowSeconds())
+            }
+            if let due = pointerState.deadline {
+                scheduleHoldDeadlineTimer(until: due)
+            } else {
+                holdDeadlineTimer?.invalidate()
+                holdDeadlineTimer = nil
+            }
+        }
         syncMousePassthrough()
+        installMouseMonitorsIfNeeded()
+    }
+
+    private func scheduleHoldDeadlineTimer(until due: Double) {
+        holdDeadlineTimer?.invalidate()
+        let delay = max(0.005, due - CACurrentMediaTime())
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handlePointerSample()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        holdDeadlineTimer = timer
     }
 
     private func scheduleFrameLoopIfNeeded() {
@@ -797,7 +913,8 @@ public final class RuneOverlayMacOSHost<State> {
                     self.stopFrameLoop()
                     return
                 }
-                if self.shouldKeepDrawing?() == true || view.hitTester.resolvedInput == .regions {
+                self.handlePointerSample()
+                if self.shouldKeepDrawing?() == true || view.hitTester.resolvedInput == .regions || self.pointerState.isCaptured {
                     let snap = view.renderFrame(
                         settle: false,
                         visible: self.presence.isVisible,
@@ -805,7 +922,7 @@ public final class RuneOverlayMacOSHost<State> {
                     )
                     self.onSurfaceSnapshot?(snap)
                     self.syncMousePassthrough()
-                    if !snap.isAnimating && self.shouldKeepDrawing?() == false {
+                    if !snap.isAnimating && self.shouldKeepDrawing?() == false && !self.pointerState.isCaptured {
                         self.stopFrameLoop()
                     }
                 }
@@ -816,6 +933,8 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     private func stopFrameLoop() {
+        holdDeadlineTimer?.invalidate()
+        holdDeadlineTimer = nil
         frameTimer?.invalidate()
         frameTimer = nil
     }

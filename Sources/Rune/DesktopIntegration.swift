@@ -2462,6 +2462,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
     public private(set) var systemContrast: Bool = false
     public private(set) var systemScrollBars = SystemScrollBars.current()
     public private(set) var wakeDeadline: Double? = nil
+    private var cachedWindowNumber: UInt32? = nil
+    private var cachedCapabilities = OverlayCapabilities()
 
     public let runtime: Runtime<State>
     private let pollHandler: ((inout State, Double, inout Tx) -> Bool)?
@@ -2535,12 +2537,20 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         #if os(macOS)
         if opts.prewarm {
             runOnMainActor {
-                self.makeMacHostIfNeeded().prewarm()
+                let host = self.makeMacHostIfNeeded()
+                host.prewarm()
+                self.lock.lock()
+                self.surfaceDescription = host.surfaceDescription
+                self.cachedWindowNumber = host.windowNumber
+                self.cachedCapabilities = host.capabilities
+                self.lock.unlock()
             }
         }
         #else
+        lock.lock()
         self.availability = .available
         self.surfaceDescription = "Software headless overlay"
+        lock.unlock()
         #endif
     }
 
@@ -2562,8 +2572,42 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             releaseWhenHidden: release
         )
         host.onCreated = { [weak self] created in
-            self?.availability = .available
-            self?.onCreatedHandler?(created)
+            guard let self else { return }
+            self.lock.lock()
+            self.availability = .available
+            self.cachedWindowNumber = created.windowNumber
+            self.cachedCapabilities = created.capabilities
+            self.lock.unlock()
+            self.onCreatedHandler?(created)
+        }
+        host.onPanelStateChanged = { [weak self] winNum, caps in
+            guard let self else { return }
+            self.lock.lock()
+            self.cachedWindowNumber = winNum
+            self.cachedCapabilities = caps
+            self.lock.unlock()
+        }
+        host.onFadeCompleted = { [weak self] _, ordered in
+            guard let self, !ordered else { return }
+            self.lock.lock()
+            let now: Double
+            if let fadeEnd = self.overlayPresence.fadeEnd {
+                now = max(Date().timeIntervalSinceReferenceDate, fadeEnd)
+            } else {
+                now = Date().timeIntervalSinceReferenceDate
+            }
+            let effects = self.overlayPresence.step(.due(now: now), release: self.releasePolicy)
+            self.isVisible = false
+            if !self.overlayPresence.isDrawing {
+                self.isFrameless = true
+                self.isIdle = true
+                self.isDirty = false
+                self.wakeDeadline = self.overlayPresence.deadline
+            }
+            self.lock.unlock()
+            if effects.contains(.releaseGpu) {
+                self.macHost?.releasePanel()
+            }
         }
         host.onFailure = { [weak self] msg in
             self?.lock.lock()
@@ -2643,21 +2687,15 @@ public final class OverlayHandle<State>: @unchecked Sendable {
     #endif
 
     public var windowNumber: UInt32? {
-        #if os(macOS)
-        if Thread.isMainThread {
-            return MainActor.assumeIsolated { macHost?.windowNumber }
-        }
-        #endif
-        return nil
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedWindowNumber
     }
 
     public var capabilities: OverlayCapabilities {
-        #if os(macOS)
-        if Thread.isMainThread {
-            return MainActor.assumeIsolated { macHost?.capabilities ?? OverlayCapabilities() }
-        }
-        #endif
-        return OverlayCapabilities()
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedCapabilities
     }
 
     public var captureExclusion: OverlaySupport {
@@ -2691,7 +2729,11 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         runOnMainActor {
             let host = self.makeMacHostIfNeeded()
             host.show(fadeSeconds: dur, settleBeforeReveal: settle)
+            self.lock.lock()
             self.surfaceDescription = host.surfaceDescription
+            self.cachedWindowNumber = host.windowNumber
+            self.cachedCapabilities = host.capabilities
+            self.lock.unlock()
         }
         #endif
     }

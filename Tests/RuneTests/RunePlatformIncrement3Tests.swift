@@ -566,6 +566,7 @@ struct RunePlatformIncrement3Tests {
                             .absolute(x: 20, y: 10)
                             .w(80)
                             .h(30)
+                            .hit()
                             .onClick { $0 += 1 }
                             .child(text("Clicks: \(clicks)"))
                     )
@@ -608,5 +609,138 @@ struct RunePlatformIncrement3Tests {
         #expect(handle.readState { $0 } == 1)
         #expect(handle.windowNumber == nil)
     }
+
+    @Test("RuneOverlayPanel constrains nothing, joins stationary spaces, and resets key focus on hide")
+    @MainActor
+    func overlayPanelConfigAndRequestKeysReset() throws {
+        let spec = OverlaySpec(
+            name: "panel-cfg",
+            size: Vec2(200, 100),
+            makeState: { 0 },
+            view: { _, _ in el().w(200).h(100) }
+        )
+        let host = RuneOverlayMacOSHost<Int>(
+            size: Vec2(200, 100),
+            placement: .init(size: Vec2(200, 100), edge: .top, margin: 0, align: .center, inset: 0),
+            options: OverlayOptions(keyPolicy: .nonActivating, input: .regions),
+            releaseWhenHidden: false
+        )
+        let (panel, _) = try #require(host.ensurePanel())
+        #expect(panel.collectionBehavior.contains(.stationary))
+        let requested = NSRect(x: 10, y: 5000, width: 200, height: 100)
+        #expect(panel.constrainFrameRect(requested, to: NSScreen.main) == requested)
+
+        host.show(fadeSeconds: 0, settleBeforeReveal: true)
+        #expect(!panel.allowsKeyFocus)
+        host.requestKeys()
+        #expect(panel.allowsKeyFocus)
+        host.hide(fadeSeconds: 0)
+        #expect(!panel.allowsKeyFocus)
+        host.releasePanel()
+        _ = spec
+    }
     #endif
+
+    @Test("Explicit El.hit() controls overlay hit regions while onPointerMove alone does not")
+    func explicitHitRegionsAndOnPointerMove() {
+        struct MoveState {
+            var moves: Int = 0
+        }
+        let rt = Runtime<MoveState>(
+            state: MoveState(),
+            viewport: Vec2(300, 200),
+            view: { _, _ in
+                el()
+                    .w(300)
+                    .h(200)
+                    .child(
+                        el()
+                            .key("hit-only")
+                            .absolute(x: 10, y: 10)
+                            .w(50)
+                            .h(40)
+                            .hit()
+                    )
+                    .child(
+                        el()
+                            .key("move-no-hit")
+                            .absolute(x: 100, y: 10)
+                            .w(60)
+                            .h(40)
+                            .onClick { _ in }
+                            .onHover { _, _, _ in }
+                            .onPointerMove { s, _, _ in s.moves += 1 }
+                    )
+            }
+        )
+        rt.frame(at: 0.0)
+        let regions = rt.overlayInteractiveRegions()
+        #expect(regions.count == 1)
+        #expect(regions[0].x == 10)
+        #expect(regions[0].width == 50)
+
+        rt.pointerMove(to: Vec2(120, 20), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.state.moves == 1)
+    }
+
+    @Test("OverlayHold captures press off-region and expires lost releases on grace deadline")
+    func overlayHoldCaptureAndLostRelease() {
+        let ptr = OverlayPointerState(
+            input: .regions,
+            interactive: false,
+            regions: [MotionRect.fromXYWH(10, 10, 40, 40)]
+        )
+        #expect(ptr.over(Vec2(20, 20)))
+        #expect(!ptr.over(Vec2(200, 200)))
+        #expect(!ptr.hit(Vec2(200, 200)))
+
+        // Down over region captures pointer even after moving off-region
+        ptr.recordClick(down: true, at: Vec2(20, 20))
+        #expect(ptr.isCaptured)
+        #expect(ptr.hit(Vec2(200, 200)))
+        let downEdge = ptr.takeEdge(down: true)
+        #expect(downEdge.point == Vec2(20, 20))
+
+        // Button reads up at t=1.0 without Up event -> enters Releasing with UNSEEN_UP_GRACE (100ms)
+        _ = ptr.read(buttons: 0, now: 1.0, at: Vec2(200, 200), inside: true)
+        #expect(ptr.deadline == 1.1)
+        #expect(ptr.takeLostBeforePosition() == nil)
+
+        // Before grace elapses, still captured
+        _ = ptr.read(buttons: 0, now: 1.05, at: Vec2(200, 200), inside: true)
+        #expect(ptr.isCaptured)
+        #expect(ptr.takeLostBeforePosition() == nil)
+
+        // Past grace, releases at lost point
+        _ = ptr.read(buttons: 0, now: 1.11, at: Vec2(200, 200), inside: true)
+        #expect(!ptr.isCaptured)
+        #expect(ptr.takeLostBeforePosition() == Vec2(200, 200))
+
+        // Queued Up gets QUEUED_UP_GRACE (2.0s)
+        ptr.recordClick(down: true, at: Vec2(25, 25))
+        _ = ptr.takeEdge(down: true)
+        ptr.recordClick(down: false, at: Vec2(120, 120))
+        _ = ptr.read(buttons: 0, now: 2.0, at: Vec2(130, 130), inside: true)
+        #expect(ptr.deadline == 4.0)
+        _ = ptr.read(buttons: 0, now: 4.01, at: Vec2(130, 130), inside: true)
+        #expect(ptr.takeLostBeforePosition() == Vec2(120, 120))
+    }
+
+    @Test("OverlayHandle exposes thread-safe cached capabilities and windowNumber off-main")
+    func overlayHandleThreadSafeReads() async {
+        let spec = OverlaySpec(
+            name: "async-reads",
+            size: Vec2(120, 40),
+            makeState: { 0 },
+            view: { _, _ in el().w(120).h(40) }
+        )
+        let handle = OverlayHandle(spec: spec)
+        let detached = await Task.detached {
+            (handle.windowNumber, handle.capabilities, handle.captureExclusion)
+        }.value
+        #expect(detached.0 == nil)
+        #expect(detached.1 == OverlayCapabilities())
+        #expect(detached.2 == .unknown)
+    }
 }
