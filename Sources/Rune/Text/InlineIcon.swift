@@ -586,12 +586,14 @@ extension TextSystem {
         srgbBlend: Bool,
         devClip: SIMD4<Float>,
         rot: Float,
+        spanRadius: Float = TextDecorations.spanRadius,
         insertImage: (RGBA8Atlas) -> SIMD4<Float>,
         into primitives: inout [Primitive]
     ) {
         for (bgRect, bgColor) in shaped.backgrounds {
             let col = bgColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
             if col.w <= 0.0005 { continue }
+            let clampedRadius = min(max(0, spanRadius), bgRect.w * 0.5)
             primitives.append(.roundedRect(
                 rect: SIMD4<Float>(
                     (textOriginX + bgRect.x * scaleVec.x) * pxScale,
@@ -599,7 +601,7 @@ extension TextSystem {
                     bgRect.z * scaleVec.x * pxScale,
                     bgRect.w * scaleVec.y * pxScale
                 ),
-                radii: SIMD4<Float>(repeating: min(4.0, bgRect.w * 0.3) * pxScale),
+                radii: SIMD4<Float>(repeating: clampedRadius * pxScale),
                 fill: col,
                 clip: devClip,
                 turn: rot

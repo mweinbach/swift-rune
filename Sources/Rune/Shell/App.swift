@@ -378,7 +378,7 @@ public struct AppWindowSpec<State> {
         self.fitContentHeight = app.isFitContentHeight
         self.menuItems = app.menuItems
         self.appShared = app.sharedHandle.shared
-        self.childWindows = []
+        self.childWindows = app.childWindows
         self.args = app.runOptions.arguments
         let capturedApp = app
         self.configureRuntime = { rtObj in
@@ -411,15 +411,25 @@ public struct AppWindowSpec<State> {
         self.windowless = false
         self.fitContentHeight = false
         self.menuItems = []
-        self.appShared = nil
+        self.appShared = AppShared<State>()
         self.childWindows = []
         self.args = nil
         self.configureRuntime = nil
         self.runAction = nil
     }
 
+    public var appHandle: AppHandle<State> {
+        AppHandle(shared: appShared ?? AppShared<State>())
+    }
+
     public static func fromApp(_ app: App<State>, key: String? = nil) -> AppWindowSpec<State> {
         AppWindowSpec(app: app, key: key)
+    }
+
+    public static func fromApp(_ key: String, _ app: App<State>) -> AppWindowSpec<State> {
+        var copy = AppWindowSpec(app: app)
+        copy.key = key
+        return copy
     }
 
     public func args(_ arguments: [String]) -> AppWindowSpec<State> {
@@ -665,6 +675,7 @@ public struct App<State> {
     public var menuItems: [NativeMenuItem<State>] = []
     public var overlayReceivers: [(OverlaySpec<State>, (OverlayHandle<State>) -> Void)] = []
     public var windowFactory: ((String) -> AnyWindowSpec?)? = nil
+    public var childWindows: [AnyWindowSpec] = []
     public var compositorValue: AnyCompositor<State>? = nil
     public var playgroundHost: PlaygroundHost<State>? = nil
 
@@ -922,6 +933,19 @@ public struct App<State> {
         var copy = self
         copy.windowFactory = factory
         return copy
+    }
+
+    /// Attaches a secondary typed-state window to this `App`, returning its `AppHandle` and `WindowHandle`
+    /// so callers can update its state or request opening before running (`App::window`).
+    public mutating func window<Child>(_ spec: AppWindowSpec<Child>) -> (AppHandle<Child>, WindowHandle) {
+        let handle = WindowHandle(key: spec.key)
+        var child = spec
+        child.key = spec.key
+        child.keepRunning = true
+        let shared = child.appShared ?? AppShared<Child>()
+        child.appShared = shared
+        childWindows.append(AnyWindowSpec.secondary(child, handle: handle))
+        return (AppHandle(shared: shared), handle)
     }
 
     public func setup(_ hook: @escaping (Waker) -> Void) -> App<State> {

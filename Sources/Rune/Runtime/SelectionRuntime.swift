@@ -93,7 +93,7 @@ public extension Runtime {
     /// Current `TextSelection` snapshot across mounted `El.selectable` elements (`Runtime::selection`).
     func currentTextSelection() -> TextSelection? {
         guard selectionState.coordinator.phase.selection != nil else { return nil }
-        return selectionState.coordinator.currentSelection(in: selectableSnapshots())
+        return selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals())
     }
 
     /// Plain joined text of the active `El.selectable` selection without `El.selectionCopy`
@@ -106,14 +106,21 @@ public extension Runtime {
     /// Clipboard string produced by copying the active `El.selectable` selection, honoring the
     /// nearest `El.selectionCopy` handler spanning the selection (`Runtime::copy_text`).
     func copySelectionText() -> String? {
-        let snaps = selectableSnapshots()
+        let snaps = selectableSnapshotsWithVirtuals()
         guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               let firstSel = sel.texts.first,
               let lastSel = sel.texts.last else {
             return nil
         }
-        guard let firstIdx = nodeByPath[firstSel.path],
-              let lastIdx = nodeByPath[lastSel.path] else {
+        let anchorListIndex: (String) -> Int? = { path in
+            if let idx = self.nodeByPath[path] { return idx }
+            for listPath in self.virtualSelectionSources.keys where path.hasPrefix(listPath + "/") {
+                if let idx = self.nodeByPath[listPath] { return idx }
+            }
+            return nil
+        }
+        guard let firstIdx = anchorListIndex(firstSel.path),
+              let lastIdx = anchorListIndex(lastSel.path) else {
             return sel.text.isEmpty ? nil : sel.text
         }
         let isDescendant: (Int, Int) -> Bool = { nodeIdx, ancestorIdx in
@@ -194,6 +201,19 @@ public extension Runtime {
     }
 }
 
+private struct VirtualSelectionInjection {
+    var listIdx: Int
+    var subtreeEnd: Int
+    var before: [SelectableNodeSnapshot]
+    var after: [SelectableNodeSnapshot]
+}
+
+private enum VirtualEndpointPos {
+    case beforeList
+    case row(Int)
+    case afterList
+}
+
 internal extension Runtime {
     func selectableNodeText(_ node: FlatNode) -> String? {
         guard !node.effectiveInert,
@@ -229,6 +249,381 @@ internal extension Runtime {
                 copyBreakAfter: copyBreaks.after,
                 copyPrefix: node.el.copyPrefixString
             ))
+        }
+        return out
+    }
+
+    private func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
+        guard rowIndex >= 0 && rowIndex < src.keys.count else { return nil }
+        let rowKey = src.keys[rowIndex]
+        if src.isIndexed {
+            guard let rowSource = src.source else { return nil }
+            let scratch = MemoCache()
+            var built = MemoScope.enterVirtualRow(
+                cache: scratch,
+                envHash: lastViewMemoEnvHash,
+                geometry: [:],
+                pass: 1
+            ) {
+                rowSource.build(state, rowIndex)
+            }
+            built = built.key(rowKey)
+            return built
+        }
+        guard rowIndex < src.storedChildren.count else { return nil }
+        var row = src.storedChildren[rowIndex]
+        if row.keyId == nil {
+            row = row.key(rowKey)
+        }
+        return row
+    }
+
+    private func collectOffscreenRowSnapshots(
+        source src: VirtualSelectionSource,
+        rowIndex: Int,
+        rowSegment: String,
+        parentInert: Bool,
+        baseY: Float,
+        into out: inout [SelectableNodeSnapshot]
+    ) {
+        guard let rowEl = offscreenRowElement(source: src, at: rowIndex) else { return }
+        var cursorY = baseY
+        var cellX: Float = 0
+        collectOffscreenSnapshotsWalk(
+            el: rowEl,
+            path: "\(src.listPath)/\(rowSegment)",
+            parentPath: src.listPath,
+            parentInert: parentInert,
+            inRowContainer: src.scrollAxes.contains(.horizontal),
+            cursorY: &cursorY,
+            nextCellX: &cellX,
+            into: &out
+        )
+    }
+
+    private func collectOffscreenSnapshotsWalk(
+        el: El<State>,
+        path: String,
+        parentPath: String?,
+        parentInert: Bool,
+        inRowContainer: Bool,
+        cursorY: inout Float,
+        nextCellX: inout Float,
+        into out: inout [SelectableNodeSnapshot]
+    ) {
+        let inert = parentInert || el.isInert
+        let isSel = !inert && !el.isSecure && el.handlers.editLens == nil && el.isSelectable
+        let text: String
+        if isSel {
+            text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+        } else {
+            text = ""
+        }
+        let rect = MotionRect.fromXYWH(inRowContainer ? nextCellX : 0, cursorY, 80, 10)
+        if isSel && !text.isEmpty {
+            if inRowContainer {
+                nextCellX += 100
+            } else {
+                cursorY += 12
+            }
+        }
+        let copyBreaks = el.copyBreaksPair
+        out.append(SelectableNodeSnapshot(
+            path: path,
+            key: el.keyId,
+            parentPath: parentPath,
+            isSelectable: isSel,
+            isSelectionGroup: !inert && el.isSelectionGroup,
+            isFocusedTextInput: false,
+            text: text,
+            rect: rect,
+            uncopied: el.uncopiedRanges,
+            copyBreakBefore: copyBreaks.before,
+            copyBreakAfter: copyBreaks.after,
+            copyPrefix: el.copyPrefixString
+        ))
+        let childInRow = el.layout.direction == .row || el.layout.direction == .rowReverse
+        var childX: Float = 0
+        var childSeen: [String: Int] = [:]
+        for idx in el.children.indices {
+            let (seg, _) = layoutPathSegment(
+                keyId: el.children[idx].keyId,
+                siblingIndex: idx,
+                siblingKeysSeen: &childSeen
+            )
+            if childInRow {
+                collectOffscreenSnapshotsWalk(
+                    el: el.children[idx],
+                    path: "\(path)/\(seg)",
+                    parentPath: path,
+                    parentInert: inert,
+                    inRowContainer: true,
+                    cursorY: &cursorY,
+                    nextCellX: &childX,
+                    into: &out
+                )
+            } else {
+                collectOffscreenSnapshotsWalk(
+                    el: el.children[idx],
+                    path: "\(path)/\(seg)",
+                    parentPath: path,
+                    parentInert: inert,
+                    inRowContainer: false,
+                    cursorY: &cursorY,
+                    nextCellX: &nextCellX,
+                    into: &out
+                )
+            }
+        }
+        if childInRow && childX > 0 {
+            cursorY += 12
+        }
+    }
+
+    private func virtualRowIndex(forPath targetPath: String, in src: VirtualSelectionSource) -> (rowIndex: Int, rowSegment: String)? {
+        guard targetPath.hasPrefix(src.listPath + "/") else { return nil }
+        let rest = targetPath.dropFirst(src.listPath.count + 1)
+        let firstSeg = String(rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false).first ?? "")
+        guard !firstSeg.isEmpty else { return nil }
+        if firstSeg.hasPrefix("@") {
+            let withoutAt = String(firstSeg.dropFirst())
+            let rawKey: String
+            let dupOrdinal: Int
+            if let dupRange = withoutAt.range(of: "#dup", options: .backwards),
+               let parsed = Int(withoutAt[dupRange.upperBound...]) {
+                rawKey = String(withoutAt[..<dupRange.lowerBound])
+                dupOrdinal = parsed
+            } else {
+                rawKey = withoutAt
+                dupOrdinal = 0
+            }
+            var seen = 0
+            for (idx, k) in src.keys.enumerated() where k == rawKey {
+                if seen == dupOrdinal {
+                    return (idx, firstSeg)
+                }
+                seen += 1
+            }
+        } else if let idx = Int(firstSeg), idx >= 0, idx < src.keys.count {
+            return (idx, firstSeg)
+        }
+        return nil
+    }
+
+    private struct VirtualTreeOrder: Comparable, Equatable {
+        let slot: Int
+        let row: Int
+        let sub: Int
+
+        static func < (lhs: VirtualTreeOrder, rhs: VirtualTreeOrder) -> Bool {
+            if lhs.slot != rhs.slot { return lhs.slot < rhs.slot }
+            if lhs.row != rhs.row { return lhs.row < rhs.row }
+            return lhs.sub < rhs.sub
+        }
+    }
+
+    private struct ResolvedVirtualEndpointInfo {
+        let snapshot: SelectableNodeSnapshot
+        let listIdx: Int
+        let rowIndex: Int
+        let orderInRow: Int
+        let rowGroupPath: String?
+    }
+
+    private func resolveVirtualEndpointInfo(forPath targetPath: String) -> ResolvedVirtualEndpointInfo? {
+        for (listPath, src) in virtualSelectionSources {
+            guard let listIdx = nodeByPath[listPath],
+                  listIdx < flatNodes.count,
+                  !flatNodes[listIdx].effectiveInert,
+                  let (rowIdx, rowSeg) = virtualRowIndex(forPath: targetPath, in: src) else {
+                continue
+            }
+            var rowSnaps: [SelectableNodeSnapshot] = []
+            collectOffscreenRowSnapshots(
+                source: src,
+                rowIndex: rowIdx,
+                rowSegment: rowSeg,
+                parentInert: flatNodes[listIdx].effectiveInert,
+                baseY: 0,
+                into: &rowSnaps
+            )
+            if let hitOffset = rowSnaps.firstIndex(where: {
+                $0.isSelectable && !($0.text.isEmpty) && ($0.path == targetPath || SelectionMath.sameKeyedPath($0.path, targetPath))
+            }) {
+                let hit = rowSnaps[hitOffset]
+                var rowGroupPath: String?
+                var pPath = hit.parentPath
+                while let p = pPath, let parentSnap = rowSnaps.first(where: { $0.path == p }) {
+                    if parentSnap.isSelectionGroup {
+                        rowGroupPath = parentSnap.path
+                        break
+                    }
+                    pPath = parentSnap.parentPath
+                }
+                return ResolvedVirtualEndpointInfo(
+                    snapshot: hit,
+                    listIdx: listIdx,
+                    rowIndex: rowIdx,
+                    orderInRow: hitOffset,
+                    rowGroupPath: rowGroupPath
+                )
+            }
+        }
+        return nil
+    }
+
+    private func resolveVirtualEndpoint(forPath targetPath: String) -> SelectableNodeSnapshot? {
+        resolveVirtualEndpointInfo(forPath: targetPath)?.snapshot
+    }
+
+    private func selectionTreeOrder(mountedIdx: Int) -> VirtualTreeOrder {
+        var cur = mountedIdx
+        while cur < flatNodes.count, let p = flatNodes[cur].parentIndex {
+            let pPath = flatNodes[p].path
+            if let src = virtualSelectionSources[pPath] {
+                let rowIdx = virtualRowIndex(forPath: flatNodes[cur].path, in: src)?.rowIndex ?? 0
+                return VirtualTreeOrder(slot: p * 2 + 1, row: rowIdx, sub: mountedIdx)
+            }
+            cur = p
+        }
+        return VirtualTreeOrder(slot: mountedIdx * 2, row: 0, sub: 0)
+    }
+
+    private func resolvedSelectionScrollAnchorIdx(forPath path: String) -> Int? {
+        if let idx = resolvedNodeIndex(forPath: path) {
+            return idx
+        }
+        return resolveVirtualEndpointInfo(forPath: path)?.listIdx
+    }
+
+    func selectableSnapshotsWithVirtuals() -> [SelectableNodeSnapshot] {
+        let base = selectableSnapshots()
+        guard let activeSel = selectionState.coordinator.phase.selection,
+              !virtualSelectionSources.isEmpty else {
+            return base
+        }
+
+        let maxOffscreenRows = 10_000
+        let maxOffscreenBytes = 4 * 1024 * 1024
+        var totalRows = 0
+        var totalBytes = 0
+        var injections: [VirtualSelectionInjection] = []
+
+        for (listPath, src) in virtualSelectionSources {
+            guard !src.keys.isEmpty,
+                  let listIdx = nodeByPath[listPath],
+                  listIdx < flatNodes.count,
+                  !flatNodes[listIdx].effectiveInert else {
+                continue
+            }
+            var subtreeEnd = listIdx
+            let prefix = listPath + "/"
+            while subtreeEnd + 1 < flatNodes.count && flatNodes[subtreeEnd + 1].path.hasPrefix(prefix) {
+                subtreeEnd += 1
+            }
+
+            func endpointPos(for path: String) -> VirtualEndpointPos? {
+                if let r = virtualRowIndex(forPath: path, in: src) {
+                    return .row(r.rowIndex)
+                }
+                if let idx = resolvedNodeIndex(forPath: path) {
+                    if idx < listIdx { return .beforeList }
+                    if idx > subtreeEnd { return .afterList }
+                }
+                return nil
+            }
+
+            guard let aPos = endpointPos(for: activeSel.path) else { continue }
+            let fPos: VirtualEndpointPos
+            if let far = activeSel.far {
+                guard let resolved = endpointPos(for: far.path) else { continue }
+                fPos = resolved
+            } else {
+                fPos = aPos
+            }
+
+            let mapPos: (VirtualEndpointPos) -> Int = { pos in
+                switch pos {
+                case .beforeList: return -1
+                case .row(let r): return r
+                case .afterList: return src.keys.count
+                }
+            }
+            let p0 = mapPos(aPos)
+            let p1 = mapPos(fPos)
+            let rawLo = min(p0, p1)
+            let rawHi = max(p0, p1)
+            if rawHi < 0 || rawLo >= src.keys.count { continue }
+            let lo = max(0, rawLo)
+            let hi = min(src.keys.count - 1, rawHi)
+
+            let mountedLo = src.mounted.lowerBound
+            let mountedHi = src.mounted.upperBound
+            let beforeRange = lo < mountedLo ? lo..<min(mountedLo, hi + 1) : 0..<0
+            let afterRange = hi >= mountedHi ? max(mountedHi, lo)..<(hi + 1) : 0..<0
+            if beforeRange.isEmpty && afterRange.isEmpty { continue }
+
+            var mountedMinTop: Float = flatNodes[listIdx].targetRect.top
+            var mountedMaxBottom: Float = flatNodes[listIdx].targetRect.bottom
+            if listIdx + 1 <= subtreeEnd {
+                mountedMinTop = flatNodes[(listIdx + 1)...subtreeEnd].map(\.targetRect.top).min() ?? mountedMinTop
+                mountedMaxBottom = flatNodes[(listIdx + 1)...subtreeEnd].map(\.targetRect.bottom).max() ?? mountedMaxBottom
+            }
+
+            var beforeSnaps: [SelectableNodeSnapshot] = []
+            for r in beforeRange {
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
+                let rowSeg = "@\(src.keys[r])"
+                let baseY = mountedMinTop - Float(mountedLo - r) * 100.0 - 10_000.0
+                let countBefore = beforeSnaps.count
+                collectOffscreenRowSnapshots(
+                    source: src,
+                    rowIndex: r,
+                    rowSegment: rowSeg,
+                    parentInert: flatNodes[listIdx].effectiveInert,
+                    baseY: baseY,
+                    into: &beforeSnaps
+                )
+                totalRows += 1
+                for s in beforeSnaps[countBefore...] { totalBytes += s.text.utf8.count }
+            }
+
+            var afterSnaps: [SelectableNodeSnapshot] = []
+            for r in afterRange {
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
+                let rowSeg = "@\(src.keys[r])"
+                let baseY = mountedMaxBottom + Float(r - mountedHi + 1) * 100.0 + 10_000.0
+                let countBefore = afterSnaps.count
+                collectOffscreenRowSnapshots(
+                    source: src,
+                    rowIndex: r,
+                    rowSegment: rowSeg,
+                    parentInert: flatNodes[listIdx].effectiveInert,
+                    baseY: baseY,
+                    into: &afterSnaps
+                )
+                totalRows += 1
+                for s in afterSnaps[countBefore...] { totalBytes += s.text.utf8.count }
+            }
+
+            if !beforeSnaps.isEmpty || !afterSnaps.isEmpty {
+                injections.append(VirtualSelectionInjection(listIdx: listIdx, subtreeEnd: subtreeEnd, before: beforeSnaps, after: afterSnaps))
+            }
+        }
+
+        guard !injections.isEmpty else { return base }
+        let beforeByIdx = Dictionary(grouping: injections, by: \.listIdx)
+        let afterByIdx = Dictionary(grouping: injections, by: \.subtreeEnd)
+        var out: [SelectableNodeSnapshot] = []
+        out.reserveCapacity(base.count + 32)
+        for (idx, snap) in base.enumerated() {
+            out.append(snap)
+            if let ins = beforeByIdx[idx] {
+                for item in ins { out.append(contentsOf: item.before) }
+            }
+            if let ins = afterByIdx[idx] {
+                for item in ins { out.append(contentsOf: item.after) }
+            }
         }
         return out
     }
@@ -310,7 +705,7 @@ internal extension Runtime {
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
             }
             return
@@ -328,7 +723,7 @@ internal extension Runtime {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
             }
             return
@@ -366,7 +761,7 @@ internal extension Runtime {
                     selectionState.dragStartPos = pos
                 }
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
                 return
             } else if let sGroup, let anchorGroup, sGroup == anchorGroup {
@@ -387,7 +782,7 @@ internal extension Runtime {
                     selectionState.dragStartPos = pos
                 }
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
                 return
             }
@@ -412,7 +807,7 @@ internal extension Runtime {
             selectionState.dragStartPos = pos
         }
         selectionState.suppressedClickOnRelease = false
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, external: false)
         dispatchSelectionChanges(at: now)
     }
 
@@ -443,7 +838,7 @@ internal extension Runtime {
                 let sUnit = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) ?? sNode.path
                 selectionState.coordinator.pick.noteClick(groupPath: sUnit)
             }
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, external: false)
             dispatchSelectionChanges(at: now)
         }
         #endif
@@ -479,23 +874,45 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             return false
         }
-        guard let anchorIdx = resolvedNodeIndex(forPath: sel.path) else {
+        let snaps = selectableSnapshots()
+        let anchorMountedIdx: Int?
+        let edgeScrollIdx: Int
+        let anchorGroup: String?
+        let anchorOrder: VirtualTreeOrder
+        if let idx = resolvedNodeIndex(forPath: sel.path) {
+            anchorMountedIdx = idx
+            edgeScrollIdx = idx
+            sel.path = flatNodes[idx].path
+            anchorGroup = SelectAllResolver.groupPath(forNodeAt: idx, in: snaps)
+            anchorOrder = selectionTreeOrder(mountedIdx: idx)
+        } else if let info = resolveVirtualEndpointInfo(forPath: sel.path) {
+            anchorMountedIdx = nil
+            edgeScrollIdx = info.listIdx
+            sel.path = info.snapshot.path
+            if let rg = info.rowGroupPath {
+                anchorGroup = rg
+            } else if info.listIdx < snaps.count, snaps[info.listIdx].isSelectionGroup {
+                anchorGroup = snaps[info.listIdx].path
+            } else {
+                anchorGroup = SelectAllResolver.groupPath(forNodeAt: info.listIdx, in: snaps)
+            }
+            anchorOrder = VirtualTreeOrder(slot: info.listIdx * 2 + 1, row: info.rowIndex, sub: info.orderInRow)
+        } else {
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
             selectionState.coordinator.phase.clear()
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, external: false)
             return false
         }
-        updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: anchorIdx, at: now)
-        sel.path = flatNodes[anchorIdx].path
-        let snaps = selectableSnapshots()
-        let anchorGroup = SelectAllResolver.groupPath(forNodeAt: anchorIdx, in: snaps)
+        updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
 
         let resolvedTarget: (idx: Int, offset: Int)?
         if let gPath = anchorGroup {
-            resolvedTarget = groupPointTarget(groupPath: gPath, anchorIdx: anchorIdx, snaps: snaps, at: pos)
+            resolvedTarget = groupPointTarget(groupPath: gPath, anchorOrder: anchorOrder, snaps: snaps, at: pos)
+        } else if let idx = anchorMountedIdx {
+            resolvedTarget = (idx, selectableHitOffset(node: flatNodes[idx], windowPos: pos))
         } else {
-            resolvedTarget = (anchorIdx, selectableHitOffset(node: flatNodes[anchorIdx], windowPos: pos))
+            return true
         }
         guard let (targetIdx, rawOffset) = resolvedTarget,
               let targetContent = selectableNodeText(flatNodes[targetIdx]) else {
@@ -508,13 +925,13 @@ internal extension Runtime {
             unit: unit,
             uncopied: flatNodes[targetIdx].el.uncopiedRanges
         )
-        if targetIdx == anchorIdx {
+        if let anchorIdx = anchorMountedIdx, targetIdx == anchorIdx {
             let ext = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
             sel.anchor = ext.anchor
             sel.focus = ext.focus
             sel.far = nil
         } else {
-            if targetIdx > anchorIdx {
+            if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
                 sel.anchor = sel.originStart
                 sel.focus = targetUnit.1
             } else {
@@ -528,7 +945,7 @@ internal extension Runtime {
            selectedText() != nil {
             selectionState.suppressedClickOnRelease = true
         }
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, external: false)
         dispatchSelectionChanges(at: now)
         return true
     }
@@ -543,7 +960,7 @@ internal extension Runtime {
         let suppressClick = selectionState.suppressedClickOnRelease && selectedText() != nil
         selectionState.suppressedClickOnRelease = false
         selectionState.coordinator.phase.endDrag()
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, external: false)
         dispatchSelectionChanges(at: now)
         return suppressClick
     }
@@ -569,7 +986,7 @@ internal extension Runtime {
                 appHandledCmdA: false
             )
             if case .selectGroup = outcome {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
                 return true
             }
@@ -608,7 +1025,7 @@ internal extension Runtime {
     }
 
     func finalizeSelectionAfterCommit(at now: Double) {
-        let snaps = selectableSnapshots()
+        let snaps = selectableSnapshotsWithVirtuals()
         if let pendingAll = selectionState.pendingSelectAllKey {
             selectionState.pendingSelectAllKey = nil
             _ = selectionState.coordinator.selectAllText(key: pendingAll, in: snaps)
@@ -695,25 +1112,46 @@ internal extension Runtime {
 
     private func reconcileSelectionPhaseAgainstTree() {
         guard let sel = selectionState.coordinator.phase.selection else { return }
-        guard let anchorIdx = resolvedNodeIndex(forPath: sel.path),
-              let anchorNow = selectableNodeText(flatNodes[anchorIdx]) else {
+        let anchorTextNow: String
+        let anchorResolvedPath: String
+        if let anchorIdx = resolvedNodeIndex(forPath: sel.path),
+           let nowText = selectableNodeText(flatNodes[anchorIdx]) {
+            anchorTextNow = nowText
+            anchorResolvedPath = flatNodes[anchorIdx].path
+        } else if let vSnap = resolveVirtualEndpoint(forPath: sel.path) {
+            anchorTextNow = vSnap.text
+            anchorResolvedPath = vSnap.path
+        } else {
             selectionState.coordinator.phase.clear()
             selectionState.isDraggingSelection = false
             return
         }
-        let anchorUpto = sel.far == nil ? min(sel.anchor, sel.focus) : min(sel.anchor, anchorNow.utf8.count)
-        guard SelectionMath.kept(then: sel.content, now: anchorNow, upto: anchorUpto) else {
+        let anchorUpto = sel.far == nil ? min(sel.anchor, sel.focus) : min(sel.anchor, anchorTextNow.utf8.count)
+        guard SelectionMath.kept(then: sel.content, now: anchorTextNow, upto: anchorUpto) else {
             selectionState.coordinator.phase.clear()
             selectionState.isDraggingSelection = false
             return
         }
         var updated = sel
-        updated.path = flatNodes[anchorIdx].path
+        updated.path = anchorResolvedPath
         if var far = sel.far {
+            let farTextNow: String?
+            let farResolvedPath: String?
             if let farIdx = resolvedNodeIndex(forPath: far.path),
-               let farNow = selectableNodeText(flatNodes[farIdx]),
+               let nowText = selectableNodeText(flatNodes[farIdx]) {
+                farTextNow = nowText
+                farResolvedPath = flatNodes[farIdx].path
+            } else if let vFar = resolveVirtualEndpoint(forPath: far.path) {
+                farTextNow = vFar.text
+                farResolvedPath = vFar.path
+            } else {
+                farTextNow = nil
+                farResolvedPath = nil
+            }
+            if let farNow = farTextNow,
+               let farPath = farResolvedPath,
                SelectionMath.kept(then: far.content, now: farNow, upto: min(sel.focus, farNow.utf8.count)) {
-                far.path = flatNodes[farIdx].path
+                far.path = farPath
                 updated.far = far
             } else {
                 selectionState.coordinator.phase.clear()
@@ -735,7 +1173,7 @@ internal extension Runtime {
         selectionState.isDispatchingSelectionChanges = true
         defer { selectionState.isDispatchingSelectionChanges = false }
 
-        let snaps = selectableSnapshots()
+        let snaps = selectableSnapshotsWithVirtuals()
         let watchers: [(path: String, el: El<State>)] = flatNodes.compactMap { n in
             guard !n.effectiveInert, n.el.hasSelectionChangeHandler else { return nil }
             return (n.path, n.el)
@@ -777,7 +1215,7 @@ internal extension Runtime {
 
     private func groupPointTarget(
         groupPath: String,
-        anchorIdx: Int,
+        anchorOrder: VirtualTreeOrder,
         snaps: [SelectableNodeSnapshot],
         at pos: Vec2
     ) -> (idx: Int, offset: Int)? {
@@ -815,7 +1253,7 @@ internal extension Runtime {
         let below = bands.first(where: { $0.top > pos.y })
         if let below {
             let minBelowIdx = boxes[below.range].map(\.idx).min()!
-            if above == nil || minBelowIdx <= anchorIdx {
+            if above == nil || selectionTreeOrder(mountedIdx: minBelowIdx) <= anchorOrder {
                 return (minBelowIdx, 0)
             }
         }
@@ -909,12 +1347,12 @@ internal extension Runtime {
         guard case .running(let scrollPath, let last, let fromOffset, let due) = selectionState.edgeScroll,
               now >= due,
               case .dragging(let sel, _) = selectionState.coordinator.phase,
-              let anchorIdx = resolvedNodeIndex(forPath: sel.path),
+              let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
               let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx),
               edge.scrollPath == scrollPath else {
             if case .running = selectionState.edgeScroll,
                case .dragging(let sel, _) = selectionState.coordinator.phase,
-               let anchorIdx = resolvedNodeIndex(forPath: sel.path),
+               let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
                selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx) == nil {
                 selectionState.edgeScroll.stop()
             }
@@ -961,7 +1399,7 @@ internal extension Runtime {
             fromOffset: by != 0 ? edge.offset : nil,
             more: !reachedEnd
         )
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, external: false)
         return true
     }
 

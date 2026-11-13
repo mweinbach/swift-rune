@@ -4,10 +4,28 @@ import RuneMotion
 // MARK: - Increment 4 Runtime Support (TxCommit, ScrollRequests, Sticky, VirtualRows/VirtualFill, Growth)
 
 extension Runtime {
+    internal struct CachedVirtualRow {
+        var el: El<State>
+        var memoIds: Set<String>
+    }
+
+    internal struct VirtualSelectionSource {
+        var listPath: String
+        var keys: [String]
+        var mounted: Range<Int>
+        var isIndexed: Bool
+        var source: VirtualRowSource<State>?
+        var storedChildren: [El<State>]
+        var scrollAxes: ScrollAxes
+    }
+
     internal struct VirtualExpansionContext {
         var rowMappings: [(listPath: String, scrollPath: String, rowSegment: String, rowKey: String)] = []
         var anyVirtualList: Bool = false
         var virtualInputs: [String: VirtualInputEntry] = [:]
+        var builtVirtualRows: [String: [String: CachedVirtualRow]] = [:]
+        var remountHitNestedVirtual: Bool = false
+        var selectionSources: [String: VirtualSelectionSource] = [:]
     }
 
     internal struct GrowthCaptureResult {
@@ -78,7 +96,13 @@ extension Runtime {
     }
 
     @inline(never)
-    internal func expandVirtualSubtrees(in rootEl: El<State>) -> (root: El<State>, context: VirtualExpansionContext) {
+    internal func expandVirtualSubtrees(
+        in rootEl: El<State>,
+        remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
+        memoGeometry: [String: MemoElementGeometry] = [:],
+        memoEnvHash: UInt64 = MemoScope.activeEnvHash,
+        memoPass: UInt64 = 0
+    ) -> (root: El<State>, context: VirtualExpansionContext) {
         var ctx = VirtualExpansionContext()
         activeVirtualPaths.removeAll(keepingCapacity: true)
         guard treeContainsVirtual(rootEl) else {
@@ -93,6 +117,10 @@ extension Runtime {
             siblingKeysSeen: &rootSeen,
             scrollPath: nil,
             scrollStickBottom: false,
+            remountRowCache: remountRowCache,
+            memoGeometry: memoGeometry,
+            memoEnvHash: memoEnvHash,
+            memoPass: memoPass,
             ctx: &ctx
         )
         return (expanded, ctx)
@@ -105,6 +133,10 @@ extension Runtime {
         siblingKeysSeen: inout [String: Int],
         scrollPath: String?,
         scrollStickBottom: Bool,
+        remountRowCache: [String: [String: CachedVirtualRow]]?,
+        memoGeometry: [String: MemoElementGeometry],
+        memoEnvHash: UInt64,
+        memoPass: UInt64,
         ctx: inout VirtualExpansionContext
     ) {
         let (segment, _) = layoutPathSegment(
@@ -127,6 +159,10 @@ extension Runtime {
                 path: path,
                 nextScrollPath: nextScrollPath,
                 nextStickBottom: nextStickBottom,
+                remountRowCache: remountRowCache,
+                memoGeometry: memoGeometry,
+                memoEnvHash: memoEnvHash,
+                memoPass: memoPass,
                 ctx: &ctx
             )
             return
@@ -142,6 +178,10 @@ extension Runtime {
                 siblingKeysSeen: &childSeen,
                 scrollPath: nextScrollPath,
                 scrollStickBottom: nextStickBottom,
+                remountRowCache: remountRowCache,
+                memoGeometry: memoGeometry,
+                memoEnvHash: memoEnvHash,
+                memoPass: memoPass,
                 ctx: &ctx
             )
         }
@@ -153,6 +193,10 @@ extension Runtime {
         path: String,
         nextScrollPath: String?,
         nextStickBottom: Bool,
+        remountRowCache: [String: [String: CachedVirtualRow]]?,
+        memoGeometry: [String: MemoElementGeometry],
+        memoEnvHash: UInt64,
+        memoPass: UInt64,
         ctx: inout VirtualExpansionContext
     ) {
         ctx.anyVirtualList = true
@@ -259,6 +303,7 @@ extension Runtime {
         vState.lastMountedRange = mounted
         vState.wantsMoreFrames = wantedMore
         vState.missingOverscanRows = missing
+        vState.isIndexed = isIndexed
         virtualLists[path] = vState
         if !isIndexed {
             PerfWarn.overbuilt(path: path, site: el.virtualizeSite, built: count, mounted: mounted.count)
@@ -271,11 +316,46 @@ extension Runtime {
             built.append(El<State>().key("__v_top_spacer").wFull().h(topSpacerH))
         }
 
+        ctx.selectionSources[path] = VirtualSelectionSource(
+            listPath: path,
+            keys: keys,
+            mounted: mounted,
+            isIndexed: isIndexed,
+            source: el.virtualRowsSource,
+            storedChildren: isIndexed ? [] : el.children,
+            scrollAxes: el.layout.scrollAxes
+        )
         var rowSeenKeys: [String: Int] = [:]
         for i in mounted {
-            var rowEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
-            if rowEl.keyId == nil {
-                rowEl = rowEl.key(keys[i])
+            let rowKey = keys[i]
+            var rowEl: El<State>
+            if isIndexed {
+                if let reused = remountRowCache?[path]?[rowKey] {
+                    rowEl = reused.el
+                    ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
+                } else {
+                    let rowTouchedBox = MemoScope.TouchedIdsBox()
+                    var builtEl = MemoScope.enterVirtualRow(
+                        cache: self.memo,
+                        envHash: memoEnvHash,
+                        geometry: memoGeometry,
+                        pass: memoPass,
+                        touchedIdsOut: rowTouchedBox
+                    ) {
+                        el.virtualRowsSource!.build(state, i)
+                    }
+                    if remountRowCache != nil && treeContainsVirtual(builtEl) {
+                        ctx.remountHitNestedVirtual = true
+                    }
+                    builtEl = builtEl.key(rowKey)
+                    rowEl = builtEl
+                    ctx.builtVirtualRows[path, default: [:]][rowKey] = CachedVirtualRow(el: rowEl, memoIds: rowTouchedBox.ids)
+                }
+            } else {
+                rowEl = el.children[i]
+                if rowEl.keyId == nil {
+                    rowEl = rowEl.key(rowKey)
+                }
             }
             let (rowSeg, _) = layoutPathSegment(
                 keyId: rowEl.keyId,
@@ -291,6 +371,10 @@ extension Runtime {
                 siblingKeysSeen: &rowSeenKeys,
                 scrollPath: nextScrollPath,
                 scrollStickBottom: nextStickBottom,
+                remountRowCache: remountRowCache,
+                memoGeometry: memoGeometry,
+                memoEnvHash: memoEnvHash,
+                memoPass: memoPass,
                 ctx: &ctx
             )
             built.append(rowEl)
@@ -323,7 +407,7 @@ extension Runtime {
             }
             for i in candidateIndices {
                 var offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
-                if offEl.keyId == nil {
+                if isIndexed || offEl.keyId == nil {
                     offEl = offEl.key(keys[i])
                 }
                 var seen: [String: Int] = [:]
@@ -428,19 +512,16 @@ extension Runtime {
             return found
         }
 
-        func walk(
+        // Iterative traversal + `@inline(never)` keep `-Onone` stack frames small on deep trees (avoiding 512KB Cooperative thread SIGBUS).
+        @inline(never)
+        func stepGrowthNode(
             el: El<State>,
             res: LayoutEngine.ResultNode,
-            parentPath: String,
-            siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int],
+            path: String,
             inGrowthSpec: GrowthSpec?,
             parentStackPath: String?,
             enclosingScrollPath: String?
-        ) {
-            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
-            let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
-
+        ) -> String? {
             var ownStackPath = parentStackPath
             if el.growthSpec != nil {
                 seenStackPaths.insert(path)
@@ -586,37 +667,58 @@ extension Runtime {
                     )
                 }
             }
+            return ownStackPath
+        }
 
-            let nextGrowth = el.growthSpec
-            let nextScrollPath = el.layout.scrollAxes.isEmpty ? enclosingScrollPath : path
-            if !el.children.isEmpty && el.children.count == res.children.count {
+        let rootPath = rootEl.keyId.map { "/@\($0)" } ?? "/0"
+        var workStack: [(
+            el: El<State>,
+            res: LayoutEngine.ResultNode,
+            path: String,
+            inGrowthSpec: GrowthSpec?,
+            parentStackPath: String?,
+            enclosingScrollPath: String?
+        )] = [
+            (
+                el: rootEl,
+                res: rootResult,
+                path: rootPath,
+                inGrowthSpec: nil,
+                parentStackPath: nil,
+                enclosingScrollPath: nil
+            )
+        ]
+        while let item = workStack.popLast() {
+            let ownStackPath = stepGrowthNode(
+                el: item.el,
+                res: item.res,
+                path: item.path,
+                inGrowthSpec: item.inGrowthSpec,
+                parentStackPath: item.parentStackPath,
+                enclosingScrollPath: item.enclosingScrollPath
+            )
+            let nextGrowth = item.el.growthSpec
+            let nextScrollPath = item.el.layout.scrollAxes.isEmpty ? item.enclosingScrollPath : item.path
+            if !item.el.children.isEmpty && item.el.children.count == item.res.children.count {
                 var childSeen: [String: Int] = [:]
-                for i in 0..<el.children.count {
-                    walk(
-                        el: el.children[i],
-                        res: res.children[i],
-                        parentPath: path,
-                        siblingIndex: i,
-                        siblingKeysSeen: &childSeen,
+                var childPaths: [String] = []
+                childPaths.reserveCapacity(item.el.children.count)
+                for i in 0..<item.el.children.count {
+                    let (seg, _) = layoutPathSegment(keyId: item.el.children[i].keyId, siblingIndex: i, siblingKeysSeen: &childSeen)
+                    childPaths.append("\(item.path)/\(seg)")
+                }
+                for i in (0..<item.el.children.count).reversed() {
+                    workStack.append((
+                        el: item.el.children[i],
+                        res: item.res.children[i],
+                        path: childPaths[i],
                         inGrowthSpec: nextGrowth,
                         parentStackPath: ownStackPath,
                         enclosingScrollPath: nextScrollPath
-                    )
+                    ))
                 }
             }
         }
-
-        var rootSeen: [String: Int] = [:]
-        walk(
-            el: rootEl,
-            res: rootResult,
-            parentPath: "",
-            siblingIndex: 0,
-            siblingKeysSeen: &rootSeen,
-            inGrowthSpec: nil,
-            parentStackPath: nil,
-            enclosingScrollPath: nil
-        )
         growthRows = growthRows.filter { seenGrowthKeys.contains($0.key) }
         growthStacks = growthStacks.compactMap { (k, v) -> (String, RuntimeGrowthStackState)? in
             guard seenStackPaths.contains(k) else { return nil }
@@ -930,16 +1032,29 @@ extension Runtime {
         var missing = 0
         var moved = false
         for listPath in activeVirtualPaths {
-            guard let vState = virtualLists[listPath] else { continue }
-            if vState.wantsMoreFrames {
-                wanted = true
-                missing += vState.missingOverscanRows
-            }
+            guard var vState = virtualLists[listPath], vState.isIndexed else { continue }
             let scrollIdx = nodeByPath[listPath].flatMap {
                 !flatNodes[$0].el.layout.scrollAxes.isEmpty ? $0 : flatNodes[$0].enclosingVScrollIndex
             }
             let scrollPath = scrollIdx.map { flatNodes[$0].path } ?? listPath
             let curScroll = scrollOffsets[scrollPath] ?? .zero
+            let vpH = max(1, scrollViewportSizes[scrollPath]?.y ?? viewport.y)
+            let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
+            let count = vState.lastKeys.count
+            let (prefix, _) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let (listWanted, listMissing) = vState.fillDemand(
+                offset: curScroll.y,
+                viewport: vpH,
+                prefix: prefix,
+                count: count
+            )
+            vState.wantsMoreFrames = listWanted
+            vState.missingOverscanRows = listMissing
+            virtualLists[listPath] = vState
+            if listWanted {
+                wanted = true
+                missing += listMissing
+            }
             if let prevScroll = virtualFillLastScrollOffsets[scrollPath], abs(curScroll.y - prevScroll.y) > 0.5 {
                 moved = true
             }
@@ -1345,8 +1460,10 @@ extension Runtime {
         let offsets = pendingScrollOffsets
         pendingScrollOffsets.removeAll(keepingCapacity: true)
 
+        let followCaret = pendingCaretFollow
+        pendingCaretFollow = false
         let destination = !bottoms.isEmpty || !pages.isEmpty || !offsets.isEmpty
-        if !reveals.isEmpty || destination {
+        if !reveals.isEmpty || destination || followCaret {
             scrollRequestsState.stepCancel()
         }
 
@@ -1436,6 +1553,43 @@ extension Runtime {
             )
             if case .move(let targetY) = eff {
                 applyScrollOffset(path: vPath, next: Vec2(cur.x, Float(targetY)), glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil)
+            }
+        }
+
+        if followCaret, let caretInfo = focusedCaretInfo(in: flatNodes), let fIdx = nodeByPath[caretInfo.keyPath] {
+            let caretRect = caretInfo.rect
+            for horizontal in [false, true] {
+                var curIdx = fIdx
+                var targetVIdx: Int? = nil
+                while flatNodes[curIdx].el.anchor == nil, let parent = flatNodes[curIdx].parentIndex {
+                    if flatNodes[parent].el.layout.scrollAxes.contains(horizontal ? .horizontal : .vertical) {
+                        targetVIdx = parent
+                        break
+                    }
+                    curIdx = parent
+                }
+                guard let vIdx = targetVIdx else { continue }
+                let vPath = flatNodes[vIdx].path
+                let cur = scrollOffsets[vPath] ?? .zero
+                let vpRect = flatNodes[vIdx].targetRect
+                let axisCur = Double(horizontal ? cur.x : cur.y)
+                let vpStart = Double(horizontal ? vpRect.x : vpRect.y)
+                let vpLen = Double(horizontal ? vpRect.width : vpRect.height)
+                let caretAt = Double(horizontal ? caretRect[0] : caretRect[1])
+                let caretLen = Double(horizontal ? caretRect[2] : caretRect[3])
+                let at = caretAt - vpStart + axisCur
+                let margin = Double(flatNodes[vIdx].el.scrollMarginPts)
+                let nextAxis = ScrollEdgeMath.reveal(
+                    offset: axisCur,
+                    top: at,
+                    height: caretLen,
+                    viewport: vpLen,
+                    margin: margin
+                )
+                if abs(nextAxis - axisCur) > 1e-4 {
+                    let next = horizontal ? Vec2(Float(nextAxis), cur.y) : Vec2(cur.x, Float(nextAxis))
+                    applyScrollOffset(path: vPath, next: next, glide: nil)
+                }
             }
         }
 

@@ -60,9 +60,18 @@ public enum RuneApp {
 
     @MainActor
     public static func run<State>(_ app: App<State>, arguments: [String]? = nil) throws {
-        let parsed = (arguments ?? app.runOptions.arguments).map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
+        let effectiveArgs = arguments ?? app.runOptions.arguments
+        let parsed = effectiveArgs.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
         if parsed.isHeadlessRequested {
             _ = try HeadlessRunner.run(app, args: parsed)
+            return
+        }
+        if !app.childWindows.isEmpty {
+            var rootApp = app
+            rootApp.childWindows = []
+            var rootSpec = AppWindowSpec.fromApp("main", rootApp)
+            rootSpec.childWindows = app.childWindows
+            try RuneMultiWindow.runWindows([rootSpec.boxed()], options: app.runOptions, arguments: effectiveArgs)
             return
         }
 

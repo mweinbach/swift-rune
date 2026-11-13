@@ -750,6 +750,7 @@ public final class Runtime<State> {
     internal var pendingScrollPages: [(key: String, pages: Int)] = []
     internal var pendingScrollOffsets: [ScrollOffsetRequest] = []
     internal var pendingKeepOnScreenKeys: [String] = []
+    internal var pendingCaretFollow: Bool = false
     internal var scrollRequestsState = ScrollRequestsState()
     internal var scrollGlidingPaths: Set<String> = []
     internal var directScrolledPaths: Set<String> = []
@@ -786,6 +787,8 @@ public final class Runtime<State> {
     internal var loopRuntime = LoopRuntime()
     internal var loopClock = LoopClock()
     internal var elSliceRenderState = ElSliceRenderState()
+    internal var wordRevealStore = WordRevealStore()
+    private var timeScaledNodeIds: Set<NodeId> = []
     internal var selectionState = RuntimeSelectionState()
     public var assistiveTechnology: Bool = false
     public var isTracing: Bool = false {
@@ -844,7 +847,7 @@ public final class Runtime<State> {
     private var pendingLaunches: [PendingFlightRequest] = []
     private var pendingUnclippedFlights: Bool = false
     internal var activeTextFlights: [ActiveTextFlight] = []
-    private var lastViewReadScroll: Bool = false
+    internal var lastViewReadScroll: Bool = false
     private struct FocusReturnEntry {
         var ownerPath: String
         var returnPath: String?
@@ -966,6 +969,9 @@ public final class Runtime<State> {
     internal var resizeReadMovedFlag: Bool = false
     internal var hasActiveExitingNodes: Bool = false
     internal var cachedResizeBuild: ResizeCachedViewBuild<State>? = nil
+    internal var virtualSelectionSources: [String: VirtualSelectionSource] = [:]
+    internal var lastViewMemoEnvHash: UInt64 = MemoScope.currentEnvironmentHash()
+    internal var lastViewOnlyMemoIds: Set<String> = []
 
     public init(
         state: State,
@@ -1661,6 +1667,9 @@ public final class Runtime<State> {
         refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
         let frameOut = scene.frame(at: animNow)
         landGroupFadesAfterFrame()
+        wordRevealStore.tick { [scene, animNow] id in
+            scene.store.nodeTimeScale(id) != 1.0 ? scene.store.nodeTime(id) : animNow
+        }
         let liveActive: Bool
         if liveVisible {
             liveActive = updateLiveBindings(at: animNow)
@@ -1685,6 +1694,7 @@ public final class Runtime<State> {
             activeTextFlights = kept
         }
 
+        let activeWordReveals = wordRevealStore.hasActiveFades { scene.store.nodeTimeScale($0) }
         let rawAnimating = frameOut.isAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
@@ -1699,11 +1709,12 @@ public final class Runtime<State> {
             || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
             || hasMovingScaleSettle
+            || activeWordReveals
         var sources: UInt32 = 0
         if frameOut.isAnimating { sources |= AnimSource.tracks }
         if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
-        if !enterDelays.isEmpty { sources |= AnimSource.reveal }
+        if !enterDelays.isEmpty || activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
         if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }
@@ -1727,13 +1738,14 @@ public final class Runtime<State> {
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
         launchedFlightIds = launchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
         unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
+        enterDelays = enterDelays.filter { activeIds.contains($0.key) }
 
         return (frameOut, animNow)
     }
 
     // MARK: - View Commit, Reconciliation & Layout
 
-    private func currentMemoGeometry(nodes: [FlatNode]? = nil) -> [String: MemoElementGeometry] {
+    internal func currentMemoGeometry(nodes: [FlatNode]? = nil) -> [String: MemoElementGeometry] {
         var caretsByKey: [String: MotionRect] = [:]
         for el in lastElements {
             if let k = el.key, let c = el.caret, c.count >= 4 {
@@ -1835,7 +1847,7 @@ public final class Runtime<State> {
         return nil
     }
 
-    private func hasScrollCallbacks() -> Bool {
+    internal func hasScrollCallbacks() -> Bool {
         flatNodes.contains {
             $0.el.handlers.onAtBottom != nil
                 || $0.el.handlers.onFarFromBottom != nil
@@ -2035,17 +2047,21 @@ public final class Runtime<State> {
             chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)],
             scrollerOverlay: cxSettings.scrollBarsState.isOverlay
         )
+        lastViewMemoEnvHash = envHash
+        let viewTouchedBox = MemoScope.TouchedIdsBox()
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
-            MemoScope.enter(
+            MemoScope.enterCollectingTouched(
                 cache: memo,
                 envHash: envHash,
-                geometry: currentMemoGeometry(nodes: memoNodes)
+                geometry: currentMemoGeometry(nodes: memoNodes),
+                touchedIdsOut: viewTouchedBox
             ) {
                 measureFramePhase(.view) {
                     buildPlaygroundViewIfAttached(cx: &cx)
                 }
             }
         }
+        lastViewOnlyMemoIds = viewTouchedBox.ids
         cxSettings.viewDefaults = cx.envState.defaults
         let passHelpLook = cx.helpLook ?? cx.envState.defaults.help
         cxSettings.captionColor = cx.envState.captionColor
@@ -2153,6 +2169,8 @@ public final class Runtime<State> {
     internal func buildMeasureResult(
         rootEl: El<State>,
         expandedContextOverride: VirtualExpansionContext? = nil,
+        remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
+        memoGeometryOverride: [String: MemoElementGeometry]? = nil,
         passHelpLook: HelpLook?,
         collector: LayoutReadCollector,
         at now: Double,
@@ -2172,7 +2190,13 @@ public final class Runtime<State> {
         if let override = expandedContextOverride {
             (expandedRoot, virtualExpansion) = (rootEl, override)
         } else {
-            (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
+            (expandedRoot, virtualExpansion) = expandVirtualSubtrees(
+                in: rootEl,
+                remountRowCache: remountRowCache,
+                memoGeometry: memoGeometryOverride ?? currentMemoGeometry(),
+                memoEnvHash: lastViewMemoEnvHash,
+                memoPass: memo.currentPass
+            )
         }
         var layoutRoot = expandedRoot
         var solvedRoot = measureFramePhase(.layout) {
@@ -2994,6 +3018,32 @@ public final class Runtime<State> {
             ? nextCommitKind()
             : .rebuild
 
+        if plannedKind == .remount,
+           let remountPass = tryVirtualRemountPass(
+               at: now,
+               cut: cut,
+               commitKind: commitKind,
+               commitMotion: commitMotion,
+               commitColorSpring: commitColorSpring,
+               commitCut: commitCut,
+               prevMountedIds: prevMountedIds
+           ) {
+            applyMeasurePass(
+                remountPass,
+                at: now,
+                cut: cut,
+                settlePass: settlePass,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitFollowEdge: commitFollowEdge,
+                commitCut: commitCut,
+                prevMountedIds: prevMountedIds,
+                didRunView: &didRunView
+            )
+            return
+        }
+
         if plannedKind == .relayout,
            let relayoutPass = tryRelayoutPass(
                at: now,
@@ -3092,6 +3142,9 @@ public final class Runtime<State> {
             viewport: viewport,
             viewportRead: pass.viewportRead
         )
+        cachedResizeBuild?.memoEnvHash = lastViewMemoEnvHash
+        cachedResizeBuild?.viewOnlyMemoIds = lastViewOnlyMemoIds
+        cachedResizeBuild?.virtualRowCache = pass.virtualExpansion.builtVirtualRows
         stateUnchangedSinceBuild = true
         pendingResizeRelayout = false
         pendingGrowthRelayout = false
@@ -3150,6 +3203,7 @@ public final class Runtime<State> {
         layoutSeen.rects = finalSeen
 
         viewHelpLook = pass.helpLook
+        virtualSelectionSources = pass.virtualExpansion.selectionSources
         if let bg = pass.rootBackground {
             clearColor = bg
         }
@@ -3564,6 +3618,38 @@ public final class Runtime<State> {
                 resolvedNS[i] = ns
                 scene.traceName(n.nodeId, n.el.traceNameValue ?? n.key)
                 scene.traceNamespace(n.nodeId, ns)
+            }
+        }
+        let nodeTimeScales = ShellSliceRenderHelpers.propagateTimeScales(
+            nodes: pass.nodes,
+            scene: &scene,
+            trackedIds: &timeScaledNodeIds,
+            wordRevealStore: &wordRevealStore
+        )
+        let commitScaledNow = cxSettings.scaledTime(at: now)
+        let revealEntries: [WordRevealCommitEntry] = pass.nodes.indices.compactMap { i in
+            let n = pass.nodes[i]
+            guard let fade = n.el.elRevealWordFade else { return nil }
+            let txt = n.el.liveText?.get()
+                ?? n.el.plainText
+                ?? n.el.richSpans?.map(\.text).joined()
+                ?? ""
+            let nodeScale = i < nodeTimeScales.count ? nodeTimeScales[i] : 1.0
+            let isScaled = nodeScale != 1.0
+            let t = isScaled ? scene.store.nodeTime(n.nodeId) : commitScaledNow
+            return WordRevealCommitEntry(id: n.nodeId, text: txt, fade: fade, nodeTime: t, timeScaled: isScaled)
+        }
+        if !revealEntries.isEmpty || !wordRevealStore.phases.isEmpty {
+            let retainIds = Set(pass.nodes.map(\.nodeId)).union(exitingSnapshots.keys)
+            wordRevealStore.commit(
+                entries: revealEntries,
+                retainIds: retainIds,
+                prevMountedIds: prevMountedIds,
+                cut: commitCut,
+                reducedMotion: reducedMotion
+            )
+            if wordRevealStore.hasActiveFades(timeScaleOf: { scene.store.nodeTimeScale($0) }) {
+                isAnimating = true
             }
         }
         for item in pendingBorderBottoms {
@@ -4421,6 +4507,7 @@ public final class Runtime<State> {
     }
 
     private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
+        let startShapedCount = textSystem.shapedCallCount
         textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
         var glyphPageEntries: [(index: Int, page: UInt16)] = []
         var usedGlyphMask: UInt32 = 0
@@ -4466,7 +4553,8 @@ public final class Runtime<State> {
             var hasLiveTransform = false
             var hasLiveSpatialSpring = false
 
-            if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: currentTime) {
+            let loopWall = scene.store.nodeTimeScale(p.id) != 1.0 ? scene.store.nodeTime(p.id) : currentTime
+            if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: loopWall) {
                 op *= ls.opacity
                 rot += ls.rotation
             }
@@ -5107,7 +5195,17 @@ public final class Runtime<State> {
             }()
 
             let totalShapePieces = el.shapes.reduce(0) { $0 + $1.pieceCount }
-            let useLayer = (blurPt >= 0.5) || el.isolatedLayer || (alpha > 0.001 && alpha < 1.0 && totalShapePieces > 1)
+            let layerOp = el.elLayerOpacity
+            let paintAlphaTotal = (alpha * layerOp).clamped(to: 0...1)
+            let hasChildren = !(childrenByParent[p.id]?.isEmpty ?? true)
+            let ownPaints = ShellSliceRenderHelpers.countOwnPaints(
+                el,
+                hasText: paintedLabelValue != nil || el.richSpans != nil,
+                totalShapePieces: totalShapePieces
+            )
+            let useLayer = (blurPt >= 0.5)
+                || el.isolatedLayer
+                || (paintAlphaTotal > 0.001 && paintAlphaTotal < 0.999 && (totalShapePieces > 1 || (layerOp < 0.999 && (hasChildren || ownPaints >= 2))))
             let devClip = SIMD4<Float>(
                 visClip.left * pxScale,
                 visClip.top * pxScale,
@@ -5206,13 +5304,13 @@ public final class Runtime<State> {
                 if useLayer {
                     primitives.append(.layerBegin(
                         rect: devRect,
-                        opacity: alpha,
+                        opacity: paintAlphaTotal,
                         blurRadius: blurPt * pxScale,
                         clip: devClip,
                         turn: effRotate
                     ))
                 }
-                let localAlpha: Float = useLayer ? 1.0 : alpha
+                let localAlpha: Float = ((useLayer ? 1.0 : paintAlphaTotal) * el.elPaintAlpha).clamped(to: 0...1)
 
                 // 0. Backdrop blur if requested
                 if el.backdropBlur >= 0.5 {
@@ -5616,11 +5714,32 @@ public final class Runtime<State> {
                 if let grid = el.terminalGridPayload {
                     let gPadL = el.layout.padding.left * scaleVec.x
                     let gPadT = el.layout.padding.top * scaleVec.y
+                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                    if abs(scaleVec.x - 1.0) < 1e-4 && abs(scaleVec.y - 1.0) < 1e-4 {
+                        let padLx = gPadL * pxScale
+                        let padTy = gPadT * pxScale
+                        let gridDevRect = SIMD4<Float>(devRect.x + padLx, devRect.y + padTy, max(0, devRect.z - padLx), max(0, devRect.w - padTy))
+                        let gridExact = SIMD4<Float>(rExact.x + padLx, rExact.y + padTy, rExact.z, rExact.w)
+                        var gridGlyphCount = 0
+                        paintTerminalGrid(
+                            grid,
+                            devRect: gridDevRect,
+                            exactRectPx: gridExact,
+                            devClip: devClip,
+                            localAlpha: localAlpha,
+                            defaultColor: defaultGridColor,
+                            effRotate: effRotate,
+                            useLayer: useLayer,
+                            primitives: &primitives,
+                            glyphPageEntries: &glyphPageEntries,
+                            usedGlyphMask: &usedGlyphMask,
+                            glyphCount: &gridGlyphCount
+                        )
+                    } else {
                     let baseX = rect.x + gPadL
                     let baseY = rect.y + gPadT
                     let cellW = grid.cellSize.x * scaleVec.x
                     let cellH = grid.cellSize.y * scaleVec.y
-                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
                     for (rowIdx, row) in grid.rows.enumerated() {
                         let rowY = baseY + Float(rowIdx) * cellH
                         for fill in row.fills {
@@ -5728,6 +5847,7 @@ public final class Runtime<State> {
                                 }
                             }
                         }
+                    }
                     }
                 }
 
@@ -6025,9 +6145,36 @@ public final class Runtime<State> {
                         srgbBlend: srgbBlend,
                         devClip: devClip,
                         rot: useLayer ? 0 : effRotate,
+                        spanRadius: el.elSpanRadius,
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
+                    if !el.elStrikes.isEmpty, let txt = paintedLabelValue {
+                        let strikeQuads = ShellSliceRenderHelpers.strikeQuads(
+                            strikes: el.elStrikes,
+                            richSpans: el.richSpans,
+                            text: txt,
+                            shaped: shaped,
+                            textSystem: textSystem,
+                            styleSize: el.textStyle.size,
+                            defaultTextColor: defaultTextColor,
+                            textOriginX: textOriginX,
+                            textOriginY: textOriginY,
+                            scaleVec: scaleVec,
+                            pxScale: pxScale,
+                            localAlpha: localAlpha,
+                            srgbBlend: srgbBlend
+                        )
+                        for sq in strikeQuads {
+                            primitives.append(attachFade(.roundedRect(
+                                rect: sq.rect,
+                                radii: .zero,
+                                fill: sq.color,
+                                clip: devClip,
+                                turn: useLayer ? 0 : effRotate
+                            )))
+                        }
+                    }
                     var highlightInks: [TextLinkInkRange] = []
                     var combinedHighlights = el.textHighlights ?? []
                     let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
@@ -6108,8 +6255,22 @@ public final class Runtime<State> {
                                 turn: useLayer ? 0 : effRotate
                             ))
                         }
+                        let revealClock = scene.store.nodeTimeScale(p.id) != 1.0 ? scene.store.nodeTime(p.id) : lastScaledAnimNow
+                        let wordFadeMask = (el.elRevealWordFade != nil)
+                            ? wordRevealStore.mask(
+                                for: p.id,
+                                text: paintedLabelValue ?? "",
+                                shaped: shaped,
+                                textSystem: textSystem,
+                                pixelScale: pxScale,
+                                now: revealClock
+                            )
+                            : nil
                         for g in shaped.glyphs {
-                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
+                            let effGlyphAlpha = glyphAlpha * wordAlpha
+                            if effGlyphAlpha <= 0.0005 { continue }
+                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
@@ -6138,7 +6299,8 @@ public final class Runtime<State> {
                     }
                 }
 
-                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput)
+                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput), else El.outline
+                let primsBeforeFocus = primitives.count
                 if !hasActiveTextLinks(el) {
                     emitFocusRingIfNeeded(
                         el: el,
@@ -6156,6 +6318,26 @@ public final class Runtime<State> {
                         devH: devH,
                         into: &primitives
                     )
+                }
+                if primitives.count == primsBeforeFocus, let ol = el.elOutline, localAlpha > 0.0005 {
+                    let avgOutlineScale = (scaleVec.x + scaleVec.y) * 0.5
+                    if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
+                        outline: ol,
+                        devRect: devRect,
+                        devRadii: devRadii,
+                        pxScale: pxScale,
+                        avgScale: avgOutlineScale
+                    ) {
+                        primitives.append(attachFade(.roundedRect(
+                            rect: og.rect,
+                            radii: og.radii,
+                            fill: .zero,
+                            borderColor: ol.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderWidth: og.widthPx,
+                            clip: devClip,
+                            turn: useLayer ? 0 : effRotate
+                        )))
+                    }
                 }
             }
 
@@ -6391,7 +6573,7 @@ public final class Runtime<State> {
                 ))
             }
 
-            let childAncestorOp: Float = (shouldEmit && useLayer) ? 1.0 : alpha
+            let childAncestorOp: Float = ((shouldEmit && useLayer) ? 1.0 : paintAlphaTotal).clamped(to: 0...1)
             let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
             let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
                 ? isGroupHovered(snap)
@@ -6764,6 +6946,10 @@ public final class Runtime<State> {
                 primitives[item.index].uv.w = (primitives[item.index].uv.w + p) / pagesF
             }
         }
+
+        let totalGlyphs = primitives.count(where: { $0.kind == .glyph })
+        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- startShapedCount))
+        FrameStatsSidecar.set(self, glyphs: totalGlyphs, shaped: shapedDelta)
 
         return RefScene(
             width: devW,
@@ -7761,7 +7947,7 @@ public final class Runtime<State> {
                     if scrollRequiresCommit {
                         directScrolledPaths.insert(path)
                         pendingCommitKind = pendingCommitKind.instant()
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, external: false)
                     } else {
                         directScrolledPaths.remove(path)
                         updateScrollPositions(at: now)
@@ -8069,6 +8255,7 @@ public final class Runtime<State> {
                     break
                 case .navigation:
                     editLens.set(&state, edit)
+                    pendingCaretFollow = true
                     dirtyCommit(at: now)
                     return true
                 case .modified:
@@ -9385,6 +9572,7 @@ public final class Runtime<State> {
                 break
             case .navigation:
                 editLens.set(&state, edit)
+                pendingCaretFollow = true
                 dirtyCommit(at: t)
                 handledByEdit = true
             case .modified:
@@ -9606,9 +9794,12 @@ public final class Runtime<State> {
         at now: Double
     ) {
         editLens.set(&state, newEdit)
+        pendingCaretFollow = true
         var tx = makeTx(at: now)
         if !el.animateEditLayoutEnabled {
             tx.instant()
+        } else if tx.motionSource == nil && !tx.commitKind.snaps && el.layoutAnim == nil {
+            tx.motionSource = .spring(el.styleSpring ?? MotionTokens.DEFAULT)
         }
         // Non-key callbacks (`onInputChange`) never inherit the key handler's physical key (`physical.rs:499`).
         tx.physicalKeyValue = nil

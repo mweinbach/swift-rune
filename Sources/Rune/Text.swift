@@ -2247,11 +2247,24 @@ public final class TextSystem: @unchecked Sendable {
     private var elisionCache: [ElisionKey: CachedElision] = [:]
     internal private(set) var measureMissCount: Int = 0
     internal private(set) var shapeMissCount: Int = 0
+    private var shapeCallCounter: UInt64 = 0
 
     internal var cachedElisionCount: Int {
         lock.lock()
         defer { lock.unlock() }
         return elisionCache.count
+    }
+
+    public var shapedCallCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return shapeCallCounter
+    }
+
+    internal func recordShapeCall() {
+        lock.lock()
+        shapeCallCounter &+= 1
+        lock.unlock()
     }
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
@@ -3120,6 +3133,7 @@ public final class TextSystem: @unchecked Sendable {
                 lineStrings: [(0, "", 0, 0, nil)]
             )
         }
+        recordShapeCall()
 
         let (shapedText, initialMarkerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
         var markerMap = initialMarkerMap
@@ -4248,6 +4262,7 @@ public final class TextSystem: @unchecked Sendable {
                 portableLines: [(0, "", 0, 0, [0])]
             )
         }
+        recordShapeCall()
 
         // Map contiguous span UTF-8 byte ranges for per-character attributes.
         var spanEntries: [(utf8Range: Range<Int>, span: TextSpan)] = []

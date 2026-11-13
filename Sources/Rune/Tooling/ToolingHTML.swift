@@ -130,11 +130,9 @@ public extension El {
         return copy
     }
 
-    /// Allows wrapping anywhere inside long tokens (`overflow-wrap: anywhere` in HTML/CSS).
+    /// Allows wrapping anywhere inside long tokens (`overflow-wrap: anywhere` in HTML/CSS & native text).
     func wrapAnywhere(_ enabled: Bool = true) -> Self {
-        var copy = self
-        copy.runtimeExtras["htmlWrapAnywhere"] = enabled
-        return copy
+        applyWrapAnywhere(enabled)
     }
 
     /// Sets justified text alignment for static HTML export (`text-align: justify`).

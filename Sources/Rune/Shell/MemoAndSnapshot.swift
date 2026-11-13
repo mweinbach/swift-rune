@@ -152,7 +152,10 @@ enum MemoRegionWarningsStore {
 
     static func recordIfMismatch<State>(id: String, reused: El<State>, rebuild: () -> El<State>) {
         #if DEBUG
-        let fresh = rebuild()
+        var fresh = rebuild()
+        if !id.hasPrefix("cached:") && fresh.keyId == nil {
+            fresh = fresh.key(id)
+        }
         var a: [String] = []
         var b: [String] = []
         describeTree(reused, parent: "", into: &a)
@@ -216,6 +219,7 @@ final class MemoBuildScope: @unchecked Sendable {
     var readFrames: [[MemoRead]] = []
     var topLevelReads: [MemoRead] = []
     var nestedFrames: [[String]] = []
+    var allTouchedScopedIds: Set<String> = []
     var regionWarnings: [String] = []
     var isVerificationDryRun: Bool = false
 
@@ -286,6 +290,10 @@ public enum MemoScope {
         )
     }
 
+    final class TouchedIdsBox {
+        var ids: Set<String> = []
+    }
+
     /// Runs `body` inside an active `MemoScope` backed by `cache`.
     public static func enter<R>(
         cache: MemoCache,
@@ -300,6 +308,43 @@ public enum MemoScope {
             lastWarningsLock.lock()
             lastWarnings = scope.regionWarnings
             lastWarningsLock.unlock()
+        }
+        return try $current.withValue(scope, operation: body)
+    }
+
+    static func enterCollectingTouched<R>(
+        cache: MemoCache,
+        envHash: UInt64,
+        geometry: [String: MemoElementGeometry] = [:],
+        touchedIdsOut: TouchedIdsBox,
+        _ body: () throws -> R
+    ) rethrows -> R {
+        let pass = cache.advancePass()
+        let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: geometry, pass: pass)
+        defer {
+            cache.setViewReads(scope.topLevelReads, pass: pass)
+            lastWarningsLock.lock()
+            lastWarnings = scope.regionWarnings
+            lastWarningsLock.unlock()
+            touchedIdsOut.ids = scope.allTouchedScopedIds
+        }
+        return try $current.withValue(scope, operation: body)
+    }
+
+    /// Runs `body` inside an active `MemoScope` backed by `cache` reusing `pass` without advancing `passCounter`.
+    static func enterVirtualRow<R>(
+        cache: MemoCache,
+        envHash: UInt64,
+        geometry: [String: MemoElementGeometry] = [:],
+        pass: UInt64,
+        touchedIdsOut: TouchedIdsBox? = nil,
+        _ body: () throws -> R
+    ) rethrows -> R {
+        let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: geometry, pass: pass)
+        defer {
+            if let touchedIdsOut {
+                touchedIdsOut.ids = scope.allTouchedScopedIds
+            }
         }
         return try $current.withValue(scope, operation: body)
     }

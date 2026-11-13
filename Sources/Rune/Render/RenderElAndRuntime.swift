@@ -638,6 +638,7 @@ extension Runtime {
         var instances: [RenderInstance] = []
         var marks: [UInt32] = []
         var newSurfaces: [SurfaceDraw] = []
+        var currentInheritedMark: UInt32 = 0
         var materials: [MaterialDraw] = []
 
         // Normalized-to-texel fixups applied once glyph/image atlases reach final size
@@ -1082,7 +1083,10 @@ extension Runtime {
                 && inFade(boundsClipPx, clip: scopeClipRect, width: mergedFadeWidth, origin: mergedFadeOrigin)
                 && (ownPaintsCount >= 2 || (ownPaintsCount == 1 && hasChildren))
 
-            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasCutout || isDissolveScope || parentIsDissolve || opacityNeedsLayer || fadeNeedsLayer
+            let layerOp = el.elLayerOpacity
+            let paintEffOpacity = (effOpacity * layerOp).clamped(to: 0...1)
+            let layerOpacityNeedsLayer = paintEffOpacity > 0.001 && paintEffOpacity < 0.999 && layerOp < 0.999 && (hasChildren || ownPaintsCount >= 2)
+            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasCutout || isDissolveScope || parentIsDissolve || opacityNeedsLayer || fadeNeedsLayer || layerOpacityNeedsLayer
             let extraClipLayer = needsLayer && hasClipScope && hasRoundedClip && combinedClipPx != boundsClipPx && parentClip.clipPx != NO_CLIP
 
             let nextChildClip: RenderClipState
@@ -1140,7 +1144,9 @@ extension Runtime {
             let imageFixupStartIdx = imageFixups.count
             let activeClip = needsLayer ? NO_CLIP : scopeClipRect
             let activeFade = needsLayer ? SIMD4<UInt32>.zero : scopeBaseFade
-            let localOpacity = needsLayer ? 1.0 : effOpacity
+            let rawLocalOpacity = needsLayer ? 1.0 : paintEffOpacity
+            let localOpacity = (rawLocalOpacity * el.elPaintAlpha).clamped(to: 0...1)
+            let markStartIdx = marks.count
 
             if needsLayer {
                 if extraClipLayer {
@@ -1174,7 +1180,7 @@ extension Runtime {
                 var scopeInst = RenderInstance.beginLayer(
                     bounds: rectPx,
                     clip: layerClip,
-                    spec: LayerSpec(opacity: effOpacity, blend: isDissolveScope ? .plusLighter : .sourceOver, blur: effBlur * scale, clipRadius: 0)
+                    spec: LayerSpec(opacity: paintEffOpacity, blend: isDissolveScope ? .plusLighter : .sourceOver, blur: effBlur * scale, clipRadius: 0)
                 )
                 scopeInst.fade = layerFade
                 if let hole = clipSpec?.cutoutCircle {
@@ -1225,7 +1231,7 @@ extension Runtime {
                         ),
                         radius: rPx,
                         continuous: isContinuous,
-                        opacity: effOpacity
+                        opacity: paintEffOpacity * el.elPaintAlpha
                     )
                     materials.append(matDraw)
                     nativeMaterialHole = isContinuous ? -rPx : rPx
@@ -1980,12 +1986,119 @@ extension Runtime {
                     }
                 }
                 let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
+                for (bgRect, bgColor) in shaped.backgrounds {
+                    let c = premulSIMD4(bgColor, opacity: localOpacity, srgb: srgbBlend)
+                    if c.w <= 0.0005 { continue }
+                    let r = min(max(0, el.elSpanRadius), bgRect.w * 0.5) * scale
+                    instances.append(RenderInstance(
+                        rect: SIMD4<Float>((textLeft + bgRect.x) * scale, (textTop + bgRect.y) * scale, bgRect.z * scale, bgRect.w * scale),
+                        radii: SIMD4<Float>(repeating: r),
+                        fill: c,
+                        border: .zero,
+                        params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+                        uv: .zero,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                }
+                var combinedHighlights = el.textHighlights ?? []
+                let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
+                if !ringHls.isEmpty {
+                    combinedHighlights.append(contentsOf: ringHls)
+                }
+                if !combinedHighlights.isEmpty && !resolvedText.displayedText.isEmpty {
+                    let quads = TextHighlightPainter.quads(
+                        highlights: combinedHighlights,
+                        in: resolvedText.displayedText,
+                        shaped: shaped,
+                        textSystem: textSystem,
+                        pixelScale: scale,
+                        origin: .zero
+                    )
+                    for q in quads {
+                        let hlRect = SIMD4<Float>(
+                            textLeft * scale + q.rect.x,
+                            textTop * scale + q.rect.y,
+                            q.rect.z,
+                            q.rect.w
+                        )
+                        let hlRadii = SIMD4<Float>(repeating: q.cornerRadius)
+                        let bgColor = premulSIMD4(q.bg, opacity: localOpacity, srgb: srgbBlend)
+                        if bgColor.w > 0.0005 {
+                            instances.append(RenderInstance(
+                                rect: hlRect,
+                                radii: hlRadii,
+                                fill: bgColor,
+                                border: .zero,
+                                params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+                                uv: .zero,
+                                clip: activeClip,
+                                fade: activeFade
+                            ))
+                            marks.append(0)
+                        }
+                        if let ring = q.ring, ring.width > 0 {
+                            let ringColor = premulSIMD4(ring.color, opacity: localOpacity, srgb: srgbBlend)
+                            if ringColor.w > 0.0005 {
+                                instances.append(RenderInstance(
+                                    rect: hlRect,
+                                    radii: hlRadii,
+                                    fill: .zero,
+                                    border: ringColor,
+                                    params: SIMD4<Float>(ring.width * scale, KIND_RECT, 0, 1.0),
+                                    uv: .zero,
+                                    clip: activeClip,
+                                    fade: activeFade
+                                ))
+                                marks.append(0)
+                            }
+                        }
+                    }
+                }
+                if !el.elStrikes.isEmpty {
+                    let strikeQuads = ShellSliceRenderHelpers.strikeQuads(
+                        strikes: el.elStrikes,
+                        richSpans: el.richSpans,
+                        text: resolvedText.displayedText,
+                        shaped: shaped,
+                        textSystem: textSystem,
+                        styleSize: el.textStyle.size,
+                        defaultTextColor: defaultTextColor,
+                        textOriginX: textLeft,
+                        textOriginY: textTop,
+                        scaleVec: Vec2(1, 1),
+                        pxScale: scale,
+                        localAlpha: localOpacity,
+                        srgbBlend: srgbBlend
+                    )
+                    for sq in strikeQuads {
+                        instances.append(RenderInstance(
+                            rect: sq.rect,
+                            radii: .zero,
+                            fill: sq.color,
+                            border: .zero,
+                            params: SIMD4<Float>(0, KIND_RECT, 0, 1.0),
+                            uv: .zero,
+                            clip: activeClip,
+                            fade: activeFade
+                        ))
+                        marks.append(0)
+                    }
+                }
+                let revealClock = scene.store.nodeTimeScale(nid) != 1.0 ? scene.store.nodeTime(nid) : lastScaledAnimNow
+                let wordFadeMask = (el.elRevealWordFade != nil)
+                    ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
+                    : nil
                 for gq in shaped.glyphs {
+                    let wordAlpha = wordFadeMask?.alpha(for: gq) ?? 1.0
+                    let gAlpha = localOpacity * wordAlpha
+                    if gAlpha <= 0.0005 { continue }
                     let gx = (textLeft + gq.rect.x * sc.x) * scale
                     let gy = (textTop + gq.rect.y * sc.y) * scale
                     let gw = max(1.0, gq.rect.z * sc.x * scale)
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
-                    let gcol = premulSIMD4(gq.color ?? defaultTextColor, opacity: localOpacity, srgb: srgbBlend)
+                    let gcol = premulSIMD4(gq.color ?? defaultTextColor, opacity: gAlpha, srgb: srgbBlend)
                     let idx = instances.count
                     instances.append(RenderInstance(
                         rect: SIMD4<Float>(gx, gy, gw, gh),
@@ -2001,8 +2114,36 @@ extension Runtime {
                     glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
                 }
             }
+            let hasFocusRingOverride = !isExiting && !effInert && !el.noFocusRing && (focusedPath == node.path) && focusVisible && (el.focusRingColor != nil || el.focusable)
+            if !hasFocusRingOverride, let ol = el.elOutline, localOpacity > 0.0005 {
+                let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
+                if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
+                    outline: ol,
+                    devRect: rectPx,
+                    devRadii: radiiPx,
+                    pxScale: scale,
+                    avgScale: avgScale
+                ) {
+                    instances.append(RenderInstance(
+                        rect: og.rect,
+                        radii: og.radii,
+                        fill: .zero,
+                        border: premulSIMD4(ol.color, opacity: localOpacity, srgb: srgbBlend),
+                        params: SIMD4<Float>(og.widthPx, KIND_RECT, 0, 1.0),
+                        uv: .zero,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                }
+            }
+            if currentInheritedMark != 0, markStartIdx < marks.count {
+                for mIdx in markStartIdx..<marks.count where marks[mIdx] == 0 {
+                    marks[mIdx] = currentInheritedMark
+                }
+            }
 
-            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion)
+            return (true, subtreeDynamic, paintEffOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion)
         }
 
         @inline(never)
@@ -2027,7 +2168,7 @@ extension Runtime {
             let focused = (node.key != nil && focusedKey == node.key)
             let activeClip = needsLayer ? NO_CLIP : parentClip.clipPx
             let activeFade = needsLayer ? SIMD4<UInt32>.zero : parentClip.fade
-            let localOpacity = needsLayer ? 1.0 : effOpacity
+            let localOpacity = ((needsLayer ? 1.0 : effOpacity) * el.elPaintAlpha).clamped(to: 0...1)
 
             // 13. Focus ring
             if focused && focusVisible {
@@ -2109,6 +2250,10 @@ extension Runtime {
             parentIsDissolve: Bool = false,
             parentScaleMotion: PaintScaleMotion = .still
         ) -> Bool {
+            let savedMark = currentInheritedMark
+            let activeNodeMark = node.el.elMark ?? savedMark
+            currentInheritedMark = activeNodeMark
+            defer { currentInheritedMark = savedMark }
             let h = paintNodeHeader(
                 node,
                 parentClip: parentClip,
@@ -2121,7 +2266,7 @@ extension Runtime {
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
-            let childOpacity = h.needsLayer ? 1.0 : h.effOpacity
+            let childOpacity = (h.needsLayer ? 1.0 : h.effOpacity).clamped(to: 0...1)
             for child in childrenByParent[node.index] ?? [] {
                 if paintSubtree(
                     child,
