@@ -733,6 +733,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         metalLayer.framebufferOnly = false
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.layer = metalLayer
+        MacOSMetalLayerSurface.pinContentsTopLeft(metalLayer)
         registerForDraggedTypes(MacOSDropReader.draggedTypes)
     }
 

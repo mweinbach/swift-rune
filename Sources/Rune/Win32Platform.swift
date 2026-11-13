@@ -87,7 +87,12 @@ public enum Win32KeyMap {
         case 0x26: return .arrowUp     // VK_UP
         case 0x27: return .arrowRight  // VK_RIGHT
         case 0x28: return .arrowDown   // VK_DOWN
+        case 0x2C: return .printScreen // VK_SNAPSHOT
+        case 0x2D: return .insert      // VK_INSERT
         case 0x2E: return .delete      // VK_DELETE
+        case 0x5D: return .contextMenu // VK_APPS
+        case 0x13: return .pause       // VK_PAUSE
+        case 0x91: return .scrollLock  // VK_SCROLL
         case 0x70...0x87:              // VK_F1..VK_F24
             return .f(UInt8(vk - 0x70 + 1))
         case 0x30...0x39:              // '0'..'9'

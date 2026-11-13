@@ -237,24 +237,40 @@ public enum PortalAppearance {
 
 /// Translates X11 keysyms (`XK_*`) and Linux evdev keycodes into `Rune.Key`.
 public enum LinuxKeyMap {
+    /// Named key mapping matching Wayland / layer-shell `named_keysym` (`platform/layer_shell.rs`).
+    public static func namedKeysym(_ symbol: UInt32) -> Key? {
+        switch symbol {
+        case 0xFF08: return .backspace      // XK_BackSpace
+        case 0xFF09: return .tab            // XK_Tab
+        case 0xFF0D, 0xFF8D: return .enter  // XK_Return, XK_KP_Enter
+        case 0xFF1B: return .escape         // XK_Escape
+        case 0xFF50: return .home           // XK_Home
+        case 0xFF51: return .arrowLeft      // XK_Left
+        case 0xFF52: return .arrowUp        // XK_Up
+        case 0xFF53: return .arrowRight     // XK_Right
+        case 0xFF54: return .arrowDown      // XK_Down
+        case 0xFF55: return .pageUp         // XK_Page_Up
+        case 0xFF56: return .pageDown       // XK_Page_Down
+        case 0xFF57: return .end            // XK_End
+        case 0xFFFF: return .delete         // XK_Delete
+        case 0xFF67: return .contextMenu    // XK_Menu
+        case 0xFF63: return .insert         // XK_Insert
+        case 0xFF61, 0xFF15: return .printScreen // XK_Print, XK_Sys_Req
+        case 0xFF14: return .scrollLock     // XK_Scroll_Lock
+        case 0xFF13, 0xFF6B: return .pause  // XK_Pause, XK_Break
+        case 0xFFBE...0xFFD5:               // XK_F1..XK_F24
+            return .f(UInt8(symbol - 0xFFBE + 1))
+        default:
+            return nil
+        }
+    }
+
     public static func translate(keysym: UInt32) -> Key? {
+        if let named = namedKeysym(keysym) {
+            return named
+        }
         switch keysym {
-        case 0xFF08: return .backspace   // XK_BackSpace
-        case 0xFF09: return .tab         // XK_Tab
-        case 0xFF0D, 0xFF8D: return .enter // XK_Return, XK_KP_Enter
-        case 0xFF1B: return .escape      // XK_Escape
-        case 0xFF50: return .home        // XK_Home
-        case 0xFF51: return .arrowLeft   // XK_Left
-        case 0xFF52: return .arrowUp     // XK_Up
-        case 0xFF53: return .arrowRight  // XK_Right
-        case 0xFF54: return .arrowDown   // XK_Down
-        case 0xFF55: return .pageUp      // XK_Page_Up
-        case 0xFF56: return .pageDown    // XK_Page_Down
-        case 0xFF57: return .end         // XK_End
-        case 0xFFFF: return .delete      // XK_Delete
         case 0x0020: return .space       // XK_space
-        case 0xFFBE...0xFFD5:            // XK_F1..XK_F24
-            return .f(UInt8(keysym - 0xFFBE + 1))
         case 0x0021...0x007E:
             guard let scalar = UnicodeScalar(keysym) else { return nil }
             return .text(String(scalar))

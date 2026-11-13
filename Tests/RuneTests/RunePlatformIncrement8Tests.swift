@@ -534,18 +534,20 @@ struct RunePlatformIncrement8Tests {
         #expect(resolved1 == "Initial tip")
         #expect(owner.view(view, stringForToolTip: 0, point: .zero, userData: nil) == "")
 
-        // Re-syncing identical regions keeps tooltips stable; changing updates text.
+        // Re-syncing identical regions keeps tooltip token 1 stable; changing replaces with token 2.
         owner.sync(regions: regions1, on: view)
+        #expect(owner.view(view, stringForToolTip: 0, point: NSPoint(x: 10, y: 10), userData: UnsafeMutableRawPointer(bitPattern: 1)) == "Initial tip")
         flip = true
         rt.markNeedsCommit()
         _ = rt.frame(at: 0.1)
         let regions2 = rt.helpRegionsList()
         owner.sync(regions: regions2, on: view)
+        #expect(owner.view(view, stringForToolTip: 0, point: NSPoint(x: 10, y: 10), userData: UnsafeMutableRawPointer(bitPattern: 1)) == "")
         let resolved2 = owner.view(
             view,
             stringForToolTip: 0,
             point: NSPoint(x: 10, y: 10),
-            userData: UnsafeMutableRawPointer(bitPattern: 1)
+            userData: UnsafeMutableRawPointer(bitPattern: 2)
         )
         #expect(resolved2 == "Updated tip")
     }

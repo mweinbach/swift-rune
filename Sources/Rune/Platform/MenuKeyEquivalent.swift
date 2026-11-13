@@ -267,3 +267,49 @@ public enum NativeMenuValidator {
         return index
     }
 }
+
+extension Chord {
+    /// Logical keycaps matching menu accelerators (`Shortcut::menu_keycaps`, independent of keyboard layout).
+    public func menuKeycaps(on platform: KeyPlatform = .current) -> [String] {
+        var caps: [String] = mods(on: platform).map { mod in
+            switch (mod, platform) {
+            case (.primary, .mac), (.super, .mac): return "⌘"
+            case (.ctrl, .mac): return "⌃"
+            case (.alt, .mac): return "⌥"
+            case (.shift, .mac): return "⇧"
+            case (.primary, _), (.ctrl, _): return "Ctrl"
+            case (.alt, _): return "Alt"
+            case (.shift, _): return "Shift"
+            case (.super, .windows): return "Win"
+            case (.super, .linux): return "Super"
+            }
+        }
+        let mac = platform.isMac
+        let keyString: String
+        switch chordKey {
+        case .char(" "): keyString = "Space"
+        case .char(let c): keyString = String(c).uppercased()
+        case .enter: keyString = mac ? "↩" : "Enter"
+        case .tab: keyString = mac ? "⇥" : "Tab"
+        case .escape: keyString = mac ? "⎋" : "Esc"
+        case .backspace: keyString = mac ? "⌫" : "Backspace"
+        case .delete: keyString = mac ? "⌦" : "Delete"
+        case .insert: keyString = "Insert"
+        case .home: keyString = mac ? "↖" : "Home"
+        case .end: keyString = mac ? "↘" : "End"
+        case .pageUp: keyString = mac ? "⇞" : (platform == .linux ? "PageUp" : "Page Up")
+        case .pageDown: keyString = mac ? "⇟" : (platform == .linux ? "PageDown" : "Page Down")
+        case .arrowLeft: keyString = mac ? "←" : "Left"
+        case .arrowRight: keyString = mac ? "→" : "Right"
+        case .arrowUp: keyString = mac ? "↑" : "Up"
+        case .arrowDown: keyString = mac ? "↓" : "Down"
+        case .function(let n): keyString = "F\(n)"
+        case .contextMenu: keyString = "Menu"
+        case .printScreen: keyString = "Print Screen"
+        case .scrollLock: keyString = "Scroll Lock"
+        case .pause: keyString = "Pause"
+        }
+        caps.append(keyString)
+        return caps
+    }
+}

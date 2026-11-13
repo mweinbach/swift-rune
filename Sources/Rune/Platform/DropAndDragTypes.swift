@@ -179,6 +179,48 @@ extension DragImage {
         copy.pngData = encoded
         return copy
     }
+
+    /// Clamps `rect` (points) in device pixels `[x, y, w, h]` to `size` (`drag_out/mod.rs::crop`).
+    public static func snapshotCrop(rect: MotionRect, scale: Float, size: (UInt32, UInt32)) -> [UInt32]? {
+        let maxW = Float(size.0)
+        let maxH = Float(size.1)
+        let x0 = UInt32(max(0, min(maxW, floor(rect.x * scale))))
+        let y0 = UInt32(max(0, min(maxH, floor(rect.y * scale))))
+        let x1 = UInt32(max(0, min(maxW, ceil((rect.x + rect.width) * scale))))
+        let y1 = UInt32(max(0, min(maxH, ceil((rect.y + rect.height) * scale))))
+        guard x1 > x0, y1 > y0 else { return nil }
+        return [x0, y0, x1 - x0, y1 - y0]
+    }
+
+    /// Converts premultiplied RGBA/BGRA readback pixels to straight RGBA (`drag_out/mod.rs::to_straight_rgba`).
+    public static func toStraightRGBA(_ pixels: inout [UInt8], bgra: Bool) {
+        let count = pixels.count - (pixels.count % 4)
+        for i in stride(from: 0, to: count, by: 4) {
+            if bgra {
+                pixels.swapAt(i, i + 2)
+            }
+            let a = pixels[i + 3]
+            if a != 0 && a != 255 {
+                let alpha = UInt32(a)
+                for c in 0..<3 {
+                    let v = (UInt32(pixels[i + c]) * 255 + alpha / 2) / alpha
+                    pixels[i + c] = UInt8(min(255, v))
+                }
+            }
+        }
+    }
+
+    /// Resolves the drag image: item's custom image else `snapshot` composited over `item.backing` (`drag_out/mod.rs::picture`).
+    public static func picture(for item: DragItem, snapshot: DragImage?) -> DragImage? {
+        if let own = item.image {
+            return own
+        }
+        guard let snap = snapshot else { return nil }
+        if let backing = item.backing {
+            return snap.over(backing) ?? snap
+        }
+        return snap
+    }
 }
 
 // MARK: - Popup Menu Types (popup_menu/mod.rs & runtime/input/popup.rs)

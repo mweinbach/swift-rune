@@ -38,7 +38,7 @@ public enum DropTempNaming {
         }
         var n = 2
         while true {
-            let candidate = cleanExt.isEmpty ? "\(cleanStem)-\(n)" : "\(cleanStem)-\(n).\(cleanExt)"
+            let candidate = cleanExt.isEmpty ? "\(cleanStem) \(n)" : "\(cleanStem) \(n).\(cleanExt)"
             if !existing.contains(candidate) {
                 return candidate
             }
@@ -740,7 +740,7 @@ public final class MacOSDragOutCoordinator {
         return img
     }
 
-    private final class Session: NSObject, NSDraggingSource {
+    internal final class Session: NSObject, NSDraggingSource {
         private let operationMask: NSDragOperation
         private let dropsWithinApp: Bool
         private let ignoreModifiers: Bool
@@ -795,7 +795,7 @@ public final class MacOSDragOutCoordinator {
         }
 
         @MainActor
-        private func finish(with outcome: DragOutcome) {
+        internal func finish(with outcome: DragOutcome) {
             unmuteAll()
             let cb = completion
             completion = nil
@@ -850,6 +850,164 @@ public enum MacOSClipboardSync {
             Clipboard.shared.writeRich(RichClipboardPayload(content: runtime.clipboard))
         }
         return handled
+    }
+}
+
+/// Discovered pasteboard item flavor for macOS incoming drags (`platform/macos/drop.rs::Item`).
+public enum DropPasteboardItem: Sendable, Equatable {
+    case file(String)
+    case promise(extension: String?)
+    case image(uti: String, extension: String)
+
+    public var hoverPath: String {
+        switch self {
+        case .file(let path):
+            return path
+        case .promise(let ext):
+            if let ext, !ext.isEmpty {
+                return "File.\(ext)"
+            }
+            return "File"
+        case .image(_, let ext):
+            return "Image.\(ext)"
+        }
+    }
+}
+
+/// Coalescing drag-destination step queue matching `platform/macos/drop.rs::Step`.
+public enum MacOSDropStep: Sendable, Equatable {
+    case enter([String], Vec2)
+    case move(Vec2)
+    case drop([String], Vec2)
+    case leave
+}
+
+public struct MacOSDropQueue: Sendable, Equatable {
+    public private(set) var steps: [MacOSDropStep] = []
+    public private(set) var isOver: Bool = false
+
+    public init() {}
+
+    public mutating func push(_ step: MacOSDropStep) {
+        if case .move = step, case .move? = steps.last {
+            steps.removeLast()
+        }
+        switch step {
+        case .enter, .move:
+            isOver = true
+        case .drop, .leave:
+            isOver = false
+        }
+        steps.append(step)
+    }
+
+    public mutating func take() -> [MacOSDropStep] {
+        let taken = steps
+        steps.removeAll(keepingCapacity: false)
+        return taken
+    }
+}
+
+extension DropTempNaming {
+    public static func filePath(fromURLString raw: String) -> String? {
+        guard let url = URL(string: raw), url.isFileURL else { return nil }
+        return url.path
+    }
+
+    public static func extensionForPromisedUTI(_ uti: String) -> String? {
+        switch uti {
+        case "public.png": return "png"
+        case "public.jpeg": return "jpg"
+        case "public.tiff": return "tiff"
+        case "public.heic": return "heic"
+        case "com.compuserve.gif": return "gif"
+        case "org.webmproject.webp": return "webp"
+        case "com.adobe.pdf": return "pdf"
+        case "public.utf8-plain-text", "public.plain-text": return "txt"
+        case "public.json": return "json"
+        case "public.svg-image": return "svg"
+        case "public.mpeg-4": return "mp4"
+        case "com.apple.quicktime-movie": return "mov"
+        default: return nil
+        }
+    }
+
+    public static func urlStem(fromURLString raw: String) -> String? {
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return nil
+        }
+        let last = url.lastPathComponent
+        guard !last.isEmpty, last != "/" else { return nil }
+        let stem = url.deletingPathExtension().lastPathComponent
+        return stem.isEmpty ? nil : safeFileStem(stem, fallback: "Image")
+    }
+}
+
+extension MacOSDropReader {
+    /// Operation selection matching `platform/macos/drop.rs::operation` (`Copy` (1), else `Generic` (4), else 0).
+    public static func operation(forSourceMask mask: UInt) -> UInt {
+        let copyMask = NSDragOperation.copy.rawValue
+        let genericMask = NSDragOperation.generic.rawValue
+        if (mask & copyMask) != 0 { return copyMask }
+        if (mask & genericMask) != 0 { return genericMask }
+        return 0
+    }
+
+    /// Reads ordered pasteboard items (`file`, `promise`, `image`) matching `platform/macos/drop.rs::items`.
+    public static func inspectItems(in pasteboard: NSPasteboard) -> [(NSPasteboardItem, DropPasteboardItem)] {
+        let promises = Set(NSFilePromiseReceiver.readableDraggedTypes)
+        let fileURLType = NSPasteboard.PasteboardType("public.file-url")
+        let promisedUTIType = NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-content-type")
+        guard let list = pasteboard.pasteboardItems else { return [] }
+        var out: [(NSPasteboardItem, DropPasteboardItem)] = []
+        for item in list {
+            let types = item.types.map(\.rawValue)
+            if types.contains("public.file-url"),
+               let rawURL = item.string(forType: fileURLType),
+               let path = DropTempNaming.filePath(fromURLString: rawURL) {
+                out.append((item, .file(path)))
+            } else if types.contains(where: { promises.contains($0) }) {
+                let uti = item.string(forType: promisedUTIType)
+                out.append((item, .promise(extension: uti.flatMap(DropTempNaming.extensionForPromisedUTI))))
+            } else if let matched = DropTempNaming.imageTypeExtensions.first(where: { types.contains($0.uti) }) {
+                out.append((item, .image(uti: matched.uti, extension: matched.ext)))
+            }
+        }
+        return out
+    }
+
+    public static func writeImage(
+        from item: NSPasteboardItem,
+        uti: String,
+        extension ext: String,
+        directory: URL
+    ) -> URL? {
+        guard let rawData = item.data(forType: NSPasteboard.PasteboardType(uti)) else {
+            return nil
+        }
+        let finalData: Data
+        if uti == "public.tiff" {
+            guard let rep = NSBitmapImageRep(data: rawData),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                return nil
+            }
+            finalData = png
+        } else {
+            finalData = rawData
+        }
+        let stem = item.string(forType: NSPasteboard.PasteboardType("public.url"))
+            .flatMap(DropTempNaming.urlStem(fromURLString:)) ?? "Image"
+        let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+        let name = DropTempNaming.freeName(stem: stem, ext: ext, existing: existing)
+        let dest = directory.appendingPathComponent(name)
+        do {
+            try finalData.write(to: dest, options: .atomic)
+            return dest
+        } catch {
+            return nil
+        }
     }
 }
 #endif

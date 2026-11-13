@@ -253,6 +253,147 @@ public struct FramePacer: Sendable, Equatable {
     }
 }
 
+/// When a display-link-paced surface's next frame draws (`platform/display_link.rs::Opportunity`).
+public enum DisplayLinkOpportunity: Sendable, Equatable {
+    /// On this tick, which presents at its target timestamp (seconds).
+    case tick(Double)
+    /// At once, aimed at no tick (`rested`).
+    case now
+    /// On a later tick.
+    case wait
+
+    /// The frame's target presentation time if it draws now (`some(nil)` when aimed at no tick),
+    /// or `nil` when it waits (`Opportunity::target`).
+    public var target: Double?? {
+        switch self {
+        case .tick(let target): return .some(.some(target))
+        case .now: return .some(.none)
+        case .wait: return nil
+        }
+    }
+}
+
+/// Deterministic display-link pacing state machine (`platform/display_link.rs`).
+public struct DisplayLinkPacer: Sendable, Equatable {
+    public private(set) var running: Bool
+    public var framePeriod: Double
+    public private(set) var lastPresent: Double?
+    public private(set) var lastTarget: Double?
+    private var pendingTickTarget: Double?
+
+    public init(framePeriod: Double = 1.0 / 60.0, running: Bool = false) {
+        self.framePeriod = max(1e-6, framePeriod)
+        self.running = running
+    }
+
+    public mutating func start() {
+        running = true
+    }
+
+    public mutating func stop() {
+        running = false
+        pendingTickTarget = nil
+    }
+
+    public mutating func enqueueTick(target: Double) {
+        pendingTickTarget = target
+    }
+
+    public mutating func presented(at timestamp: Double) {
+        lastPresent = timestamp
+    }
+
+    public func tickAfter(_ now: Double) -> Double {
+        now + framePeriod
+    }
+
+    public func defersStart(at now: Double) -> Bool {
+        Self.defersStart(
+            running: running,
+            lastPresent: lastPresent,
+            lastTarget: lastTarget,
+            now: now,
+            period: framePeriod
+        )
+    }
+
+    public mutating func nextFrame(now: Double) -> DisplayLinkOpportunity {
+        start()
+        let tick = pendingTickTarget
+        pendingTickTarget = nil
+        let next = Self.opportunity(
+            tick: tick,
+            lastPresent: lastPresent,
+            lastTarget: lastTarget,
+            now: now,
+            period: framePeriod
+        )
+        switch next {
+        case .tick(let target):
+            lastTarget = target
+        case .now:
+            lastTarget = now
+        case .wait:
+            break
+        }
+        return next
+    }
+
+    public static func opportunity(
+        tick: Double?,
+        lastPresent: Double?,
+        lastTarget: Double?,
+        now: Double,
+        period: Double
+    ) -> DisplayLinkOpportunity {
+        if let target = tick,
+           permits(lastPresent: lastPresent, lastTarget: lastTarget, target: target, now: now, period: period) {
+            return .tick(target)
+        }
+        if rested(lastPresent: lastPresent, lastTarget: lastTarget, now: now, period: period) {
+            return .now
+        }
+        return .wait
+    }
+
+    public static func permits(
+        lastPresent: Double?,
+        lastTarget: Double?,
+        target: Double,
+        now: Double,
+        period: Double
+    ) -> Bool {
+        let half = period * 0.5
+        let eps = 1e-12
+        let ahead = now < target
+        let targetSpacingOK = lastTarget.map { target + eps >= $0 + period * 0.75 } ?? true
+        let submitSpacingOK = lastPresent.map { max(0.0, now - $0) + eps >= half } ?? true
+        return ahead && targetSpacingOK && submitSpacingOK
+    }
+
+    public static func rested(
+        lastPresent: Double?,
+        lastTarget: Double?,
+        now: Double,
+        period: Double
+    ) -> Bool {
+        let eps = 1e-12
+        let targetPassed = lastTarget.map { $0 <= now + eps } ?? true
+        let presentRested = lastPresent.map { max(0.0, now - $0) + eps >= period * 1.5 } ?? true
+        return targetPassed && presentRested
+    }
+
+    public static func defersStart(
+        running: Bool,
+        lastPresent: Double?,
+        lastTarget: Double?,
+        now: Double,
+        period: Double
+    ) -> Bool {
+        !running && rested(lastPresent: lastPresent, lastTarget: lastTarget, now: now, period: period)
+    }
+}
+
 // MARK: - 5. Embed (platform/embed.rs)
 
 /// Configuration for embedding a Rune surface inside a host container view.

@@ -64,6 +64,15 @@ public enum MacOSKeyMapper {
         default:
             let chars = event.characters ?? ""
             let ign = event.charactersIgnoringModifiers ?? chars
+            if ign.unicodeScalars.count == 1, let s = ign.unicodeScalars.first {
+                switch s.value {
+                case 0xF727: key = .insert; return KeyEvent(key: key, mods: m)
+                case 0xF72E, 0xF731: key = .printScreen; return KeyEvent(key: key, mods: m)
+                case 0xF72F: key = .scrollLock; return KeyEvent(key: key, mods: m)
+                case 0xF730, 0xF732: key = .pause; return KeyEvent(key: key, mods: m)
+                default: break
+                }
+            }
             if m.cmd, ign.count == 1, let ch = ign.lowercased().first {
                 key = .command(ch)
             } else if !chars.isEmpty {
@@ -343,40 +352,87 @@ public enum MacOSHostViewHelper {
 }
 
 /// Manages `NSViewToolTipOwner` tooltip regions derived from `Runtime.helpRegionsList()`
-/// without repeating tooltip reconciliation across single- and multi-window host views.
+/// snapping to device pixels and diffing incrementally (`platform/macos/help.rs`).
 public final class MacOSToolTipOwner: NSObject, NSViewToolTipOwner {
     @MainActor
-    private struct Entry: Equatable {
-        let rect: NSRect
+    private struct Region {
+        let rect: [Float]
         let text: String
+        let tag: NSView.ToolTipTag
+        let token: Int
     }
 
     @MainActor
-    private var entries: [Entry] = []
+    private var regions: [Region] = []
+    @MainActor
+    private var nextToken: Int = 1
 
     @MainActor
     public override init() {
         super.init()
     }
 
-    @MainActor
-    public func sync(regions: [(MotionRect, String)], on view: NSView) {
-        let next = regions.map { rect, text in
-            Entry(
-                rect: NSRect(
-                    x: CGFloat(rect.x),
-                    y: CGFloat(rect.y),
-                    width: CGFloat(max(0, rect.width)),
-                    height: CGFloat(max(0, rect.height))
-                ),
-                text: text
-            )
+    /// Snaps `rect` (`[x0, y0, x1, y1]`) to the device pixel grid at `scale` (`help.rs::snap`).
+    public static func snap(_ rect: [Float], scale: Float) -> [Float] {
+        let s = max(1.0, scale)
+        return rect.map { ($0 * s).rounded() / s }
+    }
+
+    /// Computes which existing `have` tooltip entries stay and which `want` entries are already covered (`help.rs::diff`).
+    public static func diff(
+        have: [([Float], String)],
+        want: [([Float], String)]
+    ) -> (stays: [Bool], covered: [Bool]) {
+        var covered = [Bool](repeating: false, count: want.count)
+        let stays: [Bool] = have.map { h in
+            if let k = want.indices.first(where: { !covered[$0] && want[$0].0 == h.0 && want[$0].1 == h.1 }) {
+                covered[k] = true
+                return true
+            }
+            return false
         }
-        guard next != entries else { return }
-        entries = next
-        view.removeAllToolTips()
-        for (idx, item) in next.enumerated() where item.rect.width > 0 && item.rect.height > 0 {
-            view.addToolTip(item.rect, owner: self, userData: UnsafeMutableRawPointer(bitPattern: idx + 1))
+        return (stays, covered)
+    }
+
+    @MainActor
+    public func sync(regions newRegions: [(MotionRect, String)], on view: NSView, scale: Float? = nil) {
+        let effectiveScale = max(
+            1.0,
+            scale ?? Float(view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0)
+        )
+        let want: [([Float], String)] = newRegions.compactMap { rect, text in
+            let snapped = Self.snap([rect.x, rect.y, rect.x + rect.width, rect.y + rect.height], scale: effectiveScale)
+            guard snapped[2] > snapped[0], snapped[3] > snapped[1] else { return nil }
+            return (snapped, text)
+        }
+        let have: [([Float], String)] = regions.map { ($0.rect, $0.text) }
+        let (stays, covered) = Self.diff(have: have, want: want)
+        if stays.allSatisfy({ $0 }) && covered.allSatisfy({ $0 }) {
+            return
+        }
+
+        var kept: [Region] = []
+        for (idx, region) in regions.enumerated() {
+            if stays[idx] {
+                kept.append(region)
+            } else {
+                view.removeToolTip(region.tag)
+            }
+        }
+        regions = kept
+
+        for (idx, item) in want.enumerated() where !covered[idx] {
+            let r = item.0
+            let nsRect = NSRect(
+                x: CGFloat(r[0]),
+                y: CGFloat(r[1]),
+                width: CGFloat(r[2] - r[0]),
+                height: CGFloat(r[3] - r[1])
+            )
+            let token = nextToken
+            nextToken &+= 1
+            let tag = view.addToolTip(nsRect, owner: self, userData: UnsafeMutableRawPointer(bitPattern: token))
+            regions.append(Region(rect: r, text: item.1, tag: tag, token: token))
         }
     }
 
@@ -387,9 +443,9 @@ public final class MacOSToolTipOwner: NSObject, NSViewToolTipOwner {
         userData data: UnsafeMutableRawPointer?
     ) -> String {
         guard Thread.isMainThread, let raw = data else { return "" }
-        let idx = Int(bitPattern: raw) - 1
+        let token = Int(bitPattern: raw)
         return MainActor.assumeIsolated {
-            (0..<entries.count).contains(idx) ? entries[idx].text : ""
+            regions.first { $0.token == token }?.text ?? ""
         }
     }
 }
@@ -525,6 +581,18 @@ public final class MacOSWindowFrameDriver {
         guard let anim = WindowFrameMove.takeMoving(&frameMove) else { return }
         let nsRect = Self.cocoaFrame(fromTopDown: anim.to, on: window)
         window.setFrame(nsRect, display: true)
+    }
+}
+
+/// Pins a `CAMetalLayer`'s contents gravity and sRGB color space (`platform/macos/surface.rs`).
+public enum MacOSMetalLayerSurface {
+    @MainActor
+    public static func pinContentsTopLeft(_ layer: CAMetalLayer) {
+        let flipped = layer.superlayer?.isGeometryFlipped ?? false
+        layer.contentsGravity = flipped ? .bottomLeft : .topLeft
+        if let srgb = CGColorSpace(name: CGColorSpace.sRGB) {
+            layer.colorspace = srgb
+        }
     }
 }
 #endif
