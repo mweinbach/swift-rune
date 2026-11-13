@@ -681,13 +681,14 @@ extension TextEdit {
             }
             return
         }
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         if mark.isPill {
             richMarks.removeAll { $0.mark.isPill && $0.end > r.lowerBound && $0.start < r.upperBound }
         }
         richMarks.append(RichMarkRange(start: r.lowerBound, end: r.upperBound, mark: mark))
         typingStyle = .inherited
         normalizeRichMarks()
+        recordUndoChange(before: before, kind: .other)
     }
 
     public mutating func removeMark(_ mark: RichMark) {
@@ -700,7 +701,7 @@ extension TextEdit {
             typingStyle = .armed(anchor: anchor, focus: cursor, marks: active)
             return
         }
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         var next: [RichMarkRange] = []
         next.reserveCapacity(richMarks.count)
         for m in richMarks {
@@ -720,6 +721,7 @@ extension TextEdit {
         richMarks = next
         typingStyle = .inherited
         normalizeRichMarks()
+        recordUndoChange(before: before, kind: .other)
     }
 
     public mutating func setLink(_ url: String?) {
@@ -743,7 +745,7 @@ extension TextEdit {
         })
         guard !isSecure && !cleanLabel.isEmpty else { return }
         syncRichInvariants()
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         let lo = clampScalarBoundary(min(range.lowerBound, range.upperBound))
         let hi = clampScalarBoundary(max(range.lowerBound, range.upperBound))
         let covered = coverPills(lo, hi)
@@ -759,6 +761,7 @@ extension TextEdit {
         richMarks.append(RichMarkRange(start: covered.0, end: pillEnd, mark: .pill(id)))
         normalizeRichMarks()
         setSelectionRaw(anchor: pillEnd, cursor: pillEnd)
+        recordUndoChange(before: before, kind: .other)
     }
 
     // MARK: - Rich Replace Engine (text + richMarks + blocks + softBreaks)
@@ -888,7 +891,7 @@ extension TextEdit {
         let range = covered.0..<covered.1
         let lineBlk = blocks[min(lineIndexOfUTF8(range.lowerBound), max(0, blocks.count - 1))]
         let insertedMarks = typingStyle.takeAt(anchor: anchor, cursor: cursor) ?? inheritedRichMarks(at: range.lowerBound)
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         applyRichReplace(
             range: range,
             replacement: "\n",
@@ -901,6 +904,7 @@ extension TextEdit {
         setSelectionRaw(anchor: newCursor, cursor: newCursor)
         caretColumn = .free
         caretAffinity = .downstream
+        recordUndoChange(before: before, kind: .lineBreak)
     }
 
     // MARK: - Paragraphs & Block Operations
@@ -937,12 +941,13 @@ extension TextEdit {
         guard !isSecure && multiline && allowsBlock(block) else { return }
         let normalized = block.withLevel(block.listLevel ?? 0)
         syncRichInvariants()
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         for i in selectedLineRange() where i < blocks.count {
             blocks[i] = normalized
         }
         if normalized == .code { typingStyle = .inherited }
         normalizeRichMarks()
+        recordUndoChange(before: before, kind: .other)
     }
 
     public mutating func toggleBlock(_ block: Block) {
@@ -955,7 +960,7 @@ extension TextEdit {
         if allMatch {
             setBlock(.paragraph)
         } else {
-            pushUndoSnapshot(makeSnapshot())
+            let before = captureUndoBaseline()
             for i in lines where i < blocks.count {
                 switch (blocks[i].listLevel, block) {
                 case let (lvl?, .bullet(0)):
@@ -968,6 +973,7 @@ extension TextEdit {
             }
             if block == .code { typingStyle = .inherited }
             normalizeRichMarks()
+            recordUndoChange(before: before, kind: .other)
         }
     }
 
@@ -976,12 +982,13 @@ extension TextEdit {
         guard !isSecure && multiline else { return false }
         syncRichInvariants()
         guard selectionInList else { return false }
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         for i in selectedLineRange() where i < blocks.count {
             if let lvl = blocks[i].listLevel {
                 blocks[i] = blocks[i].withLevel(min(lvl + 1, Block.maxListLevel))
             }
         }
+        recordUndoChange(before: before, kind: .other)
         return true
     }
 
@@ -990,12 +997,13 @@ extension TextEdit {
         guard !isSecure && multiline else { return false }
         syncRichInvariants()
         guard selectionInList else { return false }
-        pushUndoSnapshot(makeSnapshot())
+        let before = captureUndoBaseline()
         for i in selectedLineRange() where i < blocks.count {
             if let lvl = blocks[i].listLevel {
                 blocks[i] = blocks[i].withLevel(lvl > 0 ? lvl - 1 : 0)
             }
         }
+        recordUndoChange(before: before, kind: .other)
         return true
     }
 

@@ -40,6 +40,7 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var family: FontFamily
     public var align: TextAlign
     public var wrap: TextWrap
+    public var fontSmoothing: FontSmoothing
 
     public init(
         size: Float = 14.0,
@@ -49,7 +50,8 @@ public struct TextStyle: Sendable, Hashable, Codable {
         italic: Bool = false,
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
-        wrap: TextWrap = .noWrap
+        wrap: TextWrap = .noWrap,
+        fontSmoothing: FontSmoothing = .systemDefault
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -59,6 +61,13 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.family = family
         self.align = align
         self.wrap = wrap
+        self.fontSmoothing = fontSmoothing
+    }
+
+    public func smoothing(_ mode: FontSmoothing) -> TextStyle {
+        var copy = self
+        copy.fontSmoothing = mode
+        return copy
     }
 
     public func lh(_ h: Float) -> TextStyle {
@@ -229,12 +238,26 @@ public final class GlyphAtlas: @unchecked Sendable {
         public var bearingPx: SIMD2<Float>
     }
 
+    /// Cached RGBA8 color glyph bitmap (`#807`, Apple Color Emoji / COLR / CBDT / sbix).
+    public struct ColorGlyphEntry: Sendable, Equatable {
+        public var pixelSize: SIMD2<Int>
+        public var bearingPx: SIMD2<Float>
+        public var rgba: Data
+    }
+
     #if canImport(CoreText) && canImport(CoreGraphics)
     private struct GlyphKey: Hashable {
         var fontHash: CFHashCode
         var glyphID: CGGlyph
         var sizePx10: Int
         var subpixelBin: UInt8
+        var smoothing: FontSmoothing
+    }
+
+    private struct ColorGlyphKey: Hashable {
+        var fontHash: CFHashCode
+        var glyphID: CGGlyph
+        var sizePx10: Int
     }
     #endif
 
@@ -243,6 +266,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         var sizePx10: Int
         var bold: Bool
         var italic: Bool
+        var smoothing: FontSmoothing
     }
 
     private struct IconKey: Hashable {
@@ -253,35 +277,136 @@ public final class GlyphAtlas: @unchecked Sendable {
     private let lock = NSLock()
     public private(set) var atlas: R8Atlas
     public private(set) var generation: UInt64 = 1
+    public let maxCachedEntries: Int
+    public let maxAtlasDimension: Int = 4096
+    private let targetWidth: Int
+    private let targetHeight: Int
+    private var backingAllocated: Bool = false
     private var shelfX: Int = 1
     private var shelfY: Int = 1
     private var shelfHeight: Int = 0
+    private var accessCounter: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
-    private var glyphCache: [GlyphKey: Entry] = [:]
+    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64)] = [:]
+    private var colorGlyphBytes: Int = 0
     #endif
-    private var portableGlyphCache: [PortableGlyphKey: Entry] = [:]
-    private var iconCache: [IconKey: Entry] = [:]
+    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
 
-    public init(width: Int = 1024, height: Int = 1024) {
-        self.atlas = R8Atlas(width: width, height: height)
+    /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
+    public init(width: Int = 1024, height: Int = 1024, maxCachedEntries: Int = 4096) {
+        self.targetWidth = max(1, width)
+        self.targetHeight = max(1, height)
+        self.atlas = R8Atlas(width: 1, height: 1)
+        self.maxCachedEntries = max(1, maxCachedEntries)
+    }
+
+    /// True once at least one mask/glyph/icon has triggered CPU backing allocation (`#830`).
+    public var hasAllocatedBacking: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return backingAllocated
+    }
+
+    /// Allocated CPU backing size in bytes (`0` for measure-only `TextSystem`s, `#830`).
+    public var allocatedBackingBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return backingAllocated ? atlas.texels.count : 0
+    }
+
+    /// Total cached entries across R8 glyph/icon and RGBA color-glyph tables.
+    public var cachedEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        var total = portableGlyphCache.count + iconCache.count
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        total += glyphCache.count + colorGlyphCache.count
+        #endif
+        return total
+    }
+
+    /// Fast cross-launch font identity hash (`#807`: byte length, first/last 64 KiB, and SFNT `head` table).
+    public static func fontIdentityHash(_ fontBytes: Data) -> UInt64 {
+        let edgeBytes = 64 * 1024
+        var h: UInt64 = 0xcbf29ce484222325
+        @inline(__always)
+        func mixBytes(_ ptr: UnsafeBufferPointer<UInt8>) {
+            for b in ptr {
+                h ^= UInt64(b)
+                h &*= 0x100000001b3
+            }
+        }
+        @inline(__always)
+        func mixUInt64(_ v: UInt64) {
+            var val = v
+            for _ in 0..<8 {
+                h ^= val & 0xFF
+                h &*= 0x100000001b3
+                val >>= 8
+            }
+        }
+
+        mixUInt64(UInt64(fontBytes.count))
+        let frontLen = min(fontBytes.count, edgeBytes)
+        let backStart = fontBytes.count > edgeBytes ? (fontBytes.count - edgeBytes) : 0
+        fontBytes.withUnsafeBytes { raw in
+            let bytes = raw.bindMemory(to: UInt8.self)
+            if frontLen > 0 {
+                mixBytes(UnsafeBufferPointer(start: bytes.baseAddress, count: frontLen))
+            }
+            if backStart < fontBytes.count {
+                mixBytes(UnsafeBufferPointer(start: bytes.baseAddress?.advanced(by: backStart), count: fontBytes.count - backStart))
+            }
+            // SFNT table directory (`numTables` at offset 4, 16-byte records starting at offset 12).
+            if bytes.count >= 12 {
+                let numTables = (Int(bytes[4]) << 8) | Int(bytes[5])
+                let maxRecords = min(numTables, (bytes.count - 12) / 16)
+                for i in 0..<maxRecords {
+                    let rec = 12 + i * 16
+                    // Tag "head" = 0x68 0x65 0x61 0x64
+                    if bytes[rec] == 0x68 && bytes[rec + 1] == 0x65 && bytes[rec + 2] == 0x61 && bytes[rec + 3] == 0x64 {
+                        let offset = (Int(bytes[rec + 8]) << 24)
+                            | (Int(bytes[rec + 9]) << 16)
+                            | (Int(bytes[rec + 10]) << 8)
+                            | Int(bytes[rec + 11])
+                        let length = (Int(bytes[rec + 12]) << 24)
+                            | (Int(bytes[rec + 13]) << 16)
+                            | (Int(bytes[rec + 14]) << 8)
+                            | Int(bytes[rec + 15])
+                        if offset >= 0, length > 0, offset + length <= bytes.count {
+                            mixBytes(UnsafeBufferPointer(start: bytes.baseAddress?.advanced(by: offset), count: length))
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        return h
     }
 
     public func rasterizePortableGlyph(
         scalar: UnicodeScalar,
         fontSizePx: Float,
         bold: Bool = false,
-        italic: Bool = false
+        italic: Bool = false,
+        smoothing: FontSmoothing = .systemDefault
     ) -> Entry {
         let key = PortableGlyphKey(
             scalar: scalar.value,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
             bold: bold,
-            italic: italic
+            italic: italic,
+            smoothing: smoothing
         )
         lock.lock()
-        if let cached = portableGlyphCache[key] {
+        if var cached = portableGlyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            portableGlyphCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -298,25 +423,118 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelSize: SIMD2<Int>(r.width, r.height),
             bearingPx: SIMD2<Float>(0, r.bearingY)
         )
-        portableGlyphCache[key] = entry
+        accessCounter &+= 1
+        portableGlyphCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
 
     #if canImport(CoreText) && canImport(CoreGraphics)
-    func rasterizeGlyph(font: CTFont, glyph: CGGlyph, fontSizePx: Float, subpixelX: Float = 0) -> Entry? {
+    /// True when `font` contains color outline/bitmap tables (`COLR`, `CBDT`, `sbix`) or color traits (`#807`).
+    public static func isColorFont(_ font: CTFont) -> Bool {
+        if CTFontGetSymbolicTraits(font).contains(.traitColorGlyphs) {
+            return true
+        }
+        // "COLR" (0x434F4C52), "CBDT" (0x43424454), "sbix" (0x73626978)
+        let opt = CTFontTableOptions(rawValue: 0)
+        return CTFontCopyTable(font, CTFontTableTag(0x434F4C52), opt) != nil
+            || CTFontCopyTable(font, CTFontTableTag(0x43424454), opt) != nil
+            || CTFontCopyTable(font, CTFontTableTag(0x73626978), opt) != nil
+    }
+
+    func rasterizeColorGlyph(font: CTFont, glyph: CGGlyph, fontSizePx: Float) -> ColorGlyphEntry? {
+        let key = ColorGlyphKey(
+            fontHash: CFHash(font),
+            glyphID: glyph,
+            sizePx10: Int((fontSizePx * 10.0).rounded())
+        )
+        lock.lock()
+        if var cached = colorGlyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            colorGlyphCache[key] = cached
+            lock.unlock()
+            return cached.entry
+        }
+        lock.unlock()
+
+        var g = glyph
+        var bbox = CGRect.zero
+        CTFontGetBoundingRectsForGlyphs(font, .default, &g, &bbox, 1)
+        if bbox.isEmpty || bbox.width <= 0 || bbox.height <= 0 {
+            return nil
+        }
+
+        let pad = 2
+        let minX = Int(floor(bbox.minX)) - pad
+        let minY = Int(floor(bbox.minY)) - pad
+        let maxX = Int(ceil(bbox.maxX)) + pad
+        let maxY = Int(ceil(bbox.maxY)) + pad
+        let bw = max(1, maxX - minX)
+        let bh = max(1, maxY - minY)
+
+        var rgba = Data(count: bw * bh * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let bi = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let drawn = rgba.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: bw,
+                      height: bh,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bw * 4,
+                      space: cs,
+                      bitmapInfo: bi.rawValue
+                  ) else {
+                return false
+            }
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldAntialias(true)
+            var pos = CGPoint(x: CGFloat(-minX), y: CGFloat(-minY))
+            CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
+            return true
+        }
+        guard drawn else { return nil }
+
+        let entry = ColorGlyphEntry(
+            pixelSize: SIMD2<Int>(bw, bh),
+            bearingPx: SIMD2<Float>(Float(minX), Float(-maxY)),
+            rgba: rgba
+        )
+        lock.lock()
+        accessCounter &+= 1
+        colorGlyphCache[key] = (entry, accessCounter)
+        colorGlyphBytes += rgba.count
+        evictLRUIfNeededLocked()
+        lock.unlock()
+        return entry
+    }
+
+    func rasterizeGlyph(
+        font: CTFont,
+        glyph: CGGlyph,
+        fontSizePx: Float,
+        subpixelX: Float = 0,
+        smoothing: FontSmoothing = .systemDefault
+    ) -> Entry? {
         let bin = UInt8(((subpixelX - floorf(subpixelX)) * 4.0).rounded()) & 3
         let subShift = Float(bin) * 0.25
         let key = GlyphKey(
             fontHash: CFHash(font),
             glyphID: glyph,
             sizePx10: Int((fontSizePx * 10.0).rounded()),
-            subpixelBin: bin
+            subpixelBin: bin,
+            smoothing: smoothing
         )
         lock.lock()
-        if let cached = glyphCache[key] {
+        if var cached = glyphCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            glyphCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -326,7 +544,9 @@ public final class GlyphAtlas: @unchecked Sendable {
         if bbox.isEmpty || bbox.width <= 0.01 || bbox.height <= 0.01 {
             let empty = Entry(uv: .zero, pixelSize: .zero, bearingPx: .zero)
             lock.lock()
-            glyphCache[key] = empty
+            accessCounter &+= 1
+            glyphCache[key] = (empty, accessCounter)
+            evictLRUIfNeededLocked()
             lock.unlock()
             return empty
         }
@@ -353,10 +573,11 @@ public final class GlyphAtlas: @unchecked Sendable {
             return nil
         }
 
+        let allowFontSmoothing = smoothing.isEnabled
         ctx.setAllowsAntialiasing(true)
         ctx.setShouldAntialias(true)
-        ctx.setAllowsFontSmoothing(false)
-        ctx.setShouldSmoothFonts(false)
+        ctx.setAllowsFontSmoothing(allowFontSmoothing)
+        ctx.setShouldSmoothFonts(allowFontSmoothing)
         ctx.setAllowsFontSubpixelPositioning(true)
         ctx.setShouldSubpixelPositionFonts(true)
         ctx.setFillColor(gray: 1.0, alpha: 1.0)
@@ -372,7 +593,9 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelSize: SIMD2<Int>(bw, bh),
             bearingPx: SIMD2<Float>(Float(minX) - subShift, Float(-maxY))
         )
-        glyphCache[key] = entry
+        accessCounter &+= 1
+        glyphCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
@@ -382,9 +605,12 @@ public final class GlyphAtlas: @unchecked Sendable {
         let px = max(4, pixelSize)
         let key = IconKey(icon: icon, pixelSize: px)
         lock.lock()
-        if let cached = iconCache[key] {
+        if var cached = iconCache[key] {
+            accessCounter &+= 1
+            cached.lastUsed = accessCounter
+            iconCache[key] = cached
             lock.unlock()
-            return cached
+            return cached.entry
         }
         lock.unlock()
 
@@ -442,12 +668,22 @@ public final class GlyphAtlas: @unchecked Sendable {
         lock.lock()
         let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap)
         let entry = Entry(uv: uv, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
-        iconCache[key] = entry
+        accessCounter &+= 1
+        iconCache[key] = (entry, accessCounter)
+        evictLRUIfNeededLocked()
         lock.unlock()
         return entry
     }
 
+    private func ensureBackingLocked() {
+        if !backingAllocated {
+            atlas = R8Atlas(width: targetWidth, height: targetHeight)
+            backingAllocated = true
+        }
+    }
+
     private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float> {
+        ensureBackingLocked()
         if bw + 2 > atlas.width {
             growAtlas(minWidth: bw + 4, minHeight: atlas.height)
         }
@@ -457,7 +693,11 @@ public final class GlyphAtlas: @unchecked Sendable {
             shelfHeight = 0
         }
         if shelfY + bh + 1 >= atlas.height {
-            growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
+            if atlas.height >= maxAtlasDimension && shelfY + bh + 1 >= maxAtlasDimension {
+                resetShelfLocked()
+            } else {
+                growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
+            }
         }
 
         let dstX = shelfX
@@ -483,45 +723,121 @@ public final class GlyphAtlas: @unchecked Sendable {
         )
     }
 
+    private func resetShelfLocked() {
+        shelfX = 1
+        shelfY = 1
+        shelfHeight = 0
+        if !atlas.texels.isEmpty {
+            atlas.texels.withUnsafeMutableBytes { raw in
+                if let base = raw.baseAddress {
+                    memset(base, 0, raw.count)
+                }
+            }
+        }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        glyphCache.removeAll()
+        #endif
+        portableGlyphCache.removeAll()
+        iconCache.removeAll()
+        generation &+= 1
+    }
+
+    private func evictLRUIfNeededLocked() {
+        var total = portableGlyphCache.count + iconCache.count
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        total += glyphCache.count + colorGlyphCache.count
+        #endif
+        while total > maxCachedEntries {
+            enum Victim {
+                case portable(PortableGlyphKey, UInt64)
+                case icon(IconKey, UInt64)
+                #if canImport(CoreText) && canImport(CoreGraphics)
+                case glyph(GlyphKey, UInt64)
+                case color(ColorGlyphKey, UInt64)
+                #endif
+                var seq: UInt64 {
+                    switch self {
+                    case .portable(_, let s), .icon(_, let s): return s
+                    #if canImport(CoreText) && canImport(CoreGraphics)
+                    case .glyph(_, let s), .color(_, let s): return s
+                    #endif
+                    }
+                }
+            }
+            var oldest: Victim?
+            for (k, v) in portableGlyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .portable(k, v.lastUsed) }
+            }
+            for (k, v) in iconCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .icon(k, v.lastUsed) }
+            }
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            for (k, v) in glyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .glyph(k, v.lastUsed) }
+            }
+            for (k, v) in colorGlyphCache {
+                if oldest == nil || v.lastUsed < oldest!.seq { oldest = .color(k, v.lastUsed) }
+            }
+            #endif
+            guard let victim = oldest else { break }
+            switch victim {
+            case .portable(let k, _): portableGlyphCache.removeValue(forKey: k)
+            case .icon(let k, _): iconCache.removeValue(forKey: k)
+            #if canImport(CoreText) && canImport(CoreGraphics)
+            case .glyph(let k, _): glyphCache.removeValue(forKey: k)
+            case .color(let k, _):
+                if let removed = colorGlyphCache.removeValue(forKey: k) {
+                    colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
+                }
+            #endif
+            }
+            total -= 1
+        }
+    }
+
     private func growAtlas(minWidth: Int, minHeight: Int) {
         let oldW = atlas.width
         let oldH = atlas.height
-        let newW = minWidth > oldW ? max(oldW * 2, minWidth) : oldW
-        let newH = minHeight > oldH ? max(oldH * 2, minHeight) : oldH
-        var newTexels = Array<UInt8>(repeating: 0, count: newW * newH)
-        if newW == oldW {
-            newTexels.replaceSubrange(0..<atlas.texels.count, with: atlas.texels)
+        let newW = min(maxAtlasDimension, minWidth > oldW ? max(oldW * 2, minWidth) : oldW)
+        let newH = min(maxAtlasDimension, minHeight > oldH ? max(oldH * 2, minHeight) : oldH)
+        if atlas.texels.isEmpty {
+            atlas = R8Atlas(width: newW, height: newH, texels: [])
         } else {
-            for r in 0..<oldH {
-                let srcOff = r * oldW
-                let dstOff = r * newW
-                newTexels.replaceSubrange(dstOff..<(dstOff + oldW), with: atlas.texels[srcOff..<(srcOff + oldW)])
+            var newTexels = Array<UInt8>(repeating: 0, count: newW * newH)
+            if newW == oldW {
+                newTexels.replaceSubrange(0..<atlas.texels.count, with: atlas.texels)
+            } else {
+                for r in 0..<oldH {
+                    let srcOff = r * oldW
+                    let dstOff = r * newW
+                    newTexels.replaceSubrange(dstOff..<(dstOff + oldW), with: atlas.texels[srcOff..<(srcOff + oldW)])
+                }
             }
+            atlas = R8Atlas(width: newW, height: newH, texels: newTexels)
         }
         let wRatio = Float(oldW) / Float(newW)
         let hRatio = Float(oldH) / Float(newH)
-        atlas = R8Atlas(width: newW, height: newH, texels: newTexels)
         #if canImport(CoreText) && canImport(CoreGraphics)
         for (k, var v) in glyphCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             glyphCache[k] = v
         }
         #endif
         for (k, var v) in portableGlyphCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             portableGlyphCache[k] = v
         }
         for (k, var v) in iconCache {
-            v.uv.x *= wRatio
-            v.uv.z *= wRatio
-            v.uv.y *= hRatio
-            v.uv.w *= hRatio
+            v.entry.uv.x *= wRatio
+            v.entry.uv.z *= wRatio
+            v.entry.uv.y *= hRatio
+            v.entry.uv.w *= hRatio
             iconCache[k] = v
         }
         generation &+= 1
@@ -1265,7 +1581,8 @@ public final class TextSystem: @unchecked Sendable {
                         font: runFont,
                         glyph: glyphs[i],
                         fontSizePx: runFontSizePx,
-                        subpixelX: subX
+                        subpixelX: subX,
+                        smoothing: style.fontSmoothing
                     ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
                         continue
                     }
