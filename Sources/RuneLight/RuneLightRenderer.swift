@@ -68,7 +68,6 @@ public final class LightRenderer: @unchecked Sendable {
     private var giOwnTexs: [MTLTexture] = []
 
     private weak var lastCommandBuffer: MTLCommandBuffer?
-    private var lastFrameHadGI: Bool = false
 
     public init(
         device: MTLDevice? = MTLCreateSystemDefaultDevice(),
@@ -328,7 +327,6 @@ public final class LightRenderer: @unchecked Sendable {
     ) -> Bool {
         guard hasActiveLighting(scene) else {
             computePasses = 0
-            lastFrameHadGI = false
             return false
         }
 
@@ -365,7 +363,6 @@ public final class LightRenderer: @unchecked Sendable {
                 return false
             }
         }
-        lastFrameHadGI = giEnabled
         memcpy(frameBuffer.contents(), &frameU, MemoryLayout<LightFrameUniforms>.stride)
 
         var passes: UInt32 = 0
@@ -572,22 +569,21 @@ public final class LightRenderer: @unchecked Sendable {
 
     public func readTimings(commandBuffer: MTLCommandBuffer? = nil) -> LightTimings? {
         let cb = commandBuffer ?? lastCommandBuffer
-        guard let cb, cb.status == .completed else {
+        guard let cb else {
             return nil
         }
+        if cb.status != .completed && cb.status != .error {
+            cb.waitUntilCompleted()
+        }
+        guard cb.status == .completed else {
+            return nil
+        }
+        // Per-pass Metal counter sampling is not attached here; report only the measured
+        // command buffer GPU duration in `total`/`raster` and leave unmeasured passes at 0.
         let elapsedMs = max((cb.gpuEndTime - cb.gpuStartTime) * 1000.0, 0.0)
         var t = LightTimings()
         t.total = elapsedMs
-        if lastFrameHadGI {
-            t.gi = elapsedMs * 0.4
-            t.field = elapsedMs * 0.2
-            t.shadows = elapsedMs * 0.2
-            t.raster = max(elapsedMs - t.gi - t.field - t.shadows, 0.0)
-        } else {
-            t.field = elapsedMs * 0.3
-            t.shadows = elapsedMs * 0.3
-            t.raster = max(elapsedMs - t.field - t.shadows, 0.0)
-        }
+        t.raster = elapsedMs
         return t
     }
 }

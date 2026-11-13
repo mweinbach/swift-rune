@@ -365,5 +365,9 @@ public final class GlassRenderer: @unchecked Sendable {
     public init() throws {
         throw LightRendererError.metalUnavailable
     }
+
+    public convenience init(width: UInt32, height: UInt32) throws {
+        throw LightRendererError.metalUnavailable
+    }
 }
 #endif
