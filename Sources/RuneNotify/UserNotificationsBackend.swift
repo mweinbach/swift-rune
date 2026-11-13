@@ -276,36 +276,106 @@ public final class UserNotificationsBackend: NSObject, NotificationBackend, UNUs
 }
 #endif
 
-#if os(Linux)
+#if os(macOS) || os(Linux) || os(Windows)
+private func defaultNotificationCommandRunner(executableURL: URL, arguments: [String]) throws {
+    let process = Process()
+    process.executableURL = executableURL
+    process.arguments = arguments
+    try process.run()
+}
+#else
+private func defaultNotificationCommandRunner(executableURL: URL, arguments: [String]) throws {
+    throw NotificationError.message("Process execution is unavailable on this platform")
+}
+#endif
+
+/// Injectable subprocess runner used by `LinuxNotifySendBackend` and `WindowsToastBackend`.
+public typealias NotificationCommandRunner = @Sendable (_ executableURL: URL, _ arguments: [String]) throws -> Void
+
 /// Linux `notify-send` CLI notification backend.
+///
+/// Note: Live `notify-send` binary execution and D-Bus daemon delivery are `N/A-platform` on Darwin/iOS/Windows.
 public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Sendable {
     public static let shared = LinuxNotifySendBackend()
 
-    private init() {}
+    private struct State: Sendable {
+        var identity: NotificationIdentity?
+    }
+
+    private let lock = NotifyLock(initialState: State())
+    private let availableOverride: Bool?
+    private let runner: NotificationCommandRunner
+
+    public init(isAvailable: Bool? = nil, runner: NotificationCommandRunner? = nil) {
+        self.availableOverride = isAvailable
+        self.runner = runner ?? defaultNotificationCommandRunner
+    }
 
     public var isAvailable: Bool {
-        FileManager.default.isExecutableFile(atPath: "/usr/bin/notify-send")
+        if let availableOverride {
+            return availableOverride
+        }
+        return FileManager.default.isExecutableFile(atPath: "/usr/bin/notify-send")
             || FileManager.default.isExecutableFile(atPath: "/bin/notify-send")
     }
 
     public var isAppFocused: Bool { false }
 
-    public func post(_ notification: Notification) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    public func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        adopt(identity)
+    }
+
+    public func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        guard !identity.id.isEmpty else {
+            return .failure(.message("not an app id: \(identity.id)"))
+        }
+        lock.withLock { $0.identity = identity }
+        return .success(())
+    }
+
+    /// Builds the `notify-send` CLI argument list for `notification`.
+    public func buildArguments(for notification: Notification) -> [String] {
+        let identity = lock.withLock { $0.identity }
         var args = ["notify-send"]
         switch notification.urgency {
-        case .passive: args += ["-u", "low"]
-        case .active: args += ["-u", "normal"]
-        case .timeSensitive, .critical: args += ["-u", "critical"]
+        case .passive:
+            args.append("--urgency=low")
+        case .active:
+            args.append("--urgency=normal")
+        case .timeSensitive, .critical:
+            args.append("--urgency=critical")
         }
+        if let identity {
+            let appName = identity.name.isEmpty ? identity.id : identity.name
+            if !appName.isEmpty {
+                args.append("--app-name=\(appName)")
+            }
+            if let iconPath = identity.iconPath, !iconPath.isEmpty {
+                args.append("--icon=\(iconPath)")
+            }
+        }
+        if !notification.id.isEmpty {
+            args.append("--replace-id=\(Self.replaceIdentifier(for: notification.id))")
+        }
+        for action in notification.actions {
+            switch action {
+            case .button(let id, let label), .reply(let id, _, let label):
+                args.append("--action=\(id)=\(label)")
+            }
+        }
+        args.append("--")
         args.append(notification.title)
         if !notification.body.isEmpty {
             args.append(notification.body)
         }
-        process.arguments = args
+        return args
+    }
+
+    public func post(_ notification: Notification) -> Bool {
+        guard isAvailable else { return false }
+        let args = buildArguments(for: notification)
         do {
-            try process.run()
+            try runner(URL(fileURLWithPath: "/usr/bin/env"), args)
             return true
         } catch {
             return false
@@ -315,22 +385,99 @@ public final class LinuxNotifySendBackend: NotificationBackend, @unchecked Senda
     public func remove(ids: [String]) {}
     public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {}
     public func bringToFront() {}
-}
-#endif
 
-#if os(Windows)
+    private static func replaceIdentifier(for id: String) -> UInt32 {
+        if let numeric = UInt32(id), numeric > 0 {
+            return numeric
+        }
+        var hash: UInt32 = 0x811c9dc5
+        for byte in id.utf8 {
+            hash ^= UInt32(byte)
+            hash &*= 0x01000193
+        }
+        return hash == 0 ? 1 : hash
+    }
+}
+
 /// Windows PowerShell WinRT toast notification backend.
+///
+/// Note: Live WinRT COM activation (`serveActivations`/`waitActivation`) and Windows Registry
+/// (`HKCU\Software\Classes\AppUserModelId`) calls are `N/A-platform` on Darwin/Linux.
 public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable {
     public static let shared = WindowsToastBackend()
 
-    private init() {}
+    private struct State: Sendable {
+        var identity: NotificationIdentity?
+    }
 
-    public var isAvailable: Bool { true }
+    private let lock = NotifyLock(initialState: State())
+    private let availableOverride: Bool?
+    private let runner: NotificationCommandRunner
+
+    public init(isAvailable: Bool? = nil, runner: NotificationCommandRunner? = nil) {
+        self.availableOverride = isAvailable
+        self.runner = runner ?? defaultNotificationCommandRunner
+    }
+
+    public var isAvailable: Bool {
+        availableOverride ?? true
+    }
+
     public var isAppFocused: Bool { false }
 
+    public func register(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        adopt(identity)
+    }
+
+    public func adopt(_ identity: NotificationIdentity) -> Result<Void, NotificationError> {
+        guard !identity.id.isEmpty, !identity.id.contains("\\") else {
+            return .failure(.message("not an app id: \(identity.id)"))
+        }
+        var normalized = identity
+        if let scheme = identity.activationScheme {
+            guard let valid = Self.validScheme(scheme) else {
+                return .failure(.message("not a URL scheme: \(scheme)"))
+            }
+            normalized.activationScheme = valid
+        }
+        lock.withLock { $0.identity = normalized }
+        return .success(())
+    }
+
+    public func clickFromURL(_ url: String) -> NotificationClick? {
+        guard let scheme = lock.withLock({ $0.identity?.activationScheme }), !scheme.isEmpty else {
+            return nil
+        }
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let schemeSplit = trimmed.range(of: "://") else { return nil }
+        let head = String(trimmed[..<schemeSplit.lowerBound])
+        guard head.caseInsensitiveCompare(scheme) == .orderedSame else { return nil }
+        let rest = String(trimmed[schemeSplit.upperBound...])
+        guard rest.hasPrefix("notification/") else { return nil }
+        let afterHost = String(rest.dropFirst("notification/".count))
+        let parts = afterHost.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawId = String(parts[0]).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let id = rawId.removingPercentEncoding ?? rawId
+        var info: [(String, String)] = []
+        if parts.count > 1, !parts[1].isEmpty {
+            for item in parts[1].split(separator: "&") {
+                let kv = item.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                let k = String(kv[0]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[0])
+                let v = kv.count > 1
+                    ? (String(kv[1]).replacingOccurrences(of: "+", with: " ").removingPercentEncoding ?? String(kv[1]))
+                    : ""
+                info.append((k, v))
+            }
+        }
+        return NotificationClick(id: id, info: info)
+    }
+
     public func post(_ notification: Notification) -> Bool {
-        let escapedTitle = notification.title.replacingOccurrences(of: "'", with: "''")
-        let escapedBody = notification.body.replacingOccurrences(of: "'", with: "''")
+        guard isAvailable else { return false }
+        let appId = lock.withLock { $0.identity?.id } ?? "Rune"
+        let escapedApp = Self.escapePowerShellSingleQuoted(appId)
+        let escapedTitle = Self.escapePowerShellSingleQuoted(Self.escapeXML(notification.title))
+        let escapedBody = Self.escapePowerShellSingleQuoted(Self.escapeXML(notification.body))
         let script = """
         [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
         $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
@@ -338,13 +485,13 @@ public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable
         $nodes.Item(0).AppendChild($xml.CreateTextNode('\(escapedTitle)')) | Out-Null
         $nodes.Item(1).AppendChild($xml.CreateTextNode('\(escapedBody)')) | Out-Null
         $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Rune').Show($toast)
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('\(escapedApp)').Show($toast)
         """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "powershell.exe")
-        process.arguments = ["-NoProfile", "-NonInteractive", "-Command", script]
         do {
-            try process.run()
+            try runner(
+                URL(fileURLWithPath: "powershell.exe"),
+                ["-NoProfile", "-NonInteractive", "-Command", script]
+            )
             return true
         } catch {
             return false
@@ -354,8 +501,31 @@ public final class WindowsToastBackend: NotificationBackend, @unchecked Sendable
     public func remove(ids: [String]) {}
     public func setClickHandler(_ handler: (@Sendable (NotificationClick) -> Void)?) {}
     public func bringToFront() {}
+
+    private static func validScheme(_ scheme: String) -> String? {
+        guard scheme.count >= 2, let first = scheme.first, first.isASCII && first.isLetter else {
+            return nil
+        }
+        guard scheme.allSatisfy({ ch in
+            ch.isASCII && (ch.isLetter || ch.isNumber || ch == "+" || ch == "-" || ch == ".")
+        }) else {
+            return nil
+        }
+        return scheme.lowercased()
+    }
+
+    private static func escapeXML(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+    }
+
+    private static func escapePowerShellSingleQuoted(_ s: String) -> String {
+        s.replacingOccurrences(of: "'", with: "''")
+    }
 }
-#endif
 
 public enum PlatformDefaultNotificationBackend {
     public static var shared: any NotificationBackend {

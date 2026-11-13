@@ -34,6 +34,7 @@ internal indirect enum LuauExpr {
     case bool(Bool, line: Int)
     case number(Double, line: Int)
     case string(String, line: Int)
+    case byteString([UInt8], line: Int)
     case vararg(line: Int)
     case variable(String, line: Int)
     case table([(key: LuauExpr?, value: LuauExpr)], line: Int)

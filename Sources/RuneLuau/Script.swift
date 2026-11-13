@@ -221,6 +221,7 @@ public final class Script: @unchecked Sendable {
     @discardableResult
     public func poll(now: Double, tx: inout Tx) -> Bool {
         clock = now
+        sched?.setClock(now)
         var reloaded = false
         if let watcher {
             let (saving, ready) = watcher.takeReady()
@@ -254,8 +255,10 @@ public final class Script: @unchecked Sendable {
         let resumed = runTimed {
             sched.poll(vm: vm, now: now)
         }
-        let changed = sched.takeChanged()
-        settle(tx: &tx, bumpVersion: resumed > 0 || changed)
+        settle(tx: &tx, hasTx: true, bumpVersion: true)
+        if resumed == 0 {
+            version &-= 1
+        }
         return reloaded || resumed > 0
     }
 
@@ -282,15 +285,13 @@ public final class Script: @unchecked Sendable {
         let deps = mix(mix(version, salt), scrollDep)
         let viewport = cx.viewport
         return Rune.memo(id, deps: deps) {
-            aroundRead(state: ()) {
-                renderUncached(
-                    name: name,
-                    dark: dark,
-                    viewport: viewport,
-                    scrollLookup: { cx.scrollOffset(of: $0) },
-                    State.self
-                ).key(id)
-            }
+            renderUncached(
+                name: name,
+                dark: dark,
+                viewport: viewport,
+                scrollLookup: { cx.scrollOffset(of: $0) },
+                State.self
+            ).key(id)
         }
     }
 
@@ -304,14 +305,10 @@ public final class Script: @unchecked Sendable {
     ) -> El<State> {
         let card: (String) -> El<State> = { [weak self] msg in
             let palette = self?.options.palette ?? defaultPalette()
-            return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] _, _ in
+            return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] st, tx in
                 guard let self else { return }
-                do {
-                    _ = try self.reload(self.currentSources)
-                } catch let err as ScriptError {
-                    self.fail(err)
-                } catch {
-                    self.fail(ScriptError(kind: .runtime, message: error.localizedDescription))
+                self.aroundWrite(state: &st, tx: &tx) { _ in
+                    self.reloadFromCard()
                 }
             }
         }
@@ -385,7 +382,8 @@ public final class Script: @unchecked Sendable {
         viewport: Vec2 = .zero,
         scrollLookup: ((String) -> Vec2)? = nil
     ) -> El<State> {
-        let surfaceID = "\(prefix)fn:\(id)"
+        _ = state
+        let surfaceID = "\(prefix)\(id)"
         let tracked = trackedScrollKeysBySurface[surfaceID] ?? []
         var scrollHasher = Hasher()
         scrollHasher.combine(viewport.x.bitPattern)
@@ -400,70 +398,64 @@ public final class Script: @unchecked Sendable {
         let deps = mix(mix(mix(version, salt), fnVersion), scrollDep)
         let card: (String) -> El<State> = { [weak self] msg in
             let palette = self?.options.palette ?? defaultPalette()
-            return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] _, _ in
+            return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] st, tx in
                 guard let self else { return }
-                do {
-                    _ = try self.reload(self.currentSources)
-                } catch let err as ScriptError {
-                    self.fail(err)
-                } catch {
-                    self.fail(ScriptError(kind: .runtime, message: error.localizedDescription))
+                self.aroundWrite(state: &st, tx: &tx) { _ in
+                    self.reloadFromCard()
                 }
             }
         }
         return Rune.memo(surfaceID, deps: deps) {
-            aroundRead(state: state as Any) {
-                if let failedError {
-                    return card(failedError.message)
-                }
-                guard let vm else {
-                    return card("the script isn't running")
-                }
-                let env = UIRenderEnv(
-                    script: self,
-                    vmID: vmID,
-                    salt: salt,
-                    version: version,
-                    dark: dark,
-                    viewport: viewport,
-                    scrollLookup: scrollLookup,
-                    palette: options.palette,
-                    shadows: options.shadows,
-                    baseTextStyle: options.baseTextStyle,
-                    weights: options.weights,
-                    prefix: "\(surfaceID):"
-                )
-                do {
-                    let el: El<State> = try LuauUIBridge.withSession(vm: vm, stateType: State.self, env: env) { viewTable in
-                        try runTimed {
-                            let res = try vm.call(value: fn, args: [.table(viewTable)] + args).first ?? .nil
-                            return try LuauUIBridge.unwrapEl(res, State.self)
-                        }
+            if let failedError {
+                return card(failedError.message)
+            }
+            guard let vm else {
+                return card("the script isn't running")
+            }
+            let env = UIRenderEnv(
+                script: self,
+                vmID: vmID,
+                salt: salt,
+                version: version,
+                dark: dark,
+                viewport: viewport,
+                scrollLookup: scrollLookup,
+                palette: options.palette,
+                shadows: options.shadows,
+                baseTextStyle: options.baseTextStyle,
+                weights: options.weights,
+                prefix: prefix
+            )
+            do {
+                let el: El<State> = try LuauUIBridge.withSession(vm: vm, stateType: State.self, env: env) { viewTable in
+                    try runTimed {
+                        let res = try vm.call(value: fn, args: [.table(viewTable)] + args).first ?? .nil
+                        return try LuauUIBridge.unwrapEl(res, State.self)
                     }
-                    trackedScrollKeysBySurface[surfaceID] = env.trackedScrollKeys
-                    _metrics.renders += 1
-                    if env.memoFailed {
-                        salt &+= 1
-                    }
-                    noteSchedule()
-                    return el.key(surfaceID)
-                } catch let err as LuauRuntimeError {
-                    let se = err.toScriptError()
-                    appendLog(.error, se.message)
-                    salt &+= 1
-                    noteSchedule()
-                    return card(se.message)
-                } catch let err as ScriptError {
-                    appendLog(.error, err.message)
-                    salt &+= 1
-                    noteSchedule()
-                    return card(err.message)
-                } catch {
-                    appendLog(.error, error.localizedDescription)
-                    salt &+= 1
-                    noteSchedule()
-                    return card(error.localizedDescription)
                 }
+                trackedScrollKeysBySurface[surfaceID] = env.trackedScrollKeys
+                _metrics.renders += 1
+                if env.memoFailed {
+                    salt &+= 1
+                }
+                noteSchedule()
+                return el.key(surfaceID)
+            } catch let err as LuauRuntimeError {
+                let se = err.toScriptError()
+                appendLog(.error, se.message)
+                salt &+= 1
+                noteSchedule()
+                return card(se.message)
+            } catch let err as ScriptError {
+                appendLog(.error, err.message)
+                salt &+= 1
+                noteSchedule()
+                return card(err.message)
+            } catch {
+                appendLog(.error, error.localizedDescription)
+                salt &+= 1
+                noteSchedule()
+                return card(error.localizedDescription)
             }
         }
     }
@@ -491,7 +483,15 @@ public final class Script: @unchecked Sendable {
     /// Spawns a Luau function or thread on the task scheduler (without an active `Tx`).
     public func spawnFn(_ fn: LuauValue, args: [LuauValue] = []) throws {
         var dummy = Tx()
-        try spawnFn(fn, args: args, tx: &dummy)
+        try enterThrowing(hasTx: false, tx: &dummy) {
+            guard let vm, let sched else { return }
+            if case .closure(let cl) = fn {
+                let thread = vm.createThread(closure: cl)
+                sched.run(vm: vm, thread: thread, args: args)
+            } else {
+                _ = try vm.call(value: fn, args: args)
+            }
+        }
     }
 
     /// Spawns a Luau function or thread on the task scheduler and settles against `tx`.
@@ -499,7 +499,7 @@ public final class Script: @unchecked Sendable {
         guard let vm, let sched else {
             throw failedError ?? ScriptError(kind: .missing, message: "not running")
         }
-        try enterThrowing(tx: &tx) {
+        try enterThrowing(hasTx: true, tx: &tx) {
             if case .closure(let cl) = fn {
                 let thread = vm.createThread(closure: cl)
                 sched.run(vm: vm, thread: thread, args: args)
@@ -743,15 +743,23 @@ public final class Script: @unchecked Sendable {
         hook(&state, tx, body)
     }
 
-    internal func aroundRead<R>(state: Any, _ body: () -> R) -> R {
+    internal func aroundReadOptional<R>(state: Any, _ body: () throws -> R) throws -> R? {
         guard let hook = options.aroundRead else {
-            return body()
+            return try body()
         }
-        var result: R!
+        var outcome: Result<R, Error>?
         hook(state) {
-            result = body()
+            do {
+                outcome = .success(try body())
+            } catch {
+                outcome = .failure(error)
+            }
         }
-        return result
+        switch outcome {
+        case .success(let value): return value
+        case .failure(let error): throw error
+        case nil: return nil
+        }
     }
 
     internal func callHandlerIfCurrent(vmID: UInt64, fn: LuauValue, arg: LuauValue) throws {
@@ -858,9 +866,24 @@ public final class Script: @unchecked Sendable {
         self.warnedMessages.removeAll()
         self.salt &+= 1
         var dummyTx = Tx()
-        settle(tx: &dummyTx, bumpVersion: true)
+        settle(tx: &dummyTx, hasTx: false, bumpVersion: true)
 
         return ReloadReport(compileDuration: .zero, swapDuration: swapStart.duration(to: .now))
+    }
+
+    private func reloadFromCard() {
+        let compileStart = ContinuousClock.now
+        do {
+            let compiled = try currentSources.compile()
+            let compileDur = compileStart.duration(to: .now)
+            var report = try swap(compiled: compiled)
+            report.compileDuration = compileDur
+            noteReload(report)
+        } catch let err as ScriptError {
+            fail(err)
+        } catch {
+            fail(ScriptError(kind: .runtime, message: error.localizedDescription))
+        }
     }
 
     private func runTimed<R>(_ body: () throws -> R) rethrows -> R {
@@ -879,6 +902,15 @@ public final class Script: @unchecked Sendable {
     }
 
     internal func enter(tx: inout Tx, _ body: () throws -> Void) {
+        enter(hasTx: true, tx: &tx, body)
+    }
+
+    internal func enter(_ body: () throws -> Void) {
+        var tx = Tx()
+        enter(hasTx: false, tx: &tx, body)
+    }
+
+    private func enter(hasTx: Bool, tx: inout Tx, _ body: () throws -> Void) {
         guard let vm, let sched else { return }
         do {
             try runTimed {
@@ -892,20 +924,15 @@ public final class Script: @unchecked Sendable {
         } catch {
             appendLog(.error, error.localizedDescription)
         }
-        settle(tx: &tx, bumpVersion: true)
-    }
-
-    internal func enter(_ body: () throws -> Void) {
-        var tx = Tx()
-        enter(tx: &tx, body)
+        settle(tx: &tx, hasTx: hasTx, bumpVersion: true)
     }
 
     private func enterThrowing<R>(_ body: () throws -> R) throws -> R {
         var tx = Tx()
-        return try enterThrowing(tx: &tx, body)
+        return try enterThrowing(hasTx: false, tx: &tx, body)
     }
 
-    private func enterThrowing<R>(tx: inout Tx, _ body: () throws -> R) throws -> R {
+    private func enterThrowing<R>(hasTx: Bool, tx: inout Tx, _ body: () throws -> R) throws -> R {
         guard let vm, let sched else {
             throw failedError ?? ScriptError(kind: .missing, message: "not running")
         }
@@ -915,44 +942,62 @@ public final class Script: @unchecked Sendable {
                 sched.drainDefers(vm: vm)
                 return r
             }
-            settle(tx: &tx, bumpVersion: true)
+            settle(tx: &tx, hasTx: hasTx, bumpVersion: true)
             return result
         } catch let err as LuauRuntimeError {
             let se = err.toScriptError()
             appendLog(.error, se.message)
-            settle(tx: &tx, bumpVersion: true)
+            settle(tx: &tx, hasTx: hasTx, bumpVersion: true)
             throw se
         } catch let err as ScriptError {
             appendLog(.error, err.message)
-            settle(tx: &tx, bumpVersion: true)
+            settle(tx: &tx, hasTx: hasTx, bumpVersion: true)
             throw err
         }
     }
 
-    private func settle(tx: inout Tx, bumpVersion: Bool = true) {
+    private func settle(tx: inout Tx, hasTx: Bool = true, bumpVersion: Bool = true) {
         if bumpVersion {
             version &+= 1
         }
-        noteSchedule(tx: &tx)
-    }
-
-    private func noteSchedule() {
-        var tx = Tx()
-        noteSchedule(tx: &tx)
-    }
-
-    private func noteSchedule(tx: inout Tx) {
         guard let sched else { return }
         for err in sched.errors {
             appendLog(.error, err.message)
         }
         sched.errors.removeAll()
         let deadline = sched.nextDeadline()
-        nextDeadline = deadline ?? .infinity
-        if sched.takeChanged(), deadline != nil {
+        let wait = sched.waitFor(deadline)
+        let changed = sched.takeChanged()
+        let defers = sched.hasDefers
+        nextDeadline = defers ? clock : (deadline ?? .infinity)
+        if hasTx {
+            if defers {
+                tx.wakeAfter(0.0)
+            } else if let wait {
+                tx.wakeAfter(wait)
+            }
+        } else if defers || (wait != nil && changed) {
+            if defers {
+                shared.mark()
+            }
             shared.wake()
         }
-        _ = tx
+    }
+
+    internal func noteSchedule() {
+        guard let sched else { return }
+        for err in sched.errors {
+            appendLog(.error, err.message)
+        }
+        sched.errors.removeAll()
+        let changed = sched.takeChanged()
+        let deadline = sched.nextDeadline()
+        let defers = sched.hasDefers
+        if changed || defers {
+            nextDeadline = defers ? clock : (deadline ?? .infinity)
+            shared.mark()
+            shared.wake()
+        }
     }
 
     private func fail(_ err: ScriptError) {

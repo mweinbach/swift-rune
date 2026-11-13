@@ -350,4 +350,97 @@ struct RuneParityTests {
         #expect(RuneParityCLI.run(arguments: ["unknown-cmd"]) == 2)
         #expect(RuneParityCLI.run(arguments: ["status"]) == 1)
     }
+
+    @Test("fetch_upstream.sh fetches local bare git repo on dev branch without network")
+    func fetchUpstreamScriptAgainstLocalBareRepo() throws {
+        let root = try makeTempDir("fetch-upstream")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let bareRepo = root.appendingPathComponent("bare.git")
+        let seedRepo = root.appendingPathComponent("seed")
+        let upstreamClone = root.appendingPathComponent("upstream")
+
+        func git(_ args: [String]) throws -> String {
+            try ProcessRunner.runChecked(executable: "/usr/bin/git", arguments: args)
+        }
+
+        _ = try git(["init", "--bare", "-b", "dev", bareRepo.path])
+        _ = try git(["clone", bareRepo.path, seedRepo.path])
+        _ = try git(["-C", seedRepo.path, "checkout", "-B", "dev"])
+        _ = try git(["-C", seedRepo.path, "config", "user.email", "parity@example.com"])
+        _ = try git(["-C", seedRepo.path, "config", "user.name", "Parity Bot"])
+
+        let markerFile = seedRepo.appendingPathComponent("README.md")
+        try "initial upstream\n".write(to: markerFile, atomically: true, encoding: .utf8)
+        _ = try git(["-C", seedRepo.path, "add", "."])
+        _ = try git(["-C", seedRepo.path, "commit", "-m", "initial dev commit"])
+        _ = try git(["-C", seedRepo.path, "push", "-u", "origin", "dev"])
+        _ = try git(["-C", bareRepo.path, "symbolic-ref", "HEAD", "refs/heads/dev"])
+        let firstSHA = try git(["-C", seedRepo.path, "rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        _ = try git(["clone", "--branch", "dev", bareRepo.path, upstreamClone.path])
+
+        let scriptURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(".agents/skills/upstream-rune-sync/scripts/fetch_upstream.sh")
+
+        let syncFileURL = root.appendingPathComponent(".upstream-sync.json")
+        let syncJSON = """
+        {
+          "upstreamRepo": "\(bareRepo.path)",
+          "syncedCommit": "\(firstSHA)",
+          "syncedCommitDate": "2026-11-12T00:00:00Z",
+          "syncedCommitSubject": "initial dev commit"
+        }
+        """
+        try syncJSON.write(to: syncFileURL, atomically: true, encoding: .utf8)
+
+        func runFetch(_ args: [String]) throws -> ProcessRunner.Output {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [scriptURL.path] + args
+            var env = ProcessInfo.processInfo.environment
+            env["SYNC_FILE"] = syncFileURL.path
+            proc.environment = env
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            try proc.run()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return ProcessRunner.Output(
+                exitCode: proc.terminationStatus,
+                stdout: String(data: outData, encoding: .utf8) ?? "",
+                stderr: String(data: errData, encoding: .utf8) ?? ""
+            )
+        }
+
+        // 1. Local --upstream check without fetch reports UP TO DATE at firstSHA.
+        let initialOut = try runFetch(["--upstream", upstreamClone.path])
+        #expect(initialOut.exitCode == 0)
+        #expect(initialOut.stdout.contains("Upstream HEAD: \(firstSHA)"))
+        #expect(initialOut.stdout.contains("UP TO DATE (0 commits ahead)"))
+
+        // 2. Push a new commit to bare repo on dev, then run --upstream ... --fetch --branch dev.
+        try "second upstream\n".write(to: markerFile, atomically: true, encoding: .utf8)
+        _ = try git(["-C", seedRepo.path, "add", "."])
+        _ = try git(["-C", seedRepo.path, "commit", "-m", "second dev commit"])
+        _ = try git(["-C", seedRepo.path, "push", "origin", "dev"])
+        let secondSHA = try git(["-C", seedRepo.path, "rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let fetchOut = try runFetch(["--upstream", upstreamClone.path, "--fetch", "--branch", "dev"])
+        #expect(fetchOut.exitCode == 0)
+        #expect(fetchOut.stdout.contains("Upstream HEAD: \(secondSHA)"))
+        #expect(fetchOut.stdout.contains("1 commit(s) ahead of syncedCommit"))
+        #expect(fetchOut.stdout.contains("second dev commit"))
+
+        // 3. Invalid --upstream path fails cleanly with exit code 1.
+        let missingOut = try runFetch(["--upstream", root.appendingPathComponent("missing").path])
+        #expect(missingOut.exitCode == 1)
+        #expect(missingOut.stderr.contains("not a git repository"))
+    }
 }

@@ -107,5 +107,18 @@ struct RunePerfParityTests {
 
         tracker.reset()
         #expect(tracker.snapshot().totalLiveBlocks == 0)
+
+        // Shared singleton + static AllocTracker.contribute parity.
+        AllocTracker.shared.reset()
+        defer { AllocTracker.shared.reset() }
+        AllocTracker.contribute("shared-section") { "vram=99 MiB" }
+        #expect(AllocTracker.shared.recordAllocation(pointer: 0xC1, size: AllocTracker.defaultInterval, frames: framesA))
+        let sharedSnap = AllocTracker.shared.snapshot(top: 10)
+        #expect(sharedSnap.totalLiveBlocks == 1)
+        #expect(sharedSnap.totalLiveBytes == Int64(AllocTracker.defaultInterval))
+        #expect(sharedSnap.sections == [AllocSiteSection(name: "shared-section", report: "vram=99 MiB")])
+        #expect(sharedSnap.formattedReport().contains("section shared-section\nvram=99 MiB"))
+        #expect(AllocTracker.shared.recordFree(pointer: 0xC1))
+        #expect(AllocTracker.shared.snapshot().totalLiveBlocks == 0)
     }
 }

@@ -571,6 +571,12 @@ internal final class LuauCompiler {
                 _ = fs.emit(.loadConst(k), line: line)
                 for _ in 1..<expectedResults { _ = fs.emit(.loadNil, line: line) }
             }
+        case .byteString(let b, let line):
+            if expectedResults > 0 {
+                let k = fs.addConstant(.byteString(b))
+                _ = fs.emit(.loadConst(k), line: line)
+                for _ in 1..<expectedResults { _ = fs.emit(.loadNil, line: line) }
+            }
         case .vararg(let line):
             _ = fs.emit(.loadVararg(expected: expectedResults), line: line)
 

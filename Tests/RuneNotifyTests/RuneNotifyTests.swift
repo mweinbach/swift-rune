@@ -239,4 +239,156 @@ struct RuneNotifyTests {
         try RuneNotify.serveActivations("{00000000-0000-0000-0000-000000000000}").get()
         #expect(RuneNotify.waitActivation("{00000000-0000-0000-0000-000000000000}", timeout: 0) == nil)
     }
+
+    @Test func topLevelRuneNotifyWrappersAndLiveFocusCheckDoNotCrash() throws {
+        let identity = NotificationIdentity(id: "dev.rune.wrapper-test", name: "Rune Wrapper")
+            .icon("/tmp/rune.png")
+            .activation("rune-wrapper")
+
+        RuneNotify.register(identity)
+        try RuneNotify.registerWithResult(identity).get()
+        RuneNotify.adopt(identity)
+        try RuneNotify.adoptWithResult(identity).get()
+
+        let liveService = NotificationService()
+        #expect(liveService.isAppFocused == RuneNotify.isAppFocused)
+        #expect(RuneNotify.isAppFocused == false || RuneNotify.isAppFocused == true)
+
+        RuneNotify.onClick { _ in }
+        defer { RuneNotify.shared.clearClickHandler() }
+
+        let note = Notification(id: "wrap-1", title: "Wrapper").body("Body")
+        _ = RuneNotify.post(note)
+        RuneNotify.remove(ids: ["wrap-1"])
+        RuneNotify.bringToFront()
+        #expect(RuneNotify.clickFromURL("rune-wrapper://notification/wrap-1") == nil)
+        try RuneNotify.serveActivations("{12345678-1234-1234-1234-1234567890ab}").get()
+        #expect(RuneNotify.waitActivation("{12345678-1234-1234-1234-1234567890ab}", timeout: 0) == nil)
+    }
+
+    @Test func linuxNotifySendBackendCliArgsAndErrorPaths() throws {
+        struct RecordedCall: Sendable {
+            let executable: String
+            let arguments: [String]
+        }
+        enum StubError: Error { case failed }
+
+        let calls = NotifyLock(initialState: [RecordedCall]())
+        let backend = LinuxNotifySendBackend(isAvailable: true) { exe, args in
+            calls.withLock { $0.append(RecordedCall(executable: exe.path, arguments: args)) }
+        }
+
+        // Empty app id fails validation.
+        switch backend.register(NotificationIdentity(id: "", name: "Bad")) {
+        case .success:
+            Issue.record("Expected empty identity id to fail")
+        case .failure:
+            break
+        }
+
+        try backend.register(
+            NotificationIdentity(id: "dev.rune.linux", name: "Rune Linux")
+                .icon("/usr/share/icons/rune.png")
+        ).get()
+
+        let critical = Notification(id: "build-1", title: "Build Ready")
+            .body("All green")
+            .urgency(.critical)
+            .action(id: "open", label: "Open App")
+            .reply(id: "reply", placeholder: "Type...", label: "Reply")
+
+        #expect(backend.post(critical))
+        #expect(backend.post(critical))
+
+        let recorded = calls.withLock { $0 }
+        #expect(recorded.count == 2)
+        #expect(recorded[0].executable == "/usr/bin/env")
+        let args = recorded[0].arguments
+        #expect(args.first == "notify-send")
+        #expect(args.contains("--urgency=critical"))
+        #expect(args.contains("--app-name=Rune Linux"))
+        #expect(args.contains("--icon=/usr/share/icons/rune.png"))
+        #expect(args.contains("--action=open=Open App"))
+        #expect(args.contains("--action=reply=Reply"))
+        let replaceArgs = args.filter { $0.hasPrefix("--replace-id=") }
+        #expect(replaceArgs.count == 1)
+        // Same notification id produces deterministic replace-id across posts.
+        #expect(recorded[1].arguments.filter { $0.hasPrefix("--replace-id=") } == replaceArgs)
+        let sepIndex = try #require(args.firstIndex(of: "--"))
+        #expect(Array(args[(sepIndex + 1)...]) == ["Build Ready", "All green"])
+
+        // Low and normal urgency mapping
+        #expect(backend.buildArguments(for: Notification(id: "p", title: "Passive").urgency(.passive)).contains("--urgency=low"))
+        #expect(backend.buildArguments(for: Notification(id: "a", title: "Active").urgency(.active)).contains("--urgency=normal"))
+
+        // Unavailable backend drops without invoking runner.
+        let unavailableCalls = NotifyLock(initialState: 0)
+        let unavailable = LinuxNotifySendBackend(isAvailable: false) { _, _ in
+            unavailableCalls.withLock { $0 += 1 }
+        }
+        #expect(!unavailable.post(critical))
+        #expect(unavailableCalls.withLock { $0 } == 0)
+
+        // Runner failure returns false.
+        let failing = LinuxNotifySendBackend(isAvailable: true) { _, _ in
+            throw StubError.failed
+        }
+        #expect(!failing.post(critical))
+    }
+
+    @Test func windowsToastBackendInvocationValidationAndErrorPaths() throws {
+        struct RecordedCall: Sendable {
+            let executable: String
+            let arguments: [String]
+        }
+        enum StubError: Error { case powershellMissing }
+
+        let calls = NotifyLock(initialState: [RecordedCall]())
+        let backend = WindowsToastBackend(isAvailable: true) { exe, args in
+            calls.withLock { $0.append(RecordedCall(executable: exe.lastPathComponent, arguments: args)) }
+        }
+
+        // Validation error paths matching upstream windows.rs.
+        if case .success = backend.register(NotificationIdentity(id: "bad\\id", name: "Bad")) {
+            Issue.record("Expected backslash in app id to fail")
+        }
+        if case .success = backend.adopt(NotificationIdentity(id: "dev.rune.win", name: "Win").activation("1bad")) {
+            Issue.record("Expected invalid URL scheme to fail")
+        }
+
+        try backend.register(
+            NotificationIdentity(id: "dev.rune.win", name: "Rune Win")
+                .activation("RuneNotify")
+        ).get()
+
+        let click = backend.clickFromURL("runenotify://notification/n-5?session=s1&rune.action=view")
+        #expect(click?.id == "n-5")
+        #expect(click?.get("session") == "s1")
+        #expect(click?.action == "view")
+        #expect(backend.clickFromURL("other://notification/n-5") == nil)
+
+        let note = Notification(id: "win-1", title: "Hi <User> & 'Co'")
+            .body("Line '1' & 2")
+        #expect(backend.post(note))
+
+        let recorded = calls.withLock { $0 }
+        #expect(recorded.count == 1)
+        #expect(recorded[0].executable == "powershell.exe")
+        #expect(recorded[0].arguments.prefix(3) == ["-NoProfile", "-NonInteractive", "-Command"])
+        let script = recorded[0].arguments[3]
+        #expect(script.contains("CreateToastNotifier('dev.rune.win')"))
+        #expect(script.contains("Hi &lt;User&gt; &amp; &apos;Co&apos;"))
+        #expect(script.contains("Line &apos;1&apos; &amp; 2"))
+
+        // Error path: unavailable or runner throws -> post returns false.
+        let unavailable = WindowsToastBackend(isAvailable: false) { _, _ in
+            Issue.record("Unavailable backend should not run powershell.exe")
+        }
+        #expect(!unavailable.post(note))
+
+        let failing = WindowsToastBackend(isAvailable: true) { _, _ in
+            throw StubError.powershellMissing
+        }
+        #expect(!failing.post(note))
+    }
 }

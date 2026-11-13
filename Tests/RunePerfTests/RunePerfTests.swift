@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import RunePerf
+#if canImport(Darwin)
+import Darwin
+#endif
 
 @Suite("RunePerf Tests")
 struct RunePerfTests {
@@ -34,6 +37,35 @@ struct RunePerfTests {
         #expect(snapshot.usage.residentBytes > 0)
         #expect(!snapshot.threads.isEmpty)
         #expect(snapshot.exitedThreadCpuSeconds >= 0)
+
+        #if os(macOS)
+        // A thread that burns >=0.3s of thread CPU time and exits is reflected in exitedThreadCpuSeconds.
+        let before = ProcessSampler.snapshot()
+        var thread: pthread_t?
+        let rc = pthread_create(&thread, nil, { _ in
+            func threadCpuSeconds() -> Double {
+                var ts = timespec(tv_sec: 0, tv_nsec: 0)
+                clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts)
+                return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1_000_000_000.0
+            }
+            let deadline = Date().addingTimeInterval(10.0)
+            var acc: UInt64 = 0
+            while threadCpuSeconds() < 0.3 && Date() < deadline {
+                for _ in 0..<10_000 {
+                    acc &+= 1
+                    acc ^= acc << 13
+                }
+            }
+            withUnsafePointer(to: acc) { _ = $0 }
+            return nil
+        }, nil)
+        #expect(rc == 0)
+        if let thread {
+            #expect(pthread_join(thread, nil) == 0)
+        }
+        let after = ProcessSampler.snapshot()
+        #expect(after.exitedThreadCpuSeconds - before.exitedThreadCpuSeconds > 0.2)
+        #endif
     }
 
     @Test func memoryGaugeAndLeaseTrackAndReleaseBytes() {

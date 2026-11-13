@@ -365,7 +365,7 @@ struct RuneLuauParityTests {
         )
         let cx = Cx<LuauTestState>(viewport: Vec2(200, 100))
         let el = script.view(cx)
-        #expect(hooks.reads == 1)
+        #expect(hooks.reads == 0)
 
         let btn = findElement(el) { $0.keyId == "btn" }
         #expect(btn != nil)
@@ -621,4 +621,766 @@ struct RuneLuauParityTests {
         #expect(probe.get("first").asString == "x")
         #expect(probe.get("second").asString == "y")
     }
+
+    @Test("Script lifecycle: renderFn, evalFn error, yielding spawnFn/poll wakeAfter, reloadCompiled failure, call/sources/withVM/fire/logs")
+    func scriptLifecycleMethodsAndScheduling() throws {
+        final class HookLogBox: @unchecked Sendable {
+            var logs: [(LogLevel, String)] = []
+            var startedCount = 0
+            var lastVMID: UInt64 = 0
+            var hadScriptSignal = false
+        }
+        let box = HookLogBox()
+        let customStyle = TextStyle(size: 16, weight: 500, family: .monospace)
+
+        final class WakerFlag: @unchecked Sendable {
+            var count = 0
+        }
+        let wakerFlag = WakerFlag()
+        let waker = Waker { wakerFlag.count += 1 }
+
+        let opts = ScriptOptions()
+            .onLog { lvl, msg in box.logs.append((lvl, msg)) }
+            .text(customStyle, weights: [300, 450, 650, 800])
+            .setup { host in
+                host.global("HOST_CONST", value: .number(99))
+                let pingSig = try host.signal("ping")
+                host.global("PING_SIG", value: pingSig)
+                box.hadScriptSignal = !host.scriptSignal().isNil
+                #expect(!host.vm.globals.rawGet("math").isNil)
+            }
+            .start { vm, mod, vmID in
+                box.startedCount += 1
+                box.lastVMID = vmID
+                let boot = mod.rawGet("onStart")
+                if !boot.isNil {
+                    _ = try vm.call(value: boot, args: [.number(Double(vmID))])
+                }
+            }
+
+        let initialSource = Sources.single("""
+        local ui = require("@rune/ui")
+        local startedVMID = 0
+        local calls = {}
+        local pings = 0
+        PING_SIG:Connect(function(v)
+            pings += (v or 1)
+        end)
+        return {
+            onStart = function(id)
+                startedVMID = id
+            end,
+            render = function(cx)
+                return ui.text("v1", { key = "r1" })
+            end,
+            renderCard = function(view, label, tag)
+                return ui.col({
+                    view:Memo(77, label, function()
+                        return ui.text(label .. ":" .. tag, { weight = "medium" })
+                    end),
+                })
+            end,
+            bump = function(x)
+                table.insert(calls, x)
+            end,
+            delayed = function()
+                task.wait(0.25)
+                table.insert(calls, "after-wait")
+            end,
+            badEval = function()
+                error("eval-kaboom")
+            end,
+            saveHotState = function()
+                error("hot-save-err")
+            end,
+            probe = function()
+                return {
+                    startedVMID = startedVMID,
+                    hostConst = HOST_CONST,
+                    calls = calls,
+                    pings = pings,
+                }
+            end,
+        }
+        """)
+
+        let script = Script(name: "life", sources: initialSource, options: opts)
+        #expect(script.name == "life")
+        #expect(script.sources.entryPath == initialSource.entryPath)
+        #expect(box.startedCount == 1)
+        #expect(box.lastVMID > 0)
+        #expect(box.hadScriptSignal == true)
+        script.setWaker(waker)
+
+        let ranInVM = script.withVM { vm in
+            vm.globals.rawGet("HOST_CONST").asInt
+        }
+        #expect(ranInVM == 99)
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(400, 200))
+        let renderCardFn = script.module?.rawGet("renderCard") ?? .nil
+        // renderFn passes surfaceID = "{prefix}{id}" and inner memo prefix "{prefix}" so memo keys match "{prefix}{key}".
+        let cardEl: El<LuauTestState> = script.renderFn(cx, id: "c1", fn: renderCardFn, args: [LuauValue.string("hi"), LuauValue.number(2)])
+        #expect(cardEl.keyId == "\(script.memoPrefix())c1")
+        let memoNode = findElement(cardEl) { $0.keyId == "\(script.memoPrefix())77" }
+        #expect(memoNode != nil)
+        #expect(memoNode?.plainText == "hi:2")
+        #expect(memoNode?.textStyle.family == .monospace)
+        #expect(memoNode?.textStyle.size == 16)
+        #expect(memoNode?.textStyle.weight == 450)
+
+        // evalFn error logs error, throws ScriptError, and does NOT bump version.
+        let versionBeforeBadEval = script.version
+        let badEvalFn = script.module?.rawGet("badEval") ?? .nil
+        #expect(throws: ScriptError.self) {
+            _ = try script.evalFn(badEvalFn)
+        }
+        #expect(script.version == versionBeforeBadEval)
+        #expect(box.logs.contains { $0.0 == .error && $0.1.contains("eval-kaboom") })
+
+        // call happy, call missing, fire happy & missing
+        try script.call("bump", args: [LuauData.string("direct")])
+        #expect(throws: ScriptError.self) {
+            try script.call("doesNotExist")
+        }
+        #expect(script.fire("ping", args: [LuauData.integer(4)]) == true)
+        #expect(script.fire("missingSignal") == false)
+
+        // Yielding spawnFn arms tx.wakeAfter and poll resumes it once elapsed.
+        var tx = Tx()
+        _ = script.poll(now: 100.0, tx: &tx)
+        tx = Tx()
+        let delayedFn = script.module?.rawGet("delayed") ?? .nil
+        try script.spawnFn(delayedFn, tx: &tx)
+        let wakeWait = tx.runtimeActions["wakeAfter"] as? Double
+        #expect(wakeWait != nil && (wakeWait ?? 0) > 0.2)
+
+        var pollEarlyTx = Tx()
+        let earlyRan = script.poll(now: 100.01, tx: &pollEarlyTx)
+        #expect(earlyRan == false)
+        #expect(dataList((try script.query("probe")).get("calls")).compactMap(\.asString) == ["direct"])
+
+        var pollDoneTx = Tx()
+        let lateRan = script.poll(now: 101.0, tx: &pollDoneTx)
+        #expect(lateRan == true)
+
+        let p = try script.query("probe")
+        #expect(p.get("startedVMID").asInt64 == Int64(box.lastVMID))
+        #expect(p.get("hostConst").asInt64 == 99)
+        #expect(p.get("pings").asInt64 == 4)
+        #expect(dataList(p.get("calls")).compactMap(\.asString) == ["direct", "after-wait"])
+
+        // reload failure throws, logs error, and preserves old working VM.
+        let brokenSources = Sources.single("local x = (")
+        #expect(throws: ScriptError.self) {
+            try script.reload(brokenSources)
+        }
+        #expect(try script.query("probe").get("hostConst").asInt64 == 99)
+
+        // reloadCompiled failure throws, logs error, and keeps old working VM.
+        let badRuntimeCompiled = try Sources.single("error('init-fail')").compile()
+        #expect(throws: ScriptError.self) {
+            try script.reloadCompiled(Sources.single("error('init-fail')"), compiled: badRuntimeCompiled, compileDuration: .zero)
+        }
+        #expect(try script.query("probe").get("hostConst").asInt64 == 99)
+
+        // Happy reload logs saveHotState error as .warn, logs "reloaded in ...", clears warnedMessages.
+        _ = script.renderUncached(name: "render", dark: true, LuauTestState.self)
+        let v2Report = try script.reload(Sources.single("""
+        local ui = require("@rune/ui")
+        return {
+            render = function(cx)
+                return ui.box({ dir = "ltr" }, { ui.text("v2") })
+            end,
+        }
+        """))
+        #expect(v2Report.compileDuration >= .zero)
+        #expect(box.logs.contains { $0.0 == .warn && $0.1.contains("hot-save-err") })
+        #expect(box.logs.contains { $0.0 == .info && $0.1.contains("reloaded in ") })
+
+        // Failed script: withVM returns nil and reload card works.
+        let brokenScript = Script(name: "broken", sources: Sources.single("error('start-broken')"), options: opts)
+        let vmNil: Int? = brokenScript.withVM { _ in 1 }
+        #expect(vmNil == nil)
+        let errCard = brokenScript.renderUncached(name: "render", dark: true, LuauTestState.self)
+        let errRoot = findElement(errCard) { $0.keyId == "luau-error" }
+        #expect(errRoot != nil)
+        let titleEl = collectTexts(errCard)
+        #expect(titleEl.contains { $0.contains("Stopped drawing:") && $0.contains("start-broken") })
+
+        // Check LuauCard.errorCard wrap (title + body wrapped; Reload button unwrapped) and LuauCard.rowError styling directly.
+        let cardDirect = LuauCard.errorCard(message: "line1\nline2", palette: defaultPalette(), dark: true) { _, _ in } as El<LuauTestState>
+        let wrappedTexts = findAllTexts(cardDirect)
+        #expect(wrappedTexts.count == 3)
+        #expect(wrappedTexts[0].textStyle.wrap == .wrap)
+        #expect(wrappedTexts[1].textStyle.wrap == .wrap)
+
+        let rowErrEl = LuauCard.rowError(message: "row boom") as El<LuauTestState>
+        #expect(rowErrEl.textStyle.wrap == .ellipsis)
+        #expect(rowErrEl.textStyle.family == .monospace)
+        #expect(rowErrEl.layout.width == .fraction(1.0))
+
+        // Clicking luau-reload on errorCard reloads from currentSources into healthy state.
+        final class FailToggle: @unchecked Sendable { var fail = true }
+        let toggle = FailToggle()
+        let recOpts = ScriptOptions().setup { host in
+            let fn = LuauNativeFunction(name: "shouldFail") { _, _, _ in .values([.bool(toggle.fail)]) }
+            host.global("SHOULD_FAIL", value: .nativeFunction(fn))
+        }
+        let badRenderScript = Script(name: "rec", sources: Sources.single("""
+        local ui = require("@rune/ui")
+        return {
+            render = function(cx)
+                if SHOULD_FAIL() then error("first-render-boom") end
+                return ui.text("recovered")
+            end,
+        }
+        """), options: recOpts)
+        let firstCard = badRenderScript.renderUncached(name: "render", dark: true, LuauTestState.self)
+        let reloadBtn = findElement(firstCard) { $0.keyId == "luau-reload" }
+        #expect(reloadBtn != nil)
+        toggle.fail = false
+        var clickState = LuauTestState()
+        var clickTx = Tx()
+        reloadBtn?.handlers.onClick?(&clickState, &clickTx)
+        let secondCard = badRenderScript.renderUncached(name: "render", dark: true, LuauTestState.self)
+        #expect(findElement(secondCard) { $0.plainText == "recovered" } != nil)
+    }
+
+    @Test("noteSchedule and settle: task.defer/delay inside render wake & poll, onClick sets wakeAfter")
+    func noteScheduleAndSettle() throws {
+        final class WakeCount: @unchecked Sendable { var n = 0 }
+        let wakes = WakeCount()
+        let script = Script(
+            name: "sched",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local log = {}
+            local first = true
+            return {
+                render = function(cx)
+                    if first then
+                        first = false
+                        task.defer(function()
+                            table.insert(log, "deferred")
+                        end)
+                        task.delay(0.15, function()
+                            table.insert(log, "delayed")
+                        end)
+                    end
+                    return ui.col({
+                        ui.box({
+                            key = "btn",
+                            onPress = function()
+                                task.delay(0.3, function()
+                                    table.insert(log, "click-delay")
+                                end)
+                            end,
+                        }),
+                    })
+                end,
+                log = function() return log end,
+            }
+            """)
+        )
+        script.setWaker(Waker { wakes.n += 1 })
+        var initTx = Tx()
+        _ = script.poll(now: 50.0, tx: &initTx)
+        let cx = Cx<LuauTestState>(viewport: Vec2(200, 100))
+        let root = script.view(cx)
+        // Render scheduled defer + delay, so waker should have been signaled by noteSchedule().
+        #expect(wakes.n >= 1)
+
+        var pollTx = Tx()
+        _ = script.poll(now: 50.01, tx: &pollTx)
+        let pendingWait = pollTx.runtimeActions["wakeAfter"] as? Double
+        #expect(pendingWait != nil && (pendingWait ?? 0) > 0.05)
+        #expect(dataList(try script.query("log")).compactMap(\.asString) == ["deferred"])
+
+        var lateTx = Tx()
+        _ = script.poll(now: 50.5, tx: &lateTx)
+        #expect(dataList(try script.query("log")).compactMap(\.asString) == ["deferred", "delayed"])
+
+        // Clicking button with task.delay sets tx.wakeAfter inside active Tx.
+        let btn = findElement(root) { $0.keyId == "btn" }
+        var st = LuauTestState()
+        var clickTx = Tx()
+        btn?.handlers.onClick?(&st, &clickTx)
+        let clickWait = clickTx.runtimeActions["wakeAfter"] as? Double
+        #expect(clickWait != nil && (clickWait ?? 0) > 0.2)
+    }
+
+    @Test("HostNodes: NodeArgs helpers, two-table layering, Press.attach + pressLater, onHover, key preserved")
+    func hostNodesFullSurface() throws {
+        final class NodeCapture: @unchecked Sendable {
+            var content: String?
+            var childrenCount = 0
+            var gotBool = false
+            var gotNum: Double?
+            var gotStr: String?
+            var gotFlag = false
+            var gotData: LuauData?
+            var gotColor: Color?
+            var gotPalette: Color?
+            var gotDark: Bool?
+            var hadHandler = false
+            var hadPressLater = false
+        }
+        let cap = NodeCapture()
+
+        let probeNode = HostNode(name: "probe") { (args: NodeArgs) -> El<LuauTestState> in
+            cap.content = args.content
+            let kids = args.children(LuauTestState.self)
+            cap.childrenCount = kids.count
+            if case .bool(let b)? = args.get("flagA") { cap.gotBool = b }
+            cap.gotNum = args.number("num")
+            cap.gotStr = args.string("label")
+            cap.gotFlag = args.flag("enabled")
+            cap.gotData = args.data("meta")
+            cap.gotColor = args.color("tint")
+            cap.gotPalette = args.palette("bg")
+            cap.gotDark = args.dark
+            cap.hadHandler = args.handler("onCustom") != nil
+
+            var root = El<LuauTestState>(direction: .column)
+            for k in kids { root = root.child(k) }
+
+            if let later = args.pressLater("onPress") {
+                cap.hadPressLater = true
+                root = later.attach(root, fields: [("extra", .string("from-attach"))])
+            }
+            if let custom = args.handler("onCustom") {
+                let childBtn = El<LuauTestState>()
+                    .key("custom-btn")
+                    .onClick(args.onPressWith(LuauTestState.self, handler: custom, key: "custom-k", fields: [("tag", .integer(42))]))
+                root = root.child(childBtn)
+            }
+            if let hov = args.handler("onHover") {
+                root = root.onHover(args.onHover(LuauTestState.self, handler: hov))
+            }
+            return root
+        }
+
+        let hoverNode = HostNode(name: "hoverHelper") { (args: NodeArgs) -> El<LuauTestState> in
+            var el = El<LuauTestState>(direction: .row)
+            el = args.onPress(el, "onPress")
+            el = args.onHover(el, "onHover")
+            return el
+        }
+
+        var opts = ScriptOptions()
+        opts.nodes = [probeNode, hoverNode]
+        let script = Script(
+            name: "host_nodes",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local events = {}
+            return {
+                render = function(cx)
+                    return ui.col({
+                        ui.probe("hello-node", {
+                            key = "probe-root",
+                            flagA = true,
+                            num = 1,
+                            label = "layer1",
+                            enabled = true,
+                            meta = { a = 10 },
+                            tint = "#ff0000",
+                            onPress = function(ev) table.insert(events, ev) end,
+                            onCustom = function(ev) table.insert(events, ev) end,
+                            onHover = function(ev) table.insert(events, ev) end,
+                        }, {
+                            num = 2,
+                            label = "layer2",
+                        }, {
+                            ui.text("kid1"),
+                        }),
+                        ui.hoverHelper({
+                            key = "hh",
+                            onPress = function(ev) table.insert(events, ev) end,
+                            onHover = function(ev) table.insert(events, ev) end,
+                        }),
+                    })
+                end,
+                events = function() return events end,
+            }
+            """),
+            options: opts
+        )
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(400, 200), systemDark: false)
+        let root = script.view(cx)
+        #expect(cap.content == "hello-node")
+        #expect(cap.childrenCount == 1)
+        #expect(cap.gotBool == true)
+        #expect(cap.gotNum == 2)
+        #expect(cap.gotStr == "layer2")
+        #expect(cap.gotFlag == true)
+        #expect(cap.gotData == .map(["a": .integer(10)]))
+        #expect(cap.gotColor != nil)
+        #expect(cap.gotPalette != nil)
+        #expect(cap.gotDark == false)
+        #expect(cap.hadHandler == true)
+        #expect(cap.hadPressLater == true)
+
+        // Crucial parity fix: unread "key" must NOT be suppressed by onPress/onHover/pressLater!
+        let probeEl = findElement(root) { $0.keyId == "probe-root" }
+        #expect(probeEl != nil)
+        let hhEl = findElement(root) { $0.keyId == "hh" }
+        #expect(hhEl != nil)
+
+        var st = LuauTestState()
+        var tx = Tx()
+        let press = PointerPress(window: .zero, local: .zero, elementSize: Vec2(20, 20), mods: Mods(shift: true))
+        probeEl?.handlers.onPointerUp?(&st, press, &tx)
+        probeEl?.handlers.onClick?(&st, &tx)
+        probeEl?.handlers.onHover?(&st, true, &tx)
+        let customBtn = findElement(root) { $0.keyId == "custom-btn" }
+        customBtn?.handlers.onClick?(&st, &tx)
+        hhEl?.handlers.onClick?(&st, &tx)
+        hhEl?.handlers.onHover?(&st, false, &tx)
+
+        let evs = dataList(try script.query("events"))
+        #expect(evs.count == 5)
+        #expect(evs[0].get("key").asString == "probe-root")
+        #expect(evs[0].get("extra").asString == "from-attach")
+        #expect(evs[0].get("shift").asBool == true)
+        #expect(evs[1].get("kind").asString == "hover")
+        #expect(evs[1].get("key").asString == "probe-root")
+        #expect(evs[1].get("entered").asBool == true)
+        #expect(evs[2].get("key").asString == "custom-k")
+        #expect(evs[2].get("tag").asInt64 == 42)
+        #expect(evs[3].get("key").asString == "hh")
+        #expect(evs[4].get("kind").asString == "hover")
+        #expect(evs[4].get("entered").asBool == false)
+    }
+
+    @Test("virtualList: prop type errors, rowVersions selective rebuild, rowError fallback, and per-row aroundRead")
+    func virtualListValidationRowVersionsAndHooks() throws {
+        // 1. Type validation errors
+        for badProp in [
+            "gap = \"wide\"",
+            "scrollY = 123",
+            "estimatedRowHeight = \"tall\"",
+            "rowVersions = \"bad\"",
+            "rowKey = 42",
+            "rowError = 42",
+        ] {
+            let s = Script(name: "bad_vlist", sources: Sources.single("""
+            local ui = require("@rune/ui")
+            return {
+                render = function()
+                    return ui.virtualList({
+                        count = 1,
+                        renderRow = function(i) return ui.text("r" .. i) end,
+                        \(badProp),
+                    })
+                end,
+            }
+            """))
+            let el = s.renderUncached(name: "render", dark: true, LuauTestState.self)
+            #expect(findElement(el) { $0.keyId == "luau-error" } != nil)
+        }
+
+        // 2. rowVersions selective rebuild + custom rowError + default LuauCard.rowError + per-row aroundRead
+        final class Hooks: @unchecked Sendable { var reads = 0; var allowRead = true }
+        let hooks = Hooks()
+        var opts = ScriptOptions()
+        opts.aroundRead = { _, run in
+            hooks.reads += 1
+            if hooks.allowRead { run() }
+        }
+        let script = Script(
+            name: "vlist_rows",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local row1Build = 0
+            local row2Build = 0
+            local r1Ver = 1
+            local r2Ver = 1
+            local mode = "custom-err"
+            return {
+                render = function(cx)
+                    return ui.virtualList({
+                        key = "vl",
+                        count = 2,
+                        version = 1,
+                        rowVersions = { r1Ver, r2Ver },
+                        renderRow = function(i)
+                            if i == 1 then
+                                row1Build += 1
+                                return ui.text("r1:" .. row1Build)
+                            else
+                                row2Build += 1
+                                if mode == "custom-err" then error("row2-custom") end
+                                if mode == "default-err" then error("row2-default") end
+                                return ui.text("r2:" .. row2Build)
+                            end
+                        end,
+                        rowError = function(i, msg)
+                            if mode == "default-err" then return nil end
+                            return ui.text("fallback:" .. i .. ":" .. msg)
+                        end,
+                    })
+                end,
+                bumpRow2 = function(newMode)
+                    r2Ver += 1
+                    mode = newMode
+                end,
+                builds = function() return { r1 = row1Build, r2 = row2Build } end,
+            }
+            """),
+            options: opts
+        )
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(300, 200))
+        let el1 = script.view(cx)
+        // Two mounted rows -> aroundRead called once per row (2).
+        #expect(hooks.reads == 2)
+        let texts1 = collectTexts(el1)
+        #expect(texts1.contains("r1:1"))
+        #expect(texts1.contains { $0.contains("fallback:2:") && $0.contains("row2-custom") })
+
+        // Bump only row 2 version -> row 1 memo skips rebuild, row 2 falls back to LuauCard.rowError when rowError returns nil.
+        try script.call("bumpRow2", args: [.string("default-err")])
+        let el2 = script.view(cx)
+        let b2 = try script.query("builds")
+        #expect(b2.get("r1").asInt64 == 1)
+        #expect(b2.get("r2").asInt64 == 2)
+        let row2Err = findElement(el2) { ($0.plainText ?? "").contains("row2-default") }
+        #expect(row2Err != nil)
+        #expect(row2Err?.textStyle.wrap == .ellipsis)
+        #expect(row2Err?.textStyle.family == .monospace)
+
+        // When aroundRead declines to call run(), row renders empty element without rebuilding row.
+        try script.call("bumpRow2", args: [.string("ok")])
+        hooks.allowRead = false
+        let el3 = script.view(cx)
+        let b3 = try script.query("builds")
+        #expect(b3.get("r2").asInt64 == 2)
+        #expect(!collectTexts(el3).contains("r1:1"))
+    }
+
+    @Test("ui.each memo/rebuild, view:Memo error paths & pcall recovery, stale & nested table child errors")
+    func eachMemoAndChildrenErrors() throws {
+        // 1. ui.each happy path (string field key & fn key) + selective rebuild
+        let eachScript = Script(
+            name: "each_happy",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local builds = { a = 0, b = 0 }
+            local items = { { id = "a", v = 1 }, { id = "b", v = 1 } }
+            return {
+                render = function()
+                    return ui.col({
+                        ui.col({}, ui.each(items, "id", "v", function(it)
+                            builds[it.id] += 1
+                            return ui.text(it.id .. ":" .. builds[it.id])
+                        end)),
+                        ui.col({}, ui.each(items, function(it) return "fn-" .. it.id end, function(it) return it.v end, function(it)
+                            return ui.text("fn-" .. it.id .. "-" .. it.v)
+                        end)),
+                    })
+                end,
+                bumpB = function() items[2].v += 1 end,
+                builds = function() return builds end,
+            }
+            """)
+        )
+        let cx = Cx<LuauTestState>(viewport: Vec2(300, 200))
+        let e1 = eachScript.view(cx)
+        #expect(collectTexts(e1).contains("a:1"))
+        #expect(collectTexts(e1).contains("b:1"))
+        #expect(collectTexts(e1).contains("fn-b-1"))
+        try eachScript.call("bumpB")
+        let e2 = eachScript.view(cx)
+        let b = try eachScript.query("builds")
+        #expect(b.get("a").asInt64 == 1)
+        #expect(b.get("b").asInt64 == 2)
+        #expect(collectTexts(e2).contains("fn-b-2"))
+
+        // 2. Stale element saved across renders + nested table child error
+        let staleScript = Script(
+            name: "stale_and_nested",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local saved
+            return {
+                renderStale = function()
+                    if not saved then
+                        saved = ui.text("saved")
+                    end
+                    return ui.col({ saved })
+                end,
+                renderNestedTable = function()
+                    return ui.col({ { ui.text("nested") } })
+                end,
+            }
+            """)
+        )
+        _ = staleScript.renderUncached(name: "renderStale", dark: true, LuauTestState.self)
+        let staleSecond = staleScript.renderUncached(name: "renderStale", dark: true, LuauTestState.self)
+        #expect(collectTexts(staleSecond).contains { $0.contains("elements cannot be saved across renders") })
+
+        let nestedEl = staleScript.renderUncached(name: "renderNestedTable", dark: true, LuauTestState.self)
+        #expect(collectTexts(nestedEl).contains { $0.contains("child 1 is a table, not a ui node") })
+
+        // 3. view:Memo error paths & pcall recovery
+        let memoScript = Script(
+            name: "memo_errs",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            local shouldFail = true
+            return {
+                missingArgs = function(view) return view:Memo("k") end,
+                badKey = function(view) return view:Memo({}, 1, function() return ui.text("x") end) end,
+                badBuild = function(view) return view:Memo("k", 1, "not-a-fn") end,
+                pcallRecover = function(view)
+                    local ok = pcall(function()
+                        return view:Memo("r", 1, function()
+                            if shouldFail then error("inner-memo-fail") end
+                            return ui.text("ok")
+                        end)
+                    end)
+                    if ok then return ui.text("recovered") end
+                    shouldFail = false
+                    return view:Memo("r", 2, function() return ui.text("after-pcall") end)
+                end,
+            }
+            """)
+        )
+        for fnName in ["missingArgs", "badKey", "badBuild"] {
+            let errEl = memoScript.renderUncached(name: fnName, dark: true, LuauTestState.self)
+            #expect(findElement(errEl) { $0.keyId == "luau-error" } != nil)
+        }
+        let recEl = memoScript.surface(cx, name: "pcallRecover")
+        #expect(collectTexts(recEl).contains("after-pcall"))
+    }
+
+    @Test("Props, defaultPalette light/dark tokens, shadow reversal, dir, fadeOut, hoverTransition")
+    func propsPaletteShadowsAndTextDirection() throws {
+        // 1. Default palette tokens (light & dark)
+        let pal = defaultPalette()
+        let tokenNames = [
+            "bg", "card", "card-border", "text", "text-secondary",
+            "separator", "hover", "press", "control-off", "control-track", "indicator", "selected",
+        ]
+        for tok in tokenNames {
+            let light = pal(tok, false)
+            let dark = pal(tok, true)
+            #expect(light != nil)
+            #expect(dark != nil)
+            if tok != "indicator" {
+                #expect(light != dark)
+            }
+        }
+        #expect(pal("not-a-token", true) == nil)
+
+        // 2. Custom palette, reversed shadow order, and exhaustive prop checks
+        let opts = ScriptOptions()
+            .palette { name, dark in
+                if name == "selected" { return .srgb(0.1, 0.2, 0.3) }
+                if name == "accent" { return dark ? .srgb(0.9, 0.1, 0.1) : .srgb(0.1, 0.1, 0.9) }
+                return defaultPalette()(name, dark)
+            }
+            .shadows { name, _ in
+                guard name == "raised" else { return nil }
+                return [
+                    Shadow(x: 0, y: 1, blur: 2, spread: 0, color: .srgb(1, 0, 0)),
+                    Shadow(x: 0, y: 8, blur: 12, spread: 0, color: .srgb(0, 0, 1)),
+                ]
+            }
+
+        let script = Script(
+            name: "props_full",
+            sources: Sources.single("""
+            local ui = require("@rune/ui")
+            return {
+                render = function()
+                    return ui.col({
+                        ui.col({
+                            key = "root",
+                        m = 4, mx = 6, mt = 8,
+                        pad = 10, pl = 2,
+                        minW = 10, maxW = 200, minH = 5, maxH = 100,
+                        grow = 2, shrink = true,
+                        opacity = 0.5,
+                        border = "accent", borderWidth = 3,
+                        corners = { 6, 6, 6, 6 },
+                        clip = true,
+                        pin = { top = 1, right = 2, bottom = 3, left = 4 },
+                        shadow = "raised",
+                        align = "center", justify = "between", center = true,
+                        hoverGroup = true, hoverGroupColor = "accent",
+                        helpSide = "right", help = "tip",
+                        hoverTransition = "instant",
+                        selected = true, focusable = true,
+                    }, {
+                        ui.text("rtl", {
+                            key = "t1",
+                            dir = "rtl",
+                            fadeOut = true,
+                            lineHeight = 20,
+                            tracking = 1.5,
+                            mono = true,
+                            textAlign = "end",
+                            revealOnHover = true,
+                        }),
+                        ui.col({ key = "scx", scrollX = true, disabled = true }),
+                        ui.col({ key = "scxy", scrollX = true, scrollY = true, stickBottom = true }),
+                    }),
+                    })
+                end,
+            }
+            """),
+            options: opts
+        )
+
+        let cx = Cx<LuauTestState>(viewport: Vec2(400, 300), systemDark: true)
+        let root = script.view(cx)
+        let el = findElement(root) { $0.keyId == "root" }!
+        #expect(el.opacity == 0.5)
+        #expect(el.borderWidth == 3)
+        #expect(el.isHoverGroup == true)
+        #expect(el.groupColor != nil)
+        #expect(el.helpSide == .right)
+        #expect(el.itemSelected == true)
+        #expect(el.isFocusSelected == true)
+        #expect(el.focusable == true)
+        let scx = findElement(root) { $0.keyId == "scx" }!
+        #expect(scx.a11yDisabled == true)
+        #expect(el.styleSpring == Tok.Motion.INSTANT)
+        #expect(el.layout.flexGrow == 2)
+        #expect(el.layout.flexShrink == 1)
+        #expect(el.layout.padding.top == 10)
+        #expect(el.layout.padding.left == 2)
+        #expect(el.layout.margin.top == 8)
+        #expect(el.layout.margin.left == 6)
+        // Shadows reversed from CSS order (blur 2, blur 12 -> blur 12, blur 2)
+        #expect(el.shadows.map(\.blur) == [12, 2])
+
+        let t1 = findElement(root) { $0.keyId == "t1" }!
+        #expect(t1.textStyle.direction == .rtl)
+        #expect(t1.textStyle.lineHeight == 20)
+        #expect(t1.textStyle.letterSpacing == 1.5)
+        #expect(t1.textStyle.family == .monospace)
+        #expect(t1.textStyle.align == .trailing)
+        #expect(t1.groupOpacity?.rest == 0)
+        #expect(t1.groupOpacity?.hovered == 1)
+
+        // Check fadeOut warning logged once
+        let logs = script.log
+        #expect(logs.contains { $0.level == .warn && $0.message.contains("fadeOut") })
+        #expect(!logs.contains { $0.message.contains("dir has no effect") })
+        #expect(!logs.contains { $0.message.contains("hoverTransition has no effect") })
+    }
+}
+
+private func findAllTexts<S>(_ root: El<S>) -> [El<S>] {
+    var out: [El<S>] = []
+    if root.plainText != nil { out.append(root) }
+    for c in root.children {
+        out.append(contentsOf: findAllTexts(c))
+    }
+    return out
 }

@@ -9,7 +9,7 @@ import Glibc
 
 @Suite("RunePerf & Procwatch Upstream Parity Tests")
 struct RunePerfUpstreamTests {
-    @Test func optionalCountersStayUnavailableAndInvalidTimingsRejected() {
+    @Test func optionalCountersStayUnavailableAndInvalidTimingsRejected() throws {
         let recorder = PerfRecorder()
         let empty = FrameSample(window: 0, seq: 0, outcome: .skipped, timestampMs: 0)
         recorder.recordFrame(empty)
@@ -19,6 +19,29 @@ struct RunePerfUpstreamTests {
         #expect(recorder.gpuMsStats == nil)
         #expect(recorder.inputToFrameMsStats == nil)
         #expect(recorder.lifetimeMaxAllocatedBytes == nil)
+
+        // Verify written perf.json keeps optional metrics unavailable (JSON null) when nil.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeperf-opt-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let writer = PerfStoreWriter(
+            config: PerfConfig(directory: dir, app: "opt-fixture"),
+            startNanos: DispatchTime.now().uptimeNanoseconds,
+            health: PerfFileRecorder.SharedHealth()
+        )
+        writer.accept(empty)
+        writer.writeSnapshot()
+        let snapData = try Data(contentsOf: dir.appendingPathComponent("perf.json"))
+        let snap = try #require(try JSONSerialization.jsonObject(with: snapData) as? [String: Any])
+        let frames = try #require(snap["frames"] as? [String: Any])
+        for key in ["work_ms", "ui_allocated_bytes", "gpu_ms", "input_to_frame_ms", "lifetime_max_work_ms", "lifetime_max_ui_allocated_bytes"] {
+            #expect(frames[key] == nil || frames[key] is NSNull)
+        }
+        let caps = try #require(snap["capabilities"] as? [String: Any])
+        #expect((caps["ui_allocations"] as? Bool) == false)
+        #expect((caps["input_to_frame"] as? Bool) == false)
+        #expect((caps["gpu_timestamps"] as? Bool) == false)
 
         let invalid = FrameSample(
             window: 1,
@@ -328,6 +351,55 @@ struct RunePerfUpstreamTests {
         // Drop without calling shutdown() so deinit cancels the blocked flock wait cleanly.
         blockedRecorder = nil
         #expect(!FileManager.default.fileExists(atPath: contendedDir.appendingPathComponent("perf.json").path))
+
+        // Release .perf.lock after contention and verify the 256 queued samples drain/flush cleanly to disk.
+        let drainDir = dir.appendingPathComponent("drain-after-lock", isDirectory: true)
+        try FileManager.default.createDirectory(at: drainDir, withIntermediateDirectories: true)
+        let drainLockPath = drainDir.appendingPathComponent(".perf.lock").path
+        let drainLockFd = drainLockPath.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
+        #expect(drainLockFd >= 0)
+        #expect(flock(drainLockFd, LOCK_EX | LOCK_NB) == 0)
+        var drainReleased = false
+        defer {
+            if !drainReleased {
+                flock(drainLockFd, LOCK_UN)
+                close(drainLockFd)
+            }
+        }
+
+        let drainChannel = PerfIncidentChannel(capacity: 4)
+        let drainConfig = PerfConfig(directory: drainDir, app: "drain-app").incidents(channel: drainChannel)
+        let drainRecorder = try PerfFileRecorder.start(config: drainConfig)
+        for i in 0..<1_000 {
+            let updateMs = (i == 0) ? 300.0 : 20.0
+            _ = drainRecorder.record(FrameSample(window: 1, seq: UInt64(i), outcome: .drawn, updateMs: updateMs, renderMs: 1.0))
+        }
+        #expect(drainRecorder.droppedSamples == 744)
+
+        flock(drainLockFd, LOCK_UN)
+        close(drainLockFd)
+        drainReleased = true
+
+        // Wait for the writer to acquire the lock and flush its queued incident + snapshot, then shut down.
+        let incidentURL = drainChannel.receive(timeout: 5.0)
+        #expect(incidentURL != nil)
+        drainRecorder.shutdown()
+
+        let snapData = try Data(contentsOf: drainDir.appendingPathComponent("perf.json"))
+        let snap = try #require(try JSONSerialization.jsonObject(with: snapData) as? [String: Any])
+        let frames = try #require(snap["frames"] as? [String: Any])
+        #expect((frames["total"] as? NSNumber)?.intValue == 256)
+        #expect((frames["anomalies"] as? NSNumber)?.intValue == 256)
+        #expect((frames["log_suppressed"] as? NSNumber)?.intValue == 246)
+        #expect((snap["dropped_samples"] as? NSNumber)?.uint64Value == 744)
+        let logText = try String(contentsOf: drainDir.appendingPathComponent("perf.log"), encoding: .utf8)
+        let logLines = logText.split(separator: "\n")
+        // Anomaly logging is rate-limited to 10/s (256 in the same second -> 10 frame lines + 1 memory line).
+        #expect(logLines.count == 11)
+        for line in logLines {
+            let lineData = Data(line.utf8)
+            _ = try JSONSerialization.jsonObject(with: lineData)
+        }
     }
 
     @Test func procwatchJsonUnaccountedGaugesCapAndCountingAllocator() throws {
@@ -409,6 +481,23 @@ struct RunePerfUpstreamTests {
         group.wait()
         #expect(isoAlloc.takeAllocatedBytes() == 0)
         #expect((isoAlloc.heap()?.liveBytes ?? 0) >= Int64(8 * 10_000 * 128))
+
+        // maxTags (> 16) overflow falls back to "untagged", plus ProcessHeapStats.sortedTags ordering.
+        let tagAlloc = ProcessCountingAllocator()
+        for i in 1..<ProcessCountingAllocator.maxTags {
+            tagAlloc.tagThread("tag-\(i)")
+            tagAlloc.recordAlloc(size: 100 + i)
+        }
+        tagAlloc.tagThread("overflow-17")
+        tagAlloc.recordAlloc(size: 512)
+        let tagHeap = try #require(tagAlloc.heap())
+        #expect(tagHeap.tags.count == ProcessCountingAllocator.maxTags)
+        #expect(tagHeap.tags["overflow-17"] == nil)
+        #expect(tagHeap.tags["untagged"] == 512)
+
+        let sortedStats = ProcessHeapStats(tags: ["beta": 200, "alpha": 200, "gamma": 900, "untagged": 50]).sortedTags
+        #expect(sortedStats.map(\.name) == ["gamma", "alpha", "beta", "untagged"])
+        #expect(sortedStats.map(\.bytes) == [900, 200, 200, 50])
     }
 
     @Test func procwatchWatcherWarningsReportGateLateSamplesAndExitedThreadBusiest() {
@@ -448,8 +537,20 @@ struct RunePerfUpstreamTests {
         let joined = allEvents.map(\.line).joined(separator: "\n")
         #expect(joined.contains("footprint grew"))
         #expect(joined.contains("% CPU over 60s: exited threads 100%"))
+        #expect(joined.contains("warning: footprint 1.0 GB") || joined.contains("warning: footprint 1.1 GB"))
         #expect(allEvents.filter { $0.kind == .growth }.count == 2)
         #expect(allEvents.allSatisfy { $0.isWarning })
+
+        // Flat and idle: nothing (crates/procwatch/src/lib.rs:733-737).
+        let idleWatcher = ProcwatchWatcher(config: config)
+        for i in 0...12 {
+            let idleSnap = ProcessSnapshot(
+                pid: 1,
+                timestampMs: UInt64(i * 10_000),
+                usage: ProcessUsage(footprintBytes: 50 << 20, totalCpuSeconds: 1.0)
+            )
+            #expect(idleWatcher.observe(now: Double(i * 10), snapshot: idleSnap).isEmpty)
+        }
 
         // Gate test
         var gate = ProcwatchGate()
@@ -514,5 +615,68 @@ struct RunePerfUpstreamTests {
         #expect(http.statusCode == 200)
         let obj = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect((obj["pid"] as? NSNumber)?.int32Value == ProcessInfo.processInfo.processIdentifier)
+    }
+
+    @Test func procwatchConfigDevLatestWatchAndWatchWith() throws {
+        let dev = ProcwatchConfig.dev("dev-fixture")
+        #expect(dev.every == 2.0)
+        #expect(dev.report == 60.0)
+        #expect(dev.warnFootprint == (512 << 20))
+        #expect(dev.warnGrowth == (64 << 20))
+        #expect(dev.growthWindow == 20.0)
+        #expect(dev.warnCpuCores == 0.5)
+        #expect(dev.cpuWindow == 20.0)
+        #expect(dev.name == "dev-fixture")
+
+        // Use a large sleep interval after the immediate first sample so the background thread stays quiet.
+        let warnSem = DispatchSemaphore(value: 0)
+        let seenEvent = PortableLock<ProcwatchEvent?>(initialState: nil)
+        let warnCfg = ProcwatchConfig(
+            every: 60.0,
+            report: nil,
+            warnFootprint: 1,
+            warnGrowth: UInt64.max,
+            growthWindow: 60.0,
+            warnCpuCores: 1_000_000.0,
+            cpuWindow: 60.0,
+            name: "pw-watch-with"
+        )
+        Procwatch.watchWith(warnCfg) { event, snap in
+            let shouldSignal = seenEvent.withLock { current -> Bool in
+                guard current == nil else { return false }
+                current = event
+                return true
+            }
+            if shouldSignal {
+                #expect(snap.pid == ProcessInfo.processInfo.processIdentifier)
+                warnSem.signal()
+            }
+        }
+        #expect(warnSem.wait(timeout: .now() + 3.0) == .success)
+        let event = try #require(seenEvent.withLock { $0 })
+        #expect(event.kind == .footprint)
+        #expect(event.isWarning)
+
+        // Poll briefly for latestLock update which runs immediately after observe loop.
+        var latestSnap = Procwatch.latest()
+        let deadline = Date().addingTimeInterval(1.0)
+        while latestSnap == nil && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+            latestSnap = Procwatch.latest()
+        }
+        #expect(latestSnap?.pid == ProcessInfo.processInfo.processIdentifier)
+
+        // Exercise Procwatch.watch(_:) with silent thresholds and long sleep interval.
+        let silentCfg = ProcwatchConfig(
+            every: 60.0,
+            report: nil,
+            warnFootprint: UInt64.max,
+            warnGrowth: UInt64.max,
+            growthWindow: 60.0,
+            warnCpuCores: 1_000_000.0,
+            cpuWindow: 60.0,
+            name: "pw-watch"
+        )
+        Procwatch.watch(silentCfg)
     }
 }

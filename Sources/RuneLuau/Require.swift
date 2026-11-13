@@ -73,7 +73,7 @@ internal enum LuauRequire {
         if cleanTarget.hasPrefix("@self/") {
             let rest = String(cleanTarget.dropFirst("@self/".count))
             components = moduleSegments(for: fromPath)
-            try applyRelative(rest, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled)
+            try applyRelative(rest, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled, originalTarget: target)
         } else if cleanTarget == "@self" {
             components = moduleSegments(for: fromPath)
         } else if cleanTarget.hasPrefix("@") {
@@ -83,20 +83,24 @@ internal enum LuauRequire {
             let aliasName = String(parts[0])
             let remainder = parts.count > 1 ? String(parts[1]) : ""
 
-            let callerDir = parentSegments(for: fromPath)
+            let callerDir = configStartingDir(for: fromPath)
             guard let (aliasTarget, aliasBaseDir) = findAlias(aliasName, startingAt: callerDir, compiled: compiled) else {
                 throw LuauRuntimeError(value: .string("unknown require alias '@\(aliasName)'"))
             }
 
-            if aliasTarget.hasPrefix("./") || aliasTarget.hasPrefix("../") || aliasTarget == "." || aliasTarget == ".." {
+            let isAbsolute = aliasTarget.isEmpty
+                || aliasTarget.hasPrefix("/")
+                || aliasTarget.hasPrefix("~")
+                || (aliasTarget.count >= 2 && aliasTarget[aliasTarget.index(after: aliasTarget.startIndex)] == ":")
+            if !isAbsolute {
                 components = aliasBaseDir ?? []
                 isAboveFolder = (aliasBaseDir == nil)
-                try applyRelative(aliasTarget, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled)
+                try applyRelative(aliasTarget, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled, originalTarget: target)
             } else {
                 throw LuauRuntimeError(value: .string("alias '@\(aliasName)' points outside script folder"))
             }
             if !remainder.isEmpty {
-                try applyRelative(remainder, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled)
+                try applyRelative(remainder, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled, originalTarget: target)
             }
         } else if cleanTarget.hasPrefix("./") || cleanTarget.hasPrefix("../") || cleanTarget == "." || cleanTarget == ".." {
             // Relative to caller's parent directory (init.luau is at root, so its parent is above folder!)
@@ -107,7 +111,7 @@ internal enum LuauRequire {
             } else {
                 components = Array(callerSegs.dropLast())
             }
-            try applyRelative(cleanTarget, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled)
+            try applyRelative(cleanTarget, to: &components, isAboveFolder: &isAboveFolder, compiled: compiled, originalTarget: target)
         } else {
             throw LuauRuntimeError(value: .string("require path '\(target)' must start with './', '../', or '@'"))
         }
@@ -144,16 +148,21 @@ internal enum LuauRequire {
         return segs
     }
 
-    private static func parentSegments(for path: String) -> [String] {
-        let segs = moduleSegments(for: path)
-        return segs.isEmpty ? [] : Array(segs.dropLast())
+    private static func configStartingDir(for path: String) -> [String] {
+        var clean = path
+        if clean.hasPrefix("@") { clean.removeFirst() }
+        if clean.hasSuffix(".luau") { clean = String(clean.dropLast(5)) }
+        let segs = clean.split(separator: "/").map(String.init)
+        if segs.isEmpty { return [] }
+        return Array(segs.dropLast())
     }
 
     private static func applyRelative(
         _ rel: String,
         to components: inout [String],
         isAboveFolder: inout Bool,
-        compiled: CompiledSources
+        compiled: CompiledSources,
+        originalTarget: String
     ) throws {
         for seg in rel.split(separator: "/", omittingEmptySubsequences: true) {
             let s = String(seg)
@@ -177,6 +186,10 @@ internal enum LuauRequire {
                     }
                 } else {
                     components.append(s)
+                    let base = components.joined(separator: "/")
+                    if compiled.module("\(base).luau") != nil && compiled.module("\(base)/init.luau") != nil {
+                        throw LuauRuntimeError(value: .string("ambiguous module '\(originalTarget)'"))
+                    }
                 }
             }
         }

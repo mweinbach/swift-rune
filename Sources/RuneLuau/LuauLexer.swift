@@ -5,6 +5,7 @@ internal enum LuauTokenKind: Equatable {
     case identifier(String)
     case number(Double)
     case string(String)
+    case byteString([UInt8])
     /// Backtick interpolated string broken into literal parts and expression tokens:
     /// `lit0 { expr1 } lit1 { expr2 } lit2`
     case interpString(parts: [String], expressions: [[LuauToken]])
@@ -23,7 +24,7 @@ internal enum LuauTokenKind: Equatable {
     case lparen, rparen, lbrace, rbrace, lbracket, rbracket
     case semicolon, colon, doubleColon, comma, dot, dotDot, dotDotDot
     case arrow // ->
-    case pipe, amp, question
+    case pipe, amp, question, at
 }
 
 internal struct LuauToken: Equatable {
@@ -69,8 +70,12 @@ internal final class LuauLexer {
             }
 
             if ch == "\"" || ch == "'" {
-                let str = try readQuotedString(quote: ch, line: tokLine)
-                tokens.append(LuauToken(kind: .string(str), line: tokLine, column: tokCol))
+                let bytes = try readQuotedStringBytes(quote: ch, line: tokLine)
+                if let str = String(bytes: bytes, encoding: .utf8) {
+                    tokens.append(LuauToken(kind: .string(str), line: tokLine, column: tokCol))
+                } else {
+                    tokens.append(LuauToken(kind: .byteString(bytes), line: tokLine, column: tokCol))
+                }
                 continue
             }
 
@@ -132,6 +137,7 @@ internal final class LuauLexer {
             case "|": kind = .pipe
             case "&": kind = .amp
             case "?": kind = .question
+            case "@": kind = .at
             case ":":
                 if match(":") { kind = .doubleColon } else { kind = .colon }
             case ".":
@@ -249,9 +255,9 @@ internal final class LuauLexer {
         throw syntaxError("unfinished long string", line: startLine)
     }
 
-    private func readQuotedString(quote: UnicodeScalar, line startLine: Int) throws -> String {
+    private func readQuotedStringBytes(quote: UnicodeScalar, line startLine: Int) throws -> [UInt8] {
         advance() // opening quote
-        var out = ""
+        var out: [UInt8] = []
         while let ch = peek() {
             if ch == quote {
                 advance()
@@ -262,36 +268,36 @@ internal final class LuauLexer {
             }
             if ch == "\\" {
                 advance()
-                try readEscape(into: &out, startLine: startLine)
+                try readEscapeBytes(into: &out, startLine: startLine)
             } else {
-                out.unicodeScalars.append(ch)
+                out.append(contentsOf: ch.utf8)
                 advance()
             }
         }
         throw syntaxError("unfinished string", line: startLine)
     }
 
-    private func readEscape(into out: inout String, startLine: Int) throws {
+    private func readEscapeBytes(into out: inout [UInt8], startLine: Int) throws {
         guard let esc = advance() else {
             throw syntaxError("unfinished escape sequence", line: startLine)
         }
         switch esc {
-        case "a": out.append("\u{07}")
-        case "b": out.append("\u{08}")
-        case "f": out.append("\u{0C}")
-        case "n": out.append("\n")
-        case "r": out.append("\r")
-        case "t": out.append("\t")
-        case "v": out.append("\u{0B}")
-        case "\\": out.append("\\")
-        case "\"": out.append("\"")
-        case "'": out.append("'")
-        case "`": out.append("`")
-        case "{": out.append("{")
-        case "\n": out.append("\n")
+        case "a": out.append(0x07)
+        case "b": out.append(0x08)
+        case "f": out.append(0x0C)
+        case "n": out.append(0x0A)
+        case "r": out.append(0x0D)
+        case "t": out.append(0x09)
+        case "v": out.append(0x0B)
+        case "\\": out.append(0x5C)
+        case "\"": out.append(0x22)
+        case "'": out.append(0x27)
+        case "`": out.append(0x60)
+        case "{": out.append(0x7B)
+        case "\n": out.append(0x0A)
         case "\r":
             if peek() == "\n" { advance() }
-            out.append("\n")
+            out.append(0x0A)
         case "z":
             while let c = peek(), c == " " || c == "\t" || c == "\n" || c == "\r" {
                 advance()
@@ -305,7 +311,7 @@ internal final class LuauLexer {
                 hex.unicodeScalars.append(h)
             }
             if let v = UInt8(hex, radix: 16) {
-                out.unicodeScalars.append(UnicodeScalar(v))
+                out.append(v)
             }
         case "u":
             guard match("{") else {
@@ -322,7 +328,7 @@ internal final class LuauLexer {
             guard match("}"), let code = UInt32(hex, radix: 16), let scalar = UnicodeScalar(code) else {
                 throw syntaxError("invalid UTF-8 codepoint in \\u escape", line: startLine)
             }
-            out.unicodeScalars.append(scalar)
+            out.append(contentsOf: scalar.utf8)
         default:
             if isDigit(esc) {
                 var dec = String(esc)
@@ -337,11 +343,17 @@ internal final class LuauLexer {
                 guard let code = UInt32(dec), code <= 255 else {
                     throw syntaxError("decimal escape too large", line: startLine)
                 }
-                out.unicodeScalars.append(UnicodeScalar(code)!)
+                out.append(UInt8(code))
             } else {
-                out.unicodeScalars.append(esc)
+                out.append(contentsOf: esc.utf8)
             }
         }
+    }
+
+    private func readEscape(into out: inout String, startLine: Int) throws {
+        var bytes: [UInt8] = []
+        try readEscapeBytes(into: &bytes, startLine: startLine)
+        out.append(String(decoding: bytes, as: UTF8.self))
     }
 
     private func readInterpolatedString(line startLine: Int) throws -> ([String], [[LuauToken]]) {

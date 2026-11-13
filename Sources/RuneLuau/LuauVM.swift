@@ -649,7 +649,7 @@ public final class LuauVM: @unchecked Sendable {
         switch value {
         case .table(let t): return t.metatable
         case .userdata(let u): return u.metatable
-        case .string: return getAppData(StringMetatableBox.self)?.table
+        case .string, .byteString: return getAppData(StringMetatableBox.self)?.table
         default: return nil
         }
     }
@@ -666,6 +666,14 @@ public final class LuauVM: @unchecked Sendable {
             if case .table(let t) = current {
                 let raw = t.rawGet(key)
                 if !raw.isNil { return raw }
+            }
+            if case .vector(let v) = current, case .string(let k) = key {
+                switch k {
+                case "x", "X": return .number(Double(v.x))
+                case "y", "Y": return .number(Double(v.y))
+                case "z", "Z": return .number(Double(v.z))
+                default: break
+                }
             }
             guard let mm = getMetamethod(of: current, name: "__index") else {
                 if case .table = current { return .nil }
@@ -753,6 +761,23 @@ public final class LuauVM: @unchecked Sendable {
             case .sub: return .vector(va - vb)
             case .mul: return .vector(va * vb)
             case .div: return .vector(va / vb)
+            case .idiv: return .vector(SIMD3<Double>(floor(va.x / vb.x), floor(va.y / vb.y), floor(va.z / vb.z)))
+            default: break
+            }
+        }
+        if case .vector(let v) = a, let s = b.coercedNumber {
+            switch op {
+            case .mul: return .vector(v * s)
+            case .div: return .vector(v / s)
+            case .idiv: return .vector(SIMD3<Double>(floor(v.x / s), floor(v.y / s), floor(v.z / s)))
+            default: break
+            }
+        }
+        if let s = a.coercedNumber, case .vector(let v) = b {
+            switch op {
+            case .mul: return .vector(s * v)
+            case .div: return .vector(SIMD3<Double>(s / v.x, s / v.y, s / v.z))
+            case .idiv: return .vector(SIMD3<Double>(floor(s / v.x), floor(s / v.y), floor(s / v.z)))
             default: break
             }
         }
@@ -773,28 +798,19 @@ public final class LuauVM: @unchecked Sendable {
     }
 
     private func evalConcat(_ a: LuauValue, _ b: LuauValue) throws -> LuauValue {
-        switch (a, b) {
-        case (.string(let sa), .string(let sb)):
-            try noteAllocation(32 + sa.utf8.count + sb.utf8.count)
-            return .string(sa + sb)
-        case (.string(let sa), .number(let nb)):
-            let s = sa + LuauValue.formatNumber(nb)
-            try noteAllocation(32 + s.utf8.count)
-            return .string(s)
-        case (.number(let na), .string(let sb)):
-            let s = LuauValue.formatNumber(na) + sb
-            try noteAllocation(32 + s.utf8.count)
-            return .string(s)
-        case (.number(let na), .number(let nb)):
-            let s = LuauValue.formatNumber(na) + LuauValue.formatNumber(nb)
-            try noteAllocation(32 + s.utf8.count)
-            return .string(s)
-        default:
-            if let mm = getMetamethod(of: a, name: "__concat") ?? getMetamethod(of: b, name: "__concat") {
-                return try call(value: mm, args: [a, b]).first ?? .nil
-            }
-            throw LuauRuntimeError(value: .string("attempt to concatenate \(a.typeName) with \(b.typeName)"))
+        func concatBytes(_ v: LuauValue) -> [UInt8]? {
+            if let bytes = v.stringBytes { return bytes }
+            if case .number(let n) = v { return Array(LuauValue.formatNumber(n).utf8) }
+            return nil
         }
+        if let ba = concatBytes(a), let bb = concatBytes(b) {
+            try noteAllocation(32 + ba.count + bb.count)
+            return LuauValue.fromBytes(ba + bb)
+        }
+        if let mm = getMetamethod(of: a, name: "__concat") ?? getMetamethod(of: b, name: "__concat") {
+            return try call(value: mm, args: [a, b]).first ?? .nil
+        }
+        throw LuauRuntimeError(value: .string("attempt to concatenate \(a.typeName) with \(b.typeName)"))
     }
 
     private func evalNeg(_ a: LuauValue) throws -> LuauValue {
@@ -812,6 +828,7 @@ public final class LuauVM: @unchecked Sendable {
         }
         switch a {
         case .string(let s): return .number(Double(s.utf8.count))
+        case .byteString(let b): return .number(Double(b.count))
         case .table(let t): return .number(Double(t.rawLength))
         default:
             throw LuauRuntimeError(value: .string("attempt to get length of a \(a.typeName) value"))
@@ -834,30 +851,28 @@ public final class LuauVM: @unchecked Sendable {
     }
 
     private func evalLt(_ a: LuauValue, _ b: LuauValue) throws -> Bool {
-        switch (a, b) {
-        case (.number(let na), .number(let nb)): return na < nb
-        case (.string(let sa), .string(let sb)): return sa < sb
-        default:
-            if let mm = getMetamethod(of: a, name: "__lt") ?? getMetamethod(of: b, name: "__lt") {
-                return (try call(value: mm, args: [a, b]).first ?? .nil).isTruthy
-            }
-            throw LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
+        if case .number(let na) = a, case .number(let nb) = b { return na < nb }
+        if let ba = a.stringBytes, let bb = b.stringBytes {
+            return ba.lexicographicallyPrecedes(bb)
         }
+        if let mm = getMetamethod(of: a, name: "__lt") ?? getMetamethod(of: b, name: "__lt") {
+            return (try call(value: mm, args: [a, b]).first ?? .nil).isTruthy
+        }
+        throw LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
     }
 
     private func evalLe(_ a: LuauValue, _ b: LuauValue) throws -> Bool {
-        switch (a, b) {
-        case (.number(let na), .number(let nb)): return na <= nb
-        case (.string(let sa), .string(let sb)): return sa <= sb
-        default:
-            if let mm = getMetamethod(of: a, name: "__le") ?? getMetamethod(of: b, name: "__le") {
-                return (try call(value: mm, args: [a, b]).first ?? .nil).isTruthy
-            }
-            if let mm = getMetamethod(of: a, name: "__lt") ?? getMetamethod(of: b, name: "__lt") {
-                return !(try call(value: mm, args: [b, a]).first ?? .nil).isTruthy
-            }
-            throw LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
+        if case .number(let na) = a, case .number(let nb) = b { return na <= nb }
+        if let ba = a.stringBytes, let bb = b.stringBytes {
+            return !bb.lexicographicallyPrecedes(ba)
         }
+        if let mm = getMetamethod(of: a, name: "__le") ?? getMetamethod(of: b, name: "__le") {
+            return (try call(value: mm, args: [a, b]).first ?? .nil).isTruthy
+        }
+        if let mm = getMetamethod(of: a, name: "__lt") ?? getMetamethod(of: b, name: "__lt") {
+            return !(try call(value: mm, args: [b, a]).first ?? .nil).isTruthy
+        }
+        throw LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
     }
 
     // MARK: - Sandbox & Memory Accounting
@@ -869,6 +884,9 @@ public final class LuauVM: @unchecked Sendable {
             freezeTableGraph(globals, visited: &visited)
             if let stringMt = getAppData(StringMetatableBox.self)?.table {
                 freezeTableGraph(stringMt, visited: &visited)
+            }
+            if case .table(let sigMod)? = registeredModules["@rune/signal"] {
+                freezeTableGraph(sigMod, visited: &visited)
             }
             let env = LuauTable()
             let mt = LuauTable()
@@ -943,6 +961,8 @@ public final class LuauVM: @unchecked Sendable {
             switch v {
             case .string(let s):
                 total += 32 + s.utf8.count
+            case .byteString(let b):
+                total += 32 + b.count
             case .table(let t):
                 measureTable(t)
             case .closure(let c):
@@ -951,6 +971,9 @@ public final class LuauVM: @unchecked Sendable {
                 let id = ObjectIdentifier(u)
                 if userdata.insert(id).inserted {
                     total += 64
+                    if let buf = u.payload as? LuauBufferBox {
+                        total += buf.bytes.count
+                    }
                     if let mt = u.metatable { measureTable(mt) }
                 }
             case .thread(let th):
@@ -966,6 +989,7 @@ public final class LuauVM: @unchecked Sendable {
             total += 64 + p.code.count * 16 + p.constants.count * 24
             for c in p.constants {
                 if case .string(let s) = c { total += 32 + s.utf8.count }
+                else if case .byteString(let b) = c { total += 32 + b.count }
             }
             for child in p.protos { measureProto(child) }
         }
@@ -986,6 +1010,7 @@ public final class LuauVM: @unchecked Sendable {
             for v in t.array { measureValue(v) }
             for (k, v) in t.hash {
                 if case .string(let ks) = k { total += 32 + ks.utf8.count }
+                else if case .byteString(let kb) = k { total += 32 + kb.count }
                 measureValue(v)
             }
             if let mt = t.metatable { measureTable(mt) }

@@ -50,7 +50,7 @@ public enum LuauData: Sendable, Equatable {
     /// Decodes into a `Decodable` Swift struct/value via JSONSerialization, preserving integer vs float fidelity.
     public func decode<T: Decodable>(_ type: T.Type = T.self) throws -> T {
         let jsonObject = toJSONObject()
-        let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [.fragmentsAllowed])
+        let data = try JSONSerialization.data(withJSONObject: jsonObject, options: [.fragmentsAllowed, .sortedKeys])
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -105,6 +105,7 @@ public enum LuauData: Sendable, Equatable {
             }
             return .number(n)
         case .string(let s): return .string(s)
+        case .byteString(let b): return .string(String(decoding: b, as: UTF8.self))
         case .table(let t) where depth < maxDepth:
             let len = t.rawLength
             if len > 0 {

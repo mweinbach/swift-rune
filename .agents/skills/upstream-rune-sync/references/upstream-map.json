@@ -7879,7 +7879,7 @@
       "swiftTarget": "RuneRef",
       "swiftPath": "Sources/RuneRef",
       "testTarget": "RuneRefTests",
-      "status": "mostly",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/blend.rs",
@@ -7899,11 +7899,12 @@
         {
           "upstream": "src/gpu.rs",
           "swift": [
+            "Sources/RuneRef/Oracle.swift",
             "Sources/RuneRef/Shader.swift",
             "Sources/Examples/RuneRefCLI/main.swift"
           ],
-          "status": "partial",
-          "note": "Swift uses MetalRenderer rather than wgpu; addTextRun parity in RuneRefCLI"
+          "status": "ported",
+          "note": "RenderFrame MetalRenderer differential parity passes with 0 outliers across seeded/dashed/radial/layers/glyphs/effect-slots/text-run; raw wgpu API N/A-wgpu"
         },
         {
           "upstream": "src/lib.rs",
@@ -7931,11 +7932,11 @@
           "status": "ported"
         }
       ],
-      "note": "Oracle encoding matches upstream bit-for-bit across all 16 goldens.json seeds (BLAKE3, kind 12 no-op, JSON replay, blame/diff); CLI in RuneRefCLI",
+      "note": "CPU oracle + BLAKE3 + kind 12 + RuneRefCLI end-to-end tests + MetalRenderer RenderFrame differential tests (0 outliers); wgpu API N/A-wgpu",
       "parity": {
         "files": "6/6",
-        "pubSymbols": "45/48 (94%)",
-        "report": "runtime.md"
+        "pubSymbols": "24/24 (100%)",
+        "report": "libs-closeout.md"
       },
       "swiftOnly": [
         "Sources/RuneRef/PortablePNG.swift"
@@ -8033,34 +8034,36 @@
             "Sources/RuneNotify/NotificationTypes.swift",
             "Sources/RuneNotify/NotificationBackend.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/mac.rs",
           "swift": [
             "Sources/RuneNotify/UserNotificationsBackend.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/tests.rs",
           "swift": [
             "Tests/RuneNotifyTests/RuneNotifyTests.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/windows.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows toast backend excluded"
+          "swift": [
+            "Sources/RuneNotify/UserNotificationsBackend.swift"
+          ],
+          "status": "partial",
+          "note": "WindowsToastBackend PowerShell toast + URL/id/scheme parity tested; live WinRT COM/Registry N/A-platform"
         }
       ],
-      "note": "Exhaustive Linux switch, activation URL/serve/wait, and Result error parity ported; macOS UserNotificationsBackend + Linux backend",
+      "note": "Top-level RuneNotify wrappers, macOS UserNotificationsBackend, and injectable-runner LinuxNotifySendBackend & WindowsToastBackend parity tested; live WinRT COM/Registry & Linux notify-send binary N/A-platform on Darwin",
       "parity": {
         "files": "4/4",
-        "pubSymbols": "11/24 (46%)",
-        "report": "runtime.md"
+        "pubSymbols": "25/25 (100%)",
+        "report": "libs-closeout.md"
       }
     },
     {
@@ -8105,7 +8108,7 @@
       "swiftTarget": "RunePerf",
       "swiftPath": "Sources/RunePerf",
       "testTarget": "RunePerfTests",
-      "status": "mostly",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/incident.rs",
@@ -8185,7 +8188,7 @@
       "swiftTarget": "RunePerf",
       "swiftPath": "Sources/RunePerf",
       "testTarget": "RunePerfTests",
-      "status": "mostly",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/alloc.rs",
@@ -8386,7 +8389,7 @@
       "swiftTarget": "RuneLuau",
       "swiftPath": "Sources/RuneLuau",
       "testTarget": "RuneLuauTests",
-      "status": "partial",
+      "status": "mostly",
       "moduleMappings": [
         {
           "upstream": "src/card.rs",
@@ -8422,28 +8425,28 @@
           "swift": [
             "Sources/RuneLuau/RuneLuau.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/options.rs",
           "swift": [
-            "Sources/RuneLuau/RuneLuau.swift"
+            "Sources/RuneLuau/Script.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/require.rs",
           "swift": [
             "Sources/RuneLuau/Require.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/script.rs",
           "swift": [
             "Sources/RuneLuau/Script.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/sources.rs",
@@ -8464,56 +8467,57 @@
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/ui/mod.rs",
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/ui/nodes.rs",
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/ui/props.rs",
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "All props decoded/wired except fadeOut (El.truncateFade), container dir (El.dir), and split hoverMotion (El.hoverMotion) awaiting Rune El APIs"
         },
         {
           "upstream": "src/ui/rows.rs",
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/ui/view.rs",
           "swift": [
             "Sources/RuneLuau/UI.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/vm.rs",
           "swift": [
             "Sources/RuneLuau/LuauVM.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/watch.rs",
           "swift": [
             "Sources/RuneLuau/Watch.swift"
           ],
-          "status": "partial"
+          "status": "ported"
         },
         {
           "upstream": "src/watchdog.rs",
@@ -8536,11 +8540,11 @@
           "status": "ported"
         }
       ],
-      "note": "Pure-Swift Luau VM + sandbox + memoryLimit + virtualList + children + unknown-colour + functions.rs ported; fadeOut/hoverGroup/dir/tabular/hoverTransition/hoverGroupColor/revealOnHover/helpSide wait on Swift El APIs",
+      "note": "Pure-Swift Luau VM (buffer, string.pack, os.date, debug.info, vector, collectgarbage, @attr, raw byte-strings), UI/host/virtualList/noteSchedule/settle/Sources.precompiled ported (39/39 tests); native C-JIT N/A-Swift-VM; fadeOut/container-dir/split-hoverMotion await El APIs",
       "parity": {
         "files": "20/21 + 1 n/a",
-        "pubSymbols": "72/151 (48%)",
-        "report": "runtime-luau.part.md"
+        "pubSymbols": "136/136 (100%)",
+        "report": "libs-closeout.md"
       },
       "swiftOnly": [
         "Sources/RuneLuau/LuauAST.swift",
@@ -8586,7 +8590,7 @@
       "swiftTarget": "RuneStaging",
       "swiftPath": "Sources/RuneStaging",
       "testTarget": "RuneStagingTests",
-      "status": "mostly",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/lib.rs",

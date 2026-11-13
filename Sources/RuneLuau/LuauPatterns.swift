@@ -11,27 +11,29 @@ internal enum LuauPatternEngine {
         let start: Int // 0-based byte offset
         let end: Int   // 0-based exclusive byte offset
         let captures: [String]
+        let captureBytes: [[UInt8]]
         let captureSpans: [Capture]
     }
 
     static func find(in subject: String, pattern: String, initPos: Int = 0, plain: Bool = false) -> MatchResult? {
-        let sBytes = Array(subject.utf8)
+        find(inBytes: Array(subject.utf8), patternBytes: Array(pattern.utf8), initPos: initPos, plain: plain)
+    }
+
+    static func find(inBytes sBytes: [UInt8], patternBytes pBytes: [UInt8], initPos: Int = 0, plain: Bool = false) -> MatchResult? {
         let startIdx = max(0, min(initPos, sBytes.count))
         if plain {
-            let pBytes = Array(pattern.utf8)
             if pBytes.isEmpty {
-                return MatchResult(start: startIdx, end: startIdx, captures: [], captureSpans: [])
+                return MatchResult(start: startIdx, end: startIdx, captures: [], captureBytes: [], captureSpans: [])
             }
             guard startIdx + pBytes.count <= sBytes.count else { return nil }
             for i in startIdx...(sBytes.count - pBytes.count) {
                 if sBytes[i..<(i + pBytes.count)].elementsEqual(pBytes) {
-                    return MatchResult(start: i, end: i + pBytes.count, captures: [], captureSpans: [])
+                    return MatchResult(start: i, end: i + pBytes.count, captures: [], captureBytes: [], captureSpans: [])
                 }
             }
             return nil
         }
 
-        let pBytes = Array(pattern.utf8)
         let anchored = pBytes.first == UInt8(ascii: "^")
         let pStart = anchored ? 1 : 0
 
@@ -39,15 +41,23 @@ internal enum LuauPatternEngine {
         repeat {
             var state = MatchState(s: sBytes, p: pBytes)
             if let endPos = state.match(sPos: sPos, pPos: pStart) {
-                let caps = state.captures.map { cap -> String in
+                var caps: [String] = []
+                var capBytes: [[UInt8]] = []
+                caps.reserveCapacity(state.captures.count)
+                capBytes.reserveCapacity(state.captures.count)
+                for cap in state.captures {
                     switch cap {
                     case .span(let a, let b):
-                        return String(decoding: sBytes[a..<b], as: UTF8.self)
+                        let slice = Array(sBytes[a..<b])
+                        capBytes.append(slice)
+                        caps.append(String(decoding: slice, as: UTF8.self))
                     case .position(let pos):
-                        return String(pos + 1)
+                        let str = String(pos + 1)
+                        capBytes.append(Array(str.utf8))
+                        caps.append(str)
                     }
                 }
-                return MatchResult(start: sPos, end: endPos, captures: caps, captureSpans: state.captures)
+                return MatchResult(start: sPos, end: endPos, captures: caps, captureBytes: capBytes, captureSpans: state.captures)
             }
             sPos += 1
         } while !anchored && sPos <= sBytes.count
@@ -74,14 +84,11 @@ internal enum LuauPatternEngine {
                 let ch = p[pi]
                 if ch == UInt8(ascii: "(") {
                     if pi + 1 < p.count && p[pi + 1] == UInt8(ascii: ")") {
-                        let capIdx = captures.count
                         captures.append(.position(si))
-                        openCaptures.append(capIdx)
                         let res = match(sPos: si, pPos: pi + 2)
                         if res == nil {
                             captures.removeLast()
                         }
-                        openCaptures.removeLast()
                         return res
                     } else {
                         let capIdx = captures.count
@@ -90,8 +97,12 @@ internal enum LuauPatternEngine {
                         let res = match(sPos: si, pPos: pi + 1)
                         if res == nil {
                             captures.removeLast()
+                            if openCaptures.last == capIdx {
+                                openCaptures.removeLast()
+                            }
+                        } else if openCaptures.last == capIdx {
+                            openCaptures.removeLast()
                         }
-                        openCaptures.removeLast()
                         return res
                     }
                 } else if ch == UInt8(ascii: ")") {
