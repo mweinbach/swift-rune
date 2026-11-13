@@ -22,6 +22,8 @@ public struct AccordionItem<State> {
 public enum KeybindVariant: Sendable, Hashable {
     case subtle
     case outline
+    case neutral
+    case ghost
 }
 
 // MARK: - TabStrip (`rune_kit::shell::tab_strip`)
@@ -183,26 +185,79 @@ extension Kit {
 
     // MARK: - Keybind (`rune_kit::keybind`)
 
+    /// Formats a keycap label: uppercases single ASCII/round-tripping letters (`"k"` -> `"K"`), leaving named keys intact.
+    public static func keycapLabel(_ key: String) -> String {
+        let upper = key.uppercased()
+        return (key.count == 1 && upper.lowercased() == key) ? upper : key
+    }
+
     /// Keyboard shortcut keycap sequence (`Kit::keybind`).
     public func keybind<State>(
         _ keys: [String],
         variant: KeybindVariant = .subtle
     ) -> El<State> {
-        let bgCol = (variant == .subtle) ? c.layer02 : .transparent
-        let borderCol = (variant == .subtle) ? c.borderMuted : c.borderBase
+        let bgCol: Color
+        let borderCol: Color
+        let inkCol: Color
+        let capHeight: Float
+        let capPx: Float
+        let capRadius: Float
+        let capGap: Float
+        let font = TextStyle(size: ty.smallMedium.size, weight: ty.smallMedium.weight, lineHeight: 11.0, letterSpacing: ty.smallMedium.letterSpacing, family: ty.smallMedium.family)
+
+        switch variant {
+        case .subtle:
+            bgCol = c.layer02
+            borderCol = c.borderMuted
+            inkCol = c.textMuted
+            capHeight = 18
+            capPx = 5
+            capRadius = radius.xs
+            capGap = 3
+        case .outline:
+            bgCol = .transparent
+            borderCol = c.borderBase
+            inkCol = c.textMuted
+            capHeight = 18
+            capPx = 5
+            capRadius = radius.xs
+            capGap = 3
+        case .neutral:
+            bgCol = c.layer03
+            borderCol = .transparent
+            inkCol = c.textMuted
+            capHeight = 14
+            capPx = 4
+            capRadius = 2.0
+            capGap = 2.0
+        case .ghost:
+            bgCol = .transparent
+            borderCol = .transparent
+            inkCol = c.textFaint
+            capHeight = 14
+            capPx = 4
+            capRadius = 2.0
+            capGap = 2.0
+        }
+
         return row()
-            .gap(3)
+            .role(.group)
+            .label(keys.joined(separator: " "))
+            .gap(capGap)
             .itemsCenter()
-            .children(keys.map { cap in
-                row()
-                    .h(18)
-                    .minW(18)
-                    .px(5)
+            .children(keys.enumerated().map { idx, cap in
+                var box: El<State> = row()
+                    .key("key\(idx)")
+                    .h(capHeight)
+                    .minW(capHeight)
+                    .px(capPx)
                     .center()
-                    .rounded(radius.xs)
+                    .rounded(capRadius)
                     .bg(bgCol)
-                    .border(1.0, borderCol)
-                    .child(text(cap).font(ty.smallMedium).color(c.textMuted).noWrap())
+                if borderCol.a > 0 {
+                    box = box.border(1.0, borderCol)
+                }
+                return box.child(text(Kit.keycapLabel(cap)).font(font).color(inkCol).noWrap())
             })
     }
 

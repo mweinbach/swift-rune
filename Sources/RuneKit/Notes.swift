@@ -318,6 +318,8 @@ extension Kit {
     private func drawNoteFacts<State>(key: String, rows: [(label: String, value: String)]) -> El<State> {
         var list: El<State> = col()
             .key(key)
+            .role(.group)
+            .label("facts")
             .wFull()
             .rounded(8)
             .bg(c.layer02)
@@ -340,9 +342,13 @@ extension Kit {
             if !rest.isEmpty {
                 right = right.child(text(rest).font(ty.textSmall).color(c.textBase))
             }
+            let valueSummary = [st, rest.isEmpty ? nil : rest].compactMap { $0 }.joined(separator: " ")
+            let rowLabel = valueSummary.isEmpty ? item.label : "\(item.label): \(valueSummary)"
             list = list.child(
                 row()
                     .key("\(key)-fact-\(idx)")
+                    .role(.listItem)
+                    .label(rowLabel)
                     .wFull()
                     .py(7)
                     .itemsCenter()
@@ -376,8 +382,13 @@ extension Kit {
     }
 
     private func drawNoteSteps<State>(key: String, steps: [NoteStepRow]) -> El<State> {
+        let doneCount = steps.filter {
+            ["built", "done", "shipped", "merged", "verified"].contains($0.status.lowercased())
+        }.count
         var list: El<State> = col()
             .key(key)
+            .role(.group)
+            .label("\(doneCount) of \(steps.count) built")
             .wFull()
             .rounded(8)
             .bg(c.layer02)
@@ -396,9 +407,12 @@ extension Kit {
             if let note = step.note {
                 left = left.child(text(note).font(ty.small).color(c.textMuted))
             }
+            let stepLabel = [step.title, step.status, step.note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
             list = list.child(
                 row()
                     .key("\(key)-step-\(idx)")
+                    .role(.listItem)
+                    .label(stepLabel)
                     .wFull()
                     .py(7)
                     .itemsCenter()
@@ -472,6 +486,8 @@ extension Kit {
         content = content.child(markdown(body, key: "\(key)-md"))
         return row()
             .key(key)
+            .role(.group)
+            .label(label ?? "note")
             .wFull()
             .p(12)
             .rounded(8)
