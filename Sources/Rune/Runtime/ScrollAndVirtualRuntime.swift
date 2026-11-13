@@ -16,12 +16,13 @@ extension Runtime {
 
     // MARK: - Helpers
 
-    internal func makeTx(at now: Double) -> Tx {
+    internal func makeTx(at now: Double, button: PointerButton = .primary) -> Tx {
         var tx = Tx()
         tx.clock = now
         if let sel = currentTextSelection() {
             tx.setCurrentTextSelection(sel)
         }
+        tx.button = button
         return tx
     }
 
@@ -629,42 +630,31 @@ extension Runtime {
     ) {
         guard !deltasByScrollPath.isEmpty, specs.count == flatNodes.count else { return }
         var cumulative = Array(repeating: Vec2.zero, count: flatNodes.count)
-        var ancestorScrollClip: [MotionRect?] = Array(repeating: nil, count: flatNodes.count)
         for i in flatNodes.indices {
             if let pIdx = flatNodes[i].parentIndex {
-                let ownDelta = deltasByScrollPath[flatNodes[pIdx].path] ?? .zero
+                let p = flatNodes[pIdx]
+                let pEl = p.el
+                let ownDelta = deltasByScrollPath[p.path] ?? .zero
                 let pDelta = Vec2(cumulative[pIdx].x + ownDelta.x, cumulative[pIdx].y + ownDelta.y)
                 cumulative[i] = pDelta
-                if deltasByScrollPath[flatNodes[pIdx].path] != nil {
-                    ancestorScrollClip[i] = flatNodes[pIdx].clipRect
-                } else {
-                    ancestorScrollClip[i] = ancestorScrollClip[pIdx]
-                }
                 if pDelta != .zero {
                     let inv = Vec2(-pDelta.x, -pDelta.y)
                     flatNodes[i].targetRect = flatNodes[i].targetRect.offsetBy(inv)
                     specs[i].rect = specs[i].rect.offsetBy(inv)
-                    var nextClip = flatNodes[i].clipRect.offsetBy(inv)
-                    if let sClip = ancestorScrollClip[i] {
-                        nextClip = intersectRects(nextClip, sClip)
-                    }
-                    flatNodes[i].clipRect = nextClip
+                }
+                let parentClips = pEl.layout.clipOverflow || pEl.clipRadius != nil || pEl.clipCorners != nil || pEl.clipFade != nil
+                flatNodes[i].clipRect = parentClips ? intersectRects(p.clipRect, p.targetRect) : p.clipRect
+                if pDelta != .zero {
                     if var ownSF = flatNodes[i].ownScrollFade {
-                        ownSF.rect = ownSF.rect.offsetBy(inv)
-                        if let sClip = ancestorScrollClip[i] {
-                            ownSF.rect = intersectRects(ownSF.rect, sClip)
-                        }
+                        ownSF.rect = intersectRects(flatNodes[i].clipRect, flatNodes[i].targetRect)
                         flatNodes[i].ownScrollFade = ownSF
                     }
                     if var ownCF = flatNodes[i].ownClipFade {
-                        ownCF.rect = ownCF.rect.offsetBy(inv)
-                        if let sClip = ancestorScrollClip[i] {
-                            ownCF.rect = intersectRects(ownCF.rect, sClip)
-                        }
+                        ownCF.rect = intersectRects(flatNodes[i].clipRect, flatNodes[i].targetRect)
                         flatNodes[i].ownClipFade = ownCF
                     }
                 }
-                var inheritedFades = flatNodes[pIdx].activeClipFades
+                var inheritedFades = p.activeClipFades
                 if let pSF = flatNodes[pIdx].ownScrollFade {
                     inheritedFades.append(pSF)
                 }
@@ -696,7 +686,12 @@ extension Runtime {
                 if activeVirtualPaths.contains(sPath) { continue }
                 if scrollRequestsState.owns(sPath) { continue }
                 let curY = scrollOffsets[sPath]?.y ?? 0
-                if curY <= 0.5 || wasPinnedToBottom.contains(sPath) || scrollGlidingPaths.contains(sPath) {
+                let scrollNid = NodeId.hash("scroll:" + sPath)
+                if curY <= 0.5
+                    || wasPinnedToBottom.contains(sPath)
+                    || scrollGlidingPaths.contains(sPath)
+                    || directScrolledPaths.contains(sPath)
+                    || scrollStore.isAnimating(scrollNid, Props.SCROLL) {
                     continue
                 }
                 let vpRect = drawnRect(sNode)

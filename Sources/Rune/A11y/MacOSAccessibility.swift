@@ -18,7 +18,7 @@ public extension AccessibilityTreeBuilder {
         var childrenByParent: [Int: [Int]] = [:]
         var roots: [Int] = []
         for (idx, info) in elements.enumerated() where !info.inert {
-            if let parent = info.parentIndex {
+            if let parent = info.parentIndex, parent >= 0, parent < elements.count, !elements[parent].inert {
                 childrenByParent[parent, default: []].append(idx)
             } else {
                 roots.append(idx)
@@ -127,7 +127,7 @@ public extension AccessibilityTreeBuilder {
 }
 
 public extension Runtime {
-    /// Returns the current accessibility tree snapshot built from live runtime elements.
+    /// Returns the current accessibility tree snapshot built from live runtime nodes.
     func accessibilitySnapshot(securePaths: Set<String> = []) -> AccessibilityNode {
         if flatNodes.isEmpty {
             return AccessibilityTreeBuilder.project(
@@ -201,13 +201,13 @@ public extension Runtime {
 
             var actions: [AccessibilityAction] = []
             if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
-               [.button, .checkbox, .switchControl, .radio, .tab, .menuItem].contains(el.role) {
+               [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
                 actions.append(.press)
             }
             if el.focusable && !node.effectiveInert {
                 actions.append(.focus)
             }
-            if el.role == .slider {
+            if el.role == .slider || el.handlers.onStep != nil {
                 actions.append(.increment)
                 actions.append(.decrement)
             }
@@ -280,6 +280,21 @@ public extension Runtime {
         )
     }
 
+    /// Returns the accessibility tree serialized as deterministic JSON (`Runtime::a11y_json` / `a11y::dump`).
+    func accessibilityJSON(pretty: Bool = false, securePaths: Set<String> = []) -> String {
+        AccessibilityDump.jsonString(from: accessibilitySnapshot(securePaths: securePaths), pretty: pretty)
+    }
+
+    /// Dispatches an accessibility action by key/path (`Runtime::a11y_action` convenience).
+    @discardableResult
+    func accessibilityAction(
+        _ id: String,
+        _ action: AccessibilityAction,
+        at now: Double = 0
+    ) -> Bool {
+        performAccessibilityAction(id, action: action, at: now)
+    }
+
     /// Dispatches an accessibility action onto an element identified by `id` (`key` or `path`).
     @discardableResult
     func performAccessibilityAction(
@@ -302,14 +317,18 @@ public extension Runtime {
             pointerDown(at: center, button: .primary, mods: Mods(), at: now)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
-        case .increment:
-            pointerDown(at: center, button: .primary, mods: Mods(), at: now)
-            pointerUp(at: center, button: .primary, mods: Mods(), at: now)
-            return keyDown(KeyEvent(key: .arrowUp), at: now) || keyDown(KeyEvent(key: .arrowRight), at: now)
-        case .decrement:
-            pointerDown(at: center, button: .primary, mods: Mods(), at: now)
-            pointerUp(at: center, button: .primary, mods: Mods(), at: now)
-            return keyDown(KeyEvent(key: .arrowDown), at: now) || keyDown(KeyEvent(key: .arrowLeft), at: now)
+        case .increment, .decrement:
+            guard let flatTarget = flatNodes.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
+                  !flatTarget.effectiveInert,
+                  let onStep = flatTarget.el.handlers.onStep else {
+                return false
+            }
+            let delta = (action == .increment) ? 1 : -1
+            var tx = makeTx(at: now)
+            onStep(&state, delta, &tx)
+            applyTx(tx, at: now)
+            dirtyCommit(at: now)
+            return true
         }
     }
 }

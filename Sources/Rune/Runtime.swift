@@ -19,6 +19,16 @@ private struct LiftedFlightSubtree {
     var localTurnClip: MotionRect?
     var parentPath: String?
     var nearestGroupHovered: Bool
+    var nearestGroupHoverFrac: Float
+}
+
+internal struct PresentedTransform {
+    var dx: Float = 0
+    var dy: Float = 0
+    var anchor: Vec2 = .zero
+    var anchorTo: Vec2 = .zero
+    var scale: Vec2 = Vec2(1, 1)
+    static let identity = PresentedTransform()
 }
 
 /// Snapshot of a mounted or exiting UI element exposed to tests, accessibility, and `--tree` JSON.
@@ -171,6 +181,7 @@ public final class Runtime<State> {
         let localTurnClip: MotionRect?
         let parentPath: String?
         let nearestGroupHovered: Bool
+        let nearestGroupHoverFrac: Float
         let flightCover: FlightCoverTransform?
         let flightClipOverride: MotionRect?
         let emitLiftedNow: Bool
@@ -394,7 +405,7 @@ public final class Runtime<State> {
     }
 
     // Input & focus state
-    public private(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
+    public internal(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
     public internal(set) var hoveredPath: String? = nil
     public internal(set) var hoveredKey: String? = nil
     public internal(set) var pressedPath: String? = nil
@@ -434,6 +445,7 @@ public final class Runtime<State> {
     internal var pendingKeepOnScreenKeys: [String] = []
     internal var scrollRequestsState = ScrollRequestsState()
     internal var scrollGlidingPaths: Set<String> = []
+    internal var directScrolledPaths: Set<String> = []
     internal var virtualLists: [String: RuntimeVirtualListState] = [:]
     internal var activeVirtualPaths: Set<String> = []
     internal var virtualFill = VirtualFillStateMachine()
@@ -474,7 +486,7 @@ public final class Runtime<State> {
     private var seenMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     private var committedMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     private var activeFlightIds: Set<NodeId> = []
-    private var launchedFlightIds: Set<NodeId> = []
+    internal var launchedFlightIds: Set<NodeId> = []
     private var unclippedMatchedFlightIds: Set<NodeId> = []
     private struct PendingFlightRequest {
         var source: String
@@ -491,7 +503,7 @@ public final class Runtime<State> {
         var motionSpring: Spring?
         var remainingAttempts: Int = 2
     }
-    private struct ActiveTextFlight {
+    internal struct ActiveTextFlight {
         var targetNodeId: NodeId
         var state: TextFlightState
         var sourceText: String?
@@ -502,7 +514,7 @@ public final class Runtime<State> {
     private var pendingTextFlights: [PendingFlightRequest] = []
     private var pendingLaunches: [PendingFlightRequest] = []
     private var pendingUnclippedFlights: Bool = false
-    private var activeTextFlights: [ActiveTextFlight] = []
+    internal var activeTextFlights: [ActiveTextFlight] = []
     private struct FocusReturnEntry {
         var ownerPath: String
         var returnPath: String?
@@ -513,10 +525,27 @@ public final class Runtime<State> {
     private var syncedEditFocusedPaths: Set<String> = []
     private var pendingTxFocusKey: String? = nil
     private var pendingTxBlurRequested: Bool = false
-    private var modalMemberPaths: Set<String> = []
-    private var activeModalPath: String? = nil
+    internal var modalMemberPaths: Set<String> = []
+    internal var activeModalPath: String? = nil
     private var viewHelpLook: HelpLook? = nil
     private var helpState = HelpRuntimeState()
+    internal var boundClipboard: Clipboard? = nil
+    internal var pendingPasteRequests: Int = 0
+    internal var drawnLayoutCache: [UInt64: (drawn: MotionRect, laid: MotionRect)] = [:]
+    internal var visibleWatchState: [UInt64: Bool] = [:]
+    internal var inheritedHoverCurvesByPath: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
+    internal var anchorHoverWithinByKey: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
+    internal var hoverCurvesById: [NodeId: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
+    internal var lastHoverTargetById: [NodeId: Float] = [:]
+    internal var pressedKeyFocusPath: String? = nil
+    internal var lastPixelsSizeByPath: [String: (UInt32, UInt32)] = [:]
+    internal var pixelsAspectSnapIds: Set<NodeId> = []
+    internal enum HoverHoldState: Equatable {
+        case free
+        case held
+        case released
+    }
+    internal var hoverHoldState: HoverHoldState = .free
 
     // Live property tracking `(path, target) -> lastSeenSequence`
     private struct LiveKey: Hashable {
@@ -771,6 +800,7 @@ public final class Runtime<State> {
         let sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
         }
+        updatePostFrameLayoutWatches(at: now)
         if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
         }
@@ -802,6 +832,7 @@ public final class Runtime<State> {
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
+        flushPendingPasteRequests(at: now)
 
         if let attempt = virtualFill.wake(at: now) {
             if virtualFill.step(.due(attempt: attempt, now: now)) == .draw {
@@ -829,6 +860,21 @@ public final class Runtime<State> {
                     liveTextSeenSeq[flatNodes[idx].path] = seq
                     flatNodes[idx].el.plainText = lt.get()
                 }
+            }
+        }
+
+        // Check if any async `Pixels` buffer size changed (`aspectRatio == nil`, single auto axis -> snap layout without animation)
+        for node in flatNodes {
+            guard let px = node.el.pixelsPayload else { continue }
+            let l = node.el.layout
+            guard l.aspectRatio == nil, (l.width == .auto) != (l.height == .auto) else { continue }
+            let sz = px.size
+            if let prev = lastPixelsSizeByPath[node.path], prev.0 == sz.width, prev.1 == sz.height {
+                continue
+            }
+            if sz.width > 0 && sz.height > 0 {
+                pixelsAspectSnapIds.insert(node.nodeId)
+                needsCommit = true
             }
         }
 
@@ -899,6 +945,7 @@ public final class Runtime<State> {
         )
 
         // Sample Scene & Live property bindings using scaled animation clock
+        refreshHoverAndSyncTracks(at: animNow, cut: false)
         let frameOut = scene.frame(at: animNow)
         let liveActive = updateLiveBindings(at: animNow)
         liveStore.sample(at: animNow)
@@ -1174,6 +1221,7 @@ public final class Runtime<State> {
 
         // Flatten tree, assign unique structural/keyed paths, clamp scroll offsets, and collect NodeSpecs
         lastKeyDiagnostics = KeyDiagnostics.find(in: layoutRoot)
+        inheritedHoverCurvesByPath.removeAll(keepingCapacity: true)
         var newFlat: [FlatNode] = []
         var newByPath: [String: Int] = [:]
         var newById: [NodeId: FlatNode] = [:]
@@ -1382,15 +1430,12 @@ public final class Runtime<State> {
                 b.source.subscribe(waker)
             }
 
-            // Compute interactive hover / press / pressScale adjustments on target spec
-            let isHovered = (hoveredPath == path) && !effectiveInert
+            // Compute interactive press / pressScale adjustments on target spec
             let isPressed = (pressedPath == path) && !effectiveInert
 
             var effectiveFill = el.background
             if isPressed, let pBg = el.pressBg {
                 effectiveFill = blendColorOver(bottom: effectiveFill, top: pBg, srgb: srgbBlend)
-            } else if isHovered, let hBg = el.hoverBg {
-                effectiveFill = blendColorOver(bottom: effectiveFill, top: hBg, srgb: srgbBlend)
             }
 
             var effectiveScale = Vec2(el.scale.x * anchorScaleFactor, el.scale.y * anchorScaleFactor)
@@ -1403,17 +1448,17 @@ public final class Runtime<State> {
             let selfInstantLayoutOrStyle = childInstant || commitKind.snaps || commitCut || reducedMotion
 
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
-            // Provide a subtle default interactive spring when pressScale / hover / press is used
+            // Provide a subtle default interactive spring when pressScale / press is used
             var styleSp: Spring?
             if selfInstantLayoutOrStyle {
-                styleSp = (el.hoverBg != nil || el.pressBg != nil) && !commitKind.snaps && !commitCut && !reducedMotion
+                styleSp = el.pressBg != nil && !commitKind.snaps && !commitCut && !reducedMotion
                     ? MotionTokens.INSTANT
                     : nil
             } else {
                 styleSp = el.styleSpring
                     ?? commitColorSpring
                     ?? commitMotion?.spring
-                    ?? ((el.pressScaleFactor != nil || el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
+                    ?? ((el.pressScaleFactor != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
             }
             let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
             func isRunningSameSceneFrame() -> Bool {
@@ -1437,7 +1482,7 @@ public final class Runtime<State> {
                     && abs(curTarget.height - localTarget.height) < 0.1
             }
             var layoutAnimSpec: LayoutAnim?
-            if commitCut || reducedMotion {
+            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
@@ -1452,7 +1497,7 @@ public final class Runtime<State> {
             if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && activeFlightIds.contains(nid) {
                 layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
-            var specTransition = (ancestorInstant || commitKind.snaps || commitCut || reducedMotion) ? nil : el.transition
+            var specTransition = (ancestorInstant || reducedMotion) ? nil : el.transition
             var specRect = targetRect
             var specOpacity = el.opacity
             var specScale = effectiveScale
@@ -1625,6 +1670,19 @@ public final class Runtime<State> {
         )
         reconcilePlaygroundAfterCommit(at: now)
 
+        lastPixelsSizeByPath.removeAll(keepingCapacity: true)
+        for node in newFlat {
+            if let px = node.el.pixelsPayload {
+                let sz = px.size
+                lastPixelsSizeByPath[node.path] = (sz.width, sz.height)
+            }
+        }
+        rebuildHoverCurves(for: newFlat)
+        if cut || viewCommitCount == 1 {
+            hoverHoldState = .free
+            syncHoverTracks(at: lastScaledAnimNow, cut: true, held: false)
+        }
+
         // Resolve cross-parent matched-geometry (`flightId` / `matched`) flights against last-seen rects.
         var matchedStarts: [NodeId: MatchedFlightStart] = [:]
         var newCommittedMatched: [String: MatchedSeenSnapshot] = [:]
@@ -1790,6 +1848,7 @@ public final class Runtime<State> {
             shiftFlatAndSpecsForScrollDeltas(changedScrollDeltas, specs: &specs)
         }
         let keepDeltas = applyKeepCompensation(at: now, cut: commitCut, specs: &specs)
+        directScrolledPaths.removeAll(keepingCapacity: true)
         if !keepDeltas.isEmpty {
             for (kPath, kd) in keepDeltas {
                 let prev = changedScrollDeltas[kPath] ?? .zero
@@ -2272,21 +2331,24 @@ public final class Runtime<State> {
             nodeByFrameId[p.id] = p
         }
 
-        // Compute own presented rect, opacity, scale, and rotation (applying Live & Loop tracks on top of Scene)
+        // Compute own & inherited presented rect, opacity, scale, and rotation (applying Live & Loop tracks on top of Scene)
+        var presentedInhById: [NodeId: PresentedTransform] = [:]
         var ownOpacityById: [NodeId: Float] = [:]
         var ownScaleById: [NodeId: Vec2] = [:]
         var ownRotateById: [NodeId: Float] = [:]
         for p in frameOut.nodes {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { continue }
-            var rect = p.rect
+            var baseRect = p.rect
             var op = p.opacity
-            var sc = p.scale
+            var ownSc = p.scale
             var rot = p.rotate
+            var ownDelta = Vec2.zero
 
-            if let ls = sampleLoopPresentation(id: p.id, nodeSize: rect.size, wallNow: currentTime) {
+            if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: currentTime) {
                 op *= ls.opacity
                 rot += ls.rotation
-                rect = rect.offsetBy(ls.offset)
+                ownDelta.x += ls.offset.x
+                ownDelta.y += ls.offset.y
             }
 
             for b in snap.el.liveBindings {
@@ -2295,33 +2357,60 @@ public final class Runtime<State> {
                 case .opacity:
                     if let v = liveStore.get(lnid, Props.OPACITY) { op = v.clamped(to: 0...1) }
                 case .scale:
-                    if let v = liveStore.get(lnid, Props.SCALE) { sc = Vec2(max(0, v.x), max(0, v.y)) }
+                    if let v = liveStore.get(lnid, Props.SCALE) {
+                        ownSc = Vec2(p.scale.x * max(0, v.x), p.scale.y * max(0, v.y))
+                    }
                 case .offset:
-                    if let v = liveStore.get(lnid, Props.OFFSET) { rect = rect.offsetBy(v) }
+                    if let v = liveStore.get(lnid, Props.OFFSET) {
+                        ownDelta.x += v.x
+                        ownDelta.y += v.y
+                    }
                 case .rect:
-                    if let v = liveStore.get(lnid, Props.RECT) { rect = v }
+                    if let v = liveStore.get(lnid, Props.RECT) { baseRect = v }
                 case .blur, .fill, .trim:
                     break
                 }
             }
 
-            if abs(sc.x - 1.0) > 1e-4 || abs(sc.y - 1.0) > 1e-4 {
-                let norm = snap.anchorAttachNorm ?? snap.el.origin
-                let pivot = Vec2(rect.x + rect.width * norm.x, rect.y + rect.height * norm.y)
+            let pinh: PresentedTransform = (snap.el.anchor == nil ? p.parent.flatMap { presentedInhById[$0] } : nil) ?? .identity
+            let sc = Vec2(pinh.scale.x * ownSc.x, pinh.scale.y * ownSc.y)
+            let norm = snap.anchorAttachNorm ?? snap.el.origin
+            let pivot = Vec2(baseRect.x + baseRect.width * norm.x, baseRect.y + baseRect.height * norm.y)
+            let ownDx = pinh.dx + ownDelta.x
+            let ownDy = pinh.dy + ownDelta.y
+            let centre = Vec2(pivot.x + ownDx, pivot.y + ownDy)
+            let centreTo = Vec2(
+                pinh.anchorTo.x + (centre.x - pinh.anchor.x) * pinh.scale.x,
+                pinh.anchorTo.y + (centre.y - pinh.anchor.y) * pinh.scale.y
+            )
+            let hasOwnScale = abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
+            let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
+            presentedInhById[p.id] = PresentedTransform(
+                dx: ownDx,
+                dy: ownDy,
+                anchor: anchor,
+                anchorTo: anchorTo,
+                scale: sc
+            )
+
+            let shifted = baseRect.offsetBy(Vec2(ownDx, ownDy))
+            let rect: MotionRect
+            if abs(sc.x - 1.0) > 1e-5 || abs(sc.y - 1.0) > 1e-5 || anchor != anchorTo {
                 rect = MotionRect(
-                    left: pivot.x + (rect.left - pivot.x) * sc.x,
-                    top: pivot.y + (rect.top - pivot.y) * sc.y,
-                    right: pivot.x + (rect.right - pivot.x) * sc.x,
-                    bottom: pivot.y + (rect.bottom - pivot.y) * sc.y
+                    left: anchorTo.x + (shifted.left - anchor.x) * sc.x,
+                    top: anchorTo.y + (shifted.top - anchor.y) * sc.y,
+                    right: anchorTo.x + (shifted.right - anchor.x) * sc.x,
+                    bottom: anchorTo.y + (shifted.bottom - anchor.y) * sc.y
                 )
+            } else {
+                rect = shifted
             }
 
             presentedRectById[p.id] = rect
             ownOpacityById[p.id] = op.clamped(to: 0...1)
-            ownScaleById[p.id] = sc
+            ownScaleById[p.id] = ownSc
             ownRotateById[p.id] = rot
-            let parentSc = p.parent.flatMap { presentedScaleById[$0] } ?? Vec2(1, 1)
-            presentedScaleById[p.id] = Vec2(sc.x * parentSc.x, sc.y * parentSc.y)
+            presentedScaleById[p.id] = sc
 
             if let pid = p.parent, nodeByFrameId[pid] != nil {
                 childrenByParent[pid, default: []].append(p)
@@ -2331,52 +2420,7 @@ public final class Runtime<State> {
         }
 
         // Precompute `hoverAlone` & `hoverGroupShared` active state from pointer / keyboard focus
-        let ptrPos = pointerPosition
-        let topmostPtrPath: String? = (ptrPos.x > -9000 && ptrPos.y > -9000 && !hitGeometryByPath.isEmpty)
-            ? hitTest(at: ptrPos, predicate: { _ in true })?.node.path
-            : nil
-        let ptrInside: (FlatNode) -> Bool = { node in
-            guard ptrPos.x > -9000, ptrPos.y > -9000 else { return false }
-            let insideGeom: Bool
-            if let geom = self.hitGeometryByPath[node.path] {
-                insideGeom = geom.contains(ptrPos)
-            } else {
-                let r = presentedRectById[node.nodeId] ?? node.targetRect
-                insideGeom = halfOpenContains(intersectRects(node.clipRect, r), ptrPos)
-            }
-            guard insideGeom else { return false }
-            if let top = topmostPtrPath, !(top == node.path || top.hasPrefix(node.path + "/")) {
-                return false
-            }
-            return true
-        }
-        let alonePath: String? = flatNodes
-            .filter { $0.el.isHoverAlone && !$0.effectiveInert && ptrInside($0) }
-            .max(by: { $0.path.count < $1.path.count })?.path
-        let sharedHoverKeys: Set<String> = Set(flatNodes.compactMap { node -> String? in
-            guard let k = node.el.hoverGroupShare, !node.effectiveInert else { return nil }
-            let focusIn = focusVisible && (focusedPath == node.path || (focusedPath?.hasPrefix(node.path + "/") ?? false))
-            return (ptrInside(node) || focusIn) ? k : nil
-        })
-        func isGroupHovered(_ node: FlatNode) -> Bool {
-            guard !node.effectiveInert else { return false }
-            if let alonePath, alonePath != node.path, alonePath.hasPrefix(node.path + "/") {
-                return false
-            }
-            if hoveredPath == node.path || (hoveredPath?.hasPrefix(node.path + "/") ?? false) {
-                return true
-            }
-            if ptrInside(node) {
-                return true
-            }
-            if let share = node.el.hoverGroupShare, sharedHoverKeys.contains(share) {
-                return true
-            }
-            if focusVisible, let fp = focusedPath, (fp == node.path || fp.hasPrefix(node.path + "/")) {
-                return true
-            }
-            return false
-        }
+        let isGroupHovered = makeGroupHoverPredicate(presentedRectById: presentedRectById)
 
         func sortByZOrder(_ nodes: [Presented]) -> [Presented] {
             nodes.enumerated().sorted { a, b in
@@ -2435,6 +2479,7 @@ public final class Runtime<State> {
             let localTurnClip = input.localTurnClip
             let parentPath = input.parentPath
             let nearestGroupHovered = input.nearestGroupHovered
+            let nearestGroupHoverFrac = input.nearestGroupHoverFrac
             let flightCover = input.flightCover
             let flightClipOverride = input.flightClipOverride
             let emitLiftedNow = input.emitLiftedNow
@@ -2448,7 +2493,8 @@ public final class Runtime<State> {
                     outerTurnClip: outerTurnClip,
                     localTurnClip: localTurnClip,
                     parentPath: parentPath,
-                    nearestGroupHovered: nearestGroupHovered
+                    nearestGroupHovered: nearestGroupHovered,
+                    nearestGroupHoverFrac: nearestGroupHoverFrac
                 ))
                 return ([], emptyExit)
             }
@@ -2461,7 +2507,7 @@ public final class Runtime<State> {
             let ownOp = ownOpacityById[p.id] ?? p.opacity
             let groupFactor: Float = {
                 guard let (restOp, hovOp) = el.groupOpacity else { return 1.0 }
-                return nearestGroupHovered ? hovOp : restOp
+                return restOp + (hovOp - restOp) * nearestGroupHoverFrac
             }()
             let textFlightGlyphAlpha: Float = {
                 if let tf = textFlightTarget {
@@ -2633,6 +2679,18 @@ public final class Runtime<State> {
             let isFocused = (focusedPath == snap.path) && !p.isExiting
             let isHovered = (hoveredPath == snap.path) && !p.isExiting && !snap.effectiveInert
             let isPressed = (pressedPath == snap.path) && !p.isExiting && !snap.effectiveInert
+            let hoverFrac: Float = {
+                if let tracked = liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) {
+                    return tracked.clamped(to: 0...1)
+                }
+                if el.isHoverGroup || el.hoverGroupShare != nil {
+                    return (!p.isExiting && isGroupHovered(snap)) ? 1.0 : 0.0
+                }
+                return isHovered ? 1.0 : 0.0
+            }()
+            if !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
+                fillColor = blendColorOver(bottom: fillColor, top: hBg.scaleAlpha(hoverFrac), srgb: srgbBlend)
+            }
             let scrolled: Vec2 = {
                 if !el.layout.scrollAxes.isEmpty {
                     return scrollOffsets[snap.path] ?? .zero
@@ -2969,6 +3027,34 @@ public final class Runtime<State> {
                         clip: devClip,
                         turn: useLayer ? 0 : p.rotate
                     ))
+                } else if let px = el.pixelsPayload {
+                    let sz = px.size
+                    if sz.width > 0 && sz.height > 0 {
+                        let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: px.rgbaBytes())
+                        let normUV = imagePacker.insert(atlas)
+                        let fitted = Runtime.fittedPixelsGeometry(
+                            box: devRect,
+                            uv: normUV,
+                            imageWidth: Float(sz.width),
+                            imageHeight: Float(sz.height),
+                            fit: el.pixelsFitMode,
+                            place: el.surfacePlace,
+                            pixelScale: pxScale
+                        )
+                        let maxR = min(fitted.rect.z, fitted.rect.w) * 0.5
+                        let fittedRadii: SIMD4<Float> = el.pixelsFitMode != nil
+                            ? SIMD4<Float>(min(devRadii.x, maxR), min(devRadii.y, maxR), min(devRadii.z, maxR), min(devRadii.w, maxR))
+                            : devRadii
+                        let tint = Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        primitives.append(.image(
+                            rect: fitted.rect,
+                            radii: fittedRadii,
+                            uv: fitted.uv,
+                            tint: tint,
+                            clip: devClip,
+                            turn: useLayer ? 0 : p.rotate
+                        ))
+                    }
                 }
 
                 // 6. SVG Icon payload
@@ -3249,7 +3335,7 @@ public final class Runtime<State> {
             }
 
             let hasVisualBlocker = fillColor.a > 0.001 || el.gradient != nil ||
-                (el.borderWidth > 0 && borderColor.a > 0.001) || el.imagePayload != nil ||
+                (el.borderWidth > 0 && borderColor.a > 0.001) || el.imagePayload != nil || el.pixelsPayload != nil ||
                 el.backdropBlur >= 0.5 || !el.shapes.isEmpty
             let hnd = el.handlers
             let isInteractiveBlocker = hnd.onClick != nil || hnd.onClickPress != nil || hnd.onDoubleClick != nil ||
@@ -3327,7 +3413,7 @@ public final class Runtime<State> {
                 inert: snap.effectiveInert,
                 moving: p.isMoving,
                 exiting: p.isExiting,
-                hover: isHovered ? 1.0 : 0.0,
+                hover: p.isExiting ? 0.0 : hoverFrac,
                 press: isPressed ? 1.0 : 0.0,
                 scrolled: [scrolled.x, scrolled.y],
                 caret: caretOut,
@@ -3381,6 +3467,9 @@ public final class Runtime<State> {
             let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
                 ? isGroupHovered(snap)
                 : nearestGroupHovered
+            let nextGroupHoverFrac = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
+                ? hoverFrac
+                : nearestGroupHoverFrac
             var childSteps: [EmitStepInput] = []
             if let children = childrenByParent[p.id] {
                 let firstChildFade: Float = {
@@ -3422,6 +3511,7 @@ public final class Runtime<State> {
                         localTurnClip: childLocalTurnClip,
                         parentPath: snap.path,
                         nearestGroupHovered: nextGroupHovered,
+                        nearestGroupHoverFrac: nextGroupHoverFrac,
                         flightCover: childFlightCover,
                         flightClipOverride: childFlightClip,
                         emitLiftedNow: emitLiftedNow,
@@ -3452,6 +3542,7 @@ public final class Runtime<State> {
             localTurnClip: MotionRect?,
             parentPath: String?,
             nearestGroupHovered: Bool,
+            nearestGroupHoverFrac: Float,
             flightCover: FlightCoverTransform? = nil,
             flightClipOverride: MotionRect? = nil,
             emitLiftedNow: Bool = false
@@ -3465,6 +3556,7 @@ public final class Runtime<State> {
                     localTurnClip: localTurnClip,
                     parentPath: parentPath,
                     nearestGroupHovered: nearestGroupHovered,
+                    nearestGroupHoverFrac: nearestGroupHoverFrac,
                     flightCover: flightCover,
                     flightClipOverride: flightClipOverride,
                     emitLiftedNow: emitLiftedNow,
@@ -3499,7 +3591,8 @@ public final class Runtime<State> {
                 outerTurnClip: nil,
                 localTurnClip: nil,
                 parentPath: nil,
-                nearestGroupHovered: false
+                nearestGroupHovered: false,
+                nearestGroupHoverFrac: 0.0
             )
         }
         for lifted in liftedFlights {
@@ -3513,6 +3606,7 @@ public final class Runtime<State> {
                 localTurnClip: lifted.localTurnClip,
                 parentPath: lifted.parentPath,
                 nearestGroupHovered: lifted.nearestGroupHovered,
+                nearestGroupHoverFrac: lifted.nearestGroupHoverFrac,
                 flightCover: nil,
                 flightClipOverride: isUnclippedFlight ? windowRect : nil,
                 emitLiftedNow: true
@@ -3663,7 +3757,7 @@ public final class Runtime<State> {
         return (detailed.node, detailed.rect)
     }
 
-    private func hitTestDetailed(
+    internal func hitTestDetailed(
         at point: Vec2,
         predicate: ((FlatNode) -> Bool)? = nil
     ) -> (node: FlatNode, rect: MotionRect, localPoint: Vec2)? {
@@ -3715,7 +3809,7 @@ public final class Runtime<State> {
                 }
                 let hasVis = node.el.background.a > 0.001 || node.el.gradient != nil ||
                     (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001) ||
-                    node.el.imagePayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
+                    node.el.imagePayload != nil || node.el.pixelsPayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
                 if firstBlockerPath == nil && (hasVis || node.el.explicitHit || node.el.isModal) {
                     firstBlockerPath = path
                 }
@@ -3775,7 +3869,7 @@ public final class Runtime<State> {
                 }
                 let hasVis = node.el.background.a > 0.001 || node.el.gradient != nil ||
                     (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001) ||
-                    node.el.imagePayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
+                    node.el.imagePayload != nil || node.el.pixelsPayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
                 if firstBlockerPath == nil && (hasVis || node.el.explicitHit || node.el.isModal) {
                     firstBlockerPath = path
                 }
@@ -3894,6 +3988,7 @@ public final class Runtime<State> {
     }
 
     public func pointerExit(at now: Double) {
+        hoverHoldState = .free
         pointerPosition = Vec2(-10000, -10000)
         if helpState.tipState != .idle {
             dirtyCommit(at: now)
@@ -3908,9 +4003,14 @@ public final class Runtime<State> {
             }
             dirtyCommit(at: now)
         }
+        syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
     }
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
+        let moved = pos != pointerPosition
+        if moved {
+            releaseHoverHold()
+        }
         pointerPosition = pos
 
         let moveHits = hitTestAll(at: pos, predicate: { $0.el.handlers.onPointerMove != nil })
@@ -3959,7 +4059,7 @@ public final class Runtime<State> {
                         clicks: drag.clicks,
                         mods: mods
                     )
-                    var tx = makeTx(at: now)
+                    var tx = makeTx(at: now, button: drag.button)
                     onDrag(&state, d, &tx)
                     if !tx.askedMotion { tx.instant() }
                     applyTx(tx, at: now)
@@ -3968,40 +4068,40 @@ public final class Runtime<State> {
             return
         }
 
-        let hit = hitTest(at: pos) { node in
-            let h = node.el.handlers
-            return node.el.hoverBg != nil || node.el.pressBg != nil ||
-                   node.el.isHoverGroup || node.el.isHoverAlone ||
-                   h.onHover != nil || h.onClick != nil || h.onClickPress != nil ||
-                   h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil
-        }
+        let hit = hitTest(at: pos, predicate: Self.hoverHitPredicate)
 
-        let newPath = hit?.node.path
-        let newKey = hit?.node.key
-        if newPath != hoveredPath {
-            let oldPath = hoveredPath
-            hoveredPath = newPath
-            hoveredKey = newKey
-            isDispatchingHover = true
-            defer { isDispatchingHover = false }
-            if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, false, &tx)
-                applyTx(tx, at: now)
+        if hoverHoldState != .held {
+            let newPath = hit?.node.path
+            let newKey = hit?.node.key
+            if newPath != hoveredPath {
+                let oldPath = hoveredPath
+                hoveredPath = newPath
+                hoveredKey = newKey
+                isDispatchingHover = true
+                if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
+                    var tx = makeTx(at: now)
+                    cb(&state, false, &tx)
+                    applyTx(tx, at: now)
+                }
+                if let np = newPath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
+                    var tx = makeTx(at: now)
+                    cb(&state, true, &tx)
+                    applyTx(tx, at: now)
+                }
+                isDispatchingHover = false
+                suppressRevealFromHoverCommit = true
+                dirtyCommit(at: now)
+            } else if helpTargetChanges(at: pos) {
+                dirtyCommit(at: now)
             }
-            if let np = newPath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, true, &tx)
-                applyTx(tx, at: now)
-            }
-            suppressRevealFromHoverCommit = true
-            dirtyCommit(at: now)
+            syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
         } else if helpTargetChanges(at: pos) {
             dirtyCommit(at: now)
         }
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
+        releaseHoverHold()
         suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
@@ -4019,6 +4119,7 @@ public final class Runtime<State> {
             lastClickPos = pos
         } else {
             clickCount = 1
+            lastClickTime = -.infinity
         }
 
         // Modal click-outside dismissal & scrim swallow when an active modal is mounted.
@@ -4052,9 +4153,10 @@ public final class Runtime<State> {
                     mods: mods,
                     clicks: 1
                 )
-                var tx = makeTx(at: now)
+                var tx = makeTx(at: now, button: .secondary)
                 node.el.handlers.onSecondaryClick?(&state, press, &tx)
                 applyTx(tx, at: now)
+                return
             } else {
                 handleSelectableSecondaryClick(at: pos, at: now)
             }
@@ -4064,6 +4166,10 @@ public final class Runtime<State> {
         playgroundPointerDown(at: pos, at: now)
         let interactiveHit = hitTestDetailed(at: pos) { node in
             let h = node.el.handlers
+            if button != .primary {
+                guard h.pointerButtons?.contains(button) == true else { return false }
+                return h.onClick != nil || h.onClickPress != nil || h.onPointerDown != nil || h.onDrag != nil
+            }
             return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
                    h.onPointerDown != nil || h.onDrag != nil || h.dragOut != nil ||
                    node.el.attachedDragOutItem != nil || h.editLens != nil ||
@@ -4112,7 +4218,7 @@ public final class Runtime<State> {
         )
 
         if let onDown = node.el.handlers.onPointerDown {
-            var tx = makeTx(at: now)
+            var tx = makeTx(at: now, button: button)
             onDown(&state, press, &tx)
             applyTx(tx, at: now)
         }
@@ -4169,7 +4275,7 @@ public final class Runtime<State> {
                 stateSnapshotBeforeDrag: snapshot
             )
             // Deliver initial drag at delta 0 so sliders jump/latch under pointer immediately!
-            var tx = makeTx(at: now)
+            var tx = makeTx(at: now, button: button)
             node.el.handlers.onDrag?(
                 &state,
                 Drag(
@@ -4202,7 +4308,7 @@ public final class Runtime<State> {
             draggedPastThreshold = suppressedClickFromSelDrag || (!drag.isTextSelectionDrag &&
                 hypot(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0)
             if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = makeTx(at: now)
+                var tx = makeTx(at: now, button: drag.button)
                 onEnd(&state, false, &tx)
                 applyTx(tx, at: now)
             }
@@ -4218,30 +4324,31 @@ public final class Runtime<State> {
             elementSize: Vec2(rect.width, rect.height),
             button: button,
             mods: mods,
-            clicks: clickCount
+            clicks: button == .primary ? clickCount : 1
         )
 
         if let onUp = node.el.handlers.onPointerUp {
-            var tx = makeTx(at: now)
+            var tx = makeTx(at: now, button: button)
             onUp(&state, press, &tx)
             applyTx(tx, at: now)
         }
 
         // Fire click / double-click only if pointer released inside the pressed element and not dragged!
         let inside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
-        if inside && button == .primary && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
-            if clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
-                var tx = makeTx(at: now)
+        let allowsButton = button == .primary || (button != .secondary && (node.el.handlers.pointerButtons?.contains(button) ?? false))
+        if inside && allowsButton && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
+            if button == .primary && clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
+                var tx = makeTx(at: now, button: button)
                 onDbl(&state, &tx)
                 applyTx(tx, at: now)
             } else {
                 if let onClick = node.el.handlers.onClick {
-                    var tx = makeTx(at: now)
+                    var tx = makeTx(at: now, button: button)
                     onClick(&state, &tx)
                     applyTx(tx, at: now)
                 }
                 if let onClickP = node.el.handlers.onClickPress {
-                    var tx = makeTx(at: now)
+                    var tx = makeTx(at: now, button: button)
                     onClickP(&state, press, &tx)
                     applyTx(tx, at: now)
                 }
@@ -4251,6 +4358,7 @@ public final class Runtime<State> {
 
     /// Routes wheel / trackpad scroll deltas to custom `onWheel` handlers or the nearest scrollable ancestor.
     public func wheel(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
+        releaseHoverHold()
         dismissHelp(at: now)
         let targetPos = pos ?? pointerPosition
         if let pos { pointerPosition = pos }
@@ -4294,6 +4402,7 @@ public final class Runtime<State> {
                     scrollOffsets[path] = cur
                     scrollStore.snap(nid, Props.SCROLL, to: cur)
                     scrollGlidingPaths.remove(path)
+                    directScrolledPaths.insert(path)
                     scrollRequestsState.stepCancel()
                     pendingCommitKind = pendingCommitKind.instant()
                     dirtyCommit(at: now)
@@ -4306,6 +4415,7 @@ public final class Runtime<State> {
 
     /// Starts an inertial scroll `Decay` fling (`vx`, `vy` in points/sec) on the scroll container under `pos`.
     public func fling(vx: Float = 0, vy: Float, at pos: Vec2? = nil, now: Double) {
+        releaseHoverHold()
         dismissHelp(at: now)
         let targetPos = pos ?? pointerPosition
         guard let (scrollNode, _) = hitTest(at: targetPos, predicate: { !$0.el.layout.scrollAxes.isEmpty }) else {
@@ -4315,6 +4425,7 @@ public final class Runtime<State> {
         let nid = NodeId.hash("scroll:" + path)
         let cur = scrollOffsets[path] ?? .zero
         scrollGlidingPaths.remove(path)
+        directScrolledPaths.insert(path)
         scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
@@ -4431,6 +4542,9 @@ public final class Runtime<State> {
             dirtyCommit(at: now)
             return true
         }
+        if !isRepeat {
+            pressedKeyFocusPath = focusedPath
+        }
 
         if playgroundNav(ev, isRepeat: isRepeat, at: now) {
             return true
@@ -4470,8 +4584,10 @@ public final class Runtime<State> {
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
                 }
                 if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
-                    paste(clipboard, at: now)
-                    return true
+                    let pasteContent = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
+                    if deliverPaste(pasteContent, at: now) {
+                        return true
+                    }
                 }
                 var edit = editLens.get(state)
                 if fNode.el.isSecure {
@@ -4595,6 +4711,10 @@ public final class Runtime<State> {
                 }
             }
 
+            if handleFocusedStepKey(ev, node: fNode, at: now) {
+                return true
+            }
+
             // Arrow-key roving inside `.focusGroup()` ancestor!
             if ev.mods == .none,
                (ev.key == .arrowRight || ev.key == .arrowDown || ev.key == .arrowLeft || ev.key == .arrowUp),
@@ -4624,6 +4744,14 @@ public final class Runtime<State> {
             }
             dirtyCommit(at: now)
             return true
+        }
+
+        // 2c. Non-editor `Cmd+V` falls through to active modal / root `onPaste` when unhandled by focused `onKey`.
+        if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
+            let pasteContent = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
+            if deliverPaste(pasteContent, at: now) {
+                return true
+            }
         }
 
         // 3. Tab / Shift+Tab focus ring traversal (trapped inside `.modal()` automatically via `effectiveInert`!)
@@ -4777,32 +4905,7 @@ public final class Runtime<State> {
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
-        clipboard = content
-        richClipboard = RichClipboardPayload(content: content)
-        guard let fPath = focusedPath,
-              let fIdx = nodeByPath[fPath],
-              let editLens = flatNodes[fIdx].el.handlers.editLens else {
-            return
-        }
-        var edit = editLens.get(state)
-        if flatNodes[fIdx].el.isSecure {
-            edit.isSecure = true
-        }
-        if edit.isRichEnabled && !edit.isSecure, let html = content.html, !html.isEmpty {
-            edit.pasteHTML(html, plain: content.text)
-        } else {
-            edit.paste(content.text)
-        }
-        editLens.set(&state, edit)
-        var tx = makeTx(at: now)
-        if flatNodes[fIdx].el.layoutAnim == nil {
-            tx.instant()
-        }
-        if let onChange = flatNodes[fIdx].el.handlers.onTextChange {
-            onChange(&state, edit.text, &tx)
-        }
-        applyTx(tx, at: now)
-        dirtyCommit(at: now)
+        deliverPaste(content, at: now)
     }
 
     // MARK: - JSON Element Tree Snapshot (`--tree`)
@@ -4980,10 +5083,12 @@ public final class Runtime<State> {
         if let cb = tx.clipboardWrite {
             clipboard = cb
             richClipboard = RichClipboardPayload(content: cb)
+            writeCopyToBoundClipboard(text: cb.text, rich: nil)
         }
         if let rich = tx.runtimeActions["richClipboardWrite"] as? RichClipboardPayload {
             richClipboard = rich
             clipboard = rich.content
+            writeCopyToBoundClipboard(text: rich.content.text, rich: rich)
         }
         if let urls = tx.runtimeActions["openUrlRequests"] as? [OpenUrlRequest] {
             for req in urls {
@@ -5132,7 +5237,11 @@ public final class Runtime<State> {
             )
             pendingWindowFrame = pendingWindowFrame?.merged(with: resolved) ?? resolved
         }
+        if tx.pasteRequested {
+            pendingPasteRequests += 1
+        }
         let hasCommitRequests = tx.followEdgeRequested
+            || tx.pasteRequested
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty
             || !tx.scrollPageRequests.isEmpty

@@ -316,8 +316,8 @@ public enum AccessibilityDump {
 
     private static func namedByContainerContent(_ role: ElementRole) -> Bool {
         switch role {
-        case .button, .checkbox, .link, .menuItem, .radio, .switchControl, .tab,
-             .listItem, .option, .treeItem, .row, .gridCell, .columnHeader, .heading, .alert:
+        case .button, .checkbox, .link, .menuItem, .menuItemCheckbox, .radio, .switchControl, .tab,
+             .listItem, .option, .treeItem, .row, .gridCell, .columnHeader, .heading, .alert, .status:
             return true
         default:
             return false
