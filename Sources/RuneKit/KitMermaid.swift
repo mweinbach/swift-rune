@@ -85,6 +85,7 @@ extension Kit {
         }
         return card
             .label(KitMermaid.kindLabel(source))
+            .description(source.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     /// Renders a frameless `MermaidDrawing` styled with `Kit` tokens for lightbox or custom containers.

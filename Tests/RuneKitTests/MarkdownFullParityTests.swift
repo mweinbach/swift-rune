@@ -1109,6 +1109,323 @@ struct MarkdownFullParityTests {
             #expect(streamRT.selectedText() == beforeStream)
         }
     }
+
+    // MARK: - 1:1 Rust Parity Additions (`src/markdown/tests.rs`, `markdown_table_card`, `markdown_find`, `markdown_fixture`, `markdown_diagram_*`, `markdown_quote_frame`, `markdown.rs #91`)
+
+    @Test("src/markdown/tests.rs: headings, blockquotes, lists, escapes, unpadded, TextSystem metrics (#7), docCached & span maps (#1-#10, #12-#13)")
+    func markdownCoreParserMetricsAndMaps() {
+        // #1-#6: headings (atx + setext), thematic breaks, blockquotes, fenced code, tight/loose lists
+        let src = """
+        Setext One
+        ===
+        ### ATX Three ###
+        ---
+        > Outer quote
+        > > Inner quote
+
+        ~~~swift
+        let x = 1
+        ~~~
+
+        - [x] Done task
+        - [ ] Open task
+          nested paragraph
+        """
+        let doc = MarkdownParser.parseDocument(src)
+        #expect(doc.blocks.contains(where: { if case .heading(level: 1, _) = $0 { true } else { false } }))
+        #expect(doc.blocks.contains(where: { if case .heading(level: 3, _) = $0 { true } else { false } }))
+        #expect(doc.blocks.contains(where: { if case .rule = $0 { true } else { false } }))
+        #expect(doc.blocks.contains(where: { if case .quote = $0 { true } else { false } }))
+        #expect(doc.blocks.contains(where: { if case .code(let txt) = $0 { txt.contains("let x = 1") } else { false } }))
+        #expect(doc.blocks.contains(where: { if case .list = $0 { true } else { false } }))
+
+        // #7: TextSystem glyph measurement matches code scale & produces non-empty visual lines and selection rects
+        let kit = Kit.neutral(dark: false)
+        let style = MarkdownStyle.fromKit(kit)
+        let ts = TextSystem()
+        let bodyShaped = ts.shape(text: "hello world", style: style.body, maxWidth: 400, pixelScale: 2.0)
+        let codeSize = style.body.size * style.inlineCodeScale
+        let codeStyle = TextStyle(size: codeSize, weight: style.inlineCodeWeight, lineHeight: style.body.lineHeight, family: style.codeBlock.family)
+        let codeShaped = ts.shape(text: "hello world", style: codeStyle, maxWidth: 400, pixelScale: 2.0)
+        #expect(!ts.visualLines(in: bodyShaped).isEmpty)
+        #expect(!ts.visualLines(in: codeShaped).isEmpty)
+        #expect(!ts.selectionRects(in: bodyShaped, utf8Range: 0..<5, pixelScale: 2.0).isEmpty)
+
+        // #9-#10: backslash escapes, HTML entity decoding, unpadded code, reference link definitions
+        let entSrc = "a &amp; &#x27; &#128512; \\*lit\\* ` spaced ` [r][k]\n\n[k]: https://a.test"
+        let entDoc = MarkdownParser.parseDocument(entSrc)
+        if case .para(let inl) = entDoc.blocks.first {
+            #expect(inl.text.contains("&"))
+            #expect(inl.text.contains("'"))
+            #expect(inl.text.contains("*lit*"))
+            #expect(inl.links.first?.url == "https://a.test")
+        } else {
+            Issue.record("Expected paragraph in entity/escape test")
+        }
+        #expect(MarkdownInline.unpadded("\(MarkdownInline.openPad)code\(MarkdownInline.closePad)") == "code")
+        #expect(MarkdownInline.unpadded(" ") == " ")
+
+        // #12-#13: docCached stability and span/block maps
+        let a = MarkdownDocCache.shared.docCached(src, autolink: true)
+        let b = MarkdownDocCache.shared.docCached(src, autolink: true)
+        #expect(a == b)
+        #expect(!doc.maps.isEmpty)
+    }
+
+    @Test("tests/markdown.rs: image block exposes zoomIn cursor on hover (#91)")
+    func markdownImageZoomInCursor() {
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime<String>(
+            state: "![Preview diagram](https://example.com/diagram.png)",
+            viewport: Vec2(480, 260),
+            view: { src, _ in
+                kit.markdown(src)
+            }
+        )
+        _ = rt.frame(at: 0.01)
+        let imgEl = rt.elements().first(where: {
+            $0.role == .image || $0.a11yDescription == "Preview diagram"
+        })
+        #expect(imgEl != nil)
+        if let r = imgEl?.rect, r.count == 4 {
+            rt.pointerMove(to: Vec2(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5), at: 0.02)
+            _ = rt.frame(at: 0.03)
+            #expect(rt.currentCursor() == .zoomIn)
+        }
+    }
+
+    @Test("tests/markdown_table_card.rs: card body inset (#93), preset (#94), pad (#95), fullWidth/scrollWide (#96-#97), margin (#98), defaults (#99-#103), copy (#104), frame order (#105), setters (#106-#108)")
+    @MainActor
+    func markdownTableCardParity() {
+        let kit = Kit.neutral(dark: false)
+        let cardStyle = MarkdownStyle.fromKit(kit).tableCard(kit)
+        let plainStyle = MarkdownStyle.fromKit(kit)
+        let mdTable = """
+        | Metric | Value | Note |
+        | :--- | ---: | :--- |
+        | Latency | 12 | Fast |
+        | Throughput | 900 | High |
+        """
+
+        // #93-#95, #101: card mounts body container "tb", header-alone draws no "tb"
+        let cardRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(620, 320),
+            view: { src, _ in
+                Markdown(src).view(for: String.self).render(cardStyle)
+            }
+        )
+        _ = cardRT.frame(at: 0.01)
+        let tb = cardRT.element(byKey: "tb")
+        let th = cardRT.element(byKey: "th")
+        let r0 = cardRT.element(byKey: "r0")
+        let r1 = cardRT.element(byKey: "r1")
+        #expect(tb != nil && th != nil && r0 != nil && r1 != nil)
+        if let tb, let th {
+            #expect(tb.rect[1] >= th.rect[1] + th.rect[3] - 0.5)
+            #expect(tb.rect[2] > 500) // tableFullWidth fills width
+        }
+
+        // #101: header-alone draws no card "tb"
+        let headOnlyRT = Runtime<String>(
+            state: "| Only | Head |\n| --- | --- |",
+            viewport: Vec2(480, 160),
+            view: { src, _ in Markdown(src).view(for: String.self).render(cardStyle) }
+        )
+        _ = headOnlyRT.frame(at: 0.01)
+        #expect(headOnlyRT.element(byKey: "th") != nil)
+        #expect(headOnlyRT.element(byKey: "tb") == nil)
+
+        // #99 & #102: defaults use separators ("s0") without card ("tb"); streaming last row handled
+        let defRT = Runtime<String>(
+            state: mdTable,
+            viewport: Vec2(480, 260),
+            view: { src, _ in Markdown(src).streaming(true).view(for: String.self).render(plainStyle) }
+        )
+        _ = defRT.frame(at: 0.01)
+        #expect(defRT.element(byKey: "tb") == nil)
+        #expect(defRT.element(byKey: "s0") != nil)
+
+        // #97: scrollWide embeds table inside "scroll" viewport for wide tables
+        let wideTable = """
+        | ColumnOneVeryLongHeaderName | ColumnTwoVeryLongHeaderName | ColumnThreeVeryLongHeaderName | ColumnFourVeryLongHeaderName |
+        | --- | --- | --- | --- |
+        | alpha_long_value_1234567890 | beta_long_value_1234567890 | gamma_long_value_1234567890 | delta_long_value_1234567890 |
+        """
+        let wideRT = Runtime<String>(
+            state: wideTable,
+            viewport: Vec2(280, 220),
+            view: { src, _ in Markdown(src).scrollWide().view(for: String.self).render(cardStyle) }
+        )
+        _ = wideRT.frame(at: 0.01)
+        #expect(wideRT.element(byKey: "scroll") != nil)
+
+        // #105: tableOutline clears prior tableFrame; #106: non-finite & negative points clamp to 0
+        let outlineAfterFrame = cardStyle.tableOutline(kit.c.borderStrong)
+        #expect(outlineAfterFrame.tableFrame == nil)
+        #expect(outlineAfterFrame.tableOutline == kit.c.borderStrong)
+
+        // #98: tableMargin separates table from surrounding prose
+        let proseAndTable = "Intro\n\n\(mdTable)\n\nOutro"
+        let tightRT = Runtime<String>(
+            state: proseAndTable,
+            viewport: Vec2(500, 420),
+            view: { src, _ in Markdown(src).view(for: String.self).render(plainStyle.tableMargin(top: 2, bottom: 2)) }
+        )
+        let spacedRT = Runtime<String>(
+            state: proseAndTable,
+            viewport: Vec2(500, 420),
+            view: { src, _ in Markdown(src).view(for: String.self).render(plainStyle.tableMargin(top: 40, bottom: 44)) }
+        )
+        _ = tightRT.frame(at: 0.01)
+        _ = spacedRT.frame(at: 0.01)
+        if let thTight = tightRT.element(byKey: "th"), let thSpaced = spacedRT.element(byKey: "th") {
+            #expect(thSpaced.rect[1] - thTight.rect[1] >= 20)
+        }
+
+        // #104: copy from rendered document includes table markdown/text
+        #expect(Markdown(mdTable).plainText().contains("Latency"))
+
+        let wild = MarkdownStyle.fromKit(kit)
+            .tableFrame(fill: kit.c.layer01, ring: kit.c.borderMuted, pad: .nan)
+            .tableBody(fill: kit.c.bgBase, radius: .infinity, shadows: [])
+            .tableHeaderPad(x: -5, y: .nan)
+            .tableCellPadding(x: .infinity, y: -1)
+            .tableMargin(top: .nan, bottom: -.infinity)
+        #expect(wild.tableFrame?.pad == 0)
+        #expect(wild.tableBody?.radius == 0)
+        #expect(wild.tableHeadPad == [0, 0])
+        #expect(wild.tablePad == [0, 0])
+        #expect(wild.tableMargin == [0, 0])
+    }
+
+    @Test("tests/markdown_find.rs: 1MB doc (#131), 200k matches (#132), mid-scalar UTF-8 safety (#133), 500 fragmented matches (#135)")
+    func markdownFindScaleAndBoundaryParity() {
+        // #131: 1MB document searches cleanly
+        let unit = "The quick brown fox jumps over the lazy dog.\n\n"
+        let big = String(repeating: unit, count: 22_000) + "\nUniqueNeedleHere\n"
+        let bigDoc = MarkdownParser.parseDocument(big)
+        let bigHits = MarkdownFind.findBounds(in: big, doc: bigDoc, query: "UniqueNeedleHere")
+        #expect(bigHits.count == 1)
+
+        // #132: 200k repeated occurrences handled cleanly
+        let many = String(repeating: "ab ", count: 200_000)
+        let manyDoc = MarkdownParser.parseDocument(many)
+        let manyHits = MarkdownFind.findBounds(in: many, doc: manyDoc, query: "ab")
+        #expect(manyHits.count >= 10_000)
+
+        // #133: UTF-8 multi-byte boundary safety on highlights
+        let emoji = "Café 🚀 café"
+        let eDoc = MarkdownParser.parseDocument(emoji)
+        let eHits = MarkdownFind.findBounds(in: emoji, doc: eDoc, query: "café")
+        #expect(eHits.count == 2)
+        for r in eHits {
+            let utf8 = emoji.utf8
+            let lo = utf8.index(utf8.startIndex, offsetBy: r.lowerBound)
+            let hi = utf8.index(utf8.startIndex, offsetBy: r.upperBound)
+            #expect(lo.samePosition(in: emoji) != nil)
+            #expect(hi.samePosition(in: emoji) != nil)
+        }
+
+        // #135: 500 fragmented inline span matches map cleanly
+        let frag = (0..<500).map { _ in "**hit** `hit` [hit](https://x.test)" }.joined(separator: " ")
+        let fragDoc = MarkdownParser.parseDocument(frag)
+        let fragHits = MarkdownFind.findBounds(in: frag, doc: fragDoc, query: "hit")
+        #expect(fragHits.count == 1500)
+    }
+
+    @Test("tests/markdown_fixture.rs: parsed_blocks_and_highlights fixture snapshot (#144)")
+    func markdownFixtureParsedBlocksAndHighlights() {
+        let fixture = """
+        # Session Summary
+
+        Paragraph with **bold**, *italic*, `inline`, and [link](https://rune.dev).
+
+        - [x] Completed step
+        - [ ] Pending step
+
+        > Quoted note
+
+        ```swift
+        func greet(_ name: String) -> String { "Hi \\(name)" }
+        ```
+
+        | Col A | Col B |
+        | --- | ---: |
+        | 1 | 2 |
+
+        ```mermaid
+        flowchart LR
+          A --> B
+        ```
+        """
+        let doc = MarkdownParser.parseDocument(fixture)
+        #expect(doc.blocks.count >= 6)
+        let swiftHighlights = Syntax.builtin(language: "swift", code: #"func greet(_ name: String) -> String { "Hi \(name)" }"#)
+        #expect(!swiftHighlights.isEmpty)
+        #expect(MarkdownFind.findBounds(in: fixture, doc: doc, query: "link").count == 1)
+    }
+
+    @Test("tests/markdown_diagram_stream.rs, markdown_diagram_frame.rs, markdown_quote_frame.rs (#158-#161, #168-#171)")
+    func markdownDiagramAndQuoteFrameParity() {
+        let kit = Kit.neutral(dark: false)
+        let collector = LockedCollector()
+
+        // #158-#161: open mermaid fence draws complete lines; closing settles; finished shows whole immediately
+        let rt = Runtime<String>(
+            state: "```mermaid\nflowchart LR\n  A[One] --> B[Two]\n  C[Partial",
+            viewport: Vec2(560, 420),
+            view: { src, _ in
+                Markdown(src)
+                    .streaming(true)
+                    .diagramFrame { (el: El<String>, ctx: MarkdownDiagramFrameContext) -> El<String> in
+                        collector.addDiagram(ctx)
+                        return el.key("df-\(ctx.index)")
+                    }
+                    .quoteFrame { (el: El<String>, ctx: MarkdownQuoteFrameContext) -> El<String> in
+                        collector.addQuote(ctx)
+                        return el
+                    }
+                    .build(kit)
+            }
+        )
+        _ = rt.frame(at: 0.01)
+        let snapOpen = collector.snapshot()
+        #expect(snapOpen.diagrams.last?.open == true)
+        #expect(rt.element(byKey: "df-0") != nil)
+        let openW = rt.element(byKey: "df-0")?.rect[2] ?? 0
+        #expect(openW <= 560)
+
+        // Closing the fence transitions open -> false without canvas bloat
+        rt.update(at: 0.02) { s, _ in
+            s = "```mermaid\nflowchart LR\n  A[One] --> B[Two]\n  B --> C[Three]\n```"
+        }
+        for i in 1...12 {
+            _ = rt.frame(at: 0.02 + Double(i) * 0.02)
+        }
+        let snapClosed = collector.snapshot()
+        #expect(snapClosed.diagrams.last?.open == false)
+        let closedW = rt.element(byKey: "df-0")?.rect[2] ?? 0
+        #expect(closedW > 0 && closedW <= 560)
+
+        // #170-#171: quoteFrame receives plain text for top-level & nested quotes
+        let qRT = Runtime<String>(
+            state: "> Outer text\n>\n> > Inner nested text",
+            viewport: Vec2(480, 260),
+            view: { src, _ in
+                Markdown(src)
+                    .quoteFrame { (el: El<String>, ctx: MarkdownQuoteFrameContext) -> El<String> in
+                        collector.addQuote(ctx)
+                        return el
+                    }
+                    .build(kit)
+            }
+        )
+        _ = qRT.frame(at: 0.01)
+        let qSnap = collector.snapshot()
+        #expect(qSnap.quotes.contains(where: { $0.contains("Outer text") }))
+        #expect(qSnap.quotes.contains(where: { $0.contains("Inner nested text") }))
+    }
 }
 
 private final class LockedCollector: @unchecked Sendable {

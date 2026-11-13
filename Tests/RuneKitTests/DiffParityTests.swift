@@ -715,6 +715,7 @@ struct DiffParityTests {
         let cmdCOld = state.key(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), tx: &tx)
         #expect(cmdCOld)
         #expect(tx.clipboardWrite?.text == "let a = foo.bar(1)")
+        _ = state.hoverText(side: .old, cell: "c-old", inside: false)
         let hoveredNew = state.hoverText(side: .new, cell: "c-new", inside: true)
         #expect(hoveredNew)
         #expect(state.copySide == .new)
@@ -769,5 +770,448 @@ struct DiffParityTests {
         } else {
             Issue.record("Missing mv-o-0-plus comment button")
         }
+    }
+
+    // MARK: - 1:1 Rust Parity Additions (`diff/model.rs`, `myers.rs`, `state.rs`, `view.rs`, `tests/diff.rs`)
+
+    @Test("diff/model.rs: hunk_header_tracks_counts_and_section, three_lines_is_standard, no_newline_marker_is_captured")
+    func diffModelHeadersContextAndNoNewline() {
+        // #29 hunk header omits ,1 when oldCount/newCount == 1 and retains parsed section label
+        let singlePatch = """
+        diff --git a/a.rs b/a.rs
+        --- a/a.rs
+        +++ b/a.rs
+        @@ -1 +1,2 @@ fn main()
+        -a
+        +a
+        +b
+        """
+        let singleParsed = FileDiff.parse(singlePatch)
+        #expect(singleParsed.count == 1)
+        #expect(singleParsed[0].hunks[0].header == "@@ -1 +1,2 @@ fn main()")
+        #expect(singleParsed[0].hunks[0].section == "fn main()")
+
+        let computed = FileDiff.fromTexts(path: "a.rs", old: "a\n", new: "a\nb\n", context: 3)
+        #expect(computed.hunks[0].header == "@@ -1 +1,2 @@")
+
+        // #30 three_lines_is_standard: 6 unchanged lines between edits merge into 1 hunk; 7 split into 2
+        let sixGapOld = (1...12).map { "L\($0)" }.joined(separator: "\n")
+        var sixGapNewLines = (1...12).map { "L\($0)" }
+        sixGapNewLines[1] = "X2"  // line 2
+        sixGapNewLines[8] = "X9"  // line 9 -> lines 3..8 are 6 unchanged lines
+        let merged = FileDiff.fromTexts(path: "g6.rs", old: sixGapOld, new: sixGapNewLines.joined(separator: "\n"), context: 3)
+        #expect(merged.hunks.count == 1)
+
+        let sevenGapOld = (1...13).map { "L\($0)" }.joined(separator: "\n")
+        var sevenGapNewLines = (1...13).map { "L\($0)" }
+        sevenGapNewLines[1] = "X2"  // line 2
+        sevenGapNewLines[9] = "X10" // line 10 -> lines 3..9 are 7 unchanged lines
+        let split = FileDiff.fromTexts(path: "g7.rs", old: sevenGapOld, new: sevenGapNewLines.joined(separator: "\n"), context: 3)
+        #expect(split.hunks.count == 2)
+
+        // #31 no_newline_marker_is_captured on old, new, and both sides
+        let noNewlinePatch = """
+        diff --git a/nn.txt b/nn.txt
+        --- a/nn.txt
+        +++ b/nn.txt
+        @@ -1,2 +1,2 @@
+         keep
+        -old
+        \\ No newline at end of file
+        +new
+        \\ No newline at end of file
+        """
+        let nn = FileDiff.parse(noNewlinePatch)
+        #expect(nn.count == 1)
+        #expect(nn[0].hunks[0].lines[0].noNewline == false)
+        #expect(nn[0].hunks[0].lines[1].noNewline == true)
+        #expect(nn[0].hunks[0].lines[2].noNewline == true)
+    }
+
+    @Test("diff/myers.rs: random_inputs_match_dp_lcs_length (1200 rounds), huge_inputs_with_scattered_edits (30k), repeated_blocks_pair_cleanly")
+    func diffMyersLcsHugeAndRepeatedBlocks() {
+        func dpLcsLength(_ a: [Int], _ b: [Int]) -> Int {
+            var prev = Array(repeating: 0, count: b.count + 1)
+            var curr = Array(repeating: 0, count: b.count + 1)
+            for x in a {
+                for j in 0..<b.count {
+                    curr[j + 1] = (x == b[j]) ? (prev[j] + 1) : max(prev[j + 1], curr[j])
+                }
+                swap(&prev, &curr)
+                for j in 0...b.count { curr[j] = 0 }
+            }
+            return prev[b.count]
+        }
+
+        // #34: 1200 deterministic random pairs compared against true DP LCS length
+        var rng: UInt64 = 0x5DEECE66D
+        func nextRand() -> Int {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return Int((rng >> 33) & 0x7FFF_FFFF)
+        }
+        for _ in 0..<1200 {
+            let na = nextRand() % 28
+            let nb = nextRand() % 28
+            let a = (0..<na).map { _ in nextRand() % 4 }
+            let b = (0..<nb).map { _ in nextRand() % 4 }
+            let ops = Myers.diff(a, b)
+            var eqCount = 0
+            var reconstructed: [Int] = []
+            var ia = 0
+            var ib = 0
+            for op in ops {
+                switch op {
+                case .equal(let n):
+                    eqCount += n
+                    for _ in 0..<n {
+                        #expect(a[ia] == b[ib])
+                        reconstructed.append(a[ia])
+                        ia += 1
+                        ib += 1
+                    }
+                case .delete(let n):
+                    ia += n
+                case .insert(let n):
+                    for _ in 0..<n {
+                        reconstructed.append(b[ib])
+                        ib += 1
+                    }
+                }
+            }
+            #expect(reconstructed == b)
+            #expect(eqCount == dpLcsLength(a, b))
+        }
+
+        // #35: 30k lines with 50 scattered edits reconstruct cleanly and match expected equal count
+        let nLarge = 30_000
+        let base = (0..<nLarge).map { $0 }
+        var edited = base
+        for k in 0..<50 {
+            let idx = (k * 599 + 17) % nLarge
+            edited[idx] = nLarge + k
+        }
+        let hugeOps = Myers.diff(base, edited)
+        var hugeEq = 0
+        for op in hugeOps {
+            if case .equal(let c) = op { hugeEq += c }
+        }
+        #expect(hugeEq == nLarge - 50)
+
+        // #37: repeated identical blocks stay aligned cleanly
+        let blockA = ["fn helper() {", "    let x = 1;", "    let y = 2;", "}"]
+        let oldLines = blockA + ["// middle old"] + blockA
+        let newLines = blockA + ["// middle new"] + blockA
+        let ops = Myers.diff(oldLines, newLines)
+        #expect(ops == [.equal(4), .delete(1), .insert(1), .equal(4)])
+    }
+
+    @Test("diff/state.rs: expand up/down/all (#40), split keys (#41), one-side copy & release clear (#42), cancel restore & setFiles reset (#43-#44), hover hold & visibleWindow (#45)")
+    func diffStateParityDetails() {
+        let oldLines = (1...60).map { "line \($0)" }
+        var newLines = oldLines
+        newLines[0] = "changed 1"
+        newLines[59] = "changed 60"
+        let diff = FileDiff.fromTexts(path: "long.swift", old: oldLines.joined(separator: "\n"), new: newLines.joined(separator: "\n"), context: 3)
+        var st = DiffState(diff: diff)
+
+        // #40: hidden starts at 52 (60 - 4 - 4), expand up -> 32, down -> 12, all -> 0
+        #expect(st.hidden(gap: 1) == 52)
+        st.expand(gapIndex: 1, direction: .up)
+        #expect(st.hidden(gap: 1) == 32)
+        st.expand(gapIndex: 1, direction: .down)
+        #expect(st.hidden(gap: 1) == 12)
+        st.expand(gapIndex: 1, direction: .all)
+        #expect(st.hidden(gap: 1) == 0)
+
+        // #41: split pairs changes cleanly
+        let splitSt = DiffState(diff: diff, mode: .split)
+        let splitRows = splitSt.rows()
+        #expect(splitRows.contains(where: {
+            if case .splitPair = $0 { return true }
+            return false
+        }))
+        #expect(splitSt.diff.columns >= 2)
+
+        // #42-#44: one-side selection copy, release-to-clear, cancel restores prior, setFiles ends active press
+        let p = """
+        diff --git a/s.rs b/s.rs
+        --- a/s.rs
+        +++ b/s.rs
+        @@ -1,4 +1,4 @@
+         ctx1
+        -old2
+        +new2
+         ctx3
+         ctx4
+        """
+        var selSt = DiffState(diff: FileDiff.parse(p)[0])
+        let r1 = DiffLineRef(side: .old, line: 1)
+        let r2 = DiffLineRef(side: .old, line: 2)
+        let r3 = DiffLineRef(side: .old, line: 3)
+        selSt.select(DiffLineRange(start: r1, end: r2))
+        #expect(selSt.copyText(side: .old) == "ctx1\nold2")
+
+        // Pressing already-selected single line without drag clears on release
+        selSt.select(DiffLineRange(start: r1, end: r1))
+        selSt.selection.step(.press(at: r1, column: .numbers, shift: false))
+        selSt.selection.step(.release)
+        #expect(selSt.selectedRange == nil)
+
+        // #43: Cancel restores pre-press selection
+        let prior = DiffLineRange(start: r1, end: r1)
+        selSt.select(prior)
+        selSt.selection.step(.press(at: r2, column: .numbers, shift: false))
+        selSt.selection.step(.move(at: r3))
+        selSt.selection.step(.cancel)
+        #expect(selSt.selectedRange == prior)
+
+        // #44: setFiles drops active press so cancel restores nil
+        selSt.selection.step(.press(at: r2, column: .numbers, shift: false))
+        selSt.setFiles([diff])
+        selSt.selection.step(.cancel)
+        #expect(selSt.selectedRange == nil)
+
+        // #45: copySide follows hovered side unless held cell keeps opposite side entered
+        #expect(selSt.hoverText(side: .old, cell: "o-0", inside: true) == true)
+        #expect(selSt.copySide == .old)
+        // Entering new cell while old cell is still held does NOT switch side
+        #expect(selSt.hoverText(side: .new, cell: "n-0", inside: true) == false)
+        #expect(selSt.copySide == .old)
+        // Releasing old cell leaves new cell active, then next new hover confirms switch
+        _ = selSt.hoverText(side: .old, cell: "o-0", inside: false)
+        #expect(selSt.hoverText(side: .new, cell: "n-1", inside: true) == true)
+        #expect(selSt.copySide == .new)
+
+        // #45: visibleWindow tracks scrolled offset
+        let win = splitSt.visibleWindow(for: splitRows, scrollY: 40, viewportHeight: 60, overscan: 0)
+        #expect(win.range.lowerBound > 0)
+    }
+
+    @Test("diff/view.rs: DiffViewHelpers expandTabsWithOffsets, insertSoftBreaks, mergeCodeSpans, rowLabel (#46-#48)")
+    func diffViewHelpersParity() {
+        let (expanded, map) = DiffViewHelpers.expandTabsWithOffsets("\ta\té", tabSize: 4)
+        #expect(expanded == "    a   é")
+        #expect(map != nil)
+        if let map {
+            // Raw "\t" (0..<1) -> expanded (0..<4); raw "a" (1..<2) -> (4..<5); "\t" (2..<3) -> (5..<8); "é" (3..<5) -> (8..<10)
+            #expect(map[0] == 0)
+            #expect(map[1] == 4)
+            #expect(map[2] == 5)
+            #expect(map[3] == 8)
+            #expect(map[5] == 10)
+        }
+
+        // Cross-span soft-break insertion after '.' and '/' before non-whitespace
+        let code = "a.b/c "
+        let highlights = [
+            SyntaxHighlight(range: 0..<2, paint: .kind(.punctuation)), // "a."
+            SyntaxHighlight(range: 2..<4, paint: .kind(.property)),    // "b/"
+            SyntaxHighlight(range: 4..<6, paint: .kind(.variable)),    // "c "
+        ]
+        let kit = Kit.neutral(dark: false)
+        let theme = SyntaxTheme.fromKit(kit)
+        let spans = DiffViewHelpers.mergeCodeSpans(
+            code: code,
+            rawCount: code.utf8.count,
+            offsetMap: nil,
+            highlights: highlights,
+            changedRanges: [2..<3], // "b"
+            defaultColor: kit.c.textBase,
+            syntaxTheme: theme,
+            wordBg: kit.c.warning.bg,
+            wrap: true
+        )
+        let joined = spans.map(\.text).joined()
+        #expect(joined == "a.\u{200B}b/\u{200B}c ")
+        #expect(spans.contains(where: { $0.text.contains("b") && $0.background == kit.c.warning.bg }))
+
+        // Disabled wrap keeps original characters
+        #expect(DiffViewHelpers.insertSoftBreaks("a.b(c)[d]/e", enabled: false) == "a.b(c)[d]/e")
+        #expect(DiffViewHelpers.insertSoftBreaks("a. b/ ", enabled: true) == "a. b/ ")
+
+        // rowLabel formatting
+        let added = DiffLine(kind: .addition, oldNumber: nil, newNumber: 7, text: "let x = 1")
+        let removed = DiffLine(kind: .deletion, oldNumber: 4, newNumber: nil, text: "let y = 2")
+        let ctx = DiffLine(kind: .context, oldNumber: 10, newNumber: 11, text: "keep")
+        #expect(DiffViewHelpers.rowLabel(added) == "added line 7: let x = 1")
+        #expect(DiffViewHelpers.rowLabel(removed) == "removed line 4: let y = 2")
+        #expect(DiffViewHelpers.rowLabel(ctx, side: .old) == "unchanged line 10: keep")
+        #expect(DiffViewHelpers.rowLabel(ctx, side: .new) == "unchanged line 11: keep")
+    }
+
+    @Test("tests/diff.rs: note coords in unified & split (#175)")
+    @MainActor
+    func diffRuntimeNoteCoordsParity() {
+        struct AppState: Sendable {
+            var diff: DiffState
+            var toggledNote: Bool = false
+        }
+
+        let kit = Kit.neutral(dark: false)
+        let oldText = (1...20).map { "func line\($0)() -> Int { return \($0) }" }.joined(separator: "\n")
+        var newLines = (1...20).map { "func line\($0)() -> Int { return \($0) }" }
+        newLines[1] = "func line2Changed() -> Int { return 999 }"
+        let fileDiff = FileDiff.fromTexts(path: "Sources/Demo.swift", old: oldText, new: newLines.joined(separator: "\n"), context: 3)
+
+        for mode in [DiffMode.unified, DiffMode.split] {
+            let st = AppState(
+                diff: DiffState(
+                    diff: fileDiff,
+                    mode: mode,
+                    annotations: [DiffAnnotation(id: "note-1", file: 0, side: .new, line: 2, author: "rev", body: "Check name")]
+                )
+            )
+            let rt = Runtime<AppState>(
+                state: st,
+                viewport: Vec2(720, 420),
+                view: { s, cx in
+                    DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                        .viewportHeight(360)
+                        .annotation { _, a in
+                            El<AppState>(direction: .row).key("custom-note-\(a.id)").h(88)
+                                .child(text(a.body))
+                        }
+                        .onLineClick { st, ref, _ in
+                            st.toggledNote.toggle()
+                            if st.toggledNote {
+                                st.diff.annotations.append(DiffAnnotation(id: "note-clicked", file: 0, side: ref.side, line: ref.line, body: "Added"))
+                            } else {
+                                st.diff.annotations.removeAll { $0.id == "note-clicked" }
+                            }
+                        }
+                        .build(state: s, cx: cx)
+                }
+            )
+            _ = rt.frame(at: 0.01)
+            let noteEl = rt.element(byKey: "custom-note-note-1")
+            #expect(noteEl != nil)
+            let targetKey = (mode == .unified) ? "dv-n-2" : "dv-sn-1"
+            let cell = rt.element(byKey: targetKey)
+            #expect(cell != nil)
+            if let noteRect = noteEl?.rect, noteRect.count == 4,
+               let cellRect = cell?.rect, cellRect.count == 4 {
+                #expect(noteRect[1] >= cellRect[1])
+                if mode == .split {
+                    // Split mode right-side note sits on the right half (`x >= cellRect[0] - 10`)
+                    #expect(noteRect[0] >= 350)
+                }
+                let pt = Vec2(cellRect[0] + cellRect[2] * 0.5, cellRect[1] + cellRect[3] * 0.5)
+                rt.pointerDown(at: pt, at: 0.02)
+                rt.pointerUp(at: pt, at: 0.03)
+                _ = rt.frame(at: 0.04)
+                #expect(rt.state.toggledNote == true)
+                #expect(rt.element(byKey: "custom-note-note-clicked") != nil)
+            }
+        }
+    }
+
+    @Test("tests/diff.rs: virtualization with tall notes (#176), drag/escape (#178, #180), sticky header & gutter (#179, #181), labels & hunks (#182), PerfWarn (#184-#185)")
+    @MainActor
+    func diffRuntimeVirtualDragStickyAndPerfWarnParity() {
+        struct AppState: Sendable {
+            var diff: DiffState
+            var selected: DiffLineRange? = nil
+        }
+
+        let kit = Kit.neutral(dark: false)
+        let oldText = (1...80).map { "func line\($0)() -> Int { return \($0) }" }.joined(separator: "\n")
+        var newLines = (1...80).map { "func line\($0)() -> Int { return \($0) }" }
+        newLines[0] = "// changed header line that is super super wide so horizontal scrolling can be exercised thoroughly in runtime viewports"
+        newLines[1] = "func line2Changed() -> Int { return 999 }"
+        newLines[75] = "func line76() -> Int { return -1 }"
+
+        PerfWarn.resetForTesting()
+        let bigDiff = FileDiff.fromTexts(
+            path: "Sources/Big.swift",
+            old: oldText,
+            new: newLines.joined(separator: "\n"),
+            context: 60
+        )
+        let rt = Runtime<AppState>(
+            state: AppState(diff: DiffState(
+                diff: bigDiff,
+                annotations: [DiffAnnotation(id: "tall", file: 0, side: .new, line: 4, body: "Tall note")]
+            )),
+            viewport: Vec2(360, 320),
+            onKey: { state, ev, tx in
+                state.diff.key(ev, keyPrefix: "dv", tx: &tx)
+            },
+            view: { s, cx in
+                El<AppState>(direction: .column).wFull().hFull()
+                    .child(
+                        DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                            .viewportHeight(220)
+                            .annotation { _, a in
+                                El<AppState>(direction: .row).key("tall-\(a.id)").h(110).child(text(a.body))
+                            }
+                            .onSelect { state, range, _ in
+                                state.selected = range
+                            }
+                            .build(state: s, cx: cx)
+                    )
+            }
+        )
+        _ = rt.frame(at: 0.01)
+
+        // #176: virtualization skips bottom rows out of viewport
+        #expect(rt.element(byKey: "dv-row-0") != nil)
+        #expect(rt.element(byKey: "dv-row-75") == nil)
+        let tall = rt.element(byKey: "tall-tall")
+        #expect(tall != nil)
+        #expect(abs((tall?.rect[3] ?? 0) - 110) < 2)
+
+        // #182: accessible heading label + row labels
+        let heading = rt.elements().first(where: { $0.role == .heading })
+        #expect(heading?.label?.contains("Sources/Big.swift") == true)
+        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("removed line ") == true }))
+        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("added line ") == true }))
+        #expect(rt.elements().contains(where: { $0.label?.hasPrefix("unchanged line ") == true }))
+
+        // #180 & #178: press line 2, drag to line 4, Escape during drag cancels without firing onSelect
+        if let n1 = rt.element(byKey: "dv-n-1"), let n3 = rt.element(byKey: "dv-n-3"),
+           n1.rect.count == 4, n3.rect.count == 4 {
+            let p1 = Vec2(n1.rect[0] + n1.rect[2] * 0.5, n1.rect[1] + n1.rect[3] * 0.5)
+            let p3 = Vec2(n3.rect[0] + n3.rect[2] * 0.5, n3.rect[1] + n3.rect[3] * 0.5)
+            rt.pointerMove(to: p1, at: 0.05)
+            rt.pointerDown(at: p1, at: 0.06)
+            rt.pointerMove(to: p3, at: 0.07)
+            _ = rt.keyDown(KeyEvent(key: .escape), at: 0.08)
+            rt.pointerUp(at: p3, at: 0.09)
+            _ = rt.frame(at: 0.10)
+            #expect(rt.state.selected == nil)
+            #expect(rt.state.diff.selectedRange == nil)
+        }
+
+        // #179 & #181: horizontal scroll keeps header & unified gutter pinned at left edge (`stickyLeft(0)`) & press still selects
+        if let body = rt.element(byKey: "dv-body"), body.rect.count == 4 {
+            let hdrBefore = rt.element(byKey: "dv-header")?.rect[0]
+            let center = Vec2(body.rect[0] + body.rect[2] * 0.5, body.rect[1] + 60)
+            rt.wheel(WheelEvent(dx: -120, dy: 0), at: center, now: 0.12)
+            _ = rt.frame(at: 0.13)
+            if let hdrAfter = rt.element(byKey: "dv-header")?.rect[0], let hdrBefore {
+                #expect(abs(hdrAfter - hdrBefore) < 2.0)
+            }
+            let gutter = rt.element(byKey: "dv-gutter-1")
+            #expect(gutter != nil)
+            if let g = gutter, let b = rt.element(byKey: "dv-body") {
+                #expect(abs(g.rect[0] - b.rect[0]) < 2.0)
+            }
+            if let cell = rt.element(byKey: "dv-o-0"), cell.rect.count == 4 {
+                let pt = Vec2(cell.rect[0] + cell.rect[2] * 0.5, cell.rect[1] + cell.rect[3] * 0.5)
+                rt.pointerDown(at: pt, at: 0.14)
+                rt.pointerUp(at: pt, at: 0.15)
+                _ = rt.frame(at: 0.16)
+                #expect(rt.state.selected != nil)
+            }
+        }
+
+        // #184-#185: hovering across lines & scrolling emits zero PerfWarn warnings
+        for rowIdx in 0..<8 {
+            if let codeEl = rt.element(byKey: "dv-code-\(rowIdx)"), codeEl.rect.count == 4 {
+                rt.pointerMove(to: Vec2(codeEl.rect[0] + 20, codeEl.rect[1] + 10), at: 0.20 + Double(rowIdx) * 0.01)
+                _ = rt.frame(at: 0.205 + Double(rowIdx) * 0.01)
+            }
+        }
+        #expect(PerfWarn.takeTestLog(resetSites: true).isEmpty)
     }
 }

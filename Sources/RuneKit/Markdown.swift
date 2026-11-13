@@ -1245,11 +1245,10 @@ public struct MarkdownStream: Sendable, Equatable {
         MarkdownParser.parseDocument(stabilizedSource, autolink: autolink)
     }
 
-    /// Repairs unclosed fenced code blocks and unclosed inline delimiters at the tail of an incomplete Markdown stream.
-    public static func stabilize(_ source: String) -> String {
+    /// Returns the opening fence marker if `source` ends inside an unclosed fenced code block.
+    static func unclosedFence(in source: String) -> String? {
         let lines = source.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false)
         var openFence: String? = nil
-
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if let fence = openFence {
@@ -1264,8 +1263,12 @@ public struct MarkdownStream: Sendable, Equatable {
                 openFence = String(repeating: "~", count: n)
             }
         }
+        return openFence
+    }
 
-        if let fence = openFence {
+    /// Repairs unclosed fenced code blocks and unclosed inline delimiters at the tail of an incomplete Markdown stream.
+    public static func stabilize(_ source: String) -> String {
+        if let fence = unclosedFence(in: source) {
             var out = source
             if !out.hasSuffix("\n") {
                 out.append("\n")
@@ -1332,6 +1335,9 @@ public struct MarkdownTailStream: Sendable, Equatable {
         }
         let s = stabilizedSource
         var doc = MarkdownDocCache.shared.docCached(s, autolink: autolink)
+        if MarkdownStream.unclosedFence(in: source) != nil, !doc.sources.isEmpty {
+            doc.sources[doc.sources.count - 1].open = true
+        }
         let work = Self.heldTableEndByte(in: source, parseLastBlock: {
             MarkdownParser.parseDocument(source, autolink: autolink).blocks.last
         }).flatMap { utf8Slice(source, range: 0..<$0) } ?? source
@@ -3929,7 +3935,7 @@ public struct MarkdownStyle: Sendable, Equatable {
     public func linkIcon(_ position: MarkdownLinkIconPosition?) -> MarkdownStyle { var s = self; s.linkIcon = position; return s }
 
     // Table styles
-    public func tableOutline(_ color: Color?) -> MarkdownStyle { var s = self; s.tableOutline = color; return s }
+    public func tableOutline(_ color: Color?) -> MarkdownStyle { var s = self; s.tableOutline = color; s.tableFrame = nil; return s }
     public func tableRules(_ color: Color) -> MarkdownStyle { var s = self; s.tableRule = color; return s }
     public func tableHeader(fill: Color, text: Color) -> MarkdownStyle {
         var s = self
@@ -4544,6 +4550,7 @@ private final class MarkdownRenderer<State> {
             let imgBox: El<State> = col()
                 .role(.image)
                 .label(alt.isEmpty ? src : alt)
+                .cursor(.zoomIn)
                 .wFull()
                 .p(8)
                 .rounded(6)
@@ -4836,7 +4843,8 @@ private final class MarkdownRenderer<State> {
             ? (open ? renderMermaidStreaming(lines, theme: theme, hover: hover) : renderMermaidStreamed(lines, theme: theme, hover: hover))
             : renderMermaid(lines, theme: theme, hover: hover)
         if let d = diagram {
-            let labeled = d.label(KitMermaid.kindLabel(lines)).key("card")
+            let trimmed = lines.trimmingCharacters(in: .whitespacesAndNewlines)
+            let labeled = d.label(KitMermaid.kindLabel(lines)).description(trimmed).key("card")
             let framed = view.diagramFrameHandler?(labeled, MarkdownDiagramFrameContext(index: index, source: lines, open: open)) ?? labeled
             return col().wFull().child(framed)
         }
@@ -5194,10 +5202,17 @@ private func utf8Slice(_ str: String, range: Range<Int>) -> String? {
 }
 
 private func isUTF8Boundary(_ str: String, _ byteOffset: Int) -> Bool {
+    if let isBoundary = str.utf8.withContiguousStorageIfAvailable({ buf -> Bool in
+        guard byteOffset >= 0 && byteOffset <= buf.count else { return false }
+        if byteOffset == 0 || byteOffset == buf.count { return true }
+        return (buf[byteOffset] & 0xC0) != 0x80
+    }) {
+        return isBoundary
+    }
     guard byteOffset >= 0 && byteOffset <= str.utf8.count else { return false }
     if byteOffset == 0 || byteOffset == str.utf8.count { return true }
     let idx = str.utf8.index(str.startIndex, offsetBy: byteOffset)
-    return str.unicodeScalars.indices.contains(idx) || String.Index(idx, within: str) != nil
+    return idx.samePosition(in: str.unicodeScalars) != nil
 }
 
 private func floorUTF8Boundary(_ str: String, byte: Int) -> Int {
