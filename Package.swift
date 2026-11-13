@@ -85,8 +85,10 @@ let package = Package(
         .executable(name: "rune-one-snap", targets: ["RuneOneSnap"]),
         .executable(name: "rune-custom-titlebar", targets: ["RuneCustomTitlebar"]),
         .executable(name: "rune-keep-stuck", targets: ["RuneKeepStuck"]),
+        .executable(name: "rune-scroll-anchor", targets: ["RuneScrollAnchor"]),
         .executable(name: "rune-growth-reorder", targets: ["RuneGrowthReorder"]),
         .executable(name: "rune-window-resize", targets: ["RuneWindowResize"]),
+        .executable(name: "rune-canvas-input", targets: ["RuneCanvasInput"]),
         .executable(name: "rune-popup-menu", targets: ["RunePopupMenu"]),
         .executable(name: "rune-motion-bench", targets: ["RuneMotionBench"]),
         .executable(name: "rune-interaction-cost", targets: ["RuneInteractionCost"]),
@@ -116,6 +118,15 @@ let package = Package(
         .executable(name: "rune-menu-probe", targets: ["RuneMenuProbe"]),
         .executable(name: "rune-dock-menu-probe", targets: ["RuneDockMenuProbe"]),
         .executable(name: "rune-shortcut-probe", targets: ["RuneShortcutProbe"]),
+        .executable(name: "rune-pinch-bench", targets: ["RunePinchBench"]),
+        .executable(name: "rune-coretext-compare", targets: ["RuneCoretextCompare"]),
+        .executable(name: "rune-occluded-timer", targets: ["RuneOccludedTimer"]),
+        .executable(name: "rune-layer-filter-overlay", targets: ["RuneLayerFilterOverlay"]),
+        .executable(name: "rune-kit-table", targets: ["RuneKitTable"]),
+        .executable(name: "rune-kit-tab-strip", targets: ["RuneKitTabStrip"]),
+        .executable(name: "rune-kit-shell", targets: ["RuneKitShell"]),
+        .executable(name: "rune-kit-rich-editor", targets: ["RuneKitRichEditor"]),
+        .executable(name: "rune-www", targets: ["RuneWww"]),
     ],
     targets: [
         .target(
@@ -511,6 +522,11 @@ let package = Package(
             path: "Sources/Examples/RuneKeepStuck"
         ),
         .executableTarget(
+            name: "RuneScrollAnchor",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneScrollAnchor"
+        ),
+        .executableTarget(
             name: "RuneGrowthReorder",
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneGrowthReorder"
@@ -519,6 +535,11 @@ let package = Package(
             name: "RuneWindowResize",
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneWindowResize"
+        ),
+        .executableTarget(
+            name: "RuneCanvasInput",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneCanvasInput"
         ),
         .executableTarget(
             name: "RunePopupMenu",
@@ -665,6 +686,51 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneShortcutProbe"
         ),
+        .executableTarget(
+            name: "RunePinchBench",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RunePinchBench"
+        ),
+        .executableTarget(
+            name: "RuneCoretextCompare",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneCoretextCompare"
+        ),
+        .executableTarget(
+            name: "RuneOccludedTimer",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneOccludedTimer"
+        ),
+        .executableTarget(
+            name: "RuneLayerFilterOverlay",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLayerFilterOverlay"
+        ),
+        .executableTarget(
+            name: "RuneKitTable",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneKitTable"
+        ),
+        .executableTarget(
+            name: "RuneKitTabStrip",
+            dependencies: ["Rune", "RuneKit", "RuneMotion", "OpenCodeTheme"],
+            path: "Sources/Examples/RuneKitTabStrip"
+        ),
+        .executableTarget(
+            name: "RuneKitShell",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneKitShell"
+        ),
+        .executableTarget(
+            name: "RuneKitRichEditor",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitRichEditor"
+        ),
+        .executableTarget(
+            name: "RuneWww",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneWww"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -779,6 +845,7 @@ let package = Package(
                 "RuneBackground",
                 "RuneOverlay",
                 "RuneOverlayLab",
+                "RuneGlassPanel",
                 "RuneVideoPlayer",
                 "RuneVideoTiles",
                 "RuneShowreel",
@@ -805,8 +872,10 @@ let package = Package(
                 "RuneOneSnap",
                 "RuneCustomTitlebar",
                 "RuneKeepStuck",
+                "RuneScrollAnchor",
                 "RuneGrowthReorder",
                 "RuneWindowResize",
+                "RuneCanvasInput",
                 "RuneShapes",
                 "RuneLuauPanel",
                 "RuneLuau",
@@ -849,6 +918,18 @@ let package = Package(
                 "RuneLightDemos",
                 "RuneLightLive",
                 "RuneLightReel",
+                "RunePinchBench",
+                "RuneCoretextCompare",
+                "RuneOccludedTimer",
+                "RuneLayerFilterOverlay",
+                "RuneOdometer",
+                "RuneKitTable",
+                "RuneKitTabStrip",
+                "RuneKitShell",
+                "RuneKitRichEditor",
+                "RuneWww",
+                "RuneLauncher",
+                "RuneSiteScenes",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

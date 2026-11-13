@@ -3,6 +3,7 @@ import Metal
 import Testing
 @testable import Rune
 @testable import RuneBackground
+@testable import RuneGlassPanel
 @testable import RuneOverlay
 @testable import RuneOverlayLab
 @testable import RuneVideoPlayer
@@ -320,5 +321,94 @@ struct Phase2VideoAndOverlayTests {
         let tree = String(decoding: tickedOut.treeJSON, as: UTF8.self)
         #expect(tree.contains("\"window\""))
         #expect(tree.contains("42 ticks from a background thread"))
+    }
+
+    // MARK: - RuneGlassPanel
+
+    @Test("glass-panel: 3 overlays, levels, sRGB blend, continuous corners, system material, poll handoff, and scenes")
+    func glassPanelOverlaysHandoffMaterialAndScenes() throws {
+        let origin = GlassPanelConfig.defaultPlacementOrigin(environment: ["GLASS_PANEL_AT": "240,40"])
+        #expect(origin.0 == 240 && origin.1 == 40)
+
+        let coordinator = GlassPanelCoordinator()
+        let backdropSpec = RuneGlassPanelApp.makeBackdropOverlaySpec(at: origin)
+        let flightSpec = RuneGlassPanelApp.makeFlightOverlaySpec(at: origin, coordinator: coordinator)
+        let dockSpec = RuneGlassPanelApp.makeDockOverlaySpec(at: origin)
+
+        #expect(backdropSpec.options.macosLevel == 0)
+        #expect(flightSpec.options.macosLevel == 4)
+        #expect(dockSpec.options.macosLevel == 3)
+        #expect(flightSpec.options.srgbBlend)
+        #expect(dockSpec.options.srgbBlend)
+        #expect(flightSpec.options.input == .none)
+        #expect(flightSpec.options.keyPolicy == .none)
+        #expect(flightSpec.options.prewarm)
+        #expect(flightSpec.poll != nil)
+
+        // Flight geometry: start -> lifted arc -> dock
+        let f0 = RuneGlassPanelApp.flightFrame(0.0)
+        #expect(abs(f0.rect.x - GlassPanelConfig.startRect.x) < 1e-3)
+        #expect(abs(f0.radius - GlassPanelConfig.startRadius) < 1e-3)
+        #expect(abs(f0.lift) < 1e-5)
+
+        let fMid = RuneGlassPanelApp.flightFrame(0.5)
+        #expect(fMid.lift > 0.99)
+        #expect(fMid.rect.y < GlassPanelConfig.startRect.y)
+
+        let f1 = RuneGlassPanelApp.flightFrame(1.0)
+        #expect(abs(f1.rect.x - GlassPanelConfig.dockRect.x) < 1e-3)
+        #expect(abs(f1.rect.width - GlassPanelConfig.dockRect.width) < 1e-3)
+        #expect(abs(f1.radius - GlassPanelConfig.dockRadius) < 1e-3)
+
+        // Headless poll + handoff transition on OverlayHandle states
+        let backdrop = OverlayHandle(configured: backdropSpec)
+        let flight = OverlayHandle(configured: flightSpec)
+        let dock = OverlayHandle(configured: dockSpec)
+        coordinator.install(backdrop: backdrop, flight: flight, dock: dock)
+
+        var state = GlassPanelState(role: .flight, material: .glass, fly: true)
+        var tx = Tx()
+        #expect(RuneGlassPanelApp.pollFlight(&state, at: 1.0, &tx, coordinator: coordinator))
+        #expect(state.started == 1.0)
+        #expect(!state.handed)
+        #expect(RuneGlassPanelApp.pollFlight(&state, at: 1.65, &tx, coordinator: coordinator))
+        #expect(state.landed == 1.65)
+        #expect(!state.handed)
+        #expect(RuneGlassPanelApp.pollFlight(&state, at: 1.85, &tx, coordinator: coordinator))
+        #expect(state.handed)
+        #expect(dock.isVisible)
+        #expect(!flight.isVisible)
+
+        // SystemMaterial + continuous corners on card
+        let rt = Runtime<GlassPanelState>(
+            state: GlassPanelState(role: .dock, material: .popover, mark: true),
+            viewport: GlassPanelConfig.dockWindowSize,
+            pixelScale: 2.0,
+            systemDark: true,
+            view: RuneGlassPanelApp.view
+        )
+        rt.frame(at: 0.0)
+        #expect(rt.element(byKey: "card") != nil)
+        #expect(rt.element(byKey: "docked") != nil)
+        #expect(rt.element(byKey: "mark") != nil)
+
+        // Headless scenes match --scene asking / flight / docked / mark
+        for scene in ["asking", "flight", "docked", "mark"] {
+            let out = try HeadlessRunner.run(
+                RuneGlassPanelApp.makeApp(arguments: ["--headless"]),
+                args: ToolingArgs.parse(["--scene", scene])
+            )
+            let json = String(decoding: out.treeJSON, as: UTF8.self)
+            #expect(json.contains("\"backdrop\""))
+            #expect(json.contains("\"card\""))
+            if scene == "asking" {
+                #expect(json.contains("Allow screen recording?"))
+            } else {
+                #expect(json.contains("Waiting for access"))
+            }
+            if scene == "mark" {
+                #expect(json.contains("\"mark\""))
+            }
+        }
     }
 }

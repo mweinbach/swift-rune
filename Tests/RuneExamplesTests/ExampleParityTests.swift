@@ -102,6 +102,37 @@ struct ExampleParityTests {
         #expect(one[2] > 600.0 && one[3] > 350.0, "fills the stage: \(one)")
     }
 
+    // Upstream: examples/knobs/src/main.rs:95 in_the_playground_arrows_pick_and_step_the_side_columns_knobs
+    @Test("knobs: in the playground, arrows pick and step the side column's knobs")
+    func knobsPlaygroundArrowsPickAndStepSideColumnKnobs() throws {
+        let rt = RuneKnobsDemoApp.makeApp()
+            .headlessRuntime(size: Vec2(820, 520), env: Env(systemDark: true, scale: 1.0))
+        try rt.openPlayground(at: "card-knobs")
+
+        func press(_ key: Key, shift: Bool = false) {
+            _ = rt.keyDown(KeyEvent(key: key, mods: Mods(shift: shift)), at: 0.0)
+            rt.frame(at: 1.0 / 60.0)
+        }
+        func knob(_ d: Knob) throws -> Float {
+            let pg = try #require(rt.playgroundState(as: KnobsDemoState.self))
+            return pg.knobs.get(d)
+        }
+
+        press(.arrowRight)
+        press(.arrowRight)
+        #expect(abs(try knob(radiusKnob) - 14.32) < 1e-4, "→ steps the first knob, the radius")
+        press(.arrowDown)
+        press(.arrowRight, shift: true)
+        #expect(try knob(padKnob) == 34.0, "↓ picks the padding, and ⇧→ steps it ten")
+        press(.arrowLeft)
+        #expect(try knob(padKnob) == 33.0, "← steps back rather than leaving")
+        #expect(rt.elements().contains(where: { ($0.key?.hasPrefix("playground-slot-") == true) && $0.focused }), "the keyboard is on the knobs")
+        press(.escape)
+        press(.arrowDown)
+        #expect(try knob(padKnob) == 33.0, "after Esc, ↓ moves in the list again")
+        #expect(rt.state.knobs.get(radiusKnob) == radiusKnob.default, "the real state is untouched")
+    }
+
     // Upstream: examples/knobs/src/main.rs:115 cmd_shift_k_opens_the_panel_and_a_knob_changes_the_card
     @Test("knobs: Cmd+Shift+K opens the panel and a knob changes the card")
     func knobsCmdShiftKOpensPanelAndKnobChangesCard() {
@@ -185,5 +216,37 @@ struct ExampleParityTests {
         rt.pointerUp(at: Vec2(slider.x + 70.0, slider.y), at: 2.0 / 60.0)
         rt.frame(at: 2.0 / 60.0)
         #expect(rt.state.speed == 0.5)
+    }
+
+    @Test("settings: headless scenes and script replay cover all 7 scenes, toggles, accent, and speed")
+    func settingsScenesAndScriptReplay() throws {
+        let spec = RuneSettingsApp.makeSpec()
+        for (sceneName, expectedText) in [
+            ("default", "Launch at login"),
+            ("light", "Appearance"),
+            ("dark", "Appearance"),
+            ("reduced-motion", "Reduce motion"),
+            ("toggles-off", "Play sounds"),
+            ("accent-pink", "Accent colour"),
+            ("slow", "0.50×"),
+        ] {
+            let out = try HeadlessRunner.run(spec, args: ToolingArgs.parse(["--scene", sceneName]))
+            let tree = String(decoding: out.treeJSON, as: UTF8.self)
+            #expect(tree.contains(expectedText), "Missing \(expectedText) in settings scene \(sceneName)")
+        }
+
+        var scriptArgs = ToolingArgs()
+        scriptArgs.scriptArg = """
+        [
+          {"t": 0.05, "type": "tap", "key": "Light"},
+          {"t": 0.15, "type": "tap", "key": "green"},
+          {"t": 0.25, "type": "tap", "key": "login"},
+          {"t": 0.35, "type": "tap", "key": "sounds"},
+          {"t": 0.45, "type": "drag", "key": "slider/knob", "dx": 40, "dy": 0, "dur": 0.2}
+        ]
+        """
+        let scripted = try HeadlessRunner.run(spec, args: scriptArgs)
+        let scriptedTree = String(decoding: scripted.treeJSON, as: UTF8.self)
+        #expect(!scriptedTree.contains("1.00×"))
     }
 }

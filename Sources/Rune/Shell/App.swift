@@ -343,24 +343,30 @@ public struct AppWindowSpec<State> {
     public var appShared: AppShared<State>?
     public var childWindows: [AnyWindowSpec]
     public var args: [String]?
+    internal var configureRuntime: ((AnyObject) -> Void)?
     private let runAction: (@MainActor ([String]?) throws -> Void)?
 
     public init(
         app: App<State>,
+        key: String? = nil,
         options: WindowOptions? = nil,
         macosWindow: MacWindowOptions? = nil,
         openInactive: Bool? = nil,
         onCreated: ((WindowHandle) -> Void)? = nil
     ) {
-        self.key = app.title
+        self.key = key ?? app.title
         self.appSpec = app.intoSpec()
-        self.options = options ?? app.windowOptionsValue
+        var resolvedOptions = options ?? app.windowOptionsValue
+        if app.isWindowless && options == nil {
+            resolvedOptions.visible = false
+        }
+        self.options = resolvedOptions
         self.macosWindow = macosWindow ?? app.macosWindowValue
         self.chrome = app.chromeStyle
         self.titlebar = app.customTitlebar
         self.openAs = app.openAs
         self.openInactive = openInactive ?? app.isOpenInactive
-        self.keepRunning = app.keepsRunning
+        self.keepRunning = app.keepsRunning || app.isWindowless
         self.onCreated = onCreated
         self.onReady = app.onReadyHook
         self.onQuit = app.onQuitHook
@@ -374,6 +380,11 @@ public struct AppWindowSpec<State> {
         self.appShared = app.sharedHandle.shared
         self.childWindows = []
         self.args = app.runOptions.arguments
+        let capturedApp = app
+        self.configureRuntime = { rtObj in
+            guard let rt = rtObj as? Runtime<State> else { return }
+            AppRuntimeConfigurer.configure(app: capturedApp, into: rt)
+        }
         nonisolated(unsafe) let localApp = app
         self.runAction = { arguments in
             try localApp.run(arguments: arguments)
@@ -403,11 +414,12 @@ public struct AppWindowSpec<State> {
         self.appShared = nil
         self.childWindows = []
         self.args = nil
+        self.configureRuntime = nil
         self.runAction = nil
     }
 
-    public static func fromApp(_ app: App<State>) -> AppWindowSpec<State> {
-        AppWindowSpec(app: app)
+    public static func fromApp(_ app: App<State>, key: String? = nil) -> AppWindowSpec<State> {
+        AppWindowSpec(app: app, key: key)
     }
 
     public func args(_ arguments: [String]) -> AppWindowSpec<State> {
@@ -675,6 +687,10 @@ public struct App<State> {
     public var onFrameDrawnHook: ((inout State, FrameEncoded, inout Tx) -> Void)? = nil
     public var onFrameInspectHook: ((Runtime<State>) -> Void)? = nil
     public var devStatsReceiver: ((SurfaceStats) -> Void)? = nil
+    public var globalShortcuts: [AppGlobalShortcutEntry<State>] = []
+    public var allowUnmodifiedShortcutsEnabled: Bool = false
+    public var isWebDocument: Bool = false
+    public var fontURLStrings: [String] = []
 
     public let sharedHandle: AppHandle<State>
 
@@ -1141,6 +1157,12 @@ public struct App<State> {
         runtime.onReopen = onReopenHook
         runtime.onOpenUrl = onOpenUrlHook
         runtime.tabVisitsControls = tabVisitsControlsEnabled
+        AppRuntimeConfigurer.configureShortcuts(
+            runtime: runtime,
+            entries: globalShortcuts,
+            allowUnmodified: allowUnmodifiedShortcutsEnabled,
+            sharedHandle: sharedHandle
+        )
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         sharedHandle.shared.setWaker(waker)
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {

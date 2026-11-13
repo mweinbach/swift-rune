@@ -1155,6 +1155,12 @@ public enum HeadlessRunner {
                 runtime.tabVisitsControls = app.tabVisitsControlsEnabled
                 runtime.fitHeight = app.isFitContentHeight
                 runtime.windowResting = true
+                AppRuntimeConfigurer.configureShortcuts(
+                    runtime: runtime,
+                    entries: app.globalShortcuts,
+                    allowUnmodified: app.allowUnmodifiedShortcutsEnabled,
+                    sharedHandle: app.sharedHandle
+                )
                 if let pg = app.playgroundHost {
                     let spec = app.intoSpec()
                     pg.bindScenes(spec.scenes, sceneOrder: spec.sceneOrder, view: app.view)
@@ -1174,7 +1180,7 @@ public enum HeadlessRunner {
         #endif
     }
 
-    private static func runWithHooks<State>(
+    internal static func runWithHooks<State>(
         spec: AppSpec<State>,
         args: ToolingArgs,
         chrome: Chrome = .standard,

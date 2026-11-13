@@ -747,6 +747,17 @@ private func resolvedInputKey<State>(
 }
 
 /// Bordered or plain single-line text field (`rune_kit::TextInput`).
+private func kitRichStyle(_ k: Kit) -> RichStyle {
+    RichStyle(
+        codeFg: nil,
+        codeBg: k.c.layer03,
+        codeBlockBg: k.c.layer02,
+        link: k.c.textAccent,
+        quoteBar: k.c.borderStrong,
+        marker: k.c.textMuted
+    )
+}
+
 public struct TextInput<State> {
     public var key: String?
     public var editKeyPath: WritableKeyPath<State, TextEdit>
@@ -770,6 +781,9 @@ public struct TextInput<State> {
     public var isRevealed: Bool = false
     public var isSpellcheck: Bool = false
     public var animatesEditLayout: Bool = false
+    public var decorationsList: [RichSpan] = []
+    public var pillStyleResolver: ((String) -> PillStyle)? = nil
+    public var richStyleOverride: RichStyle? = nil
     public var onChangeHandler: ((inout State, String, inout Tx) -> Void)?
     public var onSubmitHandler: ((inout State, String, inout Tx) -> Void)?
     public var onActionHandler: ((inout State, inout Tx) -> Void)?
@@ -866,6 +880,18 @@ public struct TextInput<State> {
         var copy = self; copy.animatesEditLayout = on; return copy
     }
 
+    public func decorations(_ spans: [RichSpan]) -> TextInput<State> {
+        var copy = self; copy.decorationsList = spans; return copy
+    }
+
+    public func pillStyle(_ style: @escaping (String) -> PillStyle) -> TextInput<State> {
+        var copy = self; copy.pillStyleResolver = style; return copy
+    }
+
+    public func richStyle(_ style: RichStyle) -> TextInput<State> {
+        var copy = self; copy.richStyleOverride = style; return copy
+    }
+
     public func onChange(_ f: @escaping (inout State, String, inout Tx) -> Void) -> TextInput<State> {
         var copy = self; copy.onChangeHandler = f; return copy
     }
@@ -905,6 +931,7 @@ public struct TextInput<State> {
             .font(style)
             .noWrap()
             .color(ink)
+            .richStyle(richStyleOverride ?? kitRichStyle(k))
             .placeholder(placeholderText, color: hint)
             .caret(ink, selection: k.selection())
             .secure(isSecure)
@@ -912,6 +939,12 @@ public struct TextInput<State> {
             .spellcheck(isSpellcheck)
             .invalid(isInvalid)
             .focusRing(0, offset: 0, .transparent)
+        if !decorationsList.isEmpty {
+            field = field.decorations(decorationsList)
+        }
+        if let pillStyleResolver {
+            field = field.pillStyle(pillStyleResolver)
+        }
 
         if let labelText {
             field = field.label(labelText)
@@ -1053,6 +1086,9 @@ public struct TextArea<State> {
     public var isSpellcheck: Bool = false
     public var wrapsAnywhere: Bool = false
     public var animatesEditLayout: Bool = false
+    public var decorationsList: [RichSpan] = []
+    public var pillStyleResolver: ((String) -> PillStyle)? = nil
+    public var richStyleOverride: RichStyle? = nil
     public var onChangeHandler: ((inout State, String, inout Tx) -> Void)?
     public var onSubmitHandler: ((inout State, String, inout Tx) -> Void)?
     public var onKeyHandler: ((inout State, KeyEvent, inout Tx) -> Bool)?
@@ -1127,6 +1163,18 @@ public struct TextArea<State> {
         var copy = self; copy.isSpellcheck = on; return copy
     }
 
+    public func decorations(_ spans: [RichSpan]) -> TextArea<State> {
+        var copy = self; copy.decorationsList = spans; return copy
+    }
+
+    public func pillStyle(_ style: @escaping (String) -> PillStyle) -> TextArea<State> {
+        var copy = self; copy.pillStyleResolver = style; return copy
+    }
+
+    public func richStyle(_ style: RichStyle) -> TextArea<State> {
+        var copy = self; copy.richStyleOverride = style; return copy
+    }
+
     public func onChange(_ f: @escaping (inout State, String, inout Tx) -> Void) -> TextArea<State> {
         var copy = self; copy.onChangeHandler = f; return copy
     }
@@ -1155,6 +1203,7 @@ public struct TextArea<State> {
             .font(style)
             .wrapText()
             .color(ink)
+            .richStyle(richStyleOverride ?? kitRichStyle(k))
             .placeholder(placeholderText, color: hint)
             .caret(ink, selection: k.selection())
             .secure(isSecure)
@@ -1162,6 +1211,12 @@ public struct TextArea<State> {
             .spellcheck(isSpellcheck)
             .invalid(isInvalid)
             .focusRing(0, offset: 0, .transparent)
+        if !decorationsList.isEmpty {
+            field = field.decorations(decorationsList)
+        }
+        if let pillStyleResolver {
+            field = field.pillStyle(pillStyleResolver)
+        }
 
         if let labelText {
             field = field.label(labelText)
@@ -1257,6 +1312,9 @@ public struct TextField<State> {
     public var trailingEl: El<State>?
     public var errorText: String?
     public var visualState: ControlVisualState = .rest
+    public var decorationsList: [RichSpan] = []
+    public var pillStyleResolver: ((String) -> PillStyle)? = nil
+    public var richStyleOverride: RichStyle? = nil
     public var onChangeHandler: ((inout State, String, inout Tx) -> Void)?
     public var onSubmitHandler: ((inout State, String, inout Tx) -> Void)?
     public var onActionHandler: ((inout State, inout Tx) -> Void)?
@@ -1317,6 +1375,18 @@ public struct TextField<State> {
         var copy = self; copy.onActionHandler = f; return copy
     }
 
+    public func decorations(_ spans: [RichSpan]) -> TextField<State> {
+        var copy = self; copy.decorationsList = spans; return copy
+    }
+
+    public func pillStyle(_ style: @escaping (String) -> PillStyle) -> TextField<State> {
+        var copy = self; copy.pillStyleResolver = style; return copy
+    }
+
+    public func richStyle(_ style: RichStyle) -> TextField<State> {
+        var copy = self; copy.richStyleOverride = style; return copy
+    }
+
     public func build(_ k: Kit) -> El<State> {
         let c = k.c
         let disabled = visualState == .disabled
@@ -1328,11 +1398,18 @@ public struct TextField<State> {
             .shrink(1.0)
             .font(body)
             .color(c.textStrong)
+            .richStyle(richStyleOverride ?? kitRichStyle(k))
             .placeholder(placeholderText, color: c.textWeak)
             .caret(c.textStrong, selection: k.selection())
             .label(labelText)
             .invalid(errorText != nil)
             .focusRing(0, offset: 0, .transparent)
+        if !decorationsList.isEmpty {
+            field = field.decorations(decorationsList)
+        }
+        if let pillStyleResolver {
+            field = field.pillStyle(pillStyleResolver)
+        }
 
         if !isMultiline {
             field = field.noWrap()

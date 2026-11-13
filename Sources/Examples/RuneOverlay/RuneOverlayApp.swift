@@ -162,7 +162,7 @@ public enum RuneOverlayApp {
         arguments: [String] = Array(CommandLine.arguments.dropFirst())
     ) -> [AnyWindowSpec] {
         let resolvedDisplays = displays.isEmpty ? [DisplayInfo()] : displays
-        let isHeadless = ToolingArgs.parse(arguments).isHeadlessRequested
+        let isHeadless = ToolingArgs.parse(arguments).isHeadlessRequested || arguments.contains("--headless")
         let overlayHandles = SharedWindowHandles()
 
         let controlsSpec = AppSpec<ControlsState>(

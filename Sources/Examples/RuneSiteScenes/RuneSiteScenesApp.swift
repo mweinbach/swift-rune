@@ -521,14 +521,30 @@ private final class SiteCtx {
 #endif
 
 @main
-enum RuneSiteScenesApp {
-    static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
+public enum RuneSiteScenesApp {
+    public enum CLIError: Error, CustomStringConvertible {
+        case metalUnavailable
+        case unknownScene(String)
+
+        public var description: String {
+            switch self {
+            case .metalUnavailable:
+                return "error: Metal unavailable for site-scenes"
+            case .unknownScene(let name):
+                return "error: unknown scene \(name); scenes: \(sceneNames.joined(separator: ", "))"
+            }
+        }
+    }
+
+    public static let availableScenes = sceneNames
+
+    @discardableResult
+    public static func runCLI(arguments args: [String] = Array(CommandLine.arguments.dropFirst())) throws -> [URL] {
         if args.contains("--list-scenes") {
             for name in sceneNames {
                 print(name)
             }
-            return
+            return []
         }
 
         func argValue(_ key: String) -> String? {
@@ -544,33 +560,45 @@ enum RuneSiteScenesApp {
 
         #if canImport(Metal)
         guard let ctx = SiteCtx() else {
-            fputs("error: Metal unavailable for site-scenes\n", stderr)
-            Foundation.exit(1)
+            throw CLIError.metalUnavailable
         }
 
         if let snapPath {
+            guard sceneNames.contains(snapScene) else {
+                throw CLIError.unknownScene(snapScene)
+            }
             let rgba = ctx.render(name: snapScene, t: t)
             let url = URL(fileURLWithPath: snapPath)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Frame(width: pxW, height: pxH, rgba: rgba).writePNG(to: url)
-            return
+            return [url]
         }
 
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let targets = sceneNames.filter { only == nil || $0 == only }
         if targets.isEmpty, let only {
-            fputs("error: unknown scene \(only); scenes: \(sceneNames.joined(separator: ", "))\n", stderr)
-            Foundation.exit(1)
+            throw CLIError.unknownScene(only)
         }
+        var written: [URL] = []
         for name in targets {
             let rgba = ctx.render(name: name, t: t)
             let dest = outDir.appendingPathComponent("\(name).png")
             try Frame(width: pxW, height: pxH, rgba: rgba).writePNG(to: dest)
             fputs("wrote \(name).png\n", stderr)
+            written.append(dest)
         }
+        return written
         #else
-        fputs("error: Metal unavailable on this platform\n", stderr)
-        Foundation.exit(1)
+        throw CLIError.metalUnavailable
         #endif
+    }
+
+    public static func main() throws {
+        do {
+            _ = try runCLI()
+        } catch let err as CLIError {
+            fputs("\(err.description)\n", stderr)
+            Foundation.exit(1)
+        }
     }
 }

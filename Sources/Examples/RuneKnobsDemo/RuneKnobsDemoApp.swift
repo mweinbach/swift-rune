@@ -71,7 +71,7 @@ func knobsDemoView(_ s: KnobsDemoState, _ cx: inout Cx<KnobsDemoState>) -> El<Kn
 
 func onKnobsKey(_ s: inout KnobsDemoState, _ ev: KeyEvent, _ tx: inout Tx) -> Bool {
     if RuneKnobs.key(&s.knobs, event: ev) {
-        tx.settle()
+        tx.motion(s.knobs.slide())
         return true
     }
     if s.knobs.open && s.knobs.panelKey(groups: knobGroups, event: ev) {
@@ -81,24 +81,46 @@ func onKnobsKey(_ s: inout KnobsDemoState, _ ev: KeyEvent, _ tx: inout Tx) -> Bo
     return false
 }
 
+/// The playground's side column: the same knobs as rows, filling its width.
+private func storySideView(_ s: KnobsDemoState, _ active: Bool, _ cx: inout Cx<KnobsDemoState>) -> El<KnobsDemoState> {
+    var k = s.knobs
+    k.kbd = active
+    return RuneKnobs.inline(
+        knobs: k,
+        groups: knobGroups,
+        style: styleForContext(cx),
+        keyPath: \.knobs
+    )
+}
+
+func knobsDemoPlayground() -> PlaygroundHost<KnobsDemoState> {
+    PlaygroundHost<KnobsDemoState>().story(
+        Story(path: "Card/Knobs", { KnobsDemoState() }, pageView)
+            .sideKeys(
+                RuneKnobs.sideKey(groups: knobGroups, keyPath: \.knobs),
+                storySideView
+            )
+    )
+}
+
 @main
 enum RuneKnobsDemoApp {
+    static func makeApp() -> App<KnobsDemoState> {
+        App("Knobs", size: Vec2(820, 520), init: { KnobsDemoState() }, view: knobsDemoView)
+            .onKey(onKnobsKey)
+            .scene("open") { s, _ in s.knobs.show() }
+            .scene("filter") { s, _ in
+                s.knobs.show()
+                s.knobs.filter("pad")
+            }
+            .playground(knobsDemoPlayground())
+    }
+
     static func makeSpec() -> AppSpec<KnobsDemoState> {
-        AppSpec(
-            title: "Knobs",
-            size: Vec2(820, 520),
-            state: KnobsDemoState(),
-            onKey: onKnobsKey,
-            view: knobsDemoView
-        )
-        .scene("open") { $0.knobs.show() }
-        .scene("filter") {
-            $0.knobs.show()
-            $0.knobs.filter("pad")
-        }
+        makeApp().intoSpec()
     }
 
     static func main() throws {
-        try RuneApp.run(makeSpec())
+        try makeApp().run()
     }
 }

@@ -79,7 +79,7 @@ public enum RuneVideoTilesApp {
         let state = VideoTilesState()
         let tiles = state.tiles
         let parsed = ToolingArgs.parse(arguments)
-        let isHeadless = parsed.isHeadlessRequested
+        let isHeadless = parsed.isHeadlessRequested || arguments.contains("--headless")
 
         return AppSpec<VideoTilesState>(
             title: "Video tiles (2x2 NativeSurface)",
