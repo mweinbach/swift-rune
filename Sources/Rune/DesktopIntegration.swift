@@ -564,18 +564,95 @@ public enum DragOutcome: Sendable, Equatable {
     case cancelled
 }
 
-/// Custom image preview shown under the cursor during an OS drag session.
+/// Custom image preview shown under the cursor during an OS drag session (`rune::drag_out::DragImage`).
 public struct DragImage: Sendable, Equatable {
+    public enum Placement: Sendable, Equatable {
+        case pointer
+        case element
+        case at(Vec2)
+    }
+
     public var width: UInt32
     public var height: UInt32
     public var rgba: Data
     public var hotspot: Vec2
+    public var pngData: Data?
+    public var pointsSize: Vec2?
+    public var placement: Placement
 
     public init(width: UInt32, height: UInt32, rgba: Data, hotspot: Vec2 = .zero) {
         self.width = width
         self.height = height
         self.rgba = rgba
         self.hotspot = hotspot
+        self.pngData = nil
+        self.pointsSize = nil
+        self.placement = .pointer
+    }
+
+    private init(
+        width: UInt32,
+        height: UInt32,
+        rgba: Data,
+        hotspot: Vec2,
+        pngData: Data?,
+        pointsSize: Vec2?,
+        placement: Placement
+    ) {
+        self.width = width
+        self.height = height
+        self.rgba = rgba
+        self.hotspot = hotspot
+        self.pngData = pngData
+        self.pointsSize = pointsSize
+        self.placement = placement
+    }
+
+    public static func png(_ data: Data) -> DragImage {
+        let decoded = ClipboardImage.decodeImageDataToRGBA(data)
+        return DragImage(
+            width: UInt32(decoded?.width ?? 0),
+            height: UInt32(decoded?.height ?? 0),
+            rgba: decoded?.rgba ?? Data(),
+            hotspot: .zero,
+            pngData: data,
+            pointsSize: nil,
+            placement: .pointer
+        )
+    }
+
+    public static func rgba(width: UInt32, height: UInt32, pixels: Data) -> DragImage? {
+        guard width > 0, height > 0, pixels.count >= Int(width) * Int(height) * 4,
+              let png = ClipboardImage.encodeRGBAAsPNG(width: Int(width), height: Int(height), rgba: pixels) else {
+            return nil
+        }
+        return DragImage(
+            width: width,
+            height: height,
+            rgba: pixels,
+            hotspot: .zero,
+            pngData: png,
+            pointsSize: nil,
+            placement: .pointer
+        )
+    }
+
+    public func size(_ width: Float, _ height: Float) -> DragImage {
+        var copy = self
+        copy.pointsSize = Vec2(width, height)
+        return copy
+    }
+
+    public func overElement() -> DragImage {
+        var copy = self
+        copy.placement = .element
+        return copy
+    }
+
+    public func at(_ point: Vec2) -> DragImage {
+        var copy = self
+        copy.placement = .at(point)
+        return copy
     }
 }
 
@@ -640,10 +717,36 @@ public struct DragItem: Sendable, Equatable {
         return copy
     }
 
+    public func allow(_ op: DragOperation) -> DragItem {
+        var copy = self
+        copy.operations = copy.operations.union(op)
+        return copy
+    }
+
+    public func allowMove() -> DragItem {
+        allow(.move)
+    }
+
+    public func withinApp(_ allow: Bool = true) -> DragItem {
+        allowWithinApp(allow)
+    }
+
     public func allowWithinApp(_ allow: Bool = true) -> DragItem {
         var copy = self
         copy.withinApp = allow
         return copy
+    }
+
+    public var paths: [URL] { files }
+    public var plainText: String? { text }
+    public var dragImage: DragImage? { image }
+    public var allowsMove: Bool { operations.contains(.move) }
+    public var dropsWithinApp: Bool { withinApp }
+    public var backing: Color? { backingColor }
+    public var isEmpty: Bool { files.isEmpty && pngData == nil && text == nil }
+
+    public func offers(_ op: DragOperation) -> Bool {
+        operations.contains(op)
     }
 
     public static func pastThreshold(from: Vec2, to: Vec2, threshold: Float = defaultThreshold) -> Bool {
@@ -1190,6 +1293,82 @@ public struct PopupMenu: Sendable, Equatable {
         self.selectedId = selectedId
     }
 
+    public static func picker(_ choices: [(String, String)], selected: String? = nil) -> PopupMenu {
+        var menu = PopupMenu(
+            entries: choices.map { pair in
+                .item(PopupMenuItem(id: pair.0, title: pair.1, checked: selected == pair.0))
+            },
+            selectedId: selected
+        )
+        if let selected {
+            menu = menu.selected(selected)
+        }
+        return menu
+    }
+
+    public static func picker(_ choices: [PopupMenuItem], selected: String? = nil) -> PopupMenu {
+        var menu = PopupMenu(entries: choices.map { .item($0) }, selectedId: selected)
+        if let selected {
+            menu = menu.selected(selected)
+        }
+        return menu
+    }
+
+    public func item(_ item: PopupMenuItem) -> PopupMenu {
+        var copy = self
+        copy.entries.append(.item(item))
+        return copy
+    }
+
+    public func item(
+        _ id: String,
+        _ title: String,
+        enabled: Bool = true,
+        checked: Bool = false,
+        keyEquivalent: String? = nil,
+        symbolName: String? = nil
+    ) -> PopupMenu {
+        item(PopupMenuItem(
+            id: id,
+            title: title,
+            enabled: enabled,
+            checked: checked,
+            keyEquivalent: keyEquivalent,
+            symbolName: symbolName
+        ))
+    }
+
+    public func separator() -> PopupMenu {
+        var copy = self
+        copy.entries.append(.separator)
+        return copy
+    }
+
+    public func submenu(_ title: String, _ menu: PopupMenu, enabled: Bool = true) -> PopupMenu {
+        var copy = self
+        copy.entries.append(.submenu(title: title, menu: menu, enabled: enabled))
+        return copy
+    }
+
+    public func selected(_ id: String?) -> PopupMenu {
+        var copy = self
+        copy.selectedId = id
+        copy.entries = copy.entries.map { entry in
+            switch entry {
+            case .item(var it):
+                if let id, it.id == id {
+                    it.checked = true
+                }
+                return .item(it)
+            case .separator:
+                return .separator
+            case .submenu(let title, let sub, let enabled):
+                return .submenu(title: title, menu: sub.selected(id), enabled: enabled)
+            }
+        }
+        return copy
+    }
+
     public mutating func addItem(_ item: PopupMenuItem) {
         entries.append(.item(item))
     }
@@ -1214,6 +1393,71 @@ public struct PopupMenu: Sendable, Equatable {
             }
         }
         return nil
+    }
+
+    public func validate() throws {
+        var seen = Set<String>()
+        try validate(seen: &seen)
+    }
+
+    private func validate(seen: inout Set<String>) throws {
+        for entry in entries {
+            switch entry {
+            case .item(let item):
+                if item.id.isEmpty {
+                    throw PopupMenuError.emptyId
+                }
+                if !seen.insert(item.id).inserted {
+                    throw PopupMenuError.duplicateId(item.id)
+                }
+            case .submenu(_, let sub, _):
+                try sub.validate(seen: &seen)
+            case .separator:
+                break
+            }
+        }
+    }
+
+    public func checkSelectable(id: String) throws {
+        guard let found = findItem(id: id) else {
+            throw PopupMenuError.unknownItem(id)
+        }
+        guard found.enabled else {
+            throw PopupMenuError.disabled(id)
+        }
+    }
+
+    public func toJSONObject() -> [String: Any] {
+        let itemsJSON: [[String: Any]] = entries.map { entry in
+            switch entry {
+            case .item(let item):
+                var d: [String: Any] = [
+                    "id": item.id,
+                    "title": item.title,
+                    "enabled": item.enabled,
+                    "checked": item.checked || selectedId == item.id,
+                ]
+                if let eq = item.keyEquivalent { d["keyEquivalent"] = eq }
+                if let sym = item.symbolName { d["symbol"] = sym }
+                return d
+            case .separator:
+                return ["separator": true]
+            case .submenu(let title, let sub, let enabled):
+                var d: [String: Any] = [
+                    "submenu": title,
+                    "menu": sub.toJSONObject(),
+                ]
+                if !enabled {
+                    d["enabled"] = false
+                }
+                return d
+            }
+        }
+        var out: [String: Any] = ["items": itemsJSON]
+        if let selectedId {
+            out["selected"] = selectedId
+        }
+        return out
     }
 
     #if os(macOS)
@@ -2254,13 +2498,58 @@ public struct JumpList: Sendable, Equatable, Hashable {
     }
 }
 
+/// Queued playground navigation/trigger actions recorded on `Tx` (`playground/open.rs`).
+public enum PlaygroundTxRequest: Sendable, Equatable {
+    case open
+    case openAt(story: String, variant: String?)
+    case close
+    case replay
+    case trigger(Character)
+}
+
 // MARK: - 10. Tx & El Extensions
 
 extension Tx {
+    /// Opens the built-in Playground UI.
+    public mutating func openPlayground() {
+        enqueuePlaygroundRequest(.open)
+    }
+
+    /// Opens the built-in Playground UI on `story` (path, name, or slug) and optional `variant` (`Tx::open_playground_at`).
+    public mutating func openPlaygroundAt(_ story: String, variant: String? = nil) {
+        enqueuePlaygroundRequest(.openAt(story: story, variant: variant))
+    }
+
+    /// Closes the built-in Playground UI.
+    public mutating func closePlayground() {
+        enqueuePlaygroundRequest(.close)
+    }
+
+    /// Replays the open Playground story and runs its `'r'` trigger (`Tx::replay_playground`).
+    public mutating func replayPlayground() {
+        enqueuePlaygroundRequest(.replay)
+    }
+
+    /// Fires a Playground trigger by key on the open story (`Tx::playground_trigger`).
+    public mutating func playgroundTrigger(_ key: Character) {
+        let lower = Character(key.lowercased())
+        enqueuePlaygroundRequest(lower == "r" ? .replay : .trigger(lower))
+    }
+
+    private mutating func enqueuePlaygroundRequest(_ req: PlaygroundTxRequest) {
+        var list = (runtimeActions["playgroundRequests"] as? [PlaygroundTxRequest]) ?? []
+        list.append(req)
+        runtimeActions["playgroundRequests"] = list
+    }
     /// Copies a rich clipboard payload (text, HTML, RTF, image, files, concealed).
     public mutating func copyRich(_ payload: RichClipboardPayload) {
         clipboardWrite = payload.content
         runtimeActions["richClipboardWrite"] = payload
+    }
+
+    /// Copies plain text along with HTML markup (`text/html`) to the clipboard (#832).
+    public mutating func copyHTML(_ text: String, html: String) {
+        copyRich(RichClipboardPayload(text: text, html: html))
     }
 
     /// Requests opening an `http:`, `https:`, or `mailto:` URL.
@@ -2279,6 +2568,100 @@ extension Tx {
     /// Initiates an outbound OS drag session with `item`.
     public mutating func dragOut(_ item: DragItem) {
         runtimeActions["dragOutItem"] = item
+    }
+
+    /// Shows a native popup menu at `anchor` after the current handler frame commits.
+    public mutating func popupMenu<State>(
+        _ menu: PopupMenu,
+        at anchor: PopupAnchor,
+        _ onPick: @escaping (inout State, String?, inout Tx) -> Void
+    ) {
+        let req = ErasedPopupRequest(
+            menu: menu,
+            anchor: anchor,
+            onPick: { anyState, picked, tx in
+                guard var typed = anyState as? State else { return }
+                onPick(&typed, picked, &tx)
+                anyState = typed
+            }
+        )
+        var list = (runtimeActions["erasedActions"] as? [ErasedRuntimeAction]) ?? []
+        list.append(.popup(req))
+        runtimeActions["erasedActions"] = list
+    }
+
+    public mutating func popupMenu<State>(
+        _ menu: PopupMenu,
+        at key: String,
+        _ onPick: @escaping (inout State, String?, inout Tx) -> Void
+    ) {
+        popupMenu(menu, at: .key(key), onPick)
+    }
+
+    public mutating func popupMenu<State>(
+        _ menu: PopupMenu,
+        at press: PointerPress,
+        _ onPick: @escaping (inout State, String?, inout Tx) -> Void
+    ) {
+        popupMenu(menu, at: PopupAnchor(press), onPick)
+    }
+
+    public mutating func popupMenu<State>(
+        _ menu: PopupMenu,
+        at point: Vec2,
+        _ onPick: @escaping (inout State, String?, inout Tx) -> Void
+    ) {
+        popupMenu(menu, at: PopupAnchor(point), onPick)
+    }
+
+    /// Opens an asynchronous OS file-open sheet (`NSOpenPanel`) after this frame commits.
+    public mutating func openFile<State>(
+        _ options: FileDialogOptions = FileDialogOptions(),
+        _ onAnswer: @escaping (inout State, FileDialogResult, inout Tx) -> Void
+    ) {
+        enqueueFileDialog(kind: .open, options: options, onAnswer)
+    }
+
+    /// Opens an asynchronous OS file-save sheet (`NSSavePanel`) after this frame commits.
+    public mutating func saveFile<State>(
+        _ options: FileDialogOptions = FileDialogOptions(),
+        _ onAnswer: @escaping (inout State, FileDialogResult, inout Tx) -> Void
+    ) {
+        enqueueFileDialog(kind: .save, options: options, onAnswer)
+    }
+
+    /// Opens an asynchronous OS folder-picker sheet (`NSOpenPanel` directories) after this frame commits.
+    public mutating func openFolder<State>(
+        _ options: FileDialogOptions = FileDialogOptions(),
+        _ onAnswer: @escaping (inout State, FileDialogResult, inout Tx) -> Void
+    ) {
+        enqueueFileDialog(kind: .folder, options: options, onAnswer)
+    }
+
+    private mutating func enqueueFileDialog<State>(
+        kind: FileDialogKind,
+        options: FileDialogOptions,
+        _ onAnswer: @escaping (inout State, FileDialogResult, inout Tx) -> Void
+    ) {
+        let req = ErasedFileDialogRequest(
+            kind: kind,
+            options: options,
+            onAnswer: { anyState, result, tx in
+                guard var typed = anyState as? State else { return }
+                onAnswer(&typed, result, &tx)
+                anyState = typed
+            }
+        )
+        var list = (runtimeActions["erasedActions"] as? [ErasedRuntimeAction]) ?? []
+        list.append(.fileDialog(req))
+        runtimeActions["erasedActions"] = list
+    }
+
+    /// Cursor position inside the element during `onDropFiles`, `onDropMove`, or `onDropRejected`
+    /// (also readable in `onDropHover` when `true` / `onDropRejectedHover` when `true`).
+    public var dropPoint: PointerPress? {
+        get { runtimeActions["dropPoint"] as? PointerPress }
+        set { runtimeActions["dropPoint"] = newValue }
     }
 }
 
@@ -2578,6 +2961,8 @@ public final class OverlayHandle<State>: @unchecked Sendable {
 
     #if os(macOS)
     @MainActor private var macHost: RuneOverlayMacOSHost<State>?
+    @MainActor private lazy var overlayPopupPresenter = MacOSPopupMenuPresenter()
+    @MainActor private lazy var overlayDragOutCoordinator = MacOSDragOutCoordinator()
     #endif
 
     public convenience init(spec: OverlaySpec<State>) {
@@ -2626,8 +3011,10 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             },
             view: spec.view
         )
+        rt.nativeOverlay = true
         rt.srgbBlend = opts.srgbBlend
         rt.clearColor = Color.transparent
+        rt.setSystemContrast(prefs.contrast)
         self.runtime = rt
 
         if let setupHandler {
@@ -2693,6 +3080,10 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         }
         host.onFadeCompleted = { [weak self] _, ordered in
             guard let self, !ordered else { return }
+            self.overlayPopupPresenter.cancel()
+            self.lock.lock()
+            self.runtime.cancelPopups()
+            self.lock.unlock()
             self.lock.lock()
             let now: Double
             if let fadeEnd = self.overlayPresence.fadeEnd {
@@ -2731,6 +3122,13 @@ public final class OverlayHandle<State>: @unchecked Sendable {
                 (self.isDirty || !self.isIdle || self.runtime.isAnimating || self.wakeDeadline != nil)
             self.lock.unlock()
             return keep
+        }
+        host.onHideCleanup = { [weak self] in
+            guard let self else { return }
+            self.overlayPopupPresenter.cancel()
+            self.lock.lock()
+            self.runtime.cancelPopups()
+            self.lock.unlock()
         }
         host.configureView = { [weak self] view in
             guard let self else { return }
@@ -2777,6 +3175,36 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             }
             view.onAppearanceChanged = { [weak self] dark in
                 self?.setThemeDark(dark)
+            }
+            view.onAfterFrame = { [weak self] metalView in
+                guard let self else { return }
+                let dragStart = self.withLockedRuntime { rt in rt.takeDragOutStart() }
+                if let dragStart {
+                    self.overlayDragOutCoordinator.start(dragStart, in: metalView) { [weak self] outcome in
+                        guard let self else { return }
+                        let now = Date().timeIntervalSinceReferenceDate
+                        self.withLockedRuntime { rt in rt.finishDragOut(outcome, at: now) }
+                        metalView.renderFrame(settle: false, visible: true, drawing: true)
+                    }
+                }
+                if !self.overlayPopupPresenter.isPresenting {
+                    let showOpt: PopupShow? = self.withLockedRuntime { rt in
+                        while let taken = rt.takePopup() {
+                            switch taken {
+                            case .failure: continue
+                            case .success(let show): return show
+                            }
+                        }
+                        return nil
+                    }
+                    if let show = showOpt {
+                        self.overlayPopupPresenter.present(show, in: metalView) { [weak self] picked in
+                            guard let self else { return }
+                            self.withLockedRuntime { rt in try? rt.resolvePopup(picked) }
+                            metalView.renderFrame(settle: false, visible: true, drawing: true)
+                        }
+                    }
+                }
             }
             view.onNeedsResyncGeometry = { [weak self] w, h, scale in
                 self?.withLockedRuntime { rt in

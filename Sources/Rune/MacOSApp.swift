@@ -25,11 +25,21 @@ public enum MacOSApp {
         wrapped.pollHook = spec.poll
         wrapped.onKeyHook = spec.onKey
         wrapped.srgbBlendEnabled = spec.srgbBlend
-        try run(wrapped, parsed: parsed)
+        try run(wrapped, parsed: parsed, onFileDrop: spec.onFileDrop, onFileDropPhase: spec.onFileDropPhase)
     }
 
     @MainActor
     public static func run<State>(_ appBuilder: App<State>, parsed: ToolingArgs) throws {
+        try run(appBuilder, parsed: parsed, onFileDrop: nil, onFileDropPhase: nil)
+    }
+
+    @MainActor
+    private static func run<State>(
+        _ appBuilder: App<State>,
+        parsed: ToolingArgs,
+        onFileDrop: ((inout State, [URL], inout Tx) -> Void)?,
+        onFileDropPhase: ((inout State, FileDropPhase, inout Tx) -> Void)?
+    ) throws {
         ReadySignal.runStarts()
         RelaunchController.waitForPrevious()
         HeadlessRunner.registerFonts(appBuilder.fontData)
@@ -80,7 +90,10 @@ public enum MacOSApp {
         runtime.turnScope = appBuilder.turnScopeHook
         runtime.onReopen = appBuilder.onReopenHook
         runtime.onOpenUrl = appBuilder.onOpenUrlHook
+        runtime.onAppFileDrop = onFileDrop
+        runtime.onFileDrop = onFileDropPhase
         runtime.tabVisitsControls = appBuilder.tabVisitsControlsEnabled
+        runtime.setSystemContrast(SystemPreferences.current().contrast)
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         let renderer = try MetalRenderer()
@@ -172,9 +185,37 @@ public enum MacOSApp {
             onReady: appBuilder.onReadyHook
         )
 
+        let windowlessDriver = MacOSWindowlessDriver<State>(
+            isWindowless: appBuilder.isWindowless,
+            startAt: CACurrentMediaTime(),
+            timeScale: parsed.timeScale,
+            shared: appBuilder.sharedHandle.shared,
+            runtime: runtime,
+            onShowWindow: { [weak window, weak hostView] in
+                guard let window, let hostView else { return }
+                if appBuilder.isOpenInactive {
+                    window.orderFront(nil)
+                } else {
+                    window.makeKeyAndOrderFront(nil)
+                    window.makeFirstResponder(hostView)
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                }
+                if appBuilder.openAs.isMaximized {
+                    window.zoom(nil)
+                }
+                if appBuilder.openAs.isFullScreen {
+                    window.toggleFullScreen(nil)
+                }
+                hostView.requestRender()
+            }
+        )
+
         let delegate = RuneAppDelegate(
-            keepRunning: appBuilder.keepsRunning,
+            keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
+                if focused {
+                    runtime.setSystemContrast(SystemPreferences.current().contrast)
+                }
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
                 if focused {
                     RuneStandardMenuRouter.setActiveKeyDispatcher {
@@ -190,14 +231,17 @@ public enum MacOSApp {
             },
             onClose: {
                 hostView.stopTimer()
+                hostView.cancelActiveModals()
                 appBuilder.sharedHandle.shared.setVisible(false)
-                if !appBuilder.keepsRunning && NSApplication.shared.windows.filter(\.isVisible).count <= 1 {
+                if !(appBuilder.keepsRunning || appBuilder.isWindowless) && NSApplication.shared.windows.filter(\.isVisible).count <= 1 {
                     let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
                     _ = QuitLifecycle.send(.start(ending: false, after: after))
                 }
             },
             onTerminate: {
+                windowlessDriver.stop()
                 hostView.stopTimer()
+                hostView.cancelActiveModals()
                 runtime.dispatchQuit(at: hostView.currentElapsedTime())
                 QuitLifecycle.runQuitHooksIfOwed()
                 ReadySignal.clear()
@@ -219,7 +263,7 @@ public enum MacOSApp {
         window.center()
 
         appBuilder.sharedHandle.shared.setWaker(waker)
-        appBuilder.sharedHandle.shared.setVisible(true)
+        appBuilder.sharedHandle.shared.setVisible(windowlessDriver.isWindowShown)
         appBuilder.onWindowHook?(windowHandle)
 
         RuneStandardMenuRouter.setActiveKeyDispatcher { [weak hostView] in
@@ -228,30 +272,42 @@ public enum MacOSApp {
             }
         }
 
-        waker.setCallback { [weak hostView] in
+        waker.setCallback { [weak hostView, weak windowlessDriver] in
             DispatchQueue.main.async {
-                hostView?.requestRender()
+                MainActor.assumeIsolated {
+                    if let driver = windowlessDriver, !driver.isWindowShown {
+                        driver.pump()
+                    } else {
+                        hostView?.requestRender()
+                    }
+                }
             }
         }
         appBuilder.setupHook?(waker)
 
-        if appBuilder.isOpenInactive {
-            window.orderFront(nil)
+        if appBuilder.isWindowless {
+            ReadySignal.ready()
+            windowlessDriver.start()
         } else {
-            window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(hostView)
-            app.activate(ignoringOtherApps: true)
-        }
-        if appBuilder.openAs.isMaximized {
-            window.zoom(nil)
-        }
-        if appBuilder.openAs.isFullScreen {
-            window.toggleFullScreen(nil)
+            if appBuilder.isOpenInactive {
+                window.orderFront(nil)
+            } else {
+                window.makeKeyAndOrderFront(nil)
+                window.makeFirstResponder(hostView)
+                app.activate(ignoringOtherApps: true)
+            }
+            if appBuilder.openAs.isMaximized {
+                window.zoom(nil)
+            }
+            if appBuilder.openAs.isFullScreen {
+                window.toggleFullScreen(nil)
+            }
         }
 
         withExtendedLifetime(delegate) {
             app.run()
         }
+        windowlessDriver.stop()
         QuitLifecycle.finishOrderlyExit()
     }
 }
@@ -344,6 +400,9 @@ private final class RuneMetalHostView<State>: NSView {
     private var animTimer: Timer?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
+    private let popupPresenter = MacOSPopupMenuPresenter()
+    private let fileDialogPresenter = MacOSFileDialogPresenter()
+    private let dragOutCoordinator = MacOSDragOutCoordinator()
 
     init(
         frame: NSRect,
@@ -377,7 +436,7 @@ private final class RuneMetalHostView<State>: NSView {
         metalLayer.framebufferOnly = false
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.layer = metalLayer
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes(MacOSDropReader.draggedTypes)
     }
 
     @available(*, unavailable)
@@ -552,6 +611,7 @@ private final class RuneMetalHostView<State>: NSView {
         if let stats = surfaceMeter?.currentStats() {
             devStatsReceiver?(stats)
         }
+        pumpPlatformActions()
 
         if isAnim {
             if animTimer == nil {
@@ -737,19 +797,7 @@ private final class RuneMetalHostView<State>: NSView {
 
     @discardableResult
     func dispatchKeyEvent(_ ev: KeyEvent) -> Bool {
-        if ev.mods.cmd, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
-            if let pasted = NSPasteboard.general.string(forType: .string) {
-                runtime.clipboard = ClipboardContent(pasted)
-            }
-        }
-        let prevClip = runtime.clipboard
-        let prevRich = runtime.richClipboard
-        let handled = runtime.keyDown(ev, at: nowSeconds())
-        if runtime.richClipboard != prevRich {
-            Clipboard.shared.writeRich(runtime.richClipboard)
-        } else if runtime.clipboard != prevClip, !runtime.clipboard.text.isEmpty {
-            Clipboard.shared.writeRich(RichClipboardPayload(content: runtime.clipboard))
-        }
+        let handled = MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds())
         renderTick()
         return handled
     }
@@ -784,14 +832,50 @@ private final class RuneMetalHostView<State>: NSView {
         )
     }
 
-    // MARK: - NSDraggingDestination (File Drop)
-
-    private func droppedFiles(from sender: NSDraggingInfo) -> [DroppedFile] {
-        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [
-            .urlReadingFileURLsOnly: true,
-        ]) as? [URL] ?? []
-        return urls.map { DroppedFile(url: $0) }
+    func cancelActiveModals() {
+        popupPresenter.cancel()
+        fileDialogPresenter.cancel()
+        runtime.cancelPopups()
+        runtime.cancelFileDialogs(at: nowSeconds())
     }
+
+    private func pumpPlatformActions() {
+        // 1. Outbound OS drag session
+        if let dragStart = runtime.takeDragOutStart() {
+            dragOutCoordinator.start(dragStart, in: self) { [weak self] outcome in
+                guard let self else { return }
+                self.runtime.finishDragOut(outcome, at: self.nowSeconds())
+                self.requestRender()
+            }
+        }
+        // 2. Native popup menu queue
+        if !popupPresenter.isPresenting {
+            while let taken = runtime.takePopup() {
+                switch taken {
+                case .failure:
+                    continue
+                case .success(let show):
+                    popupPresenter.present(show, in: self) { [weak self] picked in
+                        guard let self else { return }
+                        try? self.runtime.resolvePopup(picked)
+                        self.requestRender()
+                    }
+                    break
+                }
+                break
+            }
+        }
+        // 3. Async non-blocking file dialog sheet
+        if !fileDialogPresenter.isPresenting, let pending = runtime.takeFileDialog() {
+            fileDialogPresenter.present(pending, in: self.window) { [weak self] id, result in
+                guard let self else { return }
+                self.runtime.answerFileDialog(id, result)
+                self.requestRender()
+            }
+        }
+    }
+
+    // MARK: - NSDraggingDestination (File Drop)
 
     private func dragPoint(from sender: NSDraggingInfo) -> Vec2 {
         let p = convert(sender.draggingLocation, from: nil)
@@ -799,17 +883,22 @@ private final class RuneMetalHostView<State>: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let files = droppedFiles(from: sender)
-        guard !files.isEmpty else { return [] }
-        runtime.fileDrop(.entered(files, at: dragPoint(from: sender)), at: nowSeconds())
+        let urls = MacOSDropReader.hoverURLs(from: sender)
+        guard !urls.isEmpty else { return [] }
+        let pt = dragPoint(from: sender)
+        let files = urls.map { DroppedFile(url: $0) }
+        runtime.fileDrop(.entered(files, at: pt), at: nowSeconds())
         renderTick()
-        return .copy
+        return runtime.acceptsDrop(urls, at: pt) ? .copy : []
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        runtime.fileDrop(.hovered(at: dragPoint(from: sender)), at: nowSeconds())
+        let urls = MacOSDropReader.hoverURLs(from: sender)
+        let pt = dragPoint(from: sender)
+        runtime.fileDrop(.hovered(at: pt), at: nowSeconds())
         renderTick()
-        return .copy
+        guard !urls.isEmpty else { return [] }
+        return runtime.acceptsDrop(urls, at: pt) ? .copy : []
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
@@ -818,11 +907,94 @@ private final class RuneMetalHostView<State>: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let files = droppedFiles(from: sender)
-        guard !files.isEmpty else { return false }
-        runtime.fileDrop(.dropped(files, at: dragPoint(from: sender)), at: nowSeconds())
-        renderTick()
+        let pt = dragPoint(from: sender)
+        let hoverUrls = MacOSDropReader.hoverURLs(from: sender)
+        guard !hoverUrls.isEmpty else { return false }
+        MacOSDropReader.dropURLs(from: sender) { [weak self] urls in
+            guard let self, !urls.isEmpty else { return }
+            let files = urls.map { DroppedFile(url: $0) }
+            self.runtime.fileDrop(.dropped(files, at: pt), at: self.nowSeconds())
+            self.renderTick()
+        }
         return true
+    }
+}
+
+@MainActor
+private final class MacOSWindowlessDriver<State> {
+    var isWindowShown: Bool
+    private let startAt: CFTimeInterval
+    private let timeScale: Double
+    private let shared: AppShared<State>
+    private let runtime: Runtime<State>
+    private let onShowWindow: @MainActor () -> Void
+    private var timer: Timer?
+
+    init(
+        isWindowless: Bool,
+        startAt: CFTimeInterval,
+        timeScale: Double,
+        shared: AppShared<State>,
+        runtime: Runtime<State>,
+        onShowWindow: @escaping @MainActor () -> Void
+    ) {
+        self.isWindowShown = !isWindowless
+        self.startAt = startAt
+        self.timeScale = timeScale
+        self.shared = shared
+        self.runtime = runtime
+        self.onShowWindow = onShowWindow
+    }
+
+    func start() {
+        pump()
+        let t = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pump()
+            }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func pump() {
+        guard !isWindowShown else { return }
+        _ = MainQueueDispatcher.shared.drain()
+        let now = (CACurrentMediaTime() - startAt) * timeScale
+        let req = shared.applyStateUpdates(to: runtime, at: now)
+        if req.quit {
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        switch req.window {
+        case .open, .show:
+            isWindowShown = true
+            timer?.invalidate()
+            timer = nil
+            shared.setVisible(true)
+            onShowWindow()
+            return
+        default:
+            break
+        }
+        if let poll = runtime.poll {
+            var st = runtime.state
+            var tx = Tx()
+            if poll(&st, now, &tx) {
+                runtime.state = st
+                runtime.applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
+            }
+        }
+        if runtime.quitRequested || runtime.relaunchRequested {
+            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
+            _ = QuitLifecycle.send(.start(ending: false, after: after))
+            NSApplication.shared.terminate(nil)
+        }
     }
 }
 #endif

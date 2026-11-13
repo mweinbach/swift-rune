@@ -172,24 +172,33 @@ public enum Win32MessageTranslator {
 public enum Win32App {
     @MainActor
     public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs) throws {
+        HeadlessRunner.registerFonts(spec.fonts)
         var state = spec.makeState()
+        var initTx = Tx()
         if let sceneName = parsed.sceneName, let apply = spec.scenes[sceneName] {
-            var tx = Tx()
-            apply(&state, &tx)
+            apply(&state, &initTx)
         }
         let vp = parsed.viewportOverride ?? spec.size
         let isDark = parsed.darkOverride ?? spec.dark ?? true
+        let waker = Waker()
+        spec.setup?(waker)
         let runtime = Runtime<State>(
             state: state,
             viewport: vp,
             pixelScale: 1.0,
             systemDark: isDark,
             reducedMotion: parsed.reducedMotion,
-            waker: Waker(),
+            waker: waker,
             onKey: spec.onKey,
             view: spec.view
         )
         runtime.windowTitle = spec.title
+        runtime.srgbBlend = spec.srgbBlend
+        runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
+        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         let hInstance = GetModuleHandleW(nil)
         let className = "RuneWin32WindowClass".withCString(encodedAs: UTF16.self) { Array($0) }

@@ -176,17 +176,25 @@ public final class WebAppHost<State> {
             scale: dpr,
             fitHeight: config.fitContentHeight
         )
+        HeadlessRunner.registerFonts(spec.fonts)
+        let waker = Waker()
+        spec.setup?(waker)
         self.runtime = Runtime<State>(
             state: spec.makeState(),
             viewport: vp,
             pixelScale: dpr,
             systemDark: dark ?? spec.dark ?? true,
             reducedMotion: false,
-            waker: Waker(),
+            waker: waker,
             onKey: spec.onKey,
             view: spec.view
         )
         self.runtime.windowTitle = spec.title
+        self.runtime.srgbBlend = spec.srgbBlend
+        self.runtime.poll = spec.poll
+        self.runtime.onAppFileDrop = spec.onFileDrop
+        self.runtime.onFileDrop = spec.onFileDropPhase
+        self.runtime.setSystemContrast(SystemPreferences.current().contrast)
     }
 
     @discardableResult

@@ -1,6 +1,11 @@
 import Foundation
 import RuneMotion
 import RuneRef
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 #if canImport(simd)
 import simd
 #endif
@@ -26,6 +31,8 @@ public struct AppSpec<State> {
     public var setup: ((Waker) -> Void)?
     public var poll: ((inout State, Double, inout Tx) -> Bool)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
+    public var onFileDrop: ((inout State, [URL], inout Tx) -> Void)?
+    public var onFileDropPhase: ((inout State, FileDropPhase, inout Tx) -> Void)?
     public var view: (State, inout Cx<State>) -> El<State>
 
     public init(
@@ -41,6 +48,8 @@ public struct AppSpec<State> {
         setup: ((Waker) -> Void)? = nil,
         poll: ((inout State, Double, inout Tx) -> Bool)? = nil,
         onKey: ((inout State, KeyEvent, inout Tx) -> Bool)? = nil,
+        onFileDrop: ((inout State, [URL], inout Tx) -> Void)? = nil,
+        onFileDropPhase: ((inout State, FileDropPhase, inout Tx) -> Void)? = nil,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
         self.title = title
@@ -55,6 +64,8 @@ public struct AppSpec<State> {
         self.setup = setup
         self.poll = poll
         self.onKey = onKey
+        self.onFileDrop = onFileDrop
+        self.onFileDropPhase = onFileDropPhase
         self.view = view
     }
 
@@ -111,6 +122,29 @@ public struct AppSpec<State> {
         copy.poll = hook
         return copy
     }
+
+    public func onFileDrop(_ hook: @escaping (inout State, [URL], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.onFileDrop = hook
+        return copy
+    }
+
+    public func onFileDropPhase(_ hook: @escaping (inout State, FileDropPhase, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.onFileDropPhase = hook
+        return copy
+    }
+}
+
+/// Parsed `mark:NAME[+|-SECONDS]` reference (`tooling/args.rs`).
+public struct ToolingMarkOffset: Sendable, Equatable {
+    public var name: String
+    public var offset: Double
+
+    public init(name: String, offset: Double = 0.0) {
+        self.name = name
+        self.offset = offset
+    }
 }
 
 /// Parsed headless CLI arguments (`rune::tooling::Args`).
@@ -120,7 +154,10 @@ public struct ToolingArgs: Sendable, Equatable {
     public var sceneName: String? = nil
     public var scriptArg: String? = nil
     public var framesDir: String? = nil
+    public var outDir: String? = nil
+    public var frameCount: Int? = nil
     public var stripPath: String? = nil
+    public var stripCols: Int = 10
     public var fps: Double = 60.0
     public var pixelScale: Float = 2.0
     public var viewportOverride: Vec2? = nil
@@ -129,16 +166,87 @@ public struct ToolingArgs: Sendable, Equatable {
     public var timeScale: Double = 1.0
     public var forceCPU: Bool = false
     public var durationOverride: Double? = nil
+    public var durationAuto: Bool = false
     public var atTime: Double? = nil
+    public var atMark: ToolingMarkOffset? = nil
+    public var atMarkExpr: String? = nil
     public var startTime: Double = 0.0
+    public var startMark: ToolingMarkOffset? = nil
+    public var startMarkExpr: String? = nil
     public var cropKey: String? = nil
+    public var cropRects: [[Float]] = []
     public var stripEvery: Int? = nil
     public var listScenes: Bool = false
+    public var hasPlayground: Bool = false
+    public var playgroundName: String? = nil
+    public var playgroundVariant: String? = nil
+    public var wholeWindow: Bool = false
+    public var scrollBars: ScrollBars? = nil
+    public var windowName: String? = nil
+    public var listWindows: Bool = false
+    public var chromeOverlay: Bool = false
+    public var realtime: Bool = false
+    public var tracePath: String? = nil
+    public var traceAll: Bool = false
+    public var videoPath: String? = nil
+    public var extraArgs: [String] = []
 
     public init() {}
 
     public var isHeadlessRequested: Bool {
-        snapPath != nil || treePath != nil || scriptArg != nil || framesDir != nil || stripPath != nil || listScenes
+        snapPath != nil
+            || treePath != nil
+            || scriptArg != nil
+            || framesDir != nil
+            || outDir != nil
+            || frameCount != nil
+            || stripPath != nil
+            || videoPath != nil
+            || tracePath != nil
+            || listScenes
+            || listWindows
+    }
+
+    public static func parseMarkTime(_ raw: String) -> ToolingMarkOffset? {
+        guard raw.hasPrefix("mark:") else { return nil }
+        let rest = String(raw.dropFirst("mark:".count))
+        guard !rest.isEmpty else { return nil }
+        if let plusIdx = rest.lastIndex(of: "+"), plusIdx > rest.startIndex,
+           let offset = Double(rest[rest.index(after: plusIdx)...]), offset.isFinite {
+            return ToolingMarkOffset(name: String(rest[..<plusIdx]), offset: offset)
+        }
+        if let minusIdx = rest.lastIndex(of: "-"), minusIdx > rest.startIndex,
+           let offset = Double(rest[rest.index(after: minusIdx)...]), offset.isFinite {
+            return ToolingMarkOffset(name: String(rest[..<minusIdx]), offset: -offset)
+        }
+        return ToolingMarkOffset(name: rest, offset: 0.0)
+    }
+
+    /// Resolves a `mark:` expression (without the `mark:` prefix) against loaded script marks.
+    /// Exact mark names win before splitting trailing `+SECONDS` / `-SECONDS` offsets (`headless.rs`).
+    public static func resolveMarkTime(_ spec: String, marks: [String: Double]) throws -> Double {
+        if let exact = marks[spec] {
+            return max(0.0, exact)
+        }
+        let known = Array(marks.keys).sorted()
+        var idx = spec.index(after: spec.startIndex)
+        while idx < spec.endIndex {
+            let ch = spec[idx]
+            if ch == "+" || ch == "-" {
+                if let offset = Double(spec[idx...]), offset.isFinite {
+                    let name = String(spec[..<idx])
+                    guard let base = marks[name] else {
+                        throw ToolingError.unknownMark(name: name, known: known)
+                    }
+                    return max(0.0, base + offset)
+                }
+            }
+            idx = spec.index(after: idx)
+        }
+        if spec.contains("+") || spec.contains("-") {
+            throw ToolingError.invalidMarkTime(spec: spec, known: known)
+        }
+        throw ToolingError.unknownMark(name: spec, known: known)
     }
 
     public static func parse(_ arguments: [String] = Array(CommandLine.arguments.dropFirst())) -> ToolingArgs {
@@ -156,9 +264,21 @@ public struct ToolingArgs: Sendable, Equatable {
             case "--script":
                 if i + 1 < arguments.count { out.scriptArg = arguments[i + 1]; i += 1 }
             case "--frames":
-                if i + 1 < arguments.count { out.framesDir = arguments[i + 1]; i += 1 }
+                if i + 1 < arguments.count {
+                    let v = arguments[i + 1]
+                    if let n = Int(v) {
+                        out.frameCount = max(1, n)
+                    } else {
+                        out.framesDir = v
+                    }
+                    i += 1
+                }
+            case "--out":
+                if i + 1 < arguments.count { out.outDir = arguments[i + 1]; i += 1 }
             case "--strip":
                 if i + 1 < arguments.count { out.stripPath = arguments[i + 1]; i += 1 }
+            case "--cols":
+                if i + 1 < arguments.count, let v = Int(arguments[i + 1]) { out.stripCols = max(1, v); i += 1 }
             case "--fps":
                 if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.fps = max(1, v); i += 1 }
             case "--scale":
@@ -166,17 +286,92 @@ public struct ToolingArgs: Sendable, Equatable {
             case "--time-scale":
                 if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.timeScale = max(0.01, v); i += 1 }
             case "--duration":
-                if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.durationOverride = max(0, v); i += 1 }
+                if i + 1 < arguments.count {
+                    let v = arguments[i + 1]
+                    if v == "auto" {
+                        out.durationAuto = true
+                    } else if let d = Double(v) {
+                        out.durationOverride = max(0, d)
+                    }
+                    i += 1
+                }
             case "--at":
-                if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.atTime = max(0, v); i += 1 }
+                if i + 1 < arguments.count {
+                    let v = arguments[i + 1]
+                    if v.hasPrefix("mark:") {
+                        let expr = String(v.dropFirst("mark:".count))
+                        if !expr.isEmpty {
+                            out.atMarkExpr = expr
+                        }
+                        out.atMark = parseMarkTime(v)
+                    } else if let d = Double(v) {
+                        out.atTime = max(0, d)
+                    }
+                    i += 1
+                }
             case "--start":
-                if i + 1 < arguments.count, let v = Double(arguments[i + 1]) { out.startTime = max(0, v); i += 1 }
+                if i + 1 < arguments.count {
+                    let v = arguments[i + 1]
+                    if v.hasPrefix("mark:") {
+                        let expr = String(v.dropFirst("mark:".count))
+                        if !expr.isEmpty {
+                            out.startMarkExpr = expr
+                        }
+                        out.startMark = parseMarkTime(v)
+                    } else if let d = Double(v) {
+                        out.startTime = max(0, d)
+                    }
+                    i += 1
+                }
             case "--crop":
-                if i + 1 < arguments.count { out.cropKey = arguments[i + 1]; i += 1 }
+                if i + 1 < arguments.count {
+                    let v = arguments[i + 1]
+                    let parts = v.split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                    if parts.count == 4 {
+                        out.cropRects.append(parts)
+                    } else {
+                        out.cropKey = v
+                    }
+                    i += 1
+                }
             case "--every":
                 if i + 1 < arguments.count, let v = Int(arguments[i + 1]) { out.stripEvery = max(1, v); i += 1 }
             case "--list-scenes":
                 out.listScenes = true
+            case "--playground":
+                out.hasPlayground = true
+                if i + 1 < arguments.count, !arguments[i + 1].hasPrefix("-") {
+                    out.playgroundName = arguments[i + 1]
+                    i += 1
+                }
+            case "--variant":
+                if i + 1 < arguments.count { out.playgroundVariant = arguments[i + 1]; i += 1 }
+            case "--whole-window":
+                out.wholeWindow = true
+            case "--scroll-bars":
+                if i + 1 < arguments.count {
+                    switch arguments[i + 1].lowercased() {
+                    case "automatic", "auto": out.scrollBars = .automatic
+                    case "when-scrolling", "whenscrolling": out.scrollBars = .whenScrolling
+                    case "always": out.scrollBars = .always
+                    default: break
+                    }
+                    i += 1
+                }
+            case "--window":
+                if i + 1 < arguments.count { out.windowName = arguments[i + 1]; i += 1 }
+            case "--list-windows":
+                out.listWindows = true
+            case "--chrome":
+                out.chromeOverlay = true
+            case "--realtime":
+                out.realtime = true
+            case "--trace":
+                if i + 1 < arguments.count { out.tracePath = arguments[i + 1]; i += 1 }
+            case "--trace-all":
+                out.traceAll = true
+            case "--video":
+                if i + 1 < arguments.count { out.videoPath = arguments[i + 1]; i += 1 }
             case "--theme":
                 if i + 1 < arguments.count {
                     let t = arguments[i + 1].lowercased()
@@ -198,10 +393,10 @@ public struct ToolingArgs: Sendable, Equatable {
                 out.darkOverride = false
             case "--reduced-motion":
                 out.reducedMotion = true
-            case "--cpu":
+            case "--cpu", "--force-cpu":
                 out.forceCPU = true
             default:
-                break
+                out.extraArgs.append(arg)
             }
             i += 1
         }
@@ -222,12 +417,22 @@ public struct ScriptStep: Sendable {
         case down(PointerButton, Mods)
         case up(PointerButton, Mods)
         case keyDown(KeyEvent)
+        case keyUp(KeyEvent)
         case shortcut(Chord)
         case paste(ClipboardContent)
+        case ime(Ime)
         case wheel(WheelEvent)
         case fling(vx: Float, vy: Float)
         case resize(Vec2)
         case windowFocus(Bool)
+        case mark(String)
+        case reopen
+        case openUrl(String)
+        case dragFiles([URL])
+        case dropFiles([URL])
+        case dragFilesLeave
+        case popupPick(String?)
+        case fileDialogAnswer(URL?)
     }
 
     public var t: Double
@@ -235,11 +440,52 @@ public struct ScriptStep: Sendable {
     public var action: Action
 }
 
-/// Headless virtual-clock runner for `--snap`, `--tree`, `--script`, `--frames`, and `--strip`.
+/// Errors thrown by `HeadlessRunner` and CLI tooling validation.
+public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
+    case unknownWindow(name: String, available: [String])
+    case unknownMark(name: String, known: [String])
+    case invalidMarkTime(spec: String, known: [String])
+    case playgroundNotConfigured
+    case unsupportedVideoContainer(ext: String)
+    case ffmpegUnavailable
+    case ffmpegFailed(status: Int32)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unknownWindow(let name, let available):
+            if available == ["main"] {
+                return "no such window \"\(name)\"; this app has only 'main'"
+            }
+            return "no such window \"\(name)\"; available: \(available.joined(separator: ", "))"
+        case .unknownMark(let name, let known):
+            let list = known.isEmpty ? "none" : known.joined(separator: ", ")
+            return "no mark \"\(name)\" in the script (marks: \(list))"
+        case .invalidMarkTime(let spec, let known):
+            let list = known.isEmpty ? "none" : known.joined(separator: ", ")
+            return "invalid mark time \"\(spec)\": expected an exact mark name or NAME+SECONDS/NAME-SECONDS (marks: \(list))"
+        case .playgroundNotConfigured:
+            return "--playground requested, but app has no PlaygroundHost configured"
+        case .unsupportedVideoContainer(let ext):
+            return "unsupported video container .\(ext) (expected .mp4, .mov, or .webm)"
+        case .ffmpegUnavailable:
+            return "--video needs ffmpeg on PATH (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg)"
+        case .ffmpegFailed(let status):
+            return "ffmpeg failed writing video (exit status \(status))"
+        }
+    }
+}
+
+/// Headless virtual-clock runner for `--snap`, `--tree`, `--script`, `--frames`, `--out`, and `--strip`.
 public enum HeadlessRunner {
     public struct Output: Sendable {
         public var finalFrame: Frame
         public var treeJSON: Data
+        public var frameCount: Int = 0
+        public var marks: [String: Double] = [:]
+        public var windowKeys: [String] = []
+        public var tracePath: String? = nil
+        public var videoPath: String? = nil
+        public var chromeOverlaps: [String] = []
     }
 
     /// Parses a `--script` JSON array (or `{"events": [...]}` object) into sorted `ScriptStep`s.
@@ -271,7 +517,34 @@ public enum HeadlessRunner {
                 continue
             } else if let pasteObj = e["paste"] as? [String: Any] {
                 let txt = (pasteObj["text"] as? String) ?? ""
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt))))
+                let html = pasteObj["html"] as? String
+                let rtf = pasteObj["rtf"] as? String
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt, html: html, rtf: rtf))))
+                continue
+            }
+            if let reopen = e["reopen"] as? Bool, reopen {
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .reopen))
+                continue
+            }
+            if let openUrl = e["open_url"] as? String {
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .openUrl(openUrl)))
+                continue
+            }
+            if let dragStr = e["drag_files"] as? String, dragStr == "leave" {
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .dragFilesLeave))
+                continue
+            } else if let dragPaths = e["drag_files"] as? [String] {
+                let pos: ScriptStep.Position = (e["key"] as? String).map { .key($0) }
+                    ?? ((e["x"] as? NSNumber).flatMap { x in (e["y"] as? NSNumber).map { y in .xy(x.floatValue, y.floatValue) } })
+                    ?? .relative(0, 0)
+                out.append(ScriptStep(t: t, position: pos, action: .dragFiles(dragPaths.map { URL(fileURLWithPath: $0) })))
+                continue
+            }
+            if let dropPaths = e["drop_files"] as? [String] {
+                let pos: ScriptStep.Position = (e["key"] as? String).map { .key($0) }
+                    ?? ((e["x"] as? NSNumber).flatMap { x in (e["y"] as? NSNumber).map { y in .xy(x.floatValue, y.floatValue) } })
+                    ?? .relative(0, 0)
+                out.append(ScriptStep(t: t, position: pos, action: .dropFiles(dropPaths.map { URL(fileURLWithPath: $0) })))
                 continue
             }
 
@@ -373,7 +646,61 @@ public enum HeadlessRunner {
 
             case "paste":
                 let txt = (e["text"] as? String) ?? ""
-                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt))))
+                let html = e["html"] as? String
+                let rtf = e["rtf"] as? String
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .paste(ClipboardContent(txt, html: html, rtf: rtf))))
+
+            case "key-up":
+                let name = (e["name"] as? String) ?? ""
+                if let named = Key.named(name) {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyUp(KeyEvent(key: named, mods: mods))))
+                } else if mods.cmd, name.count == 1, let c = name.lowercased().first {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .keyUp(KeyEvent(key: .command(c), mods: mods))))
+                }
+
+            case "ime":
+                if let commit = e["commit"] as? String {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .ime(.commit(commit))))
+                } else if let preedit = e["preedit"] as? String {
+                    let cursorArr = e["cursor"] as? [Int]
+                    let range: Range<Int>? = (cursorArr?.count == 2) ? (cursorArr![0]..<cursorArr![1]) : nil
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .ime(.preedit(ImePreedit(text: preedit, cursorUTF8: range)))))
+                } else {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .ime(.cancel)))
+                }
+
+            case "reopen":
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .reopen))
+
+            case "open_url", "open-url":
+                if let u = e["url"] as? String {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .openUrl(u)))
+                }
+
+            case "drag_files", "drag-files":
+                if let paths = e["paths"] as? [String] {
+                    out.append(ScriptStep(t: t, position: pos, action: .dragFiles(paths.map { URL(fileURLWithPath: $0) })))
+                } else {
+                    out.append(ScriptStep(t: t, position: .relative(0, 0), action: .dragFilesLeave))
+                }
+
+            case "drop_files", "drop-files":
+                if let paths = e["paths"] as? [String] {
+                    out.append(ScriptStep(t: t, position: pos, action: .dropFiles(paths.map { URL(fileURLWithPath: $0) })))
+                }
+
+            case "menu-pick", "popup-pick":
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .popupPick(e["id"] as? String)))
+
+            case "menu-cancel", "popup-cancel":
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .popupPick(nil)))
+
+            case "file-dialog":
+                let url = (e["path"] as? String).map { URL(fileURLWithPath: $0) }
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .fileDialogAnswer(url)))
+
+            case "file-dialog-cancel":
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .fileDialogAnswer(nil)))
 
             case "wheel":
                 let dx = (e["dx"] as? NSNumber)?.floatValue ?? 0
@@ -414,8 +741,12 @@ public enum HeadlessRunner {
                 let h = (e["h"] as? NSNumber)?.floatValue ?? 600
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .resize(Vec2(w, h))))
 
-            case "wait", "mark":
+            case "wait":
                 out.append(ScriptStep(t: t, position: .relative(0, 0), action: .move))
+
+            case "mark":
+                let markName = (e["name"] as? String) ?? ""
+                out.append(ScriptStep(t: t, position: .relative(0, 0), action: .mark(markName)))
 
             default:
                 break
@@ -428,8 +759,20 @@ public enum HeadlessRunner {
 
     /// Runs `spec` deterministically under `args`, writing `--snap`, `--tree`, `--frames`, and `--strip` files if specified.
     @discardableResult
-    public static func run<State>(_ spec: AppSpec<State>, args: ToolingArgs) throws -> Output {
-        try runWithHooks(spec: spec, args: args)
+    public static func run<State>(
+        _ spec: AppSpec<State>,
+        args: ToolingArgs,
+        chrome: Chrome = .standard,
+        windowKey: String = "main",
+        availableWindows: [String] = ["main"]
+    ) throws -> Output {
+        try runWithHooks(
+            spec: spec,
+            args: args,
+            chrome: chrome,
+            windowKey: windowKey,
+            availableWindows: availableWindows
+        )
     }
 
     /// Runs `app` deterministically under `args` (including `compositor`, `setup`, `poll`, `AppHandle` updates, and frame reports).
@@ -439,6 +782,7 @@ public enum HeadlessRunner {
         if app.gpuBackendPreference == .software {
             effectiveArgs.forceCPU = true
         }
+        let resolvedChrome = app.customTitlebar?.macChrome(app.chromeStyle) ?? app.chromeStyle
         let reports = FrameReports<State>(
             onFrameEncoded: app.onFrameEncodedHook,
             onFrameDrawn: app.onFrameDrawnHook,
@@ -447,6 +791,11 @@ public enum HeadlessRunner {
         return try runWithHooks(
             spec: app.intoSpec(),
             args: effectiveArgs,
+            chrome: resolvedChrome,
+            windowKey: "main",
+            availableWindows: ["main"],
+            onReady: app.onReadyHook,
+            playgroundHost: app.playgroundHost,
             compositor: app.compositorValue,
             reports: reports,
             appShared: app.sharedHandle.shared,
@@ -462,6 +811,10 @@ public enum HeadlessRunner {
                 runtime.onReopen = app.onReopenHook
                 runtime.onOpenUrl = app.onOpenUrlHook
                 runtime.tabVisitsControls = app.tabVisitsControlsEnabled
+                if let pg = app.playgroundHost {
+                    pg.bindScenes(app.intoSpec().scenes, view: app.view)
+                    runtime.playgroundHost = pg
+                }
             }
         )
     }
@@ -479,11 +832,29 @@ public enum HeadlessRunner {
     private static func runWithHooks<State>(
         spec: AppSpec<State>,
         args: ToolingArgs,
+        chrome: Chrome = .standard,
+        windowKey: String = "main",
+        availableWindows: [String] = ["main"],
+        onReady: ((WindowHandle) -> Void)? = nil,
+        playgroundHost: PlaygroundHost<State>? = nil,
         compositor: AnyCompositor<State>? = nil,
         reports: FrameReports<State>? = nil,
         appShared: AppShared<State>? = nil,
         extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
     ) throws -> Output {
+        if args.listWindows {
+            for key in availableWindows {
+                print(key)
+            }
+            return Output(
+                finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
+                treeJSON: Data("{}".utf8),
+                windowKeys: availableWindows
+            )
+        }
+        if let requestedWindow = args.windowName, !availableWindows.contains(requestedWindow) {
+            throw ToolingError.unknownWindow(name: requestedWindow, available: availableWindows)
+        }
         if args.listScenes {
             for name in spec.scenes.keys.sorted() {
                 print(name)
@@ -515,6 +886,8 @@ public enum HeadlessRunner {
         runtime.windowTitle = spec.title
         runtime.srgbBlend = spec.srgbBlend
         runtime.poll = spec.poll
+        runtime.onAppFileDrop = spec.onFileDrop
+        runtime.onFileDrop = spec.onFileDropPhase
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
         appShared?.setWaker(waker)
@@ -601,26 +974,138 @@ public enum HeadlessRunner {
             return outFrame
         }
 
+        // Collect script marks and resolve `--at mark:...` / `--start mark:...`
+        var marks: [String: Double] = [:]
+        for step in steps {
+            if case .mark(let name) = step.action, !name.isEmpty {
+                marks[name] = step.t
+            }
+        }
+        let resolvedAtTime: Double? = try {
+            if let expr = args.atMarkExpr {
+                return try ToolingArgs.resolveMarkTime(expr, marks: marks)
+            }
+            if let m = args.atMark {
+                guard let base = marks[m.name] else {
+                    throw ToolingError.unknownMark(name: m.name, known: Array(marks.keys).sorted())
+                }
+                return max(0.0, base + m.offset)
+            }
+            return args.atTime
+        }()
+        let resolvedStartTime: Double = try {
+            if let expr = args.startMarkExpr {
+                return try ToolingArgs.resolveMarkTime(expr, marks: marks)
+            }
+            if let m = args.startMark {
+                guard let base = marks[m.name] else {
+                    throw ToolingError.unknownMark(name: m.name, known: Array(marks.keys).sorted())
+                }
+                return max(0.0, base + m.offset)
+            }
+            return args.startTime
+        }()
+
+        if args.hasPlayground {
+            guard let pg = playgroundHost ?? runtime.playgroundHost else {
+                throw ToolingError.playgroundNotConfigured
+            }
+            try pg.openAt(story: args.playgroundName, variant: args.playgroundVariant)
+            if let story = pg.currentStory {
+                if let makeState = story.makeState {
+                    runtime.state = makeState()
+                } else if story.isScene, let applyScene = spec.scenes[story.path] {
+                    var pgTx = Tx()
+                    applyScene(&runtime.state, &pgTx)
+                    runtime.applyTx(pgTx, at: 0.0, markDirtyIfNotLiveOnly: false)
+                }
+                if let fresh = pg.freshTransform {
+                    runtime.state = fresh(runtime.state)
+                }
+                if let variant = pg.currentVariant {
+                    variant.apply(&runtime.state)
+                }
+                runtime.view = { state, cx in
+                    let stageSize = story.stageConfig.size ?? vp
+                    let inner = story.view(state, pg.controls, &cx)
+                    return el().key("playground-stage").w(stageSize.x).h(stageSize.y).child(inner)
+                }
+                runtime.markNeedsCommit()
+            }
+        }
+
+        let dumpDir = args.outDir ?? args.framesDir
+        let videoEncoder: ToolingVideoEncoder? = try args.videoPath.map {
+            try ToolingVideoEncoder(outputPath: $0, width: surfaceW, height: surfaceH, fps: args.fps)
+        }
+        let traceWriter: ToolingTraceWriter? = args.tracePath.map {
+            ToolingTraceWriter(path: $0, viewport: vp, fps: args.fps, scale: args.pixelScale, traceAll: args.traceAll)
+        }
+        let chromeLights: [[Float]]? = args.chromeOverlay ? chrome.trafficLightRects() : nil
+        func applyChromeOverlay(_ frame: Frame) -> Frame {
+            guard let lights = chromeLights else { return frame }
+            return Self.paintTrafficLights(frame, scale: args.pixelScale, lights: lights)
+        }
+
         // Initial settled frame at t = 0 (or `--at` if specified)
-        let initialT = (args.atTime ?? 0.0) * args.timeScale
+        let initialT = (resolvedAtTime ?? 0.0) * args.timeScale
         var lastRefScene = runtime.frame(at: initialT)
         var capturedStripFrames: [Frame] = []
+        var dumpedFrameCount = 0
+        var didFireReady = false
 
-        if !steps.isEmpty || args.durationOverride != nil || args.framesDir != nil || args.stripPath != nil {
-            let dt = 1.0 / max(1.0, args.fps)
+        let needsLoop = !steps.isEmpty
+            || args.durationOverride != nil
+            || args.durationAuto
+            || args.frameCount != nil
+            || dumpDir != nil
+            || args.stripPath != nil
+            || args.tracePath != nil
+            || args.videoPath != nil
+
+        if needsLoop {
+            let fps = max(1.0, args.fps)
+            let dt = 1.0 / fps
+            let startFrame = max(0, Int((resolvedStartTime * fps).rounded()))
             let lastEventTime = steps.last?.t ?? 0.0
-            let maxSimTime = args.durationOverride ?? (args.atTime ?? (lastEventTime + 1.5))
+            let endMarkOrTail = marks["end"] ?? (lastEventTime + 1.0)
+            let autoFrameCount = max(0, Int((endMarkOrTail * fps).rounded()) - startFrame) + 1
+            let hasOutput = dumpDir != nil || args.videoPath != nil
+            let targetOutputFrames: Int? = {
+                if let n = args.frameCount { return n }
+                if let d = args.durationOverride { return max(1, Int((d * fps).rounded())) }
+                if args.durationAuto || hasOutput { return autoFrameCount }
+                return nil
+            }()
+            let snapT: Double = resolvedAtTime ?? {
+                if let count = targetOutputFrames, count > 0 {
+                    return Double(startFrame + count - 1) * dt
+                }
+                return steps.isEmpty ? 0.0 : (lastEventTime + 1.0)
+            }()
+            let snapFrame = max(0, Int((snapT * fps).rounded()))
+            let lastOutputFrame = targetOutputFrames.map { startFrame + max(1, $0) - 1 } ?? 0
+            let lastFrame = max(snapFrame, lastOutputFrame)
+            let maxSimTime = Double(lastFrame) * dt + dt * 0.25
+
             var simTime: Double = 0.0
             var stepCursor = 0
             var anchorPos = Vec2(vp.x * 0.5, vp.y * 0.5)
             var frameIndex = 0
-            let stripStride = args.stripEvery ?? max(1, Int(args.fps / 12.0))
+            let stripStride = args.stripEvery ?? max(1, Int(fps / 12.0))
+            let wallStart = Date()
 
-            if let framesDir = args.framesDir {
-                try FileManager.default.createDirectory(atPath: framesDir, withIntermediateDirectories: true)
+            if let dumpDir {
+                try FileManager.default.createDirectory(atPath: dumpDir, withIntermediateDirectories: true)
             }
 
-            while simTime <= maxSimTime {
+            while simTime <= maxSimTime || (targetOutputFrames != nil && dumpedFrameCount < (targetOutputFrames ?? 0)) {
+                if args.realtime {
+                    let ahead = simTime - Date().timeIntervalSince(wallStart)
+                    if ahead > 0 {
+                        Thread.sleep(forTimeInterval: ahead)
+                    }
+                }
                 while stepCursor < steps.count && steps[stepCursor].t <= simTime + 1e-6 {
                     let s = steps[stepCursor]
                     stepCursor += 1
@@ -653,10 +1138,14 @@ public enum HeadlessRunner {
                         runtime.pointerUp(at: resolvedPos, button: btn, mods: mods, at: animNow)
                     case .keyDown(let kev):
                         runtime.keyDown(kev, at: animNow)
+                    case .keyUp:
+                        break
                     case .shortcut(let chord):
                         runtime.keyDown(KeyEvent(key: chord.key, mods: chord.mods), at: animNow)
                     case .paste(let clip):
                         runtime.paste(clip, at: animNow)
+                    case .ime(let imeEv):
+                        _ = runtime.dispatchIme(imeEv, at: animNow)
                     case .wheel(let wev):
                         runtime.wheel(wev, at: resolvedPos, now: animNow)
                     case let .fling(vx, vy):
@@ -665,36 +1154,108 @@ public enum HeadlessRunner {
                         runtime.viewport = newVP
                     case .windowFocus(let foc):
                         runtime.windowFocused = foc
+                    case .mark(let markName):
+                        if args.realtime {
+                            print("rune-mark \(markName) \(s.t)")
+                            #if canImport(Darwin)
+                            Darwin.fflush(stdout)
+                            #elseif canImport(Glibc)
+                            Glibc.fflush(stdout)
+                            #endif
+                        }
+                    case .reopen:
+                        _ = runtime.dispatchReopen(hasVisibleWindows: true, at: animNow)
+                    case .openUrl(let url):
+                        runtime.dispatchOpenUrl(url, at: animNow)
+                    case .dragFiles(let urls):
+                        runtime.dragFiles(urls, at: resolvedPos, at: animNow)
+                    case .dropFiles(let urls):
+                        runtime.dropFiles(urls, at: resolvedPos, at: animNow)
+                    case .dragFilesLeave:
+                        runtime.fileDrop(.exited, at: animNow)
+                    case .popupPick(let id):
+                        try? runtime.resolvePopup(id)
+                    case .fileDialogAnswer(let url):
+                        if let pending = runtime.takeFileDialog() {
+                            runtime.answerFileDialog(pending.id, .success(url))
+                        }
                     }
                 }
 
                 let animNow = simTime * args.timeScale
+                let frameClockStart = Date()
                 lastRefScene = runtime.frame(at: animNow)
+                let frameCpuMs = Date().timeIntervalSince(frameClockStart) * 1000.0
+                traceWriter?.recordFrame(runtime: runtime, tMs: simTime * 1000.0, cpuMs: frameCpuMs)
 
-                if simTime + 1e-6 >= args.startTime {
-                    if let framesDir = args.framesDir {
-                        let f = try renderScene(lastRefScene)
-                        let outURL = URL(fileURLWithPath: framesDir).appendingPathComponent(String(format: "frame_%04d.png", frameIndex))
-                        try f.writePNG(to: outURL)
+                if args.realtime && !didFireReady {
+                    didFireReady = true
+                    onReady?(WindowHandle(key: windowKey))
+                }
+
+                if simTime + 1e-6 >= resolvedStartTime {
+                    if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {
+                        break
                     }
-                    if args.stripPath != nil && (frameIndex % stripStride == 0) {
-                        capturedStripFrames.append(try renderScene(lastRefScene))
+                    let needDump = dumpDir != nil
+                    let needVideo = videoEncoder != nil
+                    let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
+                    let needRender = needDump || needVideo || needStrip
+                    if needRender {
+                        let baseFrame = applyChromeOverlay(try renderScene(lastRefScene))
+                        if needVideo {
+                            try videoEncoder?.writeFrame(baseFrame)
+                        }
+                        var f = baseFrame
+                        if !args.cropRects.isEmpty {
+                            f = tileCrops(f, cropRectsPt: args.cropRects, scale: args.pixelScale)
+                        }
+                        if let dumpDir {
+                            let outURL = URL(fileURLWithPath: dumpDir).appendingPathComponent(String(format: "frame_%04d.png", frameIndex))
+                            try f.writePNG(to: outURL)
+                            dumpedFrameCount += 1
+                        } else if needVideo || targetOutputFrames != nil {
+                            dumpedFrameCount += 1
+                        }
+                        if needStrip {
+                            capturedStripFrames.append(f)
+                        }
+                    } else if targetOutputFrames != nil {
+                        dumpedFrameCount += 1
                     }
                     frameIndex += 1
                 }
 
-                // Stop early once all script events have fired and all animations have settled!
-                if args.durationOverride == nil && args.atTime == nil && stepCursor >= steps.count && !runtime.isAnimating && simTime >= lastEventTime + dt {
+                let explicitLengthRequested = args.durationAuto
+                    || args.durationOverride != nil
+                    || resolvedAtTime != nil
+                    || args.frameCount != nil
+                    || hasOutput
+                    || args.tracePath != nil
+                if !explicitLengthRequested && stepCursor >= steps.count && !runtime.isAnimating && simTime >= lastEventTime + dt {
+                    break
+                }
+                if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {
                     break
                 }
                 simTime += dt
             }
+        } else if args.realtime && !didFireReady {
+            didFireReady = true
+            onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = try renderAndReport(lastRefScene, at: runtime.currentTime)
-        if let cropKey = args.cropKey, let elInfo = runtime.element(byKey: cropKey) {
+        var finalFrame = applyChromeOverlay(try renderAndReport(lastRefScene, at: runtime.currentTime))
+        if !args.cropRects.isEmpty {
+            finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
+        } else if let cropKey = args.cropKey, let elInfo = runtime.element(byKey: cropKey) {
             finalFrame = cropFrame(finalFrame, rectPt: elInfo.rect, scale: args.pixelScale)
+        } else if args.hasPlayground && !args.wholeWindow, let stageEl = runtime.elements().first(where: { $0.key == "playground-stage" }) {
+            finalFrame = cropFrame(finalFrame, rectPt: stageEl.rect, scale: args.pixelScale)
         }
+        let chromeOverlaps: [String] = chromeLights.map {
+            Self.findTrafficLightOverlaps(runtime: runtime, lights: $0)
+        } ?? []
         let treeData = try runtime.treeJSONData(pretty: true, realTime: runtime.currentTime)
 
         if let snapPath = args.snapPath {
@@ -707,11 +1268,23 @@ public enum HeadlessRunner {
         }
         if let stripPath = args.stripPath {
             let frames = capturedStripFrames.isEmpty ? [finalFrame] : capturedStripFrames
-            let strip = stitchHorizontalStrip(frames: frames)
+            let useGutter = (frames.count > args.stripCols) || !args.cropRects.isEmpty
+            let strip = stitchGridStrip(frames: frames, cols: args.stripCols, gap: useGutter ? 4 : 0)
             try strip.writePNG(to: URL(fileURLWithPath: stripPath))
         }
+        try traceWriter?.finish()
+        try videoEncoder?.finish()
 
-        return Output(finalFrame: finalFrame, treeJSON: treeData)
+        return Output(
+            finalFrame: finalFrame,
+            treeJSON: treeData,
+            frameCount: dumpedFrameCount,
+            marks: marks,
+            windowKeys: [windowKey],
+            tracePath: args.tracePath,
+            videoPath: args.videoPath,
+            chromeOverlaps: chromeOverlaps
+        )
     }
 
     private static func cropFrame(_ frame: Frame, rectPt: [Float], scale: Float) -> Frame {
@@ -732,21 +1305,383 @@ public enum HeadlessRunner {
         return Frame(width: cw, height: ch, rgba: out)
     }
 
-    private static func stitchHorizontalStrip(frames: [Frame]) -> Frame {
+    private static func tileCrops(_ frame: Frame, cropRectsPt: [[Float]], scale: Float, gap: Int = 4) -> Frame {
+        let cropped = cropRectsPt.map { cropFrame(frame, rectPt: $0, scale: scale) }
+        guard !cropped.isEmpty else { return frame }
+        if cropped.count == 1 { return cropped[0] }
+        let tw = cropped.map(\.width).max() ?? frame.width
+        let th = cropped.map(\.height).reduce(0, +) + gap * (cropped.count - 1)
+        var out = [UInt8](repeating: 0, count: tw * th * 4)
+        for idx in stride(from: 0, to: out.count, by: 4) {
+            out[idx] = 128; out[idx + 1] = 128; out[idx + 2] = 128; out[idx + 3] = 255
+        }
+        var oy = 0
+        for part in cropped {
+            for row in 0..<part.height {
+                let srcStart = row * part.width * 4
+                let dstStart = ((oy + row) * tw) * 4
+                out.replaceSubrange(dstStart..<(dstStart + part.width * 4), with: part.rgba[srcStart..<(srcStart + part.width * 4)])
+            }
+            oy += part.height + gap
+        }
+        return Frame(width: tw, height: th, rgba: out)
+    }
+
+    private static func stitchGridStrip(frames: [Frame], cols: Int, gap: Int) -> Frame {
         guard let first = frames.first else {
             return Frame(width: 1, height: 1, rgba: [0, 0, 0, 255])
         }
         let w = first.width
         let h = first.height
-        let totalW = w * frames.count
-        var out = Array<UInt8>(repeating: 0, count: totalW * h * 4)
+        let colCount = max(1, min(frames.count, cols))
+        let rowCount = (frames.count + colCount - 1) / colCount
+        let totalW = colCount * w + max(0, colCount - 1) * gap
+        let totalH = rowCount * h + max(0, rowCount - 1) * gap
+        var out = [UInt8](repeating: 0, count: totalW * totalH * 4)
+        if gap > 0 {
+            for idx in stride(from: 0, to: out.count, by: 4) {
+                out[idx] = 128; out[idx + 1] = 128; out[idx + 2] = 128; out[idx + 3] = 255
+            }
+        }
         for (idx, frame) in frames.enumerated() where frame.width == w && frame.height == h {
+            let cx = (idx % colCount) * (w + gap)
+            let cy = (idx / colCount) * (h + gap)
             for row in 0..<h {
                 let srcStart = row * w * 4
-                let dstStart = (row * totalW + idx * w) * 4
+                let dstStart = ((cy + row) * totalW + cx) * 4
                 out.replaceSubrange(dstStart..<(dstStart + w * 4), with: frame.rgba[srcStart..<(srcStart + w * 4)])
             }
         }
-        return Frame(width: totalW, height: h, rgba: out)
+        return Frame(width: totalW, height: totalH, rgba: out)
+    }
+
+    private static func paintTrafficLights(_ frame: Frame, scale: Float, lights: [[Float]]) -> Frame {
+        guard lights.count >= 3 else { return frame }
+        var px = frame.rgba
+        let w = frame.width
+        let h = frame.height
+        let colors: [[Float]] = [
+            [255.0, 95.0, 87.0],
+            [254.0, 188.0, 46.0],
+            [40.0, 200.0, 64.0],
+        ]
+        func blend(_ x: Int, _ y: Int, _ c: [Float], _ a: Float) {
+            guard x >= 0, y >= 0, x < w, y < h, a > 0 else { return }
+            let i = (y * w + x) * 4
+            for k in 0..<3 {
+                let blended = Float(px[i + k]) * (1.0 - a) + c[k] * a
+                px[i + k] = UInt8(max(0, min(255, Int(blended.rounded()))))
+            }
+        }
+        for (r, c) in zip(lights, colors) where r.count == 4 {
+            let cx = (r[0] + r[2] * 0.5) * scale
+            let cy = (r[1] + r[3] * 0.5) * scale
+            let rad = (r[2] * 0.5) * scale
+            for y in Int((cy - rad - 1.0).rounded(.down))...Int((cy + rad + 1.0).rounded(.up)) {
+                for x in Int((cx - rad - 1.0).rounded(.down))...Int((cx + rad + 1.0).rounded(.up)) {
+                    let dx = Float(x) + 0.5 - cx
+                    let dy = Float(y) + 0.5 - cy
+                    let dist = sqrt(dx * dx + dy * dy)
+                    let alpha = max(0.0, min(1.0, rad - dist + 0.5))
+                    blend(x, y, c, alpha)
+                }
+            }
+        }
+        let m: Float = 4.0
+        let x0 = Int(((lights[0][0] - m) * scale).rounded(.down))
+        let y0 = Int(((lights[0][1] - m) * scale).rounded(.down))
+        let x1 = Int(((lights[2][0] + lights[2][2] + m) * scale).rounded(.up))
+        let y1 = Int(((lights[2][1] + lights[2][3] + m) * scale).rounded(.up))
+        let cyan: [Float] = [0.0, 200.0, 255.0]
+        if x0 <= x1 {
+            for x in x0...x1 {
+                blend(x, y0, cyan, 0.8)
+                blend(x, y1, cyan, 0.8)
+            }
+        }
+        if y0 <= y1 {
+            for y in y0...y1 {
+                blend(x0, y, cyan, 0.8)
+                blend(x1, y, cyan, 0.8)
+            }
+        }
+        return Frame(width: w, height: h, rgba: px)
+    }
+
+    private static func findTrafficLightOverlaps<State>(runtime: Runtime<State>, lights: [[Float]]) -> [String] {
+        guard lights.count >= 3 else { return [] }
+        let m: Float = 4.0
+        let zx0 = lights[0][0] - m
+        let zy0 = lights[0][1] - m
+        let zx1 = lights[2][0] + lights[2][2] + m
+        let zy1 = lights[2][1] + lights[2][3] + m
+        var overlaps: [String] = []
+        for e in runtime.elements() {
+            let drawn = e.text != nil || e.role == .icon || e.role == .button || e.role == .textInput
+            let v = e.visible
+            guard drawn, e.opacity > 0.01, v.count == 4, v[2] > 0.0, v[3] > 0.0 else { continue }
+            if v[0] < zx1 && (v[0] + v[2]) > zx0 && v[1] < zy1 && (v[1] + v[3]) > zy0 {
+                overlaps.append(e.key ?? e.path)
+                FileHandle.standardError.write(Data("rune: chrome: \(e.path) overlaps the traffic lights at \(v)\n".utf8))
+            }
+        }
+        return overlaps
+    }
+}
+
+private final class ToolingTraceWriter {
+    private let path: String
+    private let traceAll: Bool
+    private var lines: [String] = []
+    private var ids: [String: UInt32] = [:]
+    private var described: [UInt32: (String, String)] = [:]
+    private var states: [UInt32: [Int]] = [:]
+    private var scrolled: [UInt32: [Int]] = [:]
+
+    init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool) {
+        self.path = path
+        self.traceAll = traceAll
+        let header: [String: Any] = [
+            "type": "header",
+            "launch": "rune",
+            "width": viewport.x,
+            "height": viewport.y,
+            "hz": fps,
+            "scale": scale,
+            "platform": "rune",
+            "units": "pt",
+            "clock": "virtual",
+        ]
+        if let json = Self.encodeJSONLine(header) {
+            lines.append(json)
+        }
+    }
+
+    func recordFrame<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double) {
+        let els = runtime.elements()
+        func isTraced(_ e: ElementInfo) -> Bool {
+            traceAll || e.key != nil
+        }
+        func idFor(_ path: String) -> UInt32 {
+            if let existing = ids[path] { return existing }
+            let next = UInt32(ids.count + 1)
+            ids[path] = next
+            return next
+        }
+
+        var metas: [[String: Any]] = []
+        var changed: [[Any]] = []
+        var scrolledRows: [[Any]] = []
+        var seen = Set<UInt32>()
+
+        for e in els where isTraced(e) {
+            let id = idFor(e.path)
+            let name = e.key ?? e.path
+            seen.insert(id)
+            if described[id]?.0 != name || described[id]?.1 != e.role.rawValue {
+                described[id] = (name, e.role.rawValue)
+                var meta: [String: Any] = [
+                    "id": id,
+                    "cls": "rune",
+                    "nm": name,
+                    "host": "rune",
+                    "role": e.role.rawValue,
+                ]
+                if let pIdx = e.parentIndex, els.indices.contains(pIdx), isTraced(els[pIdx]) {
+                    meta["pv"] = idFor(els[pIdx].path)
+                }
+                metas.append(meta)
+            }
+            let r = e.rect.count == 4 ? e.rect : [Float](repeating: 0, count: 4)
+            let v = e.visible.count == 4 ? e.visible : r
+            let clipped = zip(r, v).contains { abs($0 - $1) > 0.5 }
+            let flags = (e.moving ? 1 : 0) | (clipped ? 4 : 0)
+            let q = [
+                Int((Double(r[0]) * 100.0).rounded()),
+                Int((Double(r[1]) * 100.0).rounded()),
+                Int((Double(r[2]) * 100.0).rounded()),
+                Int((Double(r[3]) * 100.0).rounded()),
+                Int((Double(e.opacity) * 1000.0).rounded()),
+                Int((Double(e.radius) * 100.0).rounded()),
+                flags,
+                Int((Double(v[0]) * 100.0).rounded()),
+                Int((Double(v[1]) * 100.0).rounded()),
+                Int((Double(v[2]) * 100.0).rounded()),
+                Int((Double(v[3]) * 100.0).rounded()),
+            ]
+            if states[id] != q {
+                states[id] = q
+                var row: [Any] = [
+                    id,
+                    Self.r2(r[0]),
+                    Self.r2(r[1]),
+                    Self.r2(r[2]),
+                    Self.r2(r[3]),
+                    Self.r3(e.opacity),
+                    Self.r2(e.radius),
+                    flags,
+                ]
+                if clipped {
+                    row.append(contentsOf: [Self.r2(v[0]), Self.r2(v[1]), Self.r2(v[2]), Self.r2(v[3])])
+                }
+                changed.append(row)
+            }
+            let sc = e.scrolled.count == 2 ? e.scrolled : [0, 0]
+            let qsc = [Int((Double(sc[0]) * 100.0).rounded()), Int((Double(sc[1]) * 100.0).rounded())]
+            if (scrolled[id] ?? [0, 0]) != qsc {
+                scrolledRows.append([id, Self.r2(sc[0]), Self.r2(sc[1])])
+                if qsc == [0, 0] {
+                    scrolled.removeValue(forKey: id)
+                } else {
+                    scrolled[id] = qsc
+                }
+            }
+        }
+
+        let gone = states.keys.filter { !seen.contains($0) }.sorted()
+        for id in gone {
+            states.removeValue(forKey: id)
+            scrolled.removeValue(forKey: id)
+        }
+
+        var line: [String: Any] = [
+            "t": (tMs * 1000.0).rounded() / 1000.0,
+            "n": 1,
+            "quality": [
+                "cpu_ms": (cpuMs * 1000.0).rounded() / 1000.0,
+                "animating": runtime.isAnimating,
+            ],
+        ]
+        if !metas.isEmpty { line["m"] = metas }
+        if !changed.isEmpty { line["e"] = changed }
+        if !gone.isEmpty { line["g"] = gone }
+        if !scrolledRows.isEmpty { line["sc"] = scrolledRows }
+        if let json = Self.encodeJSONLine(line) {
+            lines.append(json)
+        }
+    }
+
+    func finish() throws {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let body = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
+        try Data(body.utf8).write(to: url, options: .atomic)
+    }
+
+    private static func r2(_ v: Float) -> Double {
+        (Double(v) * 100.0).rounded() / 100.0
+    }
+
+    private static func r3(_ v: Float) -> Double {
+        (Double(v) * 1000.0).rounded() / 1000.0
+    }
+
+    private static func encodeJSONLine(_ obj: [String: Any]) -> String? {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
+private final class ToolingVideoEncoder {
+    private let width: Int
+    private let height: Int
+    #if os(macOS) || os(Linux)
+    private let process: Process
+    private let stdinPipe: Pipe
+    private var finished = false
+    #endif
+
+    init(outputPath: String, width: Int, height: Int, fps: Double) throws {
+        self.width = width
+        self.height = height
+        let url = URL(fileURLWithPath: outputPath)
+        let ext = url.pathExtension.lowercased()
+        let codecArgs: [String]
+        let evenFilter = "pad=ceil(iw/2)*2:ceil(ih/2)*2,scale=out_color_matrix=bt709:out_range=tv,format=yuv420p"
+        let colorTags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+        switch ext {
+        case "mp4":
+            codecArgs = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-vf", evenFilter] + colorTags + ["-movflags", "+faststart"]
+        case "mov":
+            codecArgs = ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le", "-vf", "scale=out_color_matrix=bt709:out_range=tv", "-vendor", "apl0"] + colorTags
+        case "webm":
+            codecArgs = ["-c:v", "libvpx-vp9", "-crf", "30", "-b:v", "0", "-row-mt", "1", "-deadline", "good", "-cpu-used", "4", "-vf", evenFilter] + colorTags
+        default:
+            throw ToolingError.unsupportedVideoContainer(ext: ext)
+        }
+
+        #if os(macOS) || os(Linux)
+        guard let ffmpegPath = Self.findFFmpegOnPath() else {
+            throw ToolingError.ffmpegUnavailable
+        }
+        let parent = url.deletingLastPathComponent()
+        if !parent.path.isEmpty {
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        }
+        let safeOutput = (!outputPath.hasPrefix("/") && outputPath.hasPrefix("-")) ? "./\(outputPath)" : outputPath
+        let args = [
+            "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgba",
+            "-s", "\(width)x\(height)", "-r", "\(fps)", "-i", "-",
+        ] + codecArgs + [safeOutput]
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: ffmpegPath)
+        proc.arguments = args
+        let pipe = Pipe()
+        proc.standardInput = pipe
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        self.process = proc
+        self.stdinPipe = pipe
+        #else
+        let _ = codecArgs
+        throw ToolingError.ffmpegUnavailable
+        #endif
+    }
+
+    func writeFrame(_ frame: Frame) throws {
+        #if os(macOS) || os(Linux)
+        guard frame.width == width, frame.height == height else { return }
+        try stdinPipe.fileHandleForWriting.write(contentsOf: frame.rgba)
+        #endif
+    }
+
+    func finish() throws {
+        #if os(macOS) || os(Linux)
+        guard !finished else { return }
+        finished = true
+        try? stdinPipe.fileHandleForWriting.close()
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            throw ToolingError.ffmpegFailed(status: process.terminationStatus)
+        }
+        #endif
+    }
+
+    deinit {
+        #if os(macOS) || os(Linux)
+        if !finished {
+            try? stdinPipe.fileHandleForWriting.close()
+            if process.isRunning {
+                process.terminate()
+                process.waitUntilExit()
+            }
+        }
+        #endif
+    }
+
+    private static func findFFmpegOnPath() -> String? {
+        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for dir in envPath.split(separator: ":") {
+            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent("ffmpeg").path
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+        return nil
     }
 }

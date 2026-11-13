@@ -333,7 +333,17 @@ public protocol HostedWindowEntry: AnyObject {
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double)
     func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
+    @MainActor func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double)
+    func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool
+    func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>?
+    func resolvePopup(runtimeObj: AnyObject, picked: String?)
+    func cancelPopups(runtimeObj: AnyObject)
+    func takeFileDialog(runtimeObj: AnyObject) -> FileDialogPending?
+    func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
+    func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
+    func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
+    func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
     func runReopenHook(runtimeObj: AnyObject, hasVisibleWindows: Bool) -> Bool
@@ -383,6 +393,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         )
         rt.windowTitle = spec.appSpec.title
         rt.urlOpener.headless = false
+        rt.srgbBlend = spec.appSpec.srgbBlend
+        rt.poll = spec.appSpec.poll
+        rt.onAppFileDrop = spec.appSpec.onFileDrop
+        rt.onFileDrop = spec.appSpec.onFileDropPhase
+        rt.setSystemContrast(SystemPreferences.current().contrast)
         if let onQuit = spec.onQuit {
             nonisolated(unsafe) weak let weakRt = rt
             nonisolated(unsafe) let quitFn = onQuit
@@ -412,7 +427,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func setFocused(runtimeObj: AnyObject, focused: Bool) {
-        rt(runtimeObj).windowFocused = focused
+        let r = rt(runtimeObj)
+        r.windowFocused = focused
+        if focused {
+            r.setSystemContrast(SystemPreferences.current().contrast)
+        }
     }
 
     func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
@@ -459,8 +478,53 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).keyDown(event, at: at)
     }
 
+    @MainActor
+    func keyDownWithClipboardSync(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
+        #if os(macOS)
+        return MacOSClipboardSync.dispatchKeyWithSync(event, runtime: rt(runtimeObj), at: at)
+        #else
+        return rt(runtimeObj).keyDown(event, at: at)
+        #endif
+    }
+
     func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double) {
         rt(runtimeObj).fileDrop(event, at: at)
+    }
+
+    func acceptsDrop(runtimeObj: AnyObject, urls: [URL], at: Vec2) -> Bool {
+        rt(runtimeObj).acceptsDrop(urls, at: at)
+    }
+
+    func takePopup(runtimeObj: AnyObject) -> Result<PopupShow, PopupMenuError>? {
+        rt(runtimeObj).takePopup()
+    }
+
+    func resolvePopup(runtimeObj: AnyObject, picked: String?) {
+        try? rt(runtimeObj).resolvePopup(picked)
+    }
+
+    func cancelPopups(runtimeObj: AnyObject) {
+        rt(runtimeObj).cancelPopups()
+    }
+
+    func takeFileDialog(runtimeObj: AnyObject) -> FileDialogPending? {
+        rt(runtimeObj).takeFileDialog()
+    }
+
+    func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult) {
+        rt(runtimeObj).answerFileDialog(id, result)
+    }
+
+    func cancelFileDialogs(runtimeObj: AnyObject, at: Double) {
+        rt(runtimeObj).cancelFileDialogs(at: at)
+    }
+
+    func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart? {
+        rt(runtimeObj).takeDragOutStart()
+    }
+
+    func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {
+        rt(runtimeObj).finishDragOut(outcome, at: at)
     }
 
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool {
@@ -517,18 +581,28 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
-        try HeadlessRunner.run(spec.appSpec, args: args)
+        let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
+        return try HeadlessRunner.run(
+            spec.appSpec,
+            args: args,
+            chrome: resolvedChrome,
+            windowKey: spec.key,
+            availableWindows: [spec.key]
+        )
     }
 }
 
 /// Errors from multi-window key validation or launch (`window::spec::validate`).
 public enum MultiWindowError: Error, LocalizedError, Equatable {
     case emptyOrDuplicateKey(String)
+    case unknownWindow(key: String, available: [String])
 
     public var errorDescription: String? {
         switch self {
         case .emptyOrDuplicateKey(let key):
             return "empty or duplicate window key: \(key)"
+        case let .unknownWindow(key, available):
+            return "no such window \"\(key)\"; available: \(available.joined(separator: ", "))"
         }
     }
 }
@@ -592,6 +666,46 @@ public enum RuneMultiWindow {
         return out
     }
 
+    /// Resolves `--list-windows` / `--window KEY` and executes a headless run on multi-window specs.
+    @discardableResult
+    public static func runHeadless(
+        _ windows: [AnyWindowSpec],
+        args: ToolingArgs
+    ) throws -> HeadlessRunner.Output {
+        let flat = flatten(windows)
+        try validate(flat)
+        let keys = flat.map(\.key)
+        if args.listWindows {
+            for key in keys {
+                print(key)
+            }
+            return HeadlessRunner.Output(
+                finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
+                treeJSON: Data("{}".utf8),
+                windowKeys: keys
+            )
+        }
+        let target: AnyWindowSpec
+        if let requested = args.windowName {
+            guard let found = flat.first(where: { $0.key == requested }) else {
+                throw MultiWindowError.unknownWindow(key: requested, available: keys)
+            }
+            target = found
+        } else if let first = flat.first {
+            target = first
+        } else {
+            return HeadlessRunner.Output(
+                finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
+                treeJSON: Data("{}".utf8),
+                windowKeys: []
+            )
+        }
+        // Pass `windowName: nil` since window routing already selected `target`.
+        var resolvedArgs = args
+        resolvedArgs.windowName = nil
+        return try target.makeHostEntry().runHeadless(args: resolvedArgs)
+    }
+
     /// Runs a multi-window application (`run_windows`).
     @MainActor
     public static func runWindows(
@@ -603,17 +717,13 @@ public enum RuneMultiWindow {
         try validate(flat)
         let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
         if parsed.isHeadlessRequested {
-            if let first = flat.first {
-                _ = try first.makeHostEntry().runHeadless(args: parsed)
-            }
+            _ = try runHeadless(flat, args: parsed)
             return
         }
         #if os(macOS)
         try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
         #else
-        if let first = flat.first {
-            _ = try first.makeHostEntry().runHeadless(args: parsed)
-        }
+        _ = try runHeadless(flat, args: parsed)
         #endif
     }
 }

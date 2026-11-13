@@ -631,6 +631,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if entry.secondary {
+            view.cancelActiveModals()
             window.orderOut(nil)
             isHiddenOrClosed = true
             stepRest(.unseen)
@@ -642,6 +643,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         guard !entry.secondary else { return }
         view.stopTimer()
+        view.cancelActiveModals()
         restTimer?.invalidate()
         restTimer = nil
         isTornDown = true
@@ -692,6 +694,9 @@ private final class RuneHostedMetalView: NSView {
     private var didSignalReady = false
     private var shadowResample = ShadowResampleState()
     private var drawableCounter: UInt64 = 0
+    private let popupPresenter = MacOSPopupMenuPresenter()
+    private let fileDialogPresenter = MacOSFileDialogPresenter()
+    private let dragOutCoordinator = MacOSDragOutCoordinator()
     weak var slot: HostedWindowSlot?
 
     init(
@@ -714,7 +719,7 @@ private final class RuneHostedMetalView: NSView {
         metalLayer.framebufferOnly = false
         metalLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         self.layer = metalLayer
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes(MacOSDropReader.draggedTypes)
     }
 
     @available(*, unavailable)
@@ -810,6 +815,7 @@ private final class RuneHostedMetalView: NSView {
             }
         }
         slot?.host?.drainOpenedWindows()
+        pumpPlatformActions()
 
         if entry.isAnimating(runtimeObj: runtime) {
             if animTimer == nil {
@@ -927,8 +933,92 @@ private final class RuneHostedMetalView: NSView {
                 return
             }
         }
-        _ = entry.keyDown(runtimeObj: runtime, event: KeyEvent(key: key, mods: m), at: nowSeconds())
+        _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: KeyEvent(key: key, mods: m), at: nowSeconds())
         requestRender()
+    }
+
+    func cancelActiveModals() {
+        popupPresenter.cancel()
+        fileDialogPresenter.cancel()
+        entry.cancelPopups(runtimeObj: runtime)
+        entry.cancelFileDialogs(runtimeObj: runtime, at: nowSeconds())
+    }
+
+    private func pumpPlatformActions() {
+        if let dragStart = entry.takeDragOutStart(runtimeObj: runtime) {
+            dragOutCoordinator.start(dragStart, in: self) { [weak self] outcome in
+                guard let self else { return }
+                self.entry.finishDragOut(runtimeObj: self.runtime, outcome: outcome, at: self.nowSeconds())
+                self.requestRender()
+            }
+        }
+        if !popupPresenter.isPresenting {
+            while let taken = entry.takePopup(runtimeObj: runtime) {
+                switch taken {
+                case .failure:
+                    continue
+                case .success(let show):
+                    popupPresenter.present(show, in: self) { [weak self] picked in
+                        guard let self else { return }
+                        self.entry.resolvePopup(runtimeObj: self.runtime, picked: picked)
+                        self.requestRender()
+                    }
+                    break
+                }
+                break
+            }
+        }
+        if !fileDialogPresenter.isPresenting, let pending = entry.takeFileDialog(runtimeObj: runtime) {
+            fileDialogPresenter.present(pending, in: self.window) { [weak self] id, result in
+                guard let self else { return }
+                self.entry.answerFileDialog(runtimeObj: self.runtime, id: id, result: result)
+                self.requestRender()
+            }
+        }
+    }
+
+    // MARK: - NSDraggingDestination (File Drop)
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = MacOSDropReader.hoverURLs(from: sender)
+        guard !urls.isEmpty else { return [] }
+        let pt = localPoint(forDragging: sender)
+        let files = urls.map { DroppedFile(url: $0) }
+        entry.fileDrop(runtimeObj: runtime, event: .entered(files, at: pt), at: nowSeconds())
+        requestRender()
+        return entry.acceptsDrop(runtimeObj: runtime, urls: urls, at: pt) ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        let urls = MacOSDropReader.hoverURLs(from: sender)
+        let pt = localPoint(forDragging: sender)
+        entry.fileDrop(runtimeObj: runtime, event: .hovered(at: pt), at: nowSeconds())
+        requestRender()
+        guard !urls.isEmpty else { return [] }
+        return entry.acceptsDrop(runtimeObj: runtime, urls: urls, at: pt) ? .copy : []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        entry.fileDrop(runtimeObj: runtime, event: .exited, at: nowSeconds())
+        requestRender()
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pt = localPoint(forDragging: sender)
+        let hoverUrls = MacOSDropReader.hoverURLs(from: sender)
+        guard !hoverUrls.isEmpty else { return false }
+        MacOSDropReader.dropURLs(from: sender) { [weak self] urls in
+            guard let self, !urls.isEmpty else { return }
+            let files = urls.map { DroppedFile(url: $0) }
+            self.entry.fileDrop(runtimeObj: self.runtime, event: .dropped(files, at: pt), at: self.nowSeconds())
+            self.requestRender()
+        }
+        return true
+    }
+
+    private func localPoint(forDragging sender: NSDraggingInfo) -> Vec2 {
+        let p = convert(sender.draggingLocation, from: nil)
+        return Vec2(Float(p.x), Float(p.y))
     }
 }
 

@@ -157,6 +157,7 @@ public final class RuneOverlayMetalView<State>: NSView {
     weak var pointerState: OverlayPointerState?
     var onRegionsUpdated: (([MotionRect]) -> Void)?
     var onSyncPassthrough: (() -> Void)?
+    var onAfterFrame: ((RuneOverlayMetalView<State>) -> Void)?
 
     public init(frame: NSRect, srgbBlend: Bool = true) {
         super.init(frame: frame)
@@ -277,6 +278,9 @@ public final class RuneOverlayMetalView<State>: NSView {
             renderer.render(scene: result.scene, to: drawable)
         }
         frameCounter &+= 1
+        if visible {
+            onAfterFrame?(self)
+        }
         return OverlaySurfaceSnapshot(
             frameCount: frameCounter,
             pixelWidth: pxW,
@@ -432,6 +436,7 @@ public final class RuneOverlayMacOSHost<State> {
     public var onSurfaceSnapshot: ((OverlaySurfaceSnapshot) -> Void)?
     public var onFadeCompleted: ((_ visible: Bool, _ ordered: Bool) -> Void)?
     public var onPanelStateChanged: ((_ windowNumber: UInt32?, _ capabilities: OverlayCapabilities) -> Void)?
+    public var onHideCleanup: (() -> Void)?
     public var configureView: ((RuneOverlayMetalView<State>) -> Void)?
     public var shouldKeepDrawing: (() -> Bool)?
 
@@ -567,6 +572,7 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     public func hide(fadeSeconds: Double) {
+        onHideCleanup?()
         removeMouseMonitors()
         if panel == nil {
             _ = presence.step(.hide(fadeSeconds: fadeSeconds))
@@ -583,6 +589,7 @@ public final class RuneOverlayMacOSHost<State> {
     }
 
     public func releasePanel() {
+        onHideCleanup?()
         stopFrameLoop()
         removeMouseMonitors()
         pointerState.stopped()
