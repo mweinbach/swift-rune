@@ -62,6 +62,18 @@ let package = Package(
         .executable(name: "rune-video-tiles", targets: ["RuneVideoTiles"]),
         .executable(name: "rune-web-hello", targets: ["RuneWebHello"]),
         .executable(name: "rune-web-showcase", targets: ["RuneWebShowcase"]),
+        .executable(name: "rune-ref-hashes", targets: ["RuneRefHashes"]),
+        .executable(name: "rune-kit-glyphs", targets: ["RuneKitGlyphs"]),
+        .executable(name: "rune-kit-scroll-x", targets: ["RuneKitScrollX"]),
+        .executable(name: "rune-kit-tree", targets: ["RuneKitTree"]),
+        .executable(name: "rune-scroll-keys", targets: ["RuneScrollKeys"]),
+        .executable(name: "rune-text-glide", targets: ["RuneTextGlide"]),
+        .executable(name: "rune-text-coverage", targets: ["RuneTextCoverage"]),
+        .executable(name: "rune-slow-click", targets: ["RuneSlowClick"]),
+        .executable(name: "rune-kit-shortcut-recorder", targets: ["RuneKitShortcutRecorder"]),
+        .executable(name: "rune-sticky", targets: ["RuneSticky"]),
+        .executable(name: "rune-expressive-press", targets: ["RuneExpressivePress"]),
+        .executable(name: "rune-motion-curves", targets: ["RuneMotionCurves"]),
     ],
     targets: [
         .target(
@@ -331,6 +343,66 @@ let package = Package(
             dependencies: ["Rune", "RuneKit", "RuneMotion"],
             path: "Sources/Examples/RuneWebShowcase"
         ),
+        .executableTarget(
+            name: "RuneRefHashes",
+            dependencies: ["RuneRef"],
+            path: "Sources/Examples/RuneRefHashes"
+        ),
+        .executableTarget(
+            name: "RuneKitGlyphs",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitGlyphs"
+        ),
+        .executableTarget(
+            name: "RuneKitScrollX",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitScrollX"
+        ),
+        .executableTarget(
+            name: "RuneKitTree",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitTree"
+        ),
+        .executableTarget(
+            name: "RuneScrollKeys",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneScrollKeys"
+        ),
+        .executableTarget(
+            name: "RuneTextGlide",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneTextGlide"
+        ),
+        .executableTarget(
+            name: "RuneTextCoverage",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneTextCoverage"
+        ),
+        .executableTarget(
+            name: "RuneSlowClick",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneSlowClick"
+        ),
+        .executableTarget(
+            name: "RuneKitShortcutRecorder",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitShortcutRecorder"
+        ),
+        .executableTarget(
+            name: "RuneSticky",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneSticky"
+        ),
+        .executableTarget(
+            name: "RuneExpressivePress",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneExpressivePress"
+        ),
+        .executableTarget(
+            name: "RuneMotionCurves",
+            dependencies: ["RuneMotion"],
+            path: "Sources/Examples/RuneMotionCurves"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -450,6 +522,18 @@ let package = Package(
                 "RuneRichClipboard",
                 "RuneDragOut",
                 "RuneDropFiles",
+                "RuneRefHashes",
+                "RuneKitGlyphs",
+                "RuneKitScrollX",
+                "RuneKitTree",
+                "RuneScrollKeys",
+                "RuneTextGlide",
+                "RuneTextCoverage",
+                "RuneSlowClick",
+                "RuneKitShortcutRecorder",
+                "RuneSticky",
+                "RuneExpressivePress",
+                "RuneMotionCurves",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
