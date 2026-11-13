@@ -1,5 +1,8 @@
 import Foundation
 import Rune
+#if os(macOS)
+import AppKit
+#endif
 
 public struct BackgroundState: Sendable {
     public var ticks: UInt64 = 0
@@ -185,7 +188,7 @@ public enum RuneBackgroundApp {
             return true
         }
         .onWindow { window in
-            fputs("background: native window \(window.title)\n", stderr)
+            fputs("background: native window \(window.title) (number: \(String(describing: window.windowNumber)))\n", stderr)
         }
         .scene("ticked") { state, _ in
             state.ticks = 42
@@ -277,17 +280,34 @@ public enum RuneBackgroundApp {
                     case ("status", _):
                         fputs("background: visible \(commands.isVisible), window error \(String(describing: commands.windowError))\n", stderr)
                     case ("dock", let on?):
-                        fputs("background: dock \(on) pending @platform AppHandle.setDockIcon(_ visible: Bool)\n", stderr)
+                        #if os(macOS)
+                        let showDock = (on == "on")
+                        DispatchQueue.main.async {
+                            NSApplication.shared.setActivationPolicy(showDock ? .regular : .accessory)
+                        }
+                        #else
+                        _ = on
+                        #endif
                     case ("hud", "show"): hud?.show()
                     case ("hud", "hide"): hud?.hide()
                     case ("hud", "transcribing"): hud?.update { $0.hudTranscribing = true }
                     case ("hud", "recording"): hud?.update { $0.hudTranscribing = false }
-                    case ("hud", "top"), ("hud", "bottom"), ("hud", "status"):
-                        fputs("background: hud placement/status pending @platform dynamic overlay API\n", stderr)
+                    case ("hud", "top"): hud?.setEdge(.top)
+                    case ("hud", "bottom"): hud?.setEdge(.bottom)
+                    case ("hud", "status"):
+                        fputs(
+                            "background: hud \(String(describing: hud?.availability)), visible \(String(describing: hud?.isVisible)), windowNumber \(String(describing: hud?.windowNumber))\n",
+                            stderr
+                        )
                     case ("capsule", "show"): capsule?.show()
                     case ("capsule", "hide"): capsule?.hide()
-                    case ("capsule", "left"), ("capsule", "wide"), ("capsule", "status"):
-                        fputs("background: capsule placement/resize/status pending @platform dynamic overlay API\n", stderr)
+                    case ("capsule", "left"): capsule?.setAlign(.start, inset: 12.0)
+                    case ("capsule", "wide"): capsule?.resize(Vec2(320, 48))
+                    case ("capsule", "status"):
+                        fputs(
+                            "background: capsule \(String(describing: capsule?.availability)), visible \(String(describing: capsule?.isVisible)), windowNumber \(String(describing: capsule?.windowNumber))\n",
+                            stderr
+                        )
                     default:
                         fputs(
                             "background: unknown command \(cmd) (open | show | hide | focus | position X Y | activate TOKEN | close | dock on|off | hud show|hide|top|bottom|recording|transcribing|status | capsule show|hide|left|wide|status | quit)\n",
