@@ -249,6 +249,7 @@ internal struct WordFadeMask {
 /// Commit payload describing one `El.reveal(wordFade:)` node.
 internal struct WordRevealCommitEntry {
     var id: NodeId
+    var parentId: NodeId? = nil
     var text: String
     var fade: Float
     var nodeTime: Double
@@ -259,6 +260,8 @@ internal struct WordRevealCommitEntry {
 internal struct WordRevealStore: Sendable {
     internal var phases: [NodeId: WordRevealPhase] = [:]
     private var texts: [NodeId: String] = [:]
+    private var parentIds: [NodeId: NodeId] = [:]
+    private var keptForUnmountedParent: Set<NodeId> = []
     internal var chain = WordRevealChain()
 
     func hasActiveFades(timeScaleOf: (NodeId) -> Float) -> Bool {
@@ -270,33 +273,63 @@ internal struct WordRevealStore: Sendable {
     mutating func reset() {
         phases.removeAll(keepingCapacity: true)
         texts.removeAll(keepingCapacity: true)
+        parentIds.removeAll(keepingCapacity: true)
+        keptForUnmountedParent.removeAll(keepingCapacity: true)
         chain = WordRevealChain()
+    }
+
+    mutating func prune(exitedIds: [NodeId]) {
+        guard !exitedIds.isEmpty else { return }
+        for id in exitedIds where !keptForUnmountedParent.contains(id) {
+            phases.removeValue(forKey: id)
+            texts.removeValue(forKey: id)
+            parentIds.removeValue(forKey: id)
+        }
     }
 
     mutating func commit(
         entries: [WordRevealCommitEntry],
+        presentIds: Set<NodeId>,
         retainIds: Set<NodeId>,
         prevMountedIds: Set<NodeId>,
         cut: Bool,
+        instant: Bool,
         reducedMotion: Bool
     ) {
         if cut {
             chain = WordRevealChain()
         }
         for entry in entries {
+            keptForUnmountedParent.remove(entry.id)
+            if let pid = entry.parentId {
+                parentIds[entry.id] = pid
+            }
             let wasMounted = prevMountedIds.contains(entry.id)
+            let prevPhase = phases[entry.id]
+            let prevShown: Int = {
+                switch prevPhase {
+                case let .idle(s), let .fading(s, _, _): return s
+                case nil: return 0
+                }
+            }()
+            let utf8Len = entry.text.utf8.count
+            let validBoundary: Bool = {
+                guard prevShown <= utf8Len else { return false }
+                let idx = entry.text.utf8.index(entry.text.startIndex, offsetBy: prevShown)
+                return idx.samePosition(in: entry.text) != nil
+            }()
             let arrival: WordRevealArrival
-            if cut {
-                arrival = .landed
+            if cut || instant || utf8Len < prevShown || !validBoundary {
+                arrival = .replaced
+            } else if prevPhase != nil {
+                arrival = .kept
             } else if !wasMounted {
                 arrival = .entering
-            } else if let prevText = texts[entry.id], !entry.text.hasPrefix(prevText) {
-                arrival = .replaced
             } else {
-                arrival = .kept
+                arrival = .landed
             }
 
-            var phase = phases[entry.id] ?? .idle(shown: 0)
+            var phase = prevPhase ?? .idle(shown: 0)
             let effects = phase.step(.commit(
                 content: entry.text,
                 fade: entry.fade,
@@ -315,8 +348,21 @@ internal struct WordRevealStore: Sendable {
         }
 
         if !phases.isEmpty {
-            phases = phases.filter { retainIds.contains($0.key) }
-            texts = texts.filter { retainIds.contains($0.key) }
+            let currentParentIds = parentIds
+            var retainedUnmounted: Set<NodeId> = []
+            let keep: (NodeId) -> Bool = { id in
+                if retainIds.contains(id) { return true }
+                // An instant parent unmount retains its child's reveal state across omission (`apply.rs:630`).
+                if instant, let pid = currentParentIds[id], !presentIds.contains(pid) {
+                    retainedUnmounted.insert(id)
+                    return true
+                }
+                return false
+            }
+            phases = phases.filter { keep($0.key) }
+            keptForUnmountedParent = keptForUnmountedParent.union(retainedUnmounted).intersection(phases.keys)
+            texts = texts.filter { phases.keys.contains($0.key) }
+            parentIds = parentIds.filter { phases.keys.contains($0.key) }
         }
     }
 

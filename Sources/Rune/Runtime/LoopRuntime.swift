@@ -4,13 +4,14 @@ import RuneMotion
 /// Sampled presentation values from an active `LoopTrack`.
 struct LoopSampleResult {
     var opacity: Float = 1.0
+    var scale: Float = 1.0
     var rotation: Float = 0.0
     var offset: Vec2 = .zero
 }
 
 /// Tracks active `LoopSpec` / `Cycle` / `MotionSequence` presentation tracks for mounted nodes.
 struct LoopRuntime {
-    private var entries: [NodeId: LoopSpec] = [:]
+    internal var entries: [NodeId: LoopSpec] = [:]
     var tracks: [NodeId: LoopTrack] = [:]
 
     mutating func sync(
@@ -74,8 +75,11 @@ struct LoopRuntime {
         switch spec.kind {
         case .rotation:
             res.rotation = val
-        case .opacity, .opacityCycle, .sequence:
+        case .opacity, .opacityCycle:
             res.opacity = val
+        case .sequence:
+            res.opacity = val
+            res.scale = track.pose(at: now, reduced: reducedMotion)?.scale ?? 1.0
         case .slide, .slideEased:
             if let frac = track.offset(at: now, reduced: reducedMotion) {
                 res.offset = Vec2(frac.x * nodeSize.x, frac.y * nodeSize.y)
@@ -90,7 +94,7 @@ struct LoopRuntime {
         }
         for (id, track) in tracks {
             if case .opacityCycle = entries[id]?.kind {
-                return true
+                continue
             }
             if track.isActive(at: nodeTime(id)) {
                 return true

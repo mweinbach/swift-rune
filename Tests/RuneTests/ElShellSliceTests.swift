@@ -119,8 +119,11 @@ struct ElShellSliceTests {
         let midW = try #require(rt.element(byKey: "card")?.rect[2])
         #expect(midW > 60 && midW < 120)
         _ = rt.frame(at: 1.2)
-        let settledW = try #require(rt.element(byKey: "card")?.rect[2])
-        #expect(abs(settledW - 120) < 0.5)
+        let settled = try #require(rt.element(byKey: "card"))
+        #expect(abs(settled.target[2] - 120) < 0.5)
+        // `seq`'s final beat at 0.1s holds `scale: 0.9` (`120 * 0.9 = 108`) at rest (`looping.rs:227`).
+        #expect(abs(settled.rect[2] - 108) < 0.5)
+        #expect(abs(settled.opacity - 0.4) < 0.02)
     }
 
     // MARK: - el/text.rs builders & partial items
