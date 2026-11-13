@@ -244,6 +244,7 @@ public struct NodeSpec: Sendable, Equatable {
     public var iconTurn: Float
     public var transition: Transition?
     public var snapMount: Bool
+    public var enterDelay: Float
 
     /// Layout frame in parent space when used with `Scene.insert` (alias for `rect`).
     public var frame: MotionRect {
@@ -276,6 +277,7 @@ public struct NodeSpec: Sendable, Equatable {
         self.iconTurn = 0
         self.transition = .opacity
         self.snapMount = false
+        self.enterDelay = 0
     }
 
     public init(
@@ -301,7 +303,8 @@ public struct NodeSpec: Sendable, Equatable {
         rotateAnim: Anim<Float>? = nil,
         iconTurn: Float = 0,
         transition: Transition? = nil,
-        snapMount: Bool = false
+        snapMount: Bool = false,
+        enterDelay: Float = 0
     ) {
         self.id = id
         self.parent = parent
@@ -326,6 +329,7 @@ public struct NodeSpec: Sendable, Equatable {
         self.iconTurn = iconTurn
         self.transition = transition
         self.snapMount = snapMount
+        self.enterDelay = enterDelay
     }
 
     public func parent(_ parent: NodeId) -> NodeSpec {
@@ -1793,7 +1797,9 @@ public struct Scene: Sendable {
                     applyMatchedFlight(existingIdx, spec: spec, match: m)
                 } else {
                     insert(spec.id, insertSpec, cut ? .initial : .animated)
-                    if landWaitingNodes {
+                    if cut {
+                        enterNow(spec.id)
+                    } else if landWaitingNodes {
                         landWaiting(spec.id)
                     }
 
@@ -1936,7 +1942,7 @@ public struct Scene: Sendable {
                 }
             } else {
                 let mount: Mount = (cut || snapMounts || snapNewMounts || spec.snapMount || spec.transition == nil) ? .initial : .animated
-                insert(spec.id, localSpec, mount)
+                insertDelayed(spec.id, localSpec, mount, delay: spec.enterDelay)
                 if let i = slot(spec.id) {
                     nodes[i].compatHadTransition = (spec.transition != nil)
                     if spec.scale != Vec2(1, 1) { nodes[i].baseScale2D = spec.scale }
