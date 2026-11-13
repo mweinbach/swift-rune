@@ -152,7 +152,8 @@ enum SequenceDrawer {
                         let hw = max(nm.size.x * 0.5 + 4.0, 8.0)
                         front.shape(CanvasMath.roundedRect(x0: sx - hw, y0: lineY - 8.0, x1: sx + hw, y1: lineY + 8.0, r: 8.0), fill: paint.line, border: paint.line, width: 1.0)
                         front.label(nm, center: Vec2(sx, lineY), font: numFont, color: paint.surface, align: .center)
-                        number = (k &+ step, step)
+                        let nextNum = k > UInt32.max - step ? UInt32.max : k + step
+                        number = (nextNum, step)
                     }
                     let lo = min(cx[m.from], cx[m.to]) - barWidth
                     let hi = max(cx[m.from], cx[m.to]) + barWidth

@@ -12,6 +12,7 @@ struct RequirementDiagram: Sendable {
     var dir: DiagramDirection
     var nodes: [RequirementNode]
     var edges: [LayeredEdge]
+    var title: String? = nil
 }
 
 enum RequirementParser {

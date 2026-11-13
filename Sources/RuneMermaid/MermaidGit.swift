@@ -33,6 +33,7 @@ struct GitGraphDiagram: Sendable {
     var flow: Flow
     var branches: [GitBranch]
     var commits: [GitCommit]
+    var title: String? = nil
 }
 
 enum GitParser {

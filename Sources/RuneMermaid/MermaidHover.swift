@@ -24,7 +24,7 @@ struct HoverSpot {
 
 extension Canvas {
     mutating func region(_ i: Int, outline: [Vec2]) {
-        guard hover != nil else { return }
+        guard let (mode, _) = hover, mode != .off else { return }
         if regions.count <= i {
             regions.append(contentsOf: repeatElement([], count: i + 1 - regions.count))
         }
@@ -38,7 +38,7 @@ extension Canvas {
         line: Color,
         label: (index: Int, rect: (Float, Float, Float, Float), back: Color)?
     ) {
-        guard let (_, lit) = hover else { return }
+        guard let (mode, lit) = hover, mode != .off else { return }
         var path: [Vec2] = []
         var traceOps: [CanvasOp] = []
         for op in ops[start...] {
@@ -71,7 +71,7 @@ extension Canvas {
     }
 
     func hovers(map: (Vec2) -> Vec2) -> [HoverSpot] {
-        guard let (reach, lit) = hover else { return [] }
+        guard let (reach, lit) = hover, reach != .off else { return [] }
         func drawn(_ v: Int) -> Bool {
             v < regions.count && regions[v].count >= 3
         }
@@ -215,7 +215,7 @@ enum HoverGeometry {
                 ]
                 guard let best = sides
                     .filter({ $0.2 >= 4.0 && $0.3 >= 4.0 })
-                    .max(by: { ($0.2 * $0.3) < ($1.2 * $1.3) }) else {
+                    .max(by: { ($0.2 * $0.3) <= ($1.2 * $1.3) }) else {
                     return nil
                 }
                 r = best

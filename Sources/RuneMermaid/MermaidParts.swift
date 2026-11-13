@@ -17,7 +17,7 @@ enum PartKind: Equatable {
     var enter: Transition {
         switch self {
         case .node: .scale(0.96)
-        case .edge: .opacity
+        case .edge: .draw
         case .frame: .opacity
         }
     }
@@ -48,16 +48,21 @@ struct PartNames {
     }
 
     static func fromLayered(nodes: [String], edges: [(from: Int, to: Int)], frames: [String]) -> PartNames {
+        struct EdgePair: Hashable {
+            let from: Int
+            let to: Int
+        }
         func nodeId(_ i: Int) -> String {
             i < nodes.count ? nodes[i] : "#\(i)"
         }
-        var seen: [String: Int] = [:]
+        var seen: [EdgePair: Int] = [:]
         var edgeNames: [String] = []
         edgeNames.reserveCapacity(edges.count)
         for e in edges {
+            let pair = EdgePair(from: e.from, to: e.to)
+            let count = (seen[pair] ?? 0) + 1
+            seen[pair] = count
             let base = "\(nodeId(e.from))>\(nodeId(e.to))"
-            let count = (seen[base] ?? 0) + 1
-            seen[base] = count
             edgeNames.append(count == 1 ? base : "\(base)~\(count - 1)")
         }
         return PartNames(nodes: nodes, edges: edgeNames, frames: frames)

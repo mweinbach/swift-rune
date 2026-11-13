@@ -297,6 +297,10 @@ struct RouteCtx {
         return true
     }
 
+    private func ieeeSign(_ v: Float) -> Float {
+        v.sign == .minus ? -1.0 : 1.0
+    }
+
     func route(_ i: Int, flip: Bool, insets: (Float, Float)) -> EdgeRoute {
         let (from, to) = ends[i]
         var path = placed.paths[i]
@@ -325,16 +329,15 @@ struct RouteCtx {
             } else {
                 anchors = computeAnchors(i, path: path, all: false, at: labelAt)
                 if let k = anchors.firstIndex(of: l), k > 0, k + 1 < anchors.count {
-                    let sign: Float = anchors[k + 1].y >= anchors[k - 1].y ? 1.0 : -1.0
-                    let h = sz.y * 0.5 * sign
+                    let h = sz.y * 0.5 * ieeeSign(anchors[k + 1].y - anchors[k - 1].y)
                     anchors.replaceSubrange(k...k, with: [Vec2(l.x, l.y - h), Vec2(l.x, l.y + h)])
                 }
             }
         }
 
         let n = anchors.count
-        let s0: Float = anchors[1].y >= anchors[0].y ? 1.0 : -1.0
-        let s1: Float = anchors[n - 1].y >= anchors[n - 2].y ? 1.0 : -1.0
+        let s0 = ieeeSign(anchors[1].y - anchors[0].y)
+        let s1 = ieeeSign(anchors[n - 1].y - anchors[n - 2].y)
         let tipStart = anchors[0]
         let tipEnd = anchors[n - 1]
         if abs(anchors[1].y - anchors[0].y) > insets.0 + 4.0 {
@@ -358,8 +361,8 @@ struct RouteCtx {
         let (from, to) = ends[i]
         let n = path.count
         let endsPair = (from, to)
-        let s0: Float = path[1].y >= path[0].y ? 1.0 : -1.0
-        let s1: Float = path[n - 1].y >= path[n - 2].y ? 1.0 : -1.0
+        let s0 = ieeeSign(path[1].y - path[0].y)
+        let s1 = ieeeSign(path[n - 1].y - path[n - 2].y)
         if !all && at == nil, let pair = direct(i, path: path, s0: s0, s1: s1) {
             return pair
         }

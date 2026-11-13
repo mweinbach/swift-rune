@@ -183,7 +183,8 @@ enum LayeredDrawer {
             hover: hover
         ) else { return nil }
 
-        if canvas.width > Canvas.room(for: paint) / turnBelow, dir == .right || dir == .left {
+        let stay = SteadyLayout.turned()
+        if (stay || canvas.width > Canvas.room(for: paint) / turnBelow) && (dir == .right || dir == .left) {
             let turnedDir: DiagramDirection = dir == .right ? .down : .up
             if let down = drawIn(
                 dir: turnedDir,
@@ -198,11 +199,12 @@ enum LayeredDrawer {
                 spacing: spacing,
                 paint: paint,
                 hover: hover
-            ), down.width < canvas.width {
+            ), stay || down.width < canvas.width {
                 canvas = down
                 canvas.turned = true
             }
         }
+        SteadyLayout.setTurned(canvas.turned)
         return canvas
     }
 
