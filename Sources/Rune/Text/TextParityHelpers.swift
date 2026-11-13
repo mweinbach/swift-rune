@@ -222,12 +222,22 @@ public struct RunLayout: Sendable {
     public let scale: Float
     public let graphemes: [GraphemeEntry]
     public let totalWidthPx: Float
+    internal let cellLayout: TextRunCellLayout?
 
     public init(text: String, scale: Float, graphemes: [GraphemeEntry], totalWidthPx: Float) {
         self.text = text
         self.scale = scale
         self.graphemes = graphemes
         self.totalWidthPx = totalWidthPx
+        self.cellLayout = nil
+    }
+
+    internal init(text: String, scale: Float, graphemes: [GraphemeEntry], totalWidthPx: Float, cellLayout: TextRunCellLayout?) {
+        self.text = text
+        self.scale = scale
+        self.graphemes = graphemes
+        self.totalWidthPx = totalWidthPx
+        self.cellLayout = cellLayout
     }
 
     /// Device-pixel x of the grapheme starting at UTF-8 byte `offset`.
@@ -277,7 +287,20 @@ extension TextSystem {
         }
         let endPx = (shaped.size.x * s - 1e-3).rounded(.up)
         entries.append(RunLayout.GraphemeEntry(utf8Offset: run.text.utf8.count, xPx: max(0, endPx)))
-        return RunLayout(text: run.text, scale: s, graphemes: entries, totalWidthPx: max(0, endPx))
+        let cellLayout = cachedRunCellLayout(run, style: single, pixelScale: s)
+        return RunLayout(text: run.text, scale: s, graphemes: entries, totalWidthPx: max(0, endPx), cellLayout: cellLayout)
+    }
+
+    /// Glyph quads for the grapheme starting at UTF-8 byte `utf8Offset` of `run`, positioned
+    /// with the run's top-left at `origin` in logical points (`glyph_emit.rs:104`).
+    public func glyphsIn(
+        run: RunLayout,
+        at utf8Offset: Int,
+        scale: Float = 1.0,
+        origin: Vec2 = .zero
+    ) -> [PositionedGlyph] {
+        _ = scale // Run holds its scale; retained for Rust `glyphs_in` signature compatibility.
+        return run.cellLayout?.glyphsIn(atByte: utf8Offset, using: self, originPt: origin) ?? []
     }
 }
 
@@ -367,6 +390,14 @@ extension FontSmoothing {
         return .on
         #else
         return .off
+        #endif
+    }
+
+    public static var platformDefault: FontSmoothing {
+        #if os(macOS)
+        return .on
+        #else
+        return .windfoilChromium
         #endif
     }
 

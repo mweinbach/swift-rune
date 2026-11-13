@@ -53,6 +53,72 @@ public struct CursorImage: Sendable, Hashable {
         return (u32BE(16), u32BE(20))
     }
 
+    /// Validates that `bytes` holds complete PNG chunks (`IHDR`, `IDAT`, `IEND`) and decodes cleanly via ImageIO when available.
+    public func isValidPNG() -> Bool {
+        guard bytes.count >= 33, pngSize() != nil else { return false }
+        var offset = 8
+        var sawIDAT = false
+        var sawIEND = false
+        while offset + 12 <= bytes.count {
+            let chunkLen = (Int(bytes[offset]) << 24)
+                | (Int(bytes[offset + 1]) << 16)
+                | (Int(bytes[offset + 2]) << 8)
+                | Int(bytes[offset + 3])
+            guard chunkLen >= 0, offset + 12 + chunkLen <= bytes.count else {
+                return false
+            }
+            let t0 = bytes[offset + 4], t1 = bytes[offset + 5], t2 = bytes[offset + 6], t3 = bytes[offset + 7]
+            if t0 == 0x49 && t1 == 0x44 && t2 == 0x41 && t3 == 0x54 { // IDAT
+                sawIDAT = true
+            } else if t0 == 0x49 && t1 == 0x45 && t2 == 0x4E && t3 == 0x44 { // IEND
+                sawIEND = true
+                break
+            }
+            offset += 12 + chunkLen
+        }
+        guard sawIDAT && sawIEND else { return false }
+        #if canImport(ImageIO)
+        let data = Data(bytes)
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else {
+            return false
+        }
+        #endif
+        return true
+    }
+
+    internal static func clampedHotInt(_ value: Float, limit: Int) -> Int {
+        guard limit > 0 else { return 0 }
+        if value.isNaN { return 0 }
+        if !value.isFinite { return value > 0 ? limit : 0 }
+        let floored = floorf(max(0, value))
+        if floored >= Float(limit) { return limit }
+        return max(0, Int(floored))
+    }
+
+    internal static func clampedHotFloat(_ value: Float, limit: Float) -> Float {
+        guard limit > 0 else { return 0 }
+        if value.isNaN { return 0 }
+        if !value.isFinite { return value > 0 ? limit : 0 }
+        return min(max(0, value), limit)
+    }
+
+    /// Decodes dimensions (divided by 2x scale, min 1) and clamped hotspot (`image.rs:14`).
+    public func decodedMetrics() throws -> (width: Int, height: Int, hot: SIMD2<Int>) {
+        guard let (w, h) = pngSize(), isValidPNG() else {
+            throw CursorImageError.notPNG
+        }
+        let maxSide = 256
+        guard w > 0, h > 0, w <= maxSide, h <= maxSide else {
+            throw CursorImageError.invalidDimensions(width: w, height: h, maxSide: maxSide)
+        }
+        let ptW = max(1, (w + 1) / 2)
+        let ptH = max(1, (h + 1) / 2)
+        let hx = Self.clampedHotInt(hot.x, limit: max(0, ptW - 1))
+        let hy = Self.clampedHotInt(hot.y, limit: max(0, ptH - 1))
+        return (ptW, ptH, SIMD2<Int>(hx, hy))
+    }
+
     /// Clamps a hot spot in 2x-source points to `[0, sidePt - 1]` and formats a CSS `cursor` string.
     public func cssCursor(url: String) throws -> String {
         guard let (w, h) = pngSize() else {
@@ -64,8 +130,8 @@ public struct CursorImage: Sendable, Hashable {
         }
         let maxX = max(0, Int(ceil(Float(w) / 2.0)) - 1)
         let maxY = max(0, Int(ceil(Float(h) / 2.0)) - 1)
-        let hx = min(max(0, Int(floor(max(0, hot.x)))), maxX)
-        let hy = min(max(0, Int(floor(max(0, hot.y)))), maxY)
+        let hx = Self.clampedHotInt(hot.x, limit: maxX)
+        let hy = Self.clampedHotInt(hot.y, limit: maxY)
         return "image-set(url(\"\(url)\") 2x) \(hx) \(hy), auto"
     }
 }
@@ -189,8 +255,8 @@ public final class MacOSCursorCache {
         let ptW = max(1.0, CGFloat(w) / 2.0)
         let ptH = max(1.0, CGFloat(h) / 2.0)
         nsImage.size = NSSize(width: ptW, height: ptH)
-        let hx = CGFloat(min(max(0.0, spec.hot.x), Float(ptW - 1.0)))
-        let hy = CGFloat(min(max(0.0, spec.hot.y), Float(ptH - 1.0)))
+        let hx = CGFloat(CursorImage.clampedHotFloat(spec.hot.x, limit: Float(ptW - 1.0)))
+        let hy = CGFloat(CursorImage.clampedHotFloat(spec.hot.y, limit: Float(ptH - 1.0)))
         let cur = NSCursor(image: nsImage, hotSpot: NSPoint(x: hx, y: hy))
         if cache.count >= Self.maxEntries, let oldest = order.first {
             order.removeFirst()

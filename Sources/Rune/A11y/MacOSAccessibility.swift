@@ -153,7 +153,8 @@ public extension Runtime {
         var childrenByParent: [Int: [Int]] = [:]
         var roots: [Int] = []
         for (idx, node) in flatNodes.enumerated() {
-            if node.effectiveInert || node.el.isA11yHidden { continue }
+            let isVirtualSpacer = (node.key == "__v_top_spacer" || node.key == "__v_bot_spacer")
+            if node.effectiveInert || node.el.isA11yHidden || isVirtualSpacer { continue }
             if let pIdx = node.parentIndex,
                pIdx >= 0,
                pIdx < flatNodes.count,
@@ -285,6 +286,27 @@ public extension Runtime {
                 }
             }
 
+            let resolvedPosInSet: Int? = {
+                if let explicit = el.a11yPosInSet?.position { return explicit }
+                guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
+                      let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
+                let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""
+                guard let rowKey = vList.rowKeyBySegment[rowSeg] ?? node.key else { return nil }
+                for k in vList.lastMountedRange where k >= 0 && k < vList.lastKeys.count {
+                    if vList.lastKeys[k] == rowKey { return k }
+                }
+                return vList.lastKeys.firstIndex(of: rowKey)
+            }()
+            let resolvedSizeOfSet: Int? = {
+                if let explicit = el.a11yPosInSet?.size { return explicit }
+                if let containerSize = virtualLists[node.path]?.lastKeys.count { return containerSize }
+                if let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
+                   let parentList = virtualLists[flatNodes[pIdx].path] {
+                    return parentList.lastKeys.count
+                }
+                return nil
+            }()
+
             return AccessibilityNode(
                 id: nodeId,
                 role: resolvedRole,
@@ -300,8 +322,8 @@ public extension Runtime {
                 selectedState: selectedState,
                 isExpanded: el.a11yExpanded,
                 level: el.a11yLevel,
-                positionInSet: el.a11yPosInSet?.position,
-                sizeOfSet: el.a11yPosInSet?.size,
+                positionInSet: resolvedPosInSet,
+                sizeOfSet: resolvedSizeOfSet,
                 keyboardShortcut: el.a11yShortcutHint,
                 url: el.a11yHref,
                 activeDescendant: el.a11yActiveDescendant,

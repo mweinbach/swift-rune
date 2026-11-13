@@ -825,6 +825,7 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
     private var heldFingerprint: UInt64 = 0
     private var heldDueTime: Double?
     private var wipeBehavior: WipeBehavior = .normal
+    private var unreadable: Bool = false
     private var failNextWriteMessage: String?
     public private(set) var wipeAttempts: Int = 0
 
@@ -859,6 +860,13 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
     public func setWipeBehavior(_ behavior: WipeBehavior) {
         lock.lock()
         wipeBehavior = behavior
+        lock.unlock()
+    }
+
+    /// Simulates a temporarily unreadable clipboard so ownership checks fail and preserve the hold timeout.
+    public func setUnreadable(_ unreadable: Bool) {
+        lock.lock()
+        self.unreadable = unreadable
         lock.unlock()
     }
 
@@ -938,6 +946,10 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
             lock.unlock()
             return
         }
+        if unreadable {
+            lock.unlock()
+            return
+        }
         let target = heldSlot
         let stillOurs = isOursLocked()
         let behavior = wipeBehavior
@@ -969,6 +981,10 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
     public func requestClear(slot: SecretSlot) {
         lock.lock()
         guard let active = heldSlot, active === slot else {
+            lock.unlock()
+            return
+        }
+        if unreadable {
             lock.unlock()
             return
         }

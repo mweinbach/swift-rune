@@ -569,6 +569,11 @@ public struct TextEdit: Sendable, Equatable {
                 typingStyle = .inherited
                 preedit = nil
                 preeditClauses.removeAll()
+            } else if !isSecure && oldValue {
+                if case .unrecorded = undoGroupState {
+                    syncRichInvariants()
+                    undoGroupState = .open(makeSnapshot())
+                }
             }
         }
     }
@@ -671,6 +676,12 @@ public struct TextEdit: Sendable, Equatable {
         if recordUndo {
             recordUndoChange(before: before, kind: .other)
         }
+    }
+
+    /// Replaces the entire draft and discards undo/redo history while preserving secure mode (`edit.rs:470`).
+    public mutating func replaceText(_ newText: String) {
+        setText(newText, recordUndo: false)
+        clearHistory()
     }
 
     public mutating func clear() {
@@ -1905,5 +1916,12 @@ extension TextEdit {
         anchor = newCursor
         adjustMarks(replacedRange: lo..<hi, newLength: replacement.utf8.count)
         recordUndoChange(before: before, kind: .other)
+    }
+}
+
+extension TextEdit: CustomDebugStringConvertible {
+    public var debugDescription: String {
+        let shownText = isSecure ? "[redacted]" : text
+        return "TextEdit(text: \(String(reflecting: shownText)), anchor: \(anchor), cursor: \(cursor), marks: \(marks.count), blocks: \(blocks.count), isSecure: \(isSecure), isRevealed: \(isRevealed))"
     }
 }

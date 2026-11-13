@@ -76,8 +76,10 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var opticalSize: OpticalSize
     public var direction: TextFlow?
 
+    public static let body = TextStyle(size: 13.0, weight: 400.0)
+
     public init(
-        size: Float = 14.0,
+        size: Float = 13.0,
         weight: Float = 400.0,
         lineHeight: Float? = nil,
         letterSpacing: Float = 0.0,
@@ -2243,11 +2245,99 @@ public final class TextSystem: @unchecked Sendable {
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
     private var measureCache: [MeasureKey: Vec2] = [:]
+    private struct DecoratedRange {
+        var u16Range: Range<Int>
+        var underline: Bool
+        var strikethrough: Bool
+        var background: Color?
+    }
+
+    private struct TypesetterKey: Hashable {
+        var text: String
+        var spans: [TextSpan]?
+        var pills: [PillChip]
+        var shapingStyle: TextStyle
+        var scaleBit: UInt32
+        var languageTag: String?
+        var fontEpoch: UInt64
+
+        init(text: String, spans: [TextSpan]?, pills: [PillChip], style: TextStyle, scale: Float, languageTag: String?, fontEpoch: UInt64) {
+            self.text = text
+            self.spans = spans
+            self.pills = pills
+            var normalized = style
+            normalized.align = .leading
+            normalized.wrap = .wrap
+            normalized.wrapAnywhere = false
+            normalized.elide = .end
+            normalized.maxLines = 0
+            normalized.exactLines = false
+            self.shapingStyle = normalized
+            self.scaleBit = scale.bitPattern
+            self.languageTag = languageTag
+            self.fontEpoch = fontEpoch
+        }
+    }
+
+    private struct CachedTypesetter {
+        var typesetter: CTTypesetter
+        var shapedText: String
+        var markerMap: ShapedText.MarkerMap
+        var preparedPills: [PreparedPill]
+        var spanPalette: [Color]
+        var decoratedRanges: [DecoratedRange]
+        var baseFont: CTFont
+        var baseAscentPx: CGFloat
+        var baseDescentPx: CGFloat
+    }
+
+    public var smoothing: FontSmoothing = .platformDefault {
+        didSet {
+            if smoothing != oldValue {
+                lock.lock()
+                measureCache.removeAll(keepingCapacity: true)
+                shapeCache.removeAll(keepingCapacity: true)
+                elisionCache.removeAll(keepingCapacity: true)
+                typesetterCache.removeAll(keepingCapacity: true)
+                lock.unlock()
+            }
+        }
+    }
+
+    public var applePipeline: ApplePipeline { smoothing.pipeline }
+
     private var shapeCache: [ShapeKey: ShapedText] = [:]
     private var elisionCache: [ElisionKey: CachedElision] = [:]
+    private var typesetterCache: [TypesetterKey: CachedTypesetter] = [:]
     internal private(set) var measureMissCount: Int = 0
     internal private(set) var shapeMissCount: Int = 0
+    internal private(set) var shapedBuildCount: Int = 0
+    internal private(set) var rebrokenCount: Int = 0
     private var shapeCallCounter: UInt64 = 0
+
+    /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
+    public func clearLayoutCaches() {
+        lock.lock()
+        measureCache.removeAll(keepingCapacity: true)
+        shapeCache.removeAll(keepingCapacity: true)
+        elisionCache.removeAll(keepingCapacity: true)
+        typesetterCache.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    /// Rasterizes a standalone `SVGIcon` into the glyph atlas and returns a `PositionedGlyph` quad (`text/mod.rs` `icon_quad`).
+    public func iconQuad(_ icon: SVGIcon, pixelSize: Float, origin: SIMD2<Float> = .zero) -> PositionedGlyph? {
+        guard pixelSize.isFinite && pixelSize > 0 else { return nil }
+        let px = max(1, Int(pixelSize.rounded()))
+        let entry = glyphAtlas.rasterizeIcon(icon, pixelSize: px)
+        return PositionedGlyph(
+            rect: SIMD4<Float>(origin.x, origin.y, Float(entry.pixelSize.x), Float(entry.pixelSize.y)),
+            uv: entry.uv,
+            color: nil,
+            colorGlyphIndex: nil,
+            atlasPage: entry.page
+        )
+    }
 
     internal var cachedElisionCount: Int {
         lock.lock()
@@ -2304,6 +2394,7 @@ public final class TextSystem: @unchecked Sendable {
         measureCache.removeAll(keepingCapacity: true)
         shapeCache.removeAll(keepingCapacity: true)
         elisionCache.removeAll(keepingCapacity: true)
+        typesetterCache.removeAll(keepingCapacity: true)
         return true
     }
 
@@ -2348,6 +2439,7 @@ public final class TextSystem: @unchecked Sendable {
         measureCache.removeAll(keepingCapacity: true)
         shapeCache.removeAll(keepingCapacity: true)
         elisionCache.removeAll(keepingCapacity: true)
+        typesetterCache.removeAll(keepingCapacity: true)
         lock.unlock()
 
         FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
@@ -2373,6 +2465,7 @@ public final class TextSystem: @unchecked Sendable {
             measureCache.removeAll(keepingCapacity: true)
             shapeCache.removeAll(keepingCapacity: true)
             elisionCache.removeAll(keepingCapacity: true)
+            typesetterCache.removeAll(keepingCapacity: true)
             lastObservedFontEpoch = globalEpoch
         }
         if lastObservedLanguageEpoch != langEpoch {
@@ -2382,6 +2475,7 @@ public final class TextSystem: @unchecked Sendable {
                 measureCache.removeAll(keepingCapacity: true)
                 shapeCache.removeAll(keepingCapacity: true)
                 elisionCache.removeAll(keepingCapacity: true)
+                typesetterCache.removeAll(keepingCapacity: true)
             }
             lastObservedLanguageEpoch = langEpoch
         }
@@ -2589,6 +2683,19 @@ public final class TextSystem: @unchecked Sendable {
         return CTRunDelegateCreate(&callbacks, Unmanaged.passRetained(box).toOpaque())!
     }
 
+    private static func spaceAdvancePx(font: CTFont, letterSpacingPx: Float) -> CGFloat {
+        var spaceChar: UniChar = 0x20
+        var spaceGlyph: CGGlyph = 0
+        let rawW: CGFloat
+        if CTFontGetGlyphsForCharacters(font, &spaceChar, &spaceGlyph, 1), spaceGlyph != 0 {
+            var adv = CGSize.zero
+            rawW = CGFloat(CTFontGetAdvancesForGlyphs(font, .horizontal, &spaceGlyph, &adv, 1))
+        } else {
+            rawW = CTFontGetSize(font) * 0.5
+        }
+        return max(0, rawW + CGFloat(letterSpacingPx))
+    }
+
     internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool) -> Float {
         let s = max(1.0, scale)
         let rawPx = Float(max(1, lineCount)) * lineHeightPt * s
@@ -2609,6 +2716,9 @@ public final class TextSystem: @unchecked Sendable {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
         var effectiveStyle = style
+        if effectiveStyle.fontSmoothing == .systemDefault {
+            effectiveStyle.fontSmoothing = smoothing
+        }
         if maxWidth != nil && effectiveStyle.wrap == .noWrap {
             effectiveStyle.wrap = .wrap
         }
@@ -2650,12 +2760,16 @@ public final class TextSystem: @unchecked Sendable {
         emitGlyphs: Bool = true,
         glidePx: Vec2 = .zero
     ) -> ShapedText {
-        measureFramePhase(.text) {
+        var effectiveStyle = style
+        if effectiveStyle.fontSmoothing == .systemDefault {
+            effectiveStyle.fontSmoothing = smoothing
+        }
+        return measureFramePhase(.text) {
             shapeImpl(
                 text: text,
                 spans: spans,
                 pills: pills,
-                style: style,
+                style: effectiveStyle,
                 maxWidth: maxWidth,
                 pixelScale: pixelScale,
                 emitGlyphs: emitGlyphs,
@@ -3135,165 +3249,234 @@ public final class TextSystem: @unchecked Sendable {
         }
         recordShapeCall()
 
-        let (shapedText, initialMarkerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
-        var markerMap = initialMarkerMap
-
-        let baseFont = resolveCTFont(style: style, pixelScale: scale)
-        let baseAscentPx = CTFontGetAscent(baseFont)
-        let baseDescentPx = CTFontGetDescent(baseFont)
-
-        let attrStr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
-        CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), shapedText as CFString)
-        let fullLen = CFAttributedStringGetLength(attrStr)
-        CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
-        if let langTag = TextLanguageRegistry.effectiveLanguageTag(for: authText, chosen: language) {
-            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
+        let effectiveLang = TextLanguageRegistry.effectiveLanguageTag(for: authText, chosen: language)
+        let tsKey = TypesetterKey(
+            text: authText,
+            spans: spans,
+            pills: pills,
+            style: style,
+            scale: scale,
+            languageTag: effectiveLang,
+            fontEpoch: fontEpoch()
+        )
+        let builtTypesetter: CachedTypesetter
+        lock.lock()
+        let hitTS = typesetterCache[tsKey]
+        if hitTS != nil {
+            rebrokenCount += 1
         }
-        if style.letterSpacing != 0 {
-            let kern = CGFloat(style.letterSpacing * scale) as CFNumber
-            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
-        }
+        lock.unlock()
 
-        var monoTabInterval: CGFloat? = nil
-        if style.family == .monospace && shapedText.contains("\t") {
-            var spaceChar: UniChar = 0x20
-            var spaceGlyph: CGGlyph = 0
-            if CTFontGetGlyphsForCharacters(baseFont, &spaceChar, &spaceGlyph, 1), spaceGlyph != 0 {
-                var adv = CGSize.zero
-                let w = CTFontGetAdvancesForGlyphs(baseFont, .horizontal, &spaceGlyph, &adv, 1)
-                if w > 0 {
-                    monoTabInterval = (CGFloat(w) + CGFloat(style.letterSpacing * scale)) * 4.0
-                }
+        if let hitTS {
+            builtTypesetter = hitTS
+        } else {
+            let (shapedText, initialMarkerMap, preparedPills) = Self.preparePills(pills, in: authText, fontSize: style.size)
+
+            let baseFont = resolveCTFont(style: style, pixelScale: scale)
+            let baseAscentPx = CTFontGetAscent(baseFont)
+            let baseDescentPx = CTFontGetDescent(baseFont)
+
+            let attrStr = CFAttributedStringCreateMutable(kCFAllocatorDefault, 0)!
+            CFAttributedStringReplaceString(attrStr, CFRangeMake(0, 0), shapedText as CFString)
+            let fullLen = CFAttributedStringGetLength(attrStr)
+            CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTFontAttributeName, baseFont)
+            if let langTag = effectiveLang {
+                CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTLanguageAttributeName, langTag as CFString)
             }
-        }
-
-        // Apply per-paragraph base writing direction (and 4-column tab stops for monospace) natively.
-        let shapedNS = shapedText as NSString
-        var paraScanStart = 0
-        while paraScanStart < fullLen {
-            var paraScanEnd = fullLen
-            for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
-                paraScanEnd = i
-                break
+            if style.letterSpacing != 0 {
+                let kern = CGFloat(style.letterSpacing * scale) as CFNumber
+                CFAttributedStringSetAttribute(attrStr, CFRangeMake(0, fullLen), kCTKernAttributeName, kern)
             }
-            let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
-            let resolvedDir: CTWritingDirection? = {
-                switch style.direction {
-                case .rtl: return .rightToLeft
-                case .ltr: return .leftToRight
-                case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
+
+            // Apply per-paragraph base writing direction natively; tab stops use per-'\t' CTRunDelegate widths below.
+            let shapedNS = shapedText as NSString
+            var paraScanStart = 0
+            while paraScanStart < fullLen {
+                var paraScanEnd = fullLen
+                for i in paraScanStart..<fullLen where shapedNS.character(at: i) == 0x0A {
+                    paraScanEnd = i
+                    break
                 }
-            }()
-            if resolvedDir != nil || monoTabInterval != nil {
-                var dirVal = resolvedDir ?? .natural
-                var tabVal = monoTabInterval ?? 0
-                var emptyStops = [] as CFArray
-                let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr in
-                    withUnsafeMutableBytes(of: &tabVal) { tabPtr in
-                        withUnsafePointer(to: &emptyStops) { stopsPtr -> CTParagraphStyle in
-                            var settings: [CTParagraphStyleSetting] = []
-                            if resolvedDir != nil {
-                                settings.append(CTParagraphStyleSetting(
-                                    spec: .baseWritingDirection,
-                                    valueSize: MemoryLayout<CTWritingDirection>.size,
-                                    value: dirPtr.baseAddress!
-                                ))
-                            }
-                            if monoTabInterval != nil {
-                                settings.append(CTParagraphStyleSetting(
-                                    spec: .tabStops,
-                                    valueSize: MemoryLayout<CFArray>.size,
-                                    value: stopsPtr
-                                ))
-                                settings.append(CTParagraphStyleSetting(
-                                    spec: .defaultTabInterval,
-                                    valueSize: MemoryLayout<CGFloat>.size,
-                                    value: tabPtr.baseAddress!
-                                ))
-                            }
-                            return CTParagraphStyleCreate(settings, settings.count)
+                let paraSub = shapedNS.substring(with: NSRange(location: paraScanStart, length: max(0, paraScanEnd - paraScanStart)))
+                let resolvedDir: CTWritingDirection? = {
+                    switch style.direction {
+                    case .rtl: return .rightToLeft
+                    case .ltr: return .leftToRight
+                    case nil: return Self.isRTLParagraph(paraSub) ? .rightToLeft : nil
+                    }
+                }()
+                if var dirVal = resolvedDir {
+                    let pStyle = withUnsafeMutableBytes(of: &dirVal) { dirPtr -> CTParagraphStyle in
+                        let setting = CTParagraphStyleSetting(
+                            spec: .baseWritingDirection,
+                            valueSize: MemoryLayout<CTWritingDirection>.size,
+                            value: dirPtr.baseAddress!
+                        )
+                        return withUnsafePointer(to: setting) { ptr in
+                            CTParagraphStyleCreate(ptr, 1)
                         }
                     }
+                    let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
+                    if pRangeLen > 0 {
+                        CFAttributedStringSetAttribute(attrStr, CFRangeMake(paraScanStart, pRangeLen), kCTParagraphStyleAttributeName, pStyle)
+                    }
                 }
-                let pRangeLen = min(fullLen - paraScanStart, (paraScanEnd - paraScanStart) + (paraScanEnd < fullLen ? 1 : 0))
-                if pRangeLen > 0 {
-                    CFAttributedStringSetAttribute(attrStr, CFRangeMake(paraScanStart, pRangeLen), kCTParagraphStyleAttributeName, pStyle)
+                paraScanStart = (paraScanEnd < fullLen) ? (paraScanEnd + 1) : fullLen
+            }
+
+            // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
+            let spanColorKey = "RuneColorIndex" as CFString
+            let pillMarkerKey = "RunePillMarker" as CFString
+            var spanPalette: [Color] = []
+            var decoratedRanges: [DecoratedRange] = []
+            var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
+            if let spans {
+                var authU16Cursor = 0
+                for span in spans {
+                    let u16Count = span.text.utf16.count
+                    guard u16Count > 0 else { continue }
+                    let sLo = initialMarkerMap.shapedU16ForSpanBoundary(authU16Cursor, isEnd: false)
+                    let sHi = initialMarkerMap.shapedU16ForSpanBoundary(authU16Cursor + u16Count, isEnd: true)
+                    let sLen = max(0, sHi - sLo)
+                    if sLen > 0 {
+                        let range = CFRangeMake(sLo, sLen)
+                        if span.weight != nil || span.italic || span.monospace || span.size != nil {
+                            var subStyle = style
+                            if let w = span.weight { subStyle.weight = w }
+                            if span.italic { subStyle.italic = true }
+                            if span.monospace { subStyle.family = .monospace }
+                            if let sz = span.size { subStyle.size = sz }
+                            let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
+                            CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
+                            spanTabInfo.append((
+                                u16Range: sLo..<sHi,
+                                spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
+                                isMonospace: span.monospace
+                            ))
+                        }
+                        if let col = span.color {
+                            let idx = spanPalette.count
+                            spanPalette.append(col)
+                            CFAttributedStringSetAttribute(attrStr, range, spanColorKey, idx as CFNumber)
+                        }
+                        if span.underline || span.strikethrough || span.background != nil {
+                            decoratedRanges.append(DecoratedRange(
+                                u16Range: sLo..<sHi,
+                                underline: span.underline,
+                                strikethrough: span.strikethrough,
+                                background: span.background
+                            ))
+                        }
+                    }
+                    authU16Cursor += u16Count
                 }
             }
-            paraScanStart = (paraScanEnd < fullLen) ? (paraScanEnd + 1) : fullLen
-        }
 
-        // Apply per-span font/color/size overrides in shaped UTF-16 coordinates.
-        let spanColorKey = "RuneColorIndex" as CFString
-        let pillMarkerKey = "RunePillMarker" as CFString
-        var spanPalette: [Color] = []
-        struct DecoratedRange {
-            var u16Range: Range<Int>
-            var underline: Bool
-            var strikethrough: Bool
-            var background: Color?
-        }
-        var decoratedRanges: [DecoratedRange] = []
-        if let spans {
-            var authU16Cursor = 0
-            for span in spans {
-                let u16Count = span.text.utf16.count
-                guard u16Count > 0 else { continue }
-                let sLo = markerMap.shapedU16ForSpanBoundary(authU16Cursor, isEnd: false)
-                let sHi = markerMap.shapedU16ForSpanBoundary(authU16Cursor + u16Count, isEnd: true)
-                let sLen = max(0, sHi - sLo)
-                if sLen > 0 {
-                    let range = CFRangeMake(sLo, sLen)
-                    if span.weight != nil || span.italic || span.monospace || span.size != nil {
-                        var subStyle = style
-                        if let w = span.weight { subStyle.weight = w }
-                        if span.italic { subStyle.italic = true }
-                        if span.monospace { subStyle.family = .monospace }
-                        if let sz = span.size { subStyle.size = sz }
-                        let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
-                        CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
-                    }
-                    if let col = span.color {
-                        let idx = spanPalette.count
-                        spanPalette.append(col)
-                        CFAttributedStringSetAttribute(attrStr, range, spanColorKey, idx as CFNumber)
-                    }
-                    if span.underline || span.strikethrough || span.background != nil {
-                        decoratedRanges.append(DecoratedRange(
-                            u16Range: sLo..<sHi,
-                            underline: span.underline,
-                            strikethrough: span.strikethrough,
-                            background: span.background
-                        ))
-                    }
-                }
-                authU16Cursor += u16Count
-            }
-        }
-
-        // Install CTRunDelegate width reservations on pill/icon placeholder scalars.
-        for (pIdx, vp) in preparedPills.enumerated() {
-            let leadDelegate = Self.makeWidthDelegate(
-                widthPx: CGFloat(vp.leadWidthPt * scale),
-                ascentPx: baseAscentPx,
-                descentPx: baseDescentPx
-            )
-            let leadRange = CFRangeMake(vp.leadShapedU16, 1)
-            CFAttributedStringSetAttribute(attrStr, leadRange, kCTFontAttributeName, baseFont)
-            CFAttributedStringSetAttribute(attrStr, leadRange, kCTRunDelegateAttributeName, leadDelegate)
-            CFAttributedStringSetAttribute(attrStr, leadRange, pillMarkerKey, (pIdx << 1) as CFNumber)
-            if let trailU16 = vp.trailShapedU16 {
-                let trailDelegate = Self.makeWidthDelegate(
-                    widthPx: CGFloat(vp.trailWidthPt * scale),
+            // Install CTRunDelegate width reservations on pill/icon placeholder scalars.
+            var pillMarkerU16 = Set<Int>()
+            for (pIdx, vp) in preparedPills.enumerated() {
+                pillMarkerU16.insert(vp.leadShapedU16)
+                let leadDelegate = Self.makeWidthDelegate(
+                    widthPx: CGFloat(vp.leadWidthPt * scale),
                     ascentPx: baseAscentPx,
                     descentPx: baseDescentPx
                 )
-                let trailRange = CFRangeMake(trailU16, 1)
-                CFAttributedStringSetAttribute(attrStr, trailRange, kCTFontAttributeName, baseFont)
-                CFAttributedStringSetAttribute(attrStr, trailRange, kCTRunDelegateAttributeName, trailDelegate)
-                CFAttributedStringSetAttribute(attrStr, trailRange, pillMarkerKey, ((pIdx << 1) | 1) as CFNumber)
+                let leadRange = CFRangeMake(vp.leadShapedU16, 1)
+                CFAttributedStringSetAttribute(attrStr, leadRange, kCTFontAttributeName, baseFont)
+                CFAttributedStringSetAttribute(attrStr, leadRange, kCTRunDelegateAttributeName, leadDelegate)
+                CFAttributedStringSetAttribute(attrStr, leadRange, pillMarkerKey, (pIdx << 1) as CFNumber)
+                if let trailU16 = vp.trailShapedU16 {
+                    pillMarkerU16.insert(trailU16)
+                    let trailDelegate = Self.makeWidthDelegate(
+                        widthPx: CGFloat(vp.trailWidthPt * scale),
+                        ascentPx: baseAscentPx,
+                        descentPx: baseDescentPx
+                    )
+                    let trailRange = CFRangeMake(trailU16, 1)
+                    CFAttributedStringSetAttribute(attrStr, trailRange, kCTFontAttributeName, baseFont)
+                    CFAttributedStringSetAttribute(attrStr, trailRange, kCTRunDelegateAttributeName, trailDelegate)
+                    CFAttributedStringSetAttribute(attrStr, trailRange, pillMarkerKey, ((pIdx << 1) | 1) as CFNumber)
+                }
             }
+
+            // Install CTRunDelegate tab width reservations preserving 1:1 string indices (`text/tests.rs:89`).
+            if shapedText.contains("\t") {
+                let baseSpacePx = Self.spaceAdvancePx(font: baseFont, letterSpacingPx: style.letterSpacing * scale)
+                var u16Pos = 0
+                var monoCol = 0
+                var inMonoSpan = false
+                for scalar in shapedText.unicodeScalars {
+                    let activeSpan = spanTabInfo.first(where: { $0.u16Range.contains(u16Pos) })
+                    let isMono = (style.family == .monospace) || (activeSpan?.isMonospace == true)
+                    if style.family != .monospace {
+                        if !isMono {
+                            inMonoSpan = false
+                            monoCol = 0
+                        } else if !inMonoSpan {
+                            inMonoSpan = true
+                            monoCol = 0
+                        }
+                    }
+                    if scalar.value == 0x0A {
+                        monoCol = 0
+                    } else if scalar.value == 0x09 {
+                        let spacePx = activeSpan?.spacePx ?? baseSpacePx
+                        let tabWidthPx: CGFloat
+                        if isMono {
+                            let cols = 4 - (monoCol % 4)
+                            tabWidthPx = CGFloat(cols) * spacePx
+                            monoCol += cols
+                        } else {
+                            tabWidthPx = spacePx
+                        }
+                        let tabDelegate = Self.makeWidthDelegate(
+                            widthPx: tabWidthPx,
+                            ascentPx: baseAscentPx,
+                            descentPx: baseDescentPx
+                        )
+                        let tabRange = CFRangeMake(u16Pos, 1)
+                        CFAttributedStringReplaceString(attrStr, tabRange, "\u{FFFC}" as CFString)
+                        CFAttributedStringSetAttribute(attrStr, tabRange, kCTRunDelegateAttributeName, tabDelegate)
+                    } else if isMono && !pillMarkerU16.contains(u16Pos) {
+                        monoCol += 1
+                    }
+                    u16Pos += scalar.utf16.count
+                }
+            }
+
+            let created = CachedTypesetter(
+                typesetter: CTTypesetterCreateWithAttributedString(attrStr),
+                shapedText: shapedText,
+                markerMap: initialMarkerMap,
+                preparedPills: preparedPills,
+                spanPalette: spanPalette,
+                decoratedRanges: decoratedRanges,
+                baseFont: baseFont,
+                baseAscentPx: baseAscentPx,
+                baseDescentPx: baseDescentPx
+            )
+            lock.lock()
+            if typesetterCache.count > 1024 {
+                typesetterCache.removeAll(keepingCapacity: true)
+            }
+            typesetterCache[tsKey] = created
+            shapedBuildCount += 1
+            lock.unlock()
+            builtTypesetter = created
         }
+
+        let shapedText = builtTypesetter.shapedText
+        var markerMap = builtTypesetter.markerMap
+        let preparedPills = builtTypesetter.preparedPills
+        let spanPalette = builtTypesetter.spanPalette
+        let decoratedRanges = builtTypesetter.decoratedRanges
+        let baseFont = builtTypesetter.baseFont
+        let baseAscentPx = builtTypesetter.baseAscentPx
+        let baseDescentPx = builtTypesetter.baseDescentPx
+        let fullLen = shapedText.utf16.count
+        let shapedNS = shapedText as NSString
+        let spanColorKey = "RuneColorIndex" as CFString
+        let pillMarkerKey = "RunePillMarker" as CFString
 
         // Break into visual lines using CTTypesetter while keeping pill labels & bare icons atomic when they fit.
         struct VisualLine {
@@ -3312,7 +3495,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         var visualLines: [VisualLine] = []
         var anyTruncated = false
-        let typesetter = CTTypesetterCreateWithAttributedString(attrStr)
+        let typesetter = builtTypesetter.typesetter
         let effectiveWrapWidthPx: CGFloat? = (style.wrap == .wrap && maxWidth != nil)
             ? CGFloat(max(1.0, maxWidth! * scale))
             : nil
@@ -4206,6 +4389,9 @@ public final class TextSystem: @unchecked Sendable {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
         var effectiveStyle = style
+        if effectiveStyle.fontSmoothing == .systemDefault {
+            effectiveStyle.fontSmoothing = smoothing
+        }
         if maxWidth != nil && effectiveStyle.wrap == .noWrap {
             effectiveStyle.wrap = .wrap
         }
