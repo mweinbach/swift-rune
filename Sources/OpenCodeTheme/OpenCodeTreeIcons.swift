@@ -1,5 +1,6 @@
 import Foundation
 import Rune
+import RuneKit
 
 public enum OpenCodeTreeIcons {
     public static let astro = SVGIcon(viewBox: 16.0, paths: [#"M6.08 13.92c-.63-.57-.81-1.79-.55-2.67.45.56 1.08.73 1.73.83 1 .15 1.99.1 2.92-.37l.32-.19q.13.38.08.78a2.1 2.1 0 0 1-.9 1.5q-.3.24-.61.43c-.64.44-.81.95-.57 1.69l.02.08a1.7 1.7 0 0 1-.74-.64 2 2 0 0 1-.3-.98q0-.27-.02-.52-.07-.61-.61-.62a.7.7 0 0 0-.75.6z"#, #"M2.5 11.1s1.86-.9 3.72-.9l1.4-4.39c.05-.21.2-.36.38-.36s.33.15.38.36l1.4 4.38c2.2 0 3.72.92 3.72.92l-3.16-8.69q-.13-.4-.45-.42H6.11q-.3.02-.45.42z"#], strokeWidth: nil, body: #"<path fill="currentColor" d="M6.08 13.92c-.63-.57-.81-1.79-.55-2.67.45.56 1.08.73 1.73.83 1 .15 1.99.1 2.92-.37l.32-.19q.13.38.08.78a2.1 2.1 0 0 1-.9 1.5q-.3.24-.61.43c-.64.44-.81.95-.57 1.69l.02.08a1.7 1.7 0 0 1-.74-.64 2 2 0 0 1-.3-.98q0-.27-.02-.52-.07-.61-.61-.62a.7.7 0 0 0-.75.6z" opacity=".6"/><path fill="currentColor" d="M2.5 11.1s1.86-.9 3.72-.9l1.4-4.39c.05-.21.2-.36.38-.36s.33.15.38.36l1.4 4.38c2.2 0 3.72.92 3.72.92l-3.16-8.69q-.13-.4-.45-.42H6.11q-.3.02-.45.42z"/>"#)
@@ -555,6 +556,41 @@ public enum OpenCodeTreeIcons {
             idx = next
         }
         return OpenCodeTreeIcon(token: "default")
+    }
+
+    /// File-tree row chrome (`themes/opencode/src/tree_icons.rs:style`).
+    public static func style(_ k: Kit) -> TreeStyle {
+        let t = OpenCodeTheme.theme(dark: k.dark)
+        func v(_ n: String) -> Color { t["v2-\(n)"] ?? .transparent }
+        var s = TreeStyle.fromKit(k)
+            .hover(v("overlay-simple-overlay-hover"))
+            .gap(6.0)
+            .radius(6.0)
+            .label(TextStyle(size: 12.0, weight: 500.0).lh(28.0), rest: v("text-text-muted"), selected: v("text-text-base"))
+            .fadeLongLabels(16.0)
+            .chevronOnlyFolders(true)
+            .chevron(OpenCodeIcons.chevronDown)
+            .chevronNudge(1.0)
+            .chevronColors(rest: v("icon-icon-muted"), selected: v("text-text-base"))
+            .guidesOnHover(0.75)
+        s.rowHeight = 28.0
+        s.indent = 21.5
+        s.padding = 8.0
+        let guideBase = v("border-border-muted")
+        s.guide = guideBase.alpha(guideBase.a * 0.5)
+        s.selected = v("overlay-simple-overlay-pressed")
+        return s
+    }
+
+    /// Standard file-tree row for a file or folder (`themes/opencode/src/tree_icons.rs:item`).
+    public static func item<State>(_ name: String, path: String, folder: Bool, selected: Bool, dark: Bool) -> TreeRowItem<State> {
+        let row = TreeRowItem<State>(name)
+        if folder {
+            return row
+        }
+        let t = file(path)
+        let muted = OpenCodeTheme.theme(dark: dark)["v2-icon-icon-muted"] ?? .transparent
+        return row.icon(t.icon).iconColor(selected ? t.color(dark: dark) : muted)
     }
 
     public static let allTreeIcons: [OpenCodeTreeIcon] = tokens.map { OpenCodeTreeIcon(token: $0) }

@@ -1,5 +1,6 @@
 import Testing
 import Rune
+import RuneKit
 @testable import OpenCodeTheme
 
 @Suite("OpenCode Icons Parity Tests")
@@ -7,6 +8,11 @@ struct OpenCodeIconsTests {
     @Test func coreIconsAndNewIconsCountsAndLookups() {
         #expect(OpenCodeIcons.allData.count == 170)
         #expect(OpenCodeIcons.all.count == 170)
+        for data in OpenCodeIcons.allData {
+            #expect(data.viewBox > 0 && !data.body.isEmpty)
+            #expect(OpenCodeIcons.data(named: data.name) != nil)
+            #expect(OpenCodeIcons.byName(data.name) == data.svgIcon)
+        }
         #expect(OpenCodeIcons.data(named: "chevron-down") != nil)
         #expect(OpenCodeIcons.byName("chevron-down") != nil)
         #expect(OpenCodeIcons.byName("does-not-exist") == nil)
@@ -16,6 +22,10 @@ struct OpenCodeIconsTests {
         #expect(!OpenCodeIcons.close.paths.isEmpty)
 
         #expect(OpenCodeNewIcons.all.count == 71)
+        for data in OpenCodeNewIcons.allData {
+            #expect(data.viewBox > 0 && !data.body.isEmpty)
+            #expect(OpenCodeNewIcons.byName(data.name) == data.svgIcon)
+        }
         #expect(OpenCodeNewIcons.byName("folder") != nil)
         #expect(OpenCodeNewIcons.byName("missing-icon") == nil)
     }
@@ -67,6 +77,46 @@ struct OpenCodeIconsTests {
         let swiftTreeIcon = OpenCodeTreeIcons.file("Sources/main.swift")
         #expect(!swiftTreeIcon.data.body.isEmpty)
         #expect(swiftTreeIcon.color(dark: true).a > 0)
+
+        for dark in [true, false] {
+            let k = OpenCodeTheme.kit(dark: dark)
+            let t = OpenCodeTheme.theme(dark: dark)
+            let s = OpenCodeTreeIcons.style(k)
+            #expect(s.rowHeight == 28.0)
+            #expect(s.indent == 21.5)
+            #expect(s.padding == 8.0)
+            #expect(s.gap == 6.0)
+            #expect(s.radius == 6.0)
+            #expect(s.labelFont == TextStyle(size: 12.0, weight: 500.0).lh(28.0))
+            #expect(s.labelRest == t["v2-text-text-muted"])
+            #expect(s.labelSelected == t["v2-text-text-base"])
+            #expect(s.labelFade == 16.0)
+            #expect(s.chevronOnly == true)
+            #expect(s.chevron == OpenCodeIcons.chevronDown)
+            #expect(s.chevronNudge == 1.0)
+            #expect(s.chevronRest == t["v2-icon-icon-muted"])
+            #expect(s.chevronSelected == t["v2-text-text-base"])
+            #expect(s.guidesHover == 0.75)
+            #expect(s.hover == t["v2-overlay-simple-overlay-hover"])
+            #expect(s.selected == t["v2-overlay-simple-overlay-pressed"])
+            let borderMuted = t["v2-border-border-muted"] ?? .transparent
+            #expect(abs(s.guide.a - borderMuted.a * 0.5) < 0.0001)
+            #expect(s.guide.r == borderMuted.r && s.guide.g == borderMuted.g && s.guide.b == borderMuted.b)
+
+            let folderRow: TreeRowItem<Void> = OpenCodeTreeIcons.item("src", path: "src", folder: true, selected: false, dark: dark)
+            #expect(folderRow.labelText == "src")
+            #expect(folderRow.iconSVG == nil)
+            #expect(folderRow.iconColorValue == nil)
+
+            let unselectedFile: TreeRowItem<Void> = OpenCodeTreeIcons.item("main.rs", path: "src/main.rs", folder: false, selected: false, dark: dark)
+            #expect(unselectedFile.labelText == "main.rs")
+            #expect(unselectedFile.iconSVG == OpenCodeTreeIcons.file("src/main.rs").icon)
+            #expect(unselectedFile.iconColorValue == t["v2-icon-icon-muted"])
+
+            let selectedFile: TreeRowItem<Void> = OpenCodeTreeIcons.item("main.rs", path: "src/main.rs", folder: false, selected: true, dark: dark)
+            #expect(selectedFile.iconSVG == OpenCodeTreeIcons.file("src/main.rs").icon)
+            #expect(selectedFile.iconColorValue == OpenCodeTreeIcons.file("src/main.rs").color(dark: dark))
+        }
     }
 
     @Test func multiColorIconsCarryBodyAndRasterizeAndNewIconResolvesByValue() {
