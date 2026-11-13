@@ -188,6 +188,7 @@ public struct Cx<State> {
     public let hoveredKey: String?
     public let pressedKey: String?
     public let waker: Waker
+    public var helpLook: HelpLook?
     fileprivate let scrollLookup: (String) -> Vec2
     fileprivate let scrollMaxLookup: (String) -> Vec2
     fileprivate let viewportSizeLookup: (String) -> Vec2
@@ -204,6 +205,7 @@ public struct Cx<State> {
         hoveredKey: String? = nil,
         pressedKey: String? = nil,
         waker: Waker = Waker(),
+        helpLook: HelpLook? = nil,
         scrollLookup: @escaping (String) -> Vec2 = { _ in .zero },
         scrollMaxLookup: @escaping (String) -> Vec2 = { _ in .zero },
         viewportSizeLookup: @escaping (String) -> Vec2 = { _ in .zero },
@@ -219,6 +221,7 @@ public struct Cx<State> {
         self.hoveredKey = hoveredKey
         self.pressedKey = pressedKey
         self.waker = waker
+        self.helpLook = helpLook
         self.scrollLookup = scrollLookup
         self.scrollMaxLookup = scrollMaxLookup
         self.viewportSizeLookup = viewportSizeLookup
@@ -265,6 +268,10 @@ public struct Cx<State> {
 
     public func focusColor() -> Color {
         Tok.accent(0, dark: systemDark)
+    }
+
+    public mutating func setHelpLook(_ look: HelpLook) {
+        helpLook = look
     }
 }
 
@@ -344,6 +351,7 @@ public struct ElementHandlers<State> {
     public var editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)?
     public var onTextChange: ((inout State, String, inout Tx) -> Void)?
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
+    public var modalDismiss: ((inout State, inout Tx) -> Void)?
 
     public init() {}
 }
@@ -365,11 +373,23 @@ struct ElColdData<State> {
     var groupOpacity: (rest: Float, hovered: Float)? = nil
     var groupColor: Color? = nil
     var focusRingColor: Color? = nil
+    var focusRingWidth: Float = 2.0
     var focusRingOffset: Float = 2.0
     var focusReturnKey: String? = nil
+    var modalClickOutside: Bool = false
+    var tabIndex: Int? = nil
+    var isDefaultButton: Bool = false
+    var noFocusRing: Bool = false
+    var focusRequested: Bool = false
+    var focusHighlightColor: Color? = nil
+    var focusWithinRing: (width: Float, offset: Float, color: Color)? = nil
+    var focusWithinFlat: Bool = false
+    var focusFollows: Bool = false
 
     var a11yLabel: String? = nil
     var a11yHelp: String? = nil
+    var helpWhenTruncated: Bool = false
+    var helpSide: Side? = nil
     var a11ySelected: String? = nil
     var a11yExpanded: Bool? = nil
     var a11yLevel: Int? = nil
@@ -413,6 +433,8 @@ struct ElColdData<State> {
     var hasAnimatedChanges: Bool = false
     var loopingSpec: LoopSpec? = nil
     var flightId: String? = nil
+    var flightCrop: Bool = false
+    var flightSpring: Spring? = nil
     var terminalGridPayload: TerminalGrid? = nil
     var spellcheck: Bool = false
     var liveBindings: [BoundLiveProperty] = []
@@ -502,11 +524,26 @@ public struct El<State> {
     public var groupOpacity: (rest: Float, hovered: Float)? { get { _cold?.data.groupOpacity } set { ensureCold().data.groupOpacity = newValue } }
     public var groupColor: Color? { get { _cold?.data.groupColor } set { ensureCold().data.groupColor = newValue } }
     public var focusRingColor: Color? { get { _cold?.data.focusRingColor } set { ensureCold().data.focusRingColor = newValue } }
+    public var focusRingWidth: Float { get { _cold?.data.focusRingWidth ?? 2.0 } set { ensureCold().data.focusRingWidth = newValue } }
     public var focusRingOffset: Float { get { _cold?.data.focusRingOffset ?? 2.0 } set { ensureCold().data.focusRingOffset = newValue } }
     public var focusReturnKey: String? { get { _cold?.data.focusReturnKey } set { ensureCold().data.focusReturnKey = newValue } }
+    public var modalClickOutside: Bool { get { _cold?.data.modalClickOutside ?? false } set { ensureCold().data.modalClickOutside = newValue } }
+    public var tabIndex: Int? { get { _cold?.data.tabIndex } set { ensureCold().data.tabIndex = newValue } }
+    public var isDefaultButton: Bool { get { _cold?.data.isDefaultButton ?? false } set { ensureCold().data.isDefaultButton = newValue } }
+    public var noFocusRing: Bool { get { _cold?.data.noFocusRing ?? false } set { ensureCold().data.noFocusRing = newValue } }
+    public var isFocusRequested: Bool { get { _cold?.data.focusRequested ?? false } set { ensureCold().data.focusRequested = newValue } }
+    public var focusHighlightColor: Color? { get { _cold?.data.focusHighlightColor } set { ensureCold().data.focusHighlightColor = newValue } }
+    public var focusWithinRing: (width: Float, offset: Float, color: Color)? {
+        get { _cold?.data.focusWithinRing }
+        set { ensureCold().data.focusWithinRing = newValue }
+    }
+    public var focusWithinFlat: Bool { get { _cold?.data.focusWithinFlat ?? false } set { ensureCold().data.focusWithinFlat = newValue } }
+    public var isFocusFollowsSelection: Bool { get { _cold?.data.focusFollows ?? false } set { ensureCold().data.focusFollows = newValue } }
 
     public var a11yLabel: String? { get { _cold?.data.a11yLabel } set { ensureCold().data.a11yLabel = newValue } }
     public var a11yHelp: String? { get { _cold?.data.a11yHelp } set { ensureCold().data.a11yHelp = newValue } }
+    public var isHelpWhenTruncated: Bool { get { _cold?.data.helpWhenTruncated ?? false } set { ensureCold().data.helpWhenTruncated = newValue } }
+    public var helpSide: Side? { get { _cold?.data.helpSide } set { ensureCold().data.helpSide = newValue } }
     public var a11ySelected: String? { get { _cold?.data.a11ySelected } set { ensureCold().data.a11ySelected = newValue } }
     public var a11yExpanded: Bool? { get { _cold?.data.a11yExpanded } set { ensureCold().data.a11yExpanded = newValue } }
     public var a11yLevel: Int? { get { _cold?.data.a11yLevel } set { ensureCold().data.a11yLevel = newValue } }
@@ -538,6 +575,8 @@ public struct El<State> {
     public var hasAnimatedChanges: Bool { get { _cold?.data.hasAnimatedChanges ?? false } set { ensureCold().data.hasAnimatedChanges = newValue } }
     public var loopingSpec: LoopSpec? { get { _cold?.data.loopingSpec } set { ensureCold().data.loopingSpec = newValue } }
     public var flightId: String? { get { _cold?.data.flightId } set { ensureCold().data.flightId = newValue } }
+    public var isMatchedCrop: Bool { get { _cold?.data.flightCrop ?? false } set { ensureCold().data.flightCrop = newValue } }
+    public var flightSpring: Spring? { get { _cold?.data.flightSpring } set { ensureCold().data.flightSpring = newValue } }
     public var terminalGridPayload: TerminalGrid? { get { _cold?.data.terminalGridPayload } set { ensureCold().data.terminalGridPayload = newValue } }
     public var spellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
     var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue } }
@@ -1308,14 +1347,71 @@ public struct El<State> {
     public func focusRing(_ color: Color, offset: Float = 2.0) -> Self {
         var copy = self
         copy.focusRingColor = color
+        copy.focusRingWidth = 2.0
         copy.focusRingOffset = offset
         copy.focusable = true
+        return copy
+    }
+
+    public func focusRing(_ width: Float, offset: Float, _ color: Color) -> Self {
+        var copy = self
+        copy.focusRingColor = color
+        copy.focusRingWidth = width
+        copy.focusRingOffset = offset
         return copy
     }
 
     public func focusable(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.focusable = enabled
+        return copy
+    }
+
+    public func focused(_ requested: Bool = true) -> Self {
+        var copy = self
+        copy.isFocusRequested = requested
+        return copy
+    }
+
+    public func tabIndex(_ order: Int) -> Self {
+        var copy = self
+        copy.tabIndex = order
+        return copy
+    }
+
+    public func defaultButton(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isDefaultButton = enabled
+        return copy
+    }
+
+    public func noFocusRing(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.noFocusRing = enabled
+        return copy
+    }
+
+    public func focusHighlight(_ color: Color) -> Self {
+        var copy = self
+        copy.focusHighlightColor = color
+        return copy
+    }
+
+    public func focusWithinRing(_ color: Color, width: Float = 2.0, offset: Float = 2.0) -> Self {
+        var copy = self
+        copy.focusWithinRing = (width, offset, color)
+        return copy
+    }
+
+    public func focusWithinFlat(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.focusWithinFlat = enabled
+        return copy
+    }
+
+    public func focusFollows(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isFocusFollowsSelection = enabled
         return copy
     }
 
@@ -1335,6 +1431,28 @@ public struct El<State> {
     public func modal(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isModal = enabled
+        return copy
+    }
+
+    public func modal(clickOutside: Bool, dismiss: @escaping (inout State) -> Void) -> Self {
+        var copy = self
+        copy.isModal = true
+        copy.modalClickOutside = clickOutside
+        copy.handlers.modalDismiss = { s, _ in dismiss(&s) }
+        return copy
+    }
+
+    public func modalTx(clickOutside: Bool, dismiss: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.isModal = true
+        copy.modalClickOutside = clickOutside
+        copy.handlers.modalDismiss = dismiss
+        return copy
+    }
+
+    public func modalClickOutside(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.modalClickOutside = enabled
         return copy
     }
 
@@ -1365,7 +1483,49 @@ public struct El<State> {
 
     public func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
     public func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
-    public func help(_ h: String) -> Self { var c = self; c.a11yHelp = h; return c }
+    public func help(_ h: String) -> Self {
+        var c = self
+        if !h.isEmpty || c._cold != nil {
+            c.a11yHelp = h.isEmpty ? nil : h
+            c.isHelpWhenTruncated = false
+        }
+        return c
+    }
+    public func helpWhenTruncated(_ h: String) -> Self {
+        var c = help(h)
+        if !h.isEmpty {
+            c.isHelpWhenTruncated = true
+        }
+        return c
+    }
+    public func helpRow(_ text: String) -> Self {
+        var c = self
+        if let existing = c.a11yHelp, !existing.isEmpty {
+            c.a11yHelp = existing + String(runeHelpRowSeparator) + text
+        } else {
+            return c.help(text)
+        }
+        return c
+    }
+    public func helpKeys(_ keys: [String]) -> Self {
+        var c = self
+        guard let existing = c.a11yHelp, !existing.isEmpty else { return c }
+        var appended = existing
+        for key in keys where !key.isEmpty {
+            appended.append(runeHelpKeySeparator)
+            appended.append(contentsOf: key)
+        }
+        c.a11yHelp = appended
+        return c
+    }
+    public func helpSide(_ side: Side) -> Self {
+        var c = self
+        c.helpSide = (side == .bottom) ? nil : side
+        return c
+    }
+    public func helpAbove() -> Self {
+        helpSide(.top)
+    }
     public func selected(_ val: String?) -> Self { var c = self; c.a11ySelected = val; return c }
     public func expanded(_ val: Bool?) -> Self { var c = self; c.a11yExpanded = val; return c }
     public func headingLevel(_ l: Int) -> Self { var c = self; c.role = .heading; c.a11yLevel = l; return c }
@@ -1690,6 +1850,19 @@ public struct El<State> {
     public func flightId(_ id: String) -> Self {
         var copy = self
         copy.flightId = id
+        return copy
+    }
+
+    public func matched(_ id: String, spring: Spring? = nil) -> Self {
+        var copy = self
+        copy.flightId = id
+        copy.flightSpring = spring
+        return copy
+    }
+
+    public func matchedCrop() -> Self {
+        var copy = self
+        copy.isMatchedCrop = true
         return copy
     }
 

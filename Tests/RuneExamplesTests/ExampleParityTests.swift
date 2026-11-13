@@ -71,10 +71,7 @@ struct ExampleParityTests {
     }
 
     // Upstream: examples/matched/src/main.rs:112 enter_zooms_the_picked_tile_from_its_grid_cell
-    @Test(
-        "matched: enter zooms the picked tile from its grid cell",
-        .disabled("Blocked on @el: Runtime.swift never wires El.flightId / MatchedFlightRegistry across reparenting")
-    )
+    @Test("matched: enter zooms the picked tile from its grid cell")
     func matchedEnterZoomsPickedTileFromGridCell() {
         let rt = Runtime<MatchedState>(
             state: MatchedState(),

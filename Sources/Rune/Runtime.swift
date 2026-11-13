@@ -5,6 +5,22 @@ import RuneRef
 import simd
 #endif
 
+private struct FlightCoverTransform {
+    var targetOrigin: Vec2
+    var presentedOrigin: Vec2
+    var scale: Float
+}
+
+private struct LiftedFlightSubtree {
+    var node: Presented
+    var ancestorOpacity: Float
+    var ancestorTurn: Turn?
+    var outerTurnClip: MotionRect?
+    var localTurnClip: MotionRect?
+    var parentPath: String?
+    var nearestGroupHovered: Bool
+}
+
 /// Snapshot of a mounted or exiting UI element exposed to tests, accessibility, and `--tree` JSON.
 public struct ElementInfo: Sendable, Equatable {
     public var path: String
@@ -235,12 +251,15 @@ public final class Runtime<State> {
     public private(set) var minimizeRequested: Bool = false
     public private(set) var relaunchRequested: Bool = false
     public private(set) var nextWakeDeadline: Double? = nil
+    public var helpDelay: Double = 0.5
+    public var nativeHelp: Bool = false
     public var clipboard = ClipboardContent("")
     public var richClipboard = RichClipboardPayload()
     public let fileDropState = FileDropState()
     public var onFileDrop: ((inout State, FileDropPhase, inout Tx) -> Void)? = nil
     public let urlOpener = UrlOpener(headless: true)
     public let flightRecorder = FlightRecorder()
+    public let matchedFlightRegistry = MatchedFlightRegistry()
     public var rewindRecorder: RewindRecorder? = nil
 
     // Input & focus state
@@ -268,6 +287,31 @@ public final class Runtime<State> {
     private var loopRuntime = LoopRuntime()
     private var enterDelays: [NodeId: Double] = [:]
     private var releasedEnterDelays: Set<NodeId> = []
+    private struct MatchedSeenSnapshot {
+        var id: NodeId
+        var path: String
+        var rect: MotionRect
+        var corners: Corners
+        var fill: MotionColor?
+        var opacity: Float
+    }
+    private var seenMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
+    private var committedMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
+    private var activeFlightIds: Set<NodeId> = []
+    private struct FocusReturnEntry {
+        var ownerPath: String
+        var returnPath: String?
+        var returnKey: String?
+        var prevFocusVisible: Bool
+    }
+    private var focusReturnStack: [FocusReturnEntry] = []
+    private var syncedEditFocusedPaths: Set<String> = []
+    private var pendingTxFocusKey: String? = nil
+    private var pendingTxBlurRequested: Bool = false
+    private var modalMemberPaths: Set<String> = []
+    private var activeModalPath: String? = nil
+    private var viewHelpLook: HelpLook? = nil
+    private var helpState = HelpRuntimeState()
 
     // Live property tracking `(path, target) -> lastSeenSequence`
     private struct LiveKey: Hashable {
@@ -466,11 +510,17 @@ public final class Runtime<State> {
             node.el.role != .textInput
     }
 
-    /// Earliest future wall-clock timestamp when an active `enterDelay` or `looping`/`cycle` animation needs a frame.
+    /// Earliest future wall-clock timestamp when an active `enterDelay`, tooltip wait, or `looping`/`cycle` animation needs a frame.
     public func nextWakeDeadline(after now: Double) -> Double? {
         var best: Double? = nil
         for readyAt in enterDelays.values where readyAt > now {
             best = best.map { min($0, readyAt) } ?? readyAt
+        }
+        if case .waiting(_, let since) = helpState.tipState {
+            let due = since + currentHelpDelays().open
+            if due > now {
+                best = best.map { min($0, due) } ?? due
+            }
         }
         if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
             let t = now + loopInterval
@@ -564,11 +614,13 @@ public final class Runtime<State> {
             || liveStore.isAnimating
             || liveActive
             || !enterDelays.isEmpty
+            || tooltipFading(at: now)
             || loopRuntime.hasActiveLoops(at: now, reducedMotion: reducedMotion)
 
         // Prune snapshots of exiting nodes that have finished exiting
         let activeIds = Set(frameOut.nodes.map(\.id))
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
+        activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
         return buildRefScene(frameOut: frameOut, now: now)
     }
@@ -579,6 +631,7 @@ public final class Runtime<State> {
         if cut {
             enterDelays.removeAll()
             releasedEnterDelays.removeAll()
+            activeFlightIds.removeAll()
         }
         viewCommitCount += 1
         var cx = Cx<State>(
@@ -625,6 +678,7 @@ public final class Runtime<State> {
             }
         )
         let rootEl = view(state, &cx)
+        viewHelpLook = cx.helpLook
         if rootEl.background.a >= 0.999 {
             clearColor = rootEl.background
         }
@@ -649,12 +703,13 @@ public final class Runtime<State> {
         let fullWindowClip = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
 
         let rootResolvedKey: String? = rootEl.keyId
+        let rootPath: String = rootResolvedKey.map { "/@\($0)" } ?? "/0"
         var walkStack: [WalkItem] = [
             WalkItem(
                 el: rootEl,
                 solved: solvedRoot,
                 resolvedKey: rootResolvedKey,
-                path: "/0",
+                path: rootPath,
                 parentIdx: nil,
                 parentOrigin: .zero,
                 parentScroll: .zero,
@@ -973,20 +1028,54 @@ public final class Runtime<State> {
             loopRuntime.settleAll(at: now)
         }
 
-        // Apply modal inertness: if any mounted subtree is `.modal(true)`, elements outside the topmost modal become inert!
+        // Apply modal inertness: if any mounted subtree is `.modal(...)`, elements outside the topmost modal
+        // (and its anchored portal popovers) become inert!
+        var newModalMembers: Set<String> = []
+        var newActiveModalPath: String? = nil
         if let modalRootIdx = newFlat.indices.last(where: { newFlat[$0].el.isModal }) {
             let modalPrefix = newFlat[modalRootIdx].path
-            for i in 0..<newFlat.count {
+            newActiveModalPath = modalPrefix
+            var memberIndices = Set<Int>()
+            for i in modalRootIdx..<newFlat.count {
                 let p = newFlat[i].path
-                let insideModal = (p == modalPrefix) || p.hasPrefix(modalPrefix + "/")
-                if !insideModal {
-                    newFlat[i].effectiveInert = true
-                    let id = newFlat[i].nodeId
-                    newById[id] = newFlat[i]
-                    exitingSnapshots[id] = newFlat[i]
+                if p == modalPrefix || p.hasPrefix(modalPrefix + "/") {
+                    memberIndices.insert(i)
                 }
             }
+            var addedAnchored = true
+            while addedAnchored {
+                addedAnchored = false
+                for i in 0..<newFlat.count where !memberIndices.contains(i) {
+                    if let ak = newFlat[i].el.anchor?.key,
+                       memberIndices.contains(where: { newFlat[$0].key == ak }) {
+                        let portalPrefix = newFlat[i].path
+                        for j in i..<newFlat.count {
+                            let pj = newFlat[j].path
+                            if pj == portalPrefix || pj.hasPrefix(portalPrefix + "/") {
+                                if memberIndices.insert(j).inserted {
+                                    addedAnchored = true
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for i in memberIndices {
+                newModalMembers.insert(newFlat[i].path)
+            }
+            for i in 0..<newFlat.count where !memberIndices.contains(i) {
+                newFlat[i].effectiveInert = true
+                let id = newFlat[i].nodeId
+                newById[id] = newFlat[i]
+                exitingSnapshots[id] = newFlat[i]
+            }
         }
+        modalMemberPaths = newModalMembers
+        activeModalPath = newActiveModalPath
+
+        let prevFocusedPath = focusedPath
+        let prevFocusedKey = focusedKey
+        let prevFocusVisible = focusVisible
 
         flatNodes = newFlat
         nodeByPath = newByPath
@@ -995,37 +1084,192 @@ public final class Runtime<State> {
             keyWarnings = warnings
         }
 
-        // Reconcile focus: keep focused key/path if still focusable & non-inert; handle `.autofocus()`
-        reconcileFocusAfterCommit()
+        // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
+        reconcileFocusAfterCommit(
+            prevFocusedPath: prevFocusedPath,
+            prevFocusedKey: prevFocusedKey,
+            prevFocusVisible: prevFocusVisible
+        )
 
-        scene.commit(specs, at: now, initialCut: cut)
-    }
-
-    private func reconcileFocusAfterCommit() {
-        // 1. Check if current focus still exists and isn't inert
-        if let fk = focusedKey,
-           let match = flatNodes.first(where: { $0.key == fk && $0.el.focusable && !$0.effectiveInert }) {
-            focusedPath = match.path
-            return
-        }
-        if let fp = focusedPath,
-           let idx = nodeByPath[fp],
-           flatNodes[idx].el.focusable && !flatNodes[idx].effectiveInert {
-            focusedKey = flatNodes[idx].key
-            return
-        }
-        focusedPath = nil
-        focusedKey = nil
-
-        // 2. Check for newly mounted `.autofocus()` element
-        for node in flatNodes where node.el.autofocus && !node.effectiveInert {
-            if !autofocusAppliedPaths.contains(node.path) {
-                autofocusAppliedPaths.insert(node.path)
-                focusedPath = node.path
-                focusedKey = node.key
-                break
+        // Resolve cross-parent matched-geometry (`flightId` / `matched`) flights against last-seen rects.
+        var matchedStarts: [NodeId: MatchedFlightStart] = [:]
+        var newCommittedMatched: [String: MatchedSeenSnapshot] = [:]
+        var matchedRootPaths: [String] = []
+        for node in newFlat {
+            guard let fid = node.el.flightId else { continue }
+            let nid = node.nodeId
+            newCommittedMatched[fid] = MatchedSeenSnapshot(
+                id: nid,
+                path: node.path,
+                rect: node.targetRect,
+                corners: node.el.corners,
+                fill: node.el.background.motionColor,
+                opacity: node.el.opacity
+            )
+            if !cut, !scene.hasNode(nid),
+               let prev = seenMatchedByFlightId[fid] ?? committedMatchedByFlightId[fid],
+               prev.id != nid {
+                matchedStarts[nid] = MatchedFlightStart(
+                    fromId: prev.id,
+                    startRect: prev.rect,
+                    startCorners: prev.corners,
+                    startFill: prev.fill,
+                    startOpacity: prev.opacity,
+                    spring: node.el.flightSpring ?? MotionTokens.SETTLE
+                )
+                matchedRootPaths.append(node.path)
+                activeFlightIds.insert(nid)
             }
         }
+        if !matchedRootPaths.isEmpty {
+            for i in 0..<specs.count {
+                let p = newFlat[i].path
+                if matchedRootPaths.contains(where: { p.hasPrefix($0 + "/") }) {
+                    specs[i].transition = nil
+                }
+            }
+        }
+        committedMatchedByFlightId = newCommittedMatched
+        if cut {
+            seenMatchedByFlightId = newCommittedMatched
+            for (fid, snap) in newCommittedMatched {
+                matchedFlightRegistry.recordPrevious(flightId: fid, rect: snap.rect)
+            }
+        }
+
+        scene.commit(specs, at: now, initialCut: cut, matchedStarts: matchedStarts)
+    }
+
+    private func canFocusIndex(_ idx: Int) -> Bool {
+        guard idx >= 0 && idx < flatNodes.count else { return false }
+        let node = flatNodes[idx]
+        guard node.el.focusable && !node.effectiveInert && !node.el.a11yDisabled else { return false }
+        var walk: Int? = idx
+        while let cur = walk {
+            if flatNodes[cur].el.opacity <= 0.001 || flatNodes[cur].el.isInert {
+                return false
+            }
+            walk = flatNodes[cur].parentIndex
+        }
+        return true
+    }
+
+    private func tabOrderIndices() -> [Int] {
+        let all = flatNodes.indices.filter { canFocusIndex($0) && (flatNodes[$0].el.tabIndex ?? 0) >= 0 }
+        let collapsed = all.filter { i in
+            guard let g = findFocusGroupAncestor(of: i), g != i else { return true }
+            let members = all.filter { findFocusGroupAncestor(of: $0) == g && $0 != g }
+            let chosen = members.first(where: { flatNodes[$0].path == focusedPath })
+                ?? members.first(where: { flatNodes[$0].el.itemSelected })
+                ?? members.first
+            return chosen == i
+        }
+        return collapsed.sorted { a, b in
+            let ta = flatNodes[a].el.tabIndex ?? 0
+            let tb = flatNodes[b].el.tabIndex ?? 0
+            let oa = ta > 0 ? ta : Int.max
+            let ob = tb > 0 ? tb : Int.max
+            if oa != ob { return oa < ob }
+            return a < b
+        }
+    }
+
+    private func reconcileFocusAfterCommit(
+        prevFocusedPath: String?,
+        prevFocusedKey: String?,
+        prevFocusVisible: Bool
+    ) {
+        let txBlur = pendingTxBlurRequested
+        let txFocusKey = pendingTxFocusKey
+        pendingTxBlurRequested = false
+        pendingTxFocusKey = nil
+
+        // Detect newly requested `.focused(true)` on non-inert mounted focusable nodes.
+        var requestedFocusIdx: Int? = nil
+        var nextSyncedRequests: Set<String> = []
+        for (i, node) in flatNodes.enumerated() where !node.effectiveInert {
+            if node.el.isFocusRequested {
+                nextSyncedRequests.insert(node.path)
+                if !syncedEditFocusedPaths.contains(node.path) && requestedFocusIdx == nil {
+                    requestedFocusIdx = i
+                }
+            }
+        }
+        syncedEditFocusedPaths = nextSyncedRequests
+
+        // Track `.modal` & `.focusReturn(...)` owners for return-focus restoration when they close.
+        var poppedReturns: [FocusReturnEntry] = []
+        var keptReturns: [FocusReturnEntry] = []
+        for entry in focusReturnStack {
+            if let idx = nodeByPath[entry.ownerPath],
+               (flatNodes[idx].el.isModal || flatNodes[idx].el.focusReturnKey != nil) {
+                keptReturns.append(entry)
+            } else {
+                poppedReturns.append(entry)
+            }
+        }
+        focusReturnStack = keptReturns
+        for node in flatNodes where (node.el.isModal || node.el.focusReturnKey != nil) {
+            if !focusReturnStack.contains(where: { $0.ownerPath == node.path }) {
+                focusReturnStack.append(FocusReturnEntry(
+                    ownerPath: node.path,
+                    returnPath: node.el.focusReturnKey == nil ? prevFocusedPath : nil,
+                    returnKey: node.el.focusReturnKey ?? prevFocusedKey,
+                    prevFocusVisible: prevFocusVisible
+                ))
+            }
+        }
+
+        var nextIdx: Int? = nil
+        if txBlur {
+            nextIdx = nil
+        } else if let fk = txFocusKey,
+                  let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
+            nextIdx = idx
+        } else if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
+            nextIdx = rIdx
+            focusVisible = false
+        } else if let fk = focusedKey,
+                  let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
+            nextIdx = idx
+        } else if let fp = focusedPath,
+                  let idx = nodeByPath[fp],
+                  canFocusIndex(idx) {
+            nextIdx = idx
+        }
+
+        if !txBlur && nextIdx == nil {
+            for ret in poppedReturns.reversed() {
+                if let rk = ret.returnKey,
+                   let idx = flatNodes.firstIndex(where: { $0.key == rk && canFocusIndex($0.index) }) {
+                    nextIdx = idx
+                    break
+                }
+                if let rp = ret.returnPath,
+                   let idx = nodeByPath[rp],
+                   canFocusIndex(idx) {
+                    nextIdx = idx
+                    break
+                }
+            }
+        }
+
+        if txFocusKey == nil && nextIdx == nil {
+            for (i, node) in flatNodes.enumerated() where node.el.autofocus && canFocusIndex(i) {
+                if !autofocusAppliedPaths.contains(node.path) {
+                    autofocusAppliedPaths.insert(node.path)
+                    nextIdx = i
+                    break
+                }
+            }
+        }
+
+        if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty) {
+            nextIdx = tabOrderIndices().first
+        }
+
+        focusedPath = nextIdx.map { flatNodes[$0].path }
+        focusedKey = nextIdx.flatMap { flatNodes[$0].key }
     }
 
     // MARK: - Live Property Evaluation
@@ -1266,6 +1510,20 @@ public final class Runtime<State> {
         var newHitGeometries: [String: HitGeometry] = [:]
         var newPaintOrder: [String] = []
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
+        var newHelpHits: [HelpHitRecord] = []
+        var newInteractiveHits: [HelpInteractiveHitRecord] = []
+
+        let flyingRootIds: Set<NodeId> = Set(frameOut.nodes.compactMap { p in
+            guard let snap = nodeById[p.id],
+                  snap.el.flightId != nil,
+                  (activeFlightIds.contains(p.id) || scene.isEdgeAnimating(p.id)),
+                  !p.isExiting else {
+                return nil
+            }
+            return p.id
+        })
+        var liftedFlights: [LiftedFlightSubtree] = []
+        var newSeenMatched: [String: MatchedSeenSnapshot] = [:]
 
         func emitSubtree(
             _ p: Presented,
@@ -1274,18 +1532,47 @@ public final class Runtime<State> {
             outerTurnClip: MotionRect?,
             localTurnClip: MotionRect?,
             parentPath: String?,
-            nearestGroupHovered: Bool
+            nearestGroupHovered: Bool,
+            flightCover: FlightCoverTransform? = nil,
+            flightClipOverride: MotionRect? = nil,
+            emitLiftedNow: Bool = false
         ) {
             guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return }
+            if !emitLiftedNow && flyingRootIds.contains(p.id) {
+                liftedFlights.append(LiftedFlightSubtree(
+                    node: p,
+                    ancestorOpacity: ancestorOpacity,
+                    ancestorTurn: ancestorTurn,
+                    outerTurnClip: outerTurnClip,
+                    localTurnClip: localTurnClip,
+                    parentPath: parentPath,
+                    nearestGroupHovered: nearestGroupHovered
+                ))
+                return
+            }
             let el = snap.el
-            let rect = presentedRectById[p.id] ?? p.rect
+            let rawRect = presentedRectById[p.id] ?? p.rect
             let ownOp = ownOpacityById[p.id] ?? p.opacity
             let groupFactor: Float = {
                 guard let (restOp, hovOp) = el.groupOpacity else { return 1.0 }
                 return nearestGroupHovered ? hovOp : restOp
             }()
             let alpha = (ownOp * ancestorOpacity * groupFactor).clamped(to: 0...1)
-            let scaleVec = presentedScaleById[p.id] ?? p.scale
+            let rawScaleVec = presentedScaleById[p.id] ?? p.scale
+            let rect: MotionRect
+            let scaleVec: Vec2
+            if let fc = flightCover {
+                rect = MotionRect.fromXYWH(
+                    fc.presentedOrigin.x + (rawRect.x - fc.targetOrigin.x) * fc.scale,
+                    fc.presentedOrigin.y + (rawRect.y - fc.targetOrigin.y) * fc.scale,
+                    rawRect.width * fc.scale,
+                    rawRect.height * fc.scale
+                )
+                scaleVec = Vec2(rawScaleVec.x * fc.scale, rawScaleVec.y * fc.scale)
+            } else {
+                rect = rawRect
+                scaleVec = rawScaleVec
+            }
             let effRotate = ownRotateById[p.id] ?? p.rotate
 
             let ownHasTurn = abs(effRotate) > 1e-6
@@ -1298,7 +1585,7 @@ public final class Runtime<State> {
                 nodeTurn = ancestorTurn
             }
 
-            let parentWindowClip = snap.parentIndex.map { flatNodes[$0].clipRect } ?? windowRect
+            let parentWindowClip = flightClipOverride ?? (snap.parentIndex.map { flatNodes[$0].clipRect } ?? windowRect)
             let effectiveOuterClip: MotionRect
             let effectiveHitClip: MotionRect
             let childLocalTurnClip: MotionRect?
@@ -1343,11 +1630,50 @@ public final class Runtime<State> {
             }
             let borderColor = p.border.map(Color.init) ?? el.borderColor
 
-            var visClip = snap.clipRect
+            var visClip = flightClipOverride ?? snap.clipRect
             if let rev = p.revealClip {
                 visClip = intersectRects(visClip, rev)
             }
             let visibleRect = intersectRects(visClip, rect)
+
+            if let fid = el.flightId, !p.isExiting {
+                newSeenMatched[fid] = MatchedSeenSnapshot(
+                    id: p.id,
+                    path: snap.path,
+                    rect: rect,
+                    corners: p.corners,
+                    fill: fillColor.motionColor,
+                    opacity: alpha
+                )
+                matchedFlightRegistry.recordPrevious(flightId: fid, rect: rect)
+            }
+
+            let flightScale = flightCover?.scale ?? 1.0
+            let childFlightCover: FlightCoverTransform?
+            if let fc = flightCover {
+                childFlightCover = fc
+            } else if el.flightId != nil,
+                      snap.targetRect.width > 0.5,
+                      snap.targetRect.height > 0.5,
+                      (abs(rect.width - snap.targetRect.width) > 0.5
+                        || abs(rect.height - snap.targetRect.height) > 0.5
+                        || flyingRootIds.contains(p.id)) {
+                let k: Float = el.isMatchedCrop ? 1.0 : max(rect.width / snap.targetRect.width, rect.height / snap.targetRect.height)
+                let ox = (rect.width - snap.targetRect.width * k) * 0.5
+                let oy = (rect.height - snap.targetRect.height * k) * 0.5
+                childFlightCover = FlightCoverTransform(
+                    targetOrigin: Vec2(snap.targetRect.x, snap.targetRect.y),
+                    presentedOrigin: Vec2(rect.x + ox, rect.y + oy),
+                    scale: k
+                )
+            } else {
+                childFlightCover = nil
+            }
+            let childFlightClip: MotionRect? = childFlightCover != nil
+                ? ((el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil)
+                    ? intersectRects(visClip, rect)
+                    : visClip)
+                : nil
 
             let isFocused = (focusedPath == snap.path) && !p.isExiting
             let isHovered = (hoveredPath == snap.path) && !p.isExiting && !snap.effectiveInert
@@ -1355,6 +1681,7 @@ public final class Runtime<State> {
             let scrolled = scrollOffsets[snap.path] ?? .zero
 
             var caretOut: [Float]? = nil
+            var textTruncated = false
             let editValue: TextEdit? = el.handlers.editLens.map { lens in
                 var e = lens.get(state)
                 if el.isSecure {
@@ -1410,10 +1737,10 @@ public final class Runtime<State> {
                     rect.height * pxScale
                 )
                 let devRadii = SIMD4<Float>(
-                    p.corners.topLeft * pxScale,
-                    p.corners.topRight * pxScale,
-                    p.corners.bottomRight * pxScale,
-                    p.corners.bottomLeft * pxScale
+                    p.corners.topLeft * pxScale * flightScale,
+                    p.corners.topRight * pxScale * flightScale,
+                    p.corners.bottomRight * pxScale * flightScale,
+                    p.corners.bottomLeft * pxScale * flightScale
                 )
 
                 if activeFadeEdges.count > 1 {
@@ -1493,7 +1820,8 @@ public final class Runtime<State> {
                 }
 
                 if hasFill || hasSolidBorder {
-                    let f4 = (el.gradient == nil ? fillColor : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                    let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
                     let sidePx = el.borderSides.map { s in
                         SIMD4<Float>(
@@ -1511,6 +1839,16 @@ public final class Runtime<State> {
                         borderColor: b4,
                         borderWidth: bwPx,
                         borderSides: sidePx,
+                        clip: devClip,
+                        turn: useLayer ? 0 : effRotate
+                    )))
+                } else if isFocused && focusVisible, let hl = el.focusHighlightColor {
+                    primitives.append(attachFade(.roundedRect(
+                        rect: devRect,
+                        radii: devRadii,
+                        fill: hl.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                        borderColor: .zero,
+                        borderWidth: 0,
                         clip: devClip,
                         turn: useLayer ? 0 : effRotate
                     )))
@@ -1742,14 +2080,26 @@ public final class Runtime<State> {
                         }
                     }
                 } else if el.richSpans != nil || paintedLabelValue != nil {
+                    let wrapWidth = (innerW / max(1e-4, scaleVec.x)) + 0.5
                     let shaped = textSystem.shape(
                         text: paintedLabelValue ?? "",
                         spans: el.richSpans,
                         style: el.textStyle,
-                        maxWidth: innerW + 0.5,
+                        maxWidth: wrapWidth,
                         pixelScale: pxScale,
                         emitGlyphs: true
                     )
+                    if el.isHelpWhenTruncated {
+                        let naturalSize = textSystem.measure(
+                            paintedLabelValue ?? "",
+                            style: el.textStyle,
+                            maxWidth: nil,
+                            pixelScale: pxScale
+                        )
+                        if naturalSize.x > wrapWidth + 0.5 || naturalSize.y > rect.height + 0.5 {
+                            textTruncated = true
+                        }
+                    }
                     for g in shaped.glyphs {
                         let gc = (g.color ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                         primitives.append(attachFade(.glyph(
@@ -1768,10 +2118,10 @@ public final class Runtime<State> {
                     }
                 }
 
-                // 9. Focus ring when keyboard-focus-visible (or focused textInput with explicit focusRing)
-                if isFocused, let ringCol = el.focusRingColor, (focusVisible || el.role == .textInput) {
+                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or focused textInput with explicit focusRing)
+                if isFocused, !el.noFocusRing, let ringCol = el.focusRingColor, (focusVisible || el.role == .textInput) {
                     let off = el.focusRingOffset * pxScale
-                    let ringW = 2.0 * pxScale
+                    let ringW = el.focusRingWidth * pxScale
                     let ringRect = SIMD4<Float>(
                         devRect.x - off,
                         devRect.y - off,
@@ -1792,6 +2142,44 @@ public final class Runtime<State> {
                         borderWidth: ringW,
                         clip: SIMD4<Float>(0, 0, Float(devW), Float(devH))
                     ))
+                } else if !p.isExiting, !snap.effectiveInert, focusVisible, !el.noFocusRing, !el.focusWithinFlat,
+                          let within = el.focusWithinRing,
+                          let fp = focusedPath,
+                          (fp == snap.path || fp.hasPrefix(snap.path + "/")) {
+                    let suppressed: Bool = {
+                        guard let fIdx = nodeByPath[fp] else { return false }
+                        var cur: Int? = fIdx
+                        while let c = cur {
+                            if flatNodes[c].path == snap.path { break }
+                            if flatNodes[c].el.focusWithinFlat || flatNodes[c].el.noFocusRing { return true }
+                            cur = flatNodes[c].parentIndex
+                        }
+                        return false
+                    }()
+                    if !suppressed {
+                        let off = within.offset * pxScale
+                        let ringW = within.width * pxScale
+                        let ringRect = SIMD4<Float>(
+                            devRect.x - off,
+                            devRect.y - off,
+                            devRect.z + off * 2.0,
+                            devRect.w + off * 2.0
+                        )
+                        let ringRadii = SIMD4<Float>(
+                            devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
+                            devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
+                            devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
+                            devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
+                        )
+                        primitives.append(.roundedRect(
+                            rect: ringRect,
+                            radii: ringRadii,
+                            fill: .zero,
+                            borderColor: within.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderWidth: ringW,
+                            clip: SIMD4<Float>(0, 0, Float(devW), Float(devH))
+                        ))
+                    }
                 }
             }
 
@@ -1802,6 +2190,37 @@ public final class Runtime<State> {
             let isInteractiveBlocker = hnd.onClick != nil || hnd.onClickPress != nil || hnd.onDoubleClick != nil ||
                 hnd.onPointerDown != nil || hnd.onDrag != nil || hnd.onHover != nil ||
                 hnd.editLens != nil || el.isModal || el.explicitHit
+            let resolvedRawHelp: String? = {
+                guard let h = el.a11yHelp, !h.isEmpty else { return nil }
+                if el.isHelpWhenTruncated && !textTruncated { return nil }
+                return h
+            }()
+            if shouldEmit && !p.isExiting && visibleRect.width > 0 && visibleRect.height > 0 {
+                let hitRect4 = SIMD4<Float>(
+                    visibleRect.x,
+                    visibleRect.y,
+                    visibleRect.x + visibleRect.width,
+                    visibleRect.y + visibleRect.height
+                )
+                if let hText = resolvedRawHelp {
+                    newHelpHits.append(HelpHitRecord(
+                        path: snap.path,
+                        key: snap.key,
+                        rect: hitRect4,
+                        seq: newInteractiveHits.count,
+                        text: hText,
+                        side: el.helpSide,
+                        linkIndex: nil
+                    ))
+                }
+                if isInteractiveBlocker || el.hoverBg != nil || el.pressBg != nil ||
+                   el.focusable || el.isHoverGroup || el.isHoverAlone {
+                    newInteractiveHits.append(HelpInteractiveHitRecord(
+                        path: snap.path,
+                        rect: hitRect4
+                    ))
+                }
+            }
 
             newHitGeometries[snap.path] = HitGeometry(
                 path: snap.path,
@@ -1832,7 +2251,7 @@ public final class Runtime<State> {
                 textColor: el.textColor,
                 text: elementTextValue,
                 label: el.a11yLabel,
-                help: el.a11yHelp,
+                help: resolvedRawHelp.map(runeHelpWords),
                 selected: nodeIsSecure ? nil : el.a11ySelected,
                 expanded: el.a11yExpanded,
                 level: el.a11yLevel,
@@ -1905,7 +2324,10 @@ public final class Runtime<State> {
                         outerTurnClip: nextOuterClip,
                         localTurnClip: childLocalTurnClip,
                         parentPath: snap.path,
-                        nearestGroupHovered: nextGroupHovered
+                        nearestGroupHovered: nextGroupHovered,
+                        flightCover: childFlightCover,
+                        flightClipOverride: childFlightClip,
+                        emitLiftedNow: emitLiftedNow
                     )
                 }
             }
@@ -1935,13 +2357,30 @@ public final class Runtime<State> {
                 nearestGroupHovered: false
             )
         }
+        for lifted in liftedFlights {
+            emitSubtree(
+                lifted.node,
+                ancestorOpacity: lifted.ancestorOpacity,
+                ancestorTurn: lifted.ancestorTurn,
+                outerTurnClip: lifted.outerTurnClip,
+                localTurnClip: lifted.localTurnClip,
+                parentPath: lifted.parentPath,
+                nearestGroupHovered: lifted.nearestGroupHovered,
+                flightCover: nil,
+                flightClipOverride: nil,
+                emitLiftedNow: true
+            )
+        }
+        seenMatchedByFlightId = newSeenMatched
 
         lastElements = infos
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
         hitGeometryByPath = newHitGeometries
         paintOrderPaths = newPaintOrder
-        _ = now
+        helpState.hits = newHelpHits
+        helpState.interactiveHits = newInteractiveHits
+        updateHelp(at: now, primitives: &primitives)
 
         return RefScene(
             width: devW,
@@ -2030,6 +2469,9 @@ public final class Runtime<State> {
 
     public func pointerExit(at now: Double) {
         pointerPosition = Vec2(-10000, -10000)
+        if helpState.tipState != .idle {
+            dirtyCommit(at: now)
+        }
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
@@ -2098,6 +2540,8 @@ public final class Runtime<State> {
                 applyTx(tx, at: now)
             }
             dirtyCommit(at: now)
+        } else if helpTargetChanges(at: pos) {
+            dirtyCommit(at: now)
         }
 
         if let moveHit = hitTest(at: pos, predicate: { $0.el.handlers.onPointerMove != nil }),
@@ -2119,6 +2563,7 @@ public final class Runtime<State> {
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
         pointerPosition = pos
         focusVisible = false
+        pressHelp(at: pos, now: now)
 
         if button == .primary {
             let dt = now - lastClickTime
@@ -2132,6 +2577,27 @@ public final class Runtime<State> {
             lastClickPos = pos
         } else {
             clickCount = 1
+        }
+
+        // Modal click-outside dismissal & scrim swallow when an active modal is mounted.
+        if let mPath = activeModalPath, let mIdx = nodeByPath[mPath] {
+            let hitInsideModalMember: Bool = modalMemberPaths.contains { memberPath in
+                if let geom = hitGeometryByPath[memberPath] {
+                    return geom.contains(pos)
+                }
+                if let r = presentedRectByPath[memberPath] ?? nodeByPath[memberPath].map({ flatNodes[$0].targetRect }) {
+                    return halfOpenContains(r, pos)
+                }
+                return false
+            }
+            if !hitInsideModalMember {
+                if flatNodes[mIdx].el.modalClickOutside, let dismiss = flatNodes[mIdx].el.handlers.modalDismiss {
+                    var tx = Tx()
+                    dismiss(&state, &tx)
+                    applyTx(tx, at: now)
+                }
+                return
+            }
         }
 
         if button == .secondary {
@@ -2316,6 +2782,7 @@ public final class Runtime<State> {
 
     /// Routes wheel / trackpad scroll deltas to custom `onWheel` handlers or the nearest scrollable ancestor.
     public func wheel(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
+        dismissHelp(at: now)
         let targetPos = pos ?? pointerPosition
         if let pos { pointerPosition = pos }
 
@@ -2365,6 +2832,7 @@ public final class Runtime<State> {
 
     /// Starts an inertial scroll `Decay` fling (`vx`, `vy` in points/sec) on the scroll container under `pos`.
     public func fling(vx: Float = 0, vy: Float, at pos: Vec2? = nil, now: Double) {
+        dismissHelp(at: now)
         let targetPos = pos ?? pointerPosition
         guard let (scrollNode, _) = hitTest(at: targetPos, predicate: { !$0.el.layout.scrollAxes.isEmpty }) else {
             return
@@ -2417,8 +2885,9 @@ public final class Runtime<State> {
         }
 
         if let fallbackKey {
-            if case .key(_, _, let pressed, _) = event, !pressed {
-                return false
+            if case .key(_, _, let pressed, let isRepeat) = event {
+                if !pressed { return false }
+                return keyDown(fallbackKey, isRepeat: isRepeat, at: now)
             }
             return keyDown(fallbackKey, at: now)
         }
@@ -2426,7 +2895,8 @@ public final class Runtime<State> {
     }
 
     @discardableResult
-    public func keyDown(_ ev: KeyEvent, at now: Double) -> Bool {
+    public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        dismissHelp(at: now)
         // 1. Escape cancels an in-progress drag and restores pre-drag state!
         if ev.key == .escape, let drag = activeDrag {
             state = drag.stateSnapshotBeforeDrag
@@ -2504,9 +2974,10 @@ public final class Runtime<State> {
                         var tx = Tx()
                         onSubmit(&state, edit.text, &tx)
                         applyTx(tx, at: now)
+                        dirtyCommit(at: now)
+                        return true
                     }
-                    dirtyCommit(at: now)
-                    return true
+                    // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
                 case .copy(let copied):
                     editLens.set(&state, edit)
                     clipboard = ClipboardContent(copied)
@@ -2520,12 +2991,34 @@ public final class Runtime<State> {
                 }
             }
 
-            // Space or Enter activates focused buttons/switches/checkboxes!
-            if (ev.key == .space || ev.key == .enter) && ev.mods == .none {
+            // Space activates non-input focused controls; Enter activates rows/links (`takesReturn`) or falls back when no `.defaultButton()` exists.
+            let takesReturn = fNode.el.role == .listItem || fNode.el.role == .option ||
+                fNode.el.role == .treeItem || fNode.el.role == .menuItem ||
+                fNode.el.role == .link || fNode.el.role == .row ||
+                fNode.el.role == .gridCell || fNode.el.focusHighlightColor != nil
+            if fNode.el.handlers.editLens == nil && ev.mods == .none &&
+               (ev.key == .space || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
+                if isRepeat { return true }
                 if let onClick = fNode.el.handlers.onClick {
                     focusVisible = true
                     var tx = Tx()
                     onClick(&state, &tx)
+                    applyTx(tx, at: now)
+                    return true
+                }
+                if let onClickPress = fNode.el.handlers.onClickPress {
+                    focusVisible = true
+                    let r = presentedRectByPath[fNode.path] ?? fNode.targetRect
+                    let press = PointerPress(
+                        window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
+                        local: Vec2(r.width * 0.5, r.height * 0.5),
+                        elementSize: Vec2(r.width, r.height),
+                        button: .primary,
+                        mods: .none,
+                        clicks: 1
+                    )
+                    var tx = Tx()
+                    onClickPress(&state, press, &tx)
                     applyTx(tx, at: now)
                     return true
                 }
@@ -2544,6 +3037,24 @@ public final class Runtime<State> {
             }
         }
 
+        // 2b. Unhandled Escape inside an active modal blurs focus and dismisses the innermost modal
+        // (blocking key repeat so held Escape never cascades through stacked modals).
+        if ev.key == .escape, let mPath = activeModalPath, let mIdx = nodeByPath[mPath] {
+            if isRepeat {
+                return true
+            }
+            focusedPath = nil
+            focusedKey = nil
+            syncedEditFocusedPaths.removeAll()
+            if let dismiss = flatNodes[mIdx].el.handlers.modalDismiss {
+                var tx = Tx()
+                dismiss(&state, &tx)
+                applyTx(tx, at: now)
+            }
+            dirtyCommit(at: now)
+            return true
+        }
+
         // 3. Tab / Shift+Tab focus ring traversal (trapped inside `.modal()` automatically via `effectiveInert`!)
         if ev.key == .tab && !ev.mods.ctrl && !ev.mods.alt && !ev.mods.cmd {
             if advanceTabFocus(backward: ev.mods.shift) {
@@ -2553,8 +3064,34 @@ public final class Runtime<State> {
             }
         }
 
-        // 4. Root / global `onKey` handler
-        if let globalOnKey {
+        // 3b. Default button activation on unmodified Return when no control consumed it
+        if ev.key == .enter && ev.mods == .none && !isRepeat,
+           let defNode = defaultButtonNode() {
+            if let onClick = defNode.el.handlers.onClick {
+                var tx = Tx()
+                onClick(&state, &tx)
+                applyTx(tx, at: now)
+                return true
+            }
+            if let onClickPress = defNode.el.handlers.onClickPress {
+                let r = presentedRectByPath[defNode.path] ?? defNode.targetRect
+                let press = PointerPress(
+                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
+                    local: Vec2(r.width * 0.5, r.height * 0.5),
+                    elementSize: Vec2(r.width, r.height),
+                    button: .primary,
+                    mods: .none,
+                    clicks: 1
+                )
+                var tx = Tx()
+                onClickPress(&state, press, &tx)
+                applyTx(tx, at: now)
+                return true
+            }
+        }
+
+        // 4. Root / global `onKey` handler (only when no active modal blocks background shortcuts)
+        if activeModalPath == nil, let globalOnKey {
             var tx = Tx()
             if globalOnKey(&state, ev, &tx) {
                 applyTx(tx, at: now)
@@ -2740,9 +3277,14 @@ public final class Runtime<State> {
             quitRequested = true
         }
         if tx.blurFocusRequested {
+            pendingTxBlurRequested = true
+            pendingTxFocusKey = nil
             focusedPath = nil
             focusedKey = nil
+            syncedEditFocusedPaths.removeAll()
         } else if let fk = tx.requestedFocusKey {
+            pendingTxBlurRequested = false
+            pendingTxFocusKey = fk
             focusedKey = fk
             if let match = flatNodes.first(where: { $0.key == fk }) {
                 focusedPath = match.path
@@ -2909,21 +3451,35 @@ public final class Runtime<State> {
     }
 
     private func advanceTabFocus(backward: Bool) -> Bool {
-        let candidates = flatNodes.filter { $0.el.focusable && !$0.effectiveInert }
-        guard !candidates.isEmpty else { return false }
-        if let curPath = focusedPath, let curPos = candidates.firstIndex(where: { $0.path == curPath }) {
+        let candidateIndices = tabOrderIndices()
+        guard !candidateIndices.isEmpty else { return false }
+        let nextIdx: Int
+        if let curPath = focusedPath,
+           let curPos = candidateIndices.firstIndex(where: { flatNodes[$0].path == curPath }) {
             let nextPos = backward
-                ? (curPos - 1 + candidates.count) % candidates.count
-                : (curPos + 1) % candidates.count
-            focusedPath = candidates[nextPos].path
-            focusedKey = candidates[nextPos].key
-            return true
+                ? (curPos - 1 + candidateIndices.count) % candidateIndices.count
+                : (curPos + 1) % candidateIndices.count
+            nextIdx = candidateIndices[nextPos]
         } else {
-            let pick = backward ? candidates.last! : candidates.first!
-            focusedPath = pick.path
-            focusedKey = pick.key
-            return true
+            nextIdx = backward ? candidateIndices.last! : candidateIndices.first!
         }
+        focusedPath = flatNodes[nextIdx].path
+        focusedKey = flatNodes[nextIdx].key
+        return true
+    }
+
+    private func defaultButtonNode() -> FlatNode? {
+        flatNodes.indices.compactMap { idx -> FlatNode? in
+            let node = flatNodes[idx]
+            guard node.el.isDefaultButton && !node.effectiveInert && !node.el.a11yDisabled else { return nil }
+            guard node.targetRect.width > 0 && node.targetRect.height > 0 else { return nil }
+            var walk: Int? = idx
+            while let cur = walk {
+                if flatNodes[cur].el.opacity <= 0.001 || flatNodes[cur].el.isInert { return nil }
+                walk = flatNodes[cur].parentIndex
+            }
+            return node
+        }.first
     }
 
     private func findFocusGroupAncestor(of idx: Int) -> Int? {
@@ -2939,20 +3495,21 @@ public final class Runtime<State> {
 
     private func moveFocusInGroup(groupIndex: Int, forward: Bool) -> Bool {
         let prefix = flatNodes[groupIndex].path + "/"
-        let members = flatNodes.filter {
-            ($0.path == flatNodes[groupIndex].path || $0.path.hasPrefix(prefix)) &&
-            $0.el.focusable && !$0.effectiveInert
+        let members = flatNodes.indices.filter { i in
+            (flatNodes[i].path == flatNodes[groupIndex].path || flatNodes[i].path.hasPrefix(prefix)) &&
+            canFocusIndex(i)
         }
         guard members.count > 1,
               let curPath = focusedPath,
-              let curIdx = members.firstIndex(where: { $0.path == curPath }) else {
+              let curIdx = members.firstIndex(where: { flatNodes[$0].path == curPath }) else {
             return false
         }
-        let nextIdx = forward
+        let nextPos = forward
             ? (curIdx + 1) % members.count
             : (curIdx - 1 + members.count) % members.count
-        focusedPath = members[nextIdx].path
-        focusedKey = members[nextIdx].key
+        let nextNode = flatNodes[members[nextPos]]
+        focusedPath = nextNode.path
+        focusedKey = nextNode.key
         return true
     }
 
@@ -2988,6 +3545,243 @@ public final class Runtime<State> {
             return byteCount
         }
         return resolvedEdit.snapToGraphemeBoundary(hit)
+    }
+
+    // MARK: - Tooltips (`El.help` + `HelpLook`)
+
+    /// Visible unoccluded help regions `[x0, y0, x1, y1]` + normalized text in paint order for native hosts.
+    public func helpRegions() -> [(rect: SIMD4<Float>, text: String)] {
+        helpState.regions
+    }
+
+    /// Currently shown Rune-drawn tooltip text and frame `[x, y, w, h]` in window points.
+    public func helpTooltip() -> (text: String, rect: SIMD4<Float>)? {
+        helpState.currentTip
+    }
+
+    /// Returns true when moving pointer to `pos` changes the hovered help element (or leaves one).
+    public func helpTargetChanges(at pos: Vec2) -> Bool {
+        let target = helpState.tipState.target
+        if useNativeHelp || (helpState.hits.isEmpty && target == nil) { return false }
+        let at = helpAt(point: pos).map { ($0.hit.path, $0.hit.linkIndex) }
+        if let at, let target {
+            return at.0 != target.path || at.1 != target.link
+        }
+        return (at != nil) != (target != nil)
+    }
+
+    private var useNativeHelp: Bool {
+        nativeHelp && viewHelpLook == nil
+    }
+
+    private func currentHelpLook() -> HelpLook {
+        viewHelpLook ?? HelpLook.system(dark: systemDark)
+    }
+
+    private func currentHelpDelays() -> (open: Double, skip: Double) {
+        let look = currentHelpLook()
+        return (look.delaySeconds ?? helpDelay, look.skipSeconds)
+    }
+
+    private func tooltipFading(at now: Double) -> Bool {
+        guard !reducedMotion else { return false }
+        let look = currentHelpLook()
+        if case .open(_, let since) = helpState.tipState, now < since + look.fadeEnter {
+            return true
+        }
+        if let (_, closedAt) = helpState.leaving, now < closedAt + look.fadeExit {
+            return true
+        }
+        return false
+    }
+
+    private func dismissHelp(at now: Double) {
+        if helpState.tipState.target != nil {
+            stepHelpState(event: .dismiss, at: now)
+        }
+    }
+
+    private func pressHelp(at pos: Vec2, now: Double) {
+        let onOpen: Bool
+        if case .open(let target, _) = helpState.tipState,
+           let at = helpAt(point: pos) {
+            onOpen = (at.hit.path == target.path && at.hit.linkIndex == target.link)
+        } else {
+            onOpen = false
+        }
+        if !onOpen || viewHelpLook == nil {
+            dismissHelp(at: now)
+        }
+    }
+
+    private func stepHelpState(event: HelpStepEvent, at now: Double) {
+        let delays = currentHelpDelays()
+        for effect in stepHelpTip(&helpState.tipState, event: event, openDelay: delays.open, skipDelay: delays.skip) {
+            switch effect {
+            case .wakeAt:
+                break
+            case .fadeOut:
+                helpState.currentTip = nil
+                let look = currentHelpLook()
+                let fades = look.fadeExit > 0.0 && !reducedMotion
+                if fades, let drawn = helpState.drawn {
+                    helpState.leaving = (drawn, now)
+                } else {
+                    helpState.leaving = nil
+                }
+                helpState.drawn = nil
+            }
+        }
+    }
+
+    private func helpContains(_ hit: HelpHitRecord, point: Vec2) -> Bool {
+        if let geom = hitGeometryByPath[hit.path] {
+            return geom.contains(point)
+        }
+        return helpRectContains(hit.rect, point: point)
+    }
+
+    private func helpUnder(point: Vec2) -> (hit: HelpHitRecord, nodeIndex: Int, reaches: Bool)? {
+        guard let hit = helpState.hits.last(where: { helpContains($0, point: point) }),
+              let hIdx = nodeByPath[hit.path] else {
+            return nil
+        }
+        let hNode = flatNodes[hIdx]
+        guard !hNode.effectiveInert else {
+            return (hit, hIdx, false)
+        }
+        let prefix = hit.path + "/"
+        let covered = helpState.interactiveHits.dropFirst(min(hit.seq, helpState.interactiveHits.count)).contains { inter in
+            guard !(inter.path == hit.path || inter.path.hasPrefix(prefix)) else { return false }
+            if let geom = hitGeometryByPath[inter.path] {
+                return geom.contains(point)
+            }
+            return helpRectContains(inter.rect, point: point)
+        }
+        return (hit, hIdx, !covered)
+    }
+
+    private func helpAt(point: Vec2) -> (hit: HelpHitRecord, nodeIndex: Int)? {
+        guard let u = helpUnder(point: point), u.reaches else { return nil }
+        return (u.hit, u.nodeIndex)
+    }
+
+    private func unoccludedHelpParts(for hit: HelpHitRecord) -> [SIMD4<Float>] {
+        var parts = [hit.rect]
+        let prefix = hit.path + "/"
+        for inter in helpState.interactiveHits.dropFirst(min(hit.seq, helpState.interactiveHits.count)) {
+            guard !(inter.path == hit.path || inter.path.hasPrefix(prefix)) else { continue }
+            guard parts.contains(where: { helpRectOverlaps($0, inter.rect) }) else { continue }
+            parts = parts.flatMap { helpRectSubtract($0, inter.rect) }
+            if parts.isEmpty { break }
+        }
+        return parts
+    }
+
+    private func updateHelp(at now: Double, primitives: inout [Primitive]) {
+        helpState.regions.removeAll(keepingCapacity: true)
+        if useNativeHelp {
+            var regions: [(SIMD4<Float>, String)] = []
+            for hit in helpState.hits {
+                guard let idx = nodeByPath[hit.path], !flatNodes[idx].effectiveInert else { continue }
+                let words = runeHelpWords(hit.text)
+                for part in unoccludedHelpParts(for: hit) {
+                    regions.append((part, words))
+                }
+            }
+            helpState.regions = regions
+            helpState.currentTip = nil
+            helpState.tipState = .idle
+            helpState.drawn = nil
+            helpState.leaving = nil
+            return
+        }
+
+        let inViewport = pointerPosition.x >= 0 && pointerPosition.x < viewport.x &&
+                         pointerPosition.y >= 0 && pointerPosition.y < viewport.y
+        let over: HelpOver
+        let underHit: HelpHitRecord?
+        if !inViewport {
+            over = .away
+            underHit = nil
+        } else if let u = helpUnder(point: pointerPosition) {
+            let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
+            if activeDrag != nil && helpState.tipState.target != target {
+                over = .nothing
+                underHit = nil
+            } else if u.reaches {
+                over = .help(target)
+                underHit = u.hit
+            } else {
+                over = .covered(target)
+                underHit = nil
+            }
+        } else {
+            over = .nothing
+            underHit = nil
+        }
+
+        stepHelpState(event: .frame(over: over, now: now), at: now)
+        helpState.currentTip = nil
+        let look = currentHelpLook()
+        let motion = !reducedMotion
+
+        if let (leavingDrawn, closedAt) = helpState.leaving {
+            let t: Float = (motion && look.fadeExit > 0.0) ? Float((now - closedAt) / look.fadeExit) : 1.0
+            if t < 1.0 {
+                let eased = Easing.easeIn.sample(min(1.0, max(0.0, t)))
+                var fadeDrawn = leavingDrawn
+                fadeDrawn.alpha = leavingDrawn.alpha * (1.0 - eased)
+                fadeDrawn.scale = leavingDrawn.scale + (look.fadeScale - leavingDrawn.scale) * eased
+                _ = drawHelpTooltip(
+                    fadeDrawn,
+                    look: look,
+                    viewport: viewport,
+                    pixelScale: pixelScale,
+                    srgbBlend: srgbBlend,
+                    systemDark: systemDark,
+                    textSystem: textSystem,
+                    primitives: &primitives
+                )
+            } else {
+                helpState.leaving = nil
+            }
+        }
+
+        helpState.drawn = nil
+        if case .open(let target, let since) = helpState.tipState {
+            let matchedHit = underHit ?? helpState.hits.last(where: { $0.path == target.path && $0.linkIndex == target.link })
+            if let hit = matchedHit, let idx = nodeByPath[hit.path] {
+                let anchorBox = presentedRectByPath[hit.path] ?? flatNodes[idx].targetRect
+                let anchor4 = SIMD4<Float>(
+                    anchorBox.x,
+                    anchorBox.y,
+                    anchorBox.x + anchorBox.width,
+                    anchorBox.y + anchorBox.height
+                )
+                let t: Float = (motion && look.fadeEnter > 0.0) ? Float((now - since) / look.fadeEnter) : 1.0
+                let eased = Easing.easeOut.sample(min(1.0, max(0.0, t)))
+                let drawn = HelpDrawnTip(
+                    text: hit.text,
+                    anchor: anchor4,
+                    side: hit.side,
+                    alpha: eased,
+                    scale: look.fadeScale + (1.0 - look.fadeScale) * eased
+                )
+                let tipRect = drawHelpTooltip(
+                    drawn,
+                    look: look,
+                    viewport: viewport,
+                    pixelScale: pixelScale,
+                    srgbBlend: srgbBlend,
+                    systemDark: systemDark,
+                    textSystem: textSystem,
+                    primitives: &primitives
+                )
+                helpState.currentTip = (runeHelpWords(drawn.text), tipRect)
+                helpState.drawn = drawn
+            }
+        }
     }
 }
 
