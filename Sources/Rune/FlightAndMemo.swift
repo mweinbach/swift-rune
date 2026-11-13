@@ -227,6 +227,7 @@ public final class MemoCache: @unchecked Sendable {
     private struct Entry {
         var deps: Any
         var equals: (Any) -> Bool
+        var srgbBlend: Bool
         var element: Any
     }
 
@@ -241,8 +242,12 @@ public final class MemoCache: @unchecked Sendable {
         deps: Deps,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
+        let srgb = Theme.blendsSrgb()
         lock.lock()
-        if let existing = entries[id], existing.equals(deps), let cached = existing.element as? El<State> {
+        if let existing = entries[id],
+           existing.srgbBlend == srgb,
+           existing.equals(deps),
+           let cached = existing.element as? El<State> {
             lock.unlock()
             return (cached, true)
         }
@@ -253,6 +258,7 @@ public final class MemoCache: @unchecked Sendable {
         entries[id] = Entry(
             deps: deps,
             equals: { other in (other as? Deps) == deps },
+            srgbBlend: srgb,
             element: built
         )
         lock.unlock()
@@ -281,9 +287,11 @@ public final class MemoCache: @unchecked Sendable {
 
     /// Returns cached region element if all previously read `Tracked` cell versions still match.
     func getRegionIfValid<State>(id: String) -> El<State>? {
+        let srgb = Theme.blendsSrgb()
         lock.lock()
         defer { lock.unlock() }
         guard let existing = entries["region:\(id)"],
+              existing.srgbBlend == srgb,
               let deps = existing.deps as? [UInt32: UInt64],
               let cached = existing.element as? El<State> else {
             return nil

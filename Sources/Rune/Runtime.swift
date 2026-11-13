@@ -238,7 +238,7 @@ public final class Runtime<State> {
             if reducedMotion != oldValue { needsCommit = true }
         }
     }
-    public var srgbBlend: Bool = false
+    public var srgbBlend: Bool = true
     public var windowFocused: Bool = true {
         didSet {
             if windowFocused != oldValue { needsCommit = true }
@@ -562,6 +562,12 @@ public final class Runtime<State> {
     /// updates `elements()`, and emits the complete `RefScene` primitive stream!
     @discardableResult
     public func frame(at now: Double) -> RefScene {
+        Theme.withBlend(srgbBlend) {
+            frameWithBlendScope(at: now)
+        }
+    }
+
+    private func frameWithBlendScope(at now: Double) -> RefScene {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)

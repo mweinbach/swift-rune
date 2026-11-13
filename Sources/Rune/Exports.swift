@@ -94,6 +94,30 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
         }
     }
 
+    /// Formats the color as `#rrggbbaa` in sRGB space, matching `rune::Color::hex()`.
+    public func hex() -> String {
+        let sr = UInt8((RefShader.linearToSRGB(r) * 255.0).clamped(to: 0...255).rounded())
+        let sg = UInt8((RefShader.linearToSRGB(g) * 255.0).clamped(to: 0...255).rounded())
+        let sb = UInt8((RefShader.linearToSRGB(b) * 255.0).clamped(to: 0...255).rounded())
+        let sa = UInt8((a.clamped(to: 0...1) * 255.0).rounded())
+        return String(format: "#%02x%02x%02x%02x", sr, sg, sb, sa)
+    }
+
+    /// Normalizes float bit patterns for hashing (`-0.0` hashes as `0.0`, all NaNs hash alike).
+    @inlinable
+    public static func hashBits(_ x: Float) -> UInt32 {
+        if x == 0.0 { return 0 }
+        if x.isNaN { return Float.nan.bitPattern }
+        return x.bitPattern
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(Self.hashBits(r))
+        hasher.combine(Self.hashBits(g))
+        hasher.combine(Self.hashBits(b))
+        hasher.combine(Self.hashBits(a))
+    }
+
     /// Perceptual OKLCH constructor (`L in [0, 1]`, `C >= 0`, `hueDegrees in [0, 360)`).
     public static func oklch(_ l: Float, _ c: Float, _ hueDegrees: Float) -> Color {
         oklcha(l, c, hueDegrees, 1.0)
@@ -143,8 +167,19 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
         Color(r: r, g: g, b: b, a: (a * factor).clamped(to: 0...1))
     }
 
-    /// Perceptual OKLab interpolation from `self` toward `other` by `t in [0, 1]`.
+    /// `t` of the way from `self` to `other`, straight in linear light (`rune::Color::mix`).
+    @inlinable
     public func mix(with other: Color, t: Float) -> Color {
+        Color(
+            r: r + (other.r - r) * t,
+            g: g + (other.g - g) * t,
+            b: b + (other.b - b) * t,
+            a: a + (other.a - a) * t
+        )
+    }
+
+    /// Perceptual OKLab interpolation from `self` toward `other` by `t in [0, 1]`.
+    public func mixOklab(with other: Color, t: Float) -> Color {
         let f = t.clamped(to: 0...1)
         let aLanes = toLanes()
         let bLanes = other.toLanes()
@@ -153,6 +188,37 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
             out[i] = aLanes[i] + (bLanes[i] - aLanes[i]) * f
         }
         return Color.fromLanes(out)
+    }
+
+    /// Premultiplied linear RGBA (`rune::Color::premul`).
+    @inlinable
+    public func premul(_ opacity: Float = 1.0) -> SIMD4<Float> {
+        let alpha = a * opacity
+        return SIMD4<Float>(r * alpha, g * alpha, b * alpha, alpha)
+    }
+
+    /// Premultiplied sRGB-encoded RGBA for gamma-space (`srgbBlend`) targets (`rune::Color::premul_srgb`).
+    @inlinable
+    public func premulSRGB(_ opacity: Float = 1.0) -> SIMD4<Float> {
+        let alpha = a * opacity
+        return SIMD4<Float>(
+            RefShader.linearToSRGB(r) * alpha,
+            RefShader.linearToSRGB(g) * alpha,
+            RefShader.linearToSRGB(b) * alpha,
+            alpha
+        )
+    }
+
+    /// Source-over composite of premultiplied `top` onto premultiplied `bottom` (`rune::color::over`).
+    @inlinable
+    public static func over(_ top: SIMD4<Float>, _ bottom: SIMD4<Float>) -> SIMD4<Float> {
+        let k = 1.0 - top.w
+        return SIMD4<Float>(
+            top.x + bottom.x * k,
+            top.y + bottom.y * k,
+            top.z + bottom.z * k,
+            top.w + bottom.w * k
+        )
     }
 
     /// Solves for a straight-alpha linear-light color whose linear-light composite over `bg`
@@ -214,7 +280,7 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
     public static func fromLanes(_ lanes: MotionLanes) -> Color { Color(MotionColor.fromLanes(lanes)) }
 }
 
-/// Top-level convenience matching `rune::oklch` and `rune::oklcha`.
+/// Top-level convenience matching `rune::oklch`, `rune::oklcha`, and `rune::color::hex`.
 @inlinable
 public func oklch(_ l: Float, _ c: Float, _ hueDegrees: Float) -> Color {
     Color.oklch(l, c, hueDegrees)
@@ -223,6 +289,14 @@ public func oklch(_ l: Float, _ c: Float, _ hueDegrees: Float) -> Color {
 @inlinable
 public func oklcha(_ l: Float, _ c: Float, _ hueDegrees: Float, _ alpha: Float) -> Color {
     Color.oklcha(l, c, hueDegrees, alpha)
+}
+
+/// Parses `#rgb`, `#rrggbb`, or `#rrggbbaa` (sRGB) to linear `Color` (`rune::color::hex`).
+public func hex(_ s: String) -> Color? {
+    guard s.hasPrefix("#") else { return nil }
+    let n = s.dropFirst().count
+    guard n == 3 || n == 6 || n == 8 else { return nil }
+    return Color.hex(s)
 }
 
 /// Box shadow specification (drop or inset).
@@ -286,6 +360,9 @@ public enum Tok {
         public static let lg: Float = 12
         public static let xl: Float = 16
         public static let pill: Float = 9999
+        public static let SM: Float = 6
+        public static let MD: Float = 8
+        public static let LG: Float = 12
     }
 
     public enum Space {
@@ -295,6 +372,10 @@ public enum Tok {
         public static let lg: Float = 16
         public static let xl: Float = 24
         public static let xxl: Float = 32
+        public static let S1: Float = 4
+        public static let S2: Float = 8
+        public static let S3: Float = 12
+        public static let S6: Float = 24
     }
 
     public enum Motion {
@@ -304,6 +385,8 @@ public enum Tok {
         public static let CALM = MotionTokens.CALM
         public static let MORPH = MotionTokens.MORPH
         public static let POP = MotionTokens.POP
+        /// The leading edge of something travelling (`tok::motion::LEAD`).
+        public static let LEAD = Spring(duration: 0.2, bounce: 0.0)
     }
 
     public enum Typography {
@@ -311,7 +394,7 @@ public enum Tok {
         public static let label = TextStyle(size: 12.0, weight: 500.0)
         public static let section = TextStyle(size: 11.5, weight: 600.0)
         public static let title = TextStyle(size: 13.0, weight: 600.0)
-        public static let monoCaption = TextStyle(size: 12.0, weight: 500.0).mono()
+        public static let monoCaption = TextStyle(size: 12.0, weight: 500.0)
     }
 
     /// Returns the neutral light or dark token set (`tok::theme(dark)`).
@@ -319,76 +402,106 @@ public enum Tok {
         if dark {
             return ThemeTokens(
                 dark: true,
-                bg: oklch(0.17, 0.005, 260),
-                card: oklch(0.22, 0.006, 260),
-                cardBorder: Color.white.alpha(0.10),
-                separator: Color.white.alpha(0.08),
-                text: oklch(0.94, 0.004, 260),
-                textSecondary: oklch(0.68, 0.008, 260),
-                controlTrack: oklch(0.27, 0.007, 260),
-                controlOff: oklch(0.32, 0.008, 260),
-                indicator: oklch(0.36, 0.010, 260),
-                knob: oklch(0.97, 0.002, 260),
-                knobShadow: Color.black.alpha(0.38),
-                hover: Color.white.alpha(0.06),
-                press: Color.white.alpha(0.11),
-                shadow: Color.black.alpha(0.34),
-                shadowSoft: Color.black.alpha(0.22),
-                edge: Color.white.alpha(0.07)
+                bg: oklch(0.185, 0.004, 265.0),
+                card: oklch(0.232, 0.005, 265.0),
+                cardBorder: oklcha(1.0, 0.0, 0.0, 0.05),
+                separator: oklcha(1.0, 0.0, 0.0, 0.055),
+                text: oklch(0.955, 0.003, 265.0),
+                textSecondary: oklch(0.72, 0.008, 265.0),
+                controlTrack: oklcha(1.0, 0.0, 0.0, 0.05),
+                controlOff: oklcha(1.0, 0.0, 0.0, 0.085),
+                indicator: oklch(0.43, 0.006, 265.0),
+                knob: oklch(0.985, 0.0, 0.0),
+                knobShadow: oklcha(0.0, 0.0, 0.0, 0.3),
+                hover: oklcha(1.0, 0.0, 0.0, 0.016),
+                press: oklcha(1.0, 0.0, 0.0, 0.03),
+                shadow: oklcha(0.0, 0.0, 0.0, 0.42),
+                shadowSoft: oklcha(0.0, 0.0, 0.0, 0.28),
+                edge: oklcha(0.0, 0.0, 0.0, 0.3)
             )
         } else {
             return ThemeTokens(
                 dark: false,
-                bg: oklch(0.965, 0.003, 260),
-                card: Color.white,
-                cardBorder: Color.black.alpha(0.09),
-                separator: Color.black.alpha(0.07),
-                text: oklch(0.20, 0.006, 260),
-                textSecondary: oklch(0.50, 0.008, 260),
-                controlTrack: oklch(0.91, 0.004, 260),
-                controlOff: oklch(0.86, 0.005, 260),
-                indicator: oklch(0.82, 0.006, 260),
-                knob: Color.white,
-                knobShadow: Color.black.alpha(0.20),
-                hover: Color.black.alpha(0.045),
-                press: Color.black.alpha(0.085),
-                shadow: Color.black.alpha(0.12),
-                shadowSoft: Color.black.alpha(0.07),
-                edge: Color.black.alpha(0.06)
+                bg: oklch(0.958, 0.004, 265.0),
+                card: oklch(1.0, 0.0, 0.0),
+                cardBorder: oklcha(0.0, 0.0, 0.0, 0.1),
+                separator: oklcha(0.0, 0.0, 0.0, 0.13),
+                text: oklch(0.225, 0.006, 265.0),
+                textSecondary: oklch(0.5, 0.01, 265.0),
+                controlTrack: oklcha(0.2, 0.01, 265.0, 0.13),
+                controlOff: oklcha(0.2, 0.01, 265.0, 0.24),
+                indicator: oklch(1.0, 0.0, 0.0),
+                knob: oklch(1.0, 0.0, 0.0),
+                knobShadow: oklcha(0.2, 0.02, 265.0, 0.3),
+                hover: oklcha(0.2, 0.01, 265.0, 0.07),
+                press: oklcha(0.2, 0.01, 265.0, 0.12),
+                shadow: oklcha(0.2, 0.02, 265.0, 0.16),
+                shadowSoft: oklcha(0.2, 0.02, 265.0, 0.07),
+                edge: oklcha(0.2, 0.02, 265.0, 0.2)
             )
         }
     }
 
-    /// Six curated OKLCH accents (`0..<6`: blue, purple, pink, red, orange, green).
+    /// Names for the six curated accents (`tok::ACCENT_NAMES`).
+    public static let accentNames: [String] = ["blue", "purple", "pink", "orange", "green", "graphite"]
+
+    /// Six curated OKLCH accents (`0..<6`: blue, purple, pink, orange, green, graphite; `tok::accent`).
     public static func accent(_ index: Int, dark: Bool) -> Color {
-        let hues: [Float] = [258, 300, 345, 25, 58, 148]
-        let chromas: [Float] = [0.18, 0.18, 0.19, 0.20, 0.18, 0.17]
-        let idx = ((index % hues.count) + hues.count) % hues.count
-        let l: Float = dark ? 0.67 : 0.56
-        return oklch(l, chromas[idx], hues[idx])
+        let l: Float = dark ? 0.66 : 0.6
+        let idx = ((index % 6) + 6) % 6
+        switch idx {
+        case 0: return oklch(l, 0.17, 256.0)
+        case 1: return oklch(l, 0.18, 300.0)
+        case 2: return oklch(l + 0.02, 0.19, 357.0)
+        case 3: return oklch(l + 0.08, 0.16, 58.0)
+        case 4: return oklch(l + 0.04, 0.16, 152.0)
+        default: return oklch(l - 0.02, 0.012, 265.0)
+        }
+    }
+
+    /// Whether the active view/runtime blends in sRGB (`Theme.blendsSrgb()`).
+    public static func blendsSrgb() -> Bool {
+        Theme.blendsSrgb()
+    }
+
+    /// Runs `body` under the given `srgbBlend` mode (`Theme.withBlend`).
+    public static func withBlend<R>(_ srgbBlend: Bool, _ body: () throws -> R) rethrows -> R {
+        try Theme.withBlend(srgbBlend, body)
+    }
+
+    /// Adapts `color` over `bg` for the current `Theme.blendsSrgb()` mode.
+    public static func forBlend(_ color: Color, over bg: Color) -> Color {
+        Theme.forBlend(color, over: bg)
     }
 
     /// Adapts a low-alpha sRGB-authored color for linear-light blending over `bg`.
-    public static func forBlend(_ color: Color, over bg: Color, srgbBlend: Bool = false) -> Color {
+    public static func forBlend(_ color: Color, over bg: Color, srgbBlend: Bool) -> Color {
         srgbBlend ? color : color.srgbEquivalent(over: bg)
     }
 }
 
-/// JSON theme loader supporting `"defs"` references and `"theme"` `{ "dark": ..., "light": ... }` maps
-/// (compatible with OpenCode / Rune JSON theme files).
+/// JSON theme loader supporting upstream `"palette"` + `"light"`/`"dark"` + `"blend"` + `"numbers"`
+/// as well as `"defs"` + `"theme"` `{ "dark": ..., "light": ... }` maps (`rune::theme::Theme`).
 public struct JsonTheme: Sendable, Equatable {
     public var name: String
     public var colors: [String: Color]
     public var numbers: [String: Float]
+    public var blendBg: Color?
 
-    public init(name: String = "custom", colors: [String: Color] = [:], numbers: [String: Float] = [:]) {
+    public init(
+        name: String = "custom",
+        colors: [String: Color] = [:],
+        numbers: [String: Float] = [:],
+        blendBg: Color? = nil
+    ) {
         self.name = name
         self.colors = colors
         self.numbers = numbers
+        self.blendBg = blendBg
     }
 
     public subscript(_ key: String) -> Color? {
-        colors[key]
+        tryColor(key)
     }
 
     public func num(_ key: String) -> Float? {
@@ -400,45 +513,6 @@ public struct JsonTheme: Sendable, Equatable {
     }
 
     public static func parse(data: Data, dark: Bool) throws -> JsonTheme {
-        let raw = try JSONSerialization.jsonObject(with: data, options: [])
-        guard let root = raw as? [String: Any] else {
-            throw CocoaError(.coderReadCorrupt)
-        }
-        let name = (root["name"] as? String) ?? "custom"
-        let defs = (root["defs"] as? [String: String]) ?? [:]
-        let themeDict = (root["theme"] as? [String: Any]) ?? root
-
-        func resolve(_ value: Any?, depth: Int = 0) -> Color? {
-            guard depth < 8 else { return nil }
-            if let str = value as? String {
-                if let hexColor = Color.hex(str) {
-                    return hexColor
-                }
-                let refKey = str.hasPrefix("$") ? String(str.dropFirst()) : str
-                if let defVal = defs[refKey] {
-                    return resolve(defVal, depth: depth + 1)
-                }
-                if let sibling = themeDict[refKey] {
-                    return resolve(sibling, depth: depth + 1)
-                }
-                return nil
-            } else if let variants = value as? [String: Any] {
-                let picked = dark ? (variants["dark"] ?? variants["light"]) : (variants["light"] ?? variants["dark"])
-                return resolve(picked, depth: depth + 1)
-            }
-            return nil
-        }
-
-        var resolved: [String: Color] = [:]
-        var resolvedNums: [String: Float] = [:]
-        for (k, v) in themeDict {
-            if k == "defs" || k == "$schema" || k == "name" { continue }
-            if let n = v as? NSNumber, !(v is Bool) {
-                resolvedNums[k] = n.floatValue
-            } else if let c = resolve(v) {
-                resolved[k] = c
-            }
-        }
-        return JsonTheme(name: name, colors: resolved, numbers: resolvedNums)
+        try JsonThemeParser.parse(data: data, dark: dark)
     }
 }
