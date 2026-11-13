@@ -10,23 +10,19 @@ struct LoopSampleResult {
 
 /// Tracks active `LoopSpec` / `Cycle` / `MotionSequence` presentation tracks for mounted nodes.
 struct LoopRuntime {
-    struct Entry {
-        var spec: LoopSpec
-        var track: LoopTrack
-    }
-
-    private var entries: [NodeId: Entry] = [:]
+    private var entries: [NodeId: LoopSpec] = [:]
+    var tracks: [NodeId: LoopTrack] = [:]
 
     mutating func sync(specs: [(id: NodeId, spec: LoopSpec)], at now: Double, reducedMotion: Bool, cut: Bool) {
         _ = reducedMotion
         var seen = Set<NodeId>(minimumCapacity: specs.count)
         for (id, spec) in specs {
             seen.insert(id)
-            if var existing = entries[id] {
-                if existing.spec != spec {
-                    existing.track.retime(spec: spec, at: now)
-                    existing.spec = spec
-                    entries[id] = existing
+            if let existingSpec = entries[id], var existingTrack = tracks[id] {
+                if existingSpec != spec {
+                    existingTrack.retime(spec: spec, at: now)
+                    entries[id] = spec
+                    tracks[id] = existingTrack
                 }
                 continue
             }
@@ -34,29 +30,31 @@ struct LoopRuntime {
             if cut {
                 track.finish()
             }
-            entries[id] = Entry(spec: spec, track: track)
+            entries[id] = spec
+            tracks[id] = track
         }
         entries = entries.filter { seen.contains($0.key) }
+        tracks = tracks.filter { seen.contains($0.key) }
     }
 
     mutating func settleAll(at now: Double) {
         _ = now
-        for id in entries.keys {
-            entries[id]?.track.finish()
+        for id in tracks.keys {
+            tracks[id]?.finish()
         }
     }
 
-    func sample(id: NodeId, nodeSize: Vec2, at now: Double, reducedMotion: Bool) -> LoopSampleResult? {
-        guard let entry = entries[id] else { return nil }
-        let val = entry.track.sampleAt(now: now, wall: now, reduced: reducedMotion)
+    func sample(id: NodeId, nodeSize: Vec2, at now: Double, wall: Double? = nil, reducedMotion: Bool) -> LoopSampleResult? {
+        guard let spec = entries[id], let track = tracks[id] else { return nil }
+        let val = track.sampleAt(now: now, wall: wall ?? now, reduced: reducedMotion)
         var res = LoopSampleResult()
-        switch entry.spec.kind {
+        switch spec.kind {
         case .rotation:
             res.rotation = val
         case .opacity, .opacityCycle, .sequence:
             res.opacity = val
         case .slide, .slideEased:
-            if let frac = entry.track.offset(at: now, reduced: reducedMotion) {
+            if let frac = track.offset(at: now, reduced: reducedMotion) {
                 res.offset = Vec2(frac.x * nodeSize.x, frac.y * nodeSize.y)
             }
         }
@@ -67,8 +65,11 @@ struct LoopRuntime {
         if reducedMotion {
             return false
         }
-        for entry in entries.values {
-            if entry.track.isActive(at: now) {
+        for (id, track) in tracks {
+            if case .opacityCycle = entries[id]?.kind {
+                return true
+            }
+            if track.isActive(at: now) {
                 return true
             }
         }
@@ -77,11 +78,11 @@ struct LoopRuntime {
 
     func nextFrameInterval(reducedMotion: Bool) -> Double? {
         var best: Double? = nil
-        for entry in entries.values {
+        for (id, track) in tracks {
             if reducedMotion { continue }
-            if let interval = entry.track.frameInterval() {
+            if let interval = track.frameInterval() {
                 best = best.map { min($0, interval) } ?? interval
-            } else if case .sequence = entry.spec.kind {
+            } else if case .sequence = entries[id]?.kind {
                 let step = 1.0 / 60.0
                 best = best.map { min($0, step) } ?? step
             }
