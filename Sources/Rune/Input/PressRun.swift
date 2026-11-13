@@ -106,4 +106,36 @@ internal struct RuntimeInputMachines {
     var untakenDragOuts: [(id: UInt64, path: String, key: String?, start: DragOutStart, cancelledByHost: Bool, sawFrame: Bool, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
     var activeDragOuts: [(id: UInt64, path: String, key: String?, onEnd: ((inout Any, DragOutcome, inout Tx) -> Void)?)] = []
     var nextDragOutId: UInt64 = 1
+    var dragEndSink = DragEndSink()
+}
+
+/// Thread-safe queue of completed outbound OS drag outcomes delivered by the platform host
+/// and drained on the next runtime frame (`crates/rune/src/runtime/drag_out_host.rs`).
+public final class DragEndSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [(path: String?, outcome: DragOutcome)] = []
+
+    public init() {}
+
+    /// Enqueue a completed outbound drag outcome for the active or named drag path.
+    public func push(path: String? = nil, _ outcome: DragOutcome) {
+        lock.lock()
+        pending.append((path: path, outcome: outcome))
+        lock.unlock()
+    }
+
+    /// Whether no pending drag-end events are queued.
+    public var isEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending.isEmpty
+    }
+
+    internal func drain() -> [(path: String?, outcome: DragOutcome)] {
+        lock.lock()
+        defer { lock.unlock() }
+        let items = pending
+        pending.removeAll(keepingCapacity: true)
+        return items
+    }
 }

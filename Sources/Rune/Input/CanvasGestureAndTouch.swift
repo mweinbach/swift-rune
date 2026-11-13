@@ -400,9 +400,6 @@ extension Runtime {
         markScrollMovedByHand(path: path)
         scrollRequestsState.stepCancel()
         scrollMovedSinceLastFrame = true
-        if let scrollIdx = nodeByPath[path] {
-            cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollIdx, at: now)
-        }
         if scrollRequiresCommit {
             directScrolledPaths.insert(path)
             pendingCommitKind = pendingCommitKind.instant()

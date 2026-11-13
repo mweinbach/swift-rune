@@ -681,6 +681,56 @@ struct Slice4InputWave1Tests {
             #expect(rt.state.field.text == "猫")
         }
 
+        // 3b. Internal focus move from another focused node to a field keeps open appIme alive
+        do {
+            struct MState {
+                var field = TextEdit()
+                var log: [String] = []
+            }
+            let rt = Runtime(
+                state: MState(),
+                viewport: Vec2(300, 120),
+                pixelScale: 1.0
+            ) { _, _ in
+                col().size(300, 120)
+                    .child(el().key("btn").focusable().size(100, 30))
+                    .child(textInput(key: "field", \MState.field).font(TextStyle(size: 14)).size(200, 40))
+            }
+            rt.onIme = { s, ev, _ in
+                switch ev {
+                case .preedit(let p): s.log.append("Preedit(\(p.text))")
+                case .commit(let t): s.log.append("Commit(\(t))")
+                case .enabled: s.log.append("Enabled")
+                case .disabled: s.log.append("Disabled")
+                case .cancel: s.log.append("Cancel")
+                case .deleteSurrounding(let b, let a): s.log.append("Delete(\(b),\(a))")
+                }
+                return true
+            }
+            _ = rt.frame(at: 0.0)
+            rt.update(at: 0.005) { _, tx in tx.focus("btn") }
+            _ = rt.frame(at: 0.005)
+            #expect(rt.focusedKey == "btn")
+
+            _ = rt.ime(.preedit(ImePreedit(text: "か")), at: 0.01)
+            _ = rt.frame(at: 0.01)
+            rt.update(at: 0.02) { _, tx in tx.focus("field") }
+            _ = rt.frame(at: 0.02)
+            #expect(rt.focusedKey == "field")
+            #expect(rt.state.log == ["Preedit(か)"], "internal focus transition must not finish open appIme")
+
+            _ = rt.ime(.commit("家"), at: 0.03)
+            _ = rt.frame(at: 0.03)
+            #expect(rt.state.log == ["Preedit(か)", "Commit(家)"])
+            #expect(rt.state.field.text == "")
+
+            rt.update(at: 0.035) { _, tx in tx.focus("btn") }
+            _ = rt.frame(at: 0.035)
+            _ = rt.ime(.preedit(ImePreedit(text: "ね")), at: 0.04)
+            rt.finishComposition(at: 0.05)
+            #expect(rt.state.log == ["Preedit(か)", "Commit(家)", "Preedit(ね)", "Commit(ね)"])
+        }
+
         // 4. without_on_ime_an_ime_cursor_hears_nothing
         do {
             let rt = makeEditor()

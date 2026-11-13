@@ -37,6 +37,8 @@ extension Runtime {
         }
         // 0b. Cancel any untaken drag-out starts on the next frame (`pointer_drag.rs:308`).
         flushUntakenDragOuts(at: now)
+        // 0c. Drain any host-completed outbound OS drag outcomes queued via DragEndSink.
+        flushQueuedDragEnds(at: now)
 
         // 1. Deliver queued file dialog results on frame (`file_dialog.rs`)
         if !pendingFileDialogAnswers.isEmpty {
@@ -671,6 +673,28 @@ extension Runtime {
                 activeDragOut = nil
             }
             emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: .cancelled, at: now)
+        }
+    }
+
+    internal func flushQueuedDragEnds(at now: Double) {
+        let pending = inputMachines.dragEndSink.drain()
+        guard !pending.isEmpty else { return }
+        for item in pending {
+            if let targetPath = item.path,
+               let idx = inputMachines.activeDragOuts.firstIndex(where: { $0.path == targetPath })
+            {
+                let entry = inputMachines.activeDragOuts.remove(at: idx)
+                if inputMachines.activeDragOuts.isEmpty && inputMachines.untakenDragOuts.isEmpty {
+                    activeDragOut = nil
+                } else if let last = inputMachines.activeDragOuts.last {
+                    activeDragOut = (path: last.path, key: last.key, onEnd: dragOutEndHandler(byPath: last.path))
+                } else {
+                    activeDragOut = nil
+                }
+                emitDragOutEnd(path: entry.path, fallbackOnEnd: entry.onEnd, outcome: item.outcome, at: now)
+            } else {
+                finishDragOut(item.outcome, at: now)
+            }
         }
     }
 

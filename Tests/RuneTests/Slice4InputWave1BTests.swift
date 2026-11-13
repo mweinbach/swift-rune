@@ -388,4 +388,36 @@ struct Slice4InputWave1BTests {
         #expect(rt.pointer() == nil)
         #expect(!rt.draggingFiles())
     }
+
+    @Test("dragEndSink queues outbound drag completion and drains on next frame (`pointer_drag.rs:265-277`)")
+    @MainActor
+    func dragEndSinkDrainsOnFrame() {
+        struct S {
+            var ended: [DragOutcome] = []
+        }
+        let rt = Runtime(state: S(), viewport: Vec2(200, 120), pixelScale: 1.0) { _, _ in
+            el().key("src").w(80).h(40)
+                .dragOut { _ in DragItem().text("payload") }
+                .onDragOutEnd { s, outcome, _ in s.ended.append(outcome) }
+        }
+        _ = rt.frame(at: 0.0)
+        let sink = rt.dragEndSink()
+        let p = rt.find("src")!
+        rt.pointerDown(at: p, at: 0.01)
+        rt.pointerMove(to: Vec2(p.x + 20, p.y), at: 0.02)
+        #expect(rt.takeDragOutStart() != nil)
+        #expect(rt.isDraggingOut)
+        #expect(!rt.dragEndsPending)
+
+        sink.push(.copied)
+        #expect(rt.dragEndsPending)
+        #expect(rt.hasPendingInput)
+        #expect(rt.state.ended.isEmpty)
+
+        _ = rt.frame(at: 0.04)
+        #expect(!rt.dragEndsPending)
+        #expect(!rt.isDraggingOut)
+        #expect(rt.state.ended == [.copied])
+        #expect(rt.events.contains { $0.hasPrefix("drag-end ") })
+    }
 }

@@ -80,6 +80,7 @@ public struct PendingPhysicalFocusCheck: Sendable {
 public struct FocusMachine: Sendable {
     public var highlightHidden: Bool = false
     public var highlightedPath: String? = nil
+    public var hoveredHighlight: Bool = false
     public var openedModalKind: ModalOpenedKind = .dialog
     public var typeSelect = TypeSelect()
     public var disarmedScrimReturn: Bool = false
@@ -95,6 +96,7 @@ public struct FocusMachine: Sendable {
     public mutating func resetForModalClose() {
         highlightHidden = false
         highlightedPath = nil
+        hoveredHighlight = false
         openedModalKind = .dialog
         typeSelect.reset()
         disarmedScrimReturn = false
@@ -149,9 +151,6 @@ extension Runtime {
 
     internal func finishPreeditIfNeeded(forPath path: String?, at now: Double) {
         guard let path else { return }
-        if finishAppImeComposition(at: now) {
-            return
-        }
         guard let idx = nodeByPath[path],
               let editLens = flatNodes[idx].el.handlers.editLens else {
             return
@@ -170,17 +169,46 @@ extension Runtime {
         }
     }
 
-    internal func updateMenuHoverHighlight(hoveredPath newHover: String?) {
-        guard let hp = newHover, let hIdx = nodeByPath[hp],
-              !flatNodes[hIdx].effectiveInert else {
-            return
+    @discardableResult
+    internal func updateMenuHoverHighlight(hoveredPath newHover: String?) -> Bool {
+        var hoverRowIdx: Int? = nil
+        if let hp = newHover, let hIdx = nodeByPath[hp], !flatNodes[hIdx].effectiveInert {
+            var walk: Int? = hIdx
+            while let cur = walk {
+                if flatNodes[cur].effectiveInert { break }
+                if canFocusIndex(cur) {
+                    if flatNodes[cur].el.focusHighlightColor != nil
+                        || (findFocusGroupAncestor(of: cur).map { isMenuLikeContainer($0) } ?? false) {
+                        hoverRowIdx = cur
+                    }
+                    break
+                }
+                walk = flatNodes[cur].parentIndex
+            }
         }
-        if let groupIdx = findFocusGroupAncestor(of: hIdx),
-           isMenuLikeContainer(groupIdx),
-           canFocusIndex(hIdx) {
+        if hasFocusedTextInput {
+            hoverRowIdx = nil
+        }
+        if let rowIdx = hoverRowIdx {
+            let rowPath = flatNodes[rowIdx].path
+            let rowKey = flatNodes[rowIdx].key
+            let changed = inputMachines.focusMachine.highlightHidden
+                || inputMachines.focusMachine.highlightedPath != rowPath
+                || !inputMachines.focusMachine.hoveredHighlight
+            focusedPath = rowPath
+            focusedKey = rowKey
+            focusVisible = false
             inputMachines.focusMachine.highlightHidden = false
-            inputMachines.focusMachine.highlightedPath = hp
+            inputMachines.focusMachine.highlightedPath = rowPath
+            inputMachines.focusMachine.hoveredHighlight = true
+            return changed
+        } else if inputMachines.focusMachine.hoveredHighlight {
+            inputMachines.focusMachine.hoveredHighlight = false
+            inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.highlightHidden = true
+            return true
         }
+        return false
     }
 
     internal func findSearchFollowsGroup(forFocusedIndex fIdx: Int) -> Int? {
@@ -264,6 +292,7 @@ extension Runtime {
                     }
                     inputMachines.focusMachine.highlightHidden = false
                     inputMachines.focusMachine.highlightedPath = flatNodes[members[nextPos]].path
+                    inputMachines.focusMachine.hoveredHighlight = false
                     ensureNodeVisibleInScrollAncestors(index: members[nextPos], at: now)
                     dirtyCommit(at: now)
                     return true
@@ -366,8 +395,18 @@ extension Runtime {
             default: forward = true
             }
             if (fm.highlightHidden || (fm.highlightedPath == nil && focusedPath == nil)) && isMenuLikeContainer(groupIdx) {
-                let entryPos = members.firstIndex(where: { flatNodes[$0].el.isFocusSelected || flatNodes[$0].el.itemSelected })
-                    ?? (forward ? 0 : members.count - 1)
+                let checkedPos = members.firstIndex(where: { flatNodes[$0].el.isFocusSelected || flatNodes[$0].el.itemSelected })
+                let curPos = checkedPos ?? focusedPath.flatMap { fp in
+                    members.firstIndex(where: { flatNodes[$0].path == fp })
+                }
+                let entryPos: Int
+                if let checkedPos {
+                    entryPos = checkedPos
+                } else if let curPos, forward {
+                    entryPos = curPos
+                } else {
+                    entryPos = forward ? 0 : members.count - 1
+                }
                 return moveFocusToGroupMember(members[entryPos], at: now)
             }
             guard let curPath = fm.highlightedPath ?? focusedPath,
@@ -452,6 +491,7 @@ extension Runtime {
         focusedKey = nextNode.key
         inputMachines.focusMachine.highlightHidden = false
         inputMachines.focusMachine.highlightedPath = nextNode.path
+        inputMachines.focusMachine.hoveredHighlight = false
         focusVisible = true
         ensureNodeVisibleInScrollAncestors(index: memberIdx, at: now)
         dirtyCommit(at: now)

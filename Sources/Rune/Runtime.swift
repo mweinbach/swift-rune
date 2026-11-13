@@ -753,6 +753,7 @@ public final class Runtime<State> {
             || pendingDropHoverChanged
             || !pendingHiddenDrops.isEmpty
             || !popupQueue.isEmpty
+            || dragEndsPending
     }
 
     // Input & focus state
@@ -4632,6 +4633,7 @@ public final class Runtime<State> {
                 inputMachines.focusMachine.highlightHidden = false
             }
             inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.hoveredHighlight = false
         } else if activeModalPath == nil && poppedReturns.isEmpty {
             inputMachines.focusMachine.resetForModalClose()
         }
@@ -6552,7 +6554,6 @@ public final class Runtime<State> {
                         emitGlyphs: !renderedStr.isEmpty,
                         glidePx: glidePx
                     )
-                    var singleLineShiftX: Float = 0
                     let inputClip = intersectRects(visClip, rect)
                     let devInputClip = SIMD4<Float>(
                         inputClip.x * pxScale,
@@ -8059,6 +8060,9 @@ public final class Runtime<State> {
                 exitedHover = true
             }
         }
+        if updateMenuHoverHighlight(hoveredPath: nil) {
+            exitedHover = true
+        }
         if !hoveredCallbackPaths.isEmpty {
             isDispatchingHover = true
             let (ranAnyHover, hoverAllLiveOnly) = dispatchHoverCallbacks(to: nil, at: now)
@@ -8250,7 +8254,7 @@ public final class Runtime<State> {
             if newPath != hoveredPath {
                 hoveredPath = newPath
                 hoveredKey = newKey
-                updateMenuHoverHighlight(hoveredPath: newPath)
+                let menuHoverChanged = updateMenuHoverHighlight(hoveredPath: newPath)
                 if isPointerEvent {
                     isDispatchingHover = true
                     let (ranAnyHover, hoverAllLiveOnly) = dispatchHoverCallbacks(to: newPath, at: now)
@@ -8258,12 +8262,12 @@ public final class Runtime<State> {
                     let hoverNeedsCommit = (ranAnyHover && !hoverAllLiveOnly)
                         || (!ranAnyHover && moveDispatched && !moveAllLiveOnly)
                         || hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)
-                    if hoverNeedsCommit || linkChanged || helpTargetChanges(at: pos) {
+                    if hoverNeedsCommit || linkChanged || helpTargetChanges(at: pos) || menuHoverChanged {
                         suppressRevealFromHoverCommit = true
                         dirtyCommit(at: now)
                         changed = true
                     }
-                } else if linkChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
+                } else if linkChanged || menuHoverChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
                     suppressRevealFromHoverCommit = true
                     dirtyCommit(at: now)
                     changed = true
@@ -8422,6 +8426,7 @@ public final class Runtime<State> {
                 focusedPath = nil
                 focusedKey = nil
                 inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.hoveredHighlight = false
                 imeReset = true
                 dirtyCommit(at: now)
             }
@@ -8480,6 +8485,7 @@ public final class Runtime<State> {
                 focusedPath = belowNode.path
                 focusedKey = belowNode.key
                 inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.hoveredHighlight = false
             } else if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
@@ -8488,6 +8494,7 @@ public final class Runtime<State> {
                 focusedPath = nil
                 focusedKey = nil
                 inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.hoveredHighlight = false
                 imeReset = true
                 downFocusChanged = true
             }
@@ -8517,6 +8524,7 @@ public final class Runtime<State> {
                 focusedPath = target.path
                 focusedKey = target.key
                 inputMachines.focusMachine.highlightedPath = nil
+            inputMachines.focusMachine.hoveredHighlight = false
             } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
                 if let prevFp = focusedPath {
                     let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
@@ -8526,6 +8534,8 @@ public final class Runtime<State> {
                     focusedPath = nil
                     focusedKey = nil
                     inputMachines.focusMachine.highlightedPath = nil
+                    inputMachines.focusMachine.hoveredHighlight = false
+            inputMachines.focusMachine.hoveredHighlight = false
                     imeReset = true
                     downFocusChanged = true
                 }
@@ -10981,6 +10991,7 @@ public final class Runtime<State> {
         focusedPath = flatNodes[nextIdx].path
         focusedKey = flatNodes[nextIdx].key
         inputMachines.focusMachine.highlightedPath = nil
+        inputMachines.focusMachine.hoveredHighlight = false
         if hasActiveTextLinks(flatNodes[nextIdx].el) {
             let links = flatNodes[nextIdx].el.textLinks
             let k = backward ? max(0, links.count - 1) : 0

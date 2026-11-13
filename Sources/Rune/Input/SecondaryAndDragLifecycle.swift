@@ -63,9 +63,19 @@ extension Runtime {
         inputMachines.osDragSupported
     }
 
+    /// Sink used by the platform host to enqueue completed OS drag outcomes.
+    public func dragEndSink() -> DragEndSink {
+        inputMachines.dragEndSink
+    }
+
+    /// Queue a completed OS drag outcome from the platform host to drain on the next `frame`.
+    public func queueDragEnd(path: String? = nil, _ outcome: DragOutcome) {
+        inputMachines.dragEndSink.push(path: path, outcome)
+    }
+
     /// Whether an outbound OS drag completion is pending (`Runtime::drag_ends_pending`).
     public var dragEndsPending: Bool {
-        false
+        !inputMachines.dragEndSink.isEmpty
     }
 
     // MARK: - Pointer Leave, Window Move, Cancel & Lost Release
