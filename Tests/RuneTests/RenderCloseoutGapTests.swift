@@ -890,5 +890,221 @@ struct RenderCloseoutGapTests {
         }
     }
 
+    @Test("gradient_dashed_emits_single_kind_dashed_ring_and_backdrop_slots_share_texture")
+    func gradientDashedAndBackdropSharingAndLinearFade() throws {
+        struct S {}
+        let top = Color(r: 1, g: 0, b: 0, a: 1)
+        let bot = Color(r: 0, g: 0, b: 1, a: 1)
+        let rtDash = Runtime<S>(
+            state: S(),
+            viewport: Vec2(68, 22),
+            pixelScale: 2.0,
+            view: { _, _ -> El<S> in
+                el().size(68, 22).child(
+                    el().absolute(x: 4, y: 4).size(60, 14).rounded(7)
+                        .borderGradient(width: 1, top: top, bottom: bot)
+                        .dashedBorder(1, top, dash: 8, gap: 4)
+                )
+            }
+        )
+        rtDash.setSrgbBlend(false)
+        let dashRf = rtDash.renderFrame(at: 0)
+        #expect(dashRf.instances.count == 1)
+        if let ring = dashRf.instances.first {
+            #expect(ring.params.y == KIND_DASHED)
+            #expect(abs(ring.fill.x - 1.0) < 1e-4 && abs(ring.fill.z - 0.0) < 1e-4)
+            #expect(abs(ring.border.x - 0.0) < 1e-4 && abs(ring.border.z - 1.0) < 1e-4)
+        }
+
+        let rtLin = Runtime<Bool>(
+            state: true,
+            viewport: Vec2(100, 100),
+            pixelScale: 1.0,
+            view: { lin, _ -> El<Bool> in
+                let c: El<Bool> = col().size(100, 100)
+                return (lin ? c.clipFadeLinear(bottom: 40) : c.clipFade(bottom: 40))
+                    .child(el().size(100, 100).bg(Color(r: 1, g: 1, b: 1, a: 1)))
+            }
+        )
+        rtLin.clearColor = .transparent
+        rtLin.setSrgbBlend(true)
+        let linRf = rtLin.renderFrame(at: 0)
+        let bottomWidth = linRf.instances.map { unpackFade($0.fade).width.w }.first { $0 != 0 }
+        #expect(bottomWidth == -40.0)
+
+        let renderer = try MetalRenderer()
+        let outLin = try renderer.renderOffscreen(linRf)
+        let a89 = outLin.rgba[(89 * 100 + 50) * 4 + 3]
+        #expect(abs(Double(a89) - 0.2625 * 255.0) <= 2.5)
+
+        let rtDrop = Runtime<S>(
+            state: S(),
+            viewport: Vec2(32, 32),
+            pixelScale: 1.0,
+            view: { _, _ -> El<S> in
+                el().size(32, 32)
+                    .child(el().absolute(x: 0, y: 0).size(16, 16).effect(1).effectBackdrop(true))
+                    .child(el().absolute(x: 16, y: 0).size(16, 16).effect(2).effectBackdrop(true))
+            }
+        )
+        rtDrop.setSrgbBlend(false)
+        var backdrops: [MTLTexture] = []
+        _ = try renderer.renderOffscreen(rtDrop.renderFrame(at: 0), backdropHook: { phase, site in
+            if case .backdrop = phase, let tex = site.backdrop {
+                backdrops.append(tex)
+            }
+        })
+        #expect(backdrops.count == 2)
+        if backdrops.count == 2 {
+            #expect(backdrops[0] === backdrops[1])
+        }
+
+        // Item 7 (`backdrop_tests.rs:7`): prepare lazy/reuse + setFormat between prepare & draw
+        let noBdRt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(32, 32),
+            pixelScale: 1.0,
+            view: { _, _ -> El<S> in
+                el().size(32, 32).child(el().size(16, 16).effect(1))
+            }
+        )
+        let poolRenderer = try MetalRenderer()
+        var emptyRf = noBdRt.renderFrame(at: 0)
+        emptyRf.instances = []
+        poolRenderer.prepare(frame: emptyRf, viewport: (32, 32))
+        #expect(poolRenderer.backdropTextures.isEmpty)
+        poolRenderer.prepare(frame: noBdRt.renderFrame(at: 0), viewport: (32, 32))
+        #expect(poolRenderer.backdropTextures.isEmpty)
+
+        let bdFrame = rtDrop.renderFrame(at: 0)
+        poolRenderer.prepare(frame: bdFrame, viewport: (32, 32))
+        #expect(poolRenderer.backdropTextures.count == 1)
+        let original = poolRenderer.backdropTextures[0]
+        poolRenderer.prepare(frame: bdFrame, viewport: (32, 32))
+        #expect(poolRenderer.backdropTextures[0] === original)
+        poolRenderer.setFormat(.bgra8Unorm)
+        #expect(poolRenderer.backdropTextures.contains { $0.pixelFormat == .bgra8Unorm })
+        poolRenderer.prepare(frame: bdFrame, viewport: (48, 24))
+        #expect(poolRenderer.backdropTextures.count == 2, "got \(poolRenderer.backdropTextures.map { "\($0.pixelFormat.rawValue)" })")
+
+        // Item 5 (`clip.rs:91,122` & `backdrop_blur.rs:136`): opacity isolation, nested & streaming fades
+        let rtOpacityChild = Runtime<S>(
+            state: S(),
+            viewport: Vec2(200, 120),
+            pixelScale: 1.0,
+            view: { _, _ -> El<S> in
+                el().size(200, 120).child(
+                    el().absolute(x: 40, y: 30).size(120, 60).rounded(16)
+                        .bg(Color(r: 1, g: 1, b: 1, a: 0.2)).opacity(0.5).backdropBlur(8)
+                        .child(el().size(10, 10).bg(.white))
+                )
+            }
+        )
+        let opRf = rtOpacityChild.renderFrame(at: 0)
+        let bdPos = opRf.instances.firstIndex { $0.params.y == KIND_BACKDROP_BLUR }
+        let lyPos = opRf.instances.firstIndex { $0.params.y == KIND_LAYER }
+        #expect(bdPos != nil && lyPos != nil && bdPos! < lyPos!)
+    }
+
+    @Test("nested_fade_and_streaming_mask_and_group_projection (clip.rs:91,122)")
+    func clipFadeIsolationAndStreamingMask() throws {
+        let renderer = try MetalRenderer()
+        for scale: Float in [1.0, 2.0] {
+            let rtPlain = Runtime<Bool>(
+                state: false,
+                viewport: Vec2(80, 200),
+                pixelScale: scale,
+                view: { outer, _ -> El<Bool> in
+                    col().size(80, 200).clipFade(top: outer ? 24 : 0)
+                        .child(el().h(40))
+                        .child(col().size(80, 80).clipFade(top: 8)
+                            .child(el().size(80, 80).bg(.white)))
+                }
+            )
+            let rtOuter = Runtime<Bool>(
+                state: true,
+                viewport: Vec2(80, 200),
+                pixelScale: scale,
+                view: { outer, _ -> El<Bool> in
+                    col().size(80, 200).clipFade(top: outer ? 24 : 0)
+                        .child(el().h(40))
+                        .child(col().size(80, 80).clipFade(top: 8)
+                            .child(el().size(80, 80).bg(.white)))
+                }
+            )
+            let pxPlain = try renderer.renderOffscreen(rtPlain.renderFrame(at: 0))
+            let pxOuter = try renderer.renderOffscreen(rtOuter.renderFrame(at: 0))
+            #expect(pxPlain.rgba == pxOuter.rgba)
+
+            // Streaming row mask survives outer fade (`clip.rs:143`)
+            func runStreaming(faded: Bool) throws -> Frame {
+                let rt = Runtime<(Bool, Float)>(
+                    state: (faded, 20),
+                    viewport: Vec2(80, 200),
+                    pixelScale: scale,
+                    view: { s, _ -> El<(Bool, Float)> in
+                        col().size(80, 200).clipFade(bottom: s.0 ? 24 : 0)
+                            .child(col().wFull().growth(GrowthSpec(edge: .fastFeather))
+                                .child(col().key("row").wFull().streaming(true)
+                                    .child(el().size(80, s.1).bg(.white))))
+                    }
+                )
+                _ = rt.renderFrame(at: 0)
+                rt.update(at: 0) { s, _ in s.1 = 80 }
+                _ = rt.renderFrame(at: 1.0 / 60.0)
+                let rf = rt.renderFrame(at: 2.0 / 60.0)
+                let whiteInst = rf.instances.first { $0.fill.w > 0.99 }
+                #expect(whiteInst != nil)
+                if let inst = whiteInst {
+                    let (w, o) = unpackFade(inst.fade)
+                    #expect(w.w > 0 && w.w < 24.0 * scale)
+                    #expect(o.w == 0)
+                }
+                return try renderer.renderOffscreen(rf)
+            }
+            let stPlain = try runStreaming(faded: false)
+            let stOuter = try runStreaming(faded: true)
+            #expect(stPlain.rgba == stOuter.rgba)
+
+            // Group layer projection without double fade (`clip.rs:91`)
+            for rounded in [false, true] {
+                func makeGroupRt(op: Float) -> Runtime<(Float, Bool)> {
+                    Runtime<(Float, Bool)>(
+                        state: (op, rounded),
+                        viewport: Vec2(128, 128),
+                        pixelScale: scale,
+                        view: { st, _ -> El<(Float, Bool)> in
+                            var group: El<(Float, Bool)> = col().size(80, 64).opacity(st.0)
+                                .child(el().size(80, 32).bg(.white))
+                                .child(el().size(80, 32).bg(.white))
+                            if st.1 { group = group.clipRounded(16) }
+                            return el().size(128, 128).child(
+                                col().absolute(x: 16, y: 16).size(80, 80).clipFade(top: 16)
+                                    .child(col().absolute(x: 0, y: 8).size(80, 64).clipFade().child(group))
+                            )
+                        }
+                    )
+                }
+                let plainRt = makeGroupRt(op: 1.0)
+                plainRt.clearColor = .transparent
+                plainRt.setSrgbBlend(true)
+                let isoRt = makeGroupRt(op: 0.5)
+                isoRt.clearColor = .transparent
+                isoRt.setSrgbBlend(true)
+                let plainRf = plainRt.renderFrame(at: 0)
+                let isoRf = isoRt.renderFrame(at: 0)
+                #expect(isoRf.instances.contains { $0.params.y == KIND_LAYER })
+                #expect(isoRf.instances.contains { $0.fade.z != 0 })
+                #expect(isoRf.instances.contains { $0.fade.w != 0 } == rounded)
+                let plainPx = try renderer.renderOffscreen(plainRf)
+                let isoPx = try renderer.renderOffscreen(isoRf)
+                for p in stride(from: 0, to: plainPx.rgba.count, by: 4) {
+                    let expected = Int((Float(plainPx.rgba[p + 3]) * 0.5).rounded())
+                    #expect(abs(Int(isoPx.rgba[p + 3]) - expected) <= 1)
+                }
+            }
+        }
+    }
+
     #endif
 }

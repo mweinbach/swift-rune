@@ -38,8 +38,18 @@ internal final class RenderFrameEngine {
     let breakers: PipelineBreakers = PipelineBreakers()
     let gpuLoss: GpuDeviceTracker
 
+    struct BackdropEntry {
+        let format: MTLPixelFormat
+        let texture: MTLTexture
+    }
+
     var springBindings: GPUSpringBindings?
     var springTimeSeconds: Double = 0
+    var backdrops: [BackdropEntry] = []
+    var currentFormat: MTLPixelFormat = .bgra8Unorm_srgb
+    var hasExplicitFormat: Bool = false
+    var extraFormats: [MTLPixelFormat] = []
+    var lastViewportSize: (Int, Int) = (0, 0)
 
     var hasCompiledShaders: Bool {
         _ = (pipelineSRGB, pipelineSpringsSRGB, backdropBlur)
@@ -228,6 +238,79 @@ internal final class RenderFrameEngine {
         let cacheSignature: UInt64?
     }
 
+    @discardableResult
+    func ensureBackdrop(format: MTLPixelFormat, size: (Int, Int)) -> MTLTexture? {
+        let w = min(max(size.0, 1), LayerPoolLimits.maxDimension)
+        let h = min(max(size.1, 1), LayerPoolLimits.maxDimension)
+        if let existing = backdrops.first(where: { $0.format == format && $0.texture.width == w && $0.texture.height == h }) {
+            return existing.texture
+        }
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format,
+            width: w,
+            height: h,
+            mipmapped: false
+        )
+        desc.usage = [.renderTarget, .shaderRead]
+        desc.storageMode = .private
+        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
+        tex.label = "rune.effect.backdrop"
+        let entry = BackdropEntry(format: format, texture: tex)
+        if let idx = backdrops.firstIndex(where: { $0.format == format }) {
+            backdrops[idx] = entry
+        } else {
+            backdrops.append(entry)
+        }
+        return tex
+    }
+
+    func prepare(frame: RenderFrame, viewport: (Int, Int)) {
+        let vw = max(1, viewport.0)
+        let vh = max(1, viewport.1)
+        lastViewportSize = (vw, vh)
+        if !hasExplicitFormat {
+            currentFormat = frame.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
+        }
+        _ = uploader.syncGlyphAtlas(device: device, atlas: frame.glyphs, generation: frame.glyphGeneration)
+        _ = uploader.syncImageAtlas(device: device, atlas: frame.images, revision: frame.imageRevision)
+        _ = uploader.ensureInstanceBuffer(device: device, instances: frame.instances)
+        uploader.prepareBatches(instances: frame.instances)
+
+        var needsBackdrop = false
+        var hasLayers = false
+        for inst in frame.instances {
+            let kind = Float(Int(inst.params.y.rounded()))
+            if kind == KIND_LAYER {
+                hasLayers = true
+            } else if (kind == KIND_EFFECT && inst.params.x != 0) || kind == KIND_BACKDROP_BLUR {
+                needsBackdrop = true
+            }
+            if needsBackdrop && hasLayers { break }
+        }
+        if needsBackdrop {
+            ensureBackdrop(format: currentFormat, size: (vw, vh))
+            for fmt in extraFormats {
+                ensureBackdrop(format: fmt, size: (vw, vh))
+            }
+            if hasLayers {
+                ensureBackdrop(format: .rgba16Float, size: (vw, vh))
+            }
+        }
+    }
+
+    func setFormat(_ format: MTLPixelFormat) {
+        hasExplicitFormat = true
+        if currentFormat == format { return }
+        if !extraFormats.contains(currentFormat) {
+            extraFormats.append(currentFormat)
+        }
+        extraFormats.removeAll { $0 == format }
+        currentFormat = format
+        if !backdrops.isEmpty && lastViewportSize.0 > 0 && lastViewportSize.1 > 0 {
+            ensureBackdrop(format: format, size: lastViewportSize)
+        }
+    }
+
     func draw(
         frame: RenderFrame,
         into target: MTLTexture,
@@ -243,6 +326,7 @@ internal final class RenderFrameEngine {
 
         let targetW = max(1, target.width)
         let targetH = max(1, target.height)
+        lastViewportSize = (targetW, targetH)
         let viewport = SIMD2<Float>(Float(targetW), Float(targetH))
         layersPool.preparePlan(instances: frame.instances, viewport: viewport)
 
@@ -626,7 +710,7 @@ internal final class RenderFrameEngine {
                 if wantsBackdrop && canCopyBackdrop {
                     let vw = max(1, Int(globals.viewport.x))
                     let vh = max(1, Int(globals.viewport.y))
-                    if let snap = layersPool.acquireTarget(device: device, width: vw, height: vh, format: cur.format, label: "rune.effect.backdrop") {
+                    if let snap = ensureBackdrop(format: cur.format, size: (vw, vh)) {
                         if cur.isLayer {
                             let clearPass = MTLRenderPassDescriptor()
                             clearPass.colorAttachments[0].texture = snap
@@ -949,10 +1033,24 @@ extension MetalRenderer {
         renderEngine.springBindings?.hasActiveMotion(at: timeSeconds) ?? false
     }
 
+    public var backdropTextures: [MTLTexture] {
+        renderEngine.backdrops.map(\.texture)
+    }
+
+    public func prepare(frame: RenderFrame, viewport: (Int, Int)) {
+        renderEngine.prepare(frame: frame, viewport: viewport)
+    }
+
+    public func setFormat(_ format: MTLPixelFormat) {
+        renderEngine.setFormat(format)
+    }
+
     /// `#819` GPU memory give-back on window rest / occlusion.
     public func giveBack(all: Bool = false, residentCaches: Bool = false) {
         renderEngine.layersPool.giveBack(all: all, residentCaches: residentCaches)
         renderEngine.backdropBlur.giveBack()
+        renderEngine.backdrops.removeAll()
+        renderEngine.extraFormats.removeAll()
         if all {
             renderEngine.uploader.trimUploads()
         }

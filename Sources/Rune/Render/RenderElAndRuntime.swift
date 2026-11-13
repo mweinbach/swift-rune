@@ -543,9 +543,41 @@ private func pushShadowBands(
     }
 }
 
+private func inheritFade(
+    width: inout SIMD4<Float>,
+    origin: inout SIMD4<Float>,
+    rect: SIMD4<Float>,
+    own: SIMD4<Float>
+) {
+    for edge in 0..<4 {
+        let inset = edge < 2 ? (rect[edge] - origin[edge]) : (origin[edge] - rect[edge])
+        let o = abs(own[edge])
+        let w = abs(width[edge])
+        if o > 0 && (o >= w || inset >= w) {
+            width[edge] = own[edge]
+            origin[edge] = rect[edge]
+        }
+    }
+}
+
+private func inFade(
+    _ r: SIMD4<Float>,
+    clip: SIMD4<Float>,
+    width: SIMD4<Float>,
+    origin: SIMD4<Float>
+) -> Bool {
+    let w = SIMD4<Float>(abs(width.x), abs(width.y), abs(width.z), abs(width.w))
+    return (w.x > 0 && r.x < origin.x + w.x && r.z > clip.x)
+        || (w.y > 0 && r.y < origin.y + w.y && r.w > clip.y)
+        || (w.z > 0 && r.z > origin.z - w.z && r.x < clip.z)
+        || (w.w > 0 && r.w > origin.w - w.w && r.y < clip.w)
+}
+
 private struct RenderClipState {
     var rectPt: MotionRect
     var clipPx: SIMD4<Float>
+    var fadeWidth: SIMD4<Float> = .zero
+    var fadeOrigin: SIMD4<Float> = NO_CLIP
     var fade: SIMD4<UInt32>
     var roundedMask: (rect: SIMD4<Float>, radii: SIMD4<Float>)? = nil
 }
@@ -755,6 +787,7 @@ extension Runtime {
             nextChildTransform: PresentedTransform,
             isDissolveScope: Bool,
             needsLayer: Bool,
+            extraClipLayer: Bool,
             cacheEligible: Bool,
             layerStartIdx: Int,
             surfaceStartIdx: Int,
@@ -901,7 +934,7 @@ extension Runtime {
 
             let isDissolveScope = dissolveParentIds.contains(nid)
             if effOpacity <= 0.001 && !isExiting {
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, 0, 0, 0, 0)
+                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, false, 0, 0, 0, 0)
             }
 
             let rectPx = SIMD4<Float>(effRect.x * scale, effRect.y * scale, effRect.width * scale, effRect.height * scale)
@@ -916,10 +949,43 @@ extension Runtime {
             let clipRadiiPt: SIMD4<Float>? = clipSpec?.radii
                 ?? el.clipCorners.map { SIMD4<Float>($0.topLeft, $0.topRight, $0.bottomRight, $0.bottomLeft) }
                 ?? el.clipRadius.map { SIMD4<Float>(repeating: $0) }
-            let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB ?? el.clipFade
+            let gKey = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
+            let growthMaskPt: Float? = {
+                guard el.isStreaming || el.isArrivesWhole || el.foldGlideSpec != nil else { return nil }
+                guard let gEntry = growthRows[gKey], gEntry.track.moving else { return nil }
+                let t = gEntry.track
+                let featherH: Float
+                if t.mask > 0.5 {
+                    featherH = t.mask
+                } else if let fg = el.foldGlideSpec?.feather, abs(t.h - t.target) > 0.25 {
+                    featherH = fg
+                } else {
+                    return nil
+                }
+                let clamped = min(featherH, max(1, t.h))
+                return clamped > 0.5 ? clamped : nil
+            }()
+            let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
+                ?? growthMaskPt.map { SIMD4<Float>(0, 0, 0, $0) }
+                ?? el.clipFade
+            let ownFadePx: SIMD4<Float>
+            if let ltrb = clipFadeLTRB {
+                ownFadePx = SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale)
+            } else if let lin = clipSpec?.fadeLinear {
+                let softDist = -max(0.5, (lin.to - lin.from) * scale)
+                if abs(lin.dir.x) >= abs(lin.dir.y) {
+                    ownFadePx = lin.dir.x >= 0 ? SIMD4<Float>(softDist, 0, 0, 0) : SIMD4<Float>(0, 0, softDist, 0)
+                } else {
+                    ownFadePx = lin.dir.y >= 0 ? SIMD4<Float>(0, softDist, 0, 0) : SIMD4<Float>(0, 0, 0, softDist)
+                }
+            } else {
+                ownFadePx = .zero
+            }
             let hasRoundedClip = clipRadiiPt != nil || (el.layout.clipOverflow && el.corners.maxMagnitude != 0)
-            let hasFeatherClip = clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
             let hasCutout = clipSpec?.cutoutCircle != nil
+            let hasChildren = !(childrenByParent[node.index]?.isEmpty ?? true)
+            let hasOverlappingShape = el.shapes.count > 1 || (el.shapes.first?.ops.count ?? 0) > 1
+            let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 0.999 && (hasChildren || hasOverlappingShape)
             let cacheRequested = (el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false
             let cacheEligible = cacheRequested
                 && !hasCutout
@@ -927,64 +993,69 @@ extension Runtime {
                 && el.runtimeExtras[RenderExtrasKey.effectSpec] == nil
                 && el.runtimeExtras["systemMaterial"] == nil
                 && !hasDynamicInSubtree(node)
-            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasFeatherClip || hasCutout || isDissolveScope || parentIsDissolve
 
-            let scopeClipPx: SIMD4<Float>
-            let scopeFade: SIMD4<UInt32>
+            let boundsClipPx = SIMD4<Float>(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w)
+            let combinedClipPx = intersectClipRects(parentClip.clipPx, boundsClipPx)
+            var mergedFadeWidth = parentClip.fadeWidth
+            var mergedFadeOrigin = parentClip.fadeOrigin
+            let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || clipRadiiPt != nil || clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
+            if hasClipScope && ownFadePx != .zero {
+                inheritFade(width: &mergedFadeWidth, origin: &mergedFadeOrigin, rect: boundsClipPx, own: ownFadePx)
+            }
+            let scopeClipRect = hasClipScope ? combinedClipPx : parentClip.clipPx
+            let scopeBaseFade: SIMD4<UInt32> = (mergedFadeWidth != .zero || parentClip.fade != .zero)
+                ? packFade(width: mergedFadeWidth, origin: mergedFadeOrigin, clip: scopeClipRect)
+                : .zero
+            var scopeFade = scopeBaseFade
             var scopeRoundedMask: (rect: SIMD4<Float>, radii: SIMD4<Float>)? = nil
-            let nextChildClip: RenderClipState
-
-            let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || clipRadiiPt != nil || clipFadeLTRB != nil
             if hasClipScope {
-                let boundsClipPx = SIMD4<Float>(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w)
-                var packedFade = SIMD4<UInt32>.zero
-                if let ltrb = clipFadeLTRB {
-                    packedFade = packFade(
-                        width: SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale),
-                        origin: boundsClipPx,
-                        clip: boundsClipPx
-                    )
-                } else if let lin = clipSpec?.fadeLinear {
-                    let softDist = max(0.5, (lin.to - lin.from) * scale)
-                    if abs(lin.dir.x) >= abs(lin.dir.y) {
-                        packedFade = lin.dir.x >= 0
-                            ? packFade(width: SIMD4<Float>(softDist, 0, 0, 0), origin: boundsClipPx, clip: boundsClipPx)
-                            : packFade(width: SIMD4<Float>(0, 0, softDist, 0), origin: boundsClipPx, clip: boundsClipPx)
-                    } else {
-                        packedFade = lin.dir.y >= 0
-                            ? packFade(width: SIMD4<Float>(0, softDist, 0, 0), origin: boundsClipPx, clip: boundsClipPx)
-                            : packFade(width: SIMD4<Float>(0, 0, 0, softDist), origin: boundsClipPx, clip: boundsClipPx)
-                    }
-                }
                 if let customClipR = clipRadiiPt {
                     let cr = customClipR * scale
                     let w = packClipRadii(clip: boundsClipPx, radii: cr)
-                    packedFade = SIMD4<UInt32>(packedFade.x, packedFade.y, packedFade.z, w)
+                    scopeFade = SIMD4<UInt32>(scopeFade.x, scopeFade.y, scopeFade.z, w)
                     scopeRoundedMask = (boundsClipPx, cr)
                 } else if el.corners.maxMagnitude != 0 {
                     let w = packClipRadii(clip: boundsClipPx, radii: radiiPx)
-                    packedFade = SIMD4<UInt32>(packedFade.x, packedFade.y, packedFade.z, w)
+                    scopeFade = SIMD4<UInt32>(scopeFade.x, scopeFade.y, scopeFade.z, w)
                     scopeRoundedMask = (boundsClipPx, radiiPx)
                 }
-                scopeClipPx = boundsClipPx
-                scopeFade = packedFade
+            }
 
-                if needsLayer {
-                    // Inner draws clip tightly to boundsPx inside layer; layer composite applies rounded/feathered mask!
-                    nextChildClip = RenderClipState(rectPt: visibleClipPt, clipPx: NO_CLIP, fade: .zero, roundedMask: nil)
-                } else {
-                    let parentC = parentClip.clipPx
-                    let combined = SIMD4<Float>(
-                        max(parentC.x, boundsClipPx.x),
-                        max(parentC.y, boundsClipPx.y),
-                        min(parentC.z, boundsClipPx.z),
-                        min(parentC.w, boundsClipPx.w)
-                    )
-                    nextChildClip = RenderClipState(rectPt: visibleClipPt, clipPx: combined, fade: .zero, roundedMask: scopeRoundedMask ?? parentClip.roundedMask)
-                }
+            let ownPaintsCount: Int = {
+                let effBorder = borderMap[nid] ?? (borderGradSpec?.top ?? el.borderColor)
+                let hasGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
+                var c = 0
+                if !hasGrad && effBg.a > 0.001 { c += 1 }
+                if el.borderWidth > 0 && (effBorder.a > 0.001 || borderGradSpec != nil) { c += 1 }
+                if hasGrad || el.surfacePayload != nil { c += 1 }
+                if !el.shapes.isEmpty { c += 1 }
+                if el.imagePayload != nil || el.pixelsPayload != nil { c += 1 }
+                if !el.shadows.isEmpty { c += 1 }
+                if (el.plainText?.isEmpty == false) || (el.richSpans?.isEmpty == false) || el.iconPayload != nil { c += 1 }
+                return c
+            }()
+            let fadeNeedsLayer = effOpacity > 0.001
+                && mergedFadeWidth != .zero
+                && inFade(boundsClipPx, clip: scopeClipRect, width: mergedFadeWidth, origin: mergedFadeOrigin)
+                && (ownPaintsCount >= 2 || (ownPaintsCount == 1 && hasChildren))
+
+            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasCutout || isDissolveScope || parentIsDissolve || opacityNeedsLayer || fadeNeedsLayer
+            let extraClipLayer = needsLayer && hasClipScope && hasRoundedClip && combinedClipPx != boundsClipPx && parentClip.clipPx != NO_CLIP
+
+            let nextChildClip: RenderClipState
+            if needsLayer {
+                // Inner draws clip tightly to boundsPx inside layer; layer composite applies rounded/feathered mask!
+                nextChildClip = RenderClipState(rectPt: visibleClipPt, clipPx: NO_CLIP, fadeWidth: .zero, fadeOrigin: NO_CLIP, fade: .zero, roundedMask: nil)
+            } else if hasClipScope {
+                nextChildClip = RenderClipState(
+                    rectPt: visibleClipPt,
+                    clipPx: scopeClipRect,
+                    fadeWidth: mergedFadeWidth,
+                    fadeOrigin: mergedFadeOrigin,
+                    fade: scopeBaseFade,
+                    roundedMask: scopeRoundedMask ?? parentClip.roundedMask
+                )
             } else {
-                scopeClipPx = parentClip.clipPx
-                scopeFade = parentClip.fade
                 nextChildClip = parentClip
             }
 
@@ -1024,13 +1095,39 @@ extension Runtime {
             let surfaceStartIdx = newSurfaces.count
             let glyphFixupStartIdx = glyphFixups.count
             let imageFixupStartIdx = imageFixups.count
-            let activeClip = needsLayer ? NO_CLIP : parentClip.clipPx
-            let activeFade = needsLayer ? SIMD4<UInt32>.zero : parentClip.fade
+            let activeClip = needsLayer ? NO_CLIP : scopeClipRect
+            let activeFade = needsLayer ? SIMD4<UInt32>.zero : scopeBaseFade
             let localOpacity = needsLayer ? 1.0 : effOpacity
 
             if needsLayer {
-                let layerClip = hasClipScope ? scopeClipPx : parentClip.clipPx
-                let layerFade = hasClipScope ? scopeFade : parentClip.fade
+                if extraClipLayer {
+                    var outerInst = RenderInstance.beginLayer(
+                        bounds: rectPx,
+                        clip: parentClip.clipPx,
+                        spec: LayerSpec(opacity: 1.0, blend: .sourceOver, blur: 0, clipRadius: 0)
+                    )
+                    outerInst.fade = parentClip.fade
+                    instances.append(outerInst)
+                    marks.append(0)
+                }
+                let layerClip: SIMD4<Float>
+                let layerFade: SIMD4<UInt32>
+                if extraClipLayer {
+                    layerClip = boundsClipPx
+                    var ownPacked = ownFadePx != .zero
+                        ? packFade(width: ownFadePx, origin: boundsClipPx, clip: boundsClipPx)
+                        : .zero
+                    if let (_, roundR) = scopeRoundedMask {
+                        ownPacked = SIMD4<UInt32>(ownPacked.x, ownPacked.y, ownPacked.z, packClipRadii(clip: boundsClipPx, radii: roundR))
+                    }
+                    layerFade = ownPacked
+                } else if hasClipScope {
+                    layerClip = hasRoundedClip ? boundsClipPx : scopeClipRect
+                    layerFade = scopeFade
+                } else {
+                    layerClip = parentClip.clipPx
+                    layerFade = parentClip.fade
+                }
                 var scopeInst = RenderInstance.beginLayer(
                     bounds: rectPx,
                     clip: layerClip,
@@ -1298,20 +1395,7 @@ extension Runtime {
 
             // Border & solid fill handling
             let fillPaintedByGrad = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
-            if let bottomPremul = borderBottomPremul, bwPx > 0 {
-                let bgPremul = fillPaintedByGrad ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
-                instances.append(RenderInstance(
-                    rect: rectPx,
-                    radii: shapeRadiiPx,
-                    fill: bgPremul,
-                    border: topPremul,
-                    params: SIMD4<Float>(bwPx, KIND_GRADIENT, softEdge, 1.0),
-                    uv: bottomPremul,
-                    clip: activeClip,
-                    fade: activeFade
-                ))
-                marks.append(0)
-            } else if let dash = el.dashedBorder, bwPx > 0 && effBorderColor.a > 0.001 {
+            if let dash = el.dashedBorder, bwPx > 0 && (effBorderColor.a > 0.001 || (borderBottomColor?.a ?? 0) > 0.001) {
                 if hasSolidBg && !fillPaintedByGrad {
                     instances.append(RenderInstance(
                         rect: rectPx,
@@ -1325,14 +1409,26 @@ extension Runtime {
                     ))
                     marks.append(0)
                 }
-                let ec = premulSIMD4(effBorderColor, opacity: localOpacity, srgb: srgbBlend)
                 instances.append(RenderInstance(
                     rect: rectPx,
                     radii: shapeRadiiPx,
-                    fill: ec,
-                    border: ec,
+                    fill: topPremul,
+                    border: borderBottomPremul ?? topPremul,
                     params: SIMD4<Float>(bwPx, KIND_DASHED, softEdge, 1.0),
                     uv: SIMD4<Float>(max(1, dash.dash * scale), max(1, dash.gap * scale), dash.phase * scale, 0),
+                    clip: activeClip,
+                    fade: activeFade
+                ))
+                marks.append(0)
+            } else if let bottomPremul = borderBottomPremul, bwPx > 0 {
+                let bgPremul = fillPaintedByGrad ? .zero : premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend)
+                instances.append(RenderInstance(
+                    rect: rectPx,
+                    radii: shapeRadiiPx,
+                    fill: bgPremul,
+                    border: topPremul,
+                    params: SIMD4<Float>(bwPx, KIND_GRADIENT, softEdge, 1.0),
+                    uv: bottomPremul,
                     clip: activeClip,
                     fade: activeFade
                 ))
@@ -1635,7 +1731,7 @@ extension Runtime {
                 }
             }
 
-            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx)
+            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx)
         }
 
         @inline(never)
@@ -1647,6 +1743,7 @@ extension Runtime {
             rectPx: SIMD4<Float>,
             radiiPx: SIMD4<Float>,
             needsLayer: Bool,
+            extraClipLayer: Bool,
             cacheEligible: Bool,
             subtreeDynamic: Bool,
             layerStartIdx: Int,
@@ -1681,9 +1778,10 @@ extension Runtime {
             }
 
             if needsLayer {
-                if cacheEligible && !subtreeDynamic && newSurfaces.count == surfaceStartIdx && layerStartIdx < instances.count {
+                let innerLayerIdx = layerStartIdx + (extraClipLayer ? 1 : 0)
+                if cacheEligible && !subtreeDynamic && newSurfaces.count == surfaceStartIdx && innerLayerIdx < instances.count {
                     let sig = hashCachedLayerContent(
-                        instances: instances[(layerStartIdx + 1)...],
+                        instances: instances[(innerLayerIdx + 1)...],
                         glyphFixups: glyphFixups[glyphFixupStartIdx...],
                         imageFixups: imageFixups[imageFixupStartIdx...],
                         surfacesCount: 0,
@@ -1695,13 +1793,13 @@ extension Runtime {
                         imageAtlasSize: (imagePacker.atlas.width, imagePacker.atlas.height),
                         userKey: el.runtimeExtras[RenderExtrasKey.cacheKey] as? UInt64
                     )
-                    instances[layerStartIdx].params.w = 1.0
-                    instances[layerStartIdx].radii = packU64ToFloat4(nid.rawValue)
-                    instances[layerStartIdx].uv = packU64ToFloat4(sig)
+                    instances[innerLayerIdx].params.w = 1.0
+                    instances[innerLayerIdx].radii = packU64ToFloat4(nid.rawValue)
+                    instances[innerLayerIdx].uv = packU64ToFloat4(sig)
                     if residentCacheTracker.isResident(nodeId: nid.rawValue, signature: sig) {
-                        if instances.count > layerStartIdx + 1 {
-                            instances.removeSubrange((layerStartIdx + 1)..<instances.count)
-                            marks.removeSubrange((layerStartIdx + 1)..<marks.count)
+                        if instances.count > innerLayerIdx + 1 {
+                            instances.removeSubrange((innerLayerIdx + 1)..<instances.count)
+                            marks.removeSubrange((innerLayerIdx + 1)..<marks.count)
                         }
                         if glyphFixups.count > glyphFixupStartIdx {
                             glyphFixups.removeSubrange(glyphFixupStartIdx..<glyphFixups.count)
@@ -1715,9 +1813,18 @@ extension Runtime {
                     instances: &instances,
                     surfaces: &newSurfaces,
                     marks: &marks,
-                    start: layerStartIdx,
+                    start: innerLayerIdx,
                     surfaceStart: surfaceStartIdx
                 )
+                if extraClipLayer {
+                    foldEndLayer(
+                        instances: &instances,
+                        surfaces: &newSurfaces,
+                        marks: &marks,
+                        start: layerStartIdx,
+                        surfaceStart: surfaceStartIdx
+                    )
+                }
             }
         }
 
@@ -1742,6 +1849,7 @@ extension Runtime {
                 rectPx: h.rectPx,
                 radiiPx: h.radiiPx,
                 needsLayer: h.needsLayer,
+                extraClipLayer: h.extraClipLayer,
                 cacheEligible: h.cacheEligible,
                 subtreeDynamic: subtreeDynamic,
                 layerStartIdx: h.layerStartIdx,
