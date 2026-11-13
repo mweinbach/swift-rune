@@ -6,6 +6,8 @@ import Testing
 @testable import RuneKitTable
 @testable import RuneKitTabStrip
 @testable import RuneKitShell
+@testable import RuneKitRichEditor
+@testable import RuneLauncher
 
 private func collectTreeTexts(_ node: Any, into out: inout [String]) {
     if let dict = node as? [String: Any] {
@@ -198,5 +200,87 @@ struct Phase3KitUnblockedTests {
         )
         #expect(toggledInspector)
         #expect(s.inspector.isOpen)
+    }
+
+    @Test("kit-rich-editor: rich marks, mention pills, syntax decorations, and toolbar script replay")
+    func kitRichEditorParity() throws {
+        let initial = RichEditorState()
+        #expect(initial.edit.hasRichMark(.bold))
+        #expect(initial.edit.displayPills().map(\.id) == [
+            "agent:review",
+            "file:crates/rune/src/edit.rs",
+        ])
+
+        let syntax = SyntaxTheme.fromKit(Kit.neutral(dark: true))
+        let spans = richCodeBlockSpans(edit: initial.edit, theme: syntax)
+        #expect(!spans.isEmpty)
+
+        var mutated = initial
+        insertRichMention(&mutated.edit)
+        #expect(mutated.edit.displayPills().contains(where: { $0.id == "file:crates/rune/src/text.rs" }))
+
+        let head = try HeadlessRunner.run(RuneKitRichEditorApp.makeSpec(), args: ToolingArgs.parse([]))
+        let parsed = try parseTree(head.treeJSON)
+        #expect(parsed.texts.contains("Rich composer"))
+        #expect(parsed.keys.contains("toolbar"))
+        for btnKey in ["bold", "italic", "underline", "strike", "code", "link", "mention", "bullet", "numbered", "quote", "codeblock"] {
+            #expect(parsed.keys.contains(btnKey))
+        }
+
+        // Script replay: click "@" mention button and verify rendered tree/state updates cleanly without error.
+        let steps: [[String: Any]] = [
+            ["at": 0.05, "click": "mention"],
+        ]
+        let scriptData = try JSONSerialization.data(withJSONObject: steps)
+        let scriptString = String(decoding: scriptData, as: UTF8.self)
+        let after = try HeadlessRunner.run(
+            RuneKitRichEditorApp.makeSpec(),
+            args: ToolingArgs.parse(["--script", scriptString])
+        )
+        let afterParsed = try parseTree(after.treeJSON)
+        #expect(afterParsed.keys.contains("composer-input-input"))
+    }
+
+    @Test("launcher: multi-window notes + launcher + globalShortcut cmd+space + desktop menu-bar")
+    func launcherMultiWindowAndGlobalShortcut() throws {
+        let listOut = try RuneMultiWindow.runHeadless(
+            RuneLauncherApp.makeWindows(desktop: false),
+            args: ToolingArgs.parse(["--list-windows"])
+        )
+        #expect(listOut.windowKeys == ["notes", "launcher"])
+
+        let desktopList = try RuneMultiWindow.runHeadless(
+            RuneLauncherApp.makeWindows(desktop: true),
+            args: ToolingArgs.parse(["--list-windows"])
+        )
+        #expect(desktopList.windowKeys == ["notes", "launcher", "menu-bar"])
+
+        let notesOut = try RuneMultiWindow.runHeadless(
+            RuneLauncherApp.makeWindows(desktop: false),
+            args: ToolingArgs.parse(["--window", "notes"])
+        )
+        let notesParsed = try parseTree(notesOut.treeJSON)
+        #expect(notesParsed.texts.contains("Groceries"))
+        #expect(notesParsed.texts.contains("⌘Space to search"))
+
+        // Trigger the registered `cmd+space` globalShortcut in the `launcher` window, filter to "li".
+        let steps: [[String: Any]] = [
+            ["t": 0.05, "shortcut": "cmd+space"],
+            ["t": 0.15, "type": "click", "key": "query"],
+            ["t": 0.30, "type": "type", "text": "li", "every": 0.01],
+        ]
+        let scriptData = try JSONSerialization.data(withJSONObject: steps)
+        let scriptString = String(decoding: scriptData, as: UTF8.self)
+        let launcherOut = try RuneMultiWindow.runHeadless(
+            RuneLauncherApp.makeWindows(desktop: false),
+            args: ToolingArgs.parse(["--window", "launcher", "--script", scriptString])
+        )
+        let launcherParsed = try parseTree(launcherOut.treeJSON)
+        #expect(launcherParsed.keys.contains("panel"))
+        #expect(launcherParsed.keys.contains("results"))
+        #expect(launcherParsed.keys.contains("result-1"))
+        #expect(launcherParsed.keys.contains("result-2"))
+        #expect(!launcherParsed.keys.contains("result-0"))
+        #expect(!launcherParsed.keys.contains("result-3"))
     }
 }

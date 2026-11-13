@@ -125,6 +125,8 @@ let package = Package(
         .executable(name: "rune-kit-table", targets: ["RuneKitTable"]),
         .executable(name: "rune-kit-tab-strip", targets: ["RuneKitTabStrip"]),
         .executable(name: "rune-kit-shell", targets: ["RuneKitShell"]),
+        .executable(name: "rune-kit-rich-editor", targets: ["RuneKitRichEditor"]),
+        .executable(name: "rune-www", targets: ["RuneWww"]),
     ],
     targets: [
         .target(
@@ -719,6 +721,16 @@ let package = Package(
             dependencies: ["Rune", "RuneKit", "RuneMotion"],
             path: "Sources/Examples/RuneKitShell"
         ),
+        .executableTarget(
+            name: "RuneKitRichEditor",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitRichEditor"
+        ),
+        .executableTarget(
+            name: "RuneWww",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneWww"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -914,6 +926,9 @@ let package = Package(
                 "RuneKitTable",
                 "RuneKitTabStrip",
                 "RuneKitShell",
+                "RuneKitRichEditor",
+                "RuneWww",
+                "RuneLauncher",
                 "RuneSiteScenes",
                 "OpenCodeTheme",
             ],

@@ -5449,6 +5449,24 @@ public final class Runtime<State> {
                         inputClip.height * pxScale
                     )
 
+                    if !resolvedInput.blocks.isEmpty {
+                        RichTextFieldRender.emitBlockDecorations(
+                            blocks: resolvedInput.blocks,
+                            richStyle: resolvedInput.richStyle,
+                            displayText: renderedStr,
+                            shaped: shaped,
+                            innerW: innerW,
+                            textOriginX: inputRestOriginX,
+                            textOriginY: restOriginY,
+                            scaleVec: scaleVec,
+                            pxScale: pxScale,
+                            localAlpha: localAlpha,
+                            srgbBlend: srgbBlend,
+                            devClip: devInputClip,
+                            into: &primitives
+                        )
+                    }
+
                     // Selection highlight
                     if isFocused && edit.hasSelection && !showingPlaceholder {
                         let rawRange = edit.selectedUTF8Range

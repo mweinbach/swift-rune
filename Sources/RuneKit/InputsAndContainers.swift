@@ -770,6 +770,8 @@ public struct TextInput<State> {
     public var isRevealed: Bool = false
     public var isSpellcheck: Bool = false
     public var animatesEditLayout: Bool = false
+    public var decorationsList: [RichSpan] = []
+    public var pillStyleResolver: ((String) -> PillStyle)? = nil
     public var onChangeHandler: ((inout State, String, inout Tx) -> Void)?
     public var onSubmitHandler: ((inout State, String, inout Tx) -> Void)?
     public var onActionHandler: ((inout State, inout Tx) -> Void)?
@@ -866,6 +868,14 @@ public struct TextInput<State> {
         var copy = self; copy.animatesEditLayout = on; return copy
     }
 
+    public func decorations(_ spans: [RichSpan]) -> TextInput<State> {
+        var copy = self; copy.decorationsList = spans; return copy
+    }
+
+    public func pillStyle(_ style: @escaping (String) -> PillStyle) -> TextInput<State> {
+        var copy = self; copy.pillStyleResolver = style; return copy
+    }
+
     public func onChange(_ f: @escaping (inout State, String, inout Tx) -> Void) -> TextInput<State> {
         var copy = self; copy.onChangeHandler = f; return copy
     }
@@ -912,6 +922,12 @@ public struct TextInput<State> {
             .spellcheck(isSpellcheck)
             .invalid(isInvalid)
             .focusRing(0, offset: 0, .transparent)
+        if !decorationsList.isEmpty {
+            field = field.decorations(decorationsList)
+        }
+        if let pillStyleResolver {
+            field = field.pillStyle(pillStyleResolver)
+        }
 
         if let labelText {
             field = field.label(labelText)
@@ -1053,6 +1069,8 @@ public struct TextArea<State> {
     public var isSpellcheck: Bool = false
     public var wrapsAnywhere: Bool = false
     public var animatesEditLayout: Bool = false
+    public var decorationsList: [RichSpan] = []
+    public var pillStyleResolver: ((String) -> PillStyle)? = nil
     public var onChangeHandler: ((inout State, String, inout Tx) -> Void)?
     public var onSubmitHandler: ((inout State, String, inout Tx) -> Void)?
     public var onKeyHandler: ((inout State, KeyEvent, inout Tx) -> Bool)?
@@ -1127,6 +1145,14 @@ public struct TextArea<State> {
         var copy = self; copy.isSpellcheck = on; return copy
     }
 
+    public func decorations(_ spans: [RichSpan]) -> TextArea<State> {
+        var copy = self; copy.decorationsList = spans; return copy
+    }
+
+    public func pillStyle(_ style: @escaping (String) -> PillStyle) -> TextArea<State> {
+        var copy = self; copy.pillStyleResolver = style; return copy
+    }
+
     public func onChange(_ f: @escaping (inout State, String, inout Tx) -> Void) -> TextArea<State> {
         var copy = self; copy.onChangeHandler = f; return copy
     }
@@ -1162,6 +1188,12 @@ public struct TextArea<State> {
             .spellcheck(isSpellcheck)
             .invalid(isInvalid)
             .focusRing(0, offset: 0, .transparent)
+        if !decorationsList.isEmpty {
+            field = field.decorations(decorationsList)
+        }
+        if let pillStyleResolver {
+            field = field.pillStyle(pillStyleResolver)
+        }
 
         if let labelText {
             field = field.label(labelText)

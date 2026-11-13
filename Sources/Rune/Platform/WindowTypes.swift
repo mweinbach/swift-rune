@@ -375,6 +375,7 @@ public protocol HostedWindowEntry: AnyObject {
     func currentCursor(runtimeObj: AnyObject) -> Cursor
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
+    func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
 }
 
@@ -424,6 +425,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt.nativeHelp = true
         rt.fitHeight = spec.fitContentHeight
         rt.setSystemContrast(SystemPreferences.current().contrast)
+        spec.configureRuntime?(rt)
         spec.appShared?.setWaker(waker)
         if rt.fitHeight {
             let minSz = spec.options.minSize ?? spec.appSpec.minSize ?? .zero
@@ -477,7 +479,24 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double) {
-        _ = spec.appShared?.applyStateUpdates(to: rt(runtimeObj), at: now)
+        guard let req = spec.appShared?.applyStateUpdates(to: rt(runtimeObj), at: now) else { return }
+        if let pos = req.position {
+            handle.setPosition((Int32(pos.x.rounded()), Int32(pos.y.rounded())))
+        }
+        if let place = req.place, let pos = place.position {
+            handle.setPosition((Int32(pos.x.rounded()), Int32(pos.y.rounded())))
+        }
+        switch req.window {
+        case .open: handle.open()
+        case .show: handle.show()
+        case .hide: handle.hide()
+        case .close: handle.close()
+        case .none: break
+        }
+        switch req.activation {
+        case .activate, .focus: handle.focus()
+        case .minimize, .none: break
+        }
     }
 
     func markMenusRunning(_ running: Bool) {
@@ -735,14 +754,26 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         // Renderer-level GPU memory trim hooks run on the host window controller.
     }
 
+    func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry? {
+        rt(runtimeObj).shortcutRegistry
+    }
+
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
-        return try HeadlessRunner.run(
-            spec.appSpec,
+        let configure = spec.configureRuntime
+        return try HeadlessRunner.runWithHooks(
+            spec: spec.appSpec,
             args: args,
             chrome: resolvedChrome,
             windowKey: spec.key,
-            availableWindows: [spec.key]
+            availableWindows: [spec.key],
+            onReady: spec.onReady,
+            appShared: spec.appShared,
+            windowOptions: spec.options,
+            menuItems: spec.menuItems,
+            extraConfigure: { rt, _ in
+                configure?(rt)
+            }
         )
     }
 }

@@ -14,6 +14,7 @@ internal struct ElResolvedInput {
     var isSecure: Bool
     var richStyle: RichStyle
     var maxWidthForShape: Float?
+    var blocks: [Block] = []
 
     func measureWidth(_ availMaxWidth: Float?) -> Float? {
         if isSingleLine { return nil }
@@ -167,7 +168,8 @@ internal enum ElDisplayResolver {
             )
         }
 
-        let isRich = !isSecureHidden && (edit.isRichEnabled || el.pillColorsSpec != nil || el.pillIconLookup != nil || el.pillStyleLookup != nil || el.richStyleSpec != nil)
+        let decorations = el.inputDecorations
+        let isRich = !isSecureHidden && (edit.isRichEnabled || !decorations.isEmpty || el.pillColorsSpec != nil || el.pillIconLookup != nil || el.pillStyleLookup != nil || el.richStyleSpec != nil)
         if !isRich {
             return ElResolvedInput(
                 displayString: rawDisplay,
@@ -188,6 +190,13 @@ internal enum ElDisplayResolver {
         let defaultPillBg = el.pillColorsSpec?.bg ?? richStyle.link.alpha(0.2)
         let defaultPillFg = el.pillColorsSpec?.fg
         var combinedSpans = specs.spans
+        for deco in decorations {
+            for mapped in edit.mapRangeToDisplay(deco.byteRange.lowerBound, deco.byteRange.upperBound) {
+                var shifted = deco
+                shifted.byteRange = mapped
+                combinedSpans.append(shifted)
+            }
+        }
         var pills: [PillChip] = []
         pills.reserveCapacity(specs.pills.count)
 
@@ -237,7 +246,8 @@ internal enum ElDisplayResolver {
             isRich: true,
             isSecure: edit.isSecure,
             richStyle: richStyle,
-            maxWidthForShape: isSingle ? nil : (inputStyle.wrap == .noWrap ? nil : innerWidth)
+            maxWidthForShape: isSingle ? nil : (inputStyle.wrap == .noWrap ? nil : innerWidth),
+            blocks: specs.blocks
         )
     }
 

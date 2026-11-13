@@ -584,6 +584,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     var restTimer: Timer?
     var fullScreenWatch: FullScreenWatch?
     var trafficLightSpot: RuneTrafficLights.Spot?
+    var shortcutBridge: MacOSHostShortcutBridge?
     var isHiddenOrClosed = false
     var isTornDown = false
     weak var host: RuneMultiWindowHost?
@@ -647,6 +648,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         restTimer?.invalidate()
         restTimer = nil
         isTornDown = true
+        shortcutBridge?.clear()
+        shortcutBridge = nil
         entry.markMenusRunning(false)
         entry.handle.unbind()
         host?.handlePrimaryClosed(slot: slotIndex)
@@ -1301,6 +1304,9 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         RuneDragRegions.ownWindowDragging(window: window, chrome: specEntry.chrome)
         slot.trafficLightSpot = RuneTrafficLights.Spot(window: window)
+        let shortcutBridge = MacOSHostShortcutBridge()
+        shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
+        slot.shortcutBridge = shortcutBridge
         _ = RuneMacWindowConfig.syncChrome(
             window: window,
             chrome: specEntry.chrome,
