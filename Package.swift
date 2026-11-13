@@ -118,6 +118,10 @@ let package = Package(
         .executable(name: "rune-menu-probe", targets: ["RuneMenuProbe"]),
         .executable(name: "rune-dock-menu-probe", targets: ["RuneDockMenuProbe"]),
         .executable(name: "rune-shortcut-probe", targets: ["RuneShortcutProbe"]),
+        .executable(name: "rune-pinch-bench", targets: ["RunePinchBench"]),
+        .executable(name: "rune-coretext-compare", targets: ["RuneCoretextCompare"]),
+        .executable(name: "rune-occluded-timer", targets: ["RuneOccludedTimer"]),
+        .executable(name: "rune-layer-filter-overlay", targets: ["RuneLayerFilterOverlay"]),
     ],
     targets: [
         .target(
@@ -677,6 +681,26 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneShortcutProbe"
         ),
+        .executableTarget(
+            name: "RunePinchBench",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RunePinchBench"
+        ),
+        .executableTarget(
+            name: "RuneCoretextCompare",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneCoretextCompare"
+        ),
+        .executableTarget(
+            name: "RuneOccludedTimer",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneOccludedTimer"
+        ),
+        .executableTarget(
+            name: "RuneLayerFilterOverlay",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLayerFilterOverlay"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -791,6 +815,7 @@ let package = Package(
                 "RuneBackground",
                 "RuneOverlay",
                 "RuneOverlayLab",
+                "RuneGlassPanel",
                 "RuneVideoPlayer",
                 "RuneVideoTiles",
                 "RuneShowreel",
@@ -863,6 +888,10 @@ let package = Package(
                 "RuneLightDemos",
                 "RuneLightLive",
                 "RuneLightReel",
+                "RunePinchBench",
+                "RuneCoretextCompare",
+                "RuneOccludedTimer",
+                "RuneLayerFilterOverlay",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
