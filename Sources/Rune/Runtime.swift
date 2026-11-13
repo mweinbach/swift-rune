@@ -267,7 +267,7 @@ public final class Runtime<State> {
             if !cxSettings.isApplyingZoom {
                 cxSettings.zoomState.window = viewport
             }
-            if viewport != oldValue {
+            if viewport != oldValue && !suppressViewportCommitFlag {
                 needsCommit = true
             }
         }
@@ -288,11 +288,15 @@ public final class Runtime<State> {
             if systemDark != oldValue { needsCommit = true }
         }
     }
+    private var isApplyingEffectiveReducedMotion = false
     public var reducedMotion: Bool {
         didSet {
             scene.reducedMotion = reducedMotion
             scrollStore.reducedMotion = reducedMotion
             liveStore.reducedMotion = reducedMotion
+            if !isApplyingEffectiveReducedMotion {
+                cxSettings.hostReducedMotion = reducedMotion
+            }
             if reducedMotion != oldValue { needsCommit = true }
         }
     }
@@ -355,6 +359,16 @@ public final class Runtime<State> {
     public private(set) var playgroundRequests: [PlaygroundTxRequest] = []
     public var shortcutRegistry: ShortcutRegistry? = nil
     public private(set) var imeReset: Bool = false
+
+    public let runtimeId: UInt64
+    public var fitHeight: Bool = false
+    public var windowResting: Bool = false
+    internal var fitWindowState = FitWindowState()
+    public var pendingWindowFrame: WindowFrameRequest? = nil
+    internal var userResizeNeedsCut: Bool = false
+    internal var suppressViewportCommitFlag: Bool = false
+    internal var lastCommitMotionSpring: Spring? = nil
+    private var lastScaledAnimNow: Double = 0.0
 
     internal var popupQueue: PopupQueueState = .closed
     internal var popupNeedsLayout: Bool = false
@@ -540,6 +554,7 @@ public final class Runtime<State> {
         self.state = state
         self.view = view
         self.globalOnKey = onKey
+        self.runtimeId = RuntimeIdScope.nextId()
         self.viewport = viewport
         self.pixelScale = max(pixelScale, 0.5)
         self.systemDark = systemDark
@@ -734,8 +749,10 @@ public final class Runtime<State> {
     /// updates `elements()`, and emits the complete `RefScene` primitive stream!
     @discardableResult
     public func frame(at now: Double) -> RefScene {
-        Theme.withBlend(srgbBlend) {
-            frameWithBlendScope(at: now)
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            Theme.withBlend(srgbBlend) {
+                frameWithBlendScope(at: now)
+            }
         }
     }
 
@@ -807,7 +824,9 @@ public final class Runtime<State> {
         if needsCommit {
             let commitAt = min(pendingEventTime ?? now, now)
             pendingEventTime = nil
-            commitTree(at: commitAt, cut: forceInitialSettle)
+            let cut = forceInitialSettle || userResizeNeedsCut
+            userResizeNeedsCut = false
+            commitTree(at: commitAt, cut: cut)
             needsCommit = false
             popupNeedsLayout = false
             forceInitialSettle = false
@@ -823,7 +842,13 @@ public final class Runtime<State> {
         }
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
-        let animNow = cxSettings.advanceClock(to: now)
+        let prevAnimNow = lastScaledAnimNow
+        let nextAnimNow = cxSettings.advanceClock(to: now)
+        let holdMotion = fitWindowState.frameHolds()
+        let animNow = holdMotion ? prevAnimNow : nextAnimNow
+        if !holdMotion {
+            lastScaledAnimNow = animNow
+        }
         syncMotionLoopClock(to: now)
 
         // Sample inertial scroll decay tracks and re-commit layout positions if scroll is moving
@@ -1069,7 +1094,9 @@ public final class Runtime<State> {
         cxSettings.caretReadByView = cx.envState.reads.caretRead
         let effReducedMotion = cx.envState.reducedMotionOverride ?? cxSettings.hostReducedMotion
         if effReducedMotion != self.reducedMotion {
+            isApplyingEffectiveReducedMotion = true
             self.reducedMotion = effReducedMotion
+            isApplyingEffectiveReducedMotion = false
             self.needsCommit = false
         }
         cxSettings.setTimeScale(cx.envState.timeScale, at: now)
@@ -1108,7 +1135,8 @@ public final class Runtime<State> {
                 state: state,
                 viewport: viewport,
                 pixelScale: pixelScale,
-                textSystem: textSystem
+                textSystem: textSystem,
+                fitHeight: fitHeight
             )
         }
         let growthCapture = updateGrowthRowsPostLayout(
@@ -1407,6 +1435,9 @@ public final class Runtime<State> {
             }
             if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
                 layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
+            }
+            if layoutAnimSpec == nil && !selfInstantLayoutOrStyle && activeFlightIds.contains(nid) {
+                layoutAnimSpec = LayoutAnim(spring: el.flightSpring ?? MotionTokens.SETTLE, travel: .screen)
             }
             var specTransition = (ancestorInstant || commitKind.snaps || commitCut || reducedMotion) ? nil : el.transition
             var specRect = targetRect
@@ -1767,6 +1798,23 @@ public final class Runtime<State> {
         }
         syncRideTrailingFlags(newFlat, on: &scene)
         finalizeSelectionAfterCommit(at: now)
+        if fitHeight {
+            let natH = max(1.0, ceil(solvedRoot.layout.localRect.height * cxSettings.zoomState.k * pixelScale) / pixelScale)
+            if fitWindowState.ask(height: natH, current: viewport.y) {
+                let jump = cut || (viewCommitCount <= 1) || reducedMotion
+                if !jump && windowResting {
+                    fitWindowState.hold = .asked
+                }
+                let req = WindowFrameRequest(
+                    size: (viewport.x, natH),
+                    animate: !jump,
+                    spring: jump ? nil : (lastCommitMotionSpring ?? MotionTokens.DEFAULT),
+                    center: false
+                )
+                pendingWindowFrame = pendingWindowFrame?.merged(with: req) ?? req
+            }
+        }
+        lastCommitMotionSpring = nil
     }
 
     private func findNodeForFlightSelector(_ selector: String, in nodes: [FlatNode]) -> FlatNode? {
@@ -4836,6 +4884,20 @@ public final class Runtime<State> {
             pendingUnclippedFlights = true
         }
         applySelectionTx(tx, at: now)
+        if let springOverride = tx.motionSpringRequest {
+            lastCommitMotionSpring = springOverride
+        }
+        if let wf = tx.runtimeActions["windowFrameRequest"] as? WindowFrameRequest {
+            let shouldSnap = !wf.animate || tx.settleRequested || reducedMotion
+            let resolvedSpring: Spring? = shouldSnap ? nil : (tx.motionSpringRequest ?? MotionTokens.DEFAULT)
+            let resolved = WindowFrameRequest(
+                size: wf.size,
+                animate: !shouldSnap && wf.animate,
+                spring: resolvedSpring,
+                center: wf.center
+            )
+            pendingWindowFrame = pendingWindowFrame?.merged(with: resolved) ?? resolved
+        }
         let hasCommitRequests = tx.followEdgeRequested
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty
@@ -4849,6 +4911,100 @@ public final class Runtime<State> {
         }
     }
 
+    /// Updates viewport and scale from a user/host window resize, landing running motion (`set_viewport`).
+    public func setViewport(_ newViewport: Vec2, pixelScale newScale: Float? = nil) {
+        let targetScale = newScale ?? cxSettings.zoomState.windowScale
+        cxSettings.zoomState.window = newViewport
+        cxSettings.zoomState.windowScale = max(targetScale, 0.5)
+        let (viewVP, viewScale) = cxSettings.zoomState.view()
+        if fitHeight && windowResting && fitWindowState.resized(to: viewVP.y, current: viewport.y) {
+            needsCommit = true
+            userResizeNeedsCut = false
+        }
+        if fitHeight && viewVP.x == viewport.x && viewScale == pixelScale {
+            suppressViewportCommitFlag = true
+            viewport = viewVP
+            suppressViewportCommitFlag = false
+            return
+        }
+        if viewVP != viewport || viewScale != pixelScale {
+            cxSettings.isApplyingZoom = true
+            viewport = viewVP
+            pixelScale = viewScale
+            cxSettings.isApplyingZoom = false
+            userResizeNeedsCut = true
+            needsCommit = true
+        }
+    }
+
+    /// Advances viewport for one step of the window's own resize animation without cutting springs (`step_viewport`).
+    public func stepViewport(_ newViewport: Vec2, pixelScale newScale: Float? = nil) {
+        let targetScale = newScale ?? cxSettings.zoomState.windowScale
+        cxSettings.zoomState.window = newViewport
+        cxSettings.zoomState.windowScale = max(targetScale, 0.5)
+        let (viewVP, viewScale) = cxSettings.zoomState.view()
+        if fitHeight && viewVP.x == viewport.x && viewScale == pixelScale {
+            suppressViewportCommitFlag = true
+            viewport = viewVP
+            suppressViewportCommitFlag = false
+            return
+        }
+        if viewVP != viewport || viewScale != pixelScale {
+            cxSettings.isApplyingZoom = true
+            viewport = viewVP
+            pixelScale = viewScale
+            cxSettings.isApplyingZoom = false
+            needsCommit = true
+        }
+    }
+
+    /// Whether a `Tx.resizeWindow` / `centerWindow` request is queued.
+    public var hasPendingWindowFrame: Bool {
+        pendingWindowFrame != nil
+    }
+
+    /// Consumes whether the last frame held motion for a fitting window resize (`FitWindow::take_held`).
+    public func takeFitWindowHeld() -> Bool {
+        fitWindowState.takeHeld()
+    }
+
+    /// Consumes and clears the latest pending window frame request (`Tx::resize_window` / `center_window`).
+    public func takeWindowFrameRequest() -> WindowFrameRequest? {
+        _ = fitWindowState.takeHeld()
+        defer { pendingWindowFrame = nil }
+        return pendingWindowFrame
+    }
+
+    /// Measures natural root content height at the current width without committing (`Runtime::content_height`).
+    public func contentHeight() -> Float {
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            var cx = Cx<State>(
+                viewport: viewport,
+                pixelScale: pixelScale,
+                systemDark: systemDark,
+                reducedMotion: reducedMotion,
+                windowFocused: windowFocused,
+                focusedKey: focusedKey,
+                hoveredKey: hoveredKey,
+                pressedKey: pressedKey,
+                waker: waker,
+                helpLook: viewHelpLook
+            )
+            let rootEl = view(state, &cx)
+            let measured = retainedLayout.compute(
+                root: rootEl,
+                state: state,
+                viewport: viewport,
+                pixelScale: pixelScale,
+                textSystem: textSystem,
+                fitHeight: true
+            )
+            let h = measured.layout.localRect.height
+            let scale = max(cxSettings.zoomState.windowScale, 0.5)
+            return max(1.0, ceil((h * cxSettings.zoomState.k) * scale) / scale)
+        }
+    }
+
     // MARK: - App Shell Lifecycle & State Update Helpers
 
     /// True when the view tree needs a rebuild before the next frame (`Runtime::stale`).
@@ -4858,34 +5014,38 @@ public final class Runtime<State> {
     /// or `tx.commit()` was explicitly called.
     @discardableResult
     public func runPoll(at now: Double) -> Bool {
-        guard let pollFn = poll else { return false }
-        var tx = makeTx(at: now)
-        let changed: Bool
-        if let scope = turnScope {
-            var res = false
-            scope(&state) { s in
-                res = pollFn(&s, now, &tx)
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            guard let pollFn = poll else { return false }
+            var tx = makeTx(at: now)
+            let changed: Bool
+            if let scope = turnScope {
+                var res = false
+                scope(&state) { s in
+                    res = pollFn(&s, now, &tx)
+                }
+                changed = res
+            } else {
+                changed = pollFn(&state, now, &tx)
             }
-            changed = res
-        } else {
-            changed = pollFn(&state, now, &tx)
+            let shouldDirty = changed || tx.isForceCommitRequested
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty)
+            return changed
         }
-        let shouldDirty = changed || tx.isForceCommitRequested
-        applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty)
-        return changed
     }
 
     /// Mutates state via `body`, always rebuilding unless `tx.liveOnlyRequested` is true.
     public func update(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Void) {
-        suppressRevealFromHoverCommit = false
-        let t = now ?? currentTime
-        var tx = makeTx(at: t)
-        if let scope = turnScope {
-            scope(&state) { s in body(&s, &tx) }
-        } else {
-            body(&state, &tx)
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            suppressRevealFromHoverCommit = false
+            let t = now ?? currentTime
+            var tx = makeTx(at: t)
+            if let scope = turnScope {
+                scope(&state) { s in body(&s, &tx) }
+            } else {
+                body(&state, &tx)
+            }
+            applyTx(tx, at: t, markDirtyIfNotLiveOnly: true)
         }
-        applyTx(tx, at: t, markDirtyIfNotLiveOnly: true)
     }
 
     /// Conditionally mutates state via `body`. Only dirties commit when `body` returns `true`
@@ -4893,19 +5053,21 @@ public final class Runtime<State> {
     /// etc.) still apply without forcing a rebuild (`app.rs:1240-1251`).
     @discardableResult
     public func updateIf(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Bool) -> Bool {
-        suppressRevealFromHoverCommit = false
-        let t = now ?? currentTime
-        var tx = makeTx(at: t)
-        let changed: Bool
-        if let scope = turnScope {
-            var res = false
-            scope(&state) { s in res = body(&s, &tx) }
-            changed = res
-        } else {
-            changed = body(&state, &tx)
+        RuntimeIdScope.$current.withValue(runtimeId) {
+            suppressRevealFromHoverCommit = false
+            let t = now ?? currentTime
+            var tx = makeTx(at: t)
+            let changed: Bool
+            if let scope = turnScope {
+                var res = false
+                scope(&state) { s in res = body(&s, &tx) }
+                changed = res
+            } else {
+                changed = body(&state, &tx)
+            }
+            applyTx(tx, at: t, markDirtyIfNotLiveOnly: changed || tx.isForceCommitRequested)
+            return changed
         }
-        applyTx(tx, at: t, markDirtyIfNotLiveOnly: changed || tx.isForceCommitRequested)
-        return changed
     }
 
     /// Sets `srgbBlend` and dirties the tree if changed.

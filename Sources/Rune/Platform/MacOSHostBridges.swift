@@ -1,4 +1,5 @@
 import Foundation
+import RuneMotion
 
 #if os(macOS) && canImport(AppKit)
 import AppKit
@@ -338,6 +339,192 @@ public enum MacOSHostViewHelper {
                 }
             }
         }
+    }
+}
+
+/// Manages `NSViewToolTipOwner` tooltip regions derived from `Runtime.helpRegionsList()`
+/// without repeating tooltip reconciliation across single- and multi-window host views.
+public final class MacOSToolTipOwner: NSObject, NSViewToolTipOwner {
+    @MainActor
+    private struct Entry: Equatable {
+        let rect: NSRect
+        let text: String
+    }
+
+    @MainActor
+    private var entries: [Entry] = []
+
+    @MainActor
+    public override init() {
+        super.init()
+    }
+
+    @MainActor
+    public func sync(regions: [(MotionRect, String)], on view: NSView) {
+        let next = regions.map { rect, text in
+            Entry(
+                rect: NSRect(
+                    x: CGFloat(rect.x),
+                    y: CGFloat(rect.y),
+                    width: CGFloat(max(0, rect.width)),
+                    height: CGFloat(max(0, rect.height))
+                ),
+                text: text
+            )
+        }
+        guard next != entries else { return }
+        entries = next
+        view.removeAllToolTips()
+        for (idx, item) in next.enumerated() where item.rect.width > 0 && item.rect.height > 0 {
+            view.addToolTip(item.rect, owner: self, userData: UnsafeMutableRawPointer(bitPattern: idx + 1))
+        }
+    }
+
+    @objc public func view(
+        _ view: NSView,
+        stringForToolTip tag: NSView.ToolTipTag,
+        point: NSPoint,
+        userData data: UnsafeMutableRawPointer?
+    ) -> String {
+        guard Thread.isMainThread, let raw = data else { return "" }
+        let idx = Int(bitPattern: raw) - 1
+        return MainActor.assumeIsolated {
+            (0..<entries.count).contains(idx) ? entries[idx].text : ""
+        }
+    }
+}
+
+/// Drives AppKit outer-frame spring resize & centering from `WindowFrameRequest` (`window/stepping.rs`).
+@MainActor
+public final class MacOSWindowFrameDriver {
+    private var frameMove: WindowFrameMove?
+
+    public init() {}
+
+    public var isMoving: Bool {
+        WindowFrameMove.isMoving(frameMove)
+    }
+
+    public func takeJumpIfMatching(viewport: Vec2) -> Bool {
+        WindowFrameMove.takeJump(&frameMove, viewport: (viewport.x, viewport.y))
+    }
+
+    public static func currentTopDownFrame(of window: NSWindow) -> [Float] {
+        let f = window.frame
+        let primaryH = Float(NSScreen.screens.first?.frame.height ?? window.screen?.frame.height ?? f.maxY)
+        return [Float(f.minX), primaryH - Float(f.maxY), Float(f.width), Float(f.height)]
+    }
+
+    public static func visibleTopDownFrame(for window: NSWindow) -> [Float] {
+        let screen = window.screen ?? NSScreen.main ?? NSScreen.screens.first
+        let vis = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let primaryH = Float(NSScreen.screens.first?.frame.height ?? vis.maxY)
+        return [Float(vis.minX), primaryH - Float(vis.maxY), Float(vis.width), Float(vis.height)]
+    }
+
+    public static func cocoaFrame(fromTopDown rect: [Float], on window: NSWindow) -> NSRect {
+        let primaryH = CGFloat(NSScreen.screens.first?.frame.height ?? window.screen?.frame.height ?? 0)
+        return NSRect(
+            x: CGFloat(rect[0]),
+            y: primaryH - CGFloat(rect[1]) - CGFloat(rect[3]),
+            width: CGFloat(rect[2]),
+            height: CGFloat(rect[3])
+        )
+    }
+
+    public func applyRequest(
+        _ req: WindowFrameRequest,
+        window: NSWindow,
+        now: Double,
+        minSize: (Float, Float),
+        maxSize: (Float, Float)?,
+        scale: Float,
+        painting: Bool = true,
+        stepViewport: (Vec2, Float) -> Void
+    ) {
+        let outer: (Float, Float)? = req.size.map { reqSize in
+            let clamped = WindowFrame.clampSize(reqSize, min: minSize, max: maxSize)
+            let frameSz = window.frameRect(
+                forContentRect: NSRect(x: 0, y: 0, width: CGFloat(clamped.0), height: CGFloat(clamped.1))
+            ).size
+            return (Float(frameSz.width), Float(frameSz.height))
+        }
+        let current = Self.currentTopDownFrame(of: window)
+        // Resizing again mid-flight keeps the edge the first resize keeps (`stepping.rs:165-168`).
+        let base: [Float]
+        if case .moving(let runningAnim, _, _) = frameMove {
+            base = runningAnim.to
+        } else {
+            base = current
+        }
+        let visible = Self.visibleTopDownFrame(for: window)
+        let target = WindowFrame.snap(
+            WindowFrame.target(current: base, outer: outer, center: req.center, visible: visible),
+            scale: scale
+        )
+        // Centering alone carries on with a resize already moving (`stepping.rs:172-176`).
+        let activeSpring: Spring?
+        if req.size == nil, case .moving(let runningAnim, _, _) = frameMove {
+            activeSpring = runningAnim.spring
+        } else {
+            activeSpring = nil
+        }
+        let spring = req.spring ?? activeSpring
+        if painting, let spring {
+            let prev = WindowFrameMove.takeMoving(&frameMove)
+            let anim = WindowFrameAnim.retarget(
+                previous: prev,
+                spring: spring,
+                now: now,
+                from: current,
+                to: target
+            )
+            frameMove = .moving(anim, origin: (current[0], current[1]))
+        } else {
+            let nsRect = Self.cocoaFrame(fromTopDown: target, on: window)
+            let contentSz = window.contentRect(forFrameRect: nsRect).size
+            frameMove = req.size != nil ? .jumped((Float(contentSz.width), Float(contentSz.height))) : nil
+            window.setFrame(nsRect, display: true)
+            stepViewport(Vec2(Float(max(1, contentSz.width)), Float(max(1, contentSz.height))), scale)
+        }
+    }
+
+    /// Advances an active spring resize one step; returns `true` while still moving.
+    public func step(
+        window: NSWindow,
+        now: Double,
+        scale: Float,
+        resting: Bool = false,
+        stepViewport: (Vec2, Float) -> Void
+    ) -> Bool {
+        guard case .moving(var anim, let originX, let originY) = frameMove else { return false }
+        // First frame after an idle spell defers the move so the server doesn't show a stale strip (`stepping.rs:231-235`).
+        if resting { return true }
+        let current = Self.currentTopDownFrame(of: window)
+        let dx = current[0] - originX
+        let dy = current[1] - originY
+        if abs(dx) > 0.5 || abs(dy) > 0.5 {
+            anim.shift(dx: dx, dy: dy)
+        }
+        let (pos, _) = anim.sample(at: now)
+        let snapped = WindowFrame.snap(pos, scale: scale)
+        let nsRect = Self.cocoaFrame(fromTopDown: snapped, on: window)
+        let contentSz = window.contentRect(forFrameRect: nsRect).size
+        window.setFrame(nsRect, display: true)
+        stepViewport(Vec2(Float(max(1, contentSz.width)), Float(max(1, contentSz.height))), scale)
+        if anim.isDone(at: now) {
+            frameMove = nil
+            return false
+        }
+        frameMove = .moving(anim, origin: (snapped[0], snapped[1]))
+        return true
+    }
+
+    /// Snaps a mid-flight window move to its target when painting stops (`stepping.rs:260-267`).
+    public func landFrame(window: NSWindow) {
+        guard let anim = WindowFrameMove.takeMoving(&frameMove) else { return }
+        let nsRect = Self.cocoaFrame(fromTopDown: anim.to, on: window)
+        window.setFrame(nsRect, display: true)
     }
 }
 #endif

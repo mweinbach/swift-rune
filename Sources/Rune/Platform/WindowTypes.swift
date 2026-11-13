@@ -321,6 +321,19 @@ public protocol HostedWindowEntry: AnyObject {
     func createRuntime(pixelScale: Float, systemDark: Bool, reducedMotion: Bool, waker: Waker) -> AnyObject
     func frame(runtimeObj: AnyObject, at time: Double) -> RefScene
     func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float)
+    func stepViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float)
+    func takeWindowFrameRequest(runtimeObj: AnyObject) -> WindowFrameRequest?
+    func runtimeViewport(runtimeObj: AnyObject) -> Vec2
+    func setWindowResting(runtimeObj: AnyObject, resting: Bool)
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double)
+    func markMenusRunning(_ running: Bool)
+    @MainActor func syncNativeMenus(
+        runtimeObj: AnyObject,
+        appliedRevision: inout UInt64,
+        nowProvider: @escaping () -> Double,
+        onDispatched: @escaping () -> Void
+    )
+    func helpRegionsList(runtimeObj: AnyObject) -> [(MotionRect, String)]
     func setFocused(runtimeObj: AnyObject, focused: Bool)
     func setSystemDark(runtimeObj: AnyObject, dark: Bool)
     func windowTitle(runtimeObj: AnyObject) -> String?
@@ -408,7 +421,19 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt.poll = spec.appSpec.poll
         rt.onAppFileDrop = spec.appSpec.onFileDrop
         rt.onFileDrop = spec.appSpec.onFileDropPhase
+        rt.nativeHelp = true
+        rt.fitHeight = spec.fitContentHeight
         rt.setSystemContrast(SystemPreferences.current().contrast)
+        spec.appShared?.setWaker(waker)
+        if rt.fitHeight {
+            let minSz = spec.options.minSize ?? spec.appSpec.minSize ?? .zero
+            let clamped = WindowFrame.clampSize(
+                (rt.viewport.x, rt.contentHeight()),
+                min: (minSz.x, minSz.y),
+                max: spec.options.maxSize.map { ($0.x, $0.y) }
+            )
+            rt.setViewport(Vec2(clamped.0, clamped.1), pixelScale: pixelScale)
+        }
         if let onQuit = spec.onQuit {
             nonisolated(unsafe) weak let weakRt = rt
             nonisolated(unsafe) let quitFn = onQuit
@@ -432,9 +457,82 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float) {
+        rt(runtimeObj).setViewport(viewport, pixelScale: pixelScale)
+    }
+
+    func stepViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float) {
+        rt(runtimeObj).stepViewport(viewport, pixelScale: pixelScale)
+    }
+
+    func takeWindowFrameRequest(runtimeObj: AnyObject) -> WindowFrameRequest? {
+        rt(runtimeObj).takeWindowFrameRequest()
+    }
+
+    func runtimeViewport(runtimeObj: AnyObject) -> Vec2 {
+        rt(runtimeObj).viewport
+    }
+
+    func setWindowResting(runtimeObj: AnyObject, resting: Bool) {
+        rt(runtimeObj).windowResting = resting
+    }
+
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double) {
+        _ = spec.appShared?.applyStateUpdates(to: rt(runtimeObj), at: now)
+    }
+
+    func markMenusRunning(_ running: Bool) {
+        guard let appShared = spec.appShared else { return }
+        AppMenuBridge.markRunning(appShared, running: running, headless: false)
+        if running, !spec.menuItems.isEmpty {
+            do {
+                try AppMenuBridge.setMenu(spec.menuItems, for: appShared)
+            } catch let err as MenuError {
+                AppMenuBridge.recordError(err, for: appShared)
+            } catch {
+                AppMenuBridge.recordError(.unsupported, for: appShared)
+            }
+        }
+    }
+
+    @MainActor func syncNativeMenus(
+        runtimeObj: AnyObject,
+        appliedRevision: inout UInt64,
+        nowProvider: @escaping () -> Double,
+        onDispatched: @escaping () -> Void
+    ) {
+        #if os(macOS)
+        guard let appShared = spec.appShared else { return }
+        let snap = AppMenuBridge.snapshot(for: appShared)
+        guard snap.revision != appliedRevision else { return }
+        appliedRevision = snap.revision
+        if snap.items.isEmpty {
+            RuneNativeMenuHost.shared.clear()
+            return
+        }
         let r = rt(runtimeObj)
-        r.viewport = viewport
-        r.pixelScale = pixelScale
+        do {
+            try RuneNativeMenuHost.shared.apply(items: snap.items) { [weak r] itemId in
+                guard let r else { return }
+                let latest = AppMenuBridge.snapshot(for: appShared).items
+                guard let item = latest.first(where: { !$0.isSeparator && $0.id == itemId }) else { return }
+                let action = item.action
+                r.update(at: nowProvider()) { state, tx in
+                    action(&state, &tx)
+                }
+                onDispatched()
+            }
+        } catch let err as MenuError {
+            AppMenuBridge.recordError(err, for: appShared)
+        } catch {
+            AppMenuBridge.recordError(.unsupported, for: appShared)
+        }
+        #else
+        let _ = (runtimeObj, appliedRevision, nowProvider, onDispatched)
+        #endif
+    }
+
+    func helpRegionsList(runtimeObj: AnyObject) -> [(MotionRect, String)] {
+        rt(runtimeObj).helpRegionsList()
     }
 
     func setFocused(runtimeObj: AnyObject, focused: Bool) {

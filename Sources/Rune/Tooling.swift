@@ -815,6 +815,8 @@ public enum HeadlessRunner {
             compositor: app.compositorValue,
             reports: reports,
             appShared: app.sharedHandle.shared,
+            windowOptions: app.windowOptionsValue,
+            menuItems: app.menuItems,
             extraConfigure: { runtime, _ in
                 runtime.fontSmoothing = app.fontSmoothingMode
                 runtime.onFocus = app.onFocusHook
@@ -827,6 +829,8 @@ public enum HeadlessRunner {
                 runtime.onReopen = app.onReopenHook
                 runtime.onOpenUrl = app.onOpenUrlHook
                 runtime.tabVisitsControls = app.tabVisitsControlsEnabled
+                runtime.fitHeight = app.isFitContentHeight
+                runtime.windowResting = true
                 if let pg = app.playgroundHost {
                     pg.bindScenes(app.intoSpec().scenes, view: app.view)
                     runtime.playgroundHost = pg
@@ -856,6 +860,8 @@ public enum HeadlessRunner {
         compositor: AnyCompositor<State>? = nil,
         reports: FrameReports<State>? = nil,
         appShared: AppShared<State>? = nil,
+        windowOptions: WindowOptions? = nil,
+        menuItems: [NativeMenuItem<State>] = [],
         extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
     ) throws -> Output {
         if args.listWindows {
@@ -911,7 +917,7 @@ public enum HeadlessRunner {
         }
 
         let waker = Waker()
-        let vp = args.viewportOverride ?? spec.size
+        var vp = args.viewportOverride ?? spec.size
         let isDark = args.darkOverride ?? spec.dark ?? true
         let runtime = Runtime<State>(
             state: initialState,
@@ -930,11 +936,39 @@ public enum HeadlessRunner {
         runtime.onFileDrop = spec.onFileDropPhase
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
+        if let appShared {
+            AppMenuBridge.markRunning(appShared, running: true, headless: true)
+            if !menuItems.isEmpty {
+                do {
+                    try AppMenuBridge.setMenu(menuItems, for: appShared)
+                } catch let err as MenuError {
+                    AppMenuBridge.recordError(err, for: appShared)
+                } catch {
+                    AppMenuBridge.recordError(.unsupported, for: appShared)
+                }
+            }
+        }
+        defer {
+            if let appShared {
+                AppMenuBridge.markRunning(appShared, running: false, headless: false)
+            }
+        }
         appShared?.setWaker(waker)
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
             spec.setup?(waker)
         }
         _ = appShared?.applyStateUpdates(to: runtime, at: 0.0)
+        let minSizeLimit = windowOptions?.minSize ?? spec.minSize ?? .zero
+        let limits: ((Float, Float), (Float, Float)?) = (
+            (minSizeLimit.x, minSizeLimit.y),
+            windowOptions?.maxSize.map { ($0.x, $0.y) }
+        )
+        vp = runtime.viewport
+        if runtime.fitHeight {
+            let fitted = WindowFrame.clampSize((vp.x, runtime.contentHeight()), min: limits.0, max: limits.1)
+            runtime.setViewport(Vec2(fitted.0, fitted.1), pixelScale: args.pixelScale)
+            vp = runtime.viewport
+        }
 
         // Load script steps if `--script` was passed (supports file path OR inline JSON string)
         var steps: [ScriptStep] = []
@@ -1108,8 +1142,56 @@ public enum HeadlessRunner {
         }
 
         // Initial settled frame at t = 0 (or `--at` if specified)
+        var windowFrameMove: WindowFrameMove? = nil
+        var currentOuterFrame: [Float] = [0, 0, vp.x, vp.y]
+        func stepWindowFrame(at now: Double) {
+            if case .moving(let anim, _, _) = windowFrameMove {
+                let (pos, _) = anim.sample(at: now)
+                let snapped = WindowFrame.snap(pos, scale: args.pixelScale)
+                let w = max(1.0, snapped[2])
+                let h = max(1.0, snapped[3])
+                currentOuterFrame = [snapped[0], snapped[1], w, h]
+                runtime.stepViewport(Vec2(w, h), pixelScale: args.pixelScale)
+                if anim.isDone(at: now) {
+                    windowFrameMove = nil
+                }
+            }
+        }
+        func applyPendingWindowFrame(at now: Double) {
+            guard let req = runtime.takeWindowFrameRequest() else { return }
+            guard let reqSize = req.size else { return }
+            let clamped = WindowFrame.clampSize(reqSize, min: limits.0, max: limits.1)
+            let from: [Float] = [0, 0, runtime.viewport.x, runtime.viewport.y]
+            let snappedTarget = WindowFrame.snap([0, 0, clamped.0, clamped.1], scale: args.pixelScale)
+            if req.animate, let spring = req.spring {
+                let prev = WindowFrameMove.takeMoving(&windowFrameMove)
+                let anim = WindowFrameAnim.retarget(
+                    previous: prev,
+                    spring: spring,
+                    now: now,
+                    from: from,
+                    to: snappedTarget
+                )
+                windowFrameMove = .moving(anim, origin: (0, 0))
+            } else {
+                currentOuterFrame = snappedTarget
+                windowFrameMove = nil
+                runtime.stepViewport(
+                    Vec2(max(1.0, snappedTarget[2]), max(1.0, snappedTarget[3])),
+                    pixelScale: args.pixelScale
+                )
+            }
+        }
+
         let initialT = (resolvedAtTime ?? 0.0) * args.timeScale
         var lastCaptured = captureFrame(at: initialT)
+        if runtime.hasPendingWindowFrame {
+            _ = runtime.takeFitWindowHeld()
+            applyPendingWindowFrame(at: initialT)
+        }
+        if runtime.viewport != vp {
+            lastCaptured = captureFrame(at: initialT)
+        }
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
         var didFireReady = false
@@ -1211,7 +1293,9 @@ public enum HeadlessRunner {
                     case let .fling(vx, vy):
                         runtime.fling(vx: vx, vy: vy, at: resolvedPos, now: animNow)
                     case .resize(let newVP):
-                        runtime.viewport = newVP
+                        windowFrameMove = nil
+                        currentOuterFrame = [currentOuterFrame[0], currentOuterFrame[1], newVP.x, newVP.y]
+                        runtime.setViewport(newVP)
                     case .windowFocus(let foc):
                         runtime.windowFocused = foc
                     case .mark(let markName):
@@ -1243,8 +1327,15 @@ public enum HeadlessRunner {
                 }
 
                 let animNow = simTime * args.timeScale
+                _ = appShared?.applyStateUpdates(to: runtime, at: animNow)
+                stepWindowFrame(at: animNow)
+                runtime.windowResting = (windowFrameMove == nil && !runtime.hasPendingWindowFrame)
                 let frameClockStart = Date()
                 lastCaptured = captureFrame(at: animNow)
+                if runtime.hasPendingWindowFrame {
+                    let shown = (frameIndex == 0 || runtime.takeFitWindowHeld()) ? 0.0 : (dt * args.timeScale)
+                    applyPendingWindowFrame(at: animNow - shown)
+                }
                 let frameCpuMs = Date().timeIntervalSince(frameClockStart) * 1000.0
                 traceWriter?.recordFrame(runtime: runtime, tMs: simTime * 1000.0, cpuMs: frameCpuMs)
 
@@ -1292,7 +1383,7 @@ public enum HeadlessRunner {
                     || args.frameCount != nil
                     || hasOutput
                     || args.tracePath != nil
-                if !explicitLengthRequested && stepCursor >= steps.count && !runtime.isAnimating && simTime >= lastEventTime + dt {
+                if !explicitLengthRequested && stepCursor >= steps.count && !runtime.isAnimating && windowFrameMove == nil && simTime >= lastEventTime + dt {
                     break
                 }
                 if let targetCount = targetOutputFrames, dumpedFrameCount >= targetCount {

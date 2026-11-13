@@ -647,6 +647,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         restTimer?.invalidate()
         restTimer = nil
         isTornDown = true
+        entry.markMenusRunning(false)
         entry.handle.unbind()
         host?.handlePrimaryClosed(slot: slotIndex)
     }
@@ -706,6 +707,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    private let toolTipOwner = MacOSToolTipOwner()
+    private let windowFrameDriver = MacOSWindowFrameDriver()
+    private var appliedMenuRevision: UInt64 = 0
+    private var isWindowResting = true
     weak var slot: HostedWindowSlot?
 
     init(
@@ -777,6 +782,9 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     func stopTimer() {
         displayLinkDriver?.stop()
         displayLinkDriver = nil
+        if let w = window {
+            windowFrameDriver.landFrame(window: w)
+        }
     }
 
     private func nowSeconds() -> Double {
@@ -787,17 +795,34 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-        entry.applyViewport(
-            runtimeObj: runtime,
-            viewport: Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height))),
-            pixelScale: Float(scale)
-        )
+        let newVP = Vec2(Float(max(1, bounds.width)), Float(max(1, bounds.height)))
+        if windowFrameDriver.isMoving || windowFrameDriver.takeJumpIfMatching(viewport: newVP) {
+            entry.stepViewport(runtimeObj: runtime, viewport: newVP, pixelScale: Float(scale))
+        } else {
+            entry.applyViewport(runtimeObj: runtime, viewport: newVP, pixelScale: Float(scale))
+        }
         requestRender()
     }
 
     func requestRender() {
         guard bounds.width > 0 && bounds.height > 0 else { return }
         let t = nowSeconds()
+        if let w = window {
+            let scale = Float(w.backingScaleFactor)
+            _ = windowFrameDriver.step(window: w, now: t, scale: scale, resting: isWindowResting) { [weak self] vp, sc in
+                guard let self else { return }
+                self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
+            }
+        }
+        isWindowResting = !(inLiveResize || windowFrameDriver.isMoving)
+        entry.setWindowResting(runtimeObj: runtime, resting: isWindowResting)
+        entry.applyAppStateUpdates(runtimeObj: runtime, at: t)
+        entry.syncNativeMenus(
+            runtimeObj: runtime,
+            appliedRevision: &appliedMenuRevision,
+            nowProvider: { [weak self] in self?.nowSeconds() ?? 0.0 },
+            onDispatched: { [weak self] in self?.requestRender() }
+        )
         let commitsBefore = entry.viewCommitCount(runtimeObj: runtime)
         let refScene = entry.frame(runtimeObj: runtime, at: t)
         if let title = entry.windowTitle(runtimeObj: runtime), let w = window, w.title != title {
@@ -826,9 +851,24 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
         slot?.host?.drainOpenedWindows()
         pumpPlatformActions()
+        if let frameReq = entry.takeWindowFrameRequest(runtimeObj: runtime), let w = window {
+            let scale = Float(w.backingScaleFactor)
+            let minSz = entry.options.minSize ?? WindowOptions.defaultMinSize
+            windowFrameDriver.applyRequest(
+                frameReq,
+                window: w,
+                now: t,
+                minSize: (minSz.x, minSz.y),
+                maxSize: entry.options.maxSize.map { ($0.x, $0.y) },
+                scale: scale
+            ) { [weak self] vp, sc in
+                guard let self else { return }
+                self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
+            }
+        }
         syncPlatformBridges(treeCommitted: !didInitialA11ySync || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
 
-        if entry.isAnimating(runtimeObj: runtime) {
+        if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
             if displayLinkDriver == nil {
                 displayLinkDriver = MacOSDisplayLinkDriver { [weak self] in
                     self?.requestRender()
@@ -863,6 +903,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
         if treeCommitted {
             didInitialA11ySync = true
+            toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
             accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
@@ -1166,6 +1207,12 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         if !options.accessory {
             app.activate(ignoringOtherApps: true)
         }
+        defer {
+            for slot in host.slots {
+                slot.entry.markMenusRunning(false)
+            }
+            RuneNativeMenuHost.shared.clear()
+        }
         withExtendedLifetime(host) {
             app.run()
         }
@@ -1189,10 +1236,12 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             reducedMotion: reducedMotion,
             waker: waker
         )
+        specEntry.markMenusRunning(true)
         let renderer = try MetalRenderer()
+        let initialVP = specEntry.runtimeViewport(runtimeObj: rt)
         let window = RuneMacWindowConfig.makeWindow(
             title: specEntry.title,
-            size: specEntry.size,
+            size: initialVP,
             minSize: specEntry.minSize,
             chrome: specEntry.chrome,
             titlebar: specEntry.titlebar,
@@ -1202,7 +1251,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         let respectSysDark = parsed.darkOverride == nil && specEntry.darkOverride == nil
         let view = RuneHostedMetalView(
-            frame: NSRect(x: 0, y: 0, width: CGFloat(specEntry.size.x), height: CGFloat(specEntry.size.y)),
+            frame: NSRect(x: 0, y: 0, width: CGFloat(initialVP.x), height: CGFloat(initialVP.y)),
             entry: specEntry,
             runtime: rt,
             renderer: renderer,
