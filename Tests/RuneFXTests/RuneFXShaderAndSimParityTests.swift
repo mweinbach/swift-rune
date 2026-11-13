@@ -422,6 +422,30 @@ struct RuneFXShaderAndSimParityTests {
         for k in 1..<8 {
             #expect(tile(scale15, key: k, wPx: 40, hPx: 40, xBase: 4, stridePx: 42, yBase: 4) == s15_0)
         }
+
+        // Time folding at 512 s and 1024 s turns smoothly without a frame jump.
+        let foldShape = FxShape.rounded(x: 4, y: 4, w: 24, h: 24, radius: 5)
+        let dtFold: Float = 1.0 / 64.0
+        for fold: Float in [512.0, 1024.0] {
+            let before = try renderF16(
+                renderer: renderer, queue: queue, target: target,
+                viewport: SIMD2<UInt32>(128, 64), scale: 2.0, srgb: false,
+                layers: [Fx.fill(FillParams(.liquidMetal(.chrome()))).on(foldShape).at(fold - dtFold)]
+            )
+            let atFold = try renderF16(
+                renderer: renderer, queue: queue, target: target,
+                viewport: SIMD2<UInt32>(128, 64), scale: 2.0, srgb: false,
+                layers: [Fx.fill(FillParams(.liquidMetal(.chrome()))).on(foldShape).at(fold)]
+            )
+            let after = try renderF16(
+                renderer: renderer, queue: queue, target: target,
+                viewport: SIMD2<UInt32>(128, 64), scale: 2.0, srgb: false,
+                layers: [Fx.fill(FillParams(.liquidMetal(.chrome()))).on(foldShape).at(fold + dtFold)]
+            )
+            #expect(before == after, "triangle wave is symmetric across \(fold)")
+            let maxStep = zip(before, atFold).map { abs(f16ToF32($0) - f16ToF32($1)) }.max() ?? 0
+            #expect(maxStep < 0.2, "no frame jump at \(fold): max step \(maxStep)")
+        }
     }
 
     @Test("Simulated fire GPU 6-pass fluid solver runs 3 frames, stays finite, and advances flame")

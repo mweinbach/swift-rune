@@ -61,6 +61,20 @@ public enum FxValue: Sendable, Equatable {
     case colors(Stops)
     case point(SIMD2<Float>)
     case points([SIMD2<Float>])
+
+    fileprivate var finiteFloat: Float? {
+        switch self {
+        case .number(let x) where x.isFinite: return x
+        case .count(let n): return Float(n)
+        default: return nil
+        }
+    }
+}
+
+private func assignFloat(_ value: FxValue, to field: inout Float) -> Bool {
+    guard let x = value.finiteFloat else { return false }
+    field = x
+    return true
 }
 
 /// A named preset for a fill style.
@@ -221,22 +235,30 @@ extension LiquidMetalParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("tint", .color(let c)): tint = c
-        case ("light", .color(let c)): light = c
-        case ("flow", .number(let x)) where x.isFinite: flow = x
-        case ("scale", .number(let x)) where x.isFinite: scale = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("bevel", .number(let x)) where x.isFinite: bevel = x
-        case ("dome", .number(let x)) where x.isFinite: dome = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("iridescence", .number(let x)) where x.isFinite: iridescence = x
-        case ("contrast", .number(let x)) where x.isFinite: contrast = x
-        case ("anchor", .choice(let i)) where i >= 0 && i < FillAnchor.allOptions.count:
+        switch id {
+        case "tint":
+            guard case .color(let c) = v else { return false }
+            tint = c
+            return true
+        case "light":
+            guard case .color(let c) = v else { return false }
+            light = c
+            return true
+        case "flow": return assignFloat(v, to: &flow)
+        case "scale": return assignFloat(v, to: &scale)
+        case "speed": return assignFloat(v, to: &speed)
+        case "bevel": return assignFloat(v, to: &bevel)
+        case "dome": return assignFloat(v, to: &dome)
+        case "angle": return assignFloat(v, to: &angle)
+        case "iridescence": return assignFloat(v, to: &iridescence)
+        case "contrast": return assignFloat(v, to: &contrast)
+        case "anchor":
+            guard case .choice(let i) = v, i >= 0 && i < FillAnchor.allOptions.count else { return false }
             anchor = FillAnchor.allOptions[i]
-        default: return false
+            return true
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -261,15 +283,18 @@ extension PlasticParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("color", .color(let c)): color = c
-        case ("roughness", .number(let x)) where x.isFinite: roughness = x
-        case ("dome", .number(let x)) where x.isFinite: dome = x
-        case ("bevel", .number(let x)) where x.isFinite: bevel = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        default: return false
+        switch id {
+        case "color":
+            guard case .color(let c) = v else { return false }
+            color = c
+            return true
+        case "roughness": return assignFloat(v, to: &roughness)
+        case "dome": return assignFloat(v, to: &dome)
+        case "bevel": return assignFloat(v, to: &bevel)
+        case "angle": return assignFloat(v, to: &angle)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -296,19 +321,24 @@ extension MeshGradientParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("colors", .colors(let s)): colors = s
-        case ("points", .points(let pts)) where pts.allSatisfy({ $0.x.isFinite && $0.y.isFinite }):
+        switch id {
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "points":
+            guard case .points(let pts) = v, pts.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return false }
             var padded = Array(pts.prefix(maxStops))
             while padded.count < maxStops { padded.append(.zero) }
             points = padded
-        case ("drift", .number(let x)) where x.isFinite: drift = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("sharpness", .number(let x)) where x.isFinite: sharpness = x
-        case ("warp", .number(let x)) where x.isFinite: warp = x
-        default: return false
+            return true
+        case "drift": return assignFloat(v, to: &drift)
+        case "speed": return assignFloat(v, to: &speed)
+        case "sharpness": return assignFloat(v, to: &sharpness)
+        case "warp": return assignFloat(v, to: &warp)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -341,21 +371,28 @@ extension DitherParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("pattern", .choice(let i)) where i >= 0 && i < DitherPattern.allOptions.count:
+        switch id {
+        case "pattern":
+            guard case .choice(let i) = v, i >= 0 && i < DitherPattern.allOptions.count else { return false }
             pattern = DitherPattern.allOptions[i]
-        case ("input", .choice(let i)) where i >= 0 && i < FillInput.allOptions.count:
+            return true
+        case "input":
+            guard case .choice(let i) = v, i >= 0 && i < FillInput.allOptions.count else { return false }
             input = FillInput.allOptions[i]
-        case ("colors", .colors(let s)): colors = s
-        case ("pixel", .number(let x)) where x.isFinite: pixel = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("scale", .number(let x)) where x.isFinite: scale = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("bias", .number(let x)) where x.isFinite: bias = x
-        case ("contrast", .number(let x)) where x.isFinite: contrast = x
-        default: return false
+            return true
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "pixel": return assignFloat(v, to: &pixel)
+        case "angle": return assignFloat(v, to: &angle)
+        case "scale": return assignFloat(v, to: &scale)
+        case "speed": return assignFloat(v, to: &speed)
+        case "bias": return assignFloat(v, to: &bias)
+        case "contrast": return assignFloat(v, to: &contrast)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -386,19 +423,30 @@ extension GrainGradientParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("kind", .choice(let i)) where i >= 0 && i < GradientKind.allOptions.count:
+        switch id {
+        case "kind":
+            guard case .choice(let i) = v, i >= 0 && i < GradientKind.allOptions.count else { return false }
             kind = GradientKind.allOptions[i]
-        case ("colors", .colors(let s)): colors = s
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("center", .point(let p)) where p.x.isFinite && p.y.isFinite: center = p
-        case ("amount", .number(let x)) where x.isFinite: amount = x
-        case ("size", .number(let x)) where x.isFinite: size = x
-        case ("mono", .toggle(let b)): mono = b
-        case ("fps", .number(let x)) where x.isFinite: fps = x
-        default: return false
+            return true
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "angle": return assignFloat(v, to: &angle)
+        case "center":
+            guard case .point(let p) = v, p.x.isFinite && p.y.isFinite else { return false }
+            center = p
+            return true
+        case "amount": return assignFloat(v, to: &amount)
+        case "size": return assignFloat(v, to: &size)
+        case "mono":
+            guard case .toggle(let b) = v else { return false }
+            mono = b
+            return true
+        case "fps": return assignFloat(v, to: &fps)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -429,19 +477,21 @@ extension FlutedGlassParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("rib", .number(let x)) where x.isFinite: rib = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("refraction", .number(let x)) where x.isFinite: refraction = x
-        case ("frost", .number(let x)) where x.isFinite: frost = x
-        case ("dispersion", .number(let x)) where x.isFinite: dispersion = x
-        case ("highlight", .number(let x)) where x.isFinite: highlight = x
-        case ("tint", .color(let c)): tint = c
-        case ("tint_amount", .number(let x)) where x.isFinite, ("tintAmount", .number(let x)) where x.isFinite:
-            tintAmount = x
-        default: return false
+        switch id {
+        case "rib": return assignFloat(v, to: &rib)
+        case "angle": return assignFloat(v, to: &angle)
+        case "refraction": return assignFloat(v, to: &refraction)
+        case "frost": return assignFloat(v, to: &frost)
+        case "dispersion": return assignFloat(v, to: &dispersion)
+        case "highlight": return assignFloat(v, to: &highlight)
+        case "tint":
+            guard case .color(let c) = v else { return false }
+            tint = c
+            return true
+        case "tint_amount", "tintAmount": return assignFloat(v, to: &tintAmount)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -468,17 +518,31 @@ extension MetaballParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("colors", .colors(let s)): colors = s
-        case ("base", .color(let c)): base = c
-        case ("count", .count(let n)): count = n
-        case ("count", .number(let x)) where x.isFinite: count = UInt32(max(0.0, x.rounded()))
-        case ("size", .number(let x)) where x.isFinite: size = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("gloss", .number(let x)) where x.isFinite: gloss = x
-        default: return false
+        switch id {
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "base":
+            guard case .color(let c) = v else { return false }
+            base = c
+            return true
+        case "count":
+            if case .count(let n) = v {
+                count = n
+                return true
+            }
+            if case .number(let x) = v, x.isFinite {
+                count = UInt32(max(0.0, x.rounded()))
+                return true
+            }
+            return false
+        case "size": return assignFloat(v, to: &size)
+        case "speed": return assignFloat(v, to: &speed)
+        case "gloss": return assignFloat(v, to: &gloss)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -503,15 +567,18 @@ extension SwirlParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("colors", .colors(let s)): colors = s
-        case ("scale", .number(let x)) where x.isFinite: scale = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("twist", .number(let x)) where x.isFinite: twist = x
-        case ("warp", .number(let x)) where x.isFinite: warp = x
-        default: return false
+        switch id {
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "scale": return assignFloat(v, to: &scale)
+        case "speed": return assignFloat(v, to: &speed)
+        case "twist": return assignFloat(v, to: &twist)
+        case "warp": return assignFloat(v, to: &warp)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -538,16 +605,22 @@ extension VoronoiParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("colors", .colors(let s)): colors = s
-        case ("edge_color", .color(let c)), ("edgeColor", .color(let c)): edgeColor = c
-        case ("scale", .number(let x)) where x.isFinite: scale = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("edge", .number(let x)) where x.isFinite: edge = x
-        case ("depth", .number(let x)) where x.isFinite: depth = x
-        default: return false
+        switch id {
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "edge_color", "edgeColor":
+            guard case .color(let c) = v else { return false }
+            edgeColor = c
+            return true
+        case "scale": return assignFloat(v, to: &scale)
+        case "speed": return assignFloat(v, to: &speed)
+        case "edge": return assignFloat(v, to: &edge)
+        case "depth": return assignFloat(v, to: &depth)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -574,16 +647,19 @@ extension WaveParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("colors", .colors(let s)): colors = s
-        case ("amplitude", .number(let x)) where x.isFinite: amplitude = x
-        case ("frequency", .number(let x)) where x.isFinite: frequency = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("softness", .number(let x)) where x.isFinite: softness = x
-        default: return false
+        switch id {
+        case "colors":
+            guard case .colors(let s) = v else { return false }
+            colors = s
+            return true
+        case "amplitude": return assignFloat(v, to: &amplitude)
+        case "frequency": return assignFloat(v, to: &frequency)
+        case "speed": return assignFloat(v, to: &speed)
+        case "angle": return assignFloat(v, to: &angle)
+        case "softness": return assignFloat(v, to: &softness)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -618,22 +694,29 @@ extension HalftoneParams {
     }
 
     fileprivate mutating func setParam(_ id: String, _ v: FxValue) -> Bool {
-        switch (id, v) {
-        case ("input", .choice(let i)) where i >= 0 && i < FillInput.allOptions.count:
+        switch id {
+        case "input":
+            guard case .choice(let i) = v, i >= 0 && i < FillInput.allOptions.count else { return false }
             input = FillInput.allOptions[i]
-        case ("ink", .color(let c)): ink = c
-        case ("base", .color(let c)): base = c
-        case ("cell", .number(let x)) where x.isFinite: cell = x
-        case ("angle", .number(let x)) where x.isFinite: angle = x
-        case ("ramp_angle", .number(let x)) where x.isFinite, ("rampAngle", .number(let x)) where x.isFinite:
-            rampAngle = x
-        case ("scale", .number(let x)) where x.isFinite: scale = x
-        case ("speed", .number(let x)) where x.isFinite: speed = x
-        case ("bias", .number(let x)) where x.isFinite: bias = x
-        case ("contrast", .number(let x)) where x.isFinite: contrast = x
-        default: return false
+            return true
+        case "ink":
+            guard case .color(let c) = v else { return false }
+            ink = c
+            return true
+        case "base":
+            guard case .color(let c) = v else { return false }
+            base = c
+            return true
+        case "cell": return assignFloat(v, to: &cell)
+        case "angle": return assignFloat(v, to: &angle)
+        case "ramp_angle", "rampAngle": return assignFloat(v, to: &rampAngle)
+        case "scale": return assignFloat(v, to: &scale)
+        case "speed": return assignFloat(v, to: &speed)
+        case "bias": return assignFloat(v, to: &bias)
+        case "contrast": return assignFloat(v, to: &contrast)
+        default:
+            return false
         }
-        return true
     }
 }
 
@@ -731,14 +814,8 @@ extension FillParams {
     @discardableResult
     public mutating func set(_ id: String, _ value: FxValue) -> Bool {
         switch id {
-        case "border":
-            guard case .number(let x) = value, x.isFinite else { return false }
-            border = x
-            return true
-        case "intensity":
-            guard case .number(let x) = value, x.isFinite else { return false }
-            intensity = x
-            return true
+        case "border": return assignFloat(value, to: &border)
+        case "intensity": return assignFloat(value, to: &intensity)
         default:
             return style.setParam(id, value)
         }

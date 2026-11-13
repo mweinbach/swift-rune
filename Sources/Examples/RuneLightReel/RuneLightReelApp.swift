@@ -7,10 +7,13 @@ import Metal
 @main
 struct RuneLightReelApp {
     static func main() throws {
+        try run(args: Array(CommandLine.arguments.dropFirst()))
+    }
+
+    static func run(args: [String]) throws {
         #if !canImport(Metal)
         fputs("rune-light-reel requires Metal.\n", stderr)
         #else
-        let args = Array(CommandLine.arguments.dropFirst())
         var cmd: String?
         var outDir = URL(fileURLWithPath: "demo/reel")
         var from: Float = 0.0

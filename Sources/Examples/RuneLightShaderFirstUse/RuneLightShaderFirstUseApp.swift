@@ -16,7 +16,10 @@ import Metal
 @main
 enum RuneLightShaderFirstUseApp {
     static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
+        try run(args: Array(CommandLine.arguments.dropFirst()))
+    }
+
+    static func run(args: [String]) throws {
         let snapPath: String? = {
             guard let i = args.firstIndex(of: "--snap"), i + 1 < args.count else { return nil }
             return args[i + 1]
@@ -45,7 +48,8 @@ enum RuneLightShaderFirstUseApp {
         let tFx = clock.now
         let fx = try FxRenderer(device: device, pixelFormat: .bgra8Unorm_srgb, options: FxOptions())
         fx.addFormat(.rgba16Float)
-        try fx.warmAll()
+        try fx.buildEveryPipeline()
+        fx.setFireSim(true)
         let fxMs = elapsedMs(since: tFx)
 
         let tLight = clock.now

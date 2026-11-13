@@ -717,7 +717,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneLightTests",
-            dependencies: ["RuneLight", "Rune"],
+            dependencies: ["RuneLight", "RuneFX", "Rune"],
             path: "Tests/RuneLightTests"
         ),
         .testTarget(
@@ -841,6 +841,13 @@ let package = Package(
                 "RuneMenuProbe",
                 "RuneDockMenuProbe",
                 "RuneShortcutProbe",
+                "RuneFxFirstGlow",
+                "RuneFxGallery",
+                "RuneLightShaderFirstUse",
+                "RuneLightFrameBench",
+                "RuneLightDemos",
+                "RuneLightLive",
+                "RuneLightReel",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

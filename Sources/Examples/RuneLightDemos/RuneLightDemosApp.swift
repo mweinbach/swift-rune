@@ -360,7 +360,10 @@ private func runVerify(ctx: DemoCtx) {
 @main
 enum RuneLightDemosApp {
     static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
+        try run(args: Array(CommandLine.arguments.dropFirst()))
+    }
+
+    static func run(args: [String]) throws {
         func arg(_ key: String) -> String? {
             guard let i = args.firstIndex(of: key), i + 1 < args.count else { return nil }
             return args[i + 1]

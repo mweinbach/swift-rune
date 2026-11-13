@@ -49,10 +49,19 @@ struct RuneFXParityTests {
         #expect(!badType)
         #expect(!badKey)
 
-        // Common speed param round-trip
+        // Common speed param + count->number coercion round-trip
         let okSpeed = params.set("speed", .number(1.75))
         #expect(okSpeed)
         #expect(params.get("speed") == .number(1.75))
+        let okScaleCount = params.set("scale", .count(48))
+        #expect(okScaleCount)
+        #expect(params.get("scale") == .number(48.0))
+        let okBorderCount = params.set("border", .count(3))
+        #expect(okBorderCount)
+        #expect(params.get("border") == .number(3.0))
+        let okIntensityCount = params.set("intensity", .count(1))
+        #expect(okIntensityCount)
+        #expect(params.get("intensity") == .number(1.0))
 
         // Choice param on dither
         var dither = FillParams(.dither(.handheld()))
@@ -132,11 +141,49 @@ struct RuneFXParityTests {
         #expect(spCount <= 64)
         #expect(sTable.count <= 128)
 
-        // 2. layers_that_draw_nothing_never_keep_the_loop_awake
-        let silentGlow = Fx.glow(GlowParams(intensity: 0.0, breathe: 0.3)).on(card)
-        #expect(!silentGlow.isAnimating)
-        let fadedOut = Fx.glow(GlowParams(intensity: 1.0, breathe: 0.3)).on(card).opacity(0.0)
-        #expect(!fadedOut.isAnimating)
+        // 2. layers_that_draw_nothing_never_keep_the_loop_awake (all 12 live/silent pairs)
+        let glowP = GlowParams(breathe: 0.3)
+        let pulseP = PulseParams()
+        let electricP = ElectricParams()
+        let fireP = FireParams()
+        let shimmerP = ShimmerParams()
+        let sparkleP = SparkleParams()
+        let auroraP = AuroraParams()
+        let grainP = GrainParams(fps: 24.0)
+        var glowZeroInt = glowP; glowZeroInt.intensity = 0.0
+        var glowZeroHeat = glowP; glowZeroHeat.heat = 0.0
+        var pulseZero = pulseP; pulseZero.intensity = 0.0
+        var electricZero = electricP; electricZero.intensity = 0.0
+        var fireZero = fireP; fireZero.intensity = 0.0
+        var shimmerZero = shimmerP; shimmerZero.intensity = 0.0; shimmerZero.baseAlpha = 0.0
+        var sparkleZeroInt = sparkleP; sparkleZeroInt.intensity = 0.0
+        var sparkleZeroCount = sparkleP; sparkleZeroCount.count = 0
+        var auroraZero = auroraP; auroraZero.intensity = 0.0
+        var grainZero = grainP; grainZero.amount = 0.0
+
+        let pairs: [(Fx, Fx)] = [
+            (.glow(glowP), .glow(glowZeroInt)),
+            (.glow(glowP), .glow(glowZeroHeat)),
+            (.pulse(pulseP), .pulse(pulseZero)),
+            (.electric(electricP), .electric(electricZero)),
+            (.fire(fireP), .fire(fireZero)),
+            (.distort(.heatHaze(height: 40, scale: 14, speed: 2.2, amount: 1.6, wholeShape: false)),
+             .distort(.heatHaze(height: 40, scale: 14, speed: 2.2, amount: 0.0, wholeShape: false))),
+            (.distort(.chromaSplit(offset: .zero, glitch: 0.5, feather: 0.0)),
+             .distort(.chromaSplit(offset: .zero, glitch: 0.0, feather: 0.0))),
+            (.shimmer(shimmerP), .shimmer(shimmerZero)),
+            (.sparkles(sparkleP), .sparkles(sparkleZeroInt)),
+            (.sparkles(sparkleP), .sparkles(sparkleZeroCount)),
+            (.aurora(auroraP), .aurora(auroraZero)),
+            (.grain(grainP), .grain(grainZero)),
+        ]
+        for (liveFx, silentFx) in pairs {
+            let live = liveFx.on(card).at(1.0)
+            #expect(live.isAnimating && live.pack() != nil)
+            #expect(!live.opacity(0.0).isAnimating)
+            let silent = silentFx.on(card).at(1.0)
+            #expect(!silent.isAnimating && silent.pack() == nil)
+        }
 
         // 3. a_ping_ticks_until_its_shot_has_cooled
         let ping = PulseParams(style: .ping(from: .zero, dir: SIMD2<Float>(1, 0), travel: 200.0), t0: 1.0, duration: 0.5)
@@ -181,14 +228,26 @@ struct RuneFXParityTests {
         }
 
         // 7. electric_tables_have_the_declared_layout & zero_amplitude_electricity_is_a_straight_finite_line
+        let arcLayout = ElectricParams(style: .arc(a: .zero, b: SIMD2<Float>(300, 0)), forks: 1.0, strands: 2)
+        var layoutData: [SIMD4<Float>] = []
+        let xf = RuneFXCPU.electric(arcLayout, shape: card, t: 1.7, seed: 3, reduced: false, data: &layoutData)
+        let nSeg = Int(xf.y)
+        let nForks = Int(xf.z)
+        let nStrands = Int(xf.w)
+        #expect(layoutData.count == 2 + 2 * nStrands * nSeg / 4 + nForks * 6)
+        #expect(abs(layoutData[2].x) < 1e-3)
+        var reducedDiscard: [SIMD4<Float>] = []
+        let reducedHdr = RuneFXCPU.electric(arcLayout, shape: card, t: 1.7, seed: 3, reduced: true, data: &reducedDiscard)
+        #expect(reducedHdr.z == 0.0)
+
         for style in [ElectricStyle.arc(a: .zero, b: SIMD2<Float>(300, 0)), .border] {
-            let zeroAmp = ElectricParams(style: style, amplitude: 0.0)
-            var eData: [SIMD4<Float>] = []
-            let hdr = RuneFXCPU.electric(zeroAmp, shape: card, t: 0.5, seed: 9, reduced: true, data: &eData)
-            #expect(hdr.y > 0)
-            #expect(eData.count > 2)
-            for v in eData {
-                #expect(v.x.isFinite && v.y.isFinite && v.z.isFinite && v.w.isFinite)
+            let zeroAmp = ElectricParams(style: style, amplitude: 0.0, forks: 1.0)
+            for t: Float in [0.0, 0.4, 1.7] {
+                var eData: [SIMD4<Float>] = []
+                _ = RuneFXCPU.electric(zeroAmp, shape: card, t: t, seed: 3, reduced: false, data: &eData)
+                for v in eData {
+                    #expect(v.x.isFinite && v.y.isFinite && v.z.isFinite && v.w.isFinite)
+                }
             }
         }
     }
@@ -225,11 +284,12 @@ struct RuneFXParityTests {
             #expect(hypotf(moved.x - base.x, moved.y - base.y) <= mesh.drift * 1.5 + 1e-4)
         }
 
-        // Stops keep order and cap at maxStops
+        // Stops keep order and cap at maxStops; empty input yields 1 stop
         let many = Stops.hex([0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0x00ffff, 0xff00ff, 0x111111, 0x222222])
         #expect(many.count == maxStops)
         #expect(!many.isEmpty)
-        #expect(many.colors[0].r > 0.9 && many.colors[1].g > 0.9 && many.colors[2].b > 0.9)
+        #expect(many.colors[1].hex() == 0x00ff00)
+        #expect(Stops([]).count == 1)
 
         // Backdrop / source flags follow FillInput
         #expect(FillParams(.dither(DitherParams(input: .backdrop))).needsBackdrop)
@@ -243,25 +303,63 @@ struct RuneFXParityTests {
         #expect(FillStyle.plastic(.glossy()).intensity(0.5).intensity == 0.5)
         #expect(LiquidMetalParams.chrome().anchor(.element).anchor == .element)
 
-        // Catalog: preset values sit in declared range, set rejects non-finite, distinct values round-trip and change pack
+        // Catalog: preset values sit in declared range across ALL param kinds, set rejects non-finite & wrong kind, distinct values round-trip and change pack
         for info in fillStyles() {
             for pr in info.presets {
                 let base = pr.fill()
-                for param in info.params {
-                    if case .number(let minV, let maxV, _, _) = param.kind,
-                       case .number(let curV)? = base.get(param.id) {
-                        #expect(curV >= minV - 1e-5 && curV <= maxV + 1e-5)
-                        var g = base
-                        let nanOk = g.set(param.id, .number(.nan))
-                        let infOk = g.set(param.id, .number(.infinity))
-                        #expect(!nanOk)
-                        #expect(!infOk)
-                        let alt = abs(curV - maxV) > 1e-4 ? maxV : minV
-                        let setOk = g.set(param.id, .number(alt))
-                        #expect(setOk)
-                        #expect(g != base)
+                for param in info.params + FillParams.commonParams {
+                    guard let cur = base.get(param.id) else {
+                        Issue.record("Missing param \(param.id) on \(info.id)")
+                        continue
                     }
+                    let alt: FxValue
+                    switch (param.kind, cur) {
+                    case (.number(let minV, let maxV, _, _), .number(let x)):
+                        #expect(x >= minV - 1e-5 && x <= maxV + 1e-5)
+                        alt = .number(abs(x - maxV) > 1e-4 ? maxV : minV)
+                    case (.count(let minC, let maxC), .count(let n)):
+                        #expect(n >= minC && n <= maxC)
+                        alt = .count(n != maxC ? maxC : minC)
+                    case (.choice(let choices), .choice(let k)):
+                        #expect(k >= 0 && k < choices.count)
+                        alt = .choice((k + 1) % choices.count)
+                    case (.colors(let minS, let maxS), .colors(let c)):
+                        #expect(c.count >= minS && c.count <= maxS)
+                        let hexes: [UInt32] = [0x112233, 0x445566, 0x778899, 0xaabbcc, 0xddeeff, 0x102030]
+                        alt = .colors(Stops.hex(Array(hexes.prefix(maxS))))
+                    case (.toggle, .toggle(let b)):
+                        alt = .toggle(!b)
+                    case (.color, _):
+                        alt = .color(rgb(0x123456))
+                    case (.point, _):
+                        alt = .point(SIMD2<Float>(0.25, 0.75))
+                    case (.points, _):
+                        alt = .points(Array(repeating: SIMD2<Float>(0.1, 0.2), count: maxStops))
+                    default:
+                        Issue.record("\(info.id).\(param.id): kind/value mismatch")
+                        continue
+                    }
+
+                    var g = base
+                    let setCur = g.set(param.id, cur)
+                    #expect(setCur)
+                    #expect(g == base)
+                    if case .point = param.kind { } else {
+                        let setWrongKind = g.set(param.id, .point(SIMD2<Float>(9.0, 9.0)))
+                        #expect(!setWrongKind)
+                    }
+                    let setNan = g.set(param.id, .number(.nan))
+                    let setInf = g.set(param.id, .number(.infinity))
+                    #expect(!setNan)
+                    #expect(!setInf)
+
+                    #expect(alt != cur)
+                    let setAlt = g.set(param.id, alt)
+                    #expect(setAlt)
+                    #expect(g.get(param.id) == alt)
+                    #expect(g != base)
                 }
+                #expect(base.get("nope") == nil)
             }
             var f = info.defaultFill()
             let before = Fx.fill(f).on(card).pack()!.inst
