@@ -192,6 +192,7 @@ public final class PlaygroundHost<State> {
     public var controls = PlaygroundControlValues()
 
     public var isOpen: Bool = false
+    public var now: Double = 0.0
     public var filterQuery: String = ""
     public var selectedStoryPath: String?
     public var selectedVariantIndex: Int?
@@ -588,8 +589,11 @@ public final class PlaygroundHost<State> {
     /// Evaluates every story across every viewport preset and returns layout metrics for matrix verification.
     public func evaluateSceneMatrix(initialState: () -> State) -> [SceneMatrixCell] {
         var cells: [SceneMatrixCell] = []
+        let clock = SceneClock(now: now, dt: 1.0 / 60.0)
         for story in stories {
-            let st = story.makeState?() ?? initialState()
+            let st = withSceneClock(clock) {
+                story.makeState?() ?? initialState()
+            }
             for preset in presets {
                 let rt = Runtime<State>(
                     state: st,

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import Rune
 @testable import RuneMotion
+@testable import RuneRef
 
 @Suite("Cx Environment, System Settings & Shell Integration Parity Tests", .serialized)
 struct CxEnvAndSystemParityTests {
@@ -421,6 +422,396 @@ struct CxEnvAndSystemParityTests {
         #expect(sib.config.path == "/tmp/rune-root/config/SecondApp")
         #expect(sib.state.path == "/tmp/rune-root/state/SecondApp")
         #expect(sib.logs.path == "/tmp/rune-root/logs/SecondApp")
+    }
+
+    @Test func sceneClockDefaultsToZeroAndScopesInitSceneAndSetup() throws {
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+
+        struct State: @unchecked Sendable {
+            var initClock = SceneClock(now: -1, dt: -1)
+            var sceneClockVal = SceneClock(now: -1, dt: -1)
+        }
+        final class ClockBox: @unchecked Sendable {
+            private let lock = NSLock()
+            var initClock = SceneClock(now: -1, dt: -1)
+            var sceneClockVal = SceneClock(now: -1, dt: -1)
+            var setupClock = SceneClock(now: -1, dt: -1)
+            func recordInit(_ c: SceneClock) { lock.lock(); initClock = c; lock.unlock() }
+            func recordScene(_ c: SceneClock) { lock.lock(); sceneClockVal = c; lock.unlock() }
+            func setSetup(_ c: SceneClock) { lock.lock(); setupClock = c; lock.unlock() }
+            var snapshot: (SceneClock, SceneClock, SceneClock) {
+                lock.lock(); defer { lock.unlock() }; return (initClock, sceneClockVal, setupClock)
+            }
+        }
+        let box = ClockBox()
+
+        let app = App<State> {
+            let c = sceneClock()
+            box.recordInit(c)
+            return State(initClock: c, sceneClockVal: SceneClock(now: -1, dt: -1))
+        } view: { _, _ in
+            text("hi")
+        }
+        .scene("zero") { state, _ in
+            let c = sceneClock()
+            state.sceneClockVal = c
+            box.recordScene(c)
+        }
+        .setup { _ in
+            box.setSetup(sceneClock())
+        }
+
+        let spec = app.intoSpec()
+        var args = ToolingArgs()
+        args.sceneName = "zero"
+        _ = try HeadlessRunner.run(spec, args: args)
+        let (initC, sceneC, setupC) = box.snapshot
+        #expect(initC == SceneClock(now: 0.0, dt: 0.0))
+        #expect(sceneC == SceneClock(now: 0.0, dt: 0.0))
+        #expect(setupC == SceneClock(now: 0.0, dt: 0.0))
+
+        let scoped = withSceneClock(SceneClock(now: 2.5, dt: 0.016)) {
+            sceneClock()
+        }
+        #expect(scoped == SceneClock(now: 2.5, dt: 0.016))
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+
+        struct TestBoom: Error {}
+        do {
+            _ = try withSceneClock(SceneClock(now: 9.0, dt: 0.25)) {
+                #expect(sceneClock() == SceneClock(now: 9.0, dt: 0.25))
+                throw TestBoom()
+            }
+        } catch is TestBoom {}
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+
+        // PlaygroundHost.now drives evaluateSceneMatrix makeState sceneClock
+        let host = PlaygroundHost<Int>()
+        host.now = 3.5
+        let seenMatrixClock = ClockBox()
+        host.story(PlaygroundStory<Int>(
+            path: "demo/clock",
+            makeState: {
+                seenMatrixClock.recordInit(sceneClock())
+                return 1
+            },
+            view: { _, _, _ in text("ok").size(80, 20) }
+        ))
+        let cells = host.evaluateSceneMatrix { 0 }
+        #expect(!cells.isEmpty)
+        #expect(abs(seenMatrixClock.snapshot.0.now - 3.5) < 1e-6)
+        #expect(abs(seenMatrixClock.snapshot.0.dt - (1.0 / 60.0)) < 1e-6)
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+    }
+
+    @Test func taskbarBuilderAndAppDirsHome() {
+        let tb = Taskbar()
+            .progress(.paused)
+            .badge(3, "3 alerts")
+        #expect(tb.shownProgress == .paused)
+        #expect(tb.count == 3)
+        #expect(tb.badgeDescription == "3 alerts")
+
+        let cleared = tb.badge(0, "should clear")
+        #expect(cleared.count == 0)
+        #expect(cleared.badgeDescription == "")
+
+        #expect(AppDirs.homeFrom { $0 == "HOME" ? "/tmp/test-home" : nil }?.path == "/tmp/test-home")
+        #expect(AppDirs.homeFrom { _ in nil } == nil)
+    }
+
+    @Test func txLaunchAndFlyTextDriveFlightsAndUnclippedAnimation() {
+        struct State {
+            var launched = false
+            var flew = false
+            var matchedMoved = false
+            var unclipMatched = false
+            var customMotion = false
+        }
+        func matchingFillPrims(_ scene: RefScene, _ target: SIMD4<Float>) -> [Primitive] {
+            var out: [Primitive] = []
+            for p in scene.primitives where p.kind == .roundedRect {
+                if abs(p.fill.x - target.x) < 0.01
+                    && abs(p.fill.y - target.y) < 0.01
+                    && abs(p.fill.z - target.z) < 0.01 {
+                    out.append(p)
+                }
+            }
+            return out
+        }
+        let launchColor = Color.srgb(0.2, 0.45, 0.85)
+        let matchedColor = Color.srgb(0.85, 0.35, 0.2)
+        let rt = Runtime<State>(
+            state: State(),
+            viewport: Vec2(400, 300),
+            pixelScale: 1.0
+        ) { state, _ in
+            let src: El<State> = text("hello").key("src-text").absolute(x: 240, y: 220).size(80, 24)
+            let leftClipBase: El<State> = col()
+            var leftClip = leftClipBase.key("left-clip").absolute(x: 0, y: 0).size(160, 300).clip(true)
+            if state.launched {
+                let launchText: El<State> = text("hello")
+                let launchRowBase: El<State> = row()
+                let launchRow = launchRowBase.children([launchText])
+                    .key("dst-launch")
+                    .bg(launchColor)
+                    .absolute(x: 20, y: 40)
+                    .size(100, 32)
+                leftClip = leftClip.child(launchRow)
+            }
+            if state.flew {
+                let flyTextEl: El<State> = text("hello")
+                    .key("dst-fly")
+                    .bg(.srgb(0.2, 0.7, 0.3))
+                    .absolute(x: 20, y: 100)
+                    .size(100, 24)
+                leftClip = leftClip.child(flyTextEl)
+            }
+            if state.matchedMoved {
+                let matchedDst: El<State> = el()
+                leftClip = leftClip.child(
+                    matchedDst.key("matched-dst").flightId("matched-badge").bg(matchedColor).absolute(x: 20, y: 160).size(40, 20)
+                )
+            }
+            let rootBase: El<State> = col()
+            var root = rootBase.size(400, 300).child(leftClip).child(src)
+            if !state.matchedMoved {
+                let matchedSrc: El<State> = el()
+                root = root.child(
+                    matchedSrc.key("matched-src").flightId("matched-badge").bg(matchedColor).absolute(x: 240, y: 160).size(40, 20)
+                )
+            }
+            return root
+        }
+
+        _ = rt.frame(at: 0.0)
+        #expect(!rt.isAnimating)
+
+        // 1. Tx.launch: keeps own destination size (100x32), lifts unclipped beyond left-clip (160px), starts near (240, 220)
+        rt.update(at: 0.1) { state, tx in
+            state.launched = true
+            tx.launch("src-text", to: "dst-launch")
+        }
+        let launchScene = rt.frame(at: 0.12)
+        #expect(rt.isAnimating)
+        let launchMid = rt.element(byKey: "dst-launch")
+        #expect(launchMid != nil)
+        if let rect = launchMid?.rect, rect.count >= 4 {
+            #expect(rect[0] > 160.0)
+            #expect(rect[1] > 45.0)
+            #expect(abs(rect[2] - 100.0) < 0.5)
+            #expect(abs(rect[3] - 32.0) < 0.5)
+        }
+        let targetLaunchFill = launchColor.simd4(srgb: rt.srgbBlend)
+        let launchPrimitives = matchingFillPrims(launchScene, targetLaunchFill)
+        #expect(!launchPrimitives.isEmpty)
+        #expect(launchPrimitives.contains { $0.clip == SIMD4<Float>(0, 0, 400, 300) })
+
+        _ = rt.frame(at: 2.0)
+        #expect(!rt.isAnimating)
+
+        // 2. Reduced motion bypasses Tx.launch without animating
+        rt.update(at: 2.05) { state, _ in state.launched = false }
+        _ = rt.frame(at: 2.06)
+        rt.setSystemReducedMotion(true)
+        rt.update(at: 2.1) { state, tx in
+            state.launched = true
+            tx.launch("src-text", to: "dst-launch")
+        }
+        _ = rt.frame(at: 2.1)
+        #expect(!rt.isAnimating)
+        if let rmRect = rt.element(byKey: "dst-launch")?.rect, rmRect.count >= 4 {
+            #expect(abs(rmRect[0] - 20.0) < 0.5)
+            #expect(abs(rmRect[1] - 40.0) < 0.5)
+        }
+        rt.setSystemReducedMotion(false)
+        _ = rt.frame(at: 2.2)
+
+        // 3. Regular El.flightId without unclippedFlights stays ancestor-clipped to left-clip (w <= 160)
+        rt.update(at: 2.3) { state, _ in
+            state.matchedMoved = true
+        }
+        let clippedMatchScene = rt.frame(at: 2.32)
+        let targetMatchedFill = matchedColor.simd4(srgb: rt.srgbBlend)
+        let clippedMatchPrims = matchingFillPrims(clippedMatchScene, targetMatchedFill)
+        #expect(!clippedMatchPrims.isEmpty)
+        #expect(clippedMatchPrims.allSatisfy { $0.clip.z <= 160.5 })
+        _ = rt.frame(at: 4.5)
+
+        // 4. El.flightId WITH tx.unclippedFlights() lifts clip to windowRect (w == 400)
+        rt.update(at: 4.6) { state, _ in state.matchedMoved = false }
+        _ = rt.frame(at: 6.5)
+        rt.update(at: 6.6) { state, tx in
+            state.matchedMoved = true
+            tx.unclippedFlights()
+        }
+        let unclippedMatchScene = rt.frame(at: 6.62)
+        let unclippedMatchPrims = matchingFillPrims(unclippedMatchScene, targetMatchedFill)
+        #expect(unclippedMatchPrims.contains { $0.clip == SIMD4<Float>(0, 0, 400, 300) })
+        _ = rt.frame(at: 8.5)
+
+        // 5. Tx.flyText keeps destination box size intact (100x24) while flying "flight-source/dst-fly" unclipped at text extent
+        rt.update(at: 8.6) { state, tx in
+            state.flew = true
+            tx.flyText("src-text", to: "dst-fly")
+        }
+        let flyScene = rt.frame(at: 8.65)
+        #expect(rt.isAnimating)
+        let flyMid = rt.element(byKey: "dst-fly")
+        #expect(flyMid != nil)
+        if let rect = flyMid?.rect, rect.count >= 4 {
+            #expect(abs(rect[0] - 20.0) < 0.5)
+            #expect(abs(rect[1] - 100.0) < 0.5)
+            #expect(abs(rect[2] - 100.0) < 0.5)
+            #expect(abs(rect[3] - 24.0) < 0.5)
+        }
+        let flyOverlay = rt.elements().first(where: { $0.path == "flight-source/dst-fly" })
+        #expect(flyOverlay != nil)
+        #expect(flyOverlay?.text == "hello")
+        if let oRect = flyOverlay?.rect, oRect.count >= 4 {
+            #expect(oRect[0] > 25.0)
+            #expect(oRect[2] < 99.0)
+        }
+        #expect(flyScene.primitives.contains { isGlyph($0) && $0.clip == SIMD4<Float>(0, 0, 400, 300) })
+
+        _ = rt.frame(at: 11.0)
+        #expect(!rt.isAnimating)
+
+        // 6. Tx.motion overrides launch spring
+        rt.update(at: 11.1) { state, _ in state.launched = false }
+        _ = rt.frame(at: 11.2)
+        rt.update(at: 11.3) { state, tx in
+            state.launched = true
+            tx.launch("src-text", to: "dst-launch")
+            tx.motion(Spring(duration: 0.15, bounce: 0.0))
+        }
+        _ = rt.frame(at: 11.35)
+        #expect(rt.isAnimating)
+        _ = rt.frame(at: 13.5)
+        #expect(!rt.isAnimating)
+    }
+
+    @Test func frameProfileThreadCpuAndTakePhases() {
+        _ = takeFramePhases()
+        let t0 = threadCpuMs()
+        #expect(t0 >= 0.0)
+        recordFramePhase(.commit, wallMs: 1.25, cpuMs: 0.75)
+        recordFramePhase(.paint, wallMs: 2.5, cpuMs: 1.5)
+        let taken = takeFramePhases()
+        #expect(taken.count == 2 * FRAME_PHASES)
+        #expect(taken[FramePhase.commit.rawValue] == 1.25)
+        #expect(taken[FramePhase.commit.rawValue + FRAME_PHASES] == 0.75)
+        #expect(taken[FramePhase.paint.rawValue] == 2.5)
+        #expect(taken[FramePhase.paint.rawValue + FRAME_PHASES] == 1.5)
+        let cleared = takeFramePhases()
+        #expect(cleared.allSatisfy { $0 == 0.0 })
+
+        // Verify Runtime.frame(at:) populates all 6 FramePhase slots
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+            let root: El<Int> = col()
+            return root.child(text("measured phase")).size(120, 40)
+        }
+        _ = rt.frame(at: 0.0)
+        let framePhases = takeFramePhases()
+        #expect(framePhases.count == 2 * FRAME_PHASES)
+        for phase in FramePhase.allCases {
+            #expect(framePhases[phase.rawValue] > 0.0)
+        }
+    }
+
+    @Test func appSharedMemoLayoutWithCompositorAndTextStyleParity() {
+        let shared = AppShared<Int>()
+        let woke = LockedCounter()
+        shared.connect(Waker { woke.add(1) })
+        #expect(woke.value == 1)
+
+        shared.requestPlace(PlaceRequest(position: Vec2(10, 20), size: Vec2(300, 200)))
+        let placed = shared.takePlace()
+        #expect(placed?.position == Vec2(10, 20))
+        #expect(shared.takePlace() == nil)
+
+        shared.requestOpen()
+        let drained = shared.take()
+        #expect(drained.window == .open)
+        #expect(shared.take().window == .none)
+
+        let configuredApp = App<Int>(state: 0) { _, _ in text("ok") }
+            .sameTabRouter { $0.hasPrefix("tab:") }
+            .args(["--headless"])
+        #expect(configuredApp.sameTabRouterHook?("tab:main") == true)
+
+        let cache = MemoCache()
+        let builds = LockedCounter()
+        let e1: El<Int> = memoWithHash("card", 42, cache: cache) {
+            builds.add(1)
+            return text("v1")
+        }
+        let e2: El<Int> = memoWithHash("card", 42, cache: cache) {
+            builds.add(1)
+            return text("v1-cached")
+        }
+        let e3: El<Int> = memoWithHash("card", 43, cache: cache) {
+            builds.add(1)
+            return text("v2")
+        }
+        #expect(builds.value == 2)
+        #expect(e1.plainText == "v1")
+        #expect(e2.plainText == "v1")
+        #expect(e3.plainText == "v2")
+
+        final class CapturedLayout: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _localW: Float?
+            private var _winX: Float?
+            func set(w: Float?, x: Float?) { lock.lock(); _localW = w; _winX = x; lock.unlock() }
+            var w: Float? { lock.lock(); defer { lock.unlock() }; return _localW }
+            var x: Float? { lock.lock(); defer { lock.unlock() }; return _winX }
+        }
+        let cap = CapturedLayout()
+        let rtLayout = Runtime<Int>(state: 0, viewport: Vec2(300, 200), pixelScale: 1.0) { _, cx in
+            let w1 = cx.layoutWith("box") { $0[2] }
+            let w2 = layoutWith("box") { $0[2] }
+            let wx = cx.windowLayoutWith("box") { $0[0] }
+            let wxFree = windowLayoutWith("box") { $0[0] }
+            if w1 == w2 && wx == wxFree {
+                cap.set(w: w1, x: wx)
+            }
+            let container: El<Int> = col()
+            let box: El<Int> = el()
+            return container.size(300, 200).child(
+                box.key("box").absolute(x: 24, y: 12).size(88, 36)
+            )
+        }
+        _ = rtLayout.frame(at: 0.0)
+        _ = rtLayout.frame(at: 0.05)
+        #expect(cap.w == 88.0)
+        #expect(cap.x == 24.0)
+
+        let enc = FrameEncoded(outcome: .drawn, frameMs: 2.0, at: 1.25, window: "main", seq: 7, presentsAt: 1.26, started: 1.24, refreshHz: 120.0)
+        #expect(enc.at == 1.25)
+        #expect(enc.window == "main")
+        #expect(enc.seq == 7)
+        #expect(enc.presentsAt == 1.26)
+        #expect(enc.started == 1.24)
+        #expect(enc.refreshHz == 120.0)
+
+        let gPrim = Primitive.glyph(rect: SIMD4(0, 0, 8, 8), uv: SIMD4(0, 0, 1, 1), color: SIMD4(1, 1, 1, 1), clip: SIMD4(0, 0, 100, 100))
+        let rPrim = Primitive.roundedRect(rect: SIMD4(0, 0, 8, 8), fill: .zero, clip: SIMD4(0, 0, 100, 100))
+        #expect(isGlyph(gPrim))
+        #expect(!isGlyph(rPrim))
+
+        let styled = TextStyle(size: 14)
+            .family(.systemMono)
+            .variations("wght=600")
+            .features("ss01=1")
+            .opticalSize(16)
+            .opticalSizing(.auto)
+        #expect(styled.family == .systemMono)
+        #expect(FontFamily.named("Menlo") == .custom("Menlo"))
+        #expect(styled.variations == "wght=600")
+        #expect(styled.features == "ss01=1")
+        #expect(styled.opticalSize == .auto)
+        #expect(styled.linePx() == styled.resolvedLineHeight)
     }
 }
 

@@ -15,6 +15,24 @@ public enum FontFamily: Sendable, Hashable, Codable {
     case systemUI
     case monospace
     case custom(String)
+
+    public static let systemMono: FontFamily = .monospace
+    public static func named(_ name: String) -> FontFamily { .custom(name) }
+}
+
+/// Optical sizing mode for variable/CoreText fonts (`rune::tok::OpticalSize`).
+public enum OpticalSize: Sendable, Hashable, Codable {
+    case auto
+    case fontDefault
+    case fixed(Float)
+
+    public static func == (lhs: OpticalSize, rhs: OpticalSize) -> Bool {
+        switch (lhs, rhs) {
+        case (.auto, .auto), (.fontDefault, .fontDefault): return true
+        case let (.fixed(a), .fixed(b)): return a.bitPattern == b.bitPattern || (a == b)
+        default: return false
+        }
+    }
 }
 
 public enum TextAlign: Sendable, Hashable, Codable {
@@ -41,6 +59,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var align: TextAlign
     public var wrap: TextWrap
     public var fontSmoothing: FontSmoothing
+    public var variations: String
+    public var features: String
+    public var opticalSize: OpticalSize
 
     public init(
         size: Float = 14.0,
@@ -51,7 +72,10 @@ public struct TextStyle: Sendable, Hashable, Codable {
         family: FontFamily = .systemUI,
         align: TextAlign = .leading,
         wrap: TextWrap = .noWrap,
-        fontSmoothing: FontSmoothing = .systemDefault
+        fontSmoothing: FontSmoothing = .systemDefault,
+        variations: String = "",
+        features: String = "",
+        opticalSize: OpticalSize = .auto
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -62,6 +86,65 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.align = align
         self.wrap = wrap
         self.fontSmoothing = fontSmoothing
+        self.variations = variations
+        self.features = features
+        self.opticalSize = opticalSize
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, fontSmoothing, variations, features, opticalSize
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            size: try c.decode(Float.self, forKey: .size),
+            weight: try c.decode(Float.self, forKey: .weight),
+            lineHeight: try c.decodeIfPresent(Float.self, forKey: .lineHeight),
+            letterSpacing: try c.decode(Float.self, forKey: .letterSpacing),
+            italic: try c.decode(Bool.self, forKey: .italic),
+            family: try c.decode(FontFamily.self, forKey: .family),
+            align: try c.decode(TextAlign.self, forKey: .align),
+            wrap: try c.decode(TextWrap.self, forKey: .wrap),
+            fontSmoothing: try c.decode(FontSmoothing.self, forKey: .fontSmoothing),
+            variations: try c.decodeIfPresent(String.self, forKey: .variations) ?? "",
+            features: try c.decodeIfPresent(String.self, forKey: .features) ?? "",
+            opticalSize: try c.decodeIfPresent(OpticalSize.self, forKey: .opticalSize) ?? .auto
+        )
+    }
+
+    public func family(_ family: FontFamily) -> TextStyle {
+        var copy = self
+        copy.family = family
+        return copy
+    }
+
+    public func variations(_ variations: String) -> TextStyle {
+        var copy = self
+        copy.variations = variations
+        return copy
+    }
+
+    public func features(_ features: String) -> TextStyle {
+        var copy = self
+        copy.features = features
+        return copy
+    }
+
+    public func opticalSize(_ size: Float) -> TextStyle {
+        var copy = self
+        copy.opticalSize = .fixed(size)
+        return copy
+    }
+
+    public func opticalSizing(_ opticalSize: OpticalSize) -> TextStyle {
+        var copy = self
+        copy.opticalSize = opticalSize
+        return copy
+    }
+
+    public func linePx() -> Float {
+        resolvedLineHeight
     }
 
     public func smoothing(_ mode: FontSmoothing) -> TextStyle {
@@ -1478,6 +1561,26 @@ public final class TextSystem: @unchecked Sendable {
         pixelScale: Float,
         emitGlyphs: Bool = true
     ) -> ShapedText {
+        measureFramePhase(.text) {
+            shapeImpl(
+                text: text,
+                spans: spans,
+                style: style,
+                maxWidth: maxWidth,
+                pixelScale: pixelScale,
+                emitGlyphs: emitGlyphs
+            )
+        }
+    }
+
+    private func shapeImpl(
+        text: String,
+        spans: [TextSpan]? = nil,
+        style: TextStyle,
+        maxWidth: Float?,
+        pixelScale: Float,
+        emitGlyphs: Bool = true
+    ) -> ShapedText {
         let scale = max(pixelScale, 1.0)
         let lhPt = style.resolvedLineHeight
         let lhPx = lhPt * scale
@@ -1864,7 +1967,9 @@ public final class TextSystem: @unchecked Sendable {
     }
     #else
     public func measure(_ text: String, style: TextStyle, maxWidth: Float?, pixelScale: Float) -> Vec2 {
-        measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale)
+        measureFramePhase(.text) {
+            measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale)
+        }
     }
 
     public func shape(
@@ -1875,7 +1980,9 @@ public final class TextSystem: @unchecked Sendable {
         pixelScale: Float,
         emitGlyphs: Bool = true
     ) -> ShapedText {
-        shapePortable(text: text, spans: spans, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+        measureFramePhase(.text) {
+            shapePortable(text: text, spans: spans, style: style, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+        }
     }
 
     public func caretRect(in shaped: ShapedText, utf8Offset: Int, pixelScale: Float) -> SIMD4<Float> {

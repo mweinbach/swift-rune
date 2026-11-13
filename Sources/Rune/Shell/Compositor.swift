@@ -1,4 +1,5 @@
 import Foundation
+import RuneRef
 #if canImport(Metal)
 import Metal
 #endif
@@ -104,6 +105,11 @@ public final class CompositorFrame<State> {
         uiDrawCount += 1
         drawUIImpl()
     }
+}
+
+/// True when `primitive` encodes a glyph quad (`rune::compose::is_glyph`).
+public func isGlyph(_ primitive: Primitive) -> Bool {
+    primitive.kind == .glyph
 }
 
 /// Custom GPU/Metal compositor protocol hooked onto `App` (`rune::compose::Compositor<S>`).

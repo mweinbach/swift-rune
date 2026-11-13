@@ -48,7 +48,8 @@ public struct TextFlightState: Sendable, Equatable {
         targetKey: String,
         source: MotionRect,
         born: Double,
-        unclipped: Bool = false
+        unclipped: Bool = false,
+        spring: Spring? = nil
     ) {
         self.sourceKey = sourceKey
         self.targetKey = targetKey
@@ -58,7 +59,7 @@ public struct TextFlightState: Sendable, Equatable {
         self.born = born
         self.unclipped = unclipped
         var anim = Animated<Float>(0, propClass: .opacity)
-        anim.animateTo(1, anim: .spring(GrowthCaps.growthSpring), at: born)
+        anim.animateTo(1, anim: .spring(spring ?? GrowthCaps.growthSpring), at: born)
         self.progressAnim = anim
     }
 
@@ -551,6 +552,16 @@ public func memo<State, Deps: Equatable>(
     build: () -> El<State>
 ) -> El<State> {
     memo(id, deps: deps, cache: cache, build: build)
+}
+
+/// Memoizes a declarative `El<State>` subtree by an explicit `UInt64` version hash (`rune::memo_with_hash`).
+public func memoWithHash<State>(
+    _ id: String,
+    _ versionHash: UInt64,
+    cache: MemoCache? = nil,
+    build: () -> El<State>
+) -> El<State> {
+    memo(id, deps: versionHash, cache: cache, build: build)
 }
 
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)

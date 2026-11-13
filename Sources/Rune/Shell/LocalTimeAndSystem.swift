@@ -137,3 +137,47 @@ enum JumpListStore {
 public func setJumpList(_ list: JumpList) {
     JumpListStore.apply(list)
 }
+
+// MARK: - SceneClock (`crates/rune/src/lib.rs`)
+
+/// The logical clock a scene or init/setup hook builds its state against (`rune::SceneClock`).
+public struct SceneClock: Sendable, Equatable {
+    public var now: Double
+    public var dt: Double
+
+    public init(now: Double = 0.0, dt: Double = 0.0) {
+        self.now = now
+        self.dt = dt
+    }
+}
+
+private enum SceneClockStorage {
+    private static let key = "rune.sceneClock.threadLocal"
+
+    static func current() -> SceneClock {
+        (Thread.current.threadDictionary[key] as? SceneClock) ?? SceneClock()
+    }
+
+    static func with<T>(_ clock: SceneClock, _ body: () throws -> T) rethrows -> T {
+        let prev = Thread.current.threadDictionary[key]
+        Thread.current.threadDictionary[key] = clock
+        defer {
+            if let prev {
+                Thread.current.threadDictionary[key] = prev
+            } else {
+                Thread.current.threadDictionary.removeObject(forKey: key)
+            }
+        }
+        return try body()
+    }
+}
+
+/// Readable from scene functions, `init`/`makeState`, and `AppSpec.setup` / `App.setup`; zero anywhere else (`rune::scene_clock`).
+public func sceneClock() -> SceneClock {
+    SceneClockStorage.current()
+}
+
+/// Executes `body` with `clock` installed as the current `sceneClock()`.
+public func withSceneClock<T>(_ clock: SceneClock, _ body: () throws -> T) rethrows -> T {
+    try SceneClockStorage.with(clock, body)
+}
