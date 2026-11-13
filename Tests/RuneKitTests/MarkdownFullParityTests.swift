@@ -190,20 +190,43 @@ struct MarkdownFullParityTests {
             #expect(styledSlices(blocks, .link) == [wantLink])
         }
 
-        // Every prefix of JUICE and multi-block doc parses identically through incremental MarkdownDocCache
-        // (and held_table holds incomplete pipe headers until delimiter row arrives).
+        // Held incomplete table headers wait until they are tables (upstream stream_tests::a_header_line_waits_until_it_is_a_table).
         var held = MarkdownTailStream()
-        for pending in ["| File | Change |", "| File | Change |\n", "| File | Change |\n|-"] {
+        for pending in ["| File", "| File |", "| File |\n", "| File |\n|", "Intro\n\n| File", "Intro\n| File | Change |"] {
             held.reset(pending)
-            #expect(held.document(streaming: true).blocks.isEmpty)
+            let blocks = held.document(streaming: true).blocks
+            #expect(!shownText(blocks).contains("File"))
         }
-        held.reset("Intro.\n\n| File | Change |\n|-")
+        held.reset("| File | Change")
+        if case let .table(t) = held.document(streaming: true).blocks.first {
+            #expect(t.head.count == 2)
+        } else {
+            Issue.record("Expected two-cell header to draw immediately as a table")
+        }
+        held.reset("| File |\n|---|\n")
+        if case .table = held.document(streaming: true).blocks.first {} else {
+            Issue.record("Expected one-column table once its delimiter row ends")
+        }
+        for notTable in ["| File\nis a word", "| File\n| Change", "| File\n\n", "| File |\n| Change |\n"] {
+            held.reset(notTable)
+            if case .para = held.document(streaming: true).blocks.first {} else {
+                Issue.record("Expected paragraph once pipe line proves not a table: \(notTable)")
+            }
+        }
+        held.reset("```\n| File")
+        if case let .code(c) = held.document(streaming: true).blocks.first {
+            #expect(c == "| File")
+        } else {
+            Issue.record("Expected code block inside unclosed fence")
+        }
+        let tableStreamDoc = "| File | Change |\n|---|---|\n| a.rs | x |"
+        for endIdx in tableStreamDoc.indices {
+            let prefix = String(tableStreamDoc[...endIdx])
+            held.reset(prefix)
+            let blocks = held.document(streaming: true).blocks
+            #expect(blocks.allSatisfy { if case .table = $0 { return true }; return false })
+        }
         #expect(held.document(streaming: true).blocks.count == 1)
-        held.reset("Intro.\n\n| File | Change |\n|---|---|\n| a | b |")
-        #expect(held.document(streaming: true).blocks.count == 2)
-        if case .table = held.document(streaming: true).blocks[1] {} else {
-            Issue.record("Expected table once delimiter completes")
-        }
 
         let multiDoc = """
         # Title
