@@ -84,13 +84,13 @@ public enum RuneVideoPlayerApp {
             case .file(let p): target = p
             case .url(let u): target = u
             }
-            return Player.audio(target, playing: true, looping: true, muted: false, volume: 1.0, rate: 1.0)
+            return Player.audio(target, playing: false, looping: false, muted: false, volume: 1.0, rate: 1.0)
         }
         switch source {
         case .file(let p):
-            return Player.file(p, playing: true, looping: true, muted: false, volume: 1.0, rate: 1.0)
+            return Player.file(p, playing: true, looping: true, muted: true, volume: 1.0, rate: 1.0)
         case .url(let u):
-            return Player.url(u, playing: true, looping: true, muted: false, volume: 1.0, rate: 1.0)
+            return Player.url(u, playing: true, looping: true, muted: true, volume: 1.0, rate: 1.0)
         }
     }
 

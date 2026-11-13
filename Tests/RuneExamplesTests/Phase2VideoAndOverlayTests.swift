@@ -28,7 +28,7 @@ struct Phase2VideoAndOverlayTests {
 
     // MARK: - RuneVideoPlayer
 
-    @Test("video-player: CLI option parsing, default rgbw.mp4 fixture, and headless render")
+    @Test("video-player: CLI option parsing, default rgbw.mp4 muted/looping, paused audio, and headless render")
     func videoPlayerHeadlessAndParsing() throws {
         let defaultPath = RuneVideoPlayerApp.defaultVideoPath()
         #expect(FileManager.default.fileExists(atPath: defaultPath))
@@ -36,6 +36,17 @@ struct Phase2VideoAndOverlayTests {
         let defOpts = RuneVideoPlayerApp.parseOptions(arguments: [])
         #expect(!defOpts.audio)
         #expect(defOpts.source == .file(defaultPath))
+
+        let defaultPlayer = RuneVideoPlayerApp.makePlayer(arguments: [])
+        #expect(!defaultPlayer.isAudio)
+        #expect(defaultPlayer.isPlaying)
+        #expect(defaultPlayer.isLooping)
+        #expect(defaultPlayer.isMuted)
+
+        let audioPlayer = RuneVideoPlayerApp.makePlayer(arguments: ["--audio"])
+        #expect(audioPlayer.isAudio)
+        #expect(!audioPlayer.isPlaying)
+        #expect(!audioPlayer.isLooping)
 
         let audioUrlOpts = RuneVideoPlayerApp.parseOptions(arguments: ["--audio", "--url", "https://example.com/clip.m4a"])
         #expect(audioUrlOpts.audio)
@@ -79,6 +90,7 @@ struct Phase2VideoAndOverlayTests {
         rt.poll = spec.poll
 
         let initialMuted = rt.state.clip.isMuted
+        #expect(initialMuted)
         #expect(rt.keyDown(KeyEvent(key: .text("m")), at: 0.1))
         #expect(rt.state.clip.isMuted == !initialMuted)
 
@@ -108,6 +120,9 @@ struct Phase2VideoAndOverlayTests {
 
     @Test("video-tiles: 2x2 NativeSurface grid renders synthetic frames and native Metal bench")
     func videoTilesRenderAndBench() throws {
+        #expect(VideoTilesBench.upstreamProfiles.count == 5)
+        #expect(VideoTilesBench.upstreamProfiles.map(\.tiles) == [1, 4, 9, 1, 1])
+
         let initialOut = try HeadlessRunner.run(
             RuneVideoTilesApp.makeSpec(arguments: ["--headless"]),
             args: ToolingArgs.parse(["--scene", "initial"])
@@ -126,15 +141,23 @@ struct Phase2VideoAndOverlayTests {
         #expect(initialOut.finalFrame.rgba != frame30Out.finalFrame.rgba)
 
         if MTLCreateSystemDefaultDevice() != nil {
-            let result = try VideoTilesBench.runNativeBench(frameCount: 4)
-            #expect(result.frames == 4)
+            let result = try VideoTilesBench.runNativeBench(
+                profiles: [(4, 640, 360)],
+                runs: 2,
+                framesPerRun: 4,
+                pace60Hz: false
+            )
+            #expect(result.totalFrames == 8)
+            #expect(result.profiles.count == 1)
+            #expect(result.profiles[0].warmupRuns == 1)
+            #expect(result.profiles[0].runs.count == 1)
             #expect(result.fps > 0.0)
         }
     }
 
     // MARK: - RuneOverlay
 
-    @Test("overlay: multi-window specs, headless overlay selection, and animated live cursor")
+    @Test("overlay: multi-window specs, stroke icon, click-through restore, and animated live cursor")
     func overlayMultiWindowAndCursorMotion() throws {
         let displays = [
             DisplayInfo(id: RuneDisplayId(native: .macOS(1)), name: "Main", position: (0, 0), size: (1440, 900), scale: 2.0, primary: true),
@@ -149,9 +172,8 @@ struct Phase2VideoAndOverlayTests {
         )
         #expect(controlsOut.windowKeys == ["controls"])
         let controlsTree = String(decoding: controlsOut.treeJSON, as: UTF8.self)
-        #expect(controlsTree.contains("Overlay Controls"))
-        #expect(controlsTree.contains("Click-through: ON"))
-        #expect(controlsTree.contains("toggle-click-through"))
+        #expect(controlsTree.contains("Display overlays"))
+        #expect(controlsTree.contains("Test overlay input"))
 
         let overlay0At0 = try RuneMultiWindow.runHeadless(
             RuneOverlayApp.makeWindows(displays: displays, arguments: ["--headless"]),
@@ -162,9 +184,22 @@ struct Phase2VideoAndOverlayTests {
             args: ToolingArgs.parse(["--window", "overlay-0", "--at", "0.5"])
         )
         let overlayTree = String(decoding: overlay0AtHalf.treeJSON, as: UTF8.self)
-        #expect(overlayTree.contains("Overlay 0 (1440x900)"))
-        #expect(overlayTree.contains("cursor-0"))
+        #expect(overlayTree.contains("\"stroke\""))
+        #expect(overlayTree.contains("\"remote-cursor\""))
         #expect(overlay0At0.finalFrame.rgba != overlay0AtHalf.finalFrame.rgba)
+
+        let rt = Runtime<OverlayCanvasState>(
+            state: OverlayCanvasState(index: 0, bounds: Vec2(560, 440), cursor: Live(Vec2(120, 90))),
+            viewport: Vec2(560, 440),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: RuneOverlayApp.overlayView
+        )
+        rt.frame(at: 0.0)
+        rt.pointerDown(at: Vec2(20, 20), at: 0.05)
+        rt.pointerUp(at: Vec2(20, 20), at: 0.10)
+        rt.frame(at: 0.12)
+        #expect(rt.state.restoredClickThroughCount == 1)
 
         let p0 = RuneOverlayApp.cursorPoint(forPhase: 0.0, bounds: Vec2(1440, 900), index: 0)
         let p1 = RuneOverlayApp.cursorPoint(forPhase: 0.5, bounds: Vec2(1440, 900), index: 0)
@@ -173,14 +208,14 @@ struct Phase2VideoAndOverlayTests {
 
     // MARK: - RuneOverlayLab
 
-    @Test("overlay-lab: per-display pickers, pointer-following pill options, commands, and scenes")
+    @Test("overlay-lab: capture exclusion default, underlay window options, picker button, commands, and scenes")
     func overlayLabOptionsCommandsAndScenes() throws {
         let displays = [
             DisplayInfo(id: RuneDisplayId(native: .macOS(10)), name: "Built-in", position: (0, 0), size: (1512, 982), scale: 2.0, primary: true),
             DisplayInfo(id: RuneDisplayId(native: .macOS(20)), name: "Studio", position: (1512, 0), size: (2560, 1440), scale: 2.0, primary: false),
         ]
-        let lab = RuneOverlayLabApp.makeLab(displays: displays, underlay: true)
-        #expect(lab.underlay)
+        let lab = RuneOverlayLabApp.makeLab(displays: displays, excludeFromCapture: true, underlay: false)
+        #expect(lab.excludeFromCapture)
         #expect(lab.pickers.count == 2)
 
         for picker in lab.pickers {
@@ -188,6 +223,7 @@ struct Phase2VideoAndOverlayTests {
             #expect(picker.options.level == .aboveStatus)
             #expect(picker.options.input == .all)
             #expect(picker.options.keyPolicy == .activating)
+            #expect(picker.options.excludeFromCapture)
             #expect(picker.options.prewarm)
         }
 
@@ -196,7 +232,27 @@ struct Phase2VideoAndOverlayTests {
         #expect(lab.pill.options.level == .aboveOverlays)
         #expect(lab.pill.options.input == .regions)
         #expect(lab.pill.options.keyPolicy == .nonActivating)
+        #expect(lab.pill.options.excludeFromCapture)
         #expect(lab.pill.options.prewarm)
+
+        let includeCaptureLab = RuneOverlayLabApp.makeLab(displays: displays, excludeFromCapture: false)
+        #expect(!includeCaptureLab.pill.options.excludeFromCapture)
+        #expect(!includeCaptureLab.pickers[0].options.excludeFromCapture)
+
+        // Clicking Picker chip inside the pill triggers lab.showPicker() directly.
+        lab.showPill()
+        #expect(lab.pill.isVisible)
+        lab.pill.runtime.state.expanded = true
+        lab.pill.runtime.markNeedsCommit(settle: true)
+        lab.pill.runtime.frame(at: 0.0)
+        let pickerRect = try #require(lab.pill.runtime.element(byKey: "btn-picker")?.rect)
+        let center = Vec2(pickerRect[0] + pickerRect[2] * 0.5, pickerRect[1] + pickerRect[3] * 0.5)
+        lab.pill.runtime.pointerDown(at: center, at: 0.05)
+        lab.pill.runtime.pointerUp(at: center, at: 0.10)
+        lab.pill.runtime.frame(at: 0.12)
+        #expect(!lab.pill.isVisible)
+        #expect(lab.pickers[0].isVisible)
+        lab.hideAll()
 
         #expect(lab.handleCommand("all") == "ok:all")
         #expect(lab.pill.options.input == .all)
@@ -206,14 +262,19 @@ struct Phase2VideoAndOverlayTests {
         #expect(lab.handleCommand("collapse") == "ok:collapsed")
         #expect(lab.handleCommand("status").contains("pickers=2"))
 
+        let underlayWindows = RuneOverlayLabApp.makeUnderlayWindows(displays: displays, nativeWindow: true)
+        #expect(underlayWindows.count == 1)
+
         for scene in ["pill", "expanded", "picker", "underlay", "hit-only"] {
             let out = try HeadlessRunner.run(
                 RuneOverlayLabApp.makeApp(arguments: ["--headless"]),
                 args: ToolingArgs.parse(["--scene", scene])
             )
             let tree = String(decoding: out.treeJSON, as: UTF8.self)
-            if scene == "picker" || scene == "underlay" {
+            if scene == "picker" {
                 #expect(tree.contains("Display Picker #0"))
+            } else if scene == "underlay" {
+                #expect(tree.contains("Underlay clicks: 2"))
             } else {
                 #expect(tree.contains("Overlay Lab"))
                 #expect(tree.contains("pill-card"))

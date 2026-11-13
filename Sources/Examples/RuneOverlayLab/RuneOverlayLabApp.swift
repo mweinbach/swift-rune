@@ -8,6 +8,47 @@ import AppKit
 import Darwin
 #endif
 
+public final class LabActionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fn: (@Sendable () -> Void)?
+
+    public init(_ fn: (@Sendable () -> Void)? = nil) {
+        self.fn = fn
+    }
+
+    public func set(_ fn: @escaping @Sendable () -> Void) {
+        lock.lock()
+        self.fn = fn
+        lock.unlock()
+    }
+
+    public func call() {
+        lock.lock()
+        let copy = fn
+        lock.unlock()
+        copy?()
+    }
+}
+
+public final class LabRetainer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var controller: LabController?
+
+    public init() {}
+
+    public func hold(_ controller: LabController) {
+        lock.lock()
+        self.controller = controller
+        lock.unlock()
+    }
+
+    public func release() {
+        lock.lock()
+        self.controller = nil
+        lock.unlock()
+    }
+}
+
 public struct PickerState: Sendable {
     public var displayIndex: Int
     public var displayName: String
@@ -47,6 +88,7 @@ public struct PillState: Sendable {
     public var dragStartOffset: Vec2 = .zero
     public var pointerPos: Vec2 = Vec2(130, 32)
     public var pickerActive: Bool = false
+    public var onShowPicker: LabActionBox = LabActionBox()
 
     public init(
         expanded: Bool = false,
@@ -54,7 +96,8 @@ public struct PillState: Sendable {
         clickCount: UInt32 = 0,
         offset: Vec2 = .zero,
         pointerPos: Vec2 = Vec2(130, 32),
-        pickerActive: Bool = false
+        pickerActive: Bool = false,
+        onShowPicker: LabActionBox = LabActionBox()
     ) {
         self.expanded = expanded
         self.inputMode = inputMode
@@ -63,6 +106,15 @@ public struct PillState: Sendable {
         self.dragStartOffset = offset
         self.pointerPos = pointerPos
         self.pickerActive = pickerActive
+        self.onShowPicker = onShowPicker
+    }
+}
+
+public struct UnderlayState: Sendable {
+    public var clicks: UInt32 = 0
+
+    public init(clicks: UInt32 = 0) {
+        self.clicks = clicks
     }
 }
 
@@ -70,11 +122,13 @@ public struct LabSceneState: Sendable {
     public enum Mode: Sendable {
         case pill
         case picker
+        case underlay
     }
 
     public var mode: Mode = .pill
     public var pill: PillState = PillState()
     public var picker: PickerState = PickerState(bounds: Vec2(460, 320), underlay: false)
+    public var underlay: UnderlayState = UnderlayState()
 
     public init() {}
 }
@@ -83,6 +137,7 @@ public final class LabController: @unchecked Sendable {
     public let displays: [DisplayInfo]
     public let pickers: [OverlayHandle<PickerState>]
     public let pill: OverlayHandle<PillState>
+    public let excludeFromCapture: Bool
     public let underlay: Bool
 
     private let onPickerRequested: (() -> Void)?
@@ -92,13 +147,15 @@ public final class LabController: @unchecked Sendable {
         displays: [DisplayInfo],
         pickers: [OverlayHandle<PickerState>],
         pill: OverlayHandle<PillState>,
-        underlay: Bool,
+        excludeFromCapture: Bool = true,
+        underlay: Bool = false,
         onPickerRequested: (() -> Void)? = nil,
         onQuitRequested: (() -> Void)? = nil
     ) {
         self.displays = displays
         self.pickers = pickers
         self.pill = pill
+        self.excludeFromCapture = excludeFromCapture
         self.underlay = underlay
         self.onPickerRequested = onPickerRequested
         self.onQuitRequested = onQuitRequested
@@ -110,8 +167,11 @@ public final class LabController: @unchecked Sendable {
         pill.update { $0.pickerActive = false }
     }
 
-    public func showPicker() {
+    public func showPicker(updatePillState: Bool = true) {
         pill.hide()
+        if updatePillState {
+            pill.update { $0.pickerActive = true }
+        }
         for p in pickers {
             p.update {
                 $0.cancelled = false
@@ -168,7 +228,7 @@ public final class LabController: @unchecked Sendable {
         case "status":
             let winNum = pill.windowNumber.map(String.init) ?? "none"
             let excl = "\(pill.captureExclusion)"
-            return "pillVisible=\(pill.isVisible) pickers=\(pickers.count) windowNumber=\(winNum) captureExclusion=\(excl)"
+            return "pillVisible=\(pill.isVisible) pickers=\(pickers.count) excludeFromCapture=\(excludeFromCapture) windowNumber=\(winNum) captureExclusion=\(excl)"
         case "quit":
             hideAll()
             onQuitRequested?()
@@ -202,6 +262,25 @@ public enum RuneOverlayLabApp {
         }
         #endif
         return [DisplayInfo()]
+    }
+
+    public static func renderUnderlay<State>(
+        _ s: UnderlayState,
+        mutate: @escaping (@escaping (inout UnderlayState) -> Void, inout State) -> Void
+    ) -> El<State> {
+        let t = Tok.theme(dark: true)
+        let label: El<State> = text("Underlay clicks: \(s.clicks)")
+            .font(Tok.Typography.title)
+            .color(t.text)
+        return col()
+            .key("underlay-root")
+            .sizeFull()
+            .center()
+            .bg(Color.srgb(0.05, 0.08, 0.14, 0.92))
+            .onClick { state in
+                mutate({ $0.clicks &+= 1 }, &state)
+            }
+            .child(label)
     }
 
     public static func renderPicker<State>(
@@ -357,7 +436,12 @@ public enum RuneOverlayLabApp {
                         .rounded(8)
                         .bg(Tok.accent(0, dark: true))
                         .onClick { state in
-                            mutate({ $0.pickerActive = true }, &state)
+                            var box: LabActionBox?
+                            mutate({ p in
+                                p.pickerActive = true
+                                box = p.onShowPicker
+                            }, &state)
+                            box?.call()
                         }
                         .child(text("Picker").size(12).color(.white))
                 )
@@ -408,6 +492,12 @@ public enum RuneOverlayLabApp {
         return canvas
     }
 
+    public static func underlayView(_ s: UnderlayState, _ cx: inout Cx<UnderlayState>) -> El<UnderlayState> {
+        renderUnderlay(s) { edit, state in
+            edit(&state)
+        }
+    }
+
     public static func pickerView(_ s: PickerState, _ cx: inout Cx<PickerState>) -> El<PickerState> {
         renderPicker(s) { edit, state in
             edit(&state)
@@ -430,37 +520,100 @@ public enum RuneOverlayLabApp {
             return renderPicker(s.picker) { edit, state in
                 edit(&state.picker)
             }
+        case .underlay:
+            return renderUnderlay(s.underlay) { edit, state in
+                edit(&state.underlay)
+            }
         }
+    }
+
+    public static func makeUnderlayWindows(
+        displays: [DisplayInfo] = currentDisplays(),
+        nativeWindow: Bool = ProcessInfo.processInfo.environment["OVERLAY_LAB_NATIVE_WINDOW"] != nil,
+        autoQuitSeconds: Double? = ProcessInfo.processInfo.environment["OVERLAY_LAB_SECONDS"].flatMap(Double.init)
+    ) -> [AnyWindowSpec] {
+        let primary = displays.first(where: \.primary) ?? displays.first
+        let baseOptions: WindowOptions
+        if let display = primary {
+            baseOptions = WindowOptions(
+                borderless: true,
+                position: display.position,
+                physicalSize: display.size
+            )
+        } else {
+            baseOptions = WindowOptions(borderless: true)
+        }
+
+        let configured: ConfiguredWindowOptions
+        if nativeWindow {
+            configured = ConfiguredWindowOptions(
+                options: baseOptions,
+                native: MacWindowOptions(
+                    shadow: false,
+                    level: 24,
+                    collectionBehavior: 1 | 16 | 64 | 256,
+                    excludeFromCapture: true
+                )
+            )
+        } else {
+            configured = ConfiguredWindowOptions(options: baseOptions)
+        }
+
+        let size = primary.map { Vec2(Float(max(1, $0.size.0)), Float(max(1, $0.size.1))) } ?? Vec2(680, 160)
+        var app = App<UnderlayState>(
+            title: "Overlay lab underlay",
+            size: size,
+            dark: true,
+            state: UnderlayState(),
+            view: underlayView
+        )
+        let handle = app.handle()
+        if let seconds = autoQuitSeconds, seconds > 0 {
+            app = app.setup { _ in
+                Thread.detachNewThread {
+                    Thread.sleep(forTimeInterval: seconds)
+                    handle.quit()
+                }
+            }
+        }
+
+        return [
+            AppWindowSpec.fromApp(app)
+                .configuredOptions(configured)
+                .boxed()
+        ]
     }
 
     public static func makeLab(
         displays: [DisplayInfo] = currentDisplays(),
-        underlay: Bool = ProcessInfo.processInfo.environment["OVERLAY_LAB_UNDERLAY"] == "1",
+        excludeFromCapture: Bool = ProcessInfo.processInfo.environment["OVERLAY_LAB_INCLUDE_IN_CAPTURE"] == nil,
+        underlay: Bool = ProcessInfo.processInfo.environment["OVERLAY_LAB_UNDERLAY"] != nil,
         onQuit: (() -> Void)? = nil
     ) -> LabController {
         let resolvedDisplays = displays.isEmpty ? [DisplayInfo()] : displays
         var pickerBox: [OverlayHandle<PickerState>] = []
         var pillHandleRef: OverlayHandle<PillState>? = nil
+        let showPickerAction = LabActionBox()
 
         let pillOptions = OverlayOptions(
-            placement: .edge(.top, margin: 24),
+            placement: .edge(.top, margin: 40),
             display: .underPointer,
             followPointer: true,
             level: .aboveOverlays,
-            excludeFromCapture: false,
+            excludeFromCapture: excludeFromCapture,
             keyPolicy: .nonActivating,
             input: .regions,
             prewarm: true,
             interactive: true
         )
         let pillConfigured = OverlaySpec<PillState>(
-            name: "overlay-lab-pill",
+            name: "Rune pill",
             size: Vec2(340, 180),
             edge: .top,
-            margin: 24,
+            margin: 40,
             interactive: true,
             options: pillOptions,
-            makeState: { PillState() },
+            makeState: { PillState(onShowPicker: showPickerAction) },
             view: pillView
         )
         .configured(pillOptions)
@@ -477,19 +630,20 @@ public enum RuneOverlayLabApp {
         for (idx, display) in resolvedDisplays.enumerated() {
             let bounds = Vec2(Float(max(1, display.size.0)), Float(max(1, display.size.1)))
             let displayName = display.name ?? "Display \(idx + 1)"
+            let displayTarget: DisplayTarget = display.id.map { .id($0) } ?? .index(idx)
             let opts = OverlayOptions(
                 placement: .fullDisplay,
-                display: .index(idx),
+                display: displayTarget,
                 followPointer: false,
                 level: .aboveStatus,
-                excludeFromCapture: false,
+                excludeFromCapture: excludeFromCapture,
                 keyPolicy: .activating,
                 input: .all,
                 prewarm: true,
                 interactive: true
             )
             let pickerHandle = OverlaySpec<PickerState>(
-                name: "overlay-lab-picker-\(idx)",
+                name: "Rune picker",
                 size: bounds,
                 interactive: true,
                 options: opts,
@@ -524,13 +678,18 @@ public enum RuneOverlayLabApp {
             pickerBox.append(pickerHandle)
         }
 
-        return LabController(
+        let controller = LabController(
             displays: resolvedDisplays,
             pickers: pickerBox,
             pill: pillHandle,
+            excludeFromCapture: excludeFromCapture,
             underlay: underlay,
             onQuitRequested: onQuit
         )
+        showPickerAction.set { [weak controller] in
+            controller?.showPicker(updatePillState: false)
+        }
+        return controller
     }
 
     public static func makeApp(
@@ -539,38 +698,61 @@ public enum RuneOverlayLabApp {
         let parsed = ToolingArgs.parse(arguments)
         let isHeadless = parsed.isHeadlessRequested
         let env = ProcessInfo.processInfo.environment
-        let underlay = env["OVERLAY_LAB_UNDERLAY"] == "1" || env["OVERLAY_LAB_UNDERLAY"] == "true"
-        let startWithPicker = env["OVERLAY_LAB_PICKER"] == "1" || env["OVERLAY_LAB_PICKER"] == "true"
+        let excludeFromCapture = env["OVERLAY_LAB_INCLUDE_IN_CAPTURE"] == nil
+        let underlay = env["OVERLAY_LAB_UNDERLAY"] != nil
+        let startWithPicker = env["OVERLAY_LAB_PICKER"] != nil
         let autoQuitSeconds = env["OVERLAY_LAB_SECONDS"].flatMap(Double.init)
         let controlPath = env["OVERLAY_LAB_CONTROL"]
 
         var app = App<LabSceneState>(
             title: "Overlay Lab",
-            size: Vec2(460, 320),
+            size: Vec2(680, 160),
             dark: true,
             state: LabSceneState(),
             view: sceneView
         )
         .windowless(true)
+        .accessory(true)
 
         let commands = app.handle()
+        let retainer = LabRetainer()
+
+        app = app.onQuit { _, _ in
+            retainer.release()
+        }
+
         if !isHeadless {
             app = app.setup { _ in
                 let lab = makeLab(
                     displays: currentDisplays(),
+                    excludeFromCapture: excludeFromCapture,
                     underlay: underlay,
                     onQuit: { commands.quit() }
                 )
+                retainer.hold(lab)
+
+                #if os(macOS)
+                let shouldShowPill = (controlPath == nil || controlPath?.isEmpty == true)
+                #else
+                let shouldShowPill = true
+                #endif
+
                 if startWithPicker {
                     lab.showPicker()
-                } else {
+                } else if shouldShowPill {
                     lab.showPill()
                 }
 
                 if let seconds = autoQuitSeconds, seconds > 0 {
                     Thread.detachNewThread {
+                        Thread.sleep(forTimeInterval: 0.75)
+                        fputs(
+                            "overlay-lab window=\(String(describing: lab.pill.windowNumber)) capture=\(lab.pill.captureExclusion)\n",
+                            stderr
+                        )
                         Thread.sleep(forTimeInterval: seconds)
                         lab.hideAll()
+                        retainer.release()
                         commands.quit()
                     }
                 }
@@ -595,22 +777,16 @@ public enum RuneOverlayLabApp {
                 s.picker = PickerState(
                     displayIndex: 0,
                     displayName: "Primary",
-                    bounds: Vec2(460, 320),
+                    bounds: Vec2(680, 160),
                     underlay: false,
-                    lastPointer: Vec2(210, 140),
-                    selectionStart: Vec2(120, 110),
-                    selectionEnd: Vec2(330, 230)
+                    lastPointer: Vec2(210, 100),
+                    selectionStart: Vec2(140, 60),
+                    selectionEnd: Vec2(560, 140)
                 )
             }
             .scene("underlay") { s, _ in
-                s.mode = .picker
-                s.picker = PickerState(
-                    displayIndex: 0,
-                    displayName: "Primary",
-                    bounds: Vec2(460, 320),
-                    underlay: true,
-                    lastPointer: Vec2(240, 170)
-                )
+                s.mode = .underlay
+                s.underlay = UnderlayState(clicks: 2)
             }
             .scene("hit-only") { s, _ in
                 s.mode = .pill
@@ -668,6 +844,12 @@ public enum RuneOverlayLabApp {
     @MainActor
     public static func main() throws {
         let args = Array(CommandLine.arguments.dropFirst())
-        try RuneApp.run(makeApp(arguments: args), arguments: args)
+        let parsed = ToolingArgs.parse(args)
+        if !parsed.isHeadlessRequested, ProcessInfo.processInfo.environment["OVERLAY_LAB_UNDERLAY"] != nil {
+            try RuneMultiWindow.runWindows(makeUnderlayWindows(), arguments: args)
+            return
+        }
+        let app = makeApp(arguments: args)
+        try RuneApp.run(app, arguments: args)
     }
 }

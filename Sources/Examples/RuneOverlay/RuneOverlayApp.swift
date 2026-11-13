@@ -38,17 +38,32 @@ public struct OverlayCanvasState: Sendable {
     public var index: Int
     public var bounds: Vec2
     public var cursor: Live<Vec2>
+    public var overlayHandles: SharedWindowHandles
+    public var restoredClickThroughCount: Int = 0
     public var phase: Double = 0.0
 
-    public init(index: Int, bounds: Vec2, cursor: Live<Vec2>) {
+    public init(
+        index: Int,
+        bounds: Vec2,
+        cursor: Live<Vec2>,
+        overlayHandles: SharedWindowHandles = SharedWindowHandles()
+    ) {
         self.index = index
         self.bounds = bounds
         self.cursor = cursor
+        self.overlayHandles = overlayHandles
     }
 }
 
 @main
 public enum RuneOverlayApp {
+    public static let strokeIcon = SVGIcon(
+        viewBox: 240.0,
+        paths: [],
+        strokeWidth: nil,
+        body: #"<path d="M 12 190 C 55 30 90 210 130 70 S 190 170 228 35" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>"#
+    )
+
     public static func currentDisplays() -> [DisplayInfo] {
         #if os(macOS)
         let screens = NSScreen.screens
@@ -73,81 +88,73 @@ public enum RuneOverlayApp {
     }
 
     public static func cursorPoint(forPhase t: Double, bounds: Vec2, index: Int) -> Vec2 {
-        let cx = max(80.0, Double(bounds.x) * 0.5)
-        let cy = max(80.0, Double(bounds.y) * 0.5)
-        let rx = max(40.0, Double(bounds.x) * 0.25)
-        let ry = max(40.0, Double(bounds.y) * 0.22)
-        let shift = Double(index) * 0.7
-        let x = Float(cx + cos(t * 2.2 + shift) * rx - 14.0)
-        let y = Float(cy + sin(t * 3.1 + shift) * ry - 14.0)
-        return Vec2(x, y)
+        let clamped = min(t, 4.0)
+        let shift = Double(index) * 0.5
+        let x = Float(120.0 + 120.0 * sin(clamped * 0.7 + shift))
+        let y = Float(90.0 + 50.0 * sin(clamped + shift))
+        return Vec2(
+            min(max(0, x), max(12, bounds.x - 12)),
+            min(max(0, y), max(18, bounds.y - 18))
+        )
     }
 
     public static func controlsView(_ s: ControlsState, _ cx: inout Cx<ControlsState>) -> El<ControlsState> {
-        let t = Tok.theme(dark: true)
-        let modeText = s.clickThrough ? "Click-through: ON" : "Click-through: OFF"
-        let buttonText = s.clickThrough ? "Make interactive" : "Make click-through"
+        let green = Color(r: 0.1, g: 0.85, b: 0.45, a: 1.0)
+        let heading: El<ControlsState> = text("Display overlays").font(Tok.Typography.body)
+        let testBtn: El<ControlsState> = row()
+            .key("test-overlay-input")
+            .role(.button)
+            .label("Test overlay input")
+            .p(16)
+            .rounded(8)
+            .bg(green.alpha(0.15))
+            .onClick { state in
+                state.clickThrough = false
+                for handle in state.overlayHandles.snapshot() {
+                    do {
+                        try handle.setClickThrough(false)
+                    } catch {
+                        fputs("click-through: \(error)\n", stderr)
+                    }
+                }
+            }
+            .child(text("Test overlay input").color(.white))
+
         return col()
             .sizeFull()
-            .p(16)
-            .gap(12)
-            .bg(t.bg)
-            .child(
-                row()
-                    .wFull()
-                    .itemsCenter()
-                    .justifyBetween()
-                    .child(text("Overlay Controls").font(Tok.Typography.title).color(t.text))
-                    .child(text(modeText).font(Tok.Typography.monoCaption).color(t.textSecondary))
-            )
-            .child(
-                row()
-                    .key("toggle-click-through")
-                    .role(.button)
-                    .label(buttonText)
-                    .h(36)
-                    .px(14)
-                    .center()
-                    .rounded(8)
-                    .bg(s.clickThrough ? t.card : Tok.accent(0, dark: true))
-                    .border(1, t.cardBorder)
-                    .onClick { state in
-                        state.clickThrough.toggle()
-                        let next = state.clickThrough
-                        for handle in state.overlayHandles.snapshot() {
-                            try? handle.setClickThrough(next)
-                        }
-                    }
-                    .child(text(buttonText).font(Tok.Typography.label).color(.white))
-            )
+            .p(40)
+            .gap(20)
+            .bg(Color(r: 0.018, g: 0.024, b: 0.03, a: 1.0))
+            .child(heading)
+            .child(testBtn)
     }
 
     public static func overlayView(_ s: OverlayCanvasState, _ cx: inout Cx<OverlayCanvasState>) -> El<OverlayCanvasState> {
-        let label = "Overlay \(s.index) (\(Int(s.bounds.x))x\(Int(s.bounds.y)))"
+        let green = Color(r: 0.1, g: 0.85, b: 0.45, a: 1.0)
+        let strokeEl: El<OverlayCanvasState> = icon(strokeIcon, size: 240.0)
+            .key("stroke")
+            .color(green)
+            .pin(top: 80, left: 80)
+        let cursorEl: El<OverlayCanvasState> = el()
+            .key("remote-cursor")
+            .w(12)
+            .h(18)
+            .rounded(3)
+            .bg(green)
+            .pin(top: 0, left: 0)
+            .liveOffset(s.cursor.binding)
+
         return el()
             .sizeFull()
             .bg(.transparent)
-            .child(
-                row()
-                    .pin(top: 24, left: 24)
-                    .h(30)
-                    .px(12)
-                    .center()
-                    .rounded(999)
-                    .bg(Color.srgb(0.07, 0.09, 0.12, 0.78))
-                    .border(1, Color.white.alpha(0.16))
-                    .child(text(label).size(12).color(.white))
-            )
-            .child(
-                el()
-                    .key("cursor-\(s.index)")
-                    .w(28)
-                    .h(28)
-                    .rounded(14)
-                    .bg(Tok.accent(0, dark: true).alpha(0.88))
-                    .border(2, .white)
-                    .liveOffset(s.cursor.binding)
-            )
+            .child(strokeEl)
+            .child(cursorEl)
+            .onClick { state in
+                state.restoredClickThroughCount += 1
+                for handle in state.overlayHandles.snapshot() {
+                    try? handle.setClickThrough(true)
+                }
+            }
     }
 
     public static func makeWindows(
@@ -159,8 +166,8 @@ public enum RuneOverlayApp {
         let overlayHandles = SharedWindowHandles()
 
         let controlsSpec = AppSpec<ControlsState>(
-            title: "Overlay Controls",
-            size: Vec2(320, 130),
+            title: "Rooms overlay example",
+            size: Vec2(560, 440),
             dark: true,
             state: ControlsState(clickThrough: true, overlayHandles: overlayHandles),
             view: controlsView
@@ -177,15 +184,23 @@ public enum RuneOverlayApp {
                 title: "Overlay \(idx)",
                 size: bounds,
                 dark: true,
-                state: OverlayCanvasState(index: idx, bounds: bounds, cursor: cursor),
+                state: OverlayCanvasState(
+                    index: idx,
+                    bounds: bounds,
+                    cursor: cursor,
+                    overlayHandles: overlayHandles
+                ),
                 setup: { _ in
                     guard !isHeadless else { return }
                     let thread = Thread {
                         let start = Date()
-                        while !Thread.current.isCancelled {
-                            Thread.sleep(forTimeInterval: 1.0 / 120.0)
-                            let t = Date().timeIntervalSince(start)
-                            cursor.set(cursorPoint(forPhase: t, bounds: bounds, index: idx))
+                        for tick in 1...480 {
+                            let targetT = Double(tick) / 120.0
+                            let remaining = targetT - Date().timeIntervalSince(start)
+                            if remaining > 0 {
+                                Thread.sleep(forTimeInterval: remaining)
+                            }
+                            cursor.set(cursorPoint(forPhase: targetT, bounds: bounds, index: idx))
                         }
                     }
                     thread.name = "overlay-cursor-\(idx)"
@@ -207,7 +222,7 @@ public enum RuneOverlayApp {
                 .onCreated { handle in
                     overlayHandles.append(handle)
                     fputs(
-                        "overlay-\(idx) created (windowNumber: \(String(describing: handle.windowNumber)))\n",
+                        "overlay native window number: \(String(describing: handle.windowNumber))\n",
                         stderr
                     )
                 }
