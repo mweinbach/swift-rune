@@ -1,8 +1,31 @@
 import Foundation
 import RuneMotion
 
+internal enum SelectionEdgeScrollState {
+    case idle
+    case running(scrollPath: String, last: Double, fromOffset: Double?, due: Double)
+    case laying(scrollPath: String, last: Double, fromOffset: Double?, more: Bool)
+
+    var isRunning: Bool {
+        if case .idle = self { return false }
+        return true
+    }
+
+    var scrollPath: String? {
+        switch self {
+        case .idle: return nil
+        case .running(let p, _, _, _), .laying(let p, _, _, _): return p
+        }
+    }
+
+    mutating func stop() {
+        self = .idle
+    }
+}
+
 /// Runtime-owned state for `El.selectable` text selection, drag tracking, pending `Tx` actions,
-/// and `onSelectionChange` release coalescing (`Sources/Rune/Runtime/Selection/*`).
+/// per-path click runs, edge auto-scroll, and `onSelectionChange` release coalescing
+/// (`Sources/Rune/Runtime/Selection/*`).
 internal struct RuntimeSelectionState {
     var coordinator = SelectionCoordinator()
     var isDraggingSelection: Bool = false
@@ -12,6 +35,30 @@ internal struct RuntimeSelectionState {
     var lastDispatchedDragging: Bool = false
     var pendingSelectTextRequest: (key: String, range: Range<Int>)? = nil
     var pendingSelectAllKey: String? = nil
+    var lastClickPath: String? = nil
+    var lastClickTime: Double = -10.0
+    var lastClickPos: Vec2 = Vec2(-10000, -10000)
+    var clickCount: Int = 0
+    var edgeScroll: SelectionEdgeScrollState = .idle
+
+    mutating func clearClicks() {
+        lastClickPath = nil
+        clickCount = 0
+    }
+
+    mutating func notePrimaryPress(path: String, at pos: Vec2, now: Double) -> Int {
+        let dt = now - lastClickTime
+        let dist = hypotf(pos.x - lastClickPos.x, pos.y - lastClickPos.y)
+        if path == lastClickPath && dt <= 0.35 && dist <= 4.0 {
+            clickCount += 1
+        } else {
+            clickCount = 1
+        }
+        lastClickPath = path
+        lastClickTime = now
+        lastClickPos = pos
+        return min(3, max(1, clickCount))
+    }
 }
 
 /// Optional ink override + local selection line rects returned to `buildRefScene` glyph emission.
@@ -148,14 +195,6 @@ public extension Runtime {
 }
 
 internal extension Runtime {
-    func makeTx() -> Tx {
-        var tx = Tx()
-        if let sel = currentTextSelection() {
-            tx.setCurrentTextSelection(sel)
-        }
-        return tx
-    }
-
     func selectableNodeText(_ node: FlatNode) -> String? {
         guard !node.effectiveInert,
               !node.el.isSecure,
@@ -220,6 +259,34 @@ internal extension Runtime {
         return SelectionMath.floorCharBoundary(in: displayText, offset: raw)
     }
 
+    private func isTopSelectableInputTarget(_ node: FlatNode) -> Bool {
+        if node.el.isSelectable { return true }
+        if let geom = hitGeometryByPath[node.path], geom.hasVisualBlocker || geom.isInteractiveBlocker {
+            return true
+        }
+        let h = node.el.handlers
+        return node.el.background.a > 0.001
+            || node.el.gradient != nil
+            || (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001)
+            || node.el.imagePayload != nil
+            || node.el.backdropBlur >= 0.5
+            || !node.el.shapes.isEmpty
+            || h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
+            || h.onPointerDown != nil || h.onDrag != nil || h.dragOut != nil
+            || node.el.attachedDragOutItem != nil || h.editLens != nil
+            || h.onSecondaryClick != nil || nodeTakesFocus(node.el)
+            || node.el.explicitHit || node.el.isModal
+    }
+
+    private func selectableHitNode(at pos: Vec2) -> FlatNode? {
+        guard let topHit = hitTest(at: pos, predicate: { self.isTopSelectableInputTarget($0) }),
+              let content = selectableNodeText(topHit.node),
+              !content.isEmpty else {
+            return nil
+        }
+        return topHit.node
+    }
+
     func handleSelectablePointerDown(
         at pos: Vec2,
         button: PointerButton,
@@ -232,6 +299,8 @@ internal extension Runtime {
             return
         }
         if hitInteractiveNode?.el.handlers.editLens != nil {
+            selectionState.clearClicks()
+            selectionState.edgeScroll.stop()
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
@@ -240,16 +309,15 @@ internal extension Runtime {
             }
             return
         }
-        let sHit = hitTest(at: pos) { node in
-            guard let text = self.selectableNodeText(node), !text.isEmpty else { return false }
-            return true
-        }
+        let sHitNode = selectableHitNode(at: pos)
         let qualifies: Bool = {
-            guard let sHit else { return false }
+            guard let sHitNode else { return false }
             guard let interactive = hitInteractiveNode else { return true }
-            return sHit.node.path == interactive.path || sHit.node.path.hasPrefix(interactive.path + "/")
+            return sHitNode.path == interactive.path || sHitNode.path.hasPrefix(interactive.path + "/")
         }()
-        guard qualifies, let sNode = sHit?.node, let content = selectableNodeText(sNode), !content.isEmpty else {
+        guard qualifies, let sNode = sHitNode, let content = selectableNodeText(sNode), !content.isEmpty else {
+            selectionState.clearClicks()
+            selectionState.edgeScroll.stop()
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
@@ -261,13 +329,17 @@ internal extension Runtime {
         }
 
         let offset = selectableHitOffset(node: sNode, windowPos: pos)
-        let clicks = min(3, max(1, clickCount))
+        let clicks = selectionState.notePrimaryPress(path: sNode.path, at: pos, now: now)
         let snaps = selectableSnapshots()
         let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path })
         let sGroup = sSnapIdx.flatMap { SelectAllResolver.groupPath(forNodeAt: $0, in: snaps) }
         if let sGroup {
             selectionState.coordinator.pick.noteClick(groupPath: sGroup)
         }
+        let interactiveTakesDrag: Bool = {
+            guard let h = hitInteractiveNode?.el.handlers else { return false }
+            return h.onDrag != nil || h.dragOut != nil || hitInteractiveNode?.el.attachedDragOutItem != nil
+        }()
 
         if mods.shift, clicks == 1, let existing = selectionState.coordinator.phase.selection {
             let anchorSnapIdx = snaps.firstIndex(where: { $0.path == existing.path })
@@ -281,9 +353,14 @@ internal extension Runtime {
                     origin: (existing.anchor, existing.anchor),
                     far: nil
                 )
-                selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                selectionState.isDraggingSelection = true
-                selectionState.dragStartPos = pos
+                if interactiveTakesDrag {
+                    selectionState.coordinator.phase.place(updated)
+                    selectionState.isDraggingSelection = false
+                } else {
+                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
+                    selectionState.isDraggingSelection = true
+                    selectionState.dragStartPos = pos
+                }
                 selectionState.suppressedClickOnRelease = false
                 dirtyCommit(at: now)
                 dispatchSelectionChanges(at: now)
@@ -297,9 +374,14 @@ internal extension Runtime {
                     origin: existing.origin,
                     far: SelectionFar(path: sNode.path, content: content)
                 )
-                selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                selectionState.isDraggingSelection = true
-                selectionState.dragStartPos = pos
+                if interactiveTakesDrag {
+                    selectionState.coordinator.phase.place(updated)
+                    selectionState.isDraggingSelection = false
+                } else {
+                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
+                    selectionState.isDraggingSelection = true
+                    selectionState.dragStartPos = pos
+                }
                 selectionState.suppressedClickOnRelease = false
                 dirtyCommit(at: now)
                 dispatchSelectionChanges(at: now)
@@ -309,35 +391,98 @@ internal extension Runtime {
 
         let unit = SelectionUnit.forClickCount(clicks)
         let origin = SelectionMath.unitRange(in: content, at: offset, unit: unit)
-        selectionState.coordinator.phase.startDrag(
-            selection: ActiveSelection(
-                path: sNode.path,
-                content: content,
-                anchor: origin.0,
-                focus: origin.1,
-                origin: origin
-            ),
-            unit: unit
+        let initialSel = ActiveSelection(
+            path: sNode.path,
+            content: content,
+            anchor: origin.0,
+            focus: origin.1,
+            origin: origin
         )
-        selectionState.isDraggingSelection = true
-        selectionState.dragStartPos = pos
+        if interactiveTakesDrag {
+            // Inside an onDrag/dragOut container, clicks place word/paragraph selection while drags move the row.
+            selectionState.coordinator.phase.place(initialSel)
+            selectionState.isDraggingSelection = false
+        } else {
+            selectionState.coordinator.phase.startDrag(selection: initialSel, unit: unit)
+            selectionState.isDraggingSelection = true
+            selectionState.dragStartPos = pos
+        }
         selectionState.suppressedClickOnRelease = false
         dirtyCommit(at: now)
         dispatchSelectionChanges(at: now)
     }
 
+    func handleSelectableSecondaryClick(at pos: Vec2, at now: Double) {
+        guard let sNode = selectableHitNode(at: pos),
+              let content = selectableNodeText(sNode),
+              !content.isEmpty else {
+            return
+        }
+        #if os(macOS)
+        let offset = selectableHitOffset(node: sNode, windowPos: pos)
+        let activeRange = currentTextSelection()?.texts.first(where: { $0.path == sNode.path })?.range
+        let outsideCurrent = activeRange.map { offset < $0.lowerBound || offset >= $0.upperBound } ?? true
+        if outsideCurrent {
+            let word = SelectionMath.unitRange(in: content, at: offset, unit: .word)
+            selectionState.clearClicks()
+            selectionState.isDraggingSelection = false
+            selectionState.edgeScroll.stop()
+            selectionState.coordinator.phase.place(ActiveSelection(
+                path: sNode.path,
+                content: content,
+                anchor: word.0,
+                focus: word.1,
+                origin: word
+            ))
+            let snaps = selectableSnapshots()
+            if let sIdx = snaps.firstIndex(where: { $0.path == sNode.path }),
+               let sGroup = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) {
+                selectionState.coordinator.pick.noteClick(groupPath: sGroup)
+            }
+            dirtyCommit(at: now)
+            dispatchSelectionChanges(at: now)
+        }
+        #endif
+
+        let copied = copySelectionText()
+        let menu = PopupMenu().item(
+            "copy",
+            "Copy",
+            enabled: copied != nil,
+            keyEquivalent: "mod+c"
+        )
+        enqueuePopupRequest(ErasedPopupRequest(
+            menu: menu,
+            anchor: .point(pos.x, pos.y),
+            onPick: { _, picked, tx in
+                if picked == "copy", let copied {
+                    tx.copyText(copied)
+                }
+            }
+        ))
+        popupNeedsLayout = true
+        dirtyCommit(at: now)
+    }
+
     func handleSelectablePointerMove(to pos: Vec2, mods: Mods, at now: Double) -> Bool {
         _ = mods
+        guard !hasActivePointerDrag else {
+            selectionState.edgeScroll.stop()
+            return false
+        }
         guard selectionState.isDraggingSelection,
               case .dragging(var sel, let unit) = selectionState.coordinator.phase else {
+            selectionState.edgeScroll.stop()
             return false
         }
         guard let anchorIdx = resolvedNodeIndex(forPath: sel.path) else {
             selectionState.isDraggingSelection = false
+            selectionState.edgeScroll.stop()
             selectionState.coordinator.phase.clear()
             dirtyCommit(at: now)
             return false
         }
+        updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: anchorIdx, at: now)
         sel.path = flatNodes[anchorIdx].path
         let snaps = selectableSnapshots()
         let anchorGroup = SelectAllResolver.groupPath(forNodeAt: anchorIdx, in: snaps)
@@ -381,6 +526,7 @@ internal extension Runtime {
 
     func handleSelectablePointerUp(at pos: Vec2, button: PointerButton, at now: Double) -> Bool {
         _ = pos
+        selectionState.edgeScroll.stop()
         guard button == .primary, selectionState.isDraggingSelection else {
             return false
         }
@@ -601,7 +747,7 @@ internal extension Runtime {
         guard !changes.isEmpty else { return }
         for (path, change) in changes {
             guard let idx = nodeByPath[path], idx < flatNodes.count else { continue }
-            var tx = makeTx()
+            var tx = makeTx(at: now)
             if flatNodes[idx].el.invokeSelectionChange(state: &state, change: change, tx: &tx) {
                 applyTx(tx, at: now)
             }
@@ -669,5 +815,160 @@ internal extension Runtime {
             return (maxAboveIdx, len)
         }
         return nil
+    }
+
+    // MARK: - Drag Edge Auto-Scroll (`crates/rune/src/runtime/selection/edge_scroll.rs`)
+
+    private struct SelectionEdgeInfo {
+        var scrollPath: String
+        var speed: Float
+        var room: Double
+        var offset: Double
+    }
+
+    var hasActiveSelectableEdgeScroll: Bool {
+        selectionState.edgeScroll.isRunning
+    }
+
+    func nextSelectableEdgeScrollWakeDeadline(after now: Double) -> Double? {
+        switch selectionState.edgeScroll {
+        case .running(_, _, _, let due):
+            return max(now, due)
+        case .laying(_, _, _, let more):
+            return more ? now : nil
+        case .idle:
+            return nil
+        }
+    }
+
+    private func selectableEdgeAt(windowY: Float, anchorIdx: Int) -> SelectionEdgeInfo? {
+        guard selectionState.isDraggingSelection, selectionState.coordinator.phase.isDragging else {
+            return nil
+        }
+        var cur: Int? = anchorIdx
+        var scrollNode: FlatNode? = nil
+        while let idx = cur, idx < flatNodes.count {
+            let candidate = flatNodes[idx]
+            if candidate.el.layout.scrollAxes.contains(.vertical) {
+                scrollNode = candidate
+                break
+            }
+            cur = candidate.parentIndex
+        }
+        guard let sNode = scrollNode else { return nil }
+        let sPath = sNode.path
+        let maxY = Double(scrollMaxExtents[sPath]?.y ?? 0)
+        guard maxY > 0 else { return nil }
+        let offset = Double(scrollOffsets[sPath]?.y ?? 0)
+        let rawRect = presentedRectByPath[sPath] ?? sNode.targetRect
+        let windowRect = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
+        let visible = intersectRects(intersectRects(sNode.clipRect, rawRect), windowRect)
+        let atEdge: Float = 1.0
+        guard visible.bottom - visible.top > 2.0 * atEdge else { return nil }
+
+        let speedValue: Float
+        let room: Double
+        if windowY >= visible.bottom - atEdge {
+            let past = max(Float(8.0), windowY - (visible.bottom - atEdge))
+            speedValue = min(4000.0, 10.0 * past)
+            room = max(0.0, maxY - offset)
+        } else if windowY <= visible.top + atEdge {
+            let past = max(Float(8.0), (visible.top + atEdge) - windowY)
+            speedValue = -min(4000.0, 10.0 * past)
+            room = max(0.0, offset)
+        } else {
+            return nil
+        }
+        guard room > 0.0, abs(speedValue) > 0.0 else { return nil }
+        return SelectionEdgeInfo(scrollPath: sPath, speed: speedValue, room: room, offset: offset)
+    }
+
+    private func updateSelectableEdgeScrollOnMove(pos: Vec2, anchorIdx: Int, at now: Double) {
+        guard let edge = selectableEdgeAt(windowY: pos.y, anchorIdx: anchorIdx) else {
+            selectionState.edgeScroll.stop()
+            return
+        }
+        if case .running(let existingPath, _, _, _) = selectionState.edgeScroll, existingPath == edge.scrollPath {
+            return
+        }
+        selectionState.edgeScroll = .running(scrollPath: edge.scrollPath, last: now, fromOffset: nil, due: now)
+    }
+
+    @discardableResult
+    func stepSelectableEdgeScroll(at now: Double) -> Bool {
+        guard case .running(let scrollPath, let last, let fromOffset, let due) = selectionState.edgeScroll,
+              now >= due,
+              case .dragging(let sel, _) = selectionState.coordinator.phase,
+              let anchorIdx = resolvedNodeIndex(forPath: sel.path),
+              let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx),
+              edge.scrollPath == scrollPath else {
+            if case .running = selectionState.edgeScroll,
+               case .dragging(let sel, _) = selectionState.coordinator.phase,
+               let anchorIdx = resolvedNodeIndex(forPath: sel.path),
+               selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx) == nil {
+                selectionState.edgeScroll.stop()
+            }
+            return false
+        }
+        if let prevOffset = fromOffset, abs(edge.offset - prevOffset) <= 1e-9 {
+            selectionState.edgeScroll.stop()
+            return false
+        }
+        let dt = min(max(0.0, now - last), 0.05)
+        guard dt > 1e-9 else {
+            selectionState.edgeScroll = .running(
+                scrollPath: scrollPath,
+                last: last,
+                fromOffset: fromOffset,
+                due: now + (1.0 / 60.0)
+            )
+            return false
+        }
+        var by = Double(edge.speed) * dt
+        let reachedEnd: Bool
+        if edge.room - abs(by) <= 1e-3 {
+            by = edge.speed >= 0 ? edge.room : -edge.room
+            reachedEnd = true
+        } else {
+            reachedEnd = false
+        }
+        let maxY = Double(scrollMaxExtents[scrollPath]?.y ?? 0)
+        let curOffset = scrollOffsets[scrollPath] ?? .zero
+        let nextY = Float((Double(curOffset.y) + by).clamped(to: 0.0...maxY))
+        if abs(nextY - curOffset.y) <= 1e-6 {
+            selectionState.edgeScroll.stop()
+            return false
+        }
+        let updated = Vec2(curOffset.x, nextY)
+        scrollOffsets[scrollPath] = updated
+        if nextY < Float(maxY) - 0.5 {
+            wasPinnedToBottom.remove(scrollPath)
+        }
+        scrollStore.snap(NodeId.hash("scroll:" + scrollPath), Props.SCROLL, to: updated)
+        selectionState.edgeScroll = .laying(
+            scrollPath: scrollPath,
+            last: now,
+            fromOffset: by != 0 ? edge.offset : nil,
+            more: !reachedEnd
+        )
+        dirtyCommit(at: now)
+        return true
+    }
+
+    func laidSelectableEdgeScroll(at now: Double) {
+        guard case .laying(let scrollPath, let last, let fromOffset, let more) = selectionState.edgeScroll else {
+            return
+        }
+        if more {
+            selectionState.edgeScroll = .running(
+                scrollPath: scrollPath,
+                last: last,
+                fromOffset: fromOffset,
+                due: last + (1.0 / 60.0)
+            )
+        } else {
+            selectionState.edgeScroll.stop()
+        }
+        _ = handleSelectablePointerMove(to: pointerPosition, mods: .none, at: now)
     }
 }

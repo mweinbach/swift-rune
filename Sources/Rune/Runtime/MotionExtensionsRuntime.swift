@@ -48,47 +48,50 @@ internal extension Runtime {
         }
     }
 
-    /// Synchronizes periodic / finite `LoopSpec`s against scaled animation time so hierarchical
-    /// `cx.timeScale` changes pace loops smoothly alongside `Scene` motion.
+    /// Synchronizes periodic / finite `LoopSpec`s with `LoopClock` so frame advances and
+    /// `cx.timeScale` changes preserve periodic phase without jumps (`loop_clock.rs`).
     func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at appNow: Double, cut: Bool) {
-        let scaledNow = cxSettings.scaledTime(at: appNow)
         if cut {
-            loopClock.reset(to: scaledNow, scale: cxSettings.viewTimeScale)
-            loopRuntime.sync(specs: specs, at: scaledNow, reducedMotion: reducedMotion, cut: true)
-            loopRuntime.settleAll(at: scaledNow)
+            loopClock.reset(to: appNow, scale: cxSettings.viewTimeScale)
+            loopRuntime.sync(specs: specs, at: appNow, reducedMotion: reducedMotion, cut: true)
+            loopRuntime.settleAll(at: appNow)
             return
         }
-        _ = loopClock.step(to: appNow, scale: cxSettings.viewTimeScale)
-        loopRuntime.sync(specs: specs, at: scaledNow, reducedMotion: reducedMotion, cut: false)
+        _ = loopClock.syncTracks(&loopRuntime.tracks, to: appNow, scale: cxSettings.viewTimeScale)
+        loopRuntime.sync(specs: specs, at: appNow, reducedMotion: reducedMotion, cut: false)
     }
 
-    /// Samples a node's active loop track with both scaled animation time and unscaled wall time
-    /// (wall-clock `Cycle`s retain their cadence even when animation time is scaled/paused).
-    func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, animNow: Double, wallNow: Double) -> LoopSampleResult? {
-        loopRuntime.sample(id: id, nodeSize: nodeSize, at: animNow, wall: wallNow, reducedMotion: reducedMotion)
+    /// Advances `LoopClock` on frame ticks (including clean frames without layout commits) so
+    /// active `LoopTrack` timestamps shift cleanly when `cx.timeScale != 1.0`.
+    func syncMotionLoopClock(to appNow: Double) {
+        _ = loopClock.syncTracks(&loopRuntime.tracks, to: appNow, scale: cxSettings.viewTimeScale)
+    }
+
+    /// Samples a node's active loop track (periodic tracks kept on scaled `LoopClock`; `Cycle` uses
+    /// unscaled wall-clock time so it retains its cadence even when animation time is paused).
+    func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, wallNow: Double) -> LoopSampleResult? {
+        loopRuntime.sample(id: id, nodeSize: nodeSize, at: wallNow, wall: wallNow, reducedMotion: reducedMotion)
     }
 
     /// True when any non-sleeping loop needs frame advances (`isAnimating`).
-    func hasActiveMotionLoops(at animNow: Double) -> Bool {
-        loopRuntime.hasActiveLoops(at: animNow, reducedMotion: reducedMotion)
+    func hasActiveMotionLoops(at appNow: Double) -> Bool {
+        loopRuntime.hasActiveLoops(at: appNow, reducedMotion: reducedMotion)
     }
 
     /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`
-    /// (`LoopClock.nextPendingStart`) scaled back onto app wall time.
+    /// (`LoopClock.nextPendingStart`).
     func nextLoopWakeDeadline(after now: Double) -> Double? {
         var best: Double? = nil
         if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
             best = now + loopInterval
         }
-        let scaledNow = cxSettings.scaledTime(at: now)
-        if let pendingScaled = LoopClock.nextPendingStart(
+        if let pendingWake = LoopClock.nextPendingStart(
             tracks: loopRuntime.tracks.values,
-            at: scaledNow,
+            at: now,
             reducedMotion: reducedMotion,
             timeScale: cxSettings.viewTimeScale
         ) {
-            let wallWake = now + max(0.0, pendingScaled - scaledNow)
-            best = best.map { min($0, wallWake) } ?? wallWake
+            best = best.map { min($0, pendingWake) } ?? pendingWake
         }
         return best
     }

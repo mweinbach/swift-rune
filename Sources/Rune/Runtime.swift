@@ -393,6 +393,7 @@ public final class Runtime<State> {
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
     internal var clickCount: Int = 0
     private var activeDrag: DragSession? = nil
+    internal var hasActivePointerDrag: Bool { activeDrag != nil || armedDragOut != nil }
 
     // Scroll state keyed by element path
     internal var scrollOffsets: [String: Vec2] = [:]
@@ -717,6 +718,9 @@ public final class Runtime<State> {
         if let fillDue = virtualFill.armedWake?.due, fillDue > now {
             best = best.map { min($0, fillDue) } ?? fillDue
         }
+        if let edgeWake = nextSelectableEdgeScrollWakeDeadline(after: now) {
+            best = best.map { min($0, edgeWake) } ?? edgeWake
+        }
         return best
     }
 
@@ -799,6 +803,7 @@ public final class Runtime<State> {
             }
         }
 
+        let didEdgeScroll = stepSelectableEdgeScroll(at: now)
         if needsCommit {
             let commitAt = min(pendingEventTime ?? now, now)
             pendingEventTime = nil
@@ -807,6 +812,9 @@ public final class Runtime<State> {
             popupNeedsLayout = false
             forceInitialSettle = false
             reconcileDropHoverAfterCommit(at: now)
+            if didEdgeScroll {
+                laidSelectableEdgeScroll(at: now)
+            }
             if needsCommit {
                 commitTree(at: now, cut: false)
                 needsCommit = false
@@ -816,6 +824,7 @@ public final class Runtime<State> {
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
         let animNow = cxSettings.advanceClock(to: now)
+        syncMotionLoopClock(to: now)
 
         // Sample inertial scroll decay tracks and re-commit layout positions if scroll is moving
         scrollStore.sample(at: animNow)
@@ -881,7 +890,8 @@ public final class Runtime<State> {
             || virtualFill.isFilling
             || !enterDelays.isEmpty
             || tooltipFading(at: now)
-            || hasActiveMotionLoops(at: animNow)
+            || hasActiveMotionLoops(at: now)
+            || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
         isAnimating = rawAnimating && cxSettings.viewTimeScale > 0.0
 
@@ -1851,7 +1861,7 @@ public final class Runtime<State> {
         )
     }
 
-    private func nodeTakesFocus(_ el: El<State>) -> Bool {
+    internal func nodeTakesFocus(_ el: El<State>) -> Bool {
         if el.focusable { return true }
         let pressableRoles: Set<ElementRole> = [
             .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
@@ -2206,7 +2216,7 @@ public final class Runtime<State> {
             var sc = p.scale
             var rot = p.rotate
 
-            if let ls = sampleLoopPresentation(id: p.id, nodeSize: rect.size, animNow: now, wallNow: currentTime) {
+            if let ls = sampleLoopPresentation(id: p.id, nodeSize: rect.size, wallNow: currentTime) {
                 op *= ls.opacity
                 rot += ls.rotation
                 rect = rect.offsetBy(ls.offset)
@@ -3906,6 +3916,8 @@ public final class Runtime<State> {
                 var tx = makeTx(at: now)
                 node.el.handlers.onSecondaryClick?(&state, press, &tx)
                 applyTx(tx, at: now)
+            } else {
+                handleSelectableSecondaryClick(at: pos, at: now)
             }
             return
         }

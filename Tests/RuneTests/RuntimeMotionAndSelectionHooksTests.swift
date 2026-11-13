@@ -291,9 +291,10 @@ struct RuntimeMotionAndSelectionHooksTests {
             #expect(abs(boxRight - badgeRight) < 1.5, "rideTrailing badge right (\(badgeRight)) must track animating parent right (\(boxRight))")
         }
 
-        // Now mount loopRotation, loopSlide, and wall-clock Cycle; sample periodic loops mid-cycle
+        // Now mount loopRotation, loopSlide, and wall-clock Cycle; sample periodic loops across frames
         rt.update { s, _ in s.showActiveLoops = true }
-        _ = rt.frame(at: 0.80)
+        let loopScene0 = rt.frame(at: 0.80)
+        let loopScene1 = rt.frame(at: 1.10)
         if let pulse = rt.elements().first(where: { $0.key == "pulse" }),
            let spin = rt.elements().first(where: { $0.key == "spin" }),
            let slide = rt.elements().first(where: { $0.key == "slide" }),
@@ -301,7 +302,131 @@ struct RuntimeMotionAndSelectionHooksTests {
             #expect(pulse.opacity < 0.99)
             #expect(cyc.opacity > 0.2 && cyc.opacity <= 1.0)
             #expect(rt.isAnimating)
-            _ = (spin, slide)
+            // spin has .roundedRect primitive with non-zero rotation `turn` in loopScene1
+            let rotated = loopScene1.primitives.contains {
+                $0.kind == .roundedRect && abs($0.turn) > 0.1
+            }
+            #expect(rotated, "loopRotation must emit rotated primitive turn for key \"spin\" (\(spin.rect))")
+            // slide (`w: 40, to: Vec2(0.5, 0)`) shifts presented primitive x > 0 vs rest at loopScene0
+            let slideX0 = loopScene0.primitives.filter {
+                $0.kind == .roundedRect && abs($0.rect.z - 40.0 * rt.pixelScale) < 1.0
+            }.map(\.rect.x).min()
+            let slideX1 = loopScene1.primitives.filter {
+                $0.kind == .roundedRect && abs($0.rect.z - 40.0 * rt.pixelScale) < 1.0
+            }.map(\.rect.x).min()
+            #expect(slideX0 != nil && slideX1 != nil && abs(slideX1! - slideX0!) > 1.0,
+                    "loopSlide must offset primitive rect.x across frames (0: \(String(describing: slideX0)), 1: \(String(describing: slideX1)), target: \(slide.rect))")
+        } else {
+            Issue.record("Expected active loop elements mounted")
         }
+    }
+
+    @Test("Topmost hit target, per-path clickCount, onDrag passthrough, secondary Copy menu, and drag edge auto-scroll")
+    func selectionEdgeCasesAndSecondaryMenuAndEdgeScroll() throws {
+        struct S {
+            var dragDeltaX: Float = 0
+            var dragCount: Int = 0
+        }
+
+        let rt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(420, 260),
+            view: { _, _ -> El<S> in
+                var scroller: El<S> = col().key("scroller").w(220).h(72).scrollY().selectionGroup()
+                for idx in 0..<8 {
+                    scroller = scroller.child(text("row item \(idx)").key("r\(idx)").w(200).h(24).selectable())
+                }
+                return col().w(420).h(260).gap(6)
+                    // 1. Overlapping overlay over "blocked" text (topmost target is overlay, not text)
+                    .child(
+                        col().w(200).h(26)
+                            .child(text("secret blocked").key("blocked").w(200).h(26).selectable())
+                            .child(el().key("blocker").absolute(x: 0, y: 0).w(200).h(26).bg(.srgb(0.1, 0.1, 0.1, 0.8)))
+                    )
+                    // 2. Adjacent selectable texts for per-path click run check
+                    .child(
+                        row().w(260).h(24).gap(12)
+                            .child(text("alpha one").key("pa").w(120).h(24).selectable())
+                            .child(text("beta two").key("pb").w(120).h(24).selectable())
+                    )
+                    // 3. Draggable row wrapping selectable text: clicks select word, drag calls onDrag
+                    .child(
+                        row().key("dragRow").w(200).h(24)
+                            .onDrag { state, drag, _ in
+                                state.dragDeltaX = drag.delta.x
+                                state.dragCount += 1
+                            }
+                            .child(text("drag label").key("dlbl").w(180).h(24).selectable())
+                    )
+                    // 4. Scrollable selectable list for edge auto-scroll & secondary Copy menu
+                    .child(scroller)
+            }
+        )
+
+        _ = rt.frame(at: 0.0)
+        let blocker = rt.elements().first(where: { $0.key == "blocker" })!
+        let pa = rt.elements().first(where: { $0.key == "pa" })!
+        let pb = rt.elements().first(where: { $0.key == "pb" })!
+        let dlbl = rt.elements().first(where: { $0.key == "dlbl" })!
+        let scroller = rt.elements().first(where: { $0.key == "scroller" })!
+        let r0 = rt.elements().first(where: { $0.key == "r0" })!
+
+        // 1. Clicking/dragging over opaque blocker must NOT select obscured text underneath
+        let blockPt = Vec2(blocker.rect[0] + 20, blocker.rect[1] + 12)
+        rt.pointerDown(at: blockPt, button: .primary, mods: .none, at: 0.1)
+        rt.pointerMove(to: Vec2(blockPt.x + 60, blockPt.y), mods: .none, at: 0.12)
+        rt.pointerUp(at: Vec2(blockPt.x + 60, blockPt.y), button: .primary, mods: .none, at: 0.14)
+        #expect(rt.selectedText() == nil, "opaque overlay must block selection start on obscured text")
+
+        // 2. Double-clicking pa then quickly clicking pb resets clickCount on pb (character, NOT word!)
+        let paPt = Vec2(pa.rect[0] + 15, pa.rect[1] + 12)
+        let pbPt = Vec2(pb.rect[0] + 15, pb.rect[1] + 12)
+        rt.pointerDown(at: paPt, button: .primary, mods: .none, at: 1.0)
+        rt.pointerUp(at: paPt, button: .primary, mods: .none, at: 1.02)
+        rt.pointerDown(at: paPt, button: .primary, mods: .none, at: 1.1)
+        rt.pointerUp(at: paPt, button: .primary, mods: .none, at: 1.12)
+        #expect(rt.selectedText() == "alpha")
+        // Quick click on pb (< 0.35s) must NOT double-click-select "beta"
+        rt.pointerDown(at: pbPt, button: .primary, mods: .none, at: 1.2)
+        rt.pointerUp(at: pbPt, button: .primary, mods: .none, at: 1.22)
+        #expect(rt.selectedText() == nil, "quick click on a different text path resets per-path clickCount")
+
+        // 3. Secondary-click on selectable text opens Copy menu & selects word on macOS
+        let copyWordPt = Vec2(pa.rect[0] + 15, pa.rect[1] + 12)
+        rt.pointerDown(at: copyWordPt, button: .secondary, mods: .none, at: 1.6)
+        _ = rt.frame(at: 1.61)
+        #if os(macOS)
+        #expect(rt.selectedText() == "alpha")
+        #endif
+        let popup = rt.takePopup()
+        #expect(popup != nil, "secondary click on selectable text must enqueue Copy popup menu")
+        try rt.resolvePopup("copy")
+        #expect(rt.clipboard.text == "alpha")
+
+        // 4. Inside onDrag row: double-click places word selection, dragging fires row onDrag
+        let dPt = Vec2(dlbl.rect[0] + 15, dlbl.rect[1] + 12)
+        rt.pointerDown(at: dPt, button: .primary, mods: .none, at: 2.0)
+        rt.pointerUp(at: dPt, button: .primary, mods: .none, at: 2.02)
+        rt.pointerDown(at: dPt, button: .primary, mods: .none, at: 2.1)
+        rt.pointerMove(to: Vec2(dPt.x + 30, dPt.y), mods: .none, at: 2.12)
+        rt.pointerUp(at: Vec2(dPt.x + 30, dPt.y), button: .primary, mods: .none, at: 2.14)
+        #expect(rt.state.dragCount >= 2, "onDrag move must not be swallowed when pressing selectable child inside onDrag row")
+        #expect(abs(rt.state.dragDeltaX - 30) < 0.5)
+        #expect(rt.selectedText() == "drag", "double-click inside onDrag row still selects the word")
+
+        // 5. Drag edge auto-scroll: drag from top row past bottom edge of scroller and advance frames
+        let sStart = Vec2(r0.rect[0] + 1, r0.rect[1] + 10)
+        let sBelow = Vec2(r0.rect[0] + 80, scroller.rect[1] + scroller.rect[3] + 25)
+        rt.pointerDown(at: sStart, button: .primary, mods: .none, at: 3.0)
+        rt.pointerMove(to: sBelow, mods: .none, at: 3.02)
+        _ = rt.frame(at: 3.02)
+        _ = rt.frame(at: 3.07)
+        _ = rt.frame(at: 3.12)
+        _ = rt.frame(at: 3.17)
+        let scrolledY = rt.scrollOffsets[scroller.path]?.y ?? 0
+        #expect(scrolledY > 10.0, "holding selection drag below scroll bottom must edge-scroll (got \(scrolledY))")
+        let selText = rt.selectedText() ?? ""
+        #expect(selText.contains("row item 0") && selText.contains("row item 4"), "edge-scroll drag selects across scrolled rows: \(selText)")
+        rt.pointerUp(at: sBelow, button: .primary, mods: .none, at: 3.20)
     }
 }
