@@ -377,6 +377,7 @@ public protocol HostedWindowEntry: AnyObject {
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
+    func makeDesktopMember(scale: Float, dark: Bool, isMain: Bool) -> any DesktopMember
 }
 
 final class TypedHostedWindowEntry<State>: HostedWindowEntry {
@@ -758,6 +759,16 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).shortcutRegistry
     }
 
+    func makeDesktopMember(scale: Float, dark: Bool, isMain: Bool) -> any DesktopMember {
+        DesktopWindow(
+            key: spec.key,
+            spec: spec,
+            scale: scale,
+            dark: spec.appSpec.dark ?? dark,
+            isMain: isMain
+        )
+    }
+
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
         let configure = spec.configureRuntime
@@ -860,7 +871,8 @@ public enum RuneMultiWindow {
     @discardableResult
     public static func runHeadless(
         _ windows: [AnyWindowSpec],
-        args: ToolingArgs
+        args: ToolingArgs,
+        options: RunOptions = RunOptions()
     ) throws -> HeadlessRunner.Output {
         let flat = flatten(windows)
         try validate(flat)
@@ -873,6 +885,26 @@ public enum RuneMultiWindow {
                 finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
                 treeJSON: Data("{}".utf8),
                 windowKeys: keys
+            )
+        }
+        if let desktopPath = args.desktopPath {
+            let loaded = try DesktopComposite.loadBackdrop(imagePath: desktopPath, scale: args.pixelScale)
+            let dark = args.darkOverride ?? true
+            let members: [any DesktopMember] = flat.enumerated().map { idx, spec in
+                spec.makeHostEntry().makeDesktopMember(
+                    scale: args.pixelScale,
+                    dark: dark,
+                    isMain: idx == 0
+                )
+            }
+            return try VirtualDesk.runHeadlessDesktop(
+                members: members,
+                args: args,
+                options: options,
+                desktop: loaded.desktop,
+                backdropRGBA: loaded.rgba,
+                width: loaded.pixelWidth,
+                height: loaded.pixelHeight
             )
         }
         let target: AnyWindowSpec
@@ -907,13 +939,13 @@ public enum RuneMultiWindow {
         try validate(flat)
         let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
         if parsed.isHeadlessRequested {
-            _ = try runHeadless(flat, args: parsed)
+            _ = try runHeadless(flat, args: parsed, options: options)
             return
         }
         #if os(macOS)
         try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
         #else
-        _ = try runHeadless(flat, args: parsed)
+        _ = try runHeadless(flat, args: parsed, options: options)
         #endif
     }
 
@@ -928,6 +960,26 @@ public enum RuneMultiWindow {
         let windows = factory(parsed)
         try runWindows(windows, options: options, arguments: arguments)
     }
+
+    /// Display-aware overload of `runWindowsWithArgs` mirroring `rune::run_windows_with_args(|displays| ...)`.
+    @MainActor
+    @_disfavoredOverload
+    public static func runWindowsWithArgs(
+        options: RunOptions = RunOptions(),
+        arguments: [String],
+        _ factory: ([DisplayInfo]) -> [AnyWindowSpec]
+    ) throws {
+        let parsed = ToolingArgs.parse(arguments)
+        let displays: [DisplayInfo]
+        if let desktopPath = parsed.desktopPath,
+           let loaded = try? DesktopComposite.loadBackdrop(imagePath: desktopPath, scale: parsed.pixelScale) {
+            displays = loaded.desktop.displayInfos()
+        } else {
+            displays = VirtualDesktop.single(scale: Double(max(0.5, parsed.pixelScale))).displayInfos()
+        }
+        let windows = factory(displays)
+        try runWindows(windows, options: options, arguments: arguments)
+    }
 }
 
 /// Top-level helper mirroring `rune::run_windows_with_args`.
@@ -936,6 +988,17 @@ public func runWindowsWithArgs(
     options: RunOptions = RunOptions(),
     arguments: [String],
     _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) throws {
+    try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Top-level display-aware helper mirroring `rune::run_windows_with_args(|displays| ...)`.
+@MainActor
+@_disfavoredOverload
+public func runWindowsWithArgs(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: ([DisplayInfo]) -> [AnyWindowSpec]
 ) throws {
     try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
 }

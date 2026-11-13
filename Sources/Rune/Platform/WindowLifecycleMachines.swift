@@ -358,6 +358,7 @@ public enum WindowPacingConstants {
     public static let timeoutRetry: Double = 0.016
     public static let timerFrame: Double = 0.016_667
     public static let timerFrameStall: Double = occludedRetry
+    public static let readyFallback: Double = 1.0
 }
 
 public enum WindowMissed: Equatable, Sendable {
@@ -498,5 +499,292 @@ public struct WindowTimerFrame: Equatable, Sendable {
             return asked + WindowPacingConstants.timerFrameStall
         }
         return due
+    }
+}
+
+// MARK: - Window Prime (window/native.rs)
+
+/// Whether a frame may presume a new macOS window on screen before AppKit reports it (`window/native.rs::Prime`).
+public enum WindowPrime: Equatable, Sendable {
+    case launching(left: UInt8)
+    case steady
+
+    public static func launching() -> WindowPrime { .launching(left: 2) }
+
+    public var presumes: Bool {
+        if case .launching = self { return true }
+        return false
+    }
+
+    /// A frame drew presuming the window shown.
+    public mutating func spend() {
+        if case .launching(let left) = self {
+            self = left > 1 ? .launching(left: left - 1) : .steady
+        }
+    }
+
+    public mutating func stop() {
+        self = .steady
+    }
+}
+
+// MARK: - Window FirstFrame (window/first_frame.rs)
+
+public enum FirstFrameEvent: Sendable {
+    case prepare(now: Double)
+    case retry(retry: Double)
+    case requestReveal(stale: Bool, visible: Bool, now: Double)
+    case hide
+    case expire
+    case gpuDone
+    case complete
+    case notified
+    case skipped(now: Double)
+    case takeReady
+}
+
+public enum FirstFrameEffect: Equatable, Sendable {
+    case show
+    case runOnReady
+}
+
+/// First-frame readiness, launcher reveal holding/cancellation, and `on_ready` fallback (`window/first_frame.rs::FirstFrame`).
+public struct WindowFirstFrame: Equatable, Sendable {
+    public static let prepareFor: Double = 2.0
+
+    public enum FrameState: Equatable, Sendable {
+        case stale
+        case preparing(retry: Double, until: Double)
+        case drawn(retry: Double?, until: Double?)
+
+        var preparingBounds: (Double, Double)? {
+            switch self {
+            case .stale:
+                return nil
+            case let .preparing(retry, until):
+                return (retry, until)
+            case let .drawn(retry, until):
+                if let r = retry, let u = until { return (r, u) }
+                return nil
+            }
+        }
+    }
+
+    public enum RevealState: Equatable, Sendable {
+        case idle
+        case wanted
+    }
+
+    public enum NoticeState: Equatable, Sendable {
+        case owed
+        case sent
+    }
+
+    public enum OnReadyState: Equatable, Sendable {
+        case waiting(fallback: Double?)
+        case ran
+    }
+
+    public private(set) var frame: FrameState
+    public private(set) var reveal: RevealState
+    public private(set) var notice: NoticeState
+    public private(set) var onReady: OnReadyState
+
+    public init(
+        frame: FrameState = .stale,
+        reveal: RevealState = .idle,
+        notice: NoticeState = .owed,
+        onReady: OnReadyState = .waiting(fallback: nil)
+    ) {
+        self.frame = frame
+        self.reveal = reveal
+        self.notice = notice
+        self.onReady = onReady
+    }
+
+    public static func opened(at now: Double) -> WindowFirstFrame {
+        WindowFirstFrame(onReady: .waiting(fallback: now + WindowPacingConstants.readyFallback))
+    }
+
+    public static func drawnNotified() -> WindowFirstFrame {
+        WindowFirstFrame(frame: .drawn(retry: nil, until: nil), notice: .sent)
+    }
+
+    @discardableResult
+    public mutating func step(_ event: FirstFrameEvent) -> [FirstFrameEffect] {
+        switch event {
+        case .prepare(let now):
+            let retry = now
+            let until = now + Self.prepareFor
+            switch frame {
+            case .drawn:
+                frame = .drawn(retry: retry, until: until)
+            case .stale, .preparing:
+                frame = .preparing(retry: retry, until: until)
+            }
+            return []
+
+        case .retry(let retry):
+            switch frame {
+            case .preparing(_, let until):
+                frame = .preparing(retry: retry, until: until)
+            case .drawn(_, let until?) :
+                frame = .drawn(retry: retry, until: until)
+            case .drawn, .stale:
+                break
+            }
+            return []
+
+        case .requestReveal(_, visible: true, _):
+            return [.show]
+
+        case .requestReveal(let stale, visible: false, let now):
+            if stale { unready() }
+            if ready { return [.show] }
+            reveal = .wanted
+            if deadline == nil { _ = step(.prepare(now: now)) }
+            return []
+
+        case .hide:
+            reveal = .idle
+            if notice == .sent {
+                frame = .drawn(retry: nil, until: nil)
+            }
+            return []
+
+        case .expire:
+            switch frame {
+            case .preparing, .stale:
+                frame = .stale
+            case .drawn:
+                frame = .drawn(retry: nil, until: nil)
+            }
+            if notice == .owed { return [] }
+            frame = .drawn(retry: nil, until: nil)
+            return takeReveal()
+
+        case .gpuDone:
+            switch frame {
+            case .stale:
+                frame = .drawn(retry: nil, until: nil)
+            case let .preparing(retry, until):
+                frame = .drawn(retry: retry, until: until)
+            case .drawn:
+                break
+            }
+            return []
+
+        case .complete:
+            frame = .drawn(retry: nil, until: nil)
+            return takeReveal()
+
+        case .notified:
+            notice = .sent
+            return []
+
+        case .skipped(let now):
+            if case .waiting(let existing) = onReady {
+                let next = existing.map { min($0, now) } ?? now
+                onReady = .waiting(fallback: next)
+            }
+            return []
+
+        case .takeReady:
+            switch onReady {
+            case .waiting:
+                onReady = .ran
+                return [.runOnReady]
+            case .ran:
+                return []
+            }
+        }
+    }
+
+    private mutating func unready() {
+        switch frame {
+        case let .drawn(retry?, until?):
+            frame = .preparing(retry: retry, until: until)
+        case .drawn(nil, _), .drawn(_, nil):
+            frame = .stale
+        case .stale, .preparing:
+            break
+        }
+    }
+
+    private mutating func takeReveal() -> [FirstFrameEffect] {
+        let prev = reveal
+        reveal = .idle
+        return prev == .wanted ? [.show] : []
+    }
+
+    public var ready: Bool {
+        if case .drawn = frame { return true }
+        return false
+    }
+
+    public var deadline: (Double, Double)? {
+        frame.preparingBounds
+    }
+
+    public var revealing: Bool { reveal == .wanted }
+    public var notified: Bool { notice == .sent }
+    public var settles: Bool { !(revealing && notified) }
+    public var pending: Bool { ready && (!notified || revealing) }
+
+    public var readyDeadline: Double? {
+        if case .waiting(let fallback) = onReady { return fallback }
+        return nil
+    }
+
+    public func readyDue(at now: Double) -> Bool {
+        readyDeadline.map { $0 <= now } ?? false
+    }
+
+    @discardableResult
+    public mutating func takeReady() -> Bool {
+        !step(.takeReady).isEmpty
+    }
+
+    public mutating func skipped(at now: Double) {
+        _ = step(.skipped(now: now))
+    }
+
+    @discardableResult
+    public mutating func requestReveal(stale: Bool, visible: Bool, now: Double) -> Bool {
+        step(.requestReveal(stale: stale, visible: visible, now: now)).contains(.show)
+    }
+
+    public mutating func hide() {
+        _ = step(.hide)
+    }
+
+    @discardableResult
+    public mutating func expire() -> Bool {
+        step(.expire).contains(.show)
+    }
+
+    public mutating func missed() {
+        unready()
+    }
+
+    public mutating func prepare(now: Double) {
+        _ = step(.prepare(now: now))
+    }
+
+    public mutating func retryAt(_ retry: Double) {
+        _ = step(.retry(retry: retry))
+    }
+
+    public mutating func gpuDone() {
+        _ = step(.gpuDone)
+    }
+
+    public mutating func notify() {
+        _ = step(.notified)
+    }
+
+    @discardableResult
+    public mutating func complete() -> Bool {
+        step(.complete).contains(.show)
     }
 }

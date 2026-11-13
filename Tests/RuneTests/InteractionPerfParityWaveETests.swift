@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import Rune
+#if canImport(Darwin)
+import Darwin
+#endif
 
 @Suite("Interaction & PerfWarn Wave E Parity", .serialized)
 struct InteractionPerfParityWaveETests {
@@ -191,6 +194,31 @@ struct InteractionPerfParityWaveETests {
         #expect(PerfWarn.takeTestLog().isEmpty)
     }
 
+    @Test("perf_warn/tests.rs: memo over a differently keyed root warns once per site")
+    func aMemoOverADifferentlyKeyedRootWarnsOncePerSite() {
+        Self.resetAll()
+        PerfWarn.testEnabledOverride = true
+        defer { Self.resetAll() }
+
+        let rt = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(200, 200),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { _, _ in
+            let same: El<Int> = memo("same", 0) { col().key("same") }
+            let renamed: El<Int> = memo("outer", 0) { col().key("inner") }
+            return col().child(same).child(renamed)
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 1.0 / 60.0) { n, _ in n += 1 }
+        _ = rt.frame(at: 1.0 / 60.0)
+        let log = PerfWarn.takeTestLog()
+        #expect(log.count == 1, "expected 1 warning, got \(log)")
+        #expect(log[0].contains("\"outer\"") && log[0].contains("\"inner\""), "log: \(log[0])")
+        #expect(rt.element(byKey: "outer") != nil && rt.element(byKey: "inner") == nil)
+    }
+
     // MARK: - perf_warn/commits_tests.rs (8/8)
 
     @Test("commits_tests.rs: scroll commit warns once for poll after 6 frames")
@@ -365,91 +393,358 @@ struct InteractionPerfParityWaveETests {
 
     // MARK: - perf_warn/idle_tests.rs (idle_readings_walk)
 
-    @Test("idle_tests.rs: IdleMeter stepIdleReading handles quiet streaks, resets, >2s splits, and combined reasons")
+    @Test("idle_tests.rs: exhaustive depth-5 IdleMeter walk + 120-frame wake label checks match Old oracle")
     func idleReadingsWalk() {
-        var streak = IdleMeter.StreakState.watching
+        struct OldIdle {
+            var idleFrom: Double = 0.0
+            var idleFrames: UInt32 = 0
+            var woken: (Bool, Bool, Bool) = (false, false, false)
 
-        // Non-quiet / animating / changed output all reset or stay watching.
-        #expect(IdleMeter.stepIdleReading(&streak, reading: .init(clock: 0.0, quiet: false, animating: false, same: true, timer: true, live: false, polled: false)) == nil)
-        #expect(streak == .watching)
-        #expect(IdleMeter.stepIdleReading(&streak, reading: .init(clock: 0.1, quiet: true, animating: true, same: true, timer: true, live: false, polled: false)) == nil)
-        #expect(streak == .watching)
-        #expect(IdleMeter.stepIdleReading(&streak, reading: .init(clock: 0.2, quiet: true, animating: false, same: false, timer: true, live: false, polled: false)) == nil)
-        #expect(streak == .watching)
+            var label: String {
+                switch woken {
+                case (true, _, true): return "a `wake_after` loop whose `poll` returns true"
+                case (true, false, false): return "a `wake_after` loop"
+                case (true, true, false): return "a `wake_after` loop and a live value"
+                case (false, _, _): return "a live value"
+                }
+            }
 
-        // Unwoken or unknown `same == nil` leaves state unchanged.
-        #expect(IdleMeter.stepIdleReading(&streak, reading: .init(clock: 0.3, quiet: true, animating: false, same: nil, timer: true, live: false, polled: false)) == nil)
-        #expect(IdleMeter.stepIdleReading(&streak, reading: .init(clock: 0.4, quiet: true, animating: false, same: true, timer: false, live: false, polled: false)) == nil)
-        #expect(streak == .watching)
-
-        // 119 timer frames within 2s stay silent, upgrading with live & polled, then warn on frame 120.
-        for i in 0..<119 {
-            let live = (i == 50)
-            let polled = (i == 60)
-            let res = IdleMeter.stepIdleReading(
-                &streak,
-                reading: .init(clock: 1.0 + Double(i) * 0.01, quiet: true, animating: false, same: true, timer: true, live: live, polled: polled)
-            )
-            #expect(res == nil)
+            mutating func end(_ r: IdleMeter.IdleReading) -> (String, Double)? {
+                if !r.quiet || r.animating || r.same == false {
+                    idleFrames = 0
+                    return nil
+                }
+                guard r.same != nil, (r.timer || r.live) else { return nil }
+                if idleFrames == 0 || r.clock - idleFrom > 2.0 {
+                    idleFrom = r.clock
+                    idleFrames = 0
+                    woken = (false, false, false)
+                }
+                idleFrames += 1
+                woken.0 = woken.0 || r.timer
+                woken.1 = woken.1 || r.live
+                woken.2 = woken.2 || r.polled
+                if idleFrames == 120 {
+                    return (label, r.clock - idleFrom)
+                }
+                return nil
+            }
         }
-        let fired = IdleMeter.stepIdleReading(
-            &streak,
-            reading: .init(clock: 2.2, quiet: true, animating: false, same: true, timer: true, live: false, polled: false)
-        )
-        #expect(fired?.0 == .timerPoll)
-        #expect(abs((fired?.1 ?? 0) - 1.2) < 0.001)
 
-        // Advancing > 2.0s from window start resets the count to 1.
-        var split = IdleMeter.StreakState.watching
-        _ = IdleMeter.stepIdleReading(&split, reading: .init(clock: 0.0, quiet: true, animating: false, same: true, timer: false, live: true, polled: false))
-        _ = IdleMeter.stepIdleReading(&split, reading: .init(clock: 2.5, quiet: true, animating: false, same: true, timer: false, live: true, polled: false))
-        #expect(split == .counting(from: 2.5, frames: 1, woke: .live(polled: false)))
+        func checkReading(
+            _ streak: inout IdleMeter.StreakState,
+            _ old: inout OldIdle,
+            _ r: IdleMeter.IdleReading
+        ) -> String? {
+            let expected = old.end(r)
+            let got = IdleMeter.stepIdleReading(&streak, reading: r).map { ($0.0.label, $0.1) }
+            #expect(got?.0 == expected?.0 && got?.1 == expected?.1)
+            switch streak {
+            case .watching:
+                #expect(old.idleFrames == 0)
+            case let .counting(from, frames, woke):
+                #expect(from == old.idleFrom && frames == old.idleFrames && woke.label == old.label)
+            }
+            return got?.0
+        }
+
+        let live = IdleMeter.IdleReading(
+            clock: 0.0, quiet: true, animating: false, same: true, timer: false, live: true, polled: false
+        )
+        var events: [IdleMeter.IdleReading] = []
+        var r1 = live; r1.live = false; r1.timer = true
+        var r2 = live; r2.polled = true
+        var r3 = live; r3.live = false; r3.timer = true; r3.polled = true
+        var r4 = live; r4.live = false; r4.polled = true
+        var r5 = live; r5.quiet = false
+        var r6 = live; r6.animating = true
+        var r7 = live; r7.same = nil
+        var r8 = live; r8.same = false
+        var r9 = live; r9.clock = 2.0
+        var r10 = live; r10.clock = 2.01
+        var r11 = live; r11.live = true; r11.timer = true
+        events = [live, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11]
+
+        let allLabels = [
+            "a `wake_after` loop whose `poll` returns true",
+            "a `wake_after` loop",
+            "a `wake_after` loop and a live value",
+            "a live value",
+        ]
+
+        func walk(
+            _ s: IdleMeter.StreakState,
+            _ old: OldIdle,
+            _ events: [IdleMeter.IdleReading],
+            _ depth: Int,
+            _ seen: inout [Bool]
+        ) {
+            if depth == 0 { return }
+            for r in events {
+                var ns = s
+                var nold = old
+                if let label = checkReading(&ns, &nold, r),
+                   let idx = allLabels.firstIndex(of: label) {
+                    seen[idx] = true
+                }
+                walk(ns, nold, events, depth - 1, &seen)
+            }
+        }
+
+        var seen = [false, false, false, false]
+        var s = IdleMeter.StreakState.watching
+        var old = OldIdle()
+        walk(s, old, events, 5, &seen)
+
+        for seed in [live, r1] {
+            _ = checkReading(&s, &old, r5)
+            for _ in 0..<118 {
+                _ = checkReading(&s, &old, seed)
+            }
+            walk(s, old, events, 5, &seen)
+        }
+
+        let orderedLabels = [
+            "a live value",
+            "a `wake_after` loop",
+            "a `wake_after` loop and a live value",
+            "a `wake_after` loop whose `poll` returns true",
+        ]
+        let combos: [(Bool, Bool, Bool)] = [
+            (false, true, false),
+            (true, false, false),
+            (true, true, false),
+            (true, false, true),
+        ]
+        for (i, (timer, isLive, polled)) in combos.enumerated() {
+            _ = checkReading(&s, &old, r5)
+            let reading = IdleMeter.IdleReading(
+                clock: 0.0, quiet: true, animating: false, same: true, timer: timer, live: isLive, polled: polled
+            )
+            for _ in 0..<119 {
+                #expect(checkReading(&s, &old, reading) == nil)
+            }
+            #expect(checkReading(&s, &old, reading) == orderedLabels[i])
+        }
+        #expect(seen.allSatisfy { $0 }, "the walk reaches every wake label: \(seen)")
     }
 
     // MARK: - interaction/frame_tests.rs (frame_phase_walk)
 
-    @Test("frame_tests.rs: InteractionFrameMachine walk merges ranks, commits, untimed frames, and finish")
+    @Test("frame_tests.rs: exhaustive 8^5 frame phase walk matches Old tracker oracle")
     func framePhaseWalk() {
-        var state = InteractionFrameState.idle
-        let names = InteractionNames()
-        let lowNote = InteractionNote(route: names.fixed("home"), control: names.fixed("list"), action: "on_hover", rank: 1)
-        let highNote = InteractionNote(route: names.fixed("home"), control: names.fixed("save"), action: "on_press", rank: 3)
+        Self.resetAll()
+        defer { Self.resetAll() }
 
-        // Begin queued, then note arrives -> starts phase timers and keeps earlier arrival + higher rank.
-        #expect(InteractionFrameMachine.step(&state, event: .begin(atNs: 100, queued: true, cpuMs: 1.5)).isEmpty)
-        let fx1 = InteractionFrameMachine.step(&state, event: .note(note: lowNote, arrivedNs: 90, startedNs: 110, handlerMs: 0.5))
-        #expect(fx1.count == 1)
-        let fx2 = InteractionFrameMachine.step(&state, event: .note(note: highNote, arrivedNs: 80, startedNs: 120, handlerMs: 1.2))
-        #expect(fx2.isEmpty)
-        _ = InteractionFrameMachine.step(&state, event: .commit(0b10))
-        _ = InteractionFrameMachine.step(&state, event: .commit(0b01))
-        let fxBuild = InteractionFrameMachine.step(
-            &state,
-            event: .buildTimed(atNs: 200, phases: [1, 2, 3, 4, 5, 6], shaped: 12, cpuMs: 4.5, stacks: nil)
-        )
-        #expect(fxBuild.count == 1)
-        let fxFinish = InteractionFrameMachine.step(&state, event: .finish)
-        if case let .count(built)? = fxFinish.first {
-            #expect(built.timed.arrivedNs == 80)
-            #expect(built.timed.frameStartNs == 100)
-            #expect(abs(built.timed.handlerMs - 1.7) < 0.0001)
-            #expect(built.timed.note.action == "on_press")
-            #expect(built.timed.why == 0b11)
-            #expect(built.timed.commits == 2)
-            #expect(built.cpuMs == 3.0)
-        } else {
-            Issue.record("expected .count effect from .finish")
+        struct OldTimed {
+            var arrived: UInt64
+            var frameStart: UInt64
+            var handlerMs: Double
+            var rank: UInt8
+            var why: UInt16
+            var commits: UInt32
+            var built: (UInt64, [Double], UInt32)?
+            var cpu: (Double?, Double?)
+            var stacks: UInt32?
         }
 
-        // Untimed frame produces .checkFrame with accumulated commit mask.
-        _ = InteractionFrameMachine.step(&state, event: .begin(atNs: 500, queued: false, cpuMs: nil))
-        _ = InteractionFrameMachine.step(&state, event: .commit(0b100))
-        let fxUntimed = InteractionFrameMachine.step(&state, event: .buildUntimed)
-        if case let .checkFrame(startNs, why)? = fxUntimed.first {
-            #expect(startNs == 500 && why == 0b100)
-        } else {
-            Issue.record("expected .checkFrame effect from .buildUntimed")
+        struct OldTracker {
+            var frameStart: UInt64? = nil
+            var began: (UInt64, Double?)? = nil
+            var frameWhy: UInt16 = 0
+            var timed: OldTimed? = nil
+            var times: [Double] = [Double](repeating: 0, count: 6)
+            var active: Bool = false
+
+            mutating func begin(queued: Bool, now: UInt64, cpu: Double?) -> (OldTimed, UInt64, UInt64)? {
+                let left = timed?.built?.0
+                let finished = left.flatMap { finish(submitted: $0, presentsAt: nil) }
+                frameStart = queued ? now : nil
+                began = (now, queued ? cpu : nil)
+                frameWhy = 0
+                return finished
+            }
+
+            mutating func noted(rank: UInt8, at: UInt64?, started: UInt64, handlerMs: Double) {
+                let fs: UInt64
+                if let existing = frameStart {
+                    fs = existing
+                } else {
+                    fs = started
+                    frameStart = fs
+                }
+                let arrived = min(at ?? fs, fs)
+                if var t = timed, t.built == nil {
+                    t.arrived = min(t.arrived, arrived)
+                    t.handlerMs += handlerMs
+                    if rank > t.rank { t.rank = rank }
+                    timed = t
+                } else {
+                    let c0 = began?.1
+                    timed = OldTimed(
+                        arrived: arrived,
+                        frameStart: fs,
+                        handlerMs: handlerMs,
+                        rank: rank,
+                        why: 0,
+                        commits: 0,
+                        built: nil,
+                        cpu: (c0, nil),
+                        stacks: nil
+                    )
+                    times = [Double](repeating: 0, count: 6)
+                    active = true
+                }
+            }
+
+            mutating func committed(why: UInt16) {
+                frameWhy |= why
+                if var t = timed, t.built == nil {
+                    t.why |= why
+                    t.commits += 1
+                    timed = t
+                }
+            }
+
+            mutating func build(
+                shaped: UInt32,
+                now: UInt64,
+                cpu: Double?,
+                stacks: UInt32?,
+                slowMs: Double
+            ) -> (UInt64, UInt64, UInt16, UInt32)? {
+                let why = frameWhy
+                frameStart = nil
+                let prevBegan = began
+                began = nil
+                if var t = timed, t.built == nil {
+                    let capturedTimes = times
+                    times = [Double](repeating: 0, count: 6)
+                    t.built = (now, capturedTimes, shaped)
+                    if let c0 = t.cpu.0, let c1 = cpu {
+                        t.cpu.1 = c1 - c0
+                    } else {
+                        t.cpu.1 = nil
+                    }
+                    t.stacks = stacks
+                    timed = t
+                    active = false
+                    return nil
+                }
+                guard let start = prevBegan?.0, let s = stacks else { return nil }
+                let work = Double(now >= start ? now - start : 0) / 1_000_000.0
+                return work > slowMs ? (start, now, why, s) : nil
+            }
+
+            mutating func finish(submitted: UInt64, presentsAt: UInt64?) -> (OldTimed, UInt64, UInt64)? {
+                guard let t = timed, let built = t.built else { return nil }
+                timed = nil
+                let sub = max(submitted, built.0)
+                let present = presentsAt.map { max($0, sub) } ?? sub
+                return (t, sub, present)
+            }
         }
+
+        func compare(_ got: InteractionTracker.Finished?, _ expected: (OldTimed, UInt64, UInt64)?) {
+            #expect((got != nil) == (expected != nil))
+            if let f = got, let (t, submitted, present) = expected {
+                #expect(f.submittedNs == submitted && f.presentNs == present)
+                #expect(f.builtNs == t.built?.0 && f.phases == t.built?.1 && f.shaped == t.built?.2)
+                #expect(f.cpuMs == t.cpu.1 && f.stacks?.taken == t.stacks)
+                let g = f.timed
+                #expect(g.arrivedNs == t.arrived && g.frameStartNs == t.frameStart)
+                #expect(abs(g.handlerMs - t.handlerMs) < 1e-12)
+                #expect(g.note.rank == t.rank && g.why == t.why && g.commits == t.commits)
+            }
+        }
+
+        let slowMs = 75.0
+        let base: UInt64 = 1_000_000_000
+        let ms: UInt64 = 1_000_000
+        var slow = 0
+        var quick = 0
+
+        for startPath in 0..<32_768 {
+            var path = startPath
+            let tracker = InteractionTracker()
+            var old = OldTracker()
+
+            for stepIdx in 1...5 {
+                let i = UInt64(stepIdx)
+                let e = path % 8
+                path /= 8
+                let now = base + i * 30 * ms
+                let cpu: Double? = (i % 3 != 0) ? Double(i) : nil
+                switch e {
+                case 0, 1:
+                    let got = tracker.frameBegins(queued: e == 1, nowNs: now, cpuMs: cpu, slowMs: slowMs)
+                    let exp = old.begin(queued: e == 1, now: now, cpu: cpu)
+                    compare(got, exp)
+                case 2, 3:
+                    let rank = UInt8(e)
+                    let at: UInt64? = (e == 3) ? base : nil
+                    let handlerMs = Double(i) / 1000.0
+                    old.noted(rank: rank, at: at, started: now, handlerMs: handlerMs)
+                    let note = InteractionNote(
+                        route: tracker.names.fixed("page"),
+                        control: tracker.names.fixed("button"),
+                        action: "press",
+                        rank: rank
+                    )
+                    tracker.noted(note: note, arrivedNs: at, startedNs: now, handlerMs: handlerMs)
+                case 4:
+                    old.committed(why: UInt16(1 << i))
+                    tracker.committed(why: UInt16(1 << i))
+                case 5:
+                    let taken: UInt32? = (i % 3 != 0) ? UInt32(i) : nil
+                    let untimed: Bool
+                    if case .open = tracker.currentFrameState { untimed = false } else { untimed = true }
+                    let expected = old.build(shaped: UInt32(i), now: now, cpu: cpu, stacks: taken, slowMs: slowMs)
+                    let stacks = taken.map { InteractionStacks(taken: $0, waiting: $0, cpuShare: nil, raw: []) }
+                    let got = tracker.built(shaped: UInt32(i), nodes: 99, nowNs: now, cpuMs: cpu, stacks: stacks, slowMs: slowMs)
+                    #expect(got?.startNs == expected?.0 && got?.builtNs == expected?.1 && got?.why == expected?.2 && got?.stacks.taken == expected?.3)
+                    if untimed && expected != nil {
+                        slow += 1
+                    } else if untimed && expected == nil && taken != nil {
+                        quick += 1
+                    }
+                case 6, 7:
+                    let (sub, present): (UInt64, UInt64?) = (e == 6) ? (base, now) : (now, base)
+                    let got = tracker.finish(submittedNs: sub, presentsAtNs: present, slowMs: slowMs)
+                    let exp = old.finish(submitted: sub, presentsAt: present)
+                    compare(got, exp)
+                default:
+                    Issue.record("unexpected event \(e)")
+                }
+
+                if old.active { old.times[InteractionPhase.paint.rawValue] += Double(i) }
+                if tracker.isPhaseCollectionActive { tracker.addPhase(.paint, ms: Double(i)) }
+                #expect(tracker.isPhaseCollectionActive == old.active)
+                #expect(tracker.currentPhaseTimes == old.times)
+
+                switch (tracker.currentFrameState, old.timed) {
+                case (.idle, nil):
+                    #expect(old.began == nil)
+                case let (.begun(at, queued, c, why), nil):
+                    #expect(old.began?.0 == at && old.began?.1 == c)
+                    #expect((queued ? at : nil) == old.frameStart && why == old.frameWhy)
+                case let (.open(timed, inputStart, c), .some(t)):
+                    #expect(t.built == nil)
+                    #expect(inputStart == old.frameStart && c == t.cpu.0)
+                    #expect(timed.arrivedNs == t.arrived && timed.frameStartNs == t.frameStart)
+                    #expect(timed.note.rank == t.rank && abs(timed.handlerMs - t.handlerMs) < 1e-12)
+                    #expect(timed.why == t.why && timed.commits == t.commits)
+                case let (.built(b), .some(t)):
+                    #expect(b.atNs == t.built?.0 && b.phases == t.built?.1 && b.shaped == t.built?.2)
+                    #expect(b.cpuMs == t.cpu.1 && b.stacks?.taken == t.stacks)
+                default:
+                    Issue.record("phase mismatch")
+                }
+            }
+            tracker.clearPendingRollupForTesting()
+            InteractionTracker.resetForTesting()
+        }
+        #expect(slow > 0 && quick > 0, "expected both slow (\(slow)) and quick (\(quick)) untimed frames")
     }
 
     // MARK: - interaction/tests.rs (Runtime wiring + Exporter)
@@ -789,6 +1084,639 @@ struct InteractionPerfParityWaveETests {
         #expect(watch.progress(for: 10)?.taken == 1)
         let fx3 = InteractionWatchdog.step(&watch, event: .look(frame: f1, nowNs: sampleAt + 2_000_000))
         #expect(fx3.count == 1)
+    }
+
+    @Test("watchdog_tests.rs: replaced mid look, arm-stall filing, and number-before-start boundaries")
+    func watchdogInterFrameBoundaryTests() {
+        let ms: UInt64 = 1_000_000
+        let afterUs = InteractionWatchdog.afterMs * 1000
+        let a: UInt64 = 100 * ms
+        let b: UInt64 = 1000 * ms
+        func running(_ seq: UInt64, _ start: UInt64) -> InteractionWatchdog.RunningFrame {
+            .init(seq: seq, startNs: start, afterUs: afterUs)
+        }
+        func look1(_ watch: inout InteractionWatchdog.WatchState, _ frame: InteractionWatchdog.RunningFrame?, _ now: UInt64) -> InteractionWatchdog.Effect? {
+            let fx = InteractionWatchdog.step(&watch, event: .look(frame: frame, nowNs: now))
+            #expect(fx.count == 1)
+            return fx.first
+        }
+        func taken(_ watch: inout InteractionWatchdog.WatchState, _ seq: UInt64, _ now: UInt64) {
+            #expect(InteractionWatchdog.step(&watch, event: .taken(seq: seq, nowNs: now)).isEmpty)
+        }
+        func refusedAt13Ms(_ watch: inout InteractionWatchdog.WatchState) {
+            #expect(look1(&watch, running(2, a), b + 13 * ms) == .sample(seq: 2, startNs: a, atNs: b + 13 * ms))
+            taken(&watch, 2, b + 13 * ms)
+        }
+
+        // :122 a_frame_replaced_mid_look_is_sampled_at_17_ms_of_a_20_ms_stall
+        do {
+            var watch = InteractionWatchdog.WatchState.sampling(.init(seq: 1, taken: 3, dueNs: 0))
+            refusedAt13Ms(&watch)
+            #expect(look1(&watch, running(2, b), b + 13 * ms) == .sleepNs(4 * ms))
+            #expect(look1(&watch, running(2, b), b + 17 * ms) == .sample(seq: 2, startNs: b, atNs: b + 17 * ms))
+        }
+
+        // :130 a_sample_taken_while_the_ui_stalls_in_arm_is_filed_under_the_new_frame
+        do {
+            var watch = InteractionWatchdog.WatchState.sampling(.init(seq: 1, taken: 3, dueNs: 0))
+            #expect(look1(&watch, running(2, a), b + 17 * ms) == .sample(seq: 2, startNs: a, atNs: b + 17 * ms))
+            taken(&watch, 2, b + 17 * ms)
+            #expect(look1(&watch, running(2, b + 19 * ms), b + 19 * ms) == .sleepNs(2 * ms))
+            #expect(watch == .sampling(.init(seq: 2, taken: 1, dueNs: b + 21 * ms)))
+        }
+
+        // :141 a_number_read_before_its_start_lands_keeps_its_progress_through_a_quiet_look
+        do {
+            var watch = InteractionWatchdog.WatchState.sampling(.init(seq: 1, taken: 3, dueNs: 0))
+            refusedAt13Ms(&watch)
+            #expect(look1(&watch, nil, b + 13 * ms) == .sleepNs(InteractionWatchdog.idlePollNs))
+            #expect(look1(&watch, running(2, b + 14 * ms), b + 21 * ms) == .sample(seq: 2, startNs: b + 14 * ms, atNs: b + 21 * ms))
+        }
+    }
+
+    @Test("watchdog_tests.rs: exhaustive WatchState vs Dev walks (short, parked, in-flight, nearly full)")
+    func watchdogReferenceModelWalks() {
+        let ms: UInt64 = 1_000_000
+        let restNs = InteractionWatchdog.restNs
+        let afterUs = InteractionWatchdog.afterMs * 1000
+        let hurryUs = InteractionWatchdog.hurryMs * 1000
+        let most = InteractionWatchdog.maxSamples
+        let oldStart: UInt64 = 1000
+        let newStart: UInt64 = 20 * ms
+
+        struct DevWatchdog {
+            var seen: UInt64 = 0
+            var taken: Int = 0
+            var next: UInt64 = 0
+            var quietSince: UInt64? = nil
+
+            mutating func look(start: UInt64, seq: UInt64, afterUs: UInt32, now: UInt64) -> InteractionWatchdog.Effect {
+                if start == 0 {
+                    let quiet: UInt64
+                    if let q = quietSince { quiet = q } else { quiet = now; quietSince = now }
+                    return (now - quiet < InteractionWatchdog.restNs) ? .sleepNs(InteractionWatchdog.idlePollNs) : .park
+                }
+                quietSince = nil
+                if seq != seen { seen = seq; taken = 0 }
+                if taken == 0 { next = start + UInt64(afterUs) * 1000 }
+                if now < next || taken >= InteractionWatchdog.maxSamples {
+                    return .sleepNs(taken >= InteractionWatchdog.maxSamples ? InteractionWatchdog.idlePollNs : (next - now))
+                }
+                return .sample(seq: seq, startNs: start, atNs: now)
+            }
+
+            mutating func sampled(now: UInt64) {
+                taken += 1
+                next = now + InteractionWatchdog.sampleIntervalNs
+            }
+        }
+
+        enum Letter: Equatable {
+            case see(start: UInt64, seq: UInt64, afterUs: UInt32)
+            case pass(UInt64)
+            case finish
+        }
+
+        let none = Letter.see(start: 0, seq: 1, afterUs: afterUs)
+        let see1 = Letter.see(start: oldStart, seq: 1, afterUs: afterUs)
+        let alphabet: [Letter] = [
+            none,
+            see1,
+            .see(start: oldStart, seq: 1, afterUs: hurryUs),
+            .see(start: oldStart, seq: 2, afterUs: afterUs),
+            .see(start: oldStart, seq: 2, afterUs: hurryUs),
+            .see(start: newStart, seq: 1, afterUs: afterUs),
+            .see(start: newStart, seq: 1, afterUs: hurryUs),
+            .see(start: newStart, seq: 2, afterUs: afterUs),
+            .see(start: newStart, seq: 2, afterUs: hurryUs),
+            .pass(5 * ms),
+            .pass(13 * ms),
+            .pass(restNs + 100 * ms),
+            .finish,
+        ]
+
+        struct Reached {
+            var waiting = false
+            var sampling = false
+            var quiet = false
+            var parked = false
+            var full = false
+            var sampled = false
+            var resumed = false
+        }
+
+        struct World {
+            var watch: InteractionWatchdog.WatchState = .unarmed
+            var dev = DevWatchdog()
+            var now: UInt64 = 1000
+            var inFlight: UInt64? = nil
+            var failed = false
+
+            mutating func apply(_ letter: Letter, _ reached: inout Reached) {
+                switch letter {
+                case .pass(let ns):
+                    now += ns
+                case .finish:
+                    guard let seq = inFlight else { failed = true; return }
+                    inFlight = nil
+                    _ = InteractionWatchdog.step(&watch, event: .taken(seq: seq, nowNs: now))
+                    dev.sampled(now: now)
+                case let .see(start, seq, au):
+                    let frame: InteractionWatchdog.RunningFrame? = (start != 0)
+                        ? .init(seq: seq, startNs: start, afterUs: au)
+                        : nil
+                    if frame != nil {
+                        switch watch {
+                        case .quiet, .parked:
+                            if watch.progress(for: seq) != nil { reached.resumed = true }
+                        default: break
+                        }
+                    }
+                    let fx = InteractionWatchdog.step(&watch, event: .look(frame: frame, nowNs: now))
+                    guard fx.count == 1, let effect = fx.first else { failed = true; return }
+                    let expected = dev.look(start: start, seq: seq, afterUs: au, now: now)
+                    if effect != expected { failed = true; return }
+                    switch effect {
+                    case let .sample(s, _, _):
+                        if frame == nil { failed = true; return }
+                        inFlight = s
+                        reached.sampled = true
+                    case .park:
+                        if frame != nil { failed = true; return }
+                    case .sleepNs(let wait):
+                        if wait == 0 { failed = true; return }
+                        if dev.taken >= InteractionWatchdog.maxSamples { reached.full = true }
+                    }
+                    if dev.taken > InteractionWatchdog.maxSamples { failed = true; return }
+                    switch watch {
+                    case .waiting:
+                        reached.waiting = true
+                    case .sampling:
+                        reached.sampling = true
+                    case .quiet:
+                        if effect != .sleepNs(InteractionWatchdog.idlePollNs) { failed = true; return }
+                        reached.quiet = true
+                    case .parked:
+                        if effect != .park { failed = true; return }
+                        reached.parked = true
+                    case .unarmed:
+                        failed = true
+                        return
+                    }
+                }
+                let progress = watch.progress(for: dev.seen)
+                if (progress?.taken ?? 0) != dev.taken { failed = true; return }
+                if let p = progress, p.dueNs != dev.next { failed = true; return }
+            }
+        }
+
+        func walk(_ world: World, _ depth: Int, _ reached: inout Reached) -> Bool {
+            for letter in alphabet {
+                switch letter {
+                case .finish where world.inFlight == nil: continue
+                case .see where world.inFlight != nil: continue
+                default: break
+                }
+                var next = world
+                next.apply(letter, &reached)
+                if next.failed { return false }
+                if depth > 1 {
+                    if !walk(next, depth - 1, &reached) { return false }
+                }
+            }
+            return true
+        }
+
+        func worldAfter(_ letters: [Letter]) -> World {
+            var world = World()
+            var dummy = Reached()
+            for letter in letters { world.apply(letter, &dummy) }
+            #expect(!world.failed)
+            return world
+        }
+
+        // :303 every_short_sequence_of_reads_matches_the_old_loop (depth 7)
+        do {
+            var r = Reached()
+            #expect(walk(World(), 7, &r))
+            #expect(r.waiting && r.sampling && r.quiet && r.parked && r.sampled && r.resumed)
+        }
+
+        // :310 every_sequence_from_a_parked_watchdog_that_was_sampling_matches_the_old_loop (depth 6)
+        do {
+            let w = worldAfter([.pass(13 * ms), see1, .finish, none, .pass(restNs), none])
+            if case .parked(let left) = w.watch { #expect(left != nil) } else { Issue.record("expected parked") }
+            var r = Reached()
+            #expect(walk(w, 6, &r))
+            #expect(r.waiting && r.sampling && r.parked && r.resumed)
+        }
+
+        // :319 every_sequence_from_a_sample_in_flight_matches_the_old_loop (depth 6)
+        do {
+            let w = worldAfter([.pass(13 * ms), see1])
+            #expect(w.inFlight != nil)
+            var r = Reached()
+            #expect(walk(w, 6, &r))
+            #expect(r.waiting && r.sampling && r.quiet && r.resumed)
+        }
+
+        // :328 every_sequence_from_a_nearly_full_frame_matches_the_old_loop (depth 6)
+        do {
+            var letters: [Letter] = [.pass(13 * ms)]
+            for _ in 0..<(most - 1) { letters.append(contentsOf: [see1, .finish, .pass(5 * ms)]) }
+            let w = worldAfter(letters)
+            if case .sampling(let p) = w.watch { #expect(p.taken == most - 1) } else { Issue.record("expected sampling") }
+            var r = Reached()
+            #expect(walk(w, 6, &r))
+            #expect(r.full && r.sampling && r.quiet && r.resumed)
+        }
+    }
+
+    @Test("watchdog_tests.rs: torn-read reordering between begin/disarm/hurry writes and look reads matches Dev")
+    func watchdogTornReadOrderingWalk() {
+        let ms: UInt64 = 1_000_000
+        let afterUs = InteractionWatchdog.afterMs * 1000
+        let hurryUs = InteractionWatchdog.hurryMs * 1000
+        let most = InteractionWatchdog.maxSamples
+        let oldStart: UInt64 = 1000
+        let newStart: UInt64 = 20 * ms
+
+        struct Memory {
+            var seq: UInt64
+            var start: UInt64
+            var afterUs: UInt32
+            mutating func apply(_ w: Write) {
+                switch w {
+                case .nextSeq: seq += 1
+                case .afterUs(let us): afterUs = us
+                case .start(let ns): start = ns
+                case .hurry: afterUs = min(afterUs, InteractionWatchdog.hurryMs * 1000)
+                }
+            }
+        }
+        enum Write { case nextSeq, afterUs(UInt32), start(UInt64), hurry }
+
+        final class Recorder: InteractionWatchdogFrames {
+            var writes: [Write] = []
+            func readStart() -> UInt64 { fatalError() }
+            func readSeq() -> UInt64 { fatalError() }
+            func readAfterUs() -> UInt32 { fatalError() }
+            func nextSeq() { writes.append(.nextSeq) }
+            func setAfterUs(_ us: UInt32) { writes.append(.afterUs(us)) }
+            func setStart(_ ns: UInt64) { writes.append(.start(ns)) }
+        }
+
+        final class ScriptedFrames: InteractionWatchdogFrames {
+            var memory: Memory
+            let writes: [Write]
+            let landedBy: [Int]
+            var landed = 0
+            var reads = 0
+
+            init(memory: Memory, writes: [Write], landedBy: [Int]) {
+                self.memory = memory
+                self.writes = writes
+                self.landedBy = landedBy
+            }
+
+            func readNext() -> Memory {
+                let upto = landedBy[reads]
+                for idx in landed..<upto { memory.apply(writes[idx]) }
+                landed = upto
+                reads += 1
+                return memory
+            }
+
+            func readStart() -> UInt64 { readNext().start }
+            func readSeq() -> UInt64 { readNext().seq }
+            func readAfterUs() -> UInt32 { readNext().afterUs }
+            func nextSeq() { fatalError() }
+            func setAfterUs(_ us: UInt32) { fatalError() }
+            func setStart(_ ns: UInt64) { fatalError() }
+        }
+
+        enum Program { case arm, disarm, hurry }
+        func devReads(memory startMem: Memory, writes: [Write], landedBy: [Int]) -> (UInt64, UInt64, UInt32) {
+            var memory = startMem
+            var landed = 0
+            func land(_ upto: Int) {
+                for idx in landed..<upto { memory.apply(writes[idx]) }
+                landed = upto
+            }
+            land(landedBy[0])
+            let s = memory.start
+            if s == 0 { return (0, 0, 0) }
+            land(landedBy[1])
+            let seq = memory.seq
+            land(landedBy[2])
+            return (s, seq, memory.afterUs)
+        }
+
+        struct Dev {
+            var seen: UInt64
+            var taken: Int
+            var next: UInt64
+            var quietSince: UInt64?
+            mutating func look(start: UInt64, seq: UInt64, afterUs: UInt32, now: UInt64) -> InteractionWatchdog.Effect {
+                if start == 0 {
+                    let quiet: UInt64
+                    if let q = quietSince { quiet = q } else { quiet = now; quietSince = now }
+                    return (now - quiet < InteractionWatchdog.restNs) ? .sleepNs(InteractionWatchdog.idlePollNs) : .park
+                }
+                quietSince = nil
+                if seq != seen { seen = seq; taken = 0 }
+                if taken == 0 { next = start + UInt64(afterUs) * 1000 }
+                if now < next || taken >= InteractionWatchdog.maxSamples {
+                    return .sleepNs(taken >= InteractionWatchdog.maxSamples ? InteractionWatchdog.idlePollNs : (next - now))
+                }
+                return .sample(seq: seq, startNs: start, atNs: now)
+            }
+        }
+
+        let recorder = Recorder()
+        InteractionWatchdog.begin(frames: recorder, now: { newStart })
+        let realArm = recorder.writes
+        let refArm: [Write] = [.nextSeq, .afterUs(afterUs), .start(newStart)]
+        #expect(realArm.count == refArm.count)
+
+        let programs: [[Program]] = [
+            [.arm],
+            [.disarm, .arm],
+            [.hurry, .arm],
+            [.hurry, .disarm, .arm, .hurry],
+            [.arm, .disarm],
+            [.arm, .hurry],
+        ]
+        func writesOf(_ program: [Program], _ arm: [Write]) -> [Write] {
+            program.flatMap { step in
+                switch step {
+                case .arm: return arm
+                case .disarm: return [Write.start(0)]
+                case .hurry: return [Write.hurry]
+                }
+            }
+        }
+        let memories = [
+            Memory(seq: 1, start: oldStart, afterUs: afterUs),
+            Memory(seq: 1, start: oldStart, afterUs: hurryUs),
+            Memory(seq: 1, start: 0, afterUs: afterUs),
+        ]
+        let now = newStart + 13 * ms
+        let seeds: [(InteractionWatchdog.WatchState, Dev)] = [
+            (.unarmed, Dev(seen: 0, taken: 0, next: 0, quietSince: nil)),
+            (.sampling(.init(seq: 1, taken: 3, dueNs: now - ms)), Dev(seen: 1, taken: 3, next: now - ms, quietSince: nil)),
+            (.sampling(.init(seq: 1, taken: most, dueNs: 0)), Dev(seen: 1, taken: most, next: 0, quietSince: nil)),
+            (.sampling(.init(seq: 2, taken: 3, dueNs: now + ms)), Dev(seen: 2, taken: 3, next: now + ms, quietSince: nil)),
+        ]
+        var mixed = false
+        for memory in memories {
+            for program in programs {
+                let real = writesOf(program, realArm)
+                let ref = writesOf(program, refArm)
+                for first in 0...real.count {
+                    for second in first...real.count {
+                        for third in second...real.count {
+                            let landed = [first, second, third]
+                            let scripted = ScriptedFrames(memory: memory, writes: real, landedBy: landed)
+                            let frame = InteractionWatchdog.look(frames: scripted)
+                            let (start, seq, au) = devReads(memory: memory, writes: ref, landedBy: landed)
+                            let expectedFrame: InteractionWatchdog.RunningFrame? = (start != 0)
+                                ? .init(seq: seq, startNs: start, afterUs: au)
+                                : nil
+                            #expect(frame == expectedFrame)
+                            if start == oldStart && seq == 2 { mixed = true }
+                            for (var watch, var dev) in seeds {
+                                let got = InteractionWatchdog.step(&watch, event: .look(frame: frame, nowNs: now)).first
+                                let exp = dev.look(start: start, seq: seq, afterUs: au, now: now)
+                                #expect(got == exp)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        #expect(mixed, "expected at least one torn read pairing old start with seq 2")
+    }
+
+    @Test("watchdog_tests.rs: resume-boundary capture/collect, real thread sample, paused naming, image unloads, round-trip, and 1..=8 store walk")
+    func watchdogStoreThreadAndSymbolParityTests() {
+        @Sendable func rawSample(_ id: UInt64) -> InteractionRawStack {
+            InteractionRawStack(pcs: [UInt(id)], waiting: false, cpuUs: id, imagesGeneration: 0)
+        }
+        @Sendable func ids(_ stacks: InteractionStacks) -> [UInt64] {
+            stacks.raw.map(\.cpuUs)
+        }
+        @Sendable func captured(_ caught: InteractionCaughtSamples, _ taken: InteractionWatchdogTakenFlag, _ seq: UInt64, _ atNs: UInt64, _ sample: InteractionRawStack) {
+            InteractionWatchdog.capture(samples: caught, taken: taken, seq: seq, atNs: atNs) { stopped in
+                stopped(sample)
+                return sample
+            }
+        }
+
+        // :510 a_disarm_at_the_resume_boundary_finds_the_stack_of_its_frame
+        do {
+            let caught = InteractionCaughtSamples()
+            let taken = InteractionWatchdogTakenFlag(false)
+            var found: InteractionStacks? = nil
+            InteractionWatchdog.capture(samples: caught, taken: taken, seq: 7, atNs: 1) { stopped in
+                let s = rawSample(42)
+                stopped(s)
+                found = InteractionWatchdog.collected(samples: caught, taken: taken) { 7 }
+                return s
+            }
+            #expect(found.map(ids) == [42])
+            #expect(InteractionWatchdog.collected(samples: caught, taken: taken) { 9 } == nil)
+        }
+
+        // :527 a_real_thread_ending_its_frame_as_it_resumes_finds_the_stack
+        #if os(macOS) && arch(arm64)
+        do {
+            final class LockFreeEndFlag: @unchecked Sendable {
+                private let storage = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+                init() { storage.initialize(to: 0) }
+                deinit { storage.deallocate() }
+                @inline(never)
+                func isSet() -> Bool {
+                    sched_yield()
+                    return storage.pointee != 0
+                }
+                @inline(never)
+                func markEnded() {
+                    storage.pointee = 1
+                }
+            }
+
+            let caught = InteractionCaughtSamples()
+            let taken = InteractionWatchdogTakenFlag(false)
+            let endFlag = LockFreeEndFlag()
+            let targetBox = LockedBox<InteractionThreadSamplerTarget?>(nil)
+            let readySem = DispatchSemaphore(value: 0)
+            let finishedSem = DispatchSemaphore(value: 0)
+            let foundFromThread = LockedBox<[UInt64]?>(nil)
+
+            let worker = Thread {
+                targetBox.value = InteractionThreadSamplerTarget.current()
+                readySem.signal()
+                while !endFlag.isSet() {}
+                foundFromThread.value = InteractionWatchdog.collected(samples: caught, taken: taken) { 7 }.map(ids)
+                finishedSem.signal()
+            }
+            worker.start()
+            readySem.wait()
+            if let target = targetBox.value {
+                InteractionWatchdog.capture(samples: caught, taken: taken, seq: 7, atNs: 1) { stopped in
+                    target.sample(still: {
+                        endFlag.markEnded()
+                        return true
+                    }, onStopped: stopped)
+                }
+            } else {
+                endFlag.markEnded()
+            }
+            let waitRes = finishedSem.wait(timeout: .now() + .seconds(30))
+            #expect(waitRes == .success)
+            #expect(foundFromThread.value?.count == 1)
+        }
+        #endif
+
+        // :551 a_disarm_finishes_while_naming_is_paused
+        do {
+            let caught = InteractionCaughtSamples()
+            let taken = InteractionWatchdogTakenFlag(false)
+            captured(caught, taken, 1, 1, rawSample(11))
+            let earlier = InteractionWatchdog.collected(samples: caught, taken: taken) { 1 }
+            #expect(earlier != nil)
+            let entered = DispatchSemaphore(value: 0)
+            let release = DispatchSemaphore(value: 0)
+            let done = DispatchSemaphore(value: 0)
+            let namedBox = LockedBox<InteractionStacks.NamedSummary?>(nil)
+            let finishedBox = LockedBox<[UInt64]?>(nil)
+
+            DispatchQueue.global().async {
+                namedBox.value = earlier?.names { sample in
+                    entered.signal()
+                    release.wait()
+                    return [InteractionStackFrame(name: "app::\(sample.pcs.first ?? 0)", isApp: true)]
+                }
+            }
+            entered.wait()
+            DispatchQueue.global().async {
+                captured(caught, taken, 3, 2, rawSample(33))
+                finishedBox.value = InteractionWatchdog.collected(samples: caught, taken: taken) { 3 }.map(ids)
+                done.signal()
+            }
+            let finished = done.wait(timeout: .now() + .seconds(30))
+            release.signal()
+            #expect(finished == .success)
+            #expect(finishedBox.value == [33])
+            // Allow naming closure to finish storing result
+            Thread.sleep(forTimeInterval: 0.01)
+            #expect(namedBox.value?.stack.first == "app::11")
+        }
+
+        // :589, :599, :609, :616 symbol unload checks
+        do {
+            let symbols = InteractionSymbolCache()
+            var lookups = 0
+            let f1 = symbols.frames(for: rawSample(0x40), generation: { 0 }) { _ in lookups += 1; return .init(name: "app::work", isApp: true) }
+            #expect(f1.map(\.name) == ["app::work"])
+            let f2 = symbols.frames(for: rawSample(0x40), generation: { 0 }) { _ in lookups += 1; return .init(name: "app::work", isApp: true) }
+            #expect(f2.map(\.name) == ["app::work"] && lookups == 1)
+
+            // :599 older generation -> bare 0x40, app == false, zero lookups
+            let fUnloaded = InteractionSymbolCache().frames(for: rawSample(0x40), generation: { 1 }) { _ in
+                Issue.record("unexpected lookup for older image generation")
+                return .init(name: "bad", isApp: true)
+            }
+            #expect(fUnloaded.map(\.name) == ["0x40"] && fUnloaded[0].isApp == false)
+
+            // :609 unload during lookup
+            var gen: UInt64 = 0
+            let fMidUnload = InteractionSymbolCache().frames(for: rawSample(0x40), generation: { gen }) { _ in
+                gen = 1
+                return .init(name: "app::replaced", isApp: true)
+            }
+            #expect(fMidUnload.map(\.name) == ["0x40"])
+
+            // :616 unload forgets remembered names
+            let reloadSym = InteractionSymbolCache()
+            _ = reloadSym.frames(for: rawSample(0x40), generation: { 0 }) { _ in .init(name: "app::old", isApp: true) }
+            let newer = InteractionRawStack(pcs: [0x40], waiting: false, cpuUs: 0x40, imagesGeneration: 1)
+            let fNew = reloadSym.frames(for: newer, generation: { 1 }) { _ in .init(name: "app::new", isApp: true) }
+            #expect(fNew.map(\.name) == ["app::new"])
+        }
+
+        // :626 cap + replace & :636 sample round trip through store
+        do {
+            let caught = InteractionCaughtSamples()
+            let taken = InteractionWatchdogTakenFlag(false)
+            let roundRaw = InteractionRawStack(pcs: [10, 20, 30], waiting: true, cpuUs: 5, imagesGeneration: 4)
+            captured(caught, taken, 1, 77, roundRaw)
+            let s1 = caught.collect(for: 1)
+            #expect(s1?.raw.first?.pcs == [10, 20, 30] && s1?.raw.first?.waiting == true && s1?.raw.first?.cpuUs == 5 && s1?.raw.first?.imagesGeneration == 4)
+            captured(caught, taken, 1, 90_077, rawSample(6))
+            let s2 = caught.collect(for: 1)
+            #expect(s2?.cpuShare == 1.0 / 90.0)
+            #expect(taken.load())
+        }
+
+        // :671 every_short_run_of_frames_collects_what_the_old_store_did (length 1...8 -> 9,840 sequences)
+        do {
+            struct DevSamples {
+                var samples: [(UInt64, UInt64)] = []
+                var taken = false
+                mutating func captured(_ seq: UInt64, _ id: UInt64) {
+                    samples.append((seq, id))
+                    taken = true
+                }
+                mutating func disarm(_ seq: UInt64) -> [UInt64]? {
+                    guard taken else { return nil }
+                    taken = false
+                    let kept = samples.filter { $0.0 == seq }.map(\.1)
+                    samples.removeAll()
+                    return kept.isEmpty ? nil : kept
+                }
+            }
+            enum Move { case arm, capture, disarm }
+            let moves: [Move] = [.arm, .capture, .disarm]
+            var keptAny = false
+            var emptyAny = false
+            for length in 1...8 {
+                var count = 1
+                for _ in 0..<length { count *= 3 }
+                for num in 0..<count {
+                    let caught = InteractionCaughtSamples()
+                    let taken = InteractionWatchdogTakenFlag(false)
+                    var dev = DevSamples()
+                    var seq: UInt64 = 0
+                    var running = false
+                    var id: UInt64 = 0
+                    var n = num
+                    for _ in 0..<length {
+                        let move = moves[n % 3]
+                        n /= 3
+                        switch move {
+                        case .arm:
+                            seq += 1
+                            running = true
+                        case .capture where running:
+                            id += 1
+                            captured(caught, taken, seq, id, rawSample(id))
+                            dev.captured(seq, id)
+                        case .capture:
+                            break
+                        case .disarm:
+                            running = false
+                            let got = InteractionWatchdog.collected(samples: caught, taken: taken) { seq }.map(ids)
+                            if got != nil { keptAny = true }
+                            if got == nil && id > 0 { emptyAny = true }
+                            #expect(got == dev.disarm(seq))
+                        }
+                    }
+                }
+            }
+            #expect(keptAny && emptyAny)
+        }
     }
 }
 

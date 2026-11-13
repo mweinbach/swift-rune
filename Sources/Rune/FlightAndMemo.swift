@@ -339,6 +339,7 @@ public final class MemoCache: @unchecked Sendable {
         deps: Deps,
         ignoreDuplicateGuard: Bool = false,
         callerLocation: String? = nil,
+        site: String = "",
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
         let srgb = Theme.blendsSrgb()
@@ -347,14 +348,28 @@ public final class MemoCache: @unchecked Sendable {
         let env = scope?.envHash ?? MemoScope.activeEnvHash
         let curGeometry = scope?.geometry ?? [:]
 
+        func attachMemoKey(_ el: El<State>) -> El<State> {
+            guard !rawId.hasPrefix("cached:") else { return el }
+            let existing = el.keyId
+            if let existing, existing != rawId {
+                PerfWarn.memoKeyReplaced(
+                    id: rawId,
+                    existing: existing,
+                    site: site.isEmpty ? (callerLocation ?? "") : site
+                )
+            }
+            var out = el
+            if existing != rawId {
+                out = out.key(rawId)
+                if let callerLocation { out.keyLocation = callerLocation }
+            }
+            return out
+        }
+
         // Same-pass duplicate memo IDs bypass caching (`memo.rs:1067`).
         if !ignoreDuplicateGuard, let scope, !scope.isVerificationDryRun {
             if !scope.seenScopedIds.insert(scopedId).inserted {
-                var built = build()
-                if !rawId.hasPrefix("cached:") && built.keyId == nil {
-                    built = built.key(rawId)
-                    if let callerLocation { built.keyLocation = callerLocation }
-                }
+                let built = attachMemoKey(build())
                 return (built, false)
             }
         }
@@ -390,11 +405,7 @@ public final class MemoCache: @unchecked Sendable {
         scope?.prefixStack.append(rawId)
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
-        var built = build()
-        if !rawId.hasPrefix("cached:") && built.keyId == nil {
-            built = built.key(rawId)
-            if let callerLocation { built.keyLocation = callerLocation }
-        }
+        let built = attachMemoKey(build())
         TrackedRecorder.resume(savedTracked)
         let capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
@@ -636,6 +647,7 @@ public func memo<State, Deps: Equatable>(
         rawId: id,
         deps: deps,
         callerLocation: "\(file):\(line):\(column)",
+        site: "\(file):\(line)",
         build: build
     ).element
 }

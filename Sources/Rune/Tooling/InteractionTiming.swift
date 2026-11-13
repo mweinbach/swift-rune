@@ -394,7 +394,7 @@ public enum InteractionDemangle {
 }
 
 /// Bounded caught-sample store for the watchdog thread (`MOST = 64`, `watchdog.rs` / `watchdog_tests.rs`).
-public final class InteractionCaughtSamples {
+public final class InteractionCaughtSamples: @unchecked Sendable {
     public static let maxSamples: Int = InteractionWatchdog.maxSamples
 
     public struct Entry: Sendable, Equatable {
@@ -406,7 +406,42 @@ public final class InteractionCaughtSamples {
     private var entries: [Entry] = []
     private var currentSeq: UInt64 = 0
 
-    public init() {}
+    public init() {
+        entries.reserveCapacity(Self.maxSamples)
+    }
+
+    /// Publishes one sample for `seq` and sets `taken` before returning (`watchdog.rs::Caught::publish`).
+    public func publish(
+        taken: InteractionWatchdogTakenFlag,
+        seq: UInt64,
+        atNs: UInt64,
+        raw: InteractionRawStack
+    ) {
+        lock.lock()
+        if seq != currentSeq {
+            entries.removeAll(keepingCapacity: true)
+            currentSeq = seq
+        }
+        guard entries.count < Self.maxSamples else {
+            lock.unlock()
+            return
+        }
+        entries.append(Entry(seq: seq, sample: InteractionSampledStack(raw: raw, atNs: atNs)))
+        lock.unlock()
+        taken.store(true)
+    }
+
+    /// Summarizes frame `seq`'s samples without draining them (`watchdog.rs::Caught::collect`).
+    public func collect(for seq: UInt64) -> InteractionStacks? {
+        lock.lock()
+        guard seq == currentSeq else {
+            lock.unlock()
+            return nil
+        }
+        let samples = entries.map(\.sample)
+        lock.unlock()
+        return InteractionStacks.from(samples: samples)
+    }
 
     public func push(seq: UInt64, sample: InteractionSampledStack) {
         lock.lock()
@@ -477,9 +512,19 @@ public final class InteractionThreadSamplerTarget: @unchecked Sendable {
     /// Samples this target thread's call stack and CPU usage from a background watchdog thread.
     /// Returns `nil` if called on the target thread itself or if `still()` returns `false`.
     public func sample(still: () -> Bool) -> InteractionRawStack? {
+        sampleImpl(still: still, onStopped: nil)
+    }
+
+    public func sample(still: () -> Bool, onStopped: (InteractionRawStack) -> Void) -> InteractionRawStack? {
+        withoutActuallyEscaping(onStopped) { escapingStopped in
+            sampleImpl(still: still, onStopped: escapingStopped)
+        }
+    }
+
+    private func sampleImpl(still: () -> Bool, onStopped: ((InteractionRawStack) -> Void)?) -> InteractionRawStack? {
         #if os(macOS) && arch(arm64)
         let callerMach = pthread_mach_thread_np(pthread_self())
-        guard callerMach != machThread, still() else { return nil }
+        guard callerMach != machThread else { return nil }
 
         // Read thread CPU time & run state via THREAD_BASIC_INFO BEFORE suspending the thread
         // (`stack.rs:168-214`) so we observe real wait state and perform zero Mach/heap calls while suspended.
@@ -507,6 +552,8 @@ public final class InteractionThreadSamplerTarget: @unchecked Sendable {
         let rawPCs = UnsafeMutablePointer<UInt>.allocate(capacity: maxFrames)
         defer { rawPCs.deallocate() }
         var pcCount = 0
+        var pcs: [UInt] = []
+        pcs.reserveCapacity(maxFrames)
 
         guard thread_suspend(machThread) == KERN_SUCCESS else { return nil }
         var state = arm_thread_state64_t()
@@ -546,16 +593,18 @@ public final class InteractionThreadSamplerTarget: @unchecked Sendable {
         } else {
             stateKr = KERN_ABORTED
         }
+        var capturedRaw: InteractionRawStack? = nil
+        if stateKr == KERN_SUCCESS {
+            for i in 0..<pcCount {
+                pcs.append(rawPCs[i])
+            }
+            let raw = InteractionRawStack(pcs: pcs, waiting: waiting, cpuUs: cpuUs, imagesGeneration: 0)
+            onStopped?(raw)
+            capturedRaw = raw
+        }
         _ = thread_resume(machThread)
 
-        guard stateKr == KERN_SUCCESS else { return nil }
-
-        var pcs: [UInt] = []
-        pcs.reserveCapacity(pcCount)
-        for i in 0..<pcCount {
-            pcs.append(rawPCs[i])
-        }
-        return InteractionRawStack(pcs: pcs, waiting: waiting, cpuUs: cpuUs, imagesGeneration: 0)
+        return capturedRaw
         #else
         return nil
         #endif
@@ -765,6 +814,80 @@ public enum InteractionWatchdog {
             watch = .sampling(Progress(seq: seq, taken: takenCount + 1, dueNs: now + sampleIntervalNs))
             return []
         }
+    }
+
+    public static func look(frames: any InteractionWatchdogFrames) -> RunningFrame? {
+        let start = frames.readStart()
+        if start == 0 { return nil }
+        let seq = frames.readSeq()
+        return RunningFrame(seq: seq, startNs: start, afterUs: frames.readAfterUs())
+    }
+
+    public static func begin(frames: any InteractionWatchdogFrames, now: () -> UInt64) {
+        frames.nextSeq()
+        frames.setAfterUs(afterMs * 1000)
+        frames.setStart(now())
+    }
+
+    public static func capture(
+        samples: InteractionCaughtSamples,
+        taken: InteractionWatchdogTakenFlag,
+        seq: UInt64,
+        atNs: UInt64,
+        sample: ((InteractionRawStack) -> Void) -> InteractionRawStack?
+    ) {
+        _ = sample { raw in
+            samples.publish(taken: taken, seq: seq, atNs: atNs, raw: raw)
+        }
+    }
+
+    public static func collected(
+        samples: InteractionCaughtSamples,
+        taken: InteractionWatchdogTakenFlag,
+        seq: () -> UInt64
+    ) -> InteractionStacks? {
+        if !taken.swap(false) { return nil }
+        return samples.collect(for: seq())
+    }
+}
+
+/// Abstract frame state reads/writes for `InteractionWatchdog.look` / `begin` parity tests (`watchdog.rs::Frames`).
+public protocol InteractionWatchdogFrames {
+    func readStart() -> UInt64
+    func readSeq() -> UInt64
+    func readAfterUs() -> UInt32
+    func nextSeq()
+    func setAfterUs(_ us: UInt32)
+    func setStart(_ ns: UInt64)
+}
+
+/// Thread-safe taken flag paired with `InteractionCaughtSamples.publish`/`collect` (`watchdog.rs::TAKEN`).
+public final class InteractionWatchdogTakenFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag: Bool
+
+    public init(_ initial: Bool = false) {
+        self.flag = initial
+    }
+
+    public func load() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flag
+    }
+
+    public func store(_ value: Bool) {
+        lock.lock()
+        flag = value
+        lock.unlock()
+    }
+
+    public func swap(_ value: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let prev = flag
+        flag = value
+        return prev
     }
 }
 
@@ -1250,6 +1373,14 @@ public final class InteractionTracker {
     }
 
     public init() {}
+
+    public var currentFrameState: InteractionFrameState { frameState }
+    public var isPhaseCollectionActive: Bool { activePhases }
+    public var currentPhaseTimes: [Double] { phaseTimes }
+
+    public func clearPendingRollupForTesting() {
+        rolledSinceNs = nil
+    }
 
     public func isBreached(_ note: InteractionNote) -> Bool {
         !breachedSignatures.isEmpty

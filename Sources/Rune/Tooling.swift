@@ -2278,6 +2278,225 @@ public enum HeadlessRunner {
     }
 }
 
+public enum TraceClockMode: String, Sendable {
+    case virtual
+    case wall
+}
+
+/// Source reporting drawable presentation timestamps for trace timing (`frame::present_time::Source`).
+public protocol TracePresentSource: AnyObject, Sendable {
+    func take() -> [(seq: UInt64, atNs: UInt64?)]
+}
+
+/// Per-frame display target and drawable correlation metadata (`tooling::trace::FrameTiming`).
+public struct TraceFrameTiming: Sendable, Equatable {
+    public var targetMs: Double?
+    public var drawable: UInt64?
+    public var continuous: Bool
+
+    public init(targetMs: Double? = nil, drawable: UInt64? = nil, continuous: Bool = false) {
+        self.targetMs = targetMs
+        self.drawable = drawable
+        self.continuous = continuous
+    }
+}
+
+/// Nearest-rank percentiles over a sample (`frame::present_time::Spread`).
+public struct TracePresentSpread: Sendable, Equatable {
+    public var p50: Double
+    public var p95: Double
+    public var max: Double
+
+    public static func of(_ values: [Double]) -> TracePresentSpread? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        func rank(_ p: Double) -> Double {
+            let idx = Swift.max(1, Swift.min(sorted.count, Int((p * Double(sorted.count)).rounded(.up)))) - 1
+            return sorted[idx]
+        }
+        return TracePresentSpread(p50: rank(0.5), p95: rank(0.95), max: sorted[sorted.count - 1])
+    }
+}
+
+/// Summary of drawable present cadence in a wall-clock trace (`frame::present_time::Summary`).
+public struct TracePresentSummary: Sendable, Equatable {
+    public static let bunchedMs: Double = 2.0
+
+    public var hz: Double
+    public var frames: Int
+    public var presented: Int
+    public var skipped: Int
+    public var interval: TracePresentSpread?
+    public var bunched: Int
+    public var missed: Int
+    public var lag: TracePresentSpread?
+
+    public static func ofTrace(_ text: String) -> TracePresentSummary? {
+        var dicts: [[String: Any]] = []
+        for rawLine in text.split(whereSeparator: \.isNewline) {
+            guard let data = rawLine.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            dicts.append(obj)
+        }
+        guard let header = dicts.first else { return nil }
+        let rawHz = (header["hz"] as? NSNumber)?.doubleValue
+        let hz = (rawHz.map { $0 > 0 ? $0 : nil } ?? nil) ?? 60.0
+        var frames = 0
+        var presented = 0
+        var skipped = 0
+        var timed = false
+        var intervals: [Double] = []
+        var lags: [Double] = []
+        for frame in dicts.dropFirst() where frame["t"] != nil {
+            frames += 1
+            guard let rawPresent = frame["present_ms"] else { continue }
+            timed = true
+            guard let presentNum = rawPresent as? NSNumber, !(rawPresent is NSNull) else {
+                skipped += 1
+                continue
+            }
+            let present = presentNum.doubleValue
+            presented += 1
+            if let dtNum = frame["present_dt_ms"] as? NSNumber, !(frame["present_dt_ms"] is NSNull) {
+                intervals.append(dtNum.doubleValue)
+            }
+            if let targetNum = frame["target_ms"] as? NSNumber, !(frame["target_ms"] is NSNull) {
+                lags.append(present - targetNum.doubleValue)
+            }
+        }
+        guard timed else { return nil }
+        let missedMs = 1.5 * 1000.0 / hz
+        return TracePresentSummary(
+            hz: hz,
+            frames: frames,
+            presented: presented,
+            skipped: skipped,
+            interval: TracePresentSpread.of(intervals),
+            bunched: intervals.filter { $0 < bunchedMs }.count,
+            missed: intervals.filter { $0 > missedMs }.count,
+            lag: TracePresentSpread.of(lags)
+        )
+    }
+}
+
+private final class TracePresentsQueue {
+    private static let waitFrames: UInt32 = 32
+
+    private enum Present {
+        case noDrawable
+        case waiting(seq: UInt64)
+        case landed(seq: UInt64, at: Double)
+        case skipped(seq: UInt64)
+
+        var seq: UInt64? {
+            switch self {
+            case .noDrawable: return nil
+            case .waiting(let seq), .landed(let seq, _), .skipped(let seq): return seq
+            }
+        }
+    }
+
+    private struct Pending {
+        var lineWithoutBrace: String
+        var present: Present
+        var continuous: Bool
+        var age: UInt32
+    }
+
+    private enum Cadence {
+        case broken
+        case after(Double)
+    }
+
+    private let source: any TracePresentSource
+    private let startNs: UInt64
+    private var pending: [Pending] = []
+    private var cadence: Cadence = .broken
+
+    init(source: any TracePresentSource, startNs: UInt64) {
+        self.source = source
+        self.startNs = startNs
+    }
+
+    private static func r3(_ v: Double) -> Double {
+        (v * 1000.0).rounded() / 1000.0
+    }
+
+    private static func msSince(startNs: UInt64, atNs: UInt64) -> Double {
+        let diff = Int64(bitPattern: atNs) &- Int64(bitPattern: startNs)
+        return r3(Double(diff) / 1_000_000.0)
+    }
+
+    func push(lineWithoutBrace: String, seq: UInt64?, continuous: Bool, into out: inout [String]) {
+        for i in pending.indices {
+            pending[i].age &+= 1
+        }
+        let present: Present = seq.map { .waiting(seq: $0) } ?? .noDrawable
+        pending.append(Pending(lineWithoutBrace: lineWithoutBrace, present: present, continuous: continuous, age: 0))
+        poll()
+        writeReady(into: &out, all: false)
+    }
+
+    func flush(into out: inout [String]) {
+        poll()
+        writeReady(into: &out, all: true)
+    }
+
+    private func poll() {
+        for (seq, atNs) in source.take() {
+            guard let idx = pending.firstIndex(where: { $0.present.seq == seq }) else { continue }
+            if let atNs {
+                pending[idx].present = .landed(seq: seq, at: Self.msSince(startNs: startNs, atNs: atNs))
+            } else {
+                pending[idx].present = .skipped(seq: seq)
+            }
+        }
+    }
+
+    private func writeReady(into out: inout [String], all: Bool) {
+        while let first = pending.first {
+            let ready: Bool
+            if all || first.age >= Self.waitFrames {
+                ready = true
+            } else if case .waiting = first.present {
+                ready = false
+            } else {
+                ready = true
+            }
+            guard ready else { break }
+            let item = pending.removeFirst()
+            out.append(finishLine(item))
+        }
+    }
+
+    private func finishLine(_ item: Pending) -> String {
+        var line = item.lineWithoutBrace
+        let last: Double?
+        if case .after(let prev) = cadence, item.continuous {
+            last = prev
+        } else {
+            last = nil
+        }
+        switch item.present {
+        case .landed(_, let at):
+            cadence = .after(at)
+            line.append(",\"present_ms\":\(at)")
+            if let last {
+                line.append(",\"present_dt_ms\":\(Self.r3(at - last))")
+            }
+        case .skipped:
+            cadence = .broken
+            line.append(",\"present_ms\":null")
+        case .noDrawable, .waiting:
+            cadence = .broken
+        }
+        line.append("}")
+        return line
+    }
+}
+
 internal final class ToolingTraceWriter {
     private let path: String
     private let traceAll: Bool
@@ -2289,11 +2508,27 @@ internal final class ToolingTraceWriter {
     private var effects: [UInt32: [String]] = [:]
     private var goals: [UInt32: [Int64]] = [:]
     private var channels = TraceChannels()
+    private var presents: TracePresentsQueue?
 
-    init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool) {
+    convenience init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool) {
+        self.init(path: path, viewport: viewport, fps: fps, scale: scale, traceAll: traceAll, clock: .virtual)
+    }
+
+    static func openClock(
+        path: String,
+        viewport: Vec2,
+        fps: Double,
+        scale: Float,
+        traceAll: Bool = false,
+        clock: TraceClockMode = .wall
+    ) -> ToolingTraceWriter {
+        ToolingTraceWriter(path: path, viewport: viewport, fps: fps, scale: scale, traceAll: traceAll, clock: clock)
+    }
+
+    init(path: String, viewport: Vec2, fps: Double, scale: Float, traceAll: Bool, clock: TraceClockMode) {
         self.path = path
         self.traceAll = traceAll
-        let header: [String: Any] = [
+        var header: [String: Any] = [
             "type": "header",
             "launch": "rune",
             "width": viewport.x,
@@ -2302,14 +2537,25 @@ internal final class ToolingTraceWriter {
             "scale": scale,
             "platform": "rune",
             "units": "pt",
-            "clock": "virtual",
+            "clock": clock.rawValue,
         ]
+        if clock != .virtual {
+            header["timestamp"] = "cpu-submit"
+        }
         if let json = Self.encodeJSONLine(header) {
             lines.append(json)
         }
     }
 
+    func recordPresents(source: any TracePresentSource, startNs: UInt64) {
+        presents = TracePresentsQueue(source: source, startNs: startNs)
+    }
+
     func recordFrame<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double) {
+        frameTimed(runtime: runtime, tMs: tMs, cpuMs: cpuMs, timing: TraceFrameTiming())
+    }
+
+    func frameTimed<State>(runtime: Runtime<State>, tMs: Double, cpuMs: Double, timing: TraceFrameTiming = TraceFrameTiming()) {
         let els = runtime.elements()
         func isTraced(_ e: ElementInfo) -> Bool {
             (traceAll || e.key != nil || e.traceName != nil) && !e.virtualExtent
@@ -2455,6 +2701,9 @@ internal final class ToolingTraceWriter {
                 "why": why,
             ],
         ]
+        if let targetMs = timing.targetMs {
+            line["target_ms"] = (targetMs * 1000.0).rounded() / 1000.0
+        }
         if runtime.pressedPath != nil {
             line["k"] = 1
         }
@@ -2487,6 +2736,15 @@ internal final class ToolingTraceWriter {
             if json.hasSuffix("}") {
                 json.removeLast()
                 channels.writeJSON(into: &json)
+                if let presents {
+                    presents.push(
+                        lineWithoutBrace: json,
+                        seq: timing.drawable,
+                        continuous: timing.continuous,
+                        into: &lines
+                    )
+                    return
+                }
                 json.append("}")
             }
             lines.append(json)
@@ -2494,6 +2752,7 @@ internal final class ToolingTraceWriter {
     }
 
     func finish() throws {
+        presents?.flush(into: &lines)
         let url = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let body = lines.joined(separator: "\n") + (lines.isEmpty ? "" : "\n")
