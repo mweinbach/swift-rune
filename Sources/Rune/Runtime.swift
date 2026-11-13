@@ -3589,6 +3589,7 @@ public final class Runtime<State> {
             }
         }
         committedMatchedByFlightId = newCommittedMatched
+        var extraMatchedRemovedIds: [NodeId] = []
         if commitCut {
             seenMatchedByFlightId = newCommittedMatched
             for (fid, snap) in newCommittedMatched {
@@ -3627,6 +3628,11 @@ public final class Runtime<State> {
                         dstNode.targetRect.width,
                         dstNode.targetRect.height
                     )
+                    if let supersededId = matchedStarts[dstNode.nodeId]?.fromId,
+                       supersededId != req.sourceNodeId,
+                       !pass.nodes.contains(where: { $0.nodeId == supersededId }) {
+                        extraMatchedRemovedIds.append(supersededId)
+                    }
                     matchedStarts[dstNode.nodeId] = MatchedFlightStart(
                         fromId: req.sourceNodeId ?? dstNode.nodeId,
                         startRect: startRect,
@@ -3714,7 +3720,19 @@ public final class Runtime<State> {
         }
         let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
         scene.keepFlights(keepsFlights)
-        applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
+        if !extraMatchedRemovedIds.isEmpty {
+            let extraSet = Set(extraMatchedRemovedIds)
+            let filteredOverrides = childExitOverrides.filter { !extraSet.contains($0.childId) }
+            applyChildExitHooks(filteredOverrides, matchedStarts: matchedStarts, to: &scene)
+            for extraId in extraMatchedRemovedIds {
+                scene.unmount(extraId)
+            }
+            activeFlightIds.subtract(extraSet)
+            launchedFlightIds.subtract(extraSet)
+            unclippedMatchedFlightIds.subtract(extraSet)
+        } else {
+            applyChildExitHooks(childExitOverrides, matchedStarts: matchedStarts, to: &scene)
+        }
         syncRideTrailingFlags(pass.nodes, on: &scene)
         var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
         pendingBorderBottoms.reserveCapacity(8)
