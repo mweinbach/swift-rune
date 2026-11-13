@@ -18,6 +18,7 @@ public struct Stops: Sendable, Equatable, Hashable {
     }
 
     public var count: Int { colors.count }
+    public var isEmpty: Bool { colors.isEmpty }
 }
 
 /// Linear sRGB to OKLab.
@@ -114,6 +115,11 @@ public struct LiquidMetalParams: Sendable, Equatable {
     }
 
     public static func chrome() -> LiquidMetalParams { LiquidMetalParams() }
+    public func anchor(_ anchor: FillAnchor) -> LiquidMetalParams {
+        var copy = self
+        copy.anchor = anchor
+        return copy
+    }
     public static func gold() -> LiquidMetalParams { LiquidMetalParams(tint: rgb(0xf3c56b), light: rgb(0xfff4dc), iridescence: 0.0) }
     public static func rose() -> LiquidMetalParams { LiquidMetalParams(tint: rgb(0xf2b7a2), light: rgb(0xfff0ea), iridescence: 0.05) }
     public static func gunmetal() -> LiquidMetalParams { LiquidMetalParams(tint: rgb(0x8d949e), light: rgb(0xe8f0ff), iridescence: 0.12, contrast: 1.35) }
@@ -449,6 +455,14 @@ public enum FillStyle: Sendable, Equatable {
     case waves(WaveParams)
     case halftone(HalftoneParams)
     case plastic(PlasticParams)
+
+    public func border(_ width: Float) -> FillParams {
+        FillParams(self, border: width)
+    }
+
+    public func intensity(_ k: Float) -> FillParams {
+        FillParams(self, intensity: k)
+    }
 
     internal var index: Int {
         switch self {

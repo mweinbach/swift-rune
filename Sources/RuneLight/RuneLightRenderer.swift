@@ -67,6 +67,16 @@ public final class LightRenderer: @unchecked Sendable {
     private var giMergedTexs: [MTLTexture] = []
     private var giOwnTexs: [MTLTexture] = []
 
+    internal var resourceIdentities: (frame: ObjectIdentifier, light: ObjectIdentifier, prim: ObjectIdentifier, gb0: ObjectIdentifier, vis: ObjectIdentifier) {
+        (
+            ObjectIdentifier(frameBuffer),
+            ObjectIdentifier(lightBuffer),
+            ObjectIdentifier(primBuffer),
+            ObjectIdentifier(gb0Tex),
+            ObjectIdentifier(visTex)
+        )
+    }
+
     private weak var lastCommandBuffer: MTLCommandBuffer?
 
     public init(

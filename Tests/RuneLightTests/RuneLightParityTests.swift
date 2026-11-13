@@ -335,5 +335,55 @@ struct RuneLightParityTests {
         let inside = out[80 * w + 80]
         #expect(inside.x > 0.01 && inside.y > 0.01)
     }
+
+    @Test("Steady frames reuse render targets, uniform buffers, and glass pyramid without allocation")
+    func steadyFrameReusesTargetsAndBuffers() throws {
+        guard let device = MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { return }
+        let renderer = try LightRenderer(device: device, width: 64, height: 64, outputFormat: .rgba16Float)
+        let baseTex = try makeTexture(device: device, format: .rgba16Float, width: 64, height: 64)
+        let textTex = try makeTexture(device: device, format: .rgba16Float, width: 64, height: 64)
+        let target = try makeTexture(device: device, format: .rgba16Float, width: 64, height: 64)
+        let scene = LightScene(
+            prims: [Prim.rect(16, 16, 24, 24).raised(8).emissive(SIMD3<Float>(0.5, 0.3, 0.2))],
+            lights: [Light.point(48, 32, 32).color(SIMD3<Float>(1.0, 0.8, 0.6)).intensity(1.5)],
+            settings: LightSettings(gi: GIParams())
+        )
+
+        let cmd1 = try #require(queue.makeCommandBuffer())
+        #expect(renderer.render(scene: scene, commandBuffer: cmd1, baseTexture: baseTex, textTexture: textTex, targetTexture: target))
+        cmd1.commit()
+        cmd1.waitUntilCompleted()
+        let ids1 = renderer.resourceIdentities
+        let inspect1 = renderer.inspect()
+
+        let cmd2 = try #require(queue.makeCommandBuffer())
+        #expect(renderer.render(scene: scene, commandBuffer: cmd2, baseTexture: baseTex, textTexture: textTex, targetTexture: target))
+        cmd2.commit()
+        cmd2.waitUntilCompleted()
+        let ids2 = renderer.resourceIdentities
+        let inspect2 = renderer.inspect()
+
+        #expect(ids1 == ids2)
+        #expect(inspect1.fluence === inspect2.fluence)
+        #expect(inspect1.emission === inspect2.emission)
+        #expect(inspect1.occluders === inspect2.occluders)
+
+        let glass = try GlassRenderer(device: device, width: 64, height: 64, pixelFormat: .rgba16Float)
+        let bd = try makeTexture(device: device, format: .rgba16Float, width: 64, height: 64)
+        let fluence = try makeTexture(device: device, format: .rgba16Float, width: 64, height: 64)
+        let g1 = try #require(queue.makeCommandBuffer())
+        try glass.render(commandBuffer: g1, glass: [Glass.rounded(8, 8, 48, 48, radius: 8)], lights: [], settings: GlassSettings(), backdrop: bd, fluence: fluence, target: target)
+        g1.commit()
+        g1.waitUntilCompleted()
+        let gIds1 = glass.resourceIdentities
+
+        let g2 = try #require(queue.makeCommandBuffer())
+        try glass.render(commandBuffer: g2, glass: [Glass.rounded(8, 8, 48, 48, radius: 8)], lights: [], settings: GlassSettings(), backdrop: bd, fluence: fluence, target: target)
+        g2.commit()
+        g2.waitUntilCompleted()
+        let gIds2 = glass.resourceIdentities
+        #expect(gIds1 == gIds2)
+    }
     #endif
 }
