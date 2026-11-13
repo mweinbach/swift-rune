@@ -879,4 +879,268 @@ struct ShellAndTabStripTests {
         #expect(rt.state.mainEdit.text == "a b")
         #expect(!rt.state.sidebar.isOpen)
     }
+
+    @Test("PaneState.dragTo(width:), StripTabItem avatar/editor/decorate, and full TabStrip builder/handler parity")
+    func paneStateDragToWidthAndTabStripBuilderParity() throws {
+        var pane = PaneState(width: 240).range(160, 400)
+        pane.dragTo(width: 70) // below half minWidth (80) collapses
+        #expect(!pane.isOpen)
+        pane.dragTo(width: 280) // >= half minWidth opens and sets width
+        #expect(pane.isOpen)
+        #expect(pane.width == 280)
+
+        struct App {
+            var tabs: [String] = ["a", "b"]
+            var selected: String = "a"
+            var drag = TabDragState()
+            var edit = TextEdit("Renamed")
+            var editingId: String? = nil
+            var doubled: [String] = []
+            var hovered: [(String, Bool)] = []
+            var tornMoves: [TabTearMove] = []
+            var closed: [String] = []
+        }
+
+        let kit = Kit.neutral(dark: false)
+        let customCloseSvg = SVGIcon(viewBox: 16, paths: ["M3 3l10 10"])
+
+        let rt = Runtime(state: App(), viewport: Vec2(560, 120), systemDark: false) { s, _ in
+            let items = s.tabs.enumerated().map { idx, id in
+                var item = StripTabItem<App>(id: id, title: "Tab \(id.uppercased())")
+                    .avatar(el().key("av-\(id)").size(10, 10).bg(kit.c.bgAccent))
+                    .decorate { e, _ in e.description("decorated-\(id)") }
+                if idx == 0 {
+                    item = item.status(.spinner)
+                }
+                if s.editingId == id {
+                    item = item.editor(textInput(key: "ed-\(id)", \.edit))
+                }
+                return item
+            }
+            return col().sizeFull().gap(8).children([
+                TabStrip<App>(key: "bstrip", orientation: .horizontal)
+                    .tabs(items)
+                    .active(s.selected)
+                    .dragState(\.drag, current: s.drag)
+                    .tearOut(TearOutSpec(threshold: 24, lone: true))
+                    .availableWidth(500)
+                    .gap(8)
+                    .selectOnDragStart(false)
+                    .matchedPrefix("tab-flight")
+                    .reorderSpring(MotionTokens.REFLOW)
+                    .trailing(kit.iconButton(key: "new-tab", svg: KitIcons.plus, label: "New") { _, _ in })
+                    .trailingWidth(32)
+                    .fill(kit.c.bgBase)
+                    .closeIcon(customCloseSvg)
+                    .closeTabStop(true)
+                    .busyIndicator { _ in el().key("custom-busy").size(8, 8) }
+                    .onSelect { st, id, _ in st.selected = id }
+                    .onClose { st, id, _ in st.closed.append(id) }
+                    .onDoubleClick { st, id, _ in st.doubled.append(id) }
+                    .onHover { st, id, inside, _ in st.hovered.append((id, inside)) }
+                    .onTearMove { st, mv, _ in st.tornMoves.append(mv) }
+                    .buildLayered(s, kit: kit),
+                kit.button(key: "after-bstrip", "After") { _, _ in },
+            ])
+        }
+
+        rt.frame(at: 0.0)
+        // Verify avatar, custom busy indicator, decorate, custom fill, trailingWidth width math, closeTabStop
+        #expect(rt.element(byKey: "av-a") != nil)
+        #expect(rt.element(byKey: "custom-busy") != nil)
+        #expect(rt.element(byKey: "bstrip-tab-a")?.a11yDescription == "decorated-a")
+        let stripEl = try #require(rt.element(byKey: "bstrip"))
+        #expect(stripEl.fill == kit.c.bgBase)
+        let tabA = try #require(rt.element(byKey: "bstrip-tab-a")).rect
+        let tabB = try #require(rt.element(byKey: "bstrip-tab-b")).rect
+        // Two unpinned tabs share (500 - (32 + 8)) = 460 with 8pt gap -> clamped to maxWidth 224
+        #expect(abs(tabB[0] - (tabA[0] + tabA[2] + 8.0)) < 1.5)
+        #expect(abs(tabA[2] - 224.0) < 1.5)
+
+        // closeTabStop(true) keeps close button as a focus stop inside the tab list focusGroup
+        rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.focusedKey == "bstrip-tab-a")
+        rt.keyDown(KeyEvent(key: .arrowRight), at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "bstrip-close-a")
+        rt.keyDown(KeyEvent(key: .tab), at: 0.042)
+        rt.frame(at: 0.045)
+        #expect(rt.focusedKey == "new-tab")
+
+        // Hover and double click on tab b
+        let bPt = Vec2(tabB[0] + 30, tabB[1] + 12)
+        rt.pointerMove(to: bPt, at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.state.hovered.contains { $0.0 == "b" && $0.1 == true })
+
+        rt.pointerDown(at: bPt, at: 0.07)
+        rt.pointerUp(at: bPt, at: 0.08)
+        rt.pointerDown(at: bPt, at: 0.12)
+        rt.pointerUp(at: bPt, at: 0.13)
+        rt.frame(at: 0.14)
+        #expect(rt.state.doubled.contains("b"))
+
+        // Drag vertically past threshold triggers onTearMove
+        rt.pointerDown(at: bPt, at: 0.20)
+        rt.pointerMove(to: Vec2(bPt.x, bPt.y + 40), at: 0.22)
+        rt.pointerMove(to: Vec2(bPt.x, bPt.y + 48), at: 0.24)
+        rt.pointerUp(at: Vec2(bPt.x, bPt.y + 48), at: 0.26)
+        rt.frame(at: 0.27)
+        #expect(!rt.state.tornMoves.isEmpty)
+
+        // Editor mounts inline text input in tab title slot
+        rt.update { st, _ in st.editingId = "b" }
+        rt.frame(at: 0.30)
+        #expect(rt.element(byKey: "bstrip-editor-b") != nil)
+        #expect(rt.element(byKey: "ed-b") != nil)
+        #expect(rt.element(byKey: "bstrip-close-b") == nil)
+    }
+
+    @Test("Toolbar material, SidebarHeader/Section count/toggle, Sidebar virtualRows, SidebarToggle spec, Page frame, and reduced-motion peek")
+    func toolbarHeaderVirtualSidebarTogglePageAndReducedPeek() throws {
+        struct S {
+            var sidebar = PaneState(width: 240).range(160, 360)
+            var headerCollapsed = true
+            var actionClicks = 0
+            var useVirtual = false
+            var showPage = false
+        }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(900, 500), systemDark: false) { s, _ in
+            if s.showPage {
+                return Page<S>(key: "pg", content: text("Settings body"))
+                    .title("Settings")
+                    .leading(kit.button(key: "pg-back", "Back") { _, _ in })
+                    .trailing(kit.button(key: "pg-done", "Done") { _, _ in })
+                    .titlebarInset(74)
+                    .pastLights(16, edge: 18)
+                    .frameInset(8)
+                    .toolbarInPanel(true)
+                    .build(kit)
+            }
+            let sbEl: El<S> = if s.useVirtual {
+                Sidebar<S>(key: "vsb")
+                    .label("History")
+                    .inset(0)
+                    .headerGap(4)
+                    .headerPadding(top: 8, bottom: 16)
+                    .rowGap(4)
+                    .rowHeight(28)
+                    .header(el().key("vsb-hdr").h(20))
+                    .virtualRows(count: 200, key: { _, i in "vrow-\(i)" }) { _, i in
+                        SidebarRow<S>(key: "vrow-\(i)", title: "Row \(i)").build(kit)
+                    }
+                    .build(kit)
+            } else {
+                Sidebar<S>(key: "sb")
+                    .label("Workspace")
+                    .inset(4)
+                    .section(
+                        SidebarSection<S>(key: "s1", title: "Pinned")
+                            .count(3)
+                            .action(kit.iconButton(key: "s1-add", svg: KitIcons.plus, label: "Add") { st, _ in st.actionClicks += 1 })
+                            .child(SidebarRow<S>(key: "r0", title: "Item 0").build(kit))
+                            .build(kit)
+                    )
+                    .child(
+                        SidebarHeader<S>(key: "hdr", title: "Sessions")
+                            .collapsed(s.headerCollapsed)
+                            .count(5)
+                            .action(kit.iconButton(key: "hdr-act", svg: KitIcons.plus, label: "New") { st, _ in st.actionClicks += 1 })
+                            .onToggle { st, _ in st.headerCollapsed.toggle() }
+                            .build(kit)
+                    )
+                    .build(kit)
+            }
+            return SplitView<S>(key: "sv") { _ in
+                el().key("ws-body").sizeFull()
+            }
+            .sidebar(\.sidebar, current: s.sidebar) { _ in sbEl }
+            .toolbar(Toolbar<S>(key: "tb", title: "Main").material(.underWindowBackground).build(kit))
+            .titlebarInset(ChromeInsets(leading: 74, trailing: 0, top: 0))
+            .frameInset(8)
+            .toolbarInPanel(true)
+            .sidebarPadding(12)
+            .sidebarToggle(
+                SidebarToggle<S>()
+                    .size(.large)
+                    .pastLights(16)
+                    .edge(18)
+                    .gap(4)
+                    .inHeader(true)
+                    .unread(true)
+                    .shortcut("⌥⌘S")
+            )
+            .paneMotion(.instant)
+            .sidebarPeek(SidebarPeek.hover.reducedMotionFade(0.15))
+            .reducedMotion(true)
+            .build(s, kit: kit)
+        }
+
+        rt.frame(at: 0.0)
+        // Toolbar material & SidebarToggle in header
+        let tb = try #require(rt.element(byKey: "tb"))
+        #expect(tb.fill == kit.c.bgBase)
+        #expect(rt.element(byKey: "sv-sidebar-toggle-slot") != nil)
+        let openToggle = try #require(rt.element(byKey: "sv-sidebar-toggle"))
+        #expect(abs(openToggle.rect[2] - 28.0) < 0.5)
+        #expect(openToggle.help?.contains("⌥⌘S") == true)
+        let unreadDot = try #require(rt.element(byKey: "sv-sidebar-toggle-unread"))
+        #expect(unreadDot.opacity == 0.0)
+
+        // SidebarSection count/action + SidebarHeader collapsed/count/action/onToggle
+        #expect(rt.element(byKey: "s1-count") != nil)
+        #expect(rt.element(byKey: "s1-add") != nil)
+        let hdr = try #require(rt.element(byKey: "hdr"))
+        #expect(hdr.role == .button)
+        #expect(hdr.expanded == false)
+        #expect(hdr.a11yDescription == "5 items")
+        #expect(rt.element(byKey: "hdr-count") != nil)
+        #expect(rt.element(byKey: "hdr-disclosure") != nil)
+        let hdrPt = Vec2(hdr.rect[0] + 16, hdr.rect[1] + 12)
+        rt.pointerDown(at: hdrPt, at: 0.02)
+        rt.pointerUp(at: hdrPt, at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.state.headerCollapsed == false)
+
+        // Collapsed toggle shows unread dot & peek works with pane-surface + Escape
+        rt.update { st, _ in st.sidebar.setOpen(false) }
+        rt.frame(at: 0.06)
+        #expect(try #require(rt.element(byKey: "sv-sidebar-toggle-unread")).opacity > 0.5)
+
+        let edgeRect = try #require(rt.element(byKey: "sv-peek-edge")).rect
+        rt.pointerMove(to: Vec2(edgeRect[0] + 4, edgeRect[1] + 40), at: 0.08)
+        rt.frame(at: 0.09)
+        #expect(rt.state.sidebar.isPeeking)
+        #expect(rt.element(byKey: "sv-pane-surface") != nil)
+        let peekEl = try #require(rt.element(byKey: "sv-sidebar-peek"))
+        #expect(peekEl.rect[0] == 8.0)
+
+        rt.update { st, _ in st.sidebar.endPeek() }
+        rt.frame(at: 0.11)
+        #expect(!rt.state.sidebar.isPeeking)
+
+        // Virtualized Sidebar mounts near viewport instead of all 200 rows
+        rt.update { st, _ in
+            st.sidebar.setOpen(true)
+            st.useVirtual = true
+        }
+        rt.frame(at: 0.12)
+        #expect(rt.element(byKey: "vrow-0") != nil)
+        #expect(rt.element(byKey: "vrow-199") == nil)
+
+        // Page shell chrome matches SplitView panel + toolbar height
+        rt.update { st, _ in st.showPage = true }
+        rt.frame(at: 0.14)
+        #expect(try #require(rt.element(byKey: "pg-titlebar-strip")).rect[3] == 8.0)
+        #expect(try #require(rt.element(byKey: "pg-main-pane")).rect[0] == 8.0)
+        #expect(try #require(rt.element(byKey: "pg-toolbar")).rect[3] == 48.0)
+    }
+
+    @Test(
+        "SidebarPeek dwell delays and window-blur cancel (shell_desktop.rs:200-296)",
+        .disabled("Blocked on @el: El.hoverDelays(_:_:) and El.onWindowFocus(_:) do not exist in Sources/Rune/El.swift")
+    )
+    func sidebarPeekDwellAndBlurBlockedOnEl() {}
 }

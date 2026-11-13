@@ -408,6 +408,12 @@ public struct TreeModel<T: Sendable>: Sendable {
         cursorIndex.map { nodes[$0].id }
     }
 
+    /// Selected item IDs in tree pre-order (`TreeModel::selected`).
+    public func selected() -> [String] { selectedIDs }
+
+    /// Current keyboard cursor item ID (`TreeModel::cursor`).
+    public func cursor() -> String? { cursorID }
+
     public mutating func clearSelection() {
         for i in nodes.indices {
             nodes[i].selected = false

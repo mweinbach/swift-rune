@@ -129,6 +129,7 @@ public struct Toolbar<State> {
     private var trailingInset: Float = 0
     private var hasBottomBorder: Bool = true
     private var fillColor: Color?
+    private var systemMaterialSpec: (SystemMaterial, MaterialBlendingMode)?
 
     public init(key: String = "toolbar", title: String? = nil) {
         self.keyId = key
@@ -148,6 +149,11 @@ public struct Toolbar<State> {
     }
     public func borderBottom(_ show: Bool) -> Self { var c = self; c.hasBottomBorder = show; return c }
     public func bg(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
+    public func material(_ material: SystemMaterial, blending: MaterialBlendingMode = .behindWindow) -> Self {
+        var c = self
+        c.systemMaterialSpec = (material, blending)
+        return c
+    }
 
     public func build(_ k: Kit) -> El<State> {
         var left: El<State> = row()
@@ -174,8 +180,11 @@ public struct Toolbar<State> {
             .h(Self.height)
             .itemsCenter()
             .justifyBetween()
-            .bg(fillColor ?? k.c.page)
+            .bg(fillColor ?? (systemMaterialSpec != nil ? k.c.bgBase : k.c.page))
             .windowDrag()
+        if let systemMaterialSpec {
+            bar = bar.systemMaterial(systemMaterialSpec.0, blending: systemMaterialSpec.1)
+        }
         if let titleText, !titleText.isEmpty {
             bar = bar.label(titleText)
         }
@@ -221,9 +230,12 @@ public struct SidebarHeader<State> {
     private var keyId: String
     private var titleText: String
     private var subtitleText: String?
+    private var countValue: Int?
+    private var collapsedState: Bool?
     private var leadingEl: El<State>?
     private var trailingEl: El<State>?
     private var onClickFn: ((inout State, inout Tx) -> Void)?
+    private var onToggleFn: ((inout State, inout Tx) -> Void)?
 
     public init(key: String = "sidebar-header", title: String) {
         self.keyId = key
@@ -231,22 +243,51 @@ public struct SidebarHeader<State> {
     }
 
     public func subtitle(_ value: String?) -> Self { var c = self; c.subtitleText = value; return c }
+    public func collapsed(_ value: Bool) -> Self { var c = self; c.collapsedState = value; return c }
+    public func count(_ n: Int) -> Self { var c = self; c.countValue = max(0, n); return c }
     public func leading(_ element: El<State>?) -> Self { var c = self; c.leadingEl = element; return c }
     public func trailing(_ element: El<State>?) -> Self { var c = self; c.trailingEl = element; return c }
+    public func action(_ element: El<State>?) -> Self { trailing(element) }
     public func onClick(_ f: @escaping (inout State, inout Tx) -> Void) -> Self {
         var c = self
         c.onClickFn = f
         return c
     }
+    public func onToggle(_ f: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var c = self
+        c.onToggleFn = f
+        if c.collapsedState == nil { c.collapsedState = false }
+        return c
+    }
 
     public func build(_ k: Kit) -> El<State> {
-        var titleCol: El<State> = col().grow(1).minW(0).gap(1)
+        var titleRow: El<State> = row().gap(4).itemsCenter().minW(0)
             .child(text(titleText).font(k.ty.uiMedium).color(k.c.textBase).ellipsis())
+        if let countValue {
+            titleRow = titleRow.child(
+                text("\(countValue)")
+                    .key("\(keyId)-count")
+                    .font(k.ty.smallMedium)
+                    .color(k.c.textFaint)
+                    .noWrap()
+            )
+        }
+        if let collapsedState {
+            let glyph = collapsedState ? k.glyph.triangleRight : k.glyph.triangleDown
+            titleRow = titleRow.child(
+                Rune.icon(glyph, size: 12)
+                    .key("\(keyId)-disclosure")
+                    .color(k.c.iconFaint)
+            )
+        }
+        var titleCol: El<State> = col().grow(1).minW(0).gap(1)
+            .child(titleRow)
         if let subtitleText, !subtitleText.isEmpty {
             titleCol = titleCol.child(text(subtitleText).font(k.ty.small).color(k.c.textFaint).ellipsis())
         }
         var header: El<State> = row()
             .key(keyId)
+            .label(titleText)
             .wFull()
             .minH(36)
             .px(SidebarConstants.inset)
@@ -254,11 +295,23 @@ public struct SidebarHeader<State> {
             .gap(8)
             .itemsCenter()
             .rounded(k.radius.sm)
+        if let countValue {
+            header = header.description("\(countValue) items")
+        }
         if let leadingEl { header = header.child(leadingEl) }
         header = header.child(titleCol)
         if let trailingEl { header = header.child(trailingEl) }
-        if let onClickFn {
+        if let onToggleFn {
+            header = k.interactive(header)
+                .role(.button)
+                .expanded(!(collapsedState ?? false))
+                .focusable(false)
+                .hoverMotion(.none, .none)
+                .onClick(onToggleFn)
+        } else if let onClickFn {
             header = k.interactive(header).focusRing(k.c.borderFocus).onClick(onClickFn)
+        } else {
+            header = header.role(.heading)
         }
         return header
     }
@@ -268,6 +321,7 @@ public struct SidebarHeader<State> {
 public struct SidebarSection<State> {
     private var keyId: String
     private var titleText: String?
+    private var countValue: Int?
     private var collapsible: Bool = false
     private var collapsed: Bool = false
     private var onToggleFn: ((inout State, inout Tx) -> Void)?
@@ -286,6 +340,12 @@ public struct SidebarSection<State> {
         return c
     }
 
+    public func count(_ n: Int) -> Self {
+        var c = self
+        c.countValue = max(0, n)
+        return c
+    }
+
     public func onToggle(_ f: @escaping (inout State, inout Tx) -> Void) -> Self {
         var c = self
         c.onToggleFn = f
@@ -293,6 +353,7 @@ public struct SidebarSection<State> {
     }
 
     public func trailing(_ element: El<State>?) -> Self { var c = self; c.trailingEl = element; return c }
+    public func action(_ element: El<State>?) -> Self { trailing(element) }
     public func child(_ rowEl: El<State>) -> Self { var c = self; c.items.append(rowEl); return c }
     public func children(_ rows: [El<State>]) -> Self { var c = self; c.items.append(contentsOf: rows); return c }
 
@@ -310,6 +371,9 @@ public struct SidebarSection<State> {
                 .gap(6)
                 .itemsCenter()
                 .justifyBetween()
+            if let countValue {
+                header = header.description("\(countValue) items")
+            }
             var labelRow: El<State> = row().gap(4).itemsCenter().grow(1).minW(0)
             if collapsible {
                 let glyph = collapsed ? k.glyph.triangleRight : k.glyph.triangleDown
@@ -318,6 +382,11 @@ public struct SidebarSection<State> {
             labelRow = labelRow.child(
                 text(titleText).font(k.ty.smallMedium).color(k.c.textFaint).ellipsis().a11yHidden()
             )
+            if let countValue {
+                labelRow = labelRow.child(
+                    text("\(countValue)").key("\(keyId)-count").font(k.ty.smallMedium).color(k.c.textFaint).noWrap().a11yHidden()
+                )
+            }
             header = header.child(labelRow)
             if let trailingEl {
                 header = header.child(trailingEl)
@@ -643,38 +712,118 @@ public struct SidebarRow<State> {
 
 /// Top-level vertical sidebar container (`rune_kit::shell::Sidebar`).
 public struct Sidebar<State> {
+    private struct VirtualSpec {
+        var count: Int
+        var estimatedRowHeight: Float?
+        var key: (State, Int) -> String
+        var build: (State, Int) -> El<State>
+    }
+
     private var keyId: String
+    private var labelText: String = "Sidebar"
     private var headerEl: El<State>?
     private var footerEl: El<State>?
     private var sectionsList: [El<State>] = []
     private var scrollable: Bool = true
     private var pad: Float = SidebarConstants.inset
+    private var headerGapValue: Float = 2.0
+    private var headerPadTop: Float = 0.0
+    private var headerPadBottom: Float = SidebarConstants.inset
+    private var customHeaderLayout: Bool = false
+    private var rowGapValue: Float = 10.0
+    private var rowHeightValue: Float = SidebarConstants.rowHeight
     private var fillColor: Color?
+    private var virtualSpec: VirtualSpec?
 
     public init(key: String = "sidebar") {
         self.keyId = key
     }
 
+    public func label(_ value: String) -> Self { var c = self; c.labelText = value; return c }
     public func header(_ element: El<State>?) -> Self { var c = self; c.headerEl = element; return c }
     public func footer(_ element: El<State>?) -> Self { var c = self; c.footerEl = element; return c }
-    public func section(_ element: El<State>) -> Self { var c = self; c.sectionsList.append(element); return c }
-    public func sections(_ elements: [El<State>]) -> Self { var c = self; c.sectionsList.append(contentsOf: elements); return c }
+    public func section(_ element: El<State>) -> Self {
+        var c = self
+        c.virtualSpec = nil
+        c.sectionsList.append(element)
+        return c
+    }
+    public func sections(_ elements: [El<State>]) -> Self {
+        var c = self
+        c.virtualSpec = nil
+        c.sectionsList.append(contentsOf: elements)
+        return c
+    }
+    public func child(_ element: El<State>) -> Self { section(element) }
     public func scrollable(_ enabled: Bool) -> Self { var c = self; c.scrollable = enabled; return c }
     public func padding(_ value: Float) -> Self { var c = self; c.pad = max(0, value); return c }
+    public func inset(_ points: Float) -> Self { padding(points) }
+    public func headerGap(_ points: Float) -> Self {
+        var c = self
+        c.headerGapValue = max(0, points)
+        c.customHeaderLayout = true
+        return c
+    }
+    public func headerPadding(top: Float, bottom: Float) -> Self {
+        var c = self
+        c.headerPadTop = max(0, top)
+        c.headerPadBottom = max(0, bottom)
+        c.customHeaderLayout = true
+        return c
+    }
+    public func rowGap(_ points: Float) -> Self { var c = self; c.rowGapValue = max(0, points); return c }
+    public func rowHeight(_ points: Float) -> Self { var c = self; c.rowHeightValue = max(1, points); return c }
     public func bg(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
+
+    public func virtualRows(
+        count: Int,
+        estimatedRowHeight: Float? = nil,
+        key: @escaping (State, Int) -> String,
+        build: @escaping (State, Int) -> El<State>
+    ) -> Self {
+        var c = self
+        c.sectionsList.removeAll()
+        c.virtualSpec = VirtualSpec(count: max(0, count), estimatedRowHeight: estimatedRowHeight, key: key, build: build)
+        return c
+    }
 
     public func build(_ k: Kit) -> El<State> {
         var body: El<State> = col()
             .key("\(keyId)-body")
             .role(.list)
+            .label(labelText)
             .wFull()
             .grow(1)
             .minH(0)
-            .gap(10)
-        if scrollable {
-            body = body.scroll()
+        if let virtualSpec {
+            body = body
+                .growth(.default)
+                .virtualRows(
+                    count: virtualSpec.count,
+                    estimatedRowHeight: virtualSpec.estimatedRowHeight ?? rowHeightValue,
+                    key: virtualSpec.key,
+                    build: virtualSpec.build
+                )
+        } else {
+            body = body.gap(rowGapValue)
+            if scrollable {
+                body = body.scroll()
+            }
+            body = body.children(sectionsList)
         }
-        body = body.children(sectionsList)
+
+        let builtHeader: El<State>? = headerEl.map { hdr in
+            if customHeaderLayout {
+                return col()
+                    .key("\(keyId)-header")
+                    .wFull()
+                    .pt(headerPadTop)
+                    .pb(headerPadBottom)
+                    .gap(headerGapValue)
+                    .child(hdr)
+            }
+            return hdr
+        }
 
         return col()
             .key(keyId)
@@ -682,7 +831,7 @@ public struct Sidebar<State> {
             .p(pad)
             .gap(8)
             .bg(fillColor ?? k.c.layer01)
-            .child(headerEl)
+            .child(builtHeader)
             .child(body)
             .child(footerEl)
     }
@@ -690,9 +839,18 @@ public struct Sidebar<State> {
 
 /// Built-in sidebar/inspector toggle icon button (`rune_kit::shell::SidebarToggle`).
 public struct SidebarToggle<State> {
+    public static var defaultShortcut: String { "⇧⌘B" }
+
     private var keyId: String
     private var inspector: Bool
     private var openState: Bool?
+    public private(set) var controlSize: ControlSize = .regular
+    public private(set) var pastLightsOffset: Float = 8.0
+    public private(set) var edgeOffset: Float = 12.0
+    public private(set) var trailingGap: Float = 8.0
+    public private(set) var isInHeader: Bool = false
+    public private(set) var hasUnread: Bool = false
+    public private(set) var shortcutHint: String? = SidebarToggle<State>.defaultShortcut
     private var onToggleFn: (inout State, inout Tx) -> Void
 
     public init(
@@ -715,7 +873,32 @@ public struct SidebarToggle<State> {
         self.onToggleFn = onToggle
     }
 
+    public init(key: String = "sidebar-toggle", inspector: Bool = false) {
+        self.keyId = key
+        self.inspector = inspector
+        self.onToggleFn = { _, _ in }
+    }
+
     public func open(_ isOpen: Bool?) -> Self { var c = self; c.openState = isOpen; return c }
+    public func size(_ s: ControlSize) -> Self { var c = self; c.controlSize = s; return c }
+    public func pastLights(_ points: Float) -> Self { var c = self; c.pastLightsOffset = max(0, points); return c }
+    public func edge(_ points: Float) -> Self { var c = self; c.edgeOffset = max(0, points); return c }
+    public func gap(_ points: Float) -> Self { var c = self; c.trailingGap = max(0, points); return c }
+    public func inHeader(_ on: Bool = true) -> Self { var c = self; c.isInHeader = on; return c }
+    public func unread(_ on: Bool = true) -> Self { var c = self; c.hasUnread = on; return c }
+    public func shortcut(_ hint: String?) -> Self {
+        var c = self
+        if let hint, !hint.isEmpty {
+            c.shortcutHint = hint
+        } else {
+            c.shortcutHint = nil
+        }
+        return c
+    }
+
+    public var sideLength: Float {
+        controlSize.height
+    }
 
     public func build(_ k: Kit) -> El<State> {
         let lbl: String = if let openState {
@@ -731,12 +914,29 @@ public struct SidebarToggle<State> {
             key: keyId,
             svg: inspector ? KitIcons.inspector : KitIcons.sidebar,
             label: lbl,
-            size: .sm,
+            size: controlSize,
             variant: .ghost,
             onClick: onToggleFn
         )
+        .help(lbl)
+        if let shortcutHint, !shortcutHint.isEmpty {
+            btn = btn.helpKeys([shortcutHint])
+        }
         if let openState {
             btn = btn.expanded(openState)
+        }
+        if hasUnread {
+            let dotAlpha: Float = (openState == true) ? 0.0 : 1.0
+            let dot: El<State> = el()
+                .key("\(keyId)-unread")
+                .w(7)
+                .h(7)
+                .rounded(3.5)
+                .bg(k.c.textAccent)
+                .pin(top: -2, right: -2)
+                .opacity(dotAlpha)
+                .animate(Spring(duration: SplitView<State>.dotFade, bounce: 0))
+            btn = btn.child(dot)
         }
         return btn
     }
@@ -763,6 +963,7 @@ public struct SplitView<State> {
     private var toolbarEl: El<State>?
     private var titlebarInsetValue: ChromeInsets = ChromeInsets()
     private var showSidebarToggle: Bool = true
+    private var sidebarToggleSpec: SidebarToggle<State> = SidebarToggle<State>()
     private var frameInsetValue: Float = 0
     private var toolbarInPanelValue: Bool = false
     private var sidebarPaddingValue: Float = 0
@@ -802,6 +1003,12 @@ public struct SplitView<State> {
     public func titlebarInset(_ insets: ChromeInsets) -> Self { var c = self; c.titlebarInsetValue = insets; return c }
     public func hideSidebarToggle(_ hidden: Bool = true) -> Self { var c = self; c.showSidebarToggle = !hidden; return c }
     public func sidebarToggle(_ shown: Bool) -> Self { var c = self; c.showSidebarToggle = shown; return c }
+    public func sidebarToggle(_ toggle: SidebarToggle<State>) -> Self {
+        var c = self
+        c.showSidebarToggle = true
+        c.sidebarToggleSpec = toggle
+        return c
+    }
     public func frameInset(_ inset: Float) -> Self { var c = self; c.frameInsetValue = max(0, inset); return c }
     public func toolbarInPanel(_ inside: Bool = true) -> Self { var c = self; c.toolbarInPanelValue = inside; return c }
     public func sidebarPadding(_ pad: Float) -> Self { var c = self; c.sidebarPaddingValue = max(0, pad); return c }
@@ -866,21 +1073,48 @@ public struct SplitView<State> {
         // Main center column (optional top toolbar + content)
         var mainCol: El<State> = col().key("\(keyId)-main").role(.main).grow(1).minW(0).hFull()
         var effectiveToolbar = toolbarEl
-        if let sidebarCfg, showSidebarToggle, sidebarCfg.state.isCollapsed {
-            let toggleBtn = SidebarToggle<State>(
+        let sidebarToggleEl: El<State>? = sidebarCfg.flatMap { cfg in
+            guard showSidebarToggle else { return nil }
+            var toggleBtn = SidebarToggle<State>(
                 key: "\(keyId)-sidebar-toggle",
-                keyPath: sidebarCfg.keyPath
-            ).open(!sidebarCfg.state.isCollapsed).build(k)
+                keyPath: cfg.keyPath
+            )
+            .open(!cfg.state.isCollapsed)
+            .size(sidebarToggleSpec.controlSize)
+            .pastLights(sidebarToggleSpec.pastLightsOffset)
+            .edge(sidebarToggleSpec.edgeOffset)
+            .gap(sidebarToggleSpec.trailingGap)
+            .inHeader(sidebarToggleSpec.isInHeader)
+            .unread(sidebarToggleSpec.hasUnread)
+            .shortcut(sidebarToggleSpec.shortcutHint)
+            .build(k)
+            if sidebarPeekValue.isEnabled && cfg.state.isCollapsed {
+                let sbKp = cfg.keyPath
+                toggleBtn = toggleBtn.onHover { s, hovering, _ in
+                    if hovering {
+                        s[keyPath: sbKp].peek()
+                    }
+                }
+            }
+            return toggleBtn
+        }
+        if let sidebarCfg, let toggleBtn = sidebarToggleEl, sidebarCfg.state.isCollapsed {
+            let leadPad = max(
+                0,
+                (titlebarInsetValue.leading > 0 ? titlebarInsetValue.leading + sidebarToggleSpec.pastLightsOffset : sidebarToggleSpec.edgeOffset)
+                    - (toolbarInPanelValue ? frameInsetValue : 0)
+            )
             if let bar = effectiveToolbar {
                 effectiveToolbar = row().key("\(keyId)-toolbar-wrap").wFull().itemsCenter()
-                    .child(row().pl(8).child(toggleBtn))
+                    .child(row().pl(max(8, leadPad)).pr(sidebarToggleSpec.trailingGap).child(toggleBtn))
                     .child(row().grow(1).minW(0).child(bar))
             } else if toolbarInPanelValue {
                 effectiveToolbar = row()
                     .key("\(keyId)-toggle-bar")
                     .wFull()
                     .h(Toolbar<State>.height)
-                    .px(12)
+                    .pl(max(12, leadPad))
+                    .pr(12)
                     .itemsCenter()
                     .child(toggleBtn)
                     .borderSides(bottom: 1.0, color: k.c.borderMuted)
@@ -927,6 +1161,14 @@ public struct SplitView<State> {
                 if let spring, !pane.fromPeek {
                     sbPane = sbPane.animateLayout(spring)
                 }
+                if !pane.isCollapsed, showSidebarToggle, sidebarToggleSpec.isInHeader, let toggleBtn = sidebarToggleEl {
+                    sbPane = sbPane.child(
+                        row()
+                            .key("\(keyId)-sidebar-toggle-slot")
+                            .pin(top: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5), right: max(8, sidebarPaddingValue))
+                            .child(toggleBtn)
+                    )
+                }
                 rootRow = rootRow
                     .child(sbPane)
                     .child(buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true))
@@ -952,6 +1194,11 @@ public struct SplitView<State> {
                     }
                 rootRow = rootRow.child(edgeTrigger)
                 if pane.isPeeking {
+                    let peekSurface: El<State> = el()
+                        .key("\(keyId)-pane-surface")
+                        .pin(top: 0, right: 0, bottom: 0, left: 0)
+                        .bg(k.c.layer01)
+                        .a11yHidden()
                     var peekDrawer: El<State> = col()
                         .key("\(keyId)-sidebar-peek")
                         .role(.region)
@@ -969,9 +1216,19 @@ public struct SplitView<State> {
                                 s[keyPath: sbKeyPath].endPeek()
                             }
                         }
+                        .onKey { s, ev, _ in
+                            if ev.key == .escape {
+                                s[keyPath: sbKeyPath].endPeek()
+                                return true
+                            }
+                            return false
+                        }
+                        .child(peekSurface)
                         .child(sidebarCfg.builder(state))
-                    if let spring {
-                        peekDrawer = peekDrawer.animateLayout(spring)
+                    if reducedMotionValue && sidebarPeekValue.reducedFadeSeconds > 0 {
+                        peekDrawer = peekDrawer.transition(.opacity)
+                    } else if let peekSpring = reducedMotionValue ? nil : (sidebarPeekValue.springOverride ?? spring) {
+                        peekDrawer = peekDrawer.animateLayout(peekSpring)
                     }
                     rootRow = rootRow.child(peekDrawer)
                 }
@@ -1006,7 +1263,8 @@ public struct SplitView<State> {
     }
 }
 
-/// Centered / padded workspace page frame (`rune_kit::shell::Page`).
+/// Centered / padded workspace page frame (`rune_kit::shell::Page`), also supporting
+/// `SplitView`-matched toolbar/chrome framing (`init(key:content:)`, `.title`, `.toolbarInPanel`).
 public struct Page<State> {
     private var keyId: String
     private var maxW: Float?
@@ -1015,9 +1273,22 @@ public struct Page<State> {
     private var scrollable: Bool = true
     private var headerEl: El<State>?
     private var childrenEls: [El<State>] = []
+    private var shellToolbar: Toolbar<State>?
+    private var titlebarInsetValue: Float = 0
+    private var pastLightsOffset: Float = 8.0
+    private var edgeOffset: Float = 12.0
+    private var frameInsetValue: Float = 8.0
+    private var toolbarInPanelValue: Bool = false
+    private var usesShellFrame: Bool = false
 
     public init(key: String = "page") {
         self.keyId = key
+    }
+
+    public init(key: String = "page", content: El<State>) {
+        self.keyId = key
+        self.childrenEls = [content]
+        self.usesShellFrame = true
     }
 
     public func maxWidth(_ value: Float) -> Self { var c = self; c.maxW = max(1, value); return c }
@@ -1028,7 +1299,116 @@ public struct Page<State> {
     public func child(_ element: El<State>) -> Self { var c = self; c.childrenEls.append(element); return c }
     public func children(_ elements: [El<State>]) -> Self { var c = self; c.childrenEls.append(contentsOf: elements); return c }
 
+    public func title(_ value: String) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.shellToolbar = (c.shellToolbar ?? Toolbar<State>(key: "\(keyId)-toolbar")).title(value)
+        return c
+    }
+
+    public func center(_ element: El<State>) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.shellToolbar = (c.shellToolbar ?? Toolbar<State>(key: "\(keyId)-toolbar")).center(element)
+        return c
+    }
+
+    public func leading(_ element: El<State>) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.shellToolbar = (c.shellToolbar ?? Toolbar<State>(key: "\(keyId)-toolbar")).leading(element)
+        return c
+    }
+
+    public func trailing(_ element: El<State>) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.shellToolbar = (c.shellToolbar ?? Toolbar<State>(key: "\(keyId)-toolbar")).trailing(element)
+        return c
+    }
+
+    public func toolbar(_ bar: Toolbar<State>) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.shellToolbar = bar
+        return c
+    }
+
+    public func titlebarInset(_ points: Float) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.titlebarInsetValue = max(0, points)
+        return c
+    }
+
+    public func pastLights(_ pastLights: Float, edge: Float) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.pastLightsOffset = max(0, pastLights)
+        c.edgeOffset = max(0, edge)
+        return c
+    }
+
+    public func frameInset(_ points: Float) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.frameInsetValue = max(0, points)
+        return c
+    }
+
+    public func toolbarInPanel(_ inside: Bool = true) -> Self {
+        var c = self
+        c.usesShellFrame = true
+        c.toolbarInPanelValue = inside
+        return c
+    }
+
     public func build(_ k: Kit) -> El<State> {
+        if usesShellFrame {
+            let clearX = titlebarInsetValue > 0 ? titlebarInsetValue + pastLightsOffset : edgeOffset
+            let tbPad = toolbarInPanelValue ? max(0, clearX - frameInsetValue) : clearX
+            let bar = (shellToolbar ?? Toolbar<State>(key: "\(keyId)-toolbar"))
+                .inset(leading: max(0, tbPad - 12))
+                .build(k)
+            let bodyContent: El<State> = childrenEls.count == 1
+                ? childrenEls[0]
+                : col().key("\(keyId)-content").sizeFull().children(childrenEls)
+            if toolbarInPanelValue {
+                let panel = col()
+                    .key("\(keyId)-main-pane")
+                    .role(.main)
+                    .sizeFull()
+                    .rounded(k.radius.lg)
+                    .bg(k.c.bgBase)
+                    .border(1.0, k.c.borderMuted)
+                    .clip(true)
+                    .child(bar)
+                    .child(el().key("\(keyId)-body").grow(1).minH(0).wFull().child(bodyContent))
+                return col()
+                    .key(keyId)
+                    .sizeFull()
+                    .bg(k.c.bgDeep)
+                    .child(el().key("\(keyId)-titlebar-strip").wFull().h(frameInsetValue).windowDrag())
+                    .child(el().grow(1).minH(0).wFull().px(frameInsetValue).pb(frameInsetValue).child(panel))
+            } else {
+                let panel = col()
+                    .key("\(keyId)-main-pane")
+                    .role(.main)
+                    .sizeFull()
+                    .rounded(k.radius.lg)
+                    .bg(k.c.bgBase)
+                    .border(1.0, k.c.borderMuted)
+                    .clip(true)
+                    .child(bodyContent)
+                return col()
+                    .key(keyId)
+                    .sizeFull()
+                    .bg(k.c.bgDeep)
+                    .child(bar)
+                    .child(el().grow(1).minH(0).wFull().px(frameInsetValue).pb(frameInsetValue).child(panel))
+            }
+        }
+
         var inner: El<State> = col()
             .key("\(keyId)-inner")
             .wFull()

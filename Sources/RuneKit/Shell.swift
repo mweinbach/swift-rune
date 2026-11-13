@@ -519,6 +519,17 @@ public struct PaneState: Sendable, Equatable {
         }
     }
 
+    /// Drags the pane directly to `width`, collapsing when dragged below half `minWidth` (`pane::PaneState::drag_to`).
+    public mutating func dragTo(width newWidth: Float) {
+        guard newWidth.isFinite else { return }
+        if newWidth < minWidth * 0.5 {
+            setOpen(false)
+        } else {
+            setOpen(true)
+            setWidth(newWidth)
+        }
+    }
+
     /// Applies a raw pointer delta against the currently held grip start (or a fresh start if idle).
     public mutating func dragTo(_ delta: Float, positiveGrows: Bool = true, collapseThreshold: Float = 80) {
         let start = grip.data ?? GripStart(width: width, open: isOpen)

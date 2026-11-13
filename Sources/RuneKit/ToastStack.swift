@@ -246,6 +246,9 @@ public struct ToastStack<Payload: Sendable>: Sendable {
 
     public var front: ToastStackEntry<Payload>? { entries.last }
 
+    /// Current stack expansion/hold phase (`ToastStack::stack`).
+    public var stack: ToastStackState { stackState }
+
     public var nextDue: Double? {
         entries.compactMap { entry in
             if case .running(let due) = entry.timer { return due }

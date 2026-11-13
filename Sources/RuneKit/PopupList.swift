@@ -221,6 +221,7 @@ public struct PopupList<State> {
     private var shouldAnimateFiltering: Bool = false
     private var activeIdx: Int?
     private var trackedScrollYValue: Float = 0.0
+    private var preferTrackedScroll: Bool = false
     private var emptyText: String = "No results"
     private var a11yLabel: String?
     private var onActiveHandler: ((inout State, Int) -> Void)?
@@ -336,6 +337,12 @@ public struct PopupList<State> {
         return copy
     }
 
+    public func preferTrackedScroll(_ on: Bool = true) -> PopupList<State> {
+        var copy = self
+        copy.preferTrackedScroll = on
+        return copy
+    }
+
     public func emptyMessage(_ text: String) -> PopupList<State> {
         var copy = self
         copy.emptyText = text
@@ -377,7 +384,7 @@ public struct PopupList<State> {
         let measuredVpH = cx?.layoutSize(viewportKey)?[1]
         let renderVpH = (measuredVpH ?? 0) > 0 ? min(measuredVpH!, naturalVpH) : naturalVpH
         let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
-        let scrollY = max(trackedScrollYValue, cxScrollY)
+        let scrollY = preferTrackedScroll ? trackedScrollYValue : max(trackedScrollYValue, cxScrollY)
         let overscan: Float = 265.0
         let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
         let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(renderVpH, rh) + overscan) / rh)))

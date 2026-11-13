@@ -43,6 +43,8 @@ struct FeedbackAndInputsTests {
     @Test("ToastStack bounds visible slots, promotes FIFO queue, and auto-dismisses")
     func toastStackFifoAndTick() {
         var stack = ToastStack<String>(maxVisible: 2, defaultDuration: 3.0)
+        #expect(stack.stack == .collapsed)
+        #expect(stack.page == .shown)
         let id1 = stack.push("First")
         let id2 = stack.push("Second", duration: 5.0)
         let id3 = stack.push("Third", duration: 2.0)
@@ -828,6 +830,41 @@ struct FeedbackAndInputsTests {
         #expect(rt.state.recorder.shortcut == nil)
     }
 
+    @Test("Disabling a focused ShortcutRecorder cancels active capture (tests/shortcut_recorder.rs:90)",
+          .disabled("Blocked on @el: Runtime does not emit PhysicalInput.focusLost or El.onBlur when a focused element becomes disabled(true)"))
+    func disablingFocusedRecorderCancelsCapture() throws {
+        struct S {
+            var recorder = ShortcutRecorderState()
+            var disabled = false
+            var changes = 0
+        }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(320, 140), systemDark: false) { s, _ in
+            ShortcutRecorder(key: "rec", \.recorder)
+                .disabled(s.disabled)
+                .onChange { st, _ in
+                    st.changes += 1
+                    return nil
+                }
+                .build(using: kit, in: s)
+        }
+        rt.frame(at: 0.0)
+        let rect = try #require(rt.element(byKey: "rec")).rect
+        let pt = Vec2(rect[0] + 20, rect[1] + 12)
+        rt.pointerDown(at: pt, at: 0.01)
+        rt.pointerUp(at: pt, at: 0.02)
+        rt.frame(at: 0.03)
+        #expect(rt.state.recorder.isRecording)
+
+        rt.state.disabled = true
+        rt.markNeedsCommit()
+        rt.frame(at: 0.04)
+        #expect(!rt.state.recorder.isRecording)
+        _ = rt.physicalInput(.key(key: .keyJ, mods: Mods(), pressed: true, repeat: false), at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.state.changes == 0)
+    }
+
     @Test("RollingText countdown preserves prefix identity and rolls entering/exiting glyphs by value direction")
     func rollingTextCountdownAndValueDirectionRuntime() throws {
         struct S { var text = "0:30"; var val = 30.0 }
@@ -1037,7 +1074,10 @@ struct FeedbackAndInputsTests {
         _ = rt.frame(at: 0.03)
         #expect(slot.lastMetrics.offset > 50.0)
         #expect(slot.liveThumb.get().top > topBefore)
-        #expect(slot.liveOpacity.get() == 1.0)
+        #expect(slot.visibility.opacity == 1.0)
+        _ = rt.frame(at: 0.25)
+        let barOpacity = rt.elements().first { !$0.exiting && $0.key == style.key }?.opacity ?? 0.0
+        #expect(barOpacity > 0.9)
     }
 
     @Test("Extra KitIcons glyphs rasterize with ink (tests/glyphs.rs)")

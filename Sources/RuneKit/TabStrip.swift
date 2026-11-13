@@ -508,6 +508,9 @@ public struct StripTabItem<State> {
     public var isPulsing: Bool
     public var status: TabItemStatus
     public var badgeText: String?
+    public var avatarEl: El<State>?
+    public var editorEl: El<State>?
+    public var decorateFn: ((El<State>, TabDensity) -> El<State>)?
 
     public init(id: String, title: String) {
         self.id = id
@@ -520,10 +523,20 @@ public struct StripTabItem<State> {
         self.isPulsing = false
         self.status = .none
         self.badgeText = nil
+        self.avatarEl = nil
+        self.editorEl = nil
+        self.decorateFn = nil
     }
 
     public func subtitle(_ value: String?) -> Self { var c = self; c.subtitle = value; return c }
     public func icon(_ svg: SVGIcon?) -> Self { var c = self; c.iconSvg = svg; return c }
+    public func avatar(_ element: El<State>?) -> Self { var c = self; c.avatarEl = element; return c }
+    public func editor(_ element: El<State>?) -> Self { var c = self; c.editorEl = element; return c }
+    public func decorate(_ wrap: @escaping (El<State>, TabDensity) -> El<State>) -> Self {
+        var c = self
+        c.decorateFn = wrap
+        return c
+    }
     public func pinned(_ on: Bool = true) -> Self { var c = self; c.isPinned = on; return c }
     public func closable(_ on: Bool = true) -> Self { var c = self; c.isClosable = on; return c }
     public func disabled(_ on: Bool = true) -> Self { var c = self; c.isDisabled = on; return c }
@@ -549,10 +562,22 @@ public struct TabStrip<State> {
     private var trailingEl: El<State>? = nil
     private var availableWidth: Float? = nil
     private var accessibleLabel: String? = nil
+    private var gapOverride: Float? = nil
+    private var selectOnDragStartOverride: Bool? = nil
+    private var matchedPrefixValue: String? = nil
+    private var reorderSpringValue: Spring = MotionTokens.SNAP
+    private var trailingWidthValue: Float = 28.0
+    private var fillColor: Color? = nil
+    private var closeIconSvg: SVGIcon? = nil
+    private var closeTabStopValue: Bool = false
+    private var busyIndicatorFn: ((Kit) -> El<State>)? = nil
     private var onSelectFn: ((inout State, String, inout Tx) -> Void)? = nil
     private var onCloseFn: ((inout State, String, inout Tx) -> Void)? = nil
+    private var onDoubleClickFn: ((inout State, String, inout Tx) -> Void)? = nil
+    private var onHoverFn: ((inout State, String, Bool, inout Tx) -> Void)? = nil
     private var onReorderFn: ((inout State, TabReorder, inout Tx) -> Void)? = nil
     private var onTearOutFn: ((inout State, TabTearOut, inout Tx) -> Void)? = nil
+    private var onTearMoveFn: ((inout State, TabTearMove, inout Tx) -> Void)? = nil
 
     public init(key: String = "tab-strip", tabs: [StripTabItem<State>], selected: String? = nil) {
         self.keyId = key
@@ -560,11 +585,33 @@ public struct TabStrip<State> {
         self.selectedId = selected
     }
 
+    public init(key: String = "tab-strip", orientation: TabOrientation = .horizontal) {
+        self.keyId = key
+        self.items = []
+        self.orientation = orientation
+    }
+
+    public func tabs(_ tabs: [StripTabItem<State>]) -> Self {
+        var c = self
+        c.items.append(contentsOf: tabs)
+        return c
+    }
+
+    public func active(_ id: String?) -> Self { var c = self; c.selectedId = id; return c }
     public func label(_ value: String) -> Self { var c = self; c.accessibleLabel = value; return c }
 
     public func orientation(_ value: TabOrientation) -> Self { var c = self; c.orientation = value; return c }
     public func density(_ value: TabDensity) -> Self { var c = self; c.density = value; return c }
     public func overflow(_ value: TabOverflow) -> Self { var c = self; c.overflow = value; return c }
+    public func gap(_ points: Float) -> Self { var c = self; c.gapOverride = max(0, points); return c }
+    public func selectOnDragStart(_ on: Bool) -> Self { var c = self; c.selectOnDragStartOverride = on; return c }
+    public func matchedPrefix(_ prefix: String?) -> Self { var c = self; c.matchedPrefixValue = prefix; return c }
+    public func reorderSpring(_ spring: Spring) -> Self { var c = self; c.reorderSpringValue = spring; return c }
+    public func trailingWidth(_ points: Float) -> Self { var c = self; c.trailingWidthValue = max(0, points); return c }
+    public func fill(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
+    public func closeIcon(_ svg: SVGIcon?) -> Self { var c = self; c.closeIconSvg = svg; return c }
+    public func closeTabStop(_ on: Bool = true) -> Self { var c = self; c.closeTabStopValue = on; return c }
+    public func busyIndicator(_ f: @escaping (Kit) -> El<State>) -> Self { var c = self; c.busyIndicatorFn = f; return c }
     public func dragState(_ keyPath: WritableKeyPath<State, TabDragState>, current: TabDragState) -> Self {
         var c = self
         c.dragKeyPath = keyPath
@@ -577,8 +624,11 @@ public struct TabStrip<State> {
     public func availableWidth(_ w: Float) -> Self { var c = self; c.availableWidth = w; return c }
     public func onSelect(_ f: @escaping (inout State, String, inout Tx) -> Void) -> Self { var c = self; c.onSelectFn = f; return c }
     public func onClose(_ f: @escaping (inout State, String, inout Tx) -> Void) -> Self { var c = self; c.onCloseFn = f; return c }
+    public func onDoubleClick(_ f: @escaping (inout State, String, inout Tx) -> Void) -> Self { var c = self; c.onDoubleClickFn = f; return c }
+    public func onHover(_ f: @escaping (inout State, String, Bool, inout Tx) -> Void) -> Self { var c = self; c.onHoverFn = f; return c }
     public func onReorder(_ f: @escaping (inout State, TabReorder, inout Tx) -> Void) -> Self { var c = self; c.onReorderFn = f; return c }
     public func onTearOut(_ f: @escaping (inout State, TabTearOut, inout Tx) -> Void) -> Self { var c = self; c.onTearOutFn = f; return c }
+    public func onTearMove(_ f: @escaping (inout State, TabTearMove, inout Tx) -> Void) -> Self { var c = self; c.onTearMoveFn = f; return c }
 
     public var effectiveDensity: TabDensity {
         density ?? TabDensity.default(for: orientation)
@@ -613,15 +663,18 @@ public struct TabStrip<State> {
         let unpinned = items.filter { !$0.isPinned }
         let ordered = pinned + unpinned
 
+        let effectiveGap = gapOverride ?? 2.0
         let computedUnpinnedWidth: Float? = {
             if let locked = dragStateValue.widthLock, locked > 0 {
                 return locked
             }
             if let avail = availableWidth {
+                let trailingReserve = trailingEl != nil ? (trailingWidthValue + effectiveGap) : 0.0
                 return overflowMode.tabWidth(
-                    available: avail,
+                    available: max(0, avail - trailingReserve),
                     unpinnedCount: unpinned.count,
-                    pinnedCount: pinned.count
+                    pinnedCount: pinned.count,
+                    gap: effectiveGap
                 )
             }
             return nil
@@ -629,203 +682,23 @@ public struct TabStrip<State> {
 
         let tabBarCount = ordered.count
 
-        func buildSingleTab(item: StripTabItem<State>, index: Int) -> El<State> {
-            let isSelected = (item.id == selectedId)
-            let isHovered = (dragStateValue.hoveredId == item.id)
-            let isDragged = (dragStateValue.draggingId == item.id)
-
-            let bg: Color = isSelected ? k.c.surfaceRaised : (isHovered ? k.c.surfaceHover : .transparent)
-            let fg: Color = item.isDisabled ? k.c.textFaint : (isSelected ? k.c.textBase : k.c.textMuted)
-
-            var tab: El<State> = row()
-                .key("\(keyId)-tab-\(item.id)")
-                .role(.tab)
-                .label(item.title)
-                .selected(isSelected ? "true" : "false")
-                .itemSelected(isSelected)
-                .disabled(item.isDisabled)
-                .positionInSet(index + 1, size: tabBarCount)
-                .h(tabH)
-                .px(item.isPinned ? 8 : 10)
-                .gap(6)
-                .itemsCenter()
-                .rounded(StripTabItem<State>.cornerRadius)
-                .bg(bg)
-                .clip(true)
-
-            if orientation == .horizontal {
-                if item.isPinned {
-                    tab = tab.w(36).center()
-                } else if let w = computedUnpinnedWidth {
-                    tab = tab.w(w)
-                } else {
-                    tab = tab.minW(100).maxW(220)
-                }
-            } else {
-                tab = tab.wFull()
-            }
-
-            if item.isPulsing {
-                tab = tab.border(1.5, k.c.borderFocus)
-            } else if isSelected {
-                tab = tab.border(1.0, k.c.borderMuted)
-            }
-
-            // Leading icon / status slot
-            if let svg = item.iconSvg {
-                tab = tab.child(
-                    el().w(StripTabItem<State>.iconSlot).h(tabH).center().a11yHidden()
-                        .child(Rune.icon(svg, size: 14).color(isSelected ? k.c.iconBase : k.c.iconMuted))
-                )
-            }
-
-            if !item.isPinned {
-                var textStack: El<State> = col().grow(1).minW(0).a11yHidden()
-                    .child(text(item.title).font(isSelected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
-                if let sub = item.subtitle, !sub.isEmpty {
-                    textStack = textStack.child(text(sub).font(k.ty.small).color(k.c.textFaint).ellipsis())
-                }
-                tab = tab.child(textStack)
-            }
-
-            switch item.status {
-            case .none:
-                break
-            case .dirty:
-                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent).a11yHidden())
-            case .dot(let col):
-                tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col).a11yHidden())
-            case .badge(let label, let tone):
-                tab = tab.child(k.badge(label, tone: tone).a11yHidden())
-            case .spinner:
-                tab = tab.child(k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12).a11yHidden())
-            }
-
-            if let badgeText = item.badgeText, !badgeText.isEmpty, case .none = item.status {
-                tab = tab.child(k.badge(badgeText, tone: .neutral).a11yHidden())
-            }
-
-            if item.isClosable && !item.isPinned && !item.isDisabled, let onCloseFn {
-                let idCopy = item.id
-                tab = tab.child(
-                    k.iconButton(
-                        key: "\(keyId)-close-\(item.id)",
-                        svg: k.glyph.close,
-                        label: "Close \(item.title)",
-                        size: .sm,
-                        variant: .ghost
-                    ) { s, tx in
-                        onCloseFn(&s, idCopy, &tx)
-                    }
-                )
-            }
-
-            if !item.isDisabled {
-                let idCopy = item.id
-                if !isSelected {
-                    tab = tab.hover(k.c.surfaceHover)
-                }
-                tab = tab.focusable().focusRing(k.c.borderFocus)
-
-                if let onSelectFn {
-                    tab = tab.onClick { s, tx in
-                        onSelectFn(&s, idCopy, &tx)
-                    }
-                }
-
-                // Middle-click closes closable unpinned tabs
-                if item.isClosable && !item.isPinned, let onCloseFn {
-                    tab = tab
-                        .pointerButtons([.primary, .middle])
-                        .onPointerDown { s, press, tx in
-                            if press.button == .middle {
-                                onCloseFn(&s, idCopy, &tx)
-                            } else if let dragKeyPath, press.button == .primary {
-                                s[keyPath: dragKeyPath].press(
-                                    id: idCopy,
-                                    index: index,
-                                    at: press.window,
-                                    tabWidth: computedUnpinnedWidth
-                                )
-                            }
-                        }
-                } else if let dragKeyPath {
-                    tab = tab.onPointerDown { s, press, _ in
-                        guard press.button == .primary else { return }
-                        s[keyPath: dragKeyPath].press(
-                            id: idCopy,
-                            index: index,
-                            at: press.window,
-                            tabWidth: computedUnpinnedWidth
-                        )
-                    }
-                }
-
-                if let dragKeyPath {
-                    let isPin = item.isPinned
-                    let estWidth = item.isPinned ? Float(36) : (computedUnpinnedWidth ?? 120.0)
-                    let tearSpec = tearOutSpec
-                    let onReorder = onReorderFn
-                    let onTear = onTearOutFn
-                    tab = tab
-                        .onHover { s, inside, _ in
-                            if inside {
-                                s[keyPath: dragKeyPath].setHovered(idCopy)
-                            } else if s[keyPath: dragKeyPath].hoveredId == idCopy {
-                                s[keyPath: dragKeyPath].setHovered(nil)
-                            }
-                        }
-                        .onDrag { s, drag, tx in
-                            let outcome = s[keyPath: dragKeyPath].follow(
-                                to: drag.window,
-                                orientation: orientation,
-                                tabSize: estWidth,
-                                count: tabBarCount,
-                                tearOut: tearSpec,
-                                isPinned: isPin
-                            )
-                            switch outcome {
-                            case .moved(let reorder):
-                                onReorder?(&s, reorder, &tx)
-                            case .tornOut(let tear):
-                                onTear?(&s, tear, &tx)
-                            case .none, .tearMoved:
-                                break
-                            }
-                        }
-                        .onDragEnd { s, cancelled, tx in
-                            if cancelled {
-                                s[keyPath: dragKeyPath].cancel()
-                            } else if let reorder = s[keyPath: dragKeyPath].release() {
-                                onReorder?(&s, reorder, &tx)
-                            }
-                        }
-                }
-            }
-
-            if isDragged && elevateDragged {
-                if case .dragging(_, _, _, let offset) = dragStateValue.phase {
-                    tab = orientation == .horizontal
-                        ? tab.offset(offset, 0)
-                        : tab.offset(0, offset)
-                }
-                tab = tab.z(20).shadows(k.shadowLayers(k.elevation.raised))
-            } else if dragStateValue.isDragging {
-                let shift = dragStateValue.shift(forIndex: index, itemExtent: computedUnpinnedWidth ?? 120.0)
-                if shift != 0 {
-                    tab = orientation == .horizontal
-                        ? tab.offset(shift, 0).animateLayout(MotionTokens.SNAP)
-                        : tab.offset(0, shift).animateLayout(MotionTokens.SNAP)
-                }
-            }
-
-            return tab.role(.tab)
-        }
-
         // Assemble strip children with separator suppression next to active/hovered/selected tabs
         var stripChildren: [El<State>] = []
+        stripChildren.reserveCapacity(ordered.count * 2)
         for (idx, item) in ordered.enumerated() {
-            stripChildren.append(buildSingleTab(item: item, index: idx))
+            stripChildren.append(
+                buildSingleTab(
+                    item: item,
+                    index: idx,
+                    tabBarCount: tabBarCount,
+                    dens: dens,
+                    tabH: tabH,
+                    computedUnpinnedWidth: computedUnpinnedWidth,
+                    dragStateValue: dragStateValue,
+                    elevateDragged: elevateDragged,
+                    kit: k
+                )
+            )
             if orientation == .horizontal && idx + 1 < ordered.count {
                 let next = ordered[idx + 1]
                 let suppress = item.id == selectedId
@@ -856,7 +729,7 @@ public struct TabStrip<State> {
                 .focusGroup(true)
                 .grow(1)
                 .minW(0)
-                .gap(2)
+                .gap(effectiveGap)
                 .itemsCenter()
             if computedUnpinnedWidth == nil || availableWidth == nil {
                 track = track.scroll()
@@ -871,7 +744,7 @@ public struct TabStrip<State> {
                 .wFull()
                 .grow(1)
                 .minH(0)
-                .gap(2)
+                .gap(effectiveGap)
                 .scroll()
                 .children(stripChildren)
         }
@@ -884,7 +757,7 @@ public struct TabStrip<State> {
                 .px(6)
                 .gap(4)
                 .itemsCenter()
-                .bg(k.c.layer01)
+                .bg(fillColor ?? k.c.layer01)
                 .borderSides(bottom: 1.0, color: k.c.borderMuted)
             if let dragKeyPath {
                 strip = strip.onHover { s, inside, _ in
@@ -901,11 +774,371 @@ public struct TabStrip<State> {
                 .wFull()
                 .p(6)
                 .gap(4)
-                .bg(k.c.layer01)
+                .bg(fillColor ?? k.c.layer01)
             if let leadingEl { strip = strip.child(leadingEl) }
             strip = strip.child(track)
             if let trailingEl { strip = strip.child(trailingEl) }
             return strip
         }
+    }
+
+    @inline(never)
+    private func buildSingleTab(
+        item: StripTabItem<State>,
+        index: Int,
+        tabBarCount: Int,
+        dens: TabDensity,
+        tabH: Float,
+        computedUnpinnedWidth: Float?,
+        dragStateValue: TabDragState,
+        elevateDragged: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        let isSelected = (item.id == selectedId)
+        let isHovered = (dragStateValue.hoveredId == item.id)
+        let isDragged = (dragStateValue.draggingId == item.id)
+        let isEditing = item.editorEl != nil
+
+        var tab = buildTabShell(
+            item: item,
+            index: index,
+            tabBarCount: tabBarCount,
+            tabH: tabH,
+            computedUnpinnedWidth: computedUnpinnedWidth,
+            isSelected: isSelected,
+            isHovered: isHovered,
+            isEditing: isEditing,
+            kit: k
+        )
+        tab = appendTabContent(
+            to: tab,
+            item: item,
+            tabH: tabH,
+            isSelected: isSelected,
+            isEditing: isEditing,
+            kit: k
+        )
+        if !item.isDisabled && !isEditing {
+            tab = attachTabHandlers(
+                to: tab,
+                item: item,
+                index: index,
+                tabBarCount: tabBarCount,
+                computedUnpinnedWidth: computedUnpinnedWidth,
+                isSelected: isSelected,
+                kit: k
+            )
+        }
+        return applyTabDragAndDecoration(
+            to: tab,
+            item: item,
+            index: index,
+            dens: dens,
+            computedUnpinnedWidth: computedUnpinnedWidth,
+            dragStateValue: dragStateValue,
+            isDragged: isDragged,
+            elevateDragged: elevateDragged,
+            kit: k
+        )
+    }
+
+    @inline(never)
+    private func buildTabShell(
+        item: StripTabItem<State>,
+        index: Int,
+        tabBarCount: Int,
+        tabH: Float,
+        computedUnpinnedWidth: Float?,
+        isSelected: Bool,
+        isHovered: Bool,
+        isEditing: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        let bg: Color = (isSelected || isEditing) ? k.c.surfaceRaised : (isHovered ? k.c.surfaceHover : .transparent)
+        var tab: El<State> = row()
+            .key("\(keyId)-tab-\(item.id)")
+            .role(.tab)
+            .label(item.title)
+            .selected(isSelected ? "true" : "false")
+            .itemSelected(isSelected)
+            .disabled(item.isDisabled)
+            .positionInSet(index + 1, size: tabBarCount)
+            .h(tabH)
+            .px(item.isPinned ? 8 : 10)
+            .gap(6)
+            .itemsCenter()
+            .rounded(StripTabItem<State>.cornerRadius)
+            .bg(bg)
+            .clip(true)
+
+        if orientation == .horizontal {
+            if item.isPinned {
+                tab = tab.w(36).center()
+            } else if let w = computedUnpinnedWidth {
+                tab = tab.w(w)
+            } else {
+                tab = tab.minW(100).maxW(220)
+            }
+        } else {
+            tab = tab.wFull()
+        }
+
+        if item.isPulsing {
+            tab = tab.border(1.5, k.c.borderFocus)
+        } else if isSelected {
+            tab = tab.border(1.0, k.c.borderMuted)
+        }
+        return tab
+    }
+
+    @inline(never)
+    private func appendTabContent(
+        to initialTab: El<State>,
+        item: StripTabItem<State>,
+        tabH: Float,
+        isSelected: Bool,
+        isEditing: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        var tab = initialTab
+        let fg: Color = item.isDisabled ? k.c.textFaint : (isSelected ? k.c.textBase : k.c.textMuted)
+
+        if let avatar = item.avatarEl {
+            tab = tab.child(
+                row().key("\(keyId)-avatar-\(item.id)")
+                    .size(16, 16)
+                    .center()
+                    .a11yHidden()
+                    .child(avatar)
+            )
+        } else if let svg = item.iconSvg {
+            tab = tab.child(
+                el().w(StripTabItem<State>.iconSlot).h(tabH).center().a11yHidden()
+                    .child(Rune.icon(svg, size: 14).color(isSelected ? k.c.iconBase : k.c.iconMuted))
+            )
+        }
+
+        if let editor = item.editorEl {
+            tab = tab.child(
+                row().key("\(keyId)-editor-\(item.id)")
+                    .grow(1)
+                    .minW(0)
+                    .child(editor)
+            )
+        } else if !item.isPinned {
+            var textStack: El<State> = col().grow(1).minW(0).a11yHidden()
+                .child(text(item.title).font(isSelected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
+            if let sub = item.subtitle, !sub.isEmpty {
+                textStack = textStack.child(text(sub).font(k.ty.small).color(k.c.textFaint).ellipsis())
+            }
+            tab = tab.child(textStack)
+        }
+
+        switch item.status {
+        case .none:
+            break
+        case .dirty:
+            tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent).a11yHidden())
+        case .dot(let col):
+            tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col).a11yHidden())
+        case .badge(let label, let tone):
+            tab = tab.child(k.badge(label, tone: tone).a11yHidden())
+        case .spinner:
+            let busyEl = busyIndicatorFn?(k) ?? k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12)
+            tab = tab.child(busyEl.a11yHidden())
+        }
+
+        if let badgeText = item.badgeText, !badgeText.isEmpty, case .none = item.status {
+            tab = tab.child(k.badge(badgeText, tone: .neutral).a11yHidden())
+        }
+
+        if item.isClosable && !item.isPinned && !item.isDisabled && !isEditing, let onCloseFn {
+            tab = tab.child(buildTabCloseButton(item: item, onCloseFn: onCloseFn, kit: k))
+        }
+        return tab
+    }
+
+    @inline(never)
+    private func buildTabCloseButton(
+        item: StripTabItem<State>,
+        onCloseFn: @escaping (inout State, String, inout Tx) -> Void,
+        kit k: Kit
+    ) -> El<State> {
+        let idCopy = item.id
+        var closeBtn = k.iconButton(
+            key: "\(keyId)-close-\(item.id)",
+            svg: closeIconSvg ?? k.glyph.close,
+            label: "Close \(item.title)",
+            size: .sm,
+            variant: .ghost
+        ) { s, tx in
+            onCloseFn(&s, idCopy, &tx)
+        }
+        if !closeTabStopValue {
+            closeBtn = closeBtn.focusable(false)
+        }
+        return closeBtn
+    }
+
+    @inline(never)
+    private func attachTabHandlers(
+        to initialTab: El<State>,
+        item: StripTabItem<State>,
+        index: Int,
+        tabBarCount: Int,
+        computedUnpinnedWidth: Float?,
+        isSelected: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        var tab = initialTab
+        let idCopy = item.id
+        let selectEarly = selectOnDragStartOverride ?? (orientation == .horizontal)
+
+        if !isSelected {
+            tab = tab.hover(k.c.surfaceHover)
+        }
+        tab = tab.focusable().focusRing(k.c.borderFocus)
+
+        if let onSelectFn {
+            tab = tab.onClick { s, tx in
+                onSelectFn(&s, idCopy, &tx)
+            }
+        }
+        if let onDoubleClickFn {
+            tab = tab.onDoubleClick { s, tx in
+                onDoubleClickFn(&s, idCopy, &tx)
+            }
+        }
+
+        if item.isClosable && !item.isPinned, let onCloseFn {
+            tab = tab
+                .pointerButtons([.primary, .middle])
+                .onPointerDown { s, press, tx in
+                    if press.button == .middle {
+                        onCloseFn(&s, idCopy, &tx)
+                    } else if press.button == .primary {
+                        if let dragKeyPath {
+                            s[keyPath: dragKeyPath].press(
+                                id: idCopy,
+                                index: index,
+                                at: press.window,
+                                tabWidth: computedUnpinnedWidth
+                            )
+                        }
+                        if selectEarly {
+                            onSelectFn?(&s, idCopy, &tx)
+                        }
+                    }
+                }
+        } else if dragKeyPath != nil || selectEarly {
+            tab = tab.onPointerDown { s, press, tx in
+                guard press.button == .primary else { return }
+                if let dragKeyPath {
+                    s[keyPath: dragKeyPath].press(
+                        id: idCopy,
+                        index: index,
+                        at: press.window,
+                        tabWidth: computedUnpinnedWidth
+                    )
+                }
+                if selectEarly {
+                    onSelectFn?(&s, idCopy, &tx)
+                }
+            }
+        }
+
+        if dragKeyPath != nil || onHoverFn != nil {
+            let onHover = onHoverFn
+            tab = tab.onHover { s, inside, tx in
+                if let dragKeyPath {
+                    if inside {
+                        s[keyPath: dragKeyPath].setHovered(idCopy)
+                    } else if s[keyPath: dragKeyPath].hoveredId == idCopy {
+                        s[keyPath: dragKeyPath].setHovered(nil)
+                    }
+                }
+                if let onHover {
+                    onHover(&s, idCopy, inside, &tx)
+                } else {
+                    tx.liveOnly()
+                }
+            }
+        }
+
+        if let dragKeyPath {
+            let isPin = item.isPinned
+            let estWidth = item.isPinned ? Float(36) : (computedUnpinnedWidth ?? 120.0)
+            let tearSpec = tearOutSpec
+            let onReorder = onReorderFn
+            let onTear = onTearOutFn
+            let onTearMove = onTearMoveFn
+            tab = tab
+                .onDrag { s, drag, tx in
+                    let outcome = s[keyPath: dragKeyPath].follow(
+                        to: drag.window,
+                        orientation: orientation,
+                        tabSize: estWidth,
+                        count: tabBarCount,
+                        tearOut: tearSpec,
+                        isPinned: isPin
+                    )
+                    switch outcome {
+                    case .moved(let reorder):
+                        onReorder?(&s, reorder, &tx)
+                    case .tornOut(let tear):
+                        onTear?(&s, tear, &tx)
+                    case .tearMoved(let move):
+                        onTearMove?(&s, move, &tx)
+                    case .none:
+                        break
+                    }
+                }
+                .onDragEnd { s, cancelled, tx in
+                    if cancelled {
+                        s[keyPath: dragKeyPath].cancel()
+                    } else if let reorder = s[keyPath: dragKeyPath].release() {
+                        onReorder?(&s, reorder, &tx)
+                    }
+                }
+        }
+        return tab
+    }
+
+    @inline(never)
+    private func applyTabDragAndDecoration(
+        to initialTab: El<State>,
+        item: StripTabItem<State>,
+        index: Int,
+        dens: TabDensity,
+        computedUnpinnedWidth: Float?,
+        dragStateValue: TabDragState,
+        isDragged: Bool,
+        elevateDragged: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        var tab = initialTab
+        if isDragged && elevateDragged {
+            if case .dragging(_, _, _, let offset) = dragStateValue.phase {
+                tab = orientation == .horizontal
+                    ? tab.offset(offset, 0)
+                    : tab.offset(0, offset)
+            }
+            tab = tab.z(20).shadows(k.shadowLayers(k.elevation.raised))
+        } else if dragStateValue.isDragging {
+            let shift = dragStateValue.shift(forIndex: index, itemExtent: computedUnpinnedWidth ?? 120.0)
+            if shift != 0 {
+                tab = orientation == .horizontal
+                    ? tab.offset(shift, 0).animateLayout(reorderSpringValue)
+                    : tab.offset(0, shift).animateLayout(reorderSpringValue)
+            }
+        }
+
+        if let matchedPrefixValue {
+            tab = tab.matched("\(matchedPrefixValue)-\(item.id)", spring: reorderSpringValue)
+        }
+        if let wrap = item.decorateFn {
+            tab = wrap(tab, dens)
+        }
+        return tab.role(.tab)
     }
 }

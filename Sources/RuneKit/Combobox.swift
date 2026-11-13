@@ -353,6 +353,7 @@ public struct Combobox<State> {
             .label(name)
             .placement(placementValue)
             .padding(0.0)
+            .animate(shouldAnimateFiltering)
             .open(open)
             .onCloseTx { s, tx in
                 upd(&s) { $0.close() }
@@ -383,6 +384,9 @@ public struct Combobox<State> {
             .autofocus(true)
         if let active, active < options.count {
             field = field.activeDescendant("\(key)-option-\(options[active].id)")
+        }
+        if shouldAnimateFiltering {
+            field = field.animateLayout(k.motion.control)
         }
 
         field = field
@@ -507,7 +511,9 @@ public struct Combobox<State> {
             .items(items)
             .active(activePos)
             .scrollOffset(comboState.trackedScrollY)
+            .preferTrackedScroll(true)
             .emptyMessage(emptyText)
+            .animateFiltering(shouldAnimateFiltering)
             .onActive { s, i in
                 guard i < choices.count else { return }
                 let id = opts[choices[i]].id

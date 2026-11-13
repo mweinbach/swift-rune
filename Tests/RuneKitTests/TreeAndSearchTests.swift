@@ -456,6 +456,8 @@ struct TreeAndSearchTests {
             rt.frame(at: Double(f) / 60.0)
         }
         #expect(rt.state.files.isExpanded("pkg321") && rt.state.files.isSelected("pkg321/file77.rs"))
+        #expect(rt.state.files.selected() == ["pkg321/file77.rs"])
+        #expect(rt.state.files.cursor() == "pkg321/file77.rs")
         let row = treeRows(rt).first { $0.label == "file77.rs" }
         #expect(row != nil)
         if let row {

@@ -209,6 +209,8 @@ public enum PopoverAnchor {
         scrim: El<State>?,
         content: El<State>
     ) -> El<State> {
+        let fade = Transition.asymmetric(insertion: .identity, removal: .opacity)
+            .springs(SpringPair(enter: MotionTokens.INSTANT, exit: Spring(duration: 0.25, bounce: 0.0)))
         var wrapper: El<State> = el()
             .key("\(key)-modal")
             .absolute(x: 0.0, y: 0.0)
@@ -216,6 +218,7 @@ public enum PopoverAnchor {
             .hFull()
             .z(z)
             .modal(true)
+            .transition(fade)
         if let scrim {
             wrapper = wrapper.child(scrim.z(z))
         }
@@ -300,6 +303,7 @@ public struct Popover<State> {
     private var placementValue: Placement = .bottom
     private var gutterValue: Float = 4.0
     private var paddingValue: Float = 12.0
+    private var shouldAnimateContent: Bool = false
     private var closeHandler: ((inout State, inout Tx) -> Void)?
 
     public init(_ key: String) {
@@ -357,6 +361,12 @@ public struct Popover<State> {
     public func gutter(_ g: Float) -> Popover<State> {
         var copy = self
         copy.gutterValue = g
+        return copy
+    }
+
+    public func animate(_ on: Bool = true) -> Popover<State> {
+        var copy = self
+        copy.shouldAnimateContent = on
         return copy
     }
 
@@ -438,6 +448,11 @@ public struct Popover<State> {
             bodyCol = bodyCol.child(childEl)
         }
         content = content.child(bodyCol)
+        if shouldAnimateContent {
+            content = content.animate(k.motion.overlay)
+        } else {
+            content = content.instantChanges()
+        }
 
         if let close = closeHandler {
             let scrimEl: El<State> = el()
@@ -460,24 +475,25 @@ public struct Popover<State> {
                     }
                     return false
                 }
+            let raisedSurface = PopoverAnchor.raised(k, content, radius: k.radius.md)
             let anchoredSurface = PopoverAnchor.anchored(
                 k,
-                content,
+                raisedSurface,
                 anchor: anchorKey,
                 placement: placementValue,
                 gap: gutterValue,
-                window: cx?.viewport
+                window: cx?.viewport,
+                instant: !shouldAnimateContent
             )
-            let raisedSurface = PopoverAnchor.raised(k, anchoredSurface, radius: k.radius.md)
-                .focusReturn(returnKey)
+            .focusReturn(returnKey)
             layer.append(
-                PopoverAnchor.modalOverlay(key: key, z: 60, scrim: scrimEl, content: raisedSurface)
+                PopoverAnchor.modalOverlay(key: key, z: 60, scrim: scrimEl, content: anchoredSurface)
                     .focusReturn(returnKey)
             )
         } else {
             let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
             layer.append(
-                PopoverAnchor.anchored(k, surface, anchor: anchorKey, placement: placementValue, gap: gutterValue, window: cx?.viewport)
+                PopoverAnchor.anchored(k, surface, anchor: anchorKey, placement: placementValue, gap: gutterValue, window: cx?.viewport, instant: !shouldAnimateContent)
                     .focusReturn(returnKey)
             )
         }
