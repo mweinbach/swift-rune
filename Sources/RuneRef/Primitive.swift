@@ -297,16 +297,22 @@ public struct Primitive: Sendable, Equatable {
 
     public static func layerBegin(
         rect: SIMD4<Float>,
+        radii: SIMD4<Float> = .zero,
         opacity: Float = 1.0,
         additive: Bool = false,
         blurRadius: Float = 0,
         clip: SIMD4<Float>,
+        fade: SIMD4<Float> = .zero,
+        fadeOrigin: SIMD2<Float> = .zero,
         turn: Float = 0
     ) -> Primitive {
         Primitive(
             rect: rect,
+            radii: radii,
             params: SIMD4<Float>(opacity, Float(PrimitiveKind.layerBegin.rawValue), additive ? 1.0 : 0.0, blurRadius),
             clip: clip,
+            fade: fade,
+            fadeOrigin: fadeOrigin,
             turn: turn
         )
     }

@@ -275,4 +275,98 @@ struct ElInc2ParityTests {
         #expect(fellBack == true)
         #expect(rt.state.keyCount == 1)
     }
+
+    @Test("Review #210 fixes: multi-edge scrollEdgeFade, clipRounded/clipCorners masking, scaled anchor placement, hover-as-group + hoverAlone, default transition enterDelay")
+    func review210ParityFixes() throws {
+        // 1. Mid-scrolled tall child receives BOTH top & bottom fades, plus merged ancestor clipFadeLinear
+        struct ScrollS {}
+        let red = Color(r: 1, g: 0, b: 0)
+        let scrollRt = Runtime<ScrollS>(state: ScrollS(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+            col().w(200).h(100).clipFadeLinear(left: 12).children([
+                col().key("sc").w(200).h(100).scrollY().scrollEdgeFade(20).children([
+                    el().key("tall").w(200).h(300).bg(red)
+                ])
+            ])
+        }
+        _ = scrollRt.frame(at: 0)
+        scrollRt.wheel(WheelEvent(dx: 0, dy: -80), at: Vec2(100, 50), now: 0.1)
+        let midScene = scrollRt.frame(at: 0.1)
+        // Tall child touches top scroll fade, bottom scroll fade, and ancestor left clipFadeLinear (3 fade edges -> 2 fade layers + 1 inner prim fade)
+        let fadeLayers = midScene.primitives.filter { $0.kind == .layerBegin && $0.fade.z > 0 }
+        #expect(fadeLayers.count >= 2)
+        #expect(midScene.primitives.contains { $0.fade.z > 0 && $0.fade.y > 0 } || fadeLayers.contains { $0.fade.y > 0 })
+        #expect(midScene.primitives.contains { $0.fade.z > 0 && $0.fade.y < 0 } || fadeLayers.contains { $0.fade.y < 0 })
+
+        // 2. clipRounded & clipCorners visually mask children at corners in RuneRef.render
+        struct ClipS {}
+        let green = Color(r: 0, g: 1, b: 0)
+        let clipRt = Runtime<ClipS>(state: ClipS(), viewport: Vec2(60, 60), pixelScale: 1.0) { _, _ in
+            col().w(60).h(60).bg(.black).children([
+                el().key("card").w(40).h(40).clipRounded(12).children([
+                    el().key("fill").w(40).h(40).bg(green)
+                ])
+            ])
+        }
+        let clipScene = clipRt.frame(at: 0)
+        let renderedClip = try RuneRef.render(clipScene)
+        // Pixel (0, 0) lies outside radius 12 corner circle -> remains black (green channel == 0)
+        #expect(renderedClip.pixel(x: 0, y: 0).y < 20)
+        // Pixel (20, 20) lies inside card -> bright green
+        #expect(renderedClip.pixel(x: 20, y: 20).y > 230)
+
+        // 3. Anchored overlay under 2x scaled ancestor places zoomed box beside zoomed trigger at zoomed gap
+        struct AnchS {}
+        let anchRt = Runtime<AnchS>(state: AnchS(), viewport: Vec2(400, 300), pixelScale: 1.0) { _, _ in
+            col().w(400).h(300).children([
+                col().w(100).h(40).mt(100).ml(100).scale(2.0).children([
+                    el().key("btn").w(100).h(40)
+                ]),
+                el().key("tip").w(60).h(20).anchored("btn", side: .bottom, align: .center, gap: 4)
+            ])
+        }
+        _ = anchRt.frame(at: 0)
+        // Unscaled btn is [100, 100, 100, 40] scaled 2x around center (150, 120) -> zoomed trigger [50, 80, 200, 80] (bottom = 160).
+        // Tip is zoomed 2x -> size (120, 40), gap 4*2 = 8 -> rect [90, 168, 120, 40].
+        let tipRect = anchRt.element(byKey: "tip")!.rect
+        #expect(abs(tipRect[0] - 90) < 0.5 && abs(tipRect[1] - 168) < 0.5)
+        #expect(abs(tipRect[2] - 120) < 0.5 && abs(tipRect[3] - 40) < 0.5)
+
+        // 4. `.hover(bg)` without `.hoverGroup()` still drives `groupOpacity` on children (`hover_tests.rs:85-113`)
+        struct HovS {}
+        let white = Color(r: 1, g: 1, b: 1)
+        let hovWash = Color(r: 1, g: 1, b: 1, a: 0.1)
+        let hovRt = Runtime<HovS>(state: HovS(), viewport: Vec2(240, 100), pixelScale: 1.0) { _, _ in
+            col().w(240).h(100).children([
+                row().key("row").w(200).h(30).hover(hovWash).children([
+                    el().key("label").w(100).h(30),
+                    el().key("dot").w(10).h(10).bg(white).groupOpacity(0.0, 1.0),
+                    el().key("face").w(20).h(20).hover(white).hoverAlone()
+                ])
+            ])
+        }
+        _ = hovRt.frame(at: 0)
+        hovRt.pointerMove(to: Vec2(50, 15), at: 0.05)
+        _ = hovRt.frame(at: 0.05)
+        #expect(hovRt.element(byKey: "dot")!.opacity > 0.9)
+        hovRt.pointerMove(to: Vec2(115, 10), at: 0.1)
+        _ = hovRt.frame(at: 0.1)
+        #expect(hovRt.element(byKey: "dot")!.opacity < 0.1)
+
+        // 5. `.enterDelay` WITHOUT explicit `.transition(...)` holds opacity at 0 until delay elapses
+        struct DelS { var show = false }
+        let delRt = Runtime<DelS>(state: DelS(), viewport: Vec2(200, 100)) { s, _ in
+            var ch: [El<DelS>] = []
+            if s.show {
+                ch.append(el().key("d").w(50).h(20).bg(green).enterDelay(0.2))
+            }
+            return col().w(200).h(100).children(ch)
+        }
+        _ = delRt.frame(at: 0)
+        delRt.update(at: 0.05) { s, _ in s.show = true }
+        _ = delRt.frame(at: 0.05)
+        #expect(delRt.element(byKey: "d")!.opacity < 0.01)
+        _ = delRt.frame(at: 0.30)
+        _ = delRt.frame(at: 1.50)
+        #expect(delRt.element(byKey: "d")!.opacity > 0.99)
+    }
 }

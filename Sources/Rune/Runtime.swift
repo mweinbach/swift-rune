@@ -62,12 +62,14 @@ public final class Runtime<State> {
         var nodeId: NodeId
         var el: El<State>
         var targetRect: MotionRect
+        var zoomedTargetRect: MotionRect
         var contentSize: Vec2
         var clipRect: MotionRect
         var effectiveInert: Bool
         var zOrder: Int
         var inheritedScale: Float = 1.0
-        var activeClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = nil
+        var anchorAttachNorm: Vec2? = nil
+        var activeClipFades: [EdgeFadeSpec] = []
     }
 
     private struct WalkItem {
@@ -79,11 +81,12 @@ public final class Runtime<State> {
         var parentOrigin: Vec2
         var parentScroll: Vec2
         var parentScale: Float
+        var scaleChain: [AnchorLayoutHelper.AncestorScaleStep]
         var inheritedClip: MotionRect
         var inheritedInert: Bool
         var inheritedZ: Int
         var inInstantSubtree: Bool
-        var inheritedClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)?
+        var inheritedClipFades: [EdgeFadeSpec]
     }
 
     private struct DragSession {
@@ -656,11 +659,12 @@ public final class Runtime<State> {
                 parentOrigin: .zero,
                 parentScroll: .zero,
                 parentScale: 1.0,
+                scaleChain: [],
                 inheritedClip: fullWindowClip,
                 inheritedInert: false,
                 inheritedZ: 0,
                 inInstantSubtree: false,
-                inheritedClipFade: nil
+                inheritedClipFades: []
             )
         ]
 
@@ -673,11 +677,12 @@ public final class Runtime<State> {
             let parentOrigin = item.parentOrigin
             let parentScroll = item.parentScroll
             let parentScale = item.parentScale
+            let scaleChain = item.scaleChain
             let inheritedClip = item.inheritedClip
             let inheritedInert = item.inheritedInert
             let inheritedZ = item.inheritedZ
             let inInstantSubtree = item.inInstantSubtree
-            let inheritedClipFade = item.inheritedClipFade
+            let inheritedClipFades = item.inheritedClipFades
 
             let nid: NodeId
             if el.layoutAnim?.travel == .screen, let rk = resolvedKey {
@@ -690,20 +695,24 @@ public final class Runtime<State> {
             var worldX = parentOrigin.x + localRect.x - parentScroll.x
             var worldY = parentOrigin.y + localRect.y - parentScroll.y
             var anchorScaleFactor: Float = 1.0
+            var anchorAttachNorm: Vec2? = nil
 
             if let a = el.anchor,
                let anchorFlat = newFlat.first(where: { $0.key == a.key }) {
-                let zoom = (!a.unscaled && el.scale == Vec2(1, 1)) ? max(0.001, anchorFlat.inheritedScale) : 1.0
-                anchorScaleFactor = zoom
-                let tr = anchorFlat.targetRect
-                let placed = anchorPosition(
-                    a,
-                    trigger: [tr.left, tr.top, tr.right, tr.bottom],
-                    size: (localRect.width * zoom, localRect.height * zoom),
-                    viewport: (viewport.x, viewport.y)
+                let placement = AnchorLayoutHelper.zoomedPlacement(
+                    anchor: a,
+                    triggerZoomed: anchorFlat.zoomedTargetRect,
+                    anchorScale: anchorFlat.inheritedScale,
+                    localSize: Vec2(localRect.width, localRect.height),
+                    overlayOwnScale: el.scale,
+                    viewport: viewport
                 )
-                worldX = placed.0
-                worldY = placed.1
+                worldX = placement.unscaledOrigin.x
+                worldY = placement.unscaledOrigin.y
+                anchorScaleFactor = placement.zoom
+                if abs(placement.zoom - 1.0) > 1e-5 {
+                    anchorAttachNorm = placement.attachNorm
+                }
             }
 
             // Apply sticky pinning inside scroll viewport if `.stickyTop` / `.stickyBottom` is set
@@ -721,11 +730,20 @@ public final class Runtime<State> {
             }
 
             let targetRect = MotionRect.fromXYWH(worldX, worldY, localRect.width, localRect.height)
+            let zoomedTargetRect = AnchorLayoutHelper.zoomedRect(targetRect, chain: scaleChain)
             let nodeInheritedScale = (el.anchor == nil ? parentScale : anchorScaleFactor) * el.scale.x
+            let childScaleChain = scaleChain + [
+                AnchorLayoutHelper.AncestorScaleStep(
+                    rect: targetRect,
+                    scale: (el.anchor != nil) ? nodeInheritedScale : el.scale.x,
+                    origin: (el.anchor != nil) ? .zero : el.origin,
+                    resetsAncestors: el.anchor != nil
+                )
+            ]
 
             // Update scroll bounds for scrollable containers
             var ownScroll = Vec2.zero
-            var scrollFadeInfo: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = nil
+            var scrollFadeInfo: EdgeFadeSpec? = nil
             if !el.layout.scrollAxes.isEmpty {
                 scrollViewportSizes[path] = Vec2(targetRect.width, targetRect.height)
                 scrollContentSizes[path] = solved.layout.contentSize
@@ -765,14 +783,14 @@ public final class Runtime<State> {
                     let leftW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidLeft > 0.5) ? w : 0
                     let rightW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidRight > 0.5) ? w : 0
                     if topW > 0 || botW > 0 || leftW > 0 || rightW > 0 {
-                        let minTop = 1.0 - min(1.0, hidTop / 15.0)
-                        let minBot = 1.0 - min(1.0, hidBot / 15.0)
-                        let minLeft = 1.0 - min(1.0, hidLeft / 15.0)
-                        let minRight = 1.0 - min(1.0, hidRight / 15.0)
-                        scrollFadeInfo = (
+                        let sTop = min(1.0, hidTop / 15.0)
+                        let sBot = min(1.0, hidBot / 15.0)
+                        let sLeft = min(1.0, hidLeft / 15.0)
+                        let sRight = min(1.0, hidRight / 15.0)
+                        scrollFadeInfo = EdgeFadeSpec(
                             rect: intersectRects(inheritedClip, targetRect),
                             widths: SIMD4<Float>(leftW, topW, rightW, botW),
-                            minAlpha: SIMD4<Float>(minLeft, minTop, minRight, minBot)
+                            strengths: SIMD4<Float>(sLeft, sTop, sRight, sBot)
                         )
                     }
                 }
@@ -781,23 +799,27 @@ public final class Runtime<State> {
             let ownZ = el.zIndex != 0 ? el.zIndex : inheritedZ
             let effectiveInert = inheritedInert || el.isInert
 
-            // Children clip against this node if `clipOverflow`, `clipRadius`, or `clipFade` is set
+            // Children clip against this node if `clipOverflow`, `clipRadius`, `clipCorners`, or `clipFade` is set
             let childClip: MotionRect
-            if el.layout.clipOverflow || el.clipRadius != nil || el.clipFade != nil {
+            if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil {
                 childClip = intersectRects(inheritedClip, targetRect)
             } else {
                 childClip = inheritedClip
             }
 
-            let childClipFade: (rect: MotionRect, widths: SIMD4<Float>, minAlpha: SIMD4<Float>)? = {
-                if let sf = scrollFadeInfo {
-                    return sf
-                }
-                if let cf = el.clipFade {
-                    return (rect: intersectRects(inheritedClip, targetRect), widths: cf, minAlpha: .zero)
-                }
-                return inheritedClipFade
-            }()
+            var childClipFades = inheritedClipFades
+            if let sf = scrollFadeInfo {
+                childClipFades.append(sf)
+            }
+            if let cf = el.clipFade {
+                childClipFades.append(
+                    EdgeFadeSpec(
+                        rect: intersectRects(inheritedClip, targetRect),
+                        widths: cf,
+                        strengths: SIMD4<Float>(repeating: 1.0)
+                    )
+                )
+            }
 
             let myIndex = newFlat.count
             let flat = FlatNode(
@@ -808,12 +830,14 @@ public final class Runtime<State> {
                 nodeId: nid,
                 el: el,
                 targetRect: targetRect,
+                zoomedTargetRect: zoomedTargetRect,
                 contentSize: solved.layout.contentSize,
                 clipRect: inheritedClip,
                 effectiveInert: effectiveInert,
                 zOrder: ownZ,
                 inheritedScale: nodeInheritedScale,
-                activeClipFade: inheritedClipFade
+                anchorAttachNorm: anchorAttachNorm,
+                activeClipFades: inheritedClipFades
             )
             newFlat.append(flat)
             newByPath[path] = myIndex
@@ -866,15 +890,13 @@ public final class Runtime<State> {
                 enterDelays[nid] = now + Double(el.enterDelay)
             }
             if let readyAt = enterDelays[nid], now < readyAt {
-                let eff = el.transition?.insertion
-                specOpacity = eff?.zeroOpacity ?? (el.transition != nil ? 0 : el.opacity)
-                if let eff {
-                    specScale = Vec2(specScale.x * eff.zeroScale.x, specScale.y * eff.zeroScale.y)
-                    let dx = eff.pointOffset.x + eff.relativeOffset.x * targetRect.width
-                    let dy = eff.pointOffset.y + eff.relativeOffset.y * targetRect.height
-                    specRect = targetRect.offsetBy(Vec2(dx, dy))
-                    specBlur = max(specBlur, eff.zeroBlur)
-                }
+                let eff = el.transition?.insertion ?? Transition.opacity.insertion
+                specOpacity = eff.zeroOpacity ?? 0
+                specScale = Vec2(specScale.x * eff.zeroScale.x, specScale.y * eff.zeroScale.y)
+                let dx = eff.pointOffset.x + eff.relativeOffset.x * targetRect.width
+                let dy = eff.pointOffset.y + eff.relativeOffset.y * targetRect.height
+                specRect = targetRect.offsetBy(Vec2(dx, dy))
+                specBlur = max(specBlur, eff.zeroBlur)
                 specTransition = nil
                 layoutAnimSpec = nil
                 styleSp = nil
@@ -936,11 +958,12 @@ public final class Runtime<State> {
                     parentOrigin: Vec2(worldX, worldY),
                     parentScroll: ownScroll,
                     parentScale: nodeInheritedScale,
+                    scaleChain: childScaleChain,
                     inheritedClip: childClip,
                     inheritedInert: effectiveInert,
                     inheritedZ: ownZ,
                     inInstantSubtree: childInstant,
-                    inheritedClipFade: childClipFade
+                    inheritedClipFades: childClipFades
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
@@ -1152,10 +1175,14 @@ public final class Runtime<State> {
             }
 
             if abs(sc.x - 1.0) > 1e-4 || abs(sc.y - 1.0) > 1e-4 {
-                let c = rect.center
-                let hw = rect.width * 0.5 * sc.x
-                let hh = rect.height * 0.5 * sc.y
-                rect = MotionRect(left: c.x - hw, top: c.y - hh, right: c.x + hw, bottom: c.y + hh)
+                let norm = snap.anchorAttachNorm ?? snap.el.origin
+                let pivot = Vec2(rect.x + rect.width * norm.x, rect.y + rect.height * norm.y)
+                rect = MotionRect(
+                    left: pivot.x + (rect.left - pivot.x) * sc.x,
+                    top: pivot.y + (rect.top - pivot.y) * sc.y,
+                    right: pivot.x + (rect.right - pivot.x) * sc.x,
+                    bottom: pivot.y + (rect.bottom - pivot.y) * sc.y
+                )
             }
 
             presentedRectById[p.id] = rect
@@ -1174,10 +1201,23 @@ public final class Runtime<State> {
 
         // Precompute `hoverAlone` & `hoverGroupShared` active state from pointer / keyboard focus
         let ptrPos = pointerPosition
+        let topmostPtrPath: String? = (ptrPos.x > -9000 && ptrPos.y > -9000 && !hitGeometryByPath.isEmpty)
+            ? hitTest(at: ptrPos, predicate: { _ in true })?.node.path
+            : nil
         let ptrInside: (FlatNode) -> Bool = { node in
             guard ptrPos.x > -9000, ptrPos.y > -9000 else { return false }
-            let r = presentedRectById[node.nodeId] ?? node.targetRect
-            return halfOpenContains(intersectRects(node.clipRect, r), ptrPos)
+            let insideGeom: Bool
+            if let geom = self.hitGeometryByPath[node.path] {
+                insideGeom = geom.contains(ptrPos)
+            } else {
+                let r = presentedRectById[node.nodeId] ?? node.targetRect
+                insideGeom = halfOpenContains(intersectRects(node.clipRect, r), ptrPos)
+            }
+            guard insideGeom else { return false }
+            if let top = topmostPtrPath, !(top == node.path || top.hasPrefix(node.path + "/")) {
+                return false
+            }
+            return true
         }
         let alonePath: String? = flatNodes
             .filter { $0.el.isHoverAlone && !$0.effectiveInert && ptrInside($0) }
@@ -1345,28 +1385,20 @@ public final class Runtime<State> {
             )
             let shouldEmit = alpha > 0.001 && visClip.width > 0 && visClip.height > 0
 
-            let activeEdgeFade: (fade: SIMD4<Float>, origin: SIMD2<Float>) = {
-                guard let cf = snap.activeClipFade else { return (.zero, .zero) }
+            let activeFadeEdges: [(fade: SIMD4<Float>, origin: SIMD2<Float>)] = {
+                guard !snap.activeClipFades.isEmpty else { return [] }
                 let primRect = SIMD4<Float>(rect.x * pxScale, rect.y * pxScale, rect.width * pxScale, rect.height * pxScale)
-                return AnchorLayoutHelper.edgeFadeParams(
-                    clipRect: cf.rect,
+                return AnchorLayoutHelper.edgeFadeEdges(
+                    specs: snap.activeClipFades,
                     primRectPx: primRect,
-                    pxScale: pxScale,
-                    left: cf.widths.x,
-                    top: cf.widths.y,
-                    right: cf.widths.z,
-                    bottom: cf.widths.w,
-                    minAlphaTop: cf.minAlpha.y,
-                    minAlphaBottom: cf.minAlpha.w,
-                    minAlphaLeft: cf.minAlpha.x,
-                    minAlphaRight: cf.minAlpha.z
+                    pxScale: pxScale
                 )
             }()
             func attachFade(_ prim: Primitive) -> Primitive {
-                guard activeEdgeFade.fade.z != 0 else { return prim }
+                guard let firstFade = activeFadeEdges.first else { return prim }
                 var copy = prim
-                copy.fade = activeEdgeFade.fade
-                copy.fadeOrigin = activeEdgeFade.origin
+                copy.fade = firstFade.fade
+                copy.fadeOrigin = firstFade.origin
                 return copy
             }
 
@@ -1383,6 +1415,19 @@ public final class Runtime<State> {
                     p.corners.bottomRight * pxScale,
                     p.corners.bottomLeft * pxScale
                 )
+
+                if activeFadeEdges.count > 1 {
+                    for k in 1..<activeFadeEdges.count {
+                        primitives.append(.layerBegin(
+                            rect: devRect,
+                            opacity: 1.0,
+                            clip: devClip,
+                            fade: activeFadeEdges[k].fade,
+                            fadeOrigin: activeFadeEdges[k].origin,
+                            turn: effRotate
+                        ))
+                    }
+                }
 
                 if useLayer {
                     primitives.append(.layerBegin(
@@ -1810,9 +1855,47 @@ public final class Runtime<State> {
                 a11yHidden: el.isA11yHidden
             ))
 
+            let ownClipCorners: Corners? = el.clipCorners ?? el.clipRadius.map { r in
+                el.corners.maxMagnitude > 0.001 ? p.corners : Corners(r, r, r, r)
+            }
+            let hasRoundedClipLayer: Bool = {
+                guard shouldEmit,
+                      let cc = ownClipCorners,
+                      cc.maxMagnitude > 0.01,
+                      !(childrenByParent[p.id]?.isEmpty ?? true) else {
+                    return false
+                }
+                let maxR = min(rect.width, rect.height) * 0.5
+                return min(cc.maxMagnitude, maxR) > 0.01
+            }()
+            if hasRoundedClipLayer, let cc = ownClipCorners {
+                let devRectClip = SIMD4<Float>(
+                    rect.x * pxScale,
+                    rect.y * pxScale,
+                    rect.width * pxScale,
+                    rect.height * pxScale
+                )
+                let maxR = min(devRectClip.z, devRectClip.w) * 0.5
+                let clipR = SIMD4<Float>(
+                    min(cc.topLeft * scaleVec.x * pxScale, maxR),
+                    min(cc.topRight * scaleVec.x * pxScale, maxR),
+                    min(cc.bottomRight * scaleVec.x * pxScale, maxR),
+                    min(cc.bottomLeft * scaleVec.x * pxScale, maxR)
+                )
+                primitives.append(.layerBegin(
+                    rect: devRectClip,
+                    radii: clipR,
+                    opacity: 1.0,
+                    clip: devClip,
+                    turn: useLayer ? 0 : effRotate
+                ))
+            }
+
             let childAncestorOp: Float = (shouldEmit && useLayer) ? 1.0 : alpha
             let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
-            let nextGroupHovered = el.isHoverGroup ? isGroupHovered(snap) : nearestGroupHovered
+            let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
+                ? isGroupHovered(snap)
+                : nearestGroupHovered
             if let children = childrenByParent[p.id] {
                 for child in sortByZOrder(children) {
                     emitSubtree(
@@ -1827,8 +1910,17 @@ public final class Runtime<State> {
                 }
             }
 
+            if hasRoundedClipLayer {
+                primitives.append(.layerEnd(clip: devClip))
+            }
+
             if shouldEmit && useLayer {
                 primitives.append(.layerEnd(clip: devClip))
+            }
+            if shouldEmit && activeFadeEdges.count > 1 {
+                for _ in 1..<activeFadeEdges.count {
+                    primitives.append(.layerEnd(clip: devClip))
+                }
             }
         }
 
