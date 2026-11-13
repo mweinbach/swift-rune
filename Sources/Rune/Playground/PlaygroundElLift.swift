@@ -45,6 +45,7 @@ extension El {
 
         // Cold properties (copied only when non-default to avoid unnecessary allocations)
         if let richSpans { out.richSpans = richSpans }
+        if !textLinks.isEmpty { out.textLinks = textLinks }
         if let liveText { out.liveText = liveText }
         if let placeholder { out.placeholder = placeholder }
         if let placeholderColor { out.placeholderColor = placeholderColor }
@@ -189,6 +190,16 @@ extension El {
             }
         }
 
+        func wrap2<Arg1, Arg2>(_ fn: ((inout State, Arg1, Arg2, inout Tx) -> Void)?) -> ((inout Parent, Arg1, Arg2, inout Tx) -> Void)? {
+            guard let fn else { return nil }
+            hasHandler = true
+            return { _, arg1, arg2, tx in
+                guard isValid(), var child = get() else { return }
+                fn(&child, arg1, arg2, &tx)
+                set(child)
+            }
+        }
+
         func wrapBool1<Arg>(_ fn: ((inout State, Arg, inout Tx) -> Bool)?) -> ((inout Parent, Arg, inout Tx) -> Bool)? {
             guard let fn else { return nil }
             hasHandler = true
@@ -254,6 +265,8 @@ extension El {
         lifted.onInputKey = wrapBool1(h.onInputKey)
         lifted.onTextChange = wrap1(h.onTextChange)
         lifted.onTextSubmit = wrap1(h.onTextSubmit)
+        lifted.onLink = wrap1(h.onLink)
+        lifted.onLinkSecondary = wrap2(h.onLinkSecondary)
         lifted.modalDismiss = wrap(h.modalDismiss)
         if let onAtBottom = h.onAtBottom {
             hasHandler = true

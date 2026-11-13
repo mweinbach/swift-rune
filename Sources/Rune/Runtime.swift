@@ -413,6 +413,10 @@ public final class Runtime<State> {
     public internal(set) var focusedPath: String? = nil
     public internal(set) var focusedKey: String? = nil
     public internal(set) var focusVisible: Bool = false
+    internal var linkBoxesByPath: [String: [TextLinkBox]] = [:]
+    internal var focusedLinkIndex: Int? = nil
+    internal var hoveredLink: TextLinkTarget? = nil
+    internal var pressedLink: TextLinkTarget? = nil
     private var webFocusTabStartPath: String? = nil
     private var dirChord: DirChord = .idle
     private var lastPinnedGlyphMask: UInt32 = 0
@@ -2128,6 +2132,7 @@ public final class Runtime<State> {
         if prevFocusedPath != focusedPath {
             imeReset = true
         }
+        syncFocusedLinkIndex()
     }
 
     // MARK: - Live Property Evaluation
@@ -2448,6 +2453,7 @@ public final class Runtime<State> {
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
+        var newLinkBoxes: [String: [TextLinkBox]] = [:]
         var builtSurfaces: [SurfaceDraw] = []
         var videosActive = false
         var newVideoSig: UInt64 = 0
@@ -3277,6 +3283,31 @@ public final class Runtime<State> {
                         localAlpha: localAlpha, shaped: shaped, devClip: devClip, useLayer: useLayer, effRotate: effRotate,
                         into: &primitives
                     )
+                    let linkInks = recordAndEmitTextLinks(
+                        snap: snap,
+                        el: el,
+                        text: paintedLabelValue ?? "",
+                        shaped: shaped,
+                        textOriginX: textOriginX,
+                        textOriginY: textOriginY,
+                        scaleVec: scaleVec,
+                        pxScale: pxScale,
+                        localAlpha: localAlpha,
+                        defaultTextColor: defaultTextColor,
+                        defaultRingOutline: defaultRingOutline,
+                        forceFocusRings: forceFocusRings,
+                        isFocused: isFocused,
+                        isExiting: p.isExiting,
+                        shouldEmit: shouldEmit,
+                        visClip: visClip,
+                        devClip: devClip,
+                        useLayer: useLayer,
+                        effRotate: effRotate,
+                        into: &primitives,
+                        linkBoxes: &newLinkBoxes,
+                        helpHits: &newHelpHits,
+                        interactiveHits: &newInteractiveHits
+                    )
                     textSystem.emitTextDecorationsAndPills(
                         shaped: shaped,
                         textOriginX: textOriginX,
@@ -3294,7 +3325,7 @@ public final class Runtime<State> {
                     let glyphAlpha = localAlpha * textFlightGlyphAlpha
                     if glyphAlpha > 0.0005 {
                         for g in shaped.glyphs {
-                            let gc = (selPaintInk?.color(for: g) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             primitives.append(attachFade(.glyph(
                                 rect: SIMD4<Float>(
@@ -3316,22 +3347,24 @@ public final class Runtime<State> {
                 }
 
                 // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput)
-                emitFocusRingIfNeeded(
-                    el: el,
-                    snapPath: snap.path,
-                    isExiting: p.isExiting,
-                    effectiveInert: snap.effectiveInert,
-                    isFocused: isFocused,
-                    forceFocusRings: forceFocusRings,
-                    defaultRingOutline: defaultRingOutline,
-                    devRect: devRect,
-                    devRadii: devRadii,
-                    pxScale: pxScale,
-                    localAlpha: localAlpha,
-                    devW: devW,
-                    devH: devH,
-                    into: &primitives
-                )
+                if !hasActiveTextLinks(el) {
+                    emitFocusRingIfNeeded(
+                        el: el,
+                        snapPath: snap.path,
+                        isExiting: p.isExiting,
+                        effectiveInert: snap.effectiveInert,
+                        isFocused: isFocused,
+                        forceFocusRings: forceFocusRings,
+                        defaultRingOutline: defaultRingOutline,
+                        devRect: devRect,
+                        devRadii: devRadii,
+                        pxScale: pxScale,
+                        localAlpha: localAlpha,
+                        devW: devW,
+                        devH: devH,
+                        into: &primitives
+                    )
+                }
             }
 
             let hasVisualBlocker = fillColor.a > 0.001 || el.gradient != nil ||
@@ -3707,6 +3740,8 @@ public final class Runtime<State> {
             }
         }
 
+        linkBoxesByPath = newLinkBoxes
+        appendLinkElements(to: &infos)
         lastElements = infos
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
@@ -3786,6 +3821,9 @@ public final class Runtime<State> {
             if let geom {
                 if geom.isExiting || geom.opacity <= 0.001 { continue }
                 guard let localWindowPt = geom.unturnedLocalPoint(for: point) else { continue }
+                if hasActiveTextLinks(node.el) && !node.el.isSelectable && linkIndex(atPath: path, at: point) == nil {
+                    continue
+                }
 
                 if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
                     continue
@@ -3801,6 +3839,9 @@ public final class Runtime<State> {
                 let infoRect = presentedRectByPath[path] ?? node.targetRect
                 let hitBox = intersectRects(node.clipRect, infoRect)
                 guard halfOpenContains(hitBox, point) else { continue }
+                if hasActiveTextLinks(node.el) && !node.el.isSelectable && linkIndex(atPath: path, at: point) == nil {
+                    continue
+                }
                 if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
                     continue
                 }
@@ -3940,6 +3981,7 @@ public final class Runtime<State> {
         activeDrag = nil
         pressedPath = nil
         pressedKey = nil
+        pressedLink = nil
         pointerExit(at: now)
     }
 
@@ -3947,6 +3989,8 @@ public final class Runtime<State> {
         activeDrag = nil
         pressedPath = nil
         pressedKey = nil
+        pressedLink = nil
+        hoveredLink = nil
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
@@ -3990,6 +4034,10 @@ public final class Runtime<State> {
     public func pointerExit(at now: Double) {
         hoverHoldState = .free
         pointerPosition = Vec2(-10000, -10000)
+        if hoveredLink != nil {
+            hoveredLink = nil
+            dirtyCommit(at: now)
+        }
         if helpState.tipState != .idle {
             dirtyCommit(at: now)
         }
@@ -4068,9 +4116,24 @@ public final class Runtime<State> {
             return
         }
 
-        let hit = hitTest(at: pos, predicate: Self.hoverHitPredicate)
+        let hit = hitTest(at: pos) { node in
+            Self.hoverHitPredicate(node) || self.hasActiveTextLinks(node.el)
+        }
+
+        let newHoveredLink: TextLinkTarget? = {
+            guard let hitNode = hit?.node,
+                  self.hasActiveTextLinks(hitNode.el),
+                  let linkIdx = self.linkIndex(atPath: hitNode.path, at: pos) else {
+                return nil
+            }
+            return TextLinkTarget(path: hitNode.path, key: hitNode.key, linkIndex: linkIdx)
+        }()
+        let linkChanged = (newHoveredLink != hoveredLink)
 
         if hoverHoldState != .held {
+            if linkChanged {
+                hoveredLink = newHoveredLink
+            }
             let newPath = hit?.node.path
             let newKey = hit?.node.key
             if newPath != hoveredPath {
@@ -4091,7 +4154,7 @@ public final class Runtime<State> {
                 isDispatchingHover = false
                 suppressRevealFromHoverCommit = true
                 dirtyCommit(at: now)
-            } else if helpTargetChanges(at: pos) {
+            } else if linkChanged || helpTargetChanges(at: pos) {
                 dirtyCommit(at: now)
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -4144,7 +4207,14 @@ public final class Runtime<State> {
         }
 
         if button == .secondary {
-            if let (node, rect, local) = hitTestDetailed(at: pos, predicate: { $0.el.handlers.onSecondaryClick != nil }) {
+            if let (node, rect, local) = hitTestDetailed(at: pos, predicate: {
+                $0.el.handlers.onSecondaryClick != nil || ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el))
+            }) {
+                if self.hasActiveTextLinks(node.el),
+                   let linkIdx = self.linkIndex(atPath: node.path, at: pos),
+                   dispatchLinkDown(node: node, linkIdx: linkIdx, at: pos, button: .secondary, mods: mods, at: now) {
+                    return
+                }
                 let press = PointerPress(
                     window: pos,
                     local: local,
@@ -4191,6 +4261,13 @@ public final class Runtime<State> {
             return
         }
 
+        if hasActiveTextLinks(node.el), let linkIdx = linkIndex(atPath: node.path, at: pos) {
+            handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
+            if dispatchLinkDown(node: node, linkIdx: linkIdx, at: pos, button: button, mods: mods, at: now) {
+                return
+            }
+        }
+
         let preservesSel = preservesTextSelectionInChain(node)
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         pressedPath = node.path
@@ -4198,7 +4275,7 @@ public final class Runtime<State> {
         if cxSettings.viewDefaults.webFocus && !preservesSel {
             webFocusTabStartPath = node.path
         }
-        if !preservesSel && nodeTakesFocus(node.el) {
+        if !preservesSel && !hasActiveTextLinks(node.el) && nodeTakesFocus(node.el) {
             if focusedPath != node.path {
                 imeReset = true
             }
@@ -4312,6 +4389,10 @@ public final class Runtime<State> {
                 onEnd(&state, false, &tx)
                 applyTx(tx, at: now)
             }
+        }
+
+        if dispatchLinkUp(at: pos, button: button, suppressed: suppressedClickFromSelDrag, at: now) {
+            return
         }
 
         guard let rPath = releasedPath, let idx = nodeByPath[rPath] else { return }
@@ -4678,6 +4759,12 @@ public final class Runtime<State> {
                 }
             }
 
+            // Space/Enter activates focused text links first, then buttons/rows (`takesReturn`).
+            if ev.mods == .none && (ev.key == .space || ev.key == .enter) && !isRepeat {
+                if activateFocusedLink(at: now) {
+                    return true
+                }
+            }
             // Space activates non-input focused controls; Enter activates rows/links (`takesReturn`) or falls back when no `.defaultButton()` exists.
             let takesReturn = fNode.el.role == .listItem || fNode.el.role == .option ||
                 fNode.el.role == .treeItem || fNode.el.role == .menuItem ||
@@ -5584,6 +5671,10 @@ public final class Runtime<State> {
         }
         guard var idx = curIdx else { return .default }
 
+        if let linkCur = linkCursor(atPath: flatNodes[idx].path, at: pointerPosition) {
+            return linkCur
+        }
+
         let leafEl = flatNodes[idx].el
         if leafEl.attachedCursor == nil {
             if leafEl.handlers.editLens != nil || leafEl.role == .textInput {
@@ -5671,6 +5762,9 @@ public final class Runtime<State> {
     }
 
     private func advanceTabFocus(backward: Bool) -> Bool {
+        if linkTab(backward: backward) {
+            return true
+        }
         let restrictToInputsAndLists = !cxSettings.fullKeyboardAccess && !tabVisitsControls
         let candidateIndices = tabOrderIndices().filter { idx in
             guard restrictToInputsAndLists else { return true }
@@ -5699,6 +5793,14 @@ public final class Runtime<State> {
         }
         focusedPath = flatNodes[nextIdx].path
         focusedKey = flatNodes[nextIdx].key
+        if hasActiveTextLinks(flatNodes[nextIdx].el) {
+            let links = flatNodes[nextIdx].el.textLinks
+            let k = backward ? max(0, links.count - 1) : 0
+            focusedLinkIndex = k
+            focusedKey = links[k].id
+        } else {
+            focusedLinkIndex = nil
+        }
         return true
     }
 
