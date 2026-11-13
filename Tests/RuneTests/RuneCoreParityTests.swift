@@ -184,7 +184,7 @@ struct RuneCoreParityTests {
         #expect(abs(result.layout.contentSize.y - 75) < 0.01)
     }
 
-    @Test("Layout: aspectFit respects smaller availableWidth over larger maxWidth")
+    @Test("Layout: aspectFit fitRoom sets explicit size from maxWidth per upstream fit_room")
     func layoutAspectFitBoundedRoom() {
         var child = LayoutInputNode(style: LayoutStyle())
         child.style.aspectFit = 2.0
@@ -194,9 +194,12 @@ struct RuneCoreParityTests {
         root.style.width = .points(200)
         root.style.height = .points(200)
 
+        // Upstream `fit_room` (`crates/rune/src/runtime/commit/flatten.rs:15`) sets `size: raw.max_size`,
+        // so Taffy (`taffy-0.9.0/src/compute/flexbox.rs:1371,1601`) treats `size.width = 400` as a
+        // definite cross size rather than clamping to `availableWidth = 200` (giving 400x200).
         let result = LayoutEngine.compute(root: root, viewport: Vec2(200, 200))
-        #expect(abs(result.children[0].layout.localRect.width - 200) < 0.01)
-        #expect(abs(result.children[0].layout.localRect.height - 100) < 0.01)
+        #expect(abs(result.children[0].layout.localRect.width - 400) < 0.01)
+        #expect(abs(result.children[0].layout.localRect.height - 200) < 0.01)
     }
 
     // MARK: - Text Parity

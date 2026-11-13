@@ -80,6 +80,7 @@ let package = Package(
             dependencies: [
                 "RuneMotion",
                 "RuneRef",
+                "RuneTaffy",
             ],
             path: "Sources/Rune",
             linkerSettings: [

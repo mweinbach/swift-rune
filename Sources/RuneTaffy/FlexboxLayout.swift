@@ -3,7 +3,17 @@
 private struct FlexItem {
     var node: NodeId
     var order: UInt32
-    var style: TaffyStyle
+
+    // Subset of TaffyStyle fields used by flexbox (avoids keeping TaffyStyle copies per item on stack)
+    var flexGrow: Float
+    var flexShrink: Float
+    var flexBasisDim: Dimension
+    var aspectRatio: Float?
+    var boxSizing: BoxSizing
+    var overflowMain: Overflow
+    var alignSelf: AlignSelf?
+    var position: Position
+    var inset: Rect<LengthPercentageAuto>
 
     var size: Size<Float?>
     var minSize: Size<Float?>
@@ -36,11 +46,69 @@ private struct FlexLine {
     var offsetCross: Float = 0
 }
 
+private struct FlexContainerContext {
+    var dir: FlexDirection
+    var isRow: Bool
+    var isWrapReverse: Bool
+    var flexWrap: FlexWrap
+    var alignItems: AlignItems
+    var alignContent: AlignContent
+    var justifyContent: JustifyContent
+
+    var contentBoxInset: Rect<Float>
+    var innerPB: Size<Float>
+    var minSize: Size<Float?>
+    var maxSize: Size<Float?>
+    var known: Size<Float?>
+    var availInner: Size<AvailableSpace>
+    var nodeInnerSize: Size<Float?>
+    var mainGap: Float
+    var crossGap: Float
+    var earlyReturn: LayoutOutput?
+}
+
 internal func computeFlexboxLayout(
     tree: any LayoutTree,
     node: NodeId,
     input: LayoutInput
 ) -> LayoutOutput {
+    let ctx = flexComputeContainerContext(tree: tree, node: node, input: input)
+    if let early = ctx.earlyReturn {
+        return early
+    }
+
+    var items = flexCollectItems(tree: tree, node: node, ctx: ctx)
+    flexDetermineBaseSizes(tree: tree, ctx: ctx, items: &items)
+
+    var (lines, resolvedInnerMain) = flexCollectLinesAndMainSize(ctx: ctx, items: items, input: input)
+    flexResolveFlexibleLengths(ctx: ctx, lines: lines, items: &items, resolvedInnerMain: resolvedInnerMain)
+    flexDetermineCrossSizes(tree: tree, ctx: ctx, items: &items, resolvedInnerMain: resolvedInnerMain)
+
+    let resolvedInnerCross = flexComputeLinesAndAlignContent(ctx: ctx, lines: &lines, items: items)
+    let (outerWidth, outerHeight, finalParentSize) = flexStretchAndPositionItems(
+        ctx: ctx,
+        lines: lines,
+        items: &items,
+        resolvedInnerMain: resolvedInnerMain,
+        resolvedInnerCross: resolvedInnerCross
+    )
+
+    return flexFinalizeChildrenAndOutput(
+        tree: tree,
+        ctx: ctx,
+        items: items,
+        input: input,
+        finalParentSize: finalParentSize,
+        outerWidth: outerWidth,
+        outerHeight: outerHeight
+    )
+}
+
+private func flexComputeContainerContext(
+    tree: any LayoutTree,
+    node: NodeId,
+    input: LayoutInput
+) -> FlexContainerContext {
     let style = tree.style(node)
     let parentSize = input.parentSize
     let padding = style.resolvedPadding(parentWidth: parentSize.width)
@@ -88,19 +156,19 @@ internal func computeFlexboxLayout(
     )
     known = applyAspectRatio(known, style.aspectRatio)
 
+    let dir = style.flexDirection
+    let isRow = dir.isRow
+    let innerPB = Size(width: contentBoxInset.horizontalSum, height: contentBoxInset.verticalSum)
+
+    var earlyReturn: LayoutOutput? = nil
     if input.runMode == .computeSize, let w = known.width, let h = known.height {
         let clamped = Size(
             width: maybeClamp(Swift.max(w, pbSum.width + scrollbarSize.width), min: minSize.width, max: maxSize.width),
             height: maybeClamp(Swift.max(h, pbSum.height + scrollbarSize.height), min: minSize.height, max: maxSize.height)
         )
-        return LayoutOutput.fromOuterSize(clamped)
+        earlyReturn = LayoutOutput.fromOuterSize(clamped)
     }
 
-    let dir = style.flexDirection
-    let isRow = dir.isRow
-    let isWrapReverse = style.flexWrap == .wrapReverse
-
-    let innerPB = Size(width: contentBoxInset.horizontalSum, height: contentBoxInset.verticalSum)
     let availOuter = Size(
         width: input.availableSpace.width.maybeSet(known.width),
         height: input.availableSpace.height.maybeSet(known.height)
@@ -109,20 +177,44 @@ internal func computeFlexboxLayout(
         width: availOuter.width.maybeSub(innerPB.width).mapDefiniteValue { Swift.max(0, $0) },
         height: availOuter.height.maybeSub(innerPB.height).mapDefiniteValue { Swift.max(0, $0) }
     )
-
     let nodeInnerSize = Size<Float?>(
         width: known.width.map { Swift.max(0, $0 - innerPB.width) },
         height: known.height.map { Swift.max(0, $0 - innerPB.height) }
     )
-
     let mainGap = (isRow ? style.gap.width : style.gap.height).resolveOrZero(nodeInnerSize.main(direction: dir))
     let crossGap = (isRow ? style.gap.height : style.gap.width).resolveOrZero(nodeInnerSize.cross(direction: dir))
 
-    // 1. Collect in-flow flex items
+    return FlexContainerContext(
+        dir: dir,
+        isRow: isRow,
+        isWrapReverse: style.flexWrap == .wrapReverse,
+        flexWrap: style.flexWrap,
+        alignItems: style.alignItems ?? .stretch,
+        alignContent: style.alignContent ?? .stretch,
+        justifyContent: style.justifyContent ?? .flexStart,
+        contentBoxInset: contentBoxInset,
+        innerPB: innerPB,
+        minSize: minSize,
+        maxSize: maxSize,
+        known: known,
+        availInner: availInner,
+        nodeInnerSize: nodeInnerSize,
+        mainGap: mainGap,
+        crossGap: crossGap,
+        earlyReturn: earlyReturn
+    )
+}
+
+private func flexCollectItems(
+    tree: any LayoutTree,
+    node: NodeId,
+    ctx: FlexContainerContext
+) -> [FlexItem] {
     let childCount = tree.childCount(node)
     var items: [FlexItem] = []
     items.reserveCapacity(childCount)
     var orderCounter: UInt32 = 0
+    let nodeInnerSize = ctx.nodeInnerSize
 
     for i in 0..<childCount {
         let child = tree.childId(node, at: i)
@@ -164,7 +256,15 @@ internal func computeFlexboxLayout(
         items.append(FlexItem(
             node: child,
             order: orderCounter,
-            style: cStyle,
+            flexGrow: cStyle.flexGrow,
+            flexShrink: cStyle.flexShrink,
+            flexBasisDim: cStyle.flexBasis,
+            aspectRatio: cStyle.aspectRatio,
+            boxSizing: cStyle.boxSizing,
+            overflowMain: ctx.isRow ? cStyle.overflow.x : cStyle.overflow.y,
+            alignSelf: cStyle.alignSelf,
+            position: cStyle.position,
+            inset: cStyle.inset,
             size: cSize,
             minSize: cMin,
             maxSize: cMax,
@@ -175,118 +275,128 @@ internal func computeFlexboxLayout(
         ))
         orderCounter += 1
     }
+    return items
+}
 
-    // 2. Determine flex base size & hypothetical main size for each item
-    let containerMainMax = maxSize.main(direction: dir).map { Swift.max(0, $0 - innerPB.main(direction: dir)) }
-    let containerMainMin = minSize.main(direction: dir).map { Swift.max(0, $0 - innerPB.main(direction: dir)) }
-
+private func flexDetermineBaseSizes(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    items: inout [FlexItem]
+) {
     for idx in items.indices {
-        var item = items[idx]
-        let cPb = item.padding.sumAxes + item.border.sumAxes
-        let cAdj = item.style.contentBoxAdjustment(paddingBorderSum: cPb)
+        flexDetermineSingleItemBaseSize(tree: tree, ctx: ctx, item: &items[idx])
+    }
+}
 
-        let childMainParent = nodeInnerSize.main(direction: dir)
-        let childCrossParent = nodeInnerSize.cross(direction: dir)
+private func flexDetermineSingleItemBaseSize(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    item: inout FlexItem
+) {
+    let dir = ctx.dir
+    let isRow = ctx.isRow
+    let nodeInnerSize = ctx.nodeInnerSize
+    let availInner = ctx.availInner
 
-        let resolvedBasis = item.style.flexBasis.maybeResolve(childMainParent).map { $0 + cAdj.main(direction: dir) }
+    let cPb = item.padding.sumAxes + item.border.sumAxes
+    let cAdj = item.boxSizing == .contentBox ? cPb : .zero
+    let childMainParent = nodeInnerSize.main(direction: dir)
+    let resolvedBasis = item.flexBasisDim.maybeResolve(childMainParent).map { $0 + cAdj.main(direction: dir) }
 
-        var basis: Float
-        if let rb = resolvedBasis {
-            basis = rb
-        } else if let sm = item.size.main(direction: dir) {
-            basis = sm
-        } else if let ratio = item.style.aspectRatio, ratio > 0, ratio.isFinite,
-                  let crossSize = item.size.cross(direction: dir) {
-            basis = isRow ? (crossSize * ratio) : (crossSize / ratio)
-        } else {
-            // Measure item's max-content size along main axis
-            var knownDims = Size<Float?>(width: nil, height: nil)
-            knownDims.setCross(item.size.cross(direction: dir), direction: dir)
-            let crossMarginSum = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
-            var childAvail = availInner
-            childAvail.setMain(.maxContent, direction: dir)
-            childAvail.setCross(
-                availInner.cross(direction: dir).maybeSub(crossMarginSum).mapDefiniteValue { Swift.max(0, $0) },
-                direction: dir
+    let basis: Float
+    if let rb = resolvedBasis {
+        basis = rb
+    } else if let sm = item.size.main(direction: dir) {
+        basis = sm
+    } else if let ratio = item.aspectRatio, ratio > 0, ratio.isFinite,
+              let crossSize = item.size.cross(direction: dir) {
+        basis = isRow ? (crossSize * ratio) : (crossSize / ratio)
+    } else {
+        var knownDims = Size<Float?>(width: nil, height: nil)
+        knownDims.setCross(item.size.cross(direction: dir), direction: dir)
+        let crossMarginSum = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
+        var childAvail = availInner
+        childAvail.setMain(.maxContent, direction: dir)
+        childAvail.setCross(
+            availInner.cross(direction: dir).maybeSub(crossMarginSum).mapDefiniteValue { Swift.max(0, $0) },
+            direction: dir
+        )
+        let out = computeNodeLayout(
+            tree: tree,
+            node: item.node,
+            input: LayoutInput(
+                runMode: .computeSize,
+                sizingMode: .contentSize,
+                axis: isRow ? .horizontal : .vertical,
+                knownDimensions: knownDims,
+                parentSize: nodeInnerSize,
+                availableSpace: childAvail,
+                verticalMarginsAreCollapsible: .false
             )
-            let out = computeNodeLayout(
-                tree: tree,
-                node: item.node,
-                input: LayoutInput(
-                    runMode: .computeSize,
-                    sizingMode: .contentSize,
-                    axis: isRow ? .horizontal : .vertical,
-                    knownDimensions: knownDims,
-                    parentSize: nodeInnerSize,
-                    availableSpace: childAvail,
-                    verticalMarginsAreCollapsible: .false
-                )
-            )
-            basis = out.size.main(direction: dir)
-        }
-
-        // Minimum main size for min-width/height: auto
-        let styleMinMain = item.minSize.main(direction: dir)
-        let resolvedMinMain: Float
-        if let explicitMin = styleMinMain {
-            resolvedMinMain = explicitMin
-        } else {
-            let overflowMain = isRow ? item.style.overflow.x : item.style.overflow.y
-            if overflowMain == .visible {
-                var knownDims = Size<Float?>(width: nil, height: nil)
-                knownDims.setCross(item.size.cross(direction: dir), direction: dir)
-                var childAvail = availInner
-                childAvail.setMain(.minContent, direction: dir)
-                let minOut = computeNodeLayout(
-                    tree: tree,
-                    node: item.node,
-                    input: LayoutInput(
-                        runMode: .computeSize,
-                        sizingMode: .contentSize,
-                        axis: isRow ? .horizontal : .vertical,
-                        knownDimensions: knownDims,
-                        parentSize: nodeInnerSize,
-                        availableSpace: childAvail,
-                        verticalMarginsAreCollapsible: .false
-                    )
-                )
-                let minContentMain = minOut.size.main(direction: dir)
-                let clampUpper = maybeMin(item.size.main(direction: dir), item.maxSize.main(direction: dir))
-                resolvedMinMain = maybeMin(minContentMain, clampUpper) ?? minContentMain
-            } else {
-                resolvedMinMain = 0
-            }
-        }
-
-        let pbMain = item.padding.mainAxisSum(direction: dir) + item.border.mainAxisSum(direction: dir)
-        basis = Swift.max(basis, pbMain)
-        let clampedMinMain = Swift.max(resolvedMinMain, pbMain)
-        let hypotheticalMain = maybeClamp(basis, min: clampedMinMain, max: item.maxSize.main(direction: dir))
-
-        item.flexBasis = basis
-        item.innerFlexBasis = Swift.max(0, basis - pbMain)
-        item.resolvedMinimumMainSize = clampedMinMain
-
-        let marginMainSum = (item.margin.mainStart(direction: dir) ?? 0) + (item.margin.mainEnd(direction: dir) ?? 0)
-        item.hypotheticalInnerSize.setMain(hypotheticalMain, direction: dir)
-        item.hypotheticalOuterSize.setMain(hypotheticalMain + marginMainSum, direction: dir)
-
-        // Ensure cross hypothetical is initialized if known
-        if let sc = item.size.cross(direction: dir) {
-            let clampedCross = maybeClamp(sc, min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
-            item.hypotheticalInnerSize.setCross(clampedCross, direction: dir)
-            let marginCrossSum = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
-            item.hypotheticalOuterSize.setCross(clampedCross + marginCrossSum, direction: dir)
-        }
-
-        _ = childCrossParent
-        items[idx] = item
+        )
+        basis = out.size.main(direction: dir)
     }
 
-    // 3. Determine container main size
-    let containerMainAvail = availInner.main(direction: dir)
+    let resolvedMinMain: Float
+    if let explicitMin = item.minSize.main(direction: dir) {
+        resolvedMinMain = explicitMin
+    } else if item.overflowMain == .visible {
+        var knownDims = Size<Float?>(width: nil, height: nil)
+        knownDims.setCross(item.size.cross(direction: dir), direction: dir)
+        var childAvail = availInner
+        childAvail.setMain(.minContent, direction: dir)
+        let minOut = computeNodeLayout(
+            tree: tree,
+            node: item.node,
+            input: LayoutInput(
+                runMode: .computeSize,
+                sizingMode: .contentSize,
+                axis: isRow ? .horizontal : .vertical,
+                knownDimensions: knownDims,
+                parentSize: nodeInnerSize,
+                availableSpace: childAvail,
+                verticalMarginsAreCollapsible: .false
+            )
+        )
+        let minContentMain = minOut.size.main(direction: dir)
+        let clampUpper = maybeMin(item.size.main(direction: dir), item.maxSize.main(direction: dir))
+        resolvedMinMain = maybeMin(minContentMain, clampUpper) ?? minContentMain
+    } else {
+        resolvedMinMain = 0
+    }
+
+    let pbMain = item.padding.mainAxisSum(direction: dir) + item.border.mainAxisSum(direction: dir)
+    let clampedBasis = Swift.max(basis, pbMain)
+    let clampedMinMain = Swift.max(resolvedMinMain, pbMain)
+    let hypotheticalMain = maybeClamp(clampedBasis, min: clampedMinMain, max: item.maxSize.main(direction: dir))
+
+    item.flexBasis = clampedBasis
+    item.innerFlexBasis = Swift.max(0, clampedBasis - pbMain)
+    item.resolvedMinimumMainSize = clampedMinMain
+
+    let marginMainSum = (item.margin.mainStart(direction: dir) ?? 0) + (item.margin.mainEnd(direction: dir) ?? 0)
+    item.hypotheticalInnerSize.setMain(hypotheticalMain, direction: dir)
+    item.hypotheticalOuterSize.setMain(hypotheticalMain + marginMainSum, direction: dir)
+
+    if let sc = item.size.cross(direction: dir) {
+        let clampedCross = maybeClamp(sc, min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
+        item.hypotheticalInnerSize.setCross(clampedCross, direction: dir)
+        let marginCrossSum = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
+        item.hypotheticalOuterSize.setCross(clampedCross + marginCrossSum, direction: dir)
+    }
+}
+
+private func flexCollectLinesAndMainSize(
+    ctx: FlexContainerContext,
+    items: [FlexItem],
+    input: LayoutInput
+) -> ([FlexLine], Float) {
+    let dir = ctx.dir
+    let containerMainMax = ctx.maxSize.main(direction: dir).map { Swift.max(0, $0 - ctx.innerPB.main(direction: dir)) }
+    let containerMainMin = ctx.minSize.main(direction: dir).map { Swift.max(0, $0 - ctx.innerPB.main(direction: dir)) }
+    let containerMainAvail = ctx.availInner.main(direction: dir)
     let lineBreakMainMax: Float?
-    if let nm = nodeInnerSize.main(direction: dir) {
+    if let nm = ctx.nodeInnerSize.main(direction: dir) {
         lineBreakMainMax = nm
     } else if case .definite(let d) = containerMainAvail {
         lineBreakMainMax = maybeClamp(d, min: containerMainMin, max: containerMainMax)
@@ -294,17 +404,16 @@ internal func computeFlexboxLayout(
         lineBreakMainMax = containerMainMax
     }
 
-    // 4. Collect flex items into flex lines
     var lines: [FlexLine] = []
     if !items.isEmpty {
-        if style.flexWrap == .noWrap {
+        if ctx.flexWrap == .noWrap {
             lines.append(FlexLine(itemRange: 0..<items.count))
         } else {
             var lineStart = 0
             var lineMainSum: Float = 0
             for i in items.indices {
                 let itemOuterMain = items[i].hypotheticalOuterSize.main(direction: dir)
-                let gapBefore = (i > lineStart) ? mainGap : 0
+                let gapBefore = (i > lineStart) ? ctx.mainGap : 0
                 if i > lineStart, let limit = lineBreakMainMax, lineMainSum + gapBefore + itemOuterMain > limit + 0.001 {
                     lines.append(FlexLine(itemRange: lineStart..<i))
                     lineStart = i
@@ -317,27 +426,23 @@ internal func computeFlexboxLayout(
         }
     }
 
-    // Compute container inner main size if not yet definite
     let resolvedInnerMain: Float
-    if let nm = nodeInnerSize.main(direction: dir) {
+    if let nm = ctx.nodeInnerSize.main(direction: dir) {
         resolvedInnerMain = nm
     } else {
         var maxLineMain: Float = 0
         for line in lines {
             var lineSum: Float = 0
             for i in line.itemRange {
-                if i > line.itemRange.lowerBound { lineSum += mainGap }
+                if i > line.itemRange.lowerBound { lineSum += ctx.mainGap }
                 lineSum += items[i].hypotheticalOuterSize.main(direction: dir)
             }
             maxLineMain = Swift.max(maxLineMain, lineSum)
         }
         switch containerMainAvail {
-        case .minContent:
-            resolvedInnerMain = maybeClamp(maxLineMain, min: containerMainMin, max: containerMainMax)
-        case .maxContent:
+        case .minContent, .maxContent:
             resolvedInnerMain = maybeClamp(maxLineMain, min: containerMainMin, max: containerMainMax)
         case .definite(let avail):
-            // For definite available space with auto size, flex container shrinks/grows up to available space or content
             if input.sizingMode == .contentSize {
                 resolvedInnerMain = maybeClamp(maxLineMain, min: containerMainMin, max: containerMainMax)
             } else {
@@ -345,8 +450,17 @@ internal func computeFlexboxLayout(
             }
         }
     }
+    return (lines, resolvedInnerMain)
+}
 
-    // 5. Resolve flexible lengths (CSS Flexbox 9.7) per line
+private func flexResolveFlexibleLengths(
+    ctx: FlexContainerContext,
+    lines: [FlexLine],
+    items: inout [FlexItem],
+    resolvedInnerMain: Float
+) {
+    let dir = ctx.dir
+    let mainGap = ctx.mainGap
     for line in lines {
         let lineCount = line.itemRange.count
         let totalGap = mainGap * Float(Swift.max(0, lineCount - 1))
@@ -358,19 +472,14 @@ internal func computeFlexboxLayout(
         }
         let growing = usedMain < resolvedInnerMain
 
-        var sumHypothetical: Float = totalGap
-        var sumFlexBase: Float = totalGap
         for i in line.itemRange {
-            let marginMain = (items[i].margin.mainStart(direction: dir) ?? 0) + (items[i].margin.mainEnd(direction: dir) ?? 0)
-            sumHypothetical += items[i].hypotheticalInnerSize.main(direction: dir) + marginMain
-            sumFlexBase += items[i].flexBasis + marginMain
             items[i].frozen = false
             items[i].targetSize.setMain(items[i].hypotheticalInnerSize.main(direction: dir), direction: dir)
         }
 
         // Freeze inflexible items
         for i in line.itemRange {
-            let flexFactor = growing ? items[i].style.flexGrow : items[i].style.flexShrink
+            let flexFactor = growing ? items[i].flexGrow : items[i].flexShrink
             let inflexible = flexFactor == 0
                 || (growing && items[i].flexBasis > items[i].hypotheticalInnerSize.main(direction: dir))
                 || (!growing && items[i].flexBasis < items[i].hypotheticalInnerSize.main(direction: dir))
@@ -399,7 +508,7 @@ internal func computeFlexboxLayout(
                     remainingUsed += items[i].targetSize.main(direction: dir) + marginMain
                 } else {
                     allFrozen = false
-                    unfrozenFlexSum += growing ? items[i].style.flexGrow : items[i].style.flexShrink
+                    unfrozenFlexSum += growing ? items[i].flexGrow : items[i].flexShrink
                     remainingUsed += items[i].flexBasis + marginMain
                 }
             }
@@ -415,17 +524,17 @@ internal func computeFlexboxLayout(
 
             if growing && remainingFree > 0 && unfrozenFlexSum > 0 {
                 for i in line.itemRange where !items[i].frozen {
-                    let share = items[i].style.flexGrow / unfrozenFlexSum
+                    let share = items[i].flexGrow / unfrozenFlexSum
                     items[i].targetSize.setMain(items[i].flexBasis + remainingFree * share, direction: dir)
                 }
             } else if !growing && remainingFree < 0 {
                 var scaledShrinkSum: Float = 0
                 for i in line.itemRange where !items[i].frozen {
-                    scaledShrinkSum += items[i].style.flexShrink * items[i].innerFlexBasis
+                    scaledShrinkSum += items[i].flexShrink * items[i].innerFlexBasis
                 }
                 if scaledShrinkSum > 0 {
                     for i in line.itemRange where !items[i].frozen {
-                        let ratio = (items[i].style.flexShrink * items[i].innerFlexBasis) / scaledShrinkSum
+                        let ratio = (items[i].flexShrink * items[i].innerFlexBasis) / scaledShrinkSum
                         items[i].targetSize.setMain(items[i].flexBasis + remainingFree * ratio, direction: dir)
                     }
                 } else {
@@ -439,7 +548,6 @@ internal func computeFlexboxLayout(
                 }
             }
 
-            // Clamp and check violations
             var totalViolation: Float = 0
             for i in line.itemRange where !items[i].frozen {
                 let unclamped = items[i].targetSize.main(direction: dir)
@@ -474,59 +582,86 @@ internal func computeFlexboxLayout(
             items[i].outerTargetSize.setMain(items[i].targetSize.main(direction: dir) + marginMain, direction: dir)
         }
     }
+}
 
-    // 6. Determine hypothetical cross size of each item
-    let containerCrossInner = nodeInnerSize.cross(direction: dir)
+private func flexDetermineCrossSizes(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    items: inout [FlexItem],
+    resolvedInnerMain: Float
+) {
     for idx in items.indices {
-        var item = items[idx]
-        let targetMain = item.targetSize.main(direction: dir)
-        var targetCross = item.size.cross(direction: dir)
+        flexDetermineSingleItemCrossSize(
+            tree: tree,
+            ctx: ctx,
+            item: &items[idx],
+            resolvedInnerMain: resolvedInnerMain
+        )
+    }
+}
 
-        if targetCross == nil, let ratio = item.style.aspectRatio, ratio > 0, ratio.isFinite {
-            targetCross = isRow ? (targetMain / ratio) : (targetMain * ratio)
-        }
+private func flexDetermineSingleItemCrossSize(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    item: inout FlexItem,
+    resolvedInnerMain: Float
+) {
+    let dir = ctx.dir
+    let isRow = ctx.isRow
+    let containerCrossInner = ctx.nodeInnerSize.cross(direction: dir)
+    let targetMain = item.targetSize.main(direction: dir)
+    var targetCross = item.size.cross(direction: dir)
 
-        if let tc = targetCross {
-            let clamped = maybeClamp(tc, min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
-            item.hypotheticalInnerSize.setCross(clamped, direction: dir)
-            item.targetSize.setCross(clamped, direction: dir)
-        } else {
-            var knownDims = Size<Float?>(width: nil, height: nil)
-            knownDims.setMain(targetMain, direction: dir)
-            var childAvail = availInner
-            childAvail.setMain(.definite(targetMain), direction: dir)
-
-            let out = computeNodeLayout(
-                tree: tree,
-                node: item.node,
-                input: LayoutInput(
-                    runMode: .computeSize,
-                    sizingMode: .inherentSize,
-                    axis: isRow ? .vertical : .horizontal,
-                    knownDimensions: knownDims,
-                    parentSize: Size(
-                        width: isRow ? resolvedInnerMain : containerCrossInner,
-                        height: isRow ? containerCrossInner : resolvedInnerMain
-                    ),
-                    availableSpace: childAvail,
-                    verticalMarginsAreCollapsible: .false
-                )
-            )
-            let clamped = maybeClamp(out.size.cross(direction: dir), min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
-            item.hypotheticalInnerSize.setCross(clamped, direction: dir)
-            item.targetSize.setCross(clamped, direction: dir)
-            let baselineVal = isRow ? (out.firstBaselines.y ?? clamped) : (out.firstBaselines.x ?? clamped)
-            item.baseline = baselineVal
-        }
-
-        let marginCross = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
-        item.hypotheticalOuterSize.setCross(item.hypotheticalInnerSize.cross(direction: dir) + marginCross, direction: dir)
-        item.outerTargetSize.setCross(item.hypotheticalOuterSize.cross(direction: dir), direction: dir)
-        items[idx] = item
+    if targetCross == nil, let ratio = item.aspectRatio, ratio > 0, ratio.isFinite {
+        targetCross = isRow ? (targetMain / ratio) : (targetMain * ratio)
     }
 
-    // 7. Calculate cross size of each flex line
-    let containerAlignItems = style.alignItems ?? .stretch
+    if let tc = targetCross {
+        let clamped = maybeClamp(tc, min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
+        item.hypotheticalInnerSize.setCross(clamped, direction: dir)
+        item.targetSize.setCross(clamped, direction: dir)
+    } else {
+        var knownDims = Size<Float?>(width: nil, height: nil)
+        knownDims.setMain(targetMain, direction: dir)
+        var childAvail = ctx.availInner
+        childAvail.setMain(.definite(targetMain), direction: dir)
+
+        let out = computeNodeLayout(
+            tree: tree,
+            node: item.node,
+            input: LayoutInput(
+                runMode: .computeSize,
+                sizingMode: .inherentSize,
+                axis: isRow ? .vertical : .horizontal,
+                knownDimensions: knownDims,
+                parentSize: Size(
+                    width: isRow ? resolvedInnerMain : containerCrossInner,
+                    height: isRow ? containerCrossInner : resolvedInnerMain
+                ),
+                availableSpace: childAvail,
+                verticalMarginsAreCollapsible: .false
+            )
+        )
+        let clamped = maybeClamp(out.size.cross(direction: dir), min: item.minSize.cross(direction: dir), max: item.maxSize.cross(direction: dir))
+        item.hypotheticalInnerSize.setCross(clamped, direction: dir)
+        item.targetSize.setCross(clamped, direction: dir)
+        item.baseline = isRow ? (out.firstBaselines.y ?? clamped) : (out.firstBaselines.x ?? clamped)
+    }
+
+    let marginCross = (item.margin.crossStart(direction: dir) ?? 0) + (item.margin.crossEnd(direction: dir) ?? 0)
+    item.hypotheticalOuterSize.setCross(item.hypotheticalInnerSize.cross(direction: dir) + marginCross, direction: dir)
+    item.outerTargetSize.setCross(item.hypotheticalOuterSize.cross(direction: dir), direction: dir)
+}
+
+private func flexComputeLinesAndAlignContent(
+    ctx: FlexContainerContext,
+    lines: inout [FlexLine],
+    items: [FlexItem]
+) -> Float {
+    let dir = ctx.dir
+    let containerCrossInner = ctx.nodeInnerSize.cross(direction: dir)
+    let containerAlignItems = ctx.alignItems
+
     for lineIdx in lines.indices {
         let range = lines[lineIdx].itemRange
         if lines.count == 1, let definiteCross = containerCrossInner {
@@ -535,12 +670,10 @@ internal func computeFlexboxLayout(
             var maxAscent: Float = 0
             var maxDescent: Float = 0
             var maxNonBaseline: Float = 0
-
             for i in range {
                 let item = items[i]
-                let align = item.style.alignSelf ?? containerAlignItems
+                let align = item.alignSelf ?? containerAlignItems
                 let marginCrossStart = item.margin.crossStart(direction: dir) ?? 0
-                let marginCrossEnd = item.margin.crossEnd(direction: dir) ?? 0
                 let outerCross = item.hypotheticalOuterSize.cross(direction: dir)
 
                 if align == .baseline && !item.marginIsAuto.crossStart(direction: dir) && !item.marginIsAuto.crossEnd(direction: dir) {
@@ -551,22 +684,20 @@ internal func computeFlexboxLayout(
                 } else {
                     maxNonBaseline = Swift.max(maxNonBaseline, outerCross)
                 }
-                _ = marginCrossEnd
             }
             lines[lineIdx].crossSize = Swift.max(maxNonBaseline, maxAscent + maxDescent)
         }
     }
 
-    // Determine container cross size
+    let crossGap = ctx.crossGap
     let totalLinesCross = lines.reduce(Float(0)) { $0 + $1.crossSize } + crossGap * Float(Swift.max(0, lines.count - 1))
-    let containerCrossMin = minSize.cross(direction: dir).map { Swift.max(0, $0 - innerPB.cross(direction: dir)) }
-    let containerCrossMax = maxSize.cross(direction: dir).map { Swift.max(0, $0 - innerPB.cross(direction: dir)) }
+    let containerCrossMin = ctx.minSize.cross(direction: dir).map { Swift.max(0, $0 - ctx.innerPB.cross(direction: dir)) }
+    let containerCrossMax = ctx.maxSize.cross(direction: dir).map { Swift.max(0, $0 - ctx.innerPB.cross(direction: dir)) }
     let resolvedInnerCross = containerCrossInner ?? maybeClamp(totalLinesCross, min: containerCrossMin, max: containerCrossMax)
 
-    // 8. Align-content: distribute cross space among lines
     if !lines.isEmpty {
         let freeCross = resolvedInnerCross - totalLinesCross
-        let alignContent = style.alignContent ?? .stretch
+        let alignContent = ctx.alignContent
         if lines.count == 1 && alignContent == .stretch {
             lines[0].crossSize = Swift.max(lines[0].crossSize, resolvedInnerCross)
         } else if freeCross > 0 && alignContent == .stretch {
@@ -583,9 +714,9 @@ internal func computeFlexboxLayout(
 
         switch alignContent {
         case .flexStart, .normal, .stretch:
-            curCross = isWrapReverse ? remCross : 0
+            curCross = ctx.isWrapReverse ? remCross : 0
         case .flexEnd:
-            curCross = isWrapReverse ? 0 : remCross
+            curCross = ctx.isWrapReverse ? 0 : remCross
         case .start:
             curCross = 0
         case .end:
@@ -610,17 +741,30 @@ internal func computeFlexboxLayout(
             }
         }
 
-        let lineIndices = isWrapReverse ? Array(lines.indices.reversed()) : Array(lines.indices)
+        let lineIndices = ctx.isWrapReverse ? Array(lines.indices.reversed()) : Array(lines.indices)
         for l in lineIndices {
             lines[l].offsetCross = curCross
             curCross += lines[l].crossSize + crossGap + extraGap
         }
     }
 
-    // 9. Stretch items with align-self: stretch & auto cross size, then resolve final cross sizes
+    return resolvedInnerCross
+}
+
+private func flexStretchAndPositionItems(
+    ctx: FlexContainerContext,
+    lines: [FlexLine],
+    items: inout [FlexItem],
+    resolvedInnerMain: Float,
+    resolvedInnerCross: Float
+) -> (Float, Float, Size<Float?>) {
+    let dir = ctx.dir
+    let isRow = ctx.isRow
+    let containerAlignItems = ctx.alignItems
+
     for line in lines {
         for i in line.itemRange {
-            let align = items[i].style.alignSelf ?? containerAlignItems
+            let align = items[i].alignSelf ?? containerAlignItems
             let hasAutoCross = items[i].size.cross(direction: dir) == nil
             let noAutoCrossMargin = !items[i].marginIsAuto.crossStart(direction: dir) && !items[i].marginIsAuto.crossEnd(direction: dir)
             if (align == .stretch || align == .normal) && hasAutoCross && noAutoCrossMargin {
@@ -636,27 +780,24 @@ internal func computeFlexboxLayout(
         }
     }
 
-    // 10. Main-axis positioning (auto margins + justify-content) & Cross-axis positioning
     let outerWidth = maybeClamp(
-        known.width ?? ((isRow ? resolvedInnerMain : resolvedInnerCross) + innerPB.width),
-        min: minSize.width,
-        max: maxSize.width
+        ctx.known.width ?? ((isRow ? resolvedInnerMain : resolvedInnerCross) + ctx.innerPB.width),
+        min: ctx.minSize.width,
+        max: ctx.maxSize.width
     )
     let outerHeight = maybeClamp(
-        known.height ?? ((isRow ? resolvedInnerCross : resolvedInnerMain) + innerPB.height),
-        min: minSize.height,
-        max: maxSize.height
+        ctx.known.height ?? ((isRow ? resolvedInnerCross : resolvedInnerMain) + ctx.innerPB.height),
+        min: ctx.minSize.height,
+        max: ctx.maxSize.height
     )
     let finalParentSize = Size<Float?>(
-        width: Swift.max(0, outerWidth - innerPB.width),
-        height: Swift.max(0, outerHeight - innerPB.height)
+        width: Swift.max(0, outerWidth - ctx.innerPB.width),
+        height: Swift.max(0, outerHeight - ctx.innerPB.height)
     )
 
-    let justify = style.justifyContent ?? .flexStart
+    let justify = ctx.justifyContent
     let isMainReverse = dir.isReverse
-    var contentMaxX: Float = contentBoxInset.left
-    var contentMaxY: Float = contentBoxInset.top
-    var firstBaselineY: Float? = nil
+    let mainGap = ctx.mainGap
 
     for line in lines {
         let range = line.itemRange
@@ -678,7 +819,7 @@ internal func computeFlexboxLayout(
             let perAuto = freeMain / Float(autoMarginCount)
             for i in range {
                 if items[i].marginIsAuto.mainStart(direction: dir) {
-                    if isRow { items[i].margin.left = dir == .row ? perAuto : items[i].margin.left }
+                    if dir == .row { items[i].margin.left = perAuto }
                     if dir == .rowReverse { items[i].margin.right = perAuto }
                     if dir == .column { items[i].margin.top = perAuto }
                     if dir == .columnReverse { items[i].margin.bottom = perAuto }
@@ -721,10 +862,9 @@ internal func computeFlexboxLayout(
             }
         }
 
-        // Compute max baseline in line for baseline alignment
         var maxLineBaseline: Float = 0
         for i in range {
-            let align = items[i].style.alignSelf ?? containerAlignItems
+            let align = items[i].alignSelf ?? containerAlignItems
             if align == .baseline {
                 let mStart = items[i].margin.crossStart(direction: dir) ?? 0
                 maxLineBaseline = Swift.max(maxLineBaseline, items[i].baseline + mStart)
@@ -738,13 +878,12 @@ internal func computeFlexboxLayout(
             items[i].offsetMain = curMain + mMainStart
             curMain += mMainStart + items[i].targetSize.main(direction: dir) + mMainEnd + mainGap + extraMainGap
 
-            // Cross-axis alignment within line
             let itemCross = items[i].targetSize.cross(direction: dir)
             let mCrossStart = items[i].margin.crossStart(direction: dir)
             let mCrossEnd = items[i].margin.crossEnd(direction: dir)
             let freeCross = line.crossSize - itemCross - (mCrossStart ?? 0) - (mCrossEnd ?? 0)
 
-            var offsetInLine: Float
+            let offsetInLine: Float
             if mCrossStart == nil && mCrossEnd == nil {
                 offsetInLine = Swift.max(0, freeCross) * 0.5
             } else if mCrossStart == nil {
@@ -752,13 +891,13 @@ internal func computeFlexboxLayout(
             } else if mCrossEnd == nil {
                 offsetInLine = mCrossStart ?? 0
             } else {
-                let align = items[i].style.alignSelf ?? containerAlignItems
+                let align = items[i].alignSelf ?? containerAlignItems
                 let startMargin = mCrossStart ?? 0
                 switch align {
                 case .flexStart, .normal, .stretch:
-                    offsetInLine = isWrapReverse ? (startMargin + freeCross) : startMargin
+                    offsetInLine = ctx.isWrapReverse ? (startMargin + freeCross) : startMargin
                 case .flexEnd:
-                    offsetInLine = isWrapReverse ? startMargin : (startMargin + freeCross)
+                    offsetInLine = ctx.isWrapReverse ? startMargin : (startMargin + freeCross)
                 case .start, .selfStart:
                     offsetInLine = startMargin
                 case .end, .selfEnd:
@@ -766,7 +905,7 @@ internal func computeFlexboxLayout(
                 case .center:
                     offsetInLine = startMargin + freeCross * 0.5
                 case .baseline:
-                    offsetInLine = isWrapReverse
+                    offsetInLine = ctx.isWrapReverse
                         ? (startMargin + freeCross)
                         : (maxLineBaseline - items[i].baseline)
                 }
@@ -775,77 +914,111 @@ internal func computeFlexboxLayout(
         }
     }
 
-    // 11. Final PerformLayout pass on children
+    return (outerWidth, outerHeight, finalParentSize)
+}
+
+private func flexFinalizeChildrenAndOutput(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    items: [FlexItem],
+    input: LayoutInput,
+    finalParentSize: Size<Float?>,
+    outerWidth: Float,
+    outerHeight: Float
+) -> LayoutOutput {
+    var contentMaxX: Float = ctx.contentBoxInset.left
+    var contentMaxY: Float = ctx.contentBoxInset.top
+    var firstBaselineY: Float? = nil
+
     if input.runMode == .performLayout {
         for idx in items.indices {
-            let item = items[idx]
-            let targetW = item.targetSize.width
-            let targetH = item.targetSize.height
-
-            let childOut = computeNodeLayout(
+            flexLayoutSingleChild(
                 tree: tree,
-                node: item.node,
-                input: LayoutInput(
-                    runMode: .performLayout,
-                    sizingMode: .inherentSize,
-                    axis: .both,
-                    knownDimensions: Size(width: targetW, height: targetH),
-                    parentSize: finalParentSize,
-                    availableSpace: Size(width: .definite(targetW), height: .definite(targetH)),
-                    verticalMarginsAreCollapsible: .false
-                )
+                ctx: ctx,
+                item: items[idx],
+                finalParentSize: finalParentSize,
+                contentMaxX: &contentMaxX,
+                contentMaxY: &contentMaxY,
+                firstBaselineY: &firstBaselineY
             )
-
-            var x = contentBoxInset.left + (isRow ? item.offsetMain : item.offsetCross)
-            var y = contentBoxInset.top + (isRow ? item.offsetCross : item.offsetMain)
-
-            if item.style.position == .relative {
-                if let l = item.style.inset.left.maybeResolve(finalParentSize.width) {
-                    x += l
-                } else if let r = item.style.inset.right.maybeResolve(finalParentSize.width) {
-                    x -= r
-                }
-                if let t = item.style.inset.top.maybeResolve(finalParentSize.height) {
-                    y += t
-                } else if let b = item.style.inset.bottom.maybeResolve(finalParentSize.height) {
-                    y -= b
-                }
-            }
-
-            contentMaxX = Swift.max(contentMaxX, x + targetW)
-            contentMaxY = Swift.max(contentMaxY, y + targetH)
-            if firstBaselineY == nil {
-                firstBaselineY = y + (childOut.firstBaselines.y ?? targetH)
-            }
-
-            let resolvedMargin = Rect<Float>(
-                left: item.margin.left ?? 0,
-                right: item.margin.right ?? 0,
-                top: item.margin.top ?? 0,
-                bottom: item.margin.bottom ?? 0
-            )
-
-            tree.setUnroundedLayout(item.node, Layout(
-                order: item.order,
-                location: Point(x: x, y: y),
-                size: Size(width: targetW, height: targetH),
-                contentSize: childOut.contentSize,
-                scrollbarSize: .zero,
-                border: item.border,
-                padding: item.padding,
-                margin: resolvedMargin
-            ))
         }
     }
 
     return LayoutOutput(
         size: Size(width: outerWidth, height: outerHeight),
         contentSize: Size(
-            width: Swift.max(outerWidth, contentMaxX + contentBoxInset.right),
-            height: Swift.max(outerHeight, contentMaxY + contentBoxInset.bottom)
+            width: Swift.max(outerWidth, contentMaxX + ctx.contentBoxInset.right),
+            height: Swift.max(outerHeight, contentMaxY + ctx.contentBoxInset.bottom)
         ),
         firstBaselines: Point(x: nil, y: firstBaselineY)
     )
+}
+
+private func flexLayoutSingleChild(
+    tree: any LayoutTree,
+    ctx: FlexContainerContext,
+    item: FlexItem,
+    finalParentSize: Size<Float?>,
+    contentMaxX: inout Float,
+    contentMaxY: inout Float,
+    firstBaselineY: inout Float?
+) {
+    let targetW = item.targetSize.width
+    let targetH = item.targetSize.height
+
+    let childOut = computeNodeLayout(
+        tree: tree,
+        node: item.node,
+        input: LayoutInput(
+            runMode: .performLayout,
+            sizingMode: .inherentSize,
+            axis: .both,
+            knownDimensions: Size(width: targetW, height: targetH),
+            parentSize: finalParentSize,
+            availableSpace: Size(width: .definite(targetW), height: .definite(targetH)),
+            verticalMarginsAreCollapsible: .false
+        )
+    )
+
+    var x = ctx.contentBoxInset.left + (ctx.isRow ? item.offsetMain : item.offsetCross)
+    var y = ctx.contentBoxInset.top + (ctx.isRow ? item.offsetCross : item.offsetMain)
+
+    if item.position == .relative {
+        if let l = item.inset.left.maybeResolve(finalParentSize.width) {
+            x += l
+        } else if let r = item.inset.right.maybeResolve(finalParentSize.width) {
+            x -= r
+        }
+        if let t = item.inset.top.maybeResolve(finalParentSize.height) {
+            y += t
+        } else if let b = item.inset.bottom.maybeResolve(finalParentSize.height) {
+            y -= b
+        }
+    }
+
+    contentMaxX = Swift.max(contentMaxX, x + targetW)
+    contentMaxY = Swift.max(contentMaxY, y + targetH)
+    if firstBaselineY == nil {
+        firstBaselineY = y + (childOut.firstBaselines.y ?? targetH)
+    }
+
+    let resolvedMargin = Rect<Float>(
+        left: item.margin.left ?? 0,
+        right: item.margin.right ?? 0,
+        top: item.margin.top ?? 0,
+        bottom: item.margin.bottom ?? 0
+    )
+
+    tree.setUnroundedLayout(item.node, Layout(
+        order: item.order,
+        location: Point(x: x, y: y),
+        size: Size(width: targetW, height: targetH),
+        contentSize: childOut.contentSize,
+        scrollbarSize: .zero,
+        border: item.border,
+        padding: item.padding,
+        margin: resolvedMargin
+    ))
 }
 
 extension Rect where T == Bool {
