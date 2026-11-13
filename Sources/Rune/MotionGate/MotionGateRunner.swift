@@ -400,7 +400,9 @@ private enum MotionGateSampleHelper {
 
             var colors = Array(repeating: Color.transparent, count: MotionGatePaint.colorCount)
             colors[MotionGatePaint.cFill] = e.fill
-            colors[MotionGatePaint.cBorder] = el?.borderColor ?? .transparent
+            colors[MotionGatePaint.cBorder] = node.flatMap { rt.scene.get($0.nodeId, Props.BORDER).map(Color.init) }
+                ?? el?.borderColor
+                ?? .transparent
             colors[MotionGatePaint.cText] = e.textColor ?? .transparent
             colors[MotionGatePaint.cShadow] = el?.shadows.first?.color ?? .transparent
             if let lg = el?.runtimeExtras[RenderExtrasKey.linearGradient] as? RenderLinearGradientSpec {

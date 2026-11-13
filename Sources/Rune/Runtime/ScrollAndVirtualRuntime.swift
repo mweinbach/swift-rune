@@ -494,7 +494,7 @@ extension Runtime {
                 }
             }
 
-            let nextGrowth = el.growthSpec ?? inGrowthSpec
+            let nextGrowth = el.growthSpec
             let nextScrollPath = el.layout.scrollAxes.isEmpty ? enclosingScrollPath : path
             if !el.children.isEmpty && el.children.count == res.children.count {
                 var childSeen: [String: Int] = [:]
@@ -561,7 +561,7 @@ extension Runtime {
                 }
             }
 
-            let nextGrowth = el.growthSpec ?? inGrowthSpec
+            let nextGrowth = el.growthSpec
             if !el.children.isEmpty {
                 var childSeen: [String: Int] = [:]
                 out.children = el.children.enumerated().map { idx, ch in
@@ -793,7 +793,7 @@ extension Runtime {
                 if let pSF = flatNodes[pIdx].ownScrollFade {
                     inheritedFades.append(pSF)
                 }
-                if let pCF = flatNodes[pIdx].ownClipFade {
+                if let pCF = p.ownClipFade {
                     inheritedFades.append(pCF)
                 }
                 flatNodes[i].activeClipFades = inheritedFades

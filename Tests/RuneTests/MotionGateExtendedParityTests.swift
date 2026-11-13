@@ -589,34 +589,26 @@ struct MotionGateLoopParityTests {
     }
 
     private func runFold(_ toggles: [Double], _ last: ((inout Timeline, inout Tx) -> Void)? = nil) -> MotionGateRecording {
-        let vlState = VirtualListState()
         let rt = Runtime<Timeline>(state: Timeline(), viewport: Vec2(400, 300), pixelScale: 1.0, systemDark: true) { (s: Timeline, _: inout Cx<Timeline>) -> El<Timeline> in
             let ink = oklch(0.6, 0.1, 250.0)
-            let foldHeight: Float = s.open ? Float(28 + 40 * 28) : 28.0
-            let totalEst = Float(max(0, s.rows - 1)) * 40.0 + foldHeight
-            let scrollY = max(0, totalEst - 300.0)
-            let rows: El<Timeline> = virtualRows(
-                key: "rows",
-                state: vlState,
-                count: s.rows,
-                estimatedHeight: 40.0,
-                scrollY: scrollY,
-                viewportHeight: 300.0,
-                rowKey: { "r\($0)" }
-            ) { (i: Int) -> El<Timeline> in
-                if i != 55 {
-                    return el().wFull().h(40).bg(ink)
-                }
-                var group: El<Timeline> = col().key("group").wFull().child(el().key("hdr").wFull().h(28).bg(ink))
-                if s.open {
-                    var steps: El<Timeline> = col().key("steps").wFull()
-                    for k in 0..<40 {
-                        steps = steps.child(el().key("step-\(k)").wFull().h(28).bg(ink))
+            let rows: El<Timeline> = col()
+                .key("rows")
+                .wFull()
+                .growth()
+                .virtualRows(count: s.rows, estimatedRowHeight: 40.0, key: { _, i in "r\(i)" }) { st, i in
+                    if i != 55 {
+                        return el().wFull().h(40).bg(ink)
                     }
-                    group = group.child(steps)
+                    var group: El<Timeline> = col().key("group").wFull().child(el().key("hdr").wFull().h(28).bg(ink))
+                    if st.open {
+                        var steps: El<Timeline> = col().key("steps").wFull()
+                        for k in 0..<40 {
+                            steps = steps.child(el().key("step-\(k)").wFull().h(28).bg(ink))
+                        }
+                        group = group.child(steps)
+                    }
+                    return col().wFull().foldGlide(Spring(duration: 0.18, bounce: 0.0)).child(group)
                 }
-                return col().wFull().h(foldHeight).motion(Spring(duration: 0.18, bounce: 0.0)).clip(true).child(group)
-            }
             return col().key("scroll").size(400, 300).scroll(stickBottom: true).child(rows)
         }
         let r = MotionGateRun(rt, hz: 120.0)
@@ -630,7 +622,7 @@ struct MotionGateLoopParityTests {
             }
         }
         for secs in toggles {
-            r.act("tap") { $0.update { s, _ in s.open.toggle() } }
+            r.act("tap") { $0.update { s, tx in s.open.toggle(); tx.keepOnScreen("hdr") } }
             playTicks(secs)
         }
         if let last {

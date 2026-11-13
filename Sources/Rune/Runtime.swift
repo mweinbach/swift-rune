@@ -5813,6 +5813,15 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
+        if activeDrag == nil,
+           pointerPosition.x >= 0,
+           pointerPosition.y >= 0,
+           pointerPosition.x < viewport.x,
+           pointerPosition.y < viewport.y {
+            if refreshHover(at: currentTime, isPointerEvent: false) {
+                isAnimating = true
+            }
+        }
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives)
@@ -6200,6 +6209,12 @@ public final class Runtime<State> {
             return
         }
 
+        _ = refreshHover(at: now, isPointerEvent: true)
+    }
+
+    @discardableResult
+    private func refreshHover(at now: Double, isPointerEvent: Bool) -> Bool {
+        let pos = pointerPosition
         let hit = hitTest(at: pos) { node in
             Self.hoverHitPredicate(node) || self.hasActiveTextLinks(node.el)
         }
@@ -6220,6 +6235,7 @@ public final class Runtime<State> {
             }
             let newPath = hit?.node.path
             let newKey = hit?.node.key
+            var changed = false
             if newPath != hoveredPath {
                 let oldPath = hoveredPath
                 hoveredPath = newPath
@@ -6252,21 +6268,30 @@ public final class Runtime<State> {
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                 }
                 isDispatchingHover = false
-                if !(ranAnyHover && hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)) {
-                    suppressRevealFromHoverCommit = true
+                if isPointerEvent {
+                    if !(ranAnyHover && hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)) {
+                        suppressRevealFromHoverCommit = true
+                        dirtyCommit(at: now)
+                        changed = true
+                    } else if linkChanged || helpTargetChanges(at: pos) {
+                        suppressRevealFromHoverCommit = true
+                        dirtyCommit(at: now)
+                        changed = true
+                    }
+                } else {
                     dirtyCommit(at: now)
-                } else if linkChanged || helpTargetChanges(at: pos) {
-                    suppressRevealFromHoverCommit = true
-                    dirtyCommit(at: now)
+                    changed = true
                 }
             } else if linkChanged || helpTargetChanges(at: pos) {
                 dirtyCommit(at: now)
+                changed = true
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
-        } else if helpTargetChanges(at: pos) {
-            dirtyCommit(at: now)
+            settleKitHoverDelays(at: pos, now: now)
+            return changed
         }
         settleKitHoverDelays(at: pos, now: now)
+        return false
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
