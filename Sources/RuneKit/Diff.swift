@@ -749,6 +749,66 @@ public struct FileDiff: Sendable, Equatable {
         return max(2, String(maxN).count)
     }
 
+    /// Folds a single-hunk full-context diff around its changes with `context` lines each side
+    /// (`FileDiff::fold`), preserving pairing and source texts for later gap expansion.
+    public func fold(context: Int) -> FileDiff {
+        guard hunks.count == 1, !isBinary else { return self }
+        let only = hunks[0]
+        if only.oldStart > 1 || only.newStart > 1 {
+            return self
+        }
+        let ctx = max(0, context)
+        let lines = only.lines
+        func sideText(_ side: DiffSide) -> String {
+            var out = ""
+            for l in lines {
+                let keep = l.kind == .context || l.kind == (side == .old ? .deletion : .addition)
+                guard keep else { continue }
+                out += l.text
+                if !l.noNewline {
+                    out.append("\n")
+                }
+            }
+            return out
+        }
+        let oldStr = sideText(.old)
+        let newStr = sideText(.new)
+        let newSrc = DiffSource(old: oldStr, new: newStr)
+
+        var ranges: [(Int, Int)] = []
+        for (i, l) in lines.enumerated() where l.kind != .context {
+            let start = max(0, i - ctx)
+            let end = min(lines.count - 1, i + ctx)
+            if let lastIdx = ranges.indices.last, start <= ranges[lastIdx].1 + 1 {
+                ranges[lastIdx].1 = max(ranges[lastIdx].1, end)
+            } else {
+                ranges.append((start, end))
+            }
+        }
+        func countBefore(_ side: DiffSide, index: Int) -> Int {
+            lines[..<index].filter { $0.lineNumber(for: side) != nil }.count
+        }
+        var copy = self
+        copy.hunks = ranges.map { start, end in
+            let slice = Array(lines[start...end])
+            let ob = countBefore(.old, index: start)
+            let nb = countBefore(.new, index: start)
+            let oc = slice.filter { $0.lineNumber(for: .old) != nil }.count
+            let nc = slice.filter { $0.lineNumber(for: .new) != nil }.count
+            return DiffHunk(
+                section: FileDiff.findSection(in: newSrc.oldLines, before: ob),
+                oldStart: oc == 0 ? ob : ob + 1,
+                oldCount: oc,
+                newStart: nc == 0 ? nb : nb + 1,
+                newCount: nc,
+                lines: slice
+            )
+        }
+        DiffPairs.pairLines(&copy.hunks)
+        copy.source = newSrc
+        return copy
+    }
+
     public init(
         oldPath: String,
         newPath: String,
@@ -1424,6 +1484,11 @@ public struct DiffLineRange: Sendable, Equatable, Hashable {
     public func contains(_ ref: DiffLineRef) -> Bool {
         ref.side == start.side && ref.line >= start.line && ref.line <= end.line
     }
+
+    /// Single-line selection range (`LineRange::line`).
+    public static func line(_ ref: DiffLineRef) -> DiffLineRange {
+        DiffLineRange(start: ref, end: ref)
+    }
 }
 
 /// Inline review comment attached to a line (`crate::diff::state::Annotation`).
@@ -1566,9 +1631,25 @@ public struct DiffState: Sendable, Equatable {
     public var hoveredRow: Int?
     public var copiedToastVisible: Bool
     public var visibleFile: Int
+    public var highlighter: SyntaxHighlighter = .builtin
+    internal var notifiedVisibleFile: Int?
+    private var highlighterRevision: UInt64 = 0
 
     private var ui: [DiffFileUI]
     private var copyTracker = DiffCopyTracker()
+
+    public static func == (lhs: DiffState, rhs: DiffState) -> Bool {
+        lhs.files == rhs.files
+            && lhs.mode == rhs.mode
+            && lhs.wrap == rhs.wrap
+            && lhs.annotations == rhs.annotations
+            && lhs.selection == rhs.selection
+            && lhs.hoveredRow == rhs.hoveredRow
+            && lhs.copiedToastVisible == rhs.copiedToastVisible
+            && lhs.visibleFile == rhs.visibleFile
+            && lhs.highlighterRevision == rhs.highlighterRevision
+            && lhs.ui == rhs.ui
+    }
 
     /// Compatibility accessor for the primary file (`files[0]`).
     public var diff: FileDiff {
@@ -1651,6 +1732,18 @@ public struct DiffState: Sendable, Equatable {
 
     public mutating func setMode(_ mode: DiffMode) {
         self.mode = mode
+    }
+
+    /// In split mode, returns the sole side `file` shows across the whole width when added or deleted (`DiffState::single_column`).
+    public func singleColumn(file: Int = 0) -> DiffSide? {
+        guard mode == .split, files.indices.contains(file) else { return nil }
+        return files[file].soleSide
+    }
+
+    /// Replaces the syntax highlighter used by `DiffState` / `DiffView` (`DiffState::set_highlighter`).
+    public mutating func setHighlighter(_ highlighter: SyntaxHighlighter) {
+        self.highlighter = highlighter
+        self.highlighterRevision &+= 1
     }
 
     public mutating func toggleExpanded() {
@@ -1774,6 +1867,28 @@ public struct DiffState: Sendable, Equatable {
             }
         }
         return y
+    }
+
+    /// Returns the file index covering scroll position `y`.
+    public func fileAtY(_ y: Float) -> Int {
+        guard !files.isEmpty else { return 0 }
+        let targetY = max(0, y) + 0.5
+        var cursor: Float = 0
+        for idx in files.indices {
+            var h = DiffLayout.headerHeight
+            if files[idx].isBinary {
+                h += DiffLayout.noteHeight
+            } else if !collapsed(file: idx) {
+                for r in rows(file: idx) {
+                    h += r.baseHeight
+                }
+            }
+            if targetY < cursor + h || idx == files.count - 1 {
+                return idx
+            }
+            cursor += h
+        }
+        return 0
     }
 
     public mutating func scrollToFile(_ file: Int, keyPrefix: String = "diff", tx: inout Tx) {
@@ -2203,6 +2318,7 @@ public struct DiffView<State>: Sendable {
     public let set: @Sendable (inout State, DiffState) -> Void
     public var look: DiffLook
     public var highlighter: SyntaxHighlighter
+    private var hasCustomHighlighter: Bool = false
     public var forcedMode: DiffMode?
     public var onCopyHandler: (@Sendable (inout State, String, inout Tx) -> Void)?
     public var onSelectHandler: (@Sendable (inout State, DiffLineRange?, inout Tx) -> Void)?
@@ -2246,7 +2362,12 @@ public struct DiffView<State>: Sendable {
     public func tabSize(_ spaces: Int) -> Self { var c = self; c.look.tabSize = max(1, spaces); return c }
     public func viewportHeight(_ h: Float) -> Self { var c = self; c.look.viewportHeight = max(0, h); return c }
     public func tints(_ tints: DiffTints) -> Self { var c = self; c.look.tints = tints; return c }
-    public func highlighter(_ hl: SyntaxHighlighter) -> Self { var c = self; c.highlighter = hl; return c }
+    public func highlighter(_ hl: SyntaxHighlighter) -> Self {
+        var c = self
+        c.highlighter = hl
+        c.hasCustomHighlighter = true
+        return c
+    }
     public func onCopy(_ fn: @escaping @Sendable (inout State, String, inout Tx) -> Void) -> Self {
         var c = self; c.onCopyHandler = fn; return c
     }
@@ -2291,6 +2412,12 @@ public struct DiffView<State>: Sendable {
     }
 
     private func renderContainer(hostState: State?, diffState st: DiffState, cx: Cx<State>) -> El<State> {
+        let activeView: DiffView<State> = {
+            if hasCustomHighlighter { return self }
+            var copy = self
+            copy.highlighter = st.highlighter
+            return copy
+        }()
         let k = kit
         let filesToRender = st.files.isEmpty ? [st.diff] : st.files
         let syntaxTheme = SyntaxTheme.fromKit(k)
@@ -2374,7 +2501,7 @@ public struct DiffView<State>: Sendable {
             }
 
             for rowIdx in win.range {
-                body = body.child(renderRow(
+                body = body.child(activeView.renderRow(
                     hostState: hostState,
                     fileIndex: fIdx,
                     prefix: filePrefix(fIdx),
@@ -2390,7 +2517,9 @@ public struct DiffView<State>: Sendable {
                     delLineBg: delLineBg,
                     addWordBg: addWordBg,
                     delWordBg: delWordBg,
-                    selBg: selBg
+                    selBg: selBg,
+                    annotationFixedWidth: (!st.wrap && cx.viewport.x > 2) ? (cx.viewport.x - 2) : nil,
+                    annotationStickyLeft: !st.wrap
                 ))
             }
 
@@ -2406,10 +2535,21 @@ public struct DiffView<State>: Sendable {
             .key("\(key)-body")
             .wFull()
             .scrollXY()
+            .onScroll { [get, set, onVisibleFileHandler] s, pos, _ in
+                var d = get(s)
+                let top = d.fileAtY(pos.offset.y)
+                let prevNotified = d.notifiedVisibleFile ?? 0
+                if top != prevNotified {
+                    d.notifiedVisibleFile = top
+                    d.visibleFile = top
+                    set(&s, d)
+                    onVisibleFileHandler?(&s, top)
+                }
+            }
         if look.viewportHeight > 0 {
             stack = stack.maxH(look.viewportHeight)
         } else if cx.viewport.y > 0 {
-            stack = stack.maxH(max(0, cx.viewport.y - 2)).shrink(1)
+            stack = stack.maxH(max(Float(0), cx.viewport.y - 2)).shrink(1)
         }
 
         for (fIdx, diff) in filesToRender.enumerated() {
@@ -2479,7 +2619,7 @@ public struct DiffView<State>: Sendable {
                 continue
             }
             for rowIdx in rows.indices {
-                fileSection = fileSection.child(renderRow(
+                fileSection = fileSection.child(activeView.renderRow(
                     hostState: hostState,
                     fileIndex: fIdx,
                     prefix: prefix,
@@ -2495,7 +2635,9 @@ public struct DiffView<State>: Sendable {
                     delLineBg: delLineBg,
                     addWordBg: addWordBg,
                     delWordBg: delWordBg,
-                    selBg: selBg
+                    selBg: selBg,
+                    annotationFixedWidth: (!st.wrap && headerW != nil) ? headerW : nil,
+                    annotationStickyLeft: !st.wrap
                 ))
             }
             stack = stack.child(fileSection)
@@ -2519,14 +2661,16 @@ public struct DiffView<State>: Sendable {
         delLineBg: Color,
         addWordBg: Color,
         delWordBg: Color,
-        selBg: Color
+        selBg: Color,
+        annotationFixedWidth: Float? = nil,
+        annotationStickyLeft: Bool = false
     ) -> El<State> {
         switch rows[rowIdx] {
         case .gap(let gap):
             let totalGutterW = 3 + (st.mode == .unified ? 2 * gutterWidth : gutterWidth)
             return buildGapRow(fileIndex: fileIndex, prefix: prefix, gap: gap, height: DiffLayout.gapHeight, gutterWidth: totalGutterW)
         case .annotation(let ann):
-            return buildAnnotationRow(hostState: hostState, prefix: prefix, mode: st.mode, ann: ann)
+            return buildAnnotationRow(hostState: hostState, prefix: prefix, mode: st.mode, ann: ann, fixedWidth: annotationFixedWidth, stickyLeft: annotationStickyLeft)
         case let .unified(line, intraOld, intraNew):
             return buildUnifiedRow(
                 prefix: prefix,
@@ -2853,7 +2997,7 @@ public struct DiffView<State>: Sendable {
             .child(text(label).font(kit.ty.caption()).color(kit.c.textAccent))
     }
 
-    private func buildAnnotationRow(hostState: State?, prefix: String, mode: DiffMode, ann: DiffAnnotation) -> El<State> {
+    private func buildAnnotationRow(hostState: State?, prefix: String, mode: DiffMode, ann: DiffAnnotation, fixedWidth: Float? = nil, stickyLeft: Bool = false) -> El<State> {
         let noteBody: El<State>
         if let custom = annotationBuilder, let hostState {
             noteBody = custom(hostState, ann)
@@ -2885,10 +3029,11 @@ public struct DiffView<State>: Sendable {
                 .child(ann.side == .new ? noteHalf : emptyHalf())
         }
 
-        return El<State>(direction: .column)
+        var row = El<State>(direction: .column)
             .key("\(prefix)-note-\(ann.id)")
-            .wFull()
-            .child(noteBody)
+        if stickyLeft { row = row.stickyLeft(0) }
+        if let fixedWidth { row = row.w(fixedWidth) } else { row = row.wFull() }
+        return row.child(noteBody)
     }
 
     // MARK: Gutter & Line Selection Helpers

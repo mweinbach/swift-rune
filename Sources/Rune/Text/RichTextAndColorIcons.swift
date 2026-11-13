@@ -429,6 +429,7 @@ public struct TextLink: Sendable, Hashable {
 public struct TextHighlight: Sendable, Hashable {
     public var byteRange: Range<Int>
     public var bg: Color
+    public var fg: Color?
     public var ring: TextRing?
     public var pad: Float
     public var key: String?
@@ -436,15 +437,29 @@ public struct TextHighlight: Sendable, Hashable {
     public init(
         _ byteRange: Range<Int>,
         bg: Color,
+        fg: Color? = nil,
         ring: TextRing? = nil,
         pad: Float = 0,
         key: String? = nil
     ) {
         self.byteRange = max(0, byteRange.lowerBound)..<max(max(0, byteRange.lowerBound), byteRange.upperBound)
         self.bg = bg
+        self.fg = fg
         self.ring = ring
         self.pad = max(0, pad)
         self.key = key
+    }
+
+    public func color(_ c: Color) -> Self {
+        var h = self
+        h.fg = c
+        return h
+    }
+
+    public func fg(_ c: Color?) -> Self {
+        var h = self
+        h.fg = c
+        return h
     }
 
     public func ring(_ color: Color, width: Float = 1.0) -> Self {

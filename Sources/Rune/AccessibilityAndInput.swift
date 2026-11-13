@@ -294,13 +294,14 @@ public enum AppKitAccessibilityMapper {
         case .radiogroup: return .radioGroup
         case .tabList: return .tabGroup
         case .tooltip: return .helpTag
-        case .alert, .region, .main, .status: return .group
+        case .alert, .region, .main, .status, .blockquote: return .group
         case .link: return .link
         case .toolbar: return .toolbar
         case .splitter: return .splitter
         case .list: return .list
         case .menuItemCheckbox: return .menuItem
-        case .mark: return .staticText
+        case .mark, .code: return .staticText
+        case .table: return .table
         }
     }
 
@@ -397,7 +398,7 @@ public enum UIKitAccessibilityMapper {
         case .image, .icon: return .image
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .combobox, .option, .link: return .button
-        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark:
+        case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
             return .staticText
         }
     }

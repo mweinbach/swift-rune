@@ -703,4 +703,18 @@ public struct Kit: Sendable, Equatable {
     public func elevate<S>(_ e: El<S>, _ layers: [Shadow]) -> El<S> {
         e.shadows(shadowLayers(layers))
     }
+
+    /// Mounts overlays above `base`: `base` fills the window and each overlay follows it in paint
+    /// and hit order (`rune_kit::root`). Place popover/menu/select/tooltip contents and toast regions here.
+    public static func root<State>(_ base: El<State>, overlays: [El<State>] = []) -> El<State> {
+        let within = base.hoverWithinCurves()
+        var rootEl: El<State> = el().key("kit-root").wFull().hFull().child(base.wFull().hFull())
+        for overlay in overlays {
+            rootEl = rootEl.child(overlay)
+        }
+        if let (enter, exit) = within {
+            return rootEl.hoverMotionWithin(enter, exit)
+        }
+        return rootEl
+    }
 }

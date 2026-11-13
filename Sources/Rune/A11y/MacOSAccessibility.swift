@@ -144,7 +144,7 @@ public extension Runtime {
             let n = flatNodes[idx]
             guard !n.el.isA11yHidden && !n.el.isSecure else { return }
             if let lbl = n.el.a11yLabel, !lbl.isEmpty { parts.append(lbl) }
-            else if let txt = n.el.plainText, !txt.isEmpty { parts.append(txt) }
+            else if let txt = n.el.plainText ?? n.el.richSpans?.map(\.text).joined(), !txt.isEmpty { parts.append(txt) }
             for c in (childrenByParent[idx] ?? []) {
                 collectText(c, into: &parts, childrenByParent: childrenByParent)
             }
@@ -179,7 +179,8 @@ public extension Runtime {
             let node = flatNodes[idx]
             let el = node.el
             var editIsSecure = el.isSecure
-            var editText: String? = el.plainText
+            let richPlain: String? = el.plainText ?? el.richSpans?.map(\.text).joined()
+            var editText: String? = editIsSecure ? nil : richPlain
             var editChars: Int? = nil
             var editSel: [Int]? = nil
             if let editLens = el.handlers.editLens {
@@ -217,7 +218,7 @@ public extension Runtime {
             let describedByText = el.a11yDescribedBy.flatMap { textByKey[$0] }
             let resolvedLabel: String? = isSecure
                 ? (el.a11yLabel ?? labelledByText ?? "Password")
-                : (el.a11yLabel ?? labelledByText ?? (el.role == .textInput ? nil : el.plainText))
+                : (el.a11yLabel ?? labelledByText ?? (el.role == .textInput ? nil : richPlain))
             let resolvedHelp: String? = el.a11yDescription ?? describedByText ?? el.a11yHelp
             let selectedState: Bool? = (selectableRoles.contains(el.role) || el.itemSelected) ? el.itemSelected : nil
 
@@ -226,6 +227,32 @@ public extension Runtime {
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
             let resolvedRole: ElementRole = (isSecure && el.role == .textInput) ? .passwordInput : el.role
+            let hasLinks = hasActiveTextLinks(el)
+            var builtChildren = (childrenByParent[idx] ?? []).map(build)
+            if hasLinks, let boxes = linkBoxesByPath[node.path], !boxes.isEmpty {
+                let parentFocused = (node.path == focusedPath) && !node.el.isA11yHidden
+                let activeIdx = focusedLinkIndex ?? 0
+                for box in boxes {
+                    let linkFocusable = el.focusable && !node.effectiveInert && el.opacity > 0.001 && box.windowUnion.z > 0 && box.windowUnion.w > 0
+                    let linkFocused = parentFocused && (activeIdx == box.linkIndex)
+                    var linkActions: [AccessibilityAction] = [.press]
+                    if linkFocusable {
+                        linkActions.append(.focus)
+                    }
+                    let linkLabel = box.link.label ?? (isSecure ? nil : box.sliceText)
+                    builtChildren.append(AccessibilityNode(
+                        id: box.link.id,
+                        role: box.link.role,
+                        label: linkLabel,
+                        help: box.link.help.map(runeHelpWords),
+                        frame: MotionRect.fromXYWH(box.windowUnion.x, box.windowUnion.y, box.windowUnion.z, box.windowUnion.w),
+                        isFocused: linkFocused,
+                        isFocusable: linkFocusable,
+                        url: box.link.id,
+                        actions: linkActions
+                    ))
+                }
+            }
 
             return AccessibilityNode(
                 id: nodeId,
@@ -236,8 +263,8 @@ public extension Runtime {
                 placeholder: el.placeholder,
                 range: el.a11yRange,
                 frame: rect,
-                isFocused: (node.path == focusedPath) || (focusedKey != nil && node.key == focusedKey),
-                isFocusable: el.focusable && !node.effectiveInert,
+                isFocused: !hasLinks && ((node.path == focusedPath) || (focusedKey != nil && node.key == focusedKey)),
+                isFocusable: !hasLinks && el.focusable && !node.effectiveInert,
                 isSelected: el.itemSelected,
                 selectedState: selectedState,
                 isExpanded: el.a11yExpanded,
@@ -262,7 +289,7 @@ public extension Runtime {
                 isModal: el.isModal || el.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
-                children: (childrenByParent[idx] ?? []).map(build)
+                children: builtChildren
             )
         }
 
