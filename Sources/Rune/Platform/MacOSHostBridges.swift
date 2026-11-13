@@ -595,4 +595,11 @@ public enum MacOSMetalLayerSurface {
         }
     }
 }
+
+/// AppleEvent descriptor helpers for incoming macOS get-URL events (`open_url/incoming_tests.rs`).
+public enum MacOSAppleEventHelper {
+    public static func url(from descriptor: NSAppleEventDescriptor) -> String? {
+        descriptor.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue
+    }
+}
 #endif

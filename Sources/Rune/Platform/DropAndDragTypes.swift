@@ -283,42 +283,152 @@ public struct PopupShow: Sendable, Equatable {
 
 /// Single-resolution guard shared with a native menu presenter so cancellation and item selection
 /// never invoke the runtime callback more than once.
+/// One-shot native popup menu presentation session (`popup_menu/macos.rs::Session`).
 public final class PopupSession: @unchecked Sendable {
+    private enum Phase {
+        case pending
+        case open
+        case answered(pickedId: String?, pointer: Vec2?)
+        case closed
+    }
+
     private let lock = NSLock()
+    private var phase: Phase
     private var resolveFn: ((String?) -> Void)?
+    private var trackingObject: AnyObject?
+
+    public init() {
+        self.phase = .pending
+        self.resolveFn = nil
+    }
 
     public init(_ resolveFn: @escaping (String?) -> Void) {
+        self.phase = .open
         self.resolveFn = resolveFn
     }
 
+    /// Transitions a newly-created session from pending to open; returns `true` at most once.
     @discardableResult
-    public func resolve(_ pickedId: String?) -> Bool {
+    public func begin() -> Bool {
         lock.lock()
-        let fn = resolveFn
-        resolveFn = nil
-        lock.unlock()
-        guard let fn else { return false }
-        fn(pickedId)
+        defer { lock.unlock() }
+        guard case .pending = phase else { return false }
+        phase = .open
         return true
     }
 
+    /// Associates a native tracking menu/runloop token while the session is open.
+    public func tracking(_ object: AnyObject?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .open = phase else { return }
+        trackingObject = object
+    }
+
+    @discardableResult
+    public func resolve(_ pickedId: String?, at pointer: Vec2? = nil) -> Bool {
+        lock.lock()
+        guard case .open = phase else {
+            lock.unlock()
+            return false
+        }
+        let fn = resolveFn
+        resolveFn = nil
+        if fn != nil {
+            phase = .closed
+            trackingObject = nil
+        } else {
+            phase = .answered(pickedId: pickedId, pointer: pointer)
+        }
+        lock.unlock()
+        fn?(pickedId)
+        return true
+    }
+
+    /// Takes the resolved selection and pointer position once, then closes the session.
+    public func takeAnswer() -> (pickedId: String?, pointer: Vec2?)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .answered(let pickedId, let pointer) = phase else {
+            return nil
+        }
+        phase = .closed
+        trackingObject = nil
+        return (pickedId, pointer)
+    }
+
+    /// Cancels a pending or open session and returns any active tracking token.
+    @discardableResult
+    public func cancelTracking() -> AnyObject? {
+        lock.lock()
+        switch phase {
+        case .pending, .open:
+            phase = .closed
+            let fn = resolveFn
+            resolveFn = nil
+            let tracked = trackingObject
+            trackingObject = nil
+            lock.unlock()
+            fn?(nil)
+            return tracked
+        case .answered, .closed:
+            lock.unlock()
+            return nil
+        }
+    }
+
     public func cancel() {
-        resolve(nil)
+        _ = cancelTracking()
     }
 
     public var isResolved: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return resolveFn == nil
+        switch phase {
+        case .answered, .closed:
+            return true
+        case .pending, .open:
+            return false
+        }
+    }
+
+    public var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if case .closed = phase { return true }
+        return false
     }
 }
 
 /// Type-erased popup menu request captured from `Tx.popupMenu(...)`.
-internal struct ErasedPopupRequest {
-    var menu: PopupMenu
-    var anchor: PopupAnchor
-    var onPick: (inout Any, String?, inout Tx) -> Void
-    var isFieldMenu: Bool = false
+internal final class ErasedPopupRequest: @unchecked Sendable {
+    let menu: PopupMenu
+    let anchor: PopupAnchor
+    let onPick: (inout Any, String?, inout Tx) -> Void
+    let isFieldMenu: Bool
+    private let lock = NSLock()
+    private var taken = false
+
+    init(
+        menu: PopupMenu,
+        anchor: PopupAnchor,
+        onPick: @escaping (inout Any, String?, inout Tx) -> Void,
+        isFieldMenu: Bool = false
+    ) {
+        self.menu = menu
+        self.anchor = anchor
+        self.onPick = onPick
+        self.isFieldMenu = isFieldMenu
+    }
+
+    /// Claims this request once across cloned `Tx` values (`popup_menu/tests.rs::clones_of_a_tx_share_one_request`).
+    func take() -> ErasedPopupRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !taken else { return nil }
+        taken = true
+        return self
+    }
 }
 
 /// Runtime queue state for popup menus (`Closed`, `Queued`, `Showing`).

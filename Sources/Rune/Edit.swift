@@ -451,11 +451,13 @@ public struct ClipboardContent: Sendable, Equatable {
     public var text: String
     public var html: String?
     public var rtf: String?
+    public var image: ClipboardImage?
 
-    public init(_ text: String = "", html: String? = nil, rtf: String? = nil) {
+    public init(_ text: String = "", html: String? = nil, rtf: String? = nil, image: ClipboardImage? = nil) {
         self.text = text
         self.html = html
         self.rtf = rtf
+        self.image = image
     }
 }
 

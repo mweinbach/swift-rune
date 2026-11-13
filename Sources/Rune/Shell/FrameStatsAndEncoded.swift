@@ -624,6 +624,9 @@ private enum FramePhaseStorage {
         row[phase.rawValue] += wallMs
         row[phase.rawValue + FRAME_PHASES] += cpuMs
         Thread.current.threadDictionary[key] = row
+        if InteractionGate.isOn {
+            InteractionTracker.recordActiveThreadPhase(phase.rawValue, ms: wallMs)
+        }
     }
 
     static func take() -> [Double] {

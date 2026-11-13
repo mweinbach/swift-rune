@@ -679,6 +679,14 @@ public struct Scene: Sendable {
         }
     }
 
+    public mutating func traceEvent(_ event: String) {
+        trace?.event(event)
+    }
+
+    public mutating func traceChannel(_ name: String, kind: TraceChannels.Kind, value: Float) {
+        trace?.channel(name, kind: kind, value: value)
+    }
+
     public mutating func takeTrace() -> MotionTrace? {
         defer { trace = nil }
         return trace
