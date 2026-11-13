@@ -247,6 +247,7 @@ internal extension Runtime {
         let shaped = textSystem.shape(
             text: displayText,
             spans: node.el.richSpans,
+            pills: node.el.pillChips,
             style: node.el.textStyle,
             maxWidth: wrapWidth,
             pixelScale: pixelScale,

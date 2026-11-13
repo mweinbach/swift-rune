@@ -453,6 +453,7 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
     private let minWindowSize: (Float, Float)
     private let maxWindowSize: (Float, Float)?
     private var appliedMenuRevision: UInt64 = 0
+    private let fnKeyMonitor = FnKeyMonitor()
 
     init(
         frame: NSRect,
@@ -978,11 +979,30 @@ private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClie
         _ = dispatchNativeKeyEvent(event)
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window {
+            _ = fnKeyMonitor.start(on: window)
+        } else {
+            fnKeyMonitor.stop()
+        }
+    }
+
     override func flagsChanged(with event: NSEvent) {
         let now = nowSeconds()
+        let fnTransitions = fnKeyMonitor.take()
+        if !fnTransitions.isEmpty {
+            let currentMods = mods(for: event)
+            for fnPressed in fnTransitions {
+                _ = runtime.physicalInput(.key(key: .fn, mods: currentMods, pressed: fnPressed, repeat: false), at: now)
+                _ = runtime.keyDown(KeyEvent(key: .modifier(.fn, pressed: fnPressed), mods: currentMods), at: now)
+            }
+        }
         if let mapped = MacOSKeyMapper.modifierKeyEvent(keyCode: event.keyCode, flags: event.modifierFlags) {
             runtime.dispatchModifiers(mapped.mods, at: now)
-            _ = runtime.keyDown(mapped.event, at: now)
+            if event.keyCode != FnKeyMonitor.keyCodeFn || fnTransitions.isEmpty {
+                _ = runtime.keyDown(mapped.event, at: now)
+            }
         } else {
             runtime.dispatchModifiers(mods(for: event), at: now)
         }

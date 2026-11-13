@@ -71,7 +71,10 @@ final class RetainedLayoutCoordinator {
                     if el.isRevealed { edit.isRevealed = true }
                 }
                 let str = edit.displayString.isEmpty ? (el.placeholder ?? " ") : edit.displayString
-                let textStyle = el.textStyle
+                var textStyle = el.textStyle
+                if let fDir = edit.forcedDir {
+                    textStyle.direction = fDir
+                }
                 let isSecure = edit.isSecure
                 var hasher = Hasher()
                 hasher.combine(1)
@@ -89,24 +92,28 @@ final class RetainedLayoutCoordinator {
                 return (fn, isSecure ? 0 : h, isSecure)
             } else if let spans = el.richSpans {
                 let textStyle = el.textStyle
+                let pills = el.pillChips
                 var hasher = Hasher()
                 hasher.combine(2)
                 hasher.combine(spans)
+                for p in pills { hasher.combine(p) }
                 hasher.combine(scale)
                 hasher.combine(textStyle)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let fn: (Float?) -> Vec2 = { maxW in
-                    textSystem.shape(text: "", spans: spans, style: textStyle, maxWidth: maxW, pixelScale: scale, emitGlyphs: false).size
+                    textSystem.shape(text: "", spans: spans, pills: pills, style: textStyle, maxWidth: maxW, pixelScale: scale, emitGlyphs: false).size
                 }
                 return (fn, h, false)
             } else if let rawTxt = el.liveText?.get() ?? el.plainText {
                 let isSecure = el.isSecure
                 let txt = (isSecure && !el.isRevealed && !rawTxt.isEmpty) ? "••••••••••••" : rawTxt
                 let textStyle = el.textStyle
+                let pills = el.pillChips
                 var hasher = Hasher()
                 hasher.combine(3)
                 if !isSecure {
                     hasher.combine(txt)
+                    for p in pills { hasher.combine(p) }
                 }
                 hasher.combine(el.isRevealed)
                 hasher.combine(scale)
@@ -117,7 +124,8 @@ final class RetainedLayoutCoordinator {
                         txt,
                         style: textStyle,
                         maxWidth: textStyle.wrap == .noWrap ? nil : maxW,
-                        pixelScale: scale
+                        pixelScale: scale,
+                        pills: isSecure ? [] : pills
                     )
                 }
                 return (fn, isSecure ? 0 : h, isSecure)

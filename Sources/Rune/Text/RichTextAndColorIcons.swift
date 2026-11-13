@@ -199,6 +199,7 @@ public struct RichSpan: Sendable, Hashable {
     public var ring: TextRing?
     public var pad: Float
     public var weight: Float?
+    public var size: Float?
     public var italic: Bool?
     public var monospace: Bool?
     public var underline: Bool?
@@ -211,6 +212,7 @@ public struct RichSpan: Sendable, Hashable {
         self.ring = nil
         self.pad = 0
         self.weight = nil
+        self.size = nil
         self.italic = nil
         self.monospace = nil
         self.underline = nil
@@ -222,6 +224,7 @@ public struct RichSpan: Sendable, Hashable {
     public func ring(_ c: Color, width: Float = 1.0) -> Self { var s = self; s.ring = TextRing(color: c, width: width); return s }
     public func pad(_ p: Float) -> Self { var s = self; s.pad = max(0, p); return s }
     public func weight(_ w: Float) -> Self { var s = self; s.weight = w; return s }
+    public func size(_ pts: Float) -> Self { var s = self; s.size = max(1, pts); return s }
     public func bold() -> Self { weight(700) }
     public func italic(_ on: Bool = true) -> Self { var s = self; s.italic = on; return s }
     public func mono(_ on: Bool = true) -> Self { var s = self; s.monospace = on; return s }
@@ -287,6 +290,7 @@ public enum RichSpanFlattener {
             var color: Color? = nil
             var bg: Color? = nil
             var weight: Float? = nil
+            var size: Float? = nil
             var italic = base.italic
             var monospace = (base.family == .monospace)
             var underline = false
@@ -296,6 +300,7 @@ public enum RichSpanFlattener {
                 if let c = sp.color { color = c }
                 if let bCol = sp.background { bg = bCol }
                 if let w = sp.weight { weight = w }
+                if let sz = sp.size { size = sz }
                 if let it = sp.italic { italic = it }
                 if let mo = sp.monospace { monospace = mo }
                 if let ul = sp.underline { underline = ul }
@@ -310,13 +315,15 @@ public enum RichSpanFlattener {
                 italic: italic,
                 monospace: monospace,
                 underline: underline,
-                strikethrough: strikethrough
+                strikethrough: strikethrough,
+                size: size
             )
 
             if var prev = merged.last,
                prev.color == span.color,
                prev.background == span.background,
                prev.weight == span.weight,
+               prev.size == span.size,
                prev.italic == span.italic,
                prev.monospace == span.monospace,
                prev.underline == span.underline,

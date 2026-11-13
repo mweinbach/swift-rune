@@ -282,6 +282,19 @@ extension TextEdit {
         return edit
     }
 
+    /// Replaces the soft-break paragraph flags without recording an undo step (`edit/rich.rs`, `set_soft_breaks`).
+    public mutating func setSoftBreaks(_ breaks: [Int]) {
+        softBreaks = breaks
+        syncRichInvariants()
+    }
+
+    /// Builder variant of `setSoftBreaks(_:)` (`edit/rich.rs`, `with_soft_breaks`).
+    public func withSoftBreaks(_ breaks: [Int]) -> TextEdit {
+        var copy = self
+        copy.setSoftBreaks(breaks)
+        return copy
+    }
+
     /// Enables rich formatting marks/blocks fluently.
     public func rich(_ enabled: Bool = true) -> TextEdit {
         var copy = self
@@ -1873,6 +1886,128 @@ extension TextEdit {
         return TextEdit.fromRichParts(text: text, richMarks: marks, blocks: blocks, softBreaks: softBreaks, multiline: true)
     }
 
+    /// Pastes rich HTML with plain-text fallback at the selection (`edit/input.rs:433`), dropping pill marks.
+    public mutating func pasteHTML(_ html: String, plain: String) {
+        pasteRich(html: html, plain: plain, keepPills: false)
+    }
+
+    /// Pastes rich HTML with plain-text fallback, preserving `RichMark.pill` marks (`edit/input.rs:438`).
+    public mutating func pasteHTMLWithPills(_ html: String, plain: String) {
+        pasteRich(html: html, plain: plain, keepPills: true)
+    }
+
+    private mutating func pasteRich(html: String, plain: String, keepPills: Bool) {
+        if isSecure || html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            paste(plain)
+            return
+        }
+        var frag = Self.fromHTML(html)
+        if !keepPills {
+            frag.richMarks.removeAll { $0.mark.isPill }
+        }
+        if let allowedRichMarks {
+            frag.richMarks.removeAll { !allowedRichMarks.contains($0.mark.allowBit) }
+        }
+        if let allowedBlocks {
+            for i in frag.blocks.indices where !allowedBlocks.contains(frag.blocks[i].allowBit) {
+                frag.blocks[i] = .paragraph
+            }
+        }
+        let unformatted = frag.richMarks.isEmpty && frag.blocks.allSatisfy { $0 == .paragraph }
+        if !plain.isEmpty && (frag.text.isEmpty || unformatted) {
+            paste(plain)
+            return
+        }
+        if !isRichEnabled {
+            paste(plain.isEmpty ? frag.text : plain)
+            return
+        }
+        syncRichInvariants()
+        if multiline {
+            let lineIdx = lineIndexOfUTF8(selectedUTF8Range.lowerBound)
+            if lineIdx < blocks.count && blocks[lineIdx] == .code {
+                paste(plain.isEmpty ? frag.text : plain)
+                return
+            }
+        }
+
+        breakHistoryGroup()
+        let before = captureUndoBaseline()
+        let covered = coverPills(selectedUTF8Range.lowerBound, selectedUTF8Range.upperBound)
+        let a = covered.0
+        let b = covered.1
+
+        if !multiline {
+            var clean = ""
+            var byteMap = [Int](repeating: 0, count: frag.text.utf8.count + 1)
+            var utf8Pos = 0
+            for ch in frag.text {
+                let chLen = ch.utf8.count
+                for k in 0..<chLen {
+                    byteMap[utf8Pos + k] = clean.utf8.count
+                }
+                if !(ch.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }) && ch != "\u{2028}" && ch != "\u{2029}" {
+                    clean.append(ch)
+                } else if ch == "\n", !clean.isEmpty, clean.last != " " {
+                    clean.append(" ")
+                }
+                utf8Pos += chLen
+            }
+            byteMap[frag.text.utf8.count] = clean.utf8.count
+            applyRichReplace(range: a..<b, replacement: clean, insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+            adjustMarks(replacedRange: a..<b, newLength: clean.utf8.count)
+            for m in frag.richMarks {
+                let sIdx = a + byteMap[min(m.start, frag.text.utf8.count)]
+                let eIdx = a + byteMap[min(m.end, frag.text.utf8.count)]
+                if sIdx < eIdx {
+                    richMarks.append(RichMarkRange(start: sIdx, end: eIdx, mark: m.mark))
+                }
+            }
+            typingStyle = .inherited
+            normalizeRichMarks()
+            recordUndoChange(before: before, kind: .other)
+            return
+        }
+
+        if a < b {
+            applyRichReplace(range: a..<b, replacement: "", insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+            adjustMarks(replacedRange: a..<b, newLength: 0)
+        }
+        let insAt = a
+        let lineIdx = lineIndexOfUTF8(insAt)
+        let lineRange = lineRangeUTF8(of: lineIdx)
+        let lineWasEmpty = lineRange.isEmpty
+        let origBlock = lineIdx < blocks.count ? blocks[lineIdx] : .paragraph
+
+        applyRichReplace(range: insAt..<insAt, replacement: frag.text, insertedMarks: [], newLineBlock: nil, markNewLinesSoft: false)
+        adjustMarks(replacedRange: insAt..<insAt, newLength: frag.text.utf8.count)
+
+        let fragLines = frag.blocks.count
+        if fragLines == 1 {
+            if lineWasEmpty && origBlock == .paragraph && frag.blocks[0] != .paragraph && lineIdx < blocks.count {
+                blocks[lineIdx] = frag.blocks[0]
+            }
+        } else if fragLines > 1 {
+            if (lineWasEmpty || insAt == lineRange.lowerBound) && origBlock == .paragraph && lineIdx < blocks.count {
+                blocks[lineIdx] = frag.blocks[0]
+            }
+            for k in 1..<fragLines where lineIdx + k < blocks.count {
+                blocks[lineIdx + k] = frag.blocks[k]
+            }
+            for sb in frag.softBreaks {
+                let target = lineIdx + sb
+                if target > 0 { softBreaks.append(target) }
+            }
+        }
+
+        for m in frag.richMarks {
+            richMarks.append(RichMarkRange(start: insAt + m.start, end: insAt + m.end, mark: m.mark))
+        }
+        typingStyle = .inherited
+        syncRichInvariants()
+        recordUndoChange(before: before, kind: .other)
+    }
+
     /// Exports `range` (or whole editor if `nil`) to semantic HTML.
     public func toHTML(range: Range<Int>? = nil) -> String {
         guard !isSecure else { return "" }
@@ -1896,10 +2031,12 @@ extension TextEdit {
             }
         }
 
+        let blockDirs = computeHTMLBlockDirs(paras: paras)
         var out = ""
         var idx = 0
         while idx < paras.count {
             let blk = paras[idx].block
+            let dirAttr = blockDirs[idx]
             switch blk {
             case .code:
                 out.append("<pre><code>")
@@ -1918,6 +2055,7 @@ extension TextEdit {
                 var openLists: [HTMLListKind] = []
                 while idx < paras.count && paras[idx].block.isList {
                     let curBlk = paras[idx].block
+                    let itemDirAttr = blockDirs[idx]
                     let (kind, level): (HTMLListKind, Int) = {
                         switch curBlk {
                         case let .bullet(l): return (.bullet, Int(l))
@@ -1939,7 +2077,7 @@ extension TextEdit {
                         out.append(k == .bullet ? "<ul>" : "<ol>")
                         openLists.append(k)
                     }
-                    out.append("<li>")
+                    out.append("<li\(itemDirAttr)>")
                     serializeInlineHTML(paras[idx].range, into: &out)
                     idx += 1
                     while idx < paras.count && paras[idx].softBreak && paras[idx].block == curBlk {
@@ -1953,7 +2091,7 @@ extension TextEdit {
                     out.append(popped == .bullet ? "</ul>" : "</ol>")
                 }
             case .quote:
-                out.append("<blockquote>")
+                out.append("<blockquote\(dirAttr)>")
                 serializeInlineHTML(paras[idx].range, into: &out)
                 idx += 1
                 while idx < paras.count && paras[idx].softBreak && paras[idx].block == .quote {
@@ -1963,7 +2101,7 @@ extension TextEdit {
                 }
                 out.append("</blockquote>")
             case .paragraph:
-                out.append("<p>")
+                out.append("<p\(dirAttr)>")
                 serializeInlineHTML(paras[idx].range, into: &out)
                 idx += 1
                 while idx < paras.count && paras[idx].softBreak && paras[idx].block == .paragraph {
@@ -1975,6 +2113,44 @@ extension TextEdit {
             }
         }
         return out
+    }
+
+    private func computeHTMLBlockDirs(paras: [(index: Int, range: Range<Int>, block: Block, softBreak: Bool)]) -> [String] {
+        var last: TextFlow? = nil
+        var shownByParaIndex: [Int: TextFlow] = [:]
+        for p in paragraphs() {
+            let subStart = stringIndex(forUTF8Offset: p.range.lowerBound)
+            let subEnd = stringIndex(forUTF8Offset: p.range.upperBound)
+            let slice = String(text[subStart..<subEnd])
+            let strong: TextFlow? = {
+                for sc in slice.unicodeScalars {
+                    let v = sc.value
+                    if (0x0590...0x08FF).contains(v) || (0xFB1D...0xFDFF).contains(v) || (0xFE70...0xFEFF).contains(v) {
+                        return .rtl
+                    }
+                    if (0x0041...0x024F).contains(v) || (0x0370...0x052F).contains(v) {
+                        return .ltr
+                    }
+                }
+                return nil
+            }()
+            last = forcedDir ?? strong ?? last
+            if let last {
+                shownByParaIndex[p.index] = last
+            }
+        }
+        let hasRTL = paras.contains { $0.block != .code && shownByParaIndex[$0.index] == .rtl }
+        guard hasRTL else { return Array(repeating: "", count: paras.count) }
+        return paras.map { p in
+            switch (p.block, shownByParaIndex[p.index]) {
+            case (.code, _), (_, .ltr?):
+                return " dir=\"ltr\""
+            case (_, .rtl?):
+                return " dir=\"rtl\""
+            default:
+                return ""
+            }
+        }
     }
 
     private func serializeInlineHTML(_ range: Range<Int>, into out: inout String) {

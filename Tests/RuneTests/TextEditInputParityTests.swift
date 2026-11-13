@@ -47,7 +47,9 @@ struct TextEditInputParityTests {
         let rich = ts.shapePortable(text: "", spans: spans, style: TextStyle(size: 14), maxWidth: 400, pixelScale: 2.0, emitGlyphs: false)
         #expect(rich.underlines.count == 3)
         #expect(rich.strikethroughs.count == 5)
-        #expect(rich.backgrounds.count == 5)
+        // Contiguous matching-color span backgrounds merge into a single chip rect (quality_tests.rs:83 / #501).
+        #expect(rich.backgrounds.count == 1)
+        #expect(rich.backgrounds[0].0.z > 0)
         #expect(rich.glyphs.isEmpty)
 
         let shaped2 = ts.shapePortable(text: "abc\ndef", style: TextStyle(size: 14), maxWidth: 400, pixelScale: 2.0, emitGlyphs: false)

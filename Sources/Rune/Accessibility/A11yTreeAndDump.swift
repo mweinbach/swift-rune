@@ -227,9 +227,10 @@ public final class AccessibilityTreeState {
 /// Nested JSON dump of a projected `AccessibilityNode` tree (`a11y/dump.rs`).
 public enum AccessibilityDump {
     public static func dictionary(from node: AccessibilityNode, isRoot: Bool = true) -> [String: Any] {
+        let resolvedRole = (node.isSecure && node.role == .textInput) ? ElementRole.passwordInput.rawValue : node.role.rawValue
         var dict: [String: Any] = [
             "key": node.id,
-            "role": node.role.rawValue,
+            "role": resolvedRole,
             "bounds": [
                 round1(node.frame.x),
                 round1(node.frame.y),

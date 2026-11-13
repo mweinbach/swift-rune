@@ -600,6 +600,106 @@ public enum ClipboardHTMLSanitizer: Sendable {
 
 // MARK: - Secret Clipboard Hold State Machine (crates/rune/src/clipboard/secret.rs)
 
+/// Report stored inside `SecretMachine` distinguishing normal states from wipe refusal (`secret.rs:49`).
+public enum SecretReport: Sendable, Equatable {
+    case said(SecretState)
+    case refused
+
+    public var shown: SecretState {
+        switch self {
+        case .said(let state): return state
+        case .refused: return .failed(SecretSlot.refusedWipeMessage)
+        }
+    }
+
+    public var isFailedWrite: Bool {
+        if case .said(.failed) = self { return true }
+        return false
+    }
+}
+
+/// Pure `Secret` state machine (`secret.rs:31`): tracks live vs cancelled status, latest report, and active hold count.
+public enum SecretMachine: Sendable, Equatable {
+    case live(report: SecretReport, holds: UInt32)
+    case cancelled(report: SecretReport, holds: UInt32)
+
+    public static var `default`: SecretMachine { .live(report: .said(.pending), holds: 0) }
+
+    public var report: SecretReport {
+        switch self {
+        case .live(let report, _), .cancelled(let report, _): return report
+        }
+    }
+
+    public var isCancelled: Bool {
+        if case .cancelled = self { return true }
+        return false
+    }
+}
+
+/// Event processed by `stepSecret(_:event:)` (`secret.rs:69`).
+public enum SecretMachineEvent: Sendable, Equatable {
+    case cancel
+    case held
+    case released(SecretReport)
+    case report(SecretState)
+    case dropped
+}
+
+/// Effect emitted by `stepSecret(_:event:)` (`secret.rs:83`).
+public enum SecretMachineEffect: Sendable, Equatable {
+    case clear
+}
+
+/// Pure transition function for `SecretMachine` (`secret.rs:88`).
+public func stepSecret(_ secret: inout SecretMachine, event: SecretMachineEvent) -> [SecretMachineEffect] {
+    switch event {
+    case .cancel:
+        let currentReport = secret.report
+        let holds: UInt32
+        switch secret {
+        case .live(_, let h), .cancelled(_, let h): holds = h
+        }
+        let held = (currentReport == .said(.holding)) || (currentReport.isFailedWrite && holds > 0)
+        secret = .cancelled(report: currentReport, holds: holds)
+        return held ? [.clear] : []
+    case .held:
+        switch secret {
+        case .live(_, let h):
+            secret = .live(report: .said(.holding), holds: h &+ 1)
+        case .cancelled(_, let h):
+            secret = .cancelled(report: .said(.holding), holds: h &+ 1)
+        }
+        return []
+    case .released(let next):
+        switch secret {
+        case .live(_, let h):
+            secret = .live(report: next, holds: h > 0 ? h - 1 : 0)
+        case .cancelled(_, let h):
+            secret = .cancelled(report: next, holds: h > 0 ? h - 1 : 0)
+        }
+        return []
+    case .report(let next):
+        switch secret {
+        case .live(_, let h):
+            secret = .live(report: .said(next), holds: h)
+        case .cancelled(_, let h):
+            secret = .cancelled(report: .said(next), holds: h)
+        }
+        return []
+    case .dropped:
+        switch secret {
+        case .live(.said(.pending), let h):
+            secret = .live(report: .said(.replaced), holds: h)
+        case .cancelled(.said(.pending), let h):
+            secret = .cancelled(report: .said(.cleared), holds: h)
+        default:
+            break
+        }
+        return []
+    }
+}
+
 /// Routing sink used by `SecretSlot` to ask a clipboard backend to clear a held secret.
 public protocol SecretClipboardRoute: AnyObject, Sendable {
     func requestClear(slot: SecretSlot)
@@ -710,6 +810,12 @@ public struct SecretClipboardHold: Sendable, CustomStringConvertible, CustomDebu
 
 /// Testable in-memory clipboard host implementing weak-slot `Hold` semantics (`crates/rune/src/clipboard/secret.rs`, `r131`).
 public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked Sendable {
+    public enum WipeBehavior: Sendable, Equatable {
+        case normal
+        case refuse
+        case noop
+    }
+
     private let lock = NSLock()
     private var currentText: String?
     private var revision: UInt64 = 0
@@ -718,9 +824,18 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
     private var heldRevision: UInt64?
     private var heldFingerprint: UInt64 = 0
     private var heldDueTime: Double?
-    private var refuseNextWipe = false
+    private var wipeBehavior: WipeBehavior = .normal
+    private var failNextWriteMessage: String?
+    public private(set) var wipeAttempts: Int = 0
 
     public init() {}
+
+    /// True while a held copy is still watched for its scheduled timeout or external replacement.
+    public var isWatching: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return heldSlot != nil && heldDueTime != nil
+    }
 
     public var changeCount: UInt64 {
         lock.lock()
@@ -737,7 +852,19 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
 
     public func setRefuseNextWipe(_ refuse: Bool) {
         lock.lock()
-        refuseNextWipe = refuse
+        wipeBehavior = refuse ? .refuse : .normal
+        lock.unlock()
+    }
+
+    public func setWipeBehavior(_ behavior: WipeBehavior) {
+        lock.lock()
+        wipeBehavior = behavior
+        lock.unlock()
+    }
+
+    public func setFailNextWrite(_ message: String?) {
+        lock.lock()
+        failNextWriteMessage = message
         lock.unlock()
     }
 
@@ -766,6 +893,12 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
         }
 
         lock.lock()
+        if let err = failNextWriteMessage {
+            failNextWriteMessage = nil
+            lock.unlock()
+            slot.report(.failed(err))
+            return SecretClipboardHold(slot: slot)
+        }
         let prevSlot = heldSlot
         heldSlot = nil
 
@@ -778,7 +911,9 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
         heldDueTime = clearAfterSeconds.map { now + max(0, $0) }
         lock.unlock()
 
-        prevSlot?.markReleased(.replaced)
+        if prevSlot !== slot {
+            prevSlot?.markReleased(.replaced)
+        }
         slot.markHeld()
         return SecretClipboardHold(slot: slot)
     }
@@ -805,20 +940,26 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
         }
         let target = heldSlot
         let stillOurs = isOursLocked()
-        let refused = refuseNextWipe
-        if stillOurs && !refused {
+        let behavior = wipeBehavior
+        if behavior == .noop && stillOurs {
+            // Wipe did nothing: hold and its timeout remain alive until a subsequent clear succeeds.
+            lock.unlock()
+            return
+        }
+        if stillOurs && behavior == .normal {
             currentText = nil
             revision &+= 1
+            wipeAttempts &+= 1
         }
         heldSlot = nil
         heldRevision = nil
         heldDueTime = nil
-        refuseNextWipe = false
+        wipeBehavior = .normal
         lock.unlock()
 
         if !stillOurs {
             target?.markReleased(.replaced)
-        } else if refused {
+        } else if behavior == .refuse {
             target?.markReleased(.failed(SecretSlot.refusedWipeMessage), wipeRefused: true)
         } else {
             target?.markReleased(.cleared)
@@ -832,20 +973,26 @@ public final class MemorySecretClipboardHost: SecretClipboardRoute, @unchecked S
             return
         }
         let stillOurs = isOursLocked()
-        let refused = refuseNextWipe
-        if stillOurs && !refused {
+        let behavior = wipeBehavior
+        if behavior == .noop && stillOurs {
+            // Failed/no-op clear leaves the hold & scheduled expiry intact (`hold_tests.rs:169`).
+            lock.unlock()
+            return
+        }
+        if stillOurs && behavior == .normal {
             currentText = nil
             revision &+= 1
+            wipeAttempts &+= 1
         }
         heldSlot = nil
         heldRevision = nil
         heldDueTime = nil
-        refuseNextWipe = false
+        wipeBehavior = .normal
         lock.unlock()
 
         if !stillOurs {
             slot.markReleased(.replaced)
-        } else if refused {
+        } else if behavior == .refuse {
             slot.markReleased(.failed(SecretSlot.refusedWipeMessage), wipeRefused: true)
         } else {
             slot.markReleased(.cleared)

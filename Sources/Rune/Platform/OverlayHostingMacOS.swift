@@ -427,6 +427,7 @@ public final class RuneOverlayMacOSHost<State> {
     private var holdDeadlineTimer: Timer?
     private nonisolated(unsafe) var globalMouseMonitor: Any?
     private nonisolated(unsafe) var localMouseMonitor: Any?
+    private let fnKeyMonitor = FnKeyMonitor()
 
     public var resolvedPlacementSize: Vec2
     public var overlayPlacement: OverlayGeometry.Placement
@@ -534,6 +535,7 @@ public final class RuneOverlayMacOSHost<State> {
 
         self.panel = p
         self.metalView = view
+        _ = fnKeyMonitor.start(on: p)
         let deviceName = MTLCreateSystemDefaultDevice()?.name ?? "Metal"
         self.surfaceDescription = "macOS NSPanel Metal (\(deviceName))"
         capabilities = OverlayCapabilities(
@@ -591,6 +593,7 @@ public final class RuneOverlayMacOSHost<State> {
 
     public func releasePanel() {
         onHideCleanup?()
+        fnKeyMonitor.stop()
         stopFrameLoop()
         removeMouseMonitors()
         pointerState.stopped()
@@ -601,6 +604,11 @@ public final class RuneOverlayMacOSHost<State> {
         panel = nil
         metalView = nil
         onPanelStateChanged?(nil, capabilities)
+    }
+
+    /// Drains any recorded `Fn` / Globe transitions captured on this overlay panel.
+    public func takeFnChanges() -> [Bool] {
+        fnKeyMonitor.take()
     }
 
     public func requestKeys() {

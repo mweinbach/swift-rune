@@ -169,6 +169,16 @@ public enum MacOSCarbonKeyMap {
         return out
     }
 
+    /// Resolves the current macOS keyboard-layout display label for `keyName` under Carbon `modifiers` (`shortcuts/keys.rs:98`).
+    public static func displayLabel(for keyName: String, modifiers: UInt32) -> String? {
+        guard let code = keycode(forKeyName: keyName),
+              let label = MacOSKeyboardLayout.label(key: code, modifiers: modifiers),
+              !label.isEmpty else {
+            return nil
+        }
+        return label
+    }
+
     /// Maps `NSEventModifierFlags` bits stored in `com.apple.symbolichotkeys` to Carbon modifier bits.
     public static func carbonModifiers(fromNSEventFlags flags: UInt32) -> UInt32 {
         var out: UInt32 = 0

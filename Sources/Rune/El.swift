@@ -519,6 +519,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case region = "region"
     case main = "main"
     case link = "link"
+    case passwordInput = "password-input"
 }
 
 /// Live property binding entry attached to an `El`.
