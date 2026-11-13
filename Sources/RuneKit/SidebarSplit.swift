@@ -683,12 +683,12 @@ public struct SidebarRow<State> {
             }
             if renameConfig == nil, let onClickFn {
                 if selectOnlyFlag {
-                    content = content.onClick(onClickFn).focusable(false).focusSelected(selected)
+                    content = content.onClick(onClickFn).focusable(false).preserveFocusOnPress(true).focusSelected(selected)
                 } else {
                     content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
                 }
             } else if selectOnlyFlag {
-                content = content.focusable(false).focusSelected(selected)
+                content = content.focusable(false).preserveFocusOnPress(true).focusSelected(selected)
             }
             if renameConfig == nil, let onDoubleClickFn, !selectOnlyFlag {
                 content = content.onDoubleClick(onDoubleClickFn)

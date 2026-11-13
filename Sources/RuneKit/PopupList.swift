@@ -516,6 +516,7 @@ public struct PopupList<State> {
             .wFull()
             .shrink(1.0)
             .minH(0.0)
+            .preserveFocusOnPress(true)
             .onPointerDown { _, _, _ in }
             .child(viewport)
             .child(emptyEl)
@@ -531,6 +532,7 @@ public struct PopupList<State> {
             .key("\(key)-content")
             .w(widthValue)
             .p(paddingValue)
+            .preserveFocusOnPress(true)
             .child(list)
         if shouldAnimateFiltering {
             content = content.animate(k.motion.overlay)
