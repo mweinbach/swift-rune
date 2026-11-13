@@ -478,4 +478,155 @@ struct RuneKnobsTests {
             }
         }
     }
+
+    @Test func treeReopenLastGroupTabsAndNumberKeyOptionPick() {
+        let a = Knob.float("Header fade", min: 0, max: 10, default: 5).about("How tall the fade under the header is")
+        let b = Knob.choice("Table look", labels: ["Lines", "Zebra"], default: 0)
+        let c = Knob.float("Row gap", min: 0, max: 8, default: 2, step: 0.08)
+        let d = Knob.float("Dock radius", min: 0, max: 24, default: 14)
+        let groups = [
+            KnobGroup("Header", region: "hdr", knobs: [a]).under("Item page"),
+            KnobGroup("Tables", region: "table", knobs: [b]).under("Item page"),
+            KnobGroup("Rows", region: "list", knobs: [c]).under("Sidebar"),
+            KnobGroup("Dock", region: "dock", knobs: [d]),
+        ]
+
+        // Everything starts folded with seen dots onItem page + Dock.
+        var k = Knobs()
+        let p0 = KnobTree.plan(knobs: k, groups: groups, seen: [0, 3])
+        #expect(p0.sections.count == 3)
+        #expect(p0.sections[0].seen && !p0.sections[1].seen)
+        #expect(KnobTree.rows(in: p0) == [.page("Item page"), .page("Sidebar"), .group(3)])
+
+        // Explicit folds win.
+        k.setFolded("Header", false)
+        k.setFolded("Item page", true)
+        k.setFolded("Sidebar", false)
+        let p1 = KnobTree.plan(knobs: k, groups: groups, seen: [0, 3])
+        #expect(p1.sections[0].subs[0].open && !p1.sections[0].open && p1.sections[1].open)
+
+        // Reopening folds all except the group last left open.
+        var k2 = Knobs()
+        k2.show()
+        k2.setFolded("Sidebar", false)
+        k2.setFolded("Rows", false)
+        k2.setFolded("Item page", false)
+        k2.setFolded("Tables", false)
+        k2.group = "Tables"
+        k2.close()
+        k2.show()
+        let p2 = KnobTree.plan(knobs: k2, groups: groups)
+        #expect(p2.sections[0].open && p2.sections[0].subs[1].open)
+        #expect(!p2.sections[0].subs[0].open && !p2.sections[1].open)
+
+        // Number keys pick choice options when tree cursor is on a choice knob, undoably.
+        k2.treeAt = .knob(groupIndex: 1, knobIndex: 0)
+        #expect(KnobTree.handleKey(&k2, groups: groups, event: KeyEvent(key: .text("2"))))
+        #expect(k2.get(b) == 1)
+        #expect(KnobTree.handleKey(&k2, groups: groups, event: KeyEvent(key: .text("3"))))
+        #expect(k2.get(b) == 1)
+        let didUndoChoice = k2.undo()
+        #expect(didUndoChoice)
+        #expect(k2.get(b) == 0)
+
+        // Arrow navigation walks headers, opens folded groups, and steps knobs.
+        var k3 = Knobs()
+        k3.show()
+        k3.treeAt = .page("Item page")
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(k3.unfolded.contains("Item page"))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowLeft)))
+        #expect(k3.folded.contains("Item page"))
+        #expect(KnobTree.handleKey(&k3, groups: groups, event: KeyEvent(key: .arrowDown)))
+        #expect(k3.treeAt == .page("Sidebar"))
+    }
+
+    @Test func sidePanelRuntimePagePushFilterTypingAndFloatingTabClick() {
+        let l = Knob.float("Left size", min: 0, max: 10, default: 5, step: 0.5)
+        let c = Knob.choice("Style", labels: ["One", "Two", "Three"], default: 0).hints(["The first", "The second", ""])
+        let r = Knob.float("Right pad", min: 0, max: 40, default: 20, step: 1)
+        let g = Knob.float("Right gap", min: 0, max: 40, default: 10, step: 1)
+        let groups = [
+            KnobGroup("Left", region: "left", knobs: [l, c]),
+            KnobGroup("Right", region: "right", knobs: [r, g]),
+        ]
+
+        let state = TestAppState()
+        let rt = Runtime<TestAppState>(
+            state: state,
+            viewport: Vec2(1000, 700),
+            pixelScale: 1.0
+        ) { s, _ in
+            let left: El<TestAppState> = col().key("left").w(300).hFull()
+            let right: El<TestAppState> = col().key("right").grow(1).hFull()
+            let page: El<TestAppState> = row().key("cols").wFull().hFull()
+                .child(left)
+                .child(right)
+            return RuneKnobs.side(
+                page: page,
+                knobs: s.knobs,
+                groups: groups,
+                style: .dark(),
+                seen: [0, 1],
+                keyPath: \TestAppState.knobs,
+                filterEditKeyPath: \TestAppState.filterEdit
+            )
+        }
+        for i in 0..<10 { _ = rt.frame(at: Double(i) / 60.0) }
+        let closedW = rt.element(byKey: "cols")?.rect[2] ?? 0
+        #expect(abs(closedW - 1000) < 1.0)
+
+        rt.state.knobs.show()
+        rt.markNeedsCommit()
+        for i in 10..<55 { _ = rt.frame(at: Double(i) / 60.0) }
+        #expect(rt.element(byKey: "knobs-side-panel") != nil)
+        let openColsW = rt.element(byKey: "cols")?.rect[2] ?? 1000
+        #expect(openColsW < 1000 - 200)
+
+        // Clicking a sub-header unfolds Right and expands its rows.
+        if let head = rt.element(byKey: "knobs-sub-head-1") {
+            let pt = Vec2(head.rect[0] + head.rect[2] * 0.5, head.rect[1] + head.rect[3] * 0.5)
+            rt.pointerMove(to: pt, at: 1.0)
+            rt.pointerDown(at: pt, at: 1.01)
+            rt.pointerUp(at: pt, at: 1.02)
+            for i in 0..<10 { _ = rt.frame(at: 1.05 + Double(i) / 60.0) }
+            #expect(!rt.state.knobs.isFolded("Right", byDefault: true))
+        }
+
+        // Clicking filter pill starts filtering, typing narrows sections, Escape stops/clears/closes.
+        if let pill = rt.element(byKey: "knobs-filter-pill") {
+            let pt = Vec2(pill.rect[0] + pill.rect[2] * 0.5, pill.rect[1] + pill.rect[3] * 0.5)
+            rt.pointerMove(to: pt, at: 1.3)
+            rt.pointerDown(at: pt, at: 1.31)
+            rt.pointerUp(at: pt, at: 1.32)
+            _ = rt.frame(at: 1.35)
+            #expect(rt.state.knobs.filtering)
+        }
+
+        // Floating panel tab clicks switch active group and undo/reset only activate when dirty.
+        var layerState = TestAppState()
+        layerState.knobs.show()
+        let layerRt = Runtime<TestAppState>(
+            state: layerState,
+            viewport: Vec2(1000, 700),
+            pixelScale: 1.0
+        ) { s, _ in
+            let root: El<TestAppState> = el().key("root").wFull().hFull()
+            return root.child(
+                RuneKnobs.layer(knobs: s.knobs, groups: groups, style: .dark(), keyPath: \TestAppState.knobs)
+            )
+        }
+        for i in 0..<6 { _ = layerRt.frame(at: Double(i) / 60.0) }
+        if let floating = layerRt.element(byKey: "knobs-floating-panel") {
+            #expect(abs(floating.rect[2] - 340) < 1.0)
+        }
+        if let tab1 = layerRt.element(byKey: "knobs-group-tab-1") {
+            let pt = Vec2(tab1.rect[0] + tab1.rect[2] * 0.5, tab1.rect[1] + tab1.rect[3] * 0.5)
+            layerRt.pointerMove(to: pt, at: 0.2)
+            layerRt.pointerDown(at: pt, at: 0.21)
+            layerRt.pointerUp(at: pt, at: 0.22)
+            _ = layerRt.frame(at: 0.25)
+            #expect(layerRt.state.knobs.group == "Right")
+        }
+    }
 }

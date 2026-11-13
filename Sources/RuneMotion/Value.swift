@@ -359,6 +359,16 @@ public struct Sides: Animatable, Hashable {
         Sides(top: v, right: v, bottom: v, left: v)
     }
 
+    /// Constructs `Sides` from Rust's `[left, top, right, bottom]` edge order (`value.rs::Sides`).
+    @inlinable
+    public static func fromEdges(left: Float, top: Float, right: Float, bottom: Float) -> Sides {
+        Sides(top: top, right: right, bottom: bottom, left: left)
+    }
+
+    /// Returns edges in Rust `[left, top, right, bottom]` order.
+    @inlinable
+    public var edges: [Float] { [left, top, right, bottom] }
+
     @inlinable
     public func toLanes() -> MotionLanes {
         MotionLanes(top, right, bottom, left)
@@ -568,5 +578,87 @@ extension Comparable {
     @inlinable
     public func clamped(to range: ClosedRange<Self>) -> Self {
         min(max(self, range.lowerBound), range.upperBound)
+    }
+}
+
+extension MotionColor {
+    /// Static `rgba` constructor matching `value.rs::Color::rgba`.
+    @inlinable
+    public static func rgba(_ r: Float, _ g: Float, _ b: Float, _ a: Float) -> MotionColor {
+        MotionColor(r: r, g: g, b: b, a: a)
+    }
+}
+
+/// Composite `Animatable` pair (`(A, B)` counterpart; Swift tuples cannot conform to protocols).
+public struct AnimatablePair<A: Animatable, B: Animatable>: Animatable, Hashable where A: Hashable, B: Hashable {
+    public var first: A
+    public var second: B
+
+    public static var laneCount: Int { min(MotionLanes.maxLanes, A.laneCount + B.laneCount) }
+    public static var zeroValue: Self { Self(A.zeroValue, B.zeroValue) }
+
+    public init(_ first: A, _ second: B) {
+        self.first = first
+        self.second = second
+    }
+
+    public func toLanes() -> MotionLanes {
+        var out = A.zeroValue.toLanes()
+        let a = first.toLanes()
+        let b = second.toLanes()
+        for i in 0..<A.laneCount { out[i] = a[i] }
+        let base = A.laneCount
+        for j in 0..<B.laneCount where base + j < MotionLanes.maxLanes {
+            out[base + j] = b[j]
+        }
+        return out
+    }
+
+    public static func fromLanes(_ lanes: MotionLanes) -> Self {
+        var bLanes = MotionLanes()
+        let base = A.laneCount
+        for j in 0..<B.laneCount where base + j < MotionLanes.maxLanes {
+            bLanes[j] = lanes[base + j]
+        }
+        return Self(A.fromLanes(lanes), B.fromLanes(bLanes))
+    }
+}
+
+/// Composite `Animatable` triple (`(A, B, C)` counterpart; Swift tuples cannot conform to protocols).
+public struct AnimatableTriple<A: Animatable, B: Animatable, C: Animatable>: Animatable, Hashable where A: Hashable, B: Hashable, C: Hashable {
+    public var first: A
+    public var second: B
+    public var third: C
+
+    public static var laneCount: Int { min(MotionLanes.maxLanes, A.laneCount + B.laneCount + C.laneCount) }
+    public static var zeroValue: Self { Self(A.zeroValue, B.zeroValue, C.zeroValue) }
+
+    public init(_ first: A, _ second: B, _ third: C) {
+        self.first = first
+        self.second = second
+        self.third = third
+    }
+
+    public func toLanes() -> MotionLanes {
+        var out = MotionLanes()
+        let a = first.toLanes()
+        let b = second.toLanes()
+        let c = third.toLanes()
+        for i in 0..<A.laneCount where i < MotionLanes.maxLanes { out[i] = a[i] }
+        let bBase = A.laneCount
+        for j in 0..<B.laneCount where bBase + j < MotionLanes.maxLanes { out[bBase + j] = b[j] }
+        let cBase = bBase + B.laneCount
+        for k in 0..<C.laneCount where cBase + k < MotionLanes.maxLanes { out[cBase + k] = c[k] }
+        return out
+    }
+
+    public static func fromLanes(_ lanes: MotionLanes) -> Self {
+        var bLanes = MotionLanes()
+        var cLanes = MotionLanes()
+        let bBase = A.laneCount
+        for j in 0..<B.laneCount where bBase + j < MotionLanes.maxLanes { bLanes[j] = lanes[bBase + j] }
+        let cBase = bBase + B.laneCount
+        for k in 0..<C.laneCount where cBase + k < MotionLanes.maxLanes { cLanes[k] = lanes[cBase + k] }
+        return Self(A.fromLanes(lanes), B.fromLanes(bLanes), C.fromLanes(cLanes))
     }
 }

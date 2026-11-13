@@ -904,4 +904,56 @@ struct StoreParityTests {
         clk.seek(to: 0.45)
         #expect(abs(rot.sample(at: clk.now, reduced: false) - .pi) < 1e-6)
     }
+
+    @Test("anim_ext_with_class_shared_buffer_and_composite_values")
+    func animExtWithClassSharedBufferAndCompositeValues() {
+        var animVal = Animated(Float(0)).withClass(.scale, pixelScale: 2.0)
+        animVal.animateTo(1.0, anim: MotionTokens.SETTLE.delay(0.0, as: Float.self), at: 0.0)
+        #expect(!animVal.isSettled(at: 0.05))
+        #expect(animVal.isSettled(at: 2.0))
+
+        let built: Anim<Float> = MotionTokens.SETTLE.additive(as: Float.self).completion(42)
+        #expect(built.blend == .additive && built.token == 42)
+        let paired: Anim<Vec2> = MotionTokens.SNAP_PAIR.delay(0.1, as: Vec2.self).velocity(.zero)
+        #expect(abs(paired.delay - 0.1) < 1e-6 && paired.velocityRule == .zero)
+        let curved: Anim<Float> = Curve.linear(0.25).merge(as: Float.self)
+        #expect(curved.blend == .merge)
+
+        let snapped = Snap.snapEdges([0.001, 0.001, 10.001, 20.001], scale: 2.0)
+        #expect(abs(snapped.width - 10.0) < 0.02 && abs(snapped.height - 20.0) < 0.02)
+
+        let fxOp = TransitionEffect.opacity(0.25)
+        let fxSc = TransitionEffect.scale(0.8, anchor: Vec2(0.0, 1.0))
+        let fxBl = TransitionEffect.blur(3.0)
+        #expect(fxOp.zeroOpacity == 0.25 && fxSc.zeroScale == Vec2(0.8, 0.8) && fxBl.zeroBlur == 3.0)
+
+        let buf = SharedBuffer()
+        let trace = MotionTrace.inMemory(
+            header: TraceHeader(launch: "shared-buf", width: 200, height: 100, hz: 60, scale: 1),
+            buffer: buf
+        )
+        var scene = Scene()
+        scene.trace = trace
+        let n = NodeId(101)
+        scene.insert(n, NodeSpec(MotionRect.fromXYWH(0, 0, 50, 20)), .initial)
+        _ = scene.frame(at: 0.0)
+        scene.setFrame(n, MotionRect.fromXYWH(20, 0, 50, 20), MotionTokens.SNAP)
+        _ = scene.frame(at: 1.0 / 60.0)
+        #expect(buf.contents().contains("\"launch\":\"shared-buf\""))
+        #expect(buf.contents().contains("\"t\":16.667") && buf.contents().contains("\"e\":"))
+
+        let rgba = MotionColor.rgba(0.2, 0.4, 0.6, 0.8)
+        #expect(abs(rgba.r - 0.2) < 1e-6 && abs(rgba.a - 0.8) < 1e-6)
+
+        let sides = Sides.fromEdges(left: 1, top: 2, right: 3, bottom: 4)
+        #expect(sides.edges == [1, 2, 3, 4])
+
+        let pair = AnimatablePair<Float, Vec2>(2.0, Vec2(4.0, 6.0))
+        #expect(AnimatablePair<Float, Vec2>.laneCount == 3)
+        #expect(AnimatablePair<Float, Vec2>.fromLanes(pair.toLanes()) == pair)
+
+        let triple = AnimatableTriple<Float, Vec2, Float>(1.0, Vec2(2.0, 3.0), 4.0)
+        #expect(AnimatableTriple<Float, Vec2, Float>.laneCount == 4)
+        #expect(AnimatableTriple<Float, Vec2, Float>.fromLanes(triple.toLanes()) == triple)
+    }
 }

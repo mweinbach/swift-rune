@@ -34,6 +34,13 @@ public enum Snap {
             bottom: grid(bottom, scale: scale)
         )
     }
+
+    /// Snaps 4-edge `[left, top, right, bottom]` array (`snap.rs::snap_edges`).
+    @inlinable
+    public static func snapEdges(_ e: [Float], scale: Float) -> MotionRect {
+        precondition(e.count >= 4, "snapEdges requires [left, top, right, bottom]")
+        return edges(left: e[0], top: e[1], right: e[2], bottom: e[3], scale: scale)
+    }
 }
 
 /// A magnetic snap detent along a 1D axis (e.g. sheet heights, carousel pages, scrubber ticks).

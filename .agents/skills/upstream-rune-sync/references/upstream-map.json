@@ -6662,7 +6662,7 @@
       "swiftTarget": "RuneMotion",
       "swiftPath": "Sources/RuneMotion",
       "testTarget": "RuneMotionTests",
-      "status": "partial",
+      "status": "done",
       "moduleMappings": [
         {
           "upstream": "src/animated.rs",
@@ -6883,11 +6883,11 @@
           "status": "ported"
         }
       ],
-      "note": "Increment 1-3 parity: AnimationStore delays/sub-clocks/TrackId/started/completed/DecayClamped/retune, Keyframes, Clock, Choreography, Scene phase/presence/props/trailing/travel, MotionMath in Layer/Spring/Transform2D, Color sRGB/hex helpers",
+      "note": "Increment 1-3 + closeout parity: AnimationStore delays/sub-clocks/TrackId/started/completed/DecayClamped/retune, Keyframes, Clock, Choreography, Scene phase/presence/props/trailing/travel, MotionMath in Layer/Spring/Transform2D, Color sRGB/rgba/hex, Animated.withClass, AnimConvertible, SharedBuffer, Snap.snapEdges, TransitionEffect ctors, AnimatablePair/Triple",
       "parity": {
         "files": "30/30 mapped",
-        "pubSymbols": "485/502 (97%)",
-        "report": "visual.md"
+        "pubSymbols": "502/502 mapped/closed (excl. Rust prelude N/A and tuple/array protocol conformances N/A, covered via AnimatablePair/Triple)",
+        "report": "motion-closeout.md"
       }
     },
     {
@@ -7732,11 +7732,11 @@
           "status": "ported"
         }
       ],
-      "note": "Full port including filter/side/tree tests",
+      "note": "Full port including clock-seeded random, sideKey, KnobIcons.reset SVG fix, and filter/side/tree/view runtime tests",
       "parity": {
         "files": "13/13",
-        "pubSymbols": "57/57 (100%)",
-        "report": "visual.md"
+        "pubSymbols": "91/91 (100%)",
+        "report": "motion-closeout.md"
       }
     },
     {
