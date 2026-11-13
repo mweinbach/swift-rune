@@ -10,16 +10,111 @@ public enum CopyJoin {
         current.top < previous.bottom - 0.5 && (current.left >= previous.right - 0.5 || current.right <= previous.left + 0.5)
     }
 
+    /// Input piece for `CopyJoin.join(_:)` carrying copy break counts and optional list/quote prefix.
+    public struct Entry: Sendable, Equatable {
+        public var rect: MotionRect
+        public var pieceText: String
+        public var fromStart: Bool
+        public var copyBreakBefore: UInt8
+        public var copyBreakAfter: UInt8
+        public var copyPrefix: String?
+
+        public init(
+            rect: MotionRect,
+            pieceText: String,
+            fromStart: Bool = true,
+            copyBreakBefore: UInt8 = 1,
+            copyBreakAfter: UInt8 = 1,
+            copyPrefix: String? = nil
+        ) {
+            self.rect = rect
+            self.pieceText = pieceText
+            self.fromStart = fromStart
+            self.copyBreakBefore = copyBreakBefore
+            self.copyBreakAfter = copyBreakAfter
+            self.copyPrefix = copyPrefix
+        }
+    }
+
+    /// Strips any `uncopied` UTF-8 byte spans overlapping `range` in `text`
+    /// (`crates/rune/src/el/text_spec.rs:306-318`).
+    public static func copySlice(in text: String, range: Range<Int>, uncopied: [Range<Int>]) -> String {
+        let len = text.utf8.count
+        let a = max(0, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.lowerBound)))
+        let b = max(a, min(len, SelectionMath.floorCharBoundary(in: text, offset: range.upperBound)))
+        guard a < b else { return "" }
+        let bytes = Array(text.utf8)
+        if uncopied.isEmpty {
+            return String(decoding: bytes[a..<b], as: UTF8.self)
+        }
+        var outBytes: [UInt8] = []
+        outBytes.reserveCapacity(b - a)
+        var cursor = a
+        for u in uncopied {
+            if u.upperBound <= cursor { continue }
+            if u.lowerBound >= b { break }
+            if u.lowerBound > cursor {
+                let hi = min(u.lowerBound, b)
+                if cursor < hi {
+                    outBytes.append(contentsOf: bytes[cursor..<hi])
+                }
+            }
+            cursor = max(cursor, min(u.upperBound, b))
+        }
+        if cursor < b {
+            outBytes.append(contentsOf: bytes[cursor..<b])
+        }
+        return String(decoding: outBytes, as: UTF8.self)
+    }
+
     /// Joins `(rect, text)` pieces in tree order with `\t` for side-by-side items and `\n` otherwise.
     public static func join(_ pieces: [(rect: MotionRect, text: String)]) -> String {
+        join(pieces.filter { !$0.text.isEmpty }.map { Entry(rect: $0.rect, pieceText: $0.text) })
+    }
+
+    /// Joins `Entry` pieces in tree order honoring `beside` tabs, `copyBreaks`, and `copyPrefix`
+    /// (`crates/rune/src/runtime/selection/copy_join.rs:13-73`).
+    public static func join(_ entries: [Entry]) -> String {
         var out = ""
-        var prevRect: MotionRect? = nil
-        for piece in pieces where !piece.text.isEmpty {
-            if let prev = prevRect {
-                out.append(beside(prev, piece.rect) ? "\t" : "\n")
+        var prev: (rect: MotionRect, copyBreakAfter: UInt8)? = nil
+        var pieces = 0
+        var firstPrefixCount = 0
+
+        for entry in entries {
+            if let prev {
+                if beside(prev.rect, entry.rect) {
+                    out.append("\t")
+                } else {
+                    let want = max(Int(prev.copyBreakAfter), Int(entry.copyBreakBefore), 1)
+                    var trailing = 0
+                    for b in out.utf8.reversed() {
+                        if b == UInt8(ascii: "\n") {
+                            trailing += 1
+                        } else {
+                            break
+                        }
+                    }
+                    if want > trailing {
+                        out.append(String(repeating: "\n", count: want - trailing))
+                    }
+                }
             }
-            out.append(piece.text)
-            prevRect = piece.rect
+            if entry.fromStart, let prefix = entry.copyPrefix {
+                if pieces == 0 {
+                    firstPrefixCount = prefix.utf8.count
+                }
+                out.append(prefix)
+            }
+            out.append(entry.pieceText)
+            prev = (entry.rect, entry.copyBreakAfter)
+            pieces += 1
+        }
+
+        if pieces == 1 && firstPrefixCount > 0 {
+            let bytes = Array(out.utf8)
+            if bytes.count >= firstPrefixCount {
+                return String(decoding: bytes[firstPrefixCount...], as: UTF8.self)
+            }
         }
         return out
     }
@@ -43,31 +138,41 @@ public final class SelectionCoordinator {
         let nonEmpty = ranges.filter { $0.range.lowerBound < $0.range.upperBound }
         guard !nonEmpty.isEmpty else { return nil }
         var selectedTexts: [SelectedText] = []
-        var joinInputs: [(rect: MotionRect, text: String)] = []
+        var joinEntries: [CopyJoin.Entry] = []
         selectedTexts.reserveCapacity(nonEmpty.count)
-        joinInputs.reserveCapacity(nonEmpty.count)
+        joinEntries.reserveCapacity(nonEmpty.count)
         for (node, rawRange) in nonEmpty {
             let utf8 = Array(node.text.utf8)
             let lo = SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.lowerBound)
             let hi = max(lo, SelectionMath.floorCharBoundary(in: node.text, offset: rawRange.upperBound))
             guard lo < hi else { continue }
-            let slice = String(decoding: utf8[lo..<hi], as: UTF8.self)
+            let slice = CopyJoin.copySlice(in: node.text, range: lo..<hi, uncopied: node.uncopied)
+            let trimmed = SelectionMath.trimUncopied(node.uncopied, range: (0, utf8.count))
+            let whole = !utf8.isEmpty && lo <= trimmed.0 && hi >= trimmed.1
+            let fromStart = lo <= trimmed.0
             let item = SelectedText(
                 path: node.path,
                 key: node.key,
                 range: lo..<hi,
                 len: utf8.count,
-                whole: lo == 0 && hi == utf8.count && !utf8.isEmpty,
+                whole: whole,
                 text: slice,
                 content: node.text
             )
             selectedTexts.append(item)
-            joinInputs.append((node.rect, slice))
+            joinEntries.append(CopyJoin.Entry(
+                rect: node.rect,
+                pieceText: slice,
+                fromStart: fromStart,
+                copyBreakBefore: node.copyBreakBefore,
+                copyBreakAfter: node.copyBreakAfter,
+                copyPrefix: node.copyPrefix
+            ))
         }
         guard !selectedTexts.isEmpty else { return nil }
         return TextSelection(
             texts: selectedTexts,
-            text: CopyJoin.join(joinInputs),
+            text: CopyJoin.join(joinEntries),
             backward: backward
         )
     }

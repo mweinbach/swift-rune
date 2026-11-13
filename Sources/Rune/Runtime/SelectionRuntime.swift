@@ -166,21 +166,21 @@ public extension Runtime {
                 }
                 let byteRange = rangeByPath[jNode.path] ?? 0..<0
                 let len = fullText.utf8.count
-                let slice: String
-                if byteRange.isEmpty {
-                    slice = ""
-                } else {
-                    let utf8 = Array(fullText.utf8)
-                    let lo = SelectionMath.floorCharBoundary(in: fullText, offset: byteRange.lowerBound)
-                    let hi = max(lo, SelectionMath.floorCharBoundary(in: fullText, offset: byteRange.upperBound))
-                    slice = String(decoding: utf8[lo..<hi], as: UTF8.self)
-                }
+                let uncopied = jNode.el.uncopiedRanges
+                let slice: String = byteRange.isEmpty
+                    ? ""
+                    : CopyJoin.copySlice(in: fullText, range: byteRange, uncopied: uncopied)
+                let trimmed = SelectionMath.trimUncopied(uncopied, range: (0, len))
+                let whole = !byteRange.isEmpty
+                    && len > 0
+                    && byteRange.lowerBound <= trimmed.0
+                    && byteRange.upperBound >= trimmed.1
                 pieces.append(SelectedText(
                     path: relPath,
                     key: jNode.key,
                     range: byteRange,
                     len: len,
-                    whole: !byteRange.isEmpty && byteRange.lowerBound == 0 && byteRange.upperBound == len,
+                    whole: whole,
                     text: slice,
                     content: fullText
                 ))
@@ -214,6 +214,7 @@ internal extension Runtime {
         for node in flatNodes {
             let text = selectableNodeText(node) ?? ""
             let isSel = !node.effectiveInert && !node.el.isSecure && node.el.handlers.editLens == nil && node.el.isSelectable
+            let copyBreaks = node.el.copyBreaksPair
             out.append(SelectableNodeSnapshot(
                 path: node.path,
                 key: node.key,
@@ -222,7 +223,11 @@ internal extension Runtime {
                 isSelectionGroup: !node.effectiveInert && node.el.isSelectionGroup,
                 isFocusedTextInput: node.path == focusedPath && node.el.handlers.editLens != nil,
                 text: text,
-                rect: presentedRectByPath[node.path] ?? node.targetRect
+                rect: presentedRectByPath[node.path] ?? node.targetRect,
+                uncopied: node.el.uncopiedRanges,
+                copyBreakBefore: copyBreaks.before,
+                copyBreakAfter: copyBreaks.after,
+                copyPrefix: node.el.copyPrefixString
             ))
         }
         return out
@@ -391,7 +396,7 @@ internal extension Runtime {
         }
 
         let unit = SelectionUnit.forClickCount(clicks)
-        let origin = SelectionMath.unitRange(in: content, at: offset, unit: unit)
+        let origin = SelectionMath.unitRange(in: content, at: offset, unit: unit, uncopied: sNode.el.uncopiedRanges)
         let initialSel = ActiveSelection(
             path: sNode.path,
             content: content,
@@ -424,7 +429,7 @@ internal extension Runtime {
         let activeRange = currentTextSelection()?.texts.first(where: { $0.path == sNode.path })?.range
         let outsideCurrent = activeRange.map { offset < $0.lowerBound || offset >= $0.upperBound } ?? true
         if outsideCurrent {
-            let word = SelectionMath.unitRange(in: content, at: offset, unit: .word)
+            let word = SelectionMath.unitRange(in: content, at: offset, unit: .word, uncopied: sNode.el.uncopiedRanges)
             selectionState.clearClicks()
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
@@ -499,7 +504,12 @@ internal extension Runtime {
             return true
         }
 
-        let targetUnit = SelectionMath.unitRange(in: targetContent, at: rawOffset, unit: unit)
+        let targetUnit = SelectionMath.unitRange(
+            in: targetContent,
+            at: rawOffset,
+            unit: unit,
+            uncopied: flatNodes[targetIdx].el.uncopiedRanges
+        )
         if targetIdx == anchorIdx {
             let ext = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
             sel.anchor = ext.anchor
