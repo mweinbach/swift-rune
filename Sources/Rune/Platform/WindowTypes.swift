@@ -581,18 +581,28 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
-        try HeadlessRunner.run(spec.appSpec, args: args)
+        let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
+        return try HeadlessRunner.run(
+            spec.appSpec,
+            args: args,
+            chrome: resolvedChrome,
+            windowKey: spec.key,
+            availableWindows: [spec.key]
+        )
     }
 }
 
 /// Errors from multi-window key validation or launch (`window::spec::validate`).
 public enum MultiWindowError: Error, LocalizedError, Equatable {
     case emptyOrDuplicateKey(String)
+    case unknownWindow(key: String, available: [String])
 
     public var errorDescription: String? {
         switch self {
         case .emptyOrDuplicateKey(let key):
             return "empty or duplicate window key: \(key)"
+        case let .unknownWindow(key, available):
+            return "no such window \"\(key)\"; available: \(available.joined(separator: ", "))"
         }
     }
 }
@@ -656,6 +666,46 @@ public enum RuneMultiWindow {
         return out
     }
 
+    /// Resolves `--list-windows` / `--window KEY` and executes a headless run on multi-window specs.
+    @discardableResult
+    public static func runHeadless(
+        _ windows: [AnyWindowSpec],
+        args: ToolingArgs
+    ) throws -> HeadlessRunner.Output {
+        let flat = flatten(windows)
+        try validate(flat)
+        let keys = flat.map(\.key)
+        if args.listWindows {
+            for key in keys {
+                print(key)
+            }
+            return HeadlessRunner.Output(
+                finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
+                treeJSON: Data("{}".utf8),
+                windowKeys: keys
+            )
+        }
+        let target: AnyWindowSpec
+        if let requested = args.windowName {
+            guard let found = flat.first(where: { $0.key == requested }) else {
+                throw MultiWindowError.unknownWindow(key: requested, available: keys)
+            }
+            target = found
+        } else if let first = flat.first {
+            target = first
+        } else {
+            return HeadlessRunner.Output(
+                finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]),
+                treeJSON: Data("{}".utf8),
+                windowKeys: []
+            )
+        }
+        // Pass `windowName: nil` since window routing already selected `target`.
+        var resolvedArgs = args
+        resolvedArgs.windowName = nil
+        return try target.makeHostEntry().runHeadless(args: resolvedArgs)
+    }
+
     /// Runs a multi-window application (`run_windows`).
     @MainActor
     public static func runWindows(
@@ -667,17 +717,13 @@ public enum RuneMultiWindow {
         try validate(flat)
         let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
         if parsed.isHeadlessRequested {
-            if let first = flat.first {
-                _ = try first.makeHostEntry().runHeadless(args: parsed)
-            }
+            _ = try runHeadless(flat, args: parsed)
             return
         }
         #if os(macOS)
         try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
         #else
-        if let first = flat.first {
-            _ = try first.makeHostEntry().runHeadless(args: parsed)
-        }
+        _ = try runHeadless(flat, args: parsed)
         #endif
     }
 }

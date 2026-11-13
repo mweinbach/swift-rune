@@ -208,7 +208,7 @@ public final class Runtime<State> {
     }
 
     public var state: State
-    public let view: ViewFn
+    public var view: ViewFn
     public var globalOnKey: KeyHandlerFn?
 
     public var viewport: Vec2 {
@@ -3727,6 +3727,13 @@ public final class Runtime<State> {
                     case let .openAt(story, variant):
                         do {
                             try pg.openAt(story: story, variant: variant)
+                            if let fresh = pg.freshTransform {
+                                state = fresh(state)
+                            }
+                            if let v = pg.currentVariant {
+                                v.apply(&state)
+                            }
+                            dirtyCommit(at: now)
                         } catch {
                             pg.open()
                         }
