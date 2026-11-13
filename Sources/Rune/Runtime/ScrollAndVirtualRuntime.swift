@@ -7,6 +7,7 @@ extension Runtime {
     internal struct VirtualExpansionContext {
         var rowMappings: [(listPath: String, scrollPath: String, rowSegment: String, rowKey: String)] = []
         var anyVirtualList: Bool = false
+        var virtualInputs: [String: VirtualInputEntry] = [:]
     }
 
     internal struct GrowthCaptureResult {
@@ -210,10 +211,11 @@ extension Runtime {
             wasPinnedToBottom.insert(vpPath)
         } else if let anchorKey = vState.lastAnchorKey,
                   !scrollRequestsState.owns(vpPath),
+                  !directScrolledPaths.contains(vpPath),
                   let anchorIdx = keys.firstIndex(of: anchorKey) {
-            let expectedY = prefix[anchorIdx] + vState.lastAnchorLocalY
-            if abs(expectedY - curOffsetY) > 0.25 {
-                curOffsetY = max(0, min(max(0, total - vpH), expectedY))
+            let prefixDelta = prefix[anchorIdx] - vState.lastAnchorPrefixY
+            if abs(prefixDelta) > 0.25 {
+                curOffsetY = max(0, min(max(0, total - vpH), curOffsetY + prefixDelta))
                 scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
                 let nid = NodeId.hash("scroll:\(vpPath)")
                 scrollStore.snap(nid, Props.SCROLL, to: scrollOffsets[vpPath] ?? .zero)
@@ -245,9 +247,11 @@ extension Runtime {
             let ai = vis.lowerBound
             vState.lastAnchorKey = keys[ai]
             vState.lastAnchorLocalY = max(0, curOffsetY - prefix[ai])
+            vState.lastAnchorPrefixY = prefix[ai]
         } else if stickyPin {
             vState.lastAnchorKey = nil
             vState.lastAnchorLocalY = 0
+            vState.lastAnchorPrefixY = 0
         }
 
         vState.lastMountedRange = mounted
@@ -277,6 +281,7 @@ extension Runtime {
                 siblingKeysSeen: &rowSeenKeys
             )
             ctx.rowMappings.append((listPath: path, scrollPath: vpPath, rowSegment: rowSeg, rowKey: keys[i]))
+            virtualLists[path]?.rowKeyBySegment[rowSeg] = keys[i]
             walkVirtualSubtrees(
                 &rowEl,
                 parentPath: path,
@@ -292,8 +297,88 @@ extension Runtime {
         if botSpacerH > 0 {
             built.append(El<State>().key("__v_bot_spacer").wFull().h(botSpacerH))
         }
+        if focusedPath != nil || focusedKey != nil {
+            var candidateIndices: [Int] = []
+            if let fp = focusedPath, fp.hasPrefix(path + "/") {
+                let rest = fp.dropFirst(path.count + 1)
+                let rowSeg = String(rest.prefix(while: { $0 != "/" }))
+                let rowKey = rowSeg.hasPrefix("@") ? String(rowSeg.dropFirst()) : rowSeg
+                let baseRowKey = rowKey.components(separatedBy: "#dup").first ?? rowKey
+                for i in 0..<count where !mounted.contains(i) {
+                    if keys[i] == rowKey || keys[i] == baseRowKey || keys[i] == vState.rowKeyBySegment[rowSeg] {
+                        candidateIndices.append(i)
+                    }
+                }
+            } else if let fp = focusedPath, let prev = virtualInputs[fp] {
+                for i in 0..<count where !mounted.contains(i) && keys[i] == prev.rowKey {
+                    candidateIndices.append(i)
+                }
+            }
+            if candidateIndices.isEmpty && !isIndexed {
+                for i in 0..<count where !mounted.contains(i) {
+                    candidateIndices.append(i)
+                }
+            }
+            for i in candidateIndices {
+                var offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
+                if offEl.keyId == nil {
+                    offEl = offEl.key(keys[i])
+                }
+                var seen: [String: Int] = [:]
+                collectVirtualInputs(
+                    in: offEl,
+                    parentPath: path,
+                    siblingIndex: i,
+                    siblingKeysSeen: &seen,
+                    rowKey: keys[i],
+                    targetPath: focusedPath,
+                    targetKey: focusedKey,
+                    out: &ctx.virtualInputs
+                )
+            }
+        }
         el.children = built
         el.virtualRowsSource = nil
+    }
+
+    private func collectVirtualInputs(
+        in el: El<State>,
+        parentPath: String,
+        siblingIndex: Int,
+        siblingKeysSeen: inout [String: Int],
+        rowKey: String,
+        targetPath: String?,
+        targetKey: String?,
+        out: inout [String: VirtualInputEntry]
+    ) {
+        let (seg, resolvedKey) = layoutPathSegment(
+            keyId: el.keyId,
+            siblingIndex: siblingIndex,
+            siblingKeysSeen: &siblingKeysSeen
+        )
+        let path = "\(parentPath)/\(seg)"
+        if el.handlers.editLens != nil,
+           (path == targetPath || (targetKey != nil && (resolvedKey == targetKey || el.keyId == targetKey))) {
+            out[path] = VirtualInputEntry(
+                path: path,
+                key: resolvedKey ?? el.keyId,
+                rowKey: rowKey,
+                el: el
+            )
+        }
+        var childSeen: [String: Int] = [:]
+        for idx in el.children.indices {
+            collectVirtualInputs(
+                in: el.children[idx],
+                parentPath: path,
+                siblingIndex: idx,
+                siblingKeysSeen: &childSeen,
+                rowKey: rowKey,
+                targetPath: targetPath,
+                targetKey: targetKey,
+                out: &out
+            )
+        }
     }
 
     // MARK: - GrowthStack & FoldGlide
@@ -342,17 +427,40 @@ extension Runtime {
                 let glideArg: (FoldGlide, Float)? = el.foldGlideSpec.map { ($0, limit) }
                 let streaming = el.isStreaming
                 let whole = el.isArrivesWhole && !streaming
+                let firstChildTop = res.children.first?.layout.localRect.y
 
                 if var existing = growthRows[gKey] {
+                    let prevTarget = existing.track.target
+                    let prevH = existing.track.h
+                    let prevTop = existing.lastFirstChildTop
                     existing.edge = edge
                     existing.spring = spring
                     existing.foldLimit = limit
                     existing.track.setKind(streaming: streaming, whole: whole, glide: glideArg)
                     if settleAll || (snaps && el.foldGlideSpec == nil && !streaming && !whole) {
                         existing.track = existing.track.restarted(at: naturalH)
+                        existing.contentSlide = nil
                     } else if abs(existing.track.target - naturalH) > 0.1 {
                         existing.track.retarget(naturalH)
+                        if let prevTop, let curTop = firstChildTop {
+                            let topDelta = curTop - prevTop
+                            let was = naturalH - prevH
+                            if topDelta * (naturalH - prevTarget) > 0.01 && abs(was) > 0.01 {
+                                let curSlide: Float
+                                if let oldSlide = existing.contentSlide, abs(oldSlide.was) > 0.01 {
+                                    let oldLeft = prevTarget - prevH
+                                    curSlide = oldSlide.dy * min(1, max(0, oldLeft / oldSlide.was))
+                                } else {
+                                    curSlide = 0
+                                }
+                                existing.contentSlide = (was: was, dy: curSlide - topDelta)
+                            }
+                        }
                     }
+                    if !existing.track.moving {
+                        existing.contentSlide = nil
+                    }
+                    existing.lastFirstChildTop = firstChildTop
                     growthRows[gKey] = existing
                     if existing.track.moving {
                         result.activeCount += 1
@@ -379,7 +487,9 @@ extension Runtime {
                         track: track,
                         edge: edge,
                         spring: spring,
-                        foldLimit: limit
+                        foldLimit: limit,
+                        lastFirstChildTop: firstChildTop,
+                        contentSlide: nil
                     )
                 }
             }
@@ -492,6 +602,9 @@ extension Runtime {
             for _ in 0..<substeps {
                 entry.track.step(spring: entry.spring, edge: entry.edge, carryingTail: false)
             }
+            if !entry.track.moving {
+                entry.contentSlide = nil
+            }
             growthRows[k] = entry
             if abs(entry.track.h - prevH) > 0.05 || abs(entry.track.mask - prevM) > 0.05 || !entry.track.moving {
                 anyChanged = true
@@ -541,9 +654,11 @@ extension Runtime {
                 let ai = vis.lowerBound
                 vState.lastAnchorKey = vState.lastKeys[ai]
                 vState.lastAnchorLocalY = max(0, offsetY - prefix[ai])
+                vState.lastAnchorPrefixY = prefix[ai]
             } else if stickyPin {
                 vState.lastAnchorKey = nil
                 vState.lastAnchorLocalY = 0
+                vState.lastAnchorPrefixY = 0
             }
             if vState.measuredByKey.count > RuntimeVirtualListState.maxCachedKeys {
                 let keepSet = Set(vState.lastKeys)

@@ -794,6 +794,14 @@ public struct Scene: Sendable {
         intent(id, TraceIntent.position | TraceIntent.size, secs)
 
         if anim.travel == .screen && !store.reducedMotion {
+            let destOrigin = parentTargetOrigin(i)
+            if let path = nodes[i].path,
+               nodes[i].frame == frame,
+               path.endLocal == frame,
+               abs(path.origin.x - destOrigin.x) < 1e-4,
+               abs(path.origin.y - destOrigin.y) < 1e-4 {
+                return
+            }
             let curPos: (Float, Float, Float, Float)
             let curVel: (Float, Float, Float, Float)
             if let path = nodes[i].path {

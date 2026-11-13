@@ -1118,10 +1118,11 @@ public enum HeadlessRunner {
             effectiveArgs.forceCPU = true
         }
         let resolvedChrome = app.customTitlebar?.macChrome(app.chromeStyle) ?? app.chromeStyle
-        let reports: FrameReports<State>? = (app.onFrameEncodedHook != nil || app.onFrameDrawnHook != nil)
+        let reports: FrameReports<State>? = (app.onFrameEncodedHook != nil || app.onFrameDrawnHook != nil || app.onFrameInspectHook != nil)
             ? FrameReports<State>(
                 onFrameEncoded: app.onFrameEncodedHook,
                 onFrameDrawn: app.onFrameDrawnHook,
+                onInspectDrawn: app.onFrameInspectHook,
                 drawnInterval: 0.0,
                 windowKey: "main"
             )
@@ -1411,6 +1412,7 @@ public enum HeadlessRunner {
                 runtime.updateIf(at: now) { s, tx in
                     reports.flush(state: &s, tx: &tx, at: now, force: true)
                 }
+                reports.inspect(runtime)
             }
             return outFrame
         }
@@ -1551,6 +1553,7 @@ public enum HeadlessRunner {
         var capturedStripFrames: [Frame] = []
         var dumpedFrameCount = 0
         var didFireReady = false
+        var lastRenderedLoopFrame: Frame? = nil
 
         let needsLoop = !steps.isEmpty
             || args.durationOverride != nil
@@ -1748,11 +1751,16 @@ public enum HeadlessRunner {
                     let needDump = dumpDir != nil
                     let needVideo = videoEncoder != nil
                     let needStrip = args.stripPath != nil && (frameIndex % stripStride == 0)
-                    let needRender = needDump || needVideo || needStrip
+                    let hasFrameObservers = compositor != nil
+                        || (reports?.wanted ?? false)
+                        || (reports?.onFrameDrawn != nil)
+                        || (reports?.onInspectDrawn != nil)
+                    let needRender = needDump || needVideo || needStrip || (args.frameCount != nil && hasFrameObservers)
                     if needRender {
                         let renderedBase = try renderAndReport(lastCaptured, at: animNow, reportEncoded: true)
                         reportedInLoop = true
                         let baseFrame = applyChromeOverlay(renderedBase, at: simTime)
+                        lastRenderedLoopFrame = baseFrame
                         if needVideo {
                             try videoEncoder?.writeFrame(baseFrame)
                         }
@@ -1802,10 +1810,14 @@ public enum HeadlessRunner {
             onReady?(WindowHandle(key: windowKey))
         }
 
-        var finalFrame = applyChromeOverlay(
-            try renderAndReport(lastCaptured, at: runtime.currentTime, reportEncoded: !reportedInLoop),
-            at: runtime.currentTime
-        )
+        var finalFrame = if let lastRenderedLoopFrame {
+            lastRenderedLoopFrame
+        } else {
+            applyChromeOverlay(
+                try renderAndReport(lastCaptured, at: runtime.currentTime, reportEncoded: !reportedInLoop),
+                at: runtime.currentTime
+            )
+        }
         if args.firstPixels {
             FileHandle.standardError.write(Data("rune: first pixels \(finalFrame.width)x\(finalFrame.height)\n".utf8))
         }

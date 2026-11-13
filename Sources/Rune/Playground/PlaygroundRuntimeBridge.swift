@@ -676,8 +676,7 @@ extension Runtime {
         syncPlaygroundRegion()
 
         if let fPath = focusedPath,
-           let fIdx = nodeByPath[fPath],
-           flatNodes[fIdx].el.handlers.editLens != nil {
+           focusedInputElement(at: fPath)?.handlers.editLens != nil {
             return filterKey(event, at: now)
         }
 

@@ -122,7 +122,14 @@ enum JumpListStore {
         }
         lock.unlock()
         guard !skip else { return }
-        // In native windowed macOS hosts, Platform's Dock menu integration consumes the list.
+        #if os(macOS)
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                guard NSApplication.shared.delegate != nil else { return }
+                RuneNativeMenuHost.shared.setJumpMenu(list) { _ in }
+            }
+        }
+        #endif
     }
 
     static func resetForTests() {

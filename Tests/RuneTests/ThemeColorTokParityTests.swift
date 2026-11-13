@@ -327,4 +327,44 @@ struct ThemeColorTokParityTests {
             #expect(err == .missingMode("light"))
         }
     }
+
+    @Test func colorMixOklabMatchesEndpointsAndPerceptualMidpoint() {
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let blue = Color(r: 0, g: 0, b: 1, a: 0.2)
+
+        let atZero = red.mixOklab(with: blue, t: 0)
+        let atUnder = red.mixOklab(with: blue, t: -0.5)
+        #expect(abs(atZero.r - red.r) < 1e-5)
+        #expect(abs(atZero.g - red.g) < 1e-5)
+        #expect(abs(atZero.b - red.b) < 1e-5)
+        #expect(abs(atZero.a - red.a) < 1e-5)
+        #expect(abs(atUnder.r - red.r) < 1e-5)
+        #expect(abs(atUnder.a - red.a) < 1e-5)
+
+        let atOne = red.mixOklab(with: blue, t: 1)
+        let atOver = red.mixOklab(with: blue, t: 1.5)
+        #expect(abs(atOne.r - blue.r) < 1e-5)
+        #expect(abs(atOne.g - blue.g) < 1e-5)
+        #expect(abs(atOne.b - blue.b) < 1e-5)
+        #expect(abs(atOne.a - blue.a) < 1e-5)
+        #expect(abs(atOver.b - blue.b) < 1e-5)
+        #expect(abs(atOver.a - blue.a) < 1e-5)
+
+        // OKLab midpoint between pure red and translucent blue respects premultiplied OKLab alpha weighting
+        // (`mid.a == 0.6`), while equal-alpha red <-> blue mixes through perceptual purple without a muddy shift.
+        let mid = red.mixOklab(with: blue, t: 0.5)
+        let linearMid = red.mix(with: blue, t: 0.5)
+        #expect(abs(mid.a - 0.6) < 1e-5)
+        #expect(mid.r > 0.25)
+        #expect(mid.g < 0.05)
+        #expect(mid != linearMid)
+
+        let opaqueBlue = Color(r: 0, g: 0, b: 1, a: 1)
+        let opaqueMid = red.mixOklab(with: opaqueBlue, t: 0.5)
+        let opaqueLinearMid = red.mix(with: opaqueBlue, t: 0.5)
+        #expect(abs(opaqueMid.a - 1.0) < 1e-5)
+        #expect(opaqueMid.r > 0.25 && opaqueMid.b > 0.15)
+        #expect(opaqueMid.g < 0.12)
+        #expect(opaqueMid != opaqueLinearMid)
+    }
 }
