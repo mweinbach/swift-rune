@@ -103,12 +103,11 @@ enum AnchorLayoutHelper {
         return (Vec2(unx, uny), zoom, Vec2(normX, normY))
     }
 
-    static func fitIfNeeded<State>(
+    static func collectFitBounds<State>(
         rootEl: El<State>,
-        rootInput: inout LayoutInputNode,
-        solved: inout LayoutEngine.ResultNode,
+        solved: LayoutEngine.ResultNode,
         viewport: Vec2
-    ) {
+    ) -> [([Int], Bool, Float)] {
         var boundsToApply: [([Int], Bool, Float)] = [] // (indexPath, vertical, bound)
         var earlier: [PlacedAnchor] = []
 
@@ -178,6 +177,16 @@ enum AnchorLayoutHelper {
         }
 
         scan(el: rootEl, solvedNode: solved, parentOrigin: .zero, parentScale: 1.0, scaleChain: [], indexPath: [])
+        return boundsToApply
+    }
+
+    static func fitIfNeeded<State>(
+        rootEl: El<State>,
+        rootInput: inout LayoutInputNode,
+        solved: inout LayoutEngine.ResultNode,
+        viewport: Vec2
+    ) {
+        let boundsToApply = collectFitBounds(rootEl: rootEl, solved: solved, viewport: viewport)
         guard !boundsToApply.isEmpty else { return }
 
         func mutateInput(_ node: inout LayoutInputNode, path: ArraySlice<Int>, vertical: Bool, maxLen: Float) {

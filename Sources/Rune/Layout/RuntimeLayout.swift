@@ -39,6 +39,7 @@ final class RetainedLayoutCoordinator {
         var flat: [PreparedNode] = []
         flat.reserveCapacity(32)
         var aspectFitIndices: [Int] = []
+        var hasAnchoredFit = false
 
         if lastViewport != viewport {
             lastViewport = viewport
@@ -61,7 +62,11 @@ final class RetainedLayoutCoordinator {
         func makeMeasure(el: El<State>) -> (fn: ((Float?) -> Vec2)?, hash: UInt64?, redacted: Bool) {
             guard el.children.isEmpty else { return (nil, nil, false) }
             if let editLens = el.handlers.editLens {
-                let edit = editLens.get(state)
+                var edit = editLens.get(state)
+                if el.isSecure {
+                    edit.isSecure = true
+                    if el.isRevealed { edit.isRevealed = true }
+                }
                 let str = edit.displayString.isEmpty ? (el.placeholder ?? " ") : edit.displayString
                 let textStyle = el.textStyle
                 let isSecure = edit.isSecure
@@ -91,18 +96,23 @@ final class RetainedLayoutCoordinator {
                     textSystem.shape(text: "", spans: spans, style: textStyle, maxWidth: maxW, pixelScale: scale, emitGlyphs: false).size
                 }
                 return (fn, h, false)
-            } else if let txt = el.liveText?.get() ?? el.plainText {
+            } else if let rawTxt = el.liveText?.get() ?? el.plainText {
+                let isSecure = el.isSecure
+                let txt = (isSecure && !el.isRevealed && !rawTxt.isEmpty) ? "••••••••••••" : rawTxt
                 let textStyle = el.textStyle
                 var hasher = Hasher()
                 hasher.combine(3)
-                hasher.combine(txt)
+                if !isSecure {
+                    hasher.combine(txt)
+                }
+                hasher.combine(el.isRevealed)
                 hasher.combine(scale)
                 hasher.combine(textStyle)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
                 let fn: (Float?) -> Vec2 = { maxW in
                     textSystem.measure(txt, style: textStyle, maxWidth: maxW, pixelScale: scale)
                 }
-                return (fn, h, false)
+                return (fn, isSecure ? 0 : h, isSecure)
             } else if let (_, iconSize) = el.iconPayload {
                 var hasher = Hasher()
                 hasher.combine(4)
@@ -244,6 +254,9 @@ final class RetainedLayoutCoordinator {
             if ratio != nil {
                 aspectFitIndices.append(myIndex)
             }
+            if el.anchor?.fit == true {
+                hasAnchoredFit = true
+            }
             return (myIndex, slot, dirty)
         }
 
@@ -352,6 +365,42 @@ final class RetainedLayoutCoordinator {
                 ),
                 children: childResults
             )
+        }
+
+        if hasAnchoredFit {
+            let preFitSolved = extract(rootRes.idx)
+            let boundsToApply = AnchorLayoutHelper.collectFitBounds(
+                rootEl: rootEl,
+                solved: preFitSolved,
+                viewport: viewport
+            )
+            if !boundsToApply.isEmpty {
+                for (idxPath, vertical, bound) in boundsToApply {
+                    var targetIdx: Int? = rootRes.idx
+                    for c in idxPath {
+                        guard let cur = targetIdx, c >= 0, c < flat[cur].childIndices.count else {
+                            targetIdx = nil
+                            break
+                        }
+                        targetIdx = flat[cur].childIndices[c]
+                    }
+                    guard let idx = targetIdx else { continue }
+                    let dim: RuneTaffy.Dimension = .length(max(0, bound))
+                    if vertical {
+                        flat[idx].taffyStyle.maxSize.height = dim
+                    } else {
+                        flat[idx].taffyStyle.maxSize.width = dim
+                    }
+                    var ancestors: [SlotId] = []
+                    var cur = flat[idx].parentIndex
+                    while let p = cur {
+                        ancestors.append(flat[p].slot)
+                        cur = flat[p].parentIndex
+                    }
+                    store.setStyleAndMarkAncestors(flat[idx].slot, style: flat[idx].taffyStyle, ancestors: ancestors)
+                }
+                store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
+            }
         }
 
         return extract(rootRes.idx)

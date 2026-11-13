@@ -118,6 +118,29 @@ public final class Runtime<State> {
         var stateSnapshotBeforeDrag: State
     }
 
+    private struct EmitStepInput {
+        let p: Presented
+        let ancestorOpacity: Float
+        let ancestorTurn: Turn?
+        let outerTurnClip: MotionRect?
+        let localTurnClip: MotionRect?
+        let parentPath: String?
+        let nearestGroupHovered: Bool
+        let flightCover: FlightCoverTransform?
+        let flightClipOverride: MotionRect?
+        let emitLiftedNow: Bool
+    }
+
+    private struct EmitNodeExit {
+        let layerEndCount: Int
+        let devClip: SIMD4<Float>
+    }
+
+    private enum EmitWorkItem {
+        case enter(EmitStepInput)
+        case exit(EmitNodeExit)
+    }
+
     private struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
         var shelfX: Int = 1
@@ -1525,19 +1548,20 @@ public final class Runtime<State> {
         var liftedFlights: [LiftedFlightSubtree] = []
         var newSeenMatched: [String: MatchedSeenSnapshot] = [:]
 
-        func emitSubtree(
-            _ p: Presented,
-            ancestorOpacity: Float,
-            ancestorTurn: Turn?,
-            outerTurnClip: MotionRect?,
-            localTurnClip: MotionRect?,
-            parentPath: String?,
-            nearestGroupHovered: Bool,
-            flightCover: FlightCoverTransform? = nil,
-            flightClipOverride: MotionRect? = nil,
-            emitLiftedNow: Bool = false
-        ) {
-            guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return }
+        @inline(never)
+        func emitNodeEnter(_ input: EmitStepInput) -> (children: [EmitStepInput], exit: EmitNodeExit) {
+            let p = input.p
+            let ancestorOpacity = input.ancestorOpacity
+            let ancestorTurn = input.ancestorTurn
+            let outerTurnClip = input.outerTurnClip
+            let localTurnClip = input.localTurnClip
+            let parentPath = input.parentPath
+            let nearestGroupHovered = input.nearestGroupHovered
+            let flightCover = input.flightCover
+            let flightClipOverride = input.flightClipOverride
+            let emitLiftedNow = input.emitLiftedNow
+            let emptyExit = EmitNodeExit(layerEndCount: 0, devClip: .zero)
+            guard let snap = nodeById[p.id] ?? exitingSnapshots[p.id] else { return ([], emptyExit) }
             if !emitLiftedNow && flyingRootIds.contains(p.id) {
                 liftedFlights.append(LiftedFlightSubtree(
                     node: p,
@@ -1548,7 +1572,7 @@ public final class Runtime<State> {
                     parentPath: parentPath,
                     nearestGroupHovered: nearestGroupHovered
                 ))
-                return
+                return ([], emptyExit)
             }
             let el = snap.el
             let rawRect = presentedRectById[p.id] ?? p.rect
@@ -1585,7 +1609,13 @@ public final class Runtime<State> {
                 nodeTurn = ancestorTurn
             }
 
-            let parentWindowClip = flightClipOverride ?? (snap.parentIndex.map { flatNodes[$0].clipRect } ?? windowRect)
+            let parentWindowClip: MotionRect = {
+                if let flightClipOverride { return flightClipOverride }
+                if nodeById[p.id] != nil {
+                    return snap.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].clipRect : nil } ?? windowRect
+                }
+                return snap.clipRect
+            }()
             let effectiveOuterClip: MotionRect
             let effectiveHitClip: MotionRect
             let childLocalTurnClip: MotionRect?
@@ -2315,10 +2345,13 @@ public final class Runtime<State> {
             let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
                 ? isGroupHovered(snap)
                 : nearestGroupHovered
+            var childSteps: [EmitStepInput] = []
             if let children = childrenByParent[p.id] {
-                for child in sortByZOrder(children) {
-                    emitSubtree(
-                        child,
+                let sorted = sortByZOrder(children)
+                childSteps.reserveCapacity(sorted.count)
+                for child in sorted {
+                    childSteps.append(EmitStepInput(
+                        p: child,
                         ancestorOpacity: childAncestorOp,
                         ancestorTurn: nodeTurn,
                         outerTurnClip: nextOuterClip,
@@ -2328,20 +2361,62 @@ public final class Runtime<State> {
                         flightCover: childFlightCover,
                         flightClipOverride: childFlightClip,
                         emitLiftedNow: emitLiftedNow
-                    )
+                    ))
                 }
             }
-
+            var layerEndCount = 0
             if hasRoundedClipLayer {
-                primitives.append(.layerEnd(clip: devClip))
+                layerEndCount += 1
             }
-
             if shouldEmit && useLayer {
-                primitives.append(.layerEnd(clip: devClip))
+                layerEndCount += 1
             }
             if shouldEmit && activeFadeEdges.count > 1 {
-                for _ in 1..<activeFadeEdges.count {
-                    primitives.append(.layerEnd(clip: devClip))
+                layerEndCount += activeFadeEdges.count - 1
+            }
+            return (childSteps, EmitNodeExit(layerEndCount: layerEndCount, devClip: devClip))
+        }
+
+        func emitSubtree(
+            _ p: Presented,
+            ancestorOpacity: Float,
+            ancestorTurn: Turn?,
+            outerTurnClip: MotionRect?,
+            localTurnClip: MotionRect?,
+            parentPath: String?,
+            nearestGroupHovered: Bool,
+            flightCover: FlightCoverTransform? = nil,
+            flightClipOverride: MotionRect? = nil,
+            emitLiftedNow: Bool = false
+        ) {
+            var workStack: [EmitWorkItem] = [
+                .enter(EmitStepInput(
+                    p: p,
+                    ancestorOpacity: ancestorOpacity,
+                    ancestorTurn: ancestorTurn,
+                    outerTurnClip: outerTurnClip,
+                    localTurnClip: localTurnClip,
+                    parentPath: parentPath,
+                    nearestGroupHovered: nearestGroupHovered,
+                    flightCover: flightCover,
+                    flightClipOverride: flightClipOverride,
+                    emitLiftedNow: emitLiftedNow
+                ))
+            ]
+            while let item = workStack.popLast() {
+                switch item {
+                case .enter(let step):
+                    let res = emitNodeEnter(step)
+                    if res.exit.layerEndCount > 0 {
+                        workStack.append(.exit(res.exit))
+                    }
+                    for childStep in res.children.reversed() {
+                        workStack.append(.enter(childStep))
+                    }
+                case .exit(let ex):
+                    for _ in 0..<ex.layerEndCount {
+                        primitives.append(.layerEnd(clip: ex.devClip))
+                    }
                 }
             }
         }
