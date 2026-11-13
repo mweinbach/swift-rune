@@ -9,6 +9,9 @@ import simd
 #if canImport(Metal)
 @preconcurrency import Metal
 #endif
+#if os(macOS)
+import AppKit
+#endif
 
 @Suite("Render ABI & Packing Parity Tests")
 struct RenderABIParityTests {
@@ -106,7 +109,9 @@ struct SystemMaterialParityTests {
         let darkGlass = MaterialMath.fallbackFill(material: .glass, dark: true, opacity: 0.5)
         let lightGlass = MaterialMath.fallbackFill(material: .glass, dark: false, opacity: 0.5)
         #expect(darkGlass.x < lightGlass.x)
-        #expect(abs(darkGlass.w - 0.34) < 1e-3)
+        #expect(abs(darkGlass.w - 0.47) < 1e-3)
+        let custom = MaterialMath.fallbackFill(material: .glass, fill: SIMD4<Float>(1, 0, 0, 1), dark: true, opacity: 0.5)
+        #expect(abs(custom.x - 1.0) < 1e-4 && abs(custom.w - 0.5) < 1e-4)
     }
 
     @Test("assignSlots caps native slots at 4, preserves IDs, and sends overflow to fallback")
@@ -158,6 +163,128 @@ struct SystemMaterialParityTests {
         #expect(assignment.nativeSlots.count == 1)
         #expect(assignment.fallbackDraws.isEmpty)
         host.hideAll()
+    }
+
+    @Test("MaterialMode.fromEnv handles legacy and unsynced modes and MaterialDraw.points scales down")
+    func materialModesAndPointsScaling() {
+        #expect(MaterialMode.fromEnv(["RUNE_SYSTEM_MATERIAL": "legacy"]) == .legacy)
+        #expect(MaterialMode.fromEnv(["RUNE_SYSTEM_MATERIAL": "unsynced"]) == .unsynced)
+
+        let draw = MaterialDraw(
+            id: 7,
+            material: .glass,
+            blending: .behindWindow,
+            rect: MotionRect(left: 20, top: 40, right: 220, bottom: 160),
+            radius: 24,
+            continuous: true,
+            opacity: 1.0
+        )
+        let logical = draw.points(scale: 2.0)
+        #expect(abs(logical.rect.left - 10) < 1e-4)
+        #expect(abs(logical.rect.top - 20) < 1e-4)
+        #expect(abs(logical.rect.right - 110) < 1e-4)
+        #expect(abs(logical.rect.bottom - 80) < 1e-4)
+        #expect(abs(logical.radius - 12) < 1e-4)
+
+        // Multi-corner radius clamp parity
+        #expect(MaterialMath.clampRadius([40, 12, 8, 4], width: 60, height: 30) == 15)
+        #expect(MaterialMath.clampRadius([Float](), width: 60, height: 30) == 0)
+    }
+
+    @Test("PresentSyncFlag drives presentsWithTransaction on moving, material, or live state and clears on live resize end")
+    @MainActor
+    func presentSyncFlagAndWatcher() {
+        var sync = PresentSyncFlag()
+        #expect(sync.isSynced == false)
+        #expect(sync.setMaterials(true) == true)
+        #expect(sync.isSynced == true)
+        #expect(sync.setMaterials(false) == false)
+        #expect(sync.isSynced == false)
+        #expect(sync.setMoving(true) == true)
+        #expect(sync.isSynced == true)
+        #expect(sync.setMoving(false) == false)
+        #expect(sync.isSynced == false)
+        #expect(sync.setLive(true) == true)
+        #expect(sync.isSynced == true)
+        #expect(sync.setLive(false) == false)
+        #expect(sync.isSynced == false)
+
+        let layer = CAMetalLayer()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 120, height: 80),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        let watcher = MaterialPresentWatcher(window: window, metalLayer: layer)
+        watcher.setLive(true)
+        #expect(layer.presentsWithTransaction == true)
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+        #expect(watcher.flag.live == false)
+        #expect(layer.presentsWithTransaction == false)
+    }
+
+    @Test("Material elements report physical rects, suppress fill, cut shadow holes, and fall back past slot cap")
+    func runtimeNativeMaterialsAndFallback() throws {
+        struct S {}
+        let renderer = try MetalRenderer()
+
+        // Single material at 2x scale: physical rect + suppressed fill + shadow hole cutout
+        let rtSingle = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 80),
+            pixelScale: 2.0,
+            view: { _, _ in
+                col()
+                    .size(80, 80)
+                    .child(
+                        el()
+                            .size(40, 40)
+                            .absolute(x: 20, y: 20)
+                            .continuousRounded(10)
+                            .systemMaterial(.glass)
+                            .shadow(Shadow(x: 0, y: 4, blur: 8, color: Color(r: 0, g: 0, b: 0, a: 0.9)))
+                    )
+            }
+        )
+        rtSingle.nativeMaterials = true
+        rtSingle.clearColor = Color.transparent
+        let rfSingle = rtSingle.renderFrame(at: 0)
+        #expect(rfSingle.materials.count == 1)
+        #expect(abs(rfSingle.materials[0].rect.left - 40) < 1e-3)
+        #expect(abs(rfSingle.materials[0].rect.width - 80) < 1e-3)
+        #expect(rfSingle.materials[0].continuous == true)
+
+        let imgSingle = try renderer.renderOffscreen(rfSingle)
+        // Native hole center (80, 80 in 160x160 2x buffer) stays transparent while outer shadow below draws dark alpha
+        let centerOff = (80 * imgSingle.width + 80) * 4
+        let belowOff = (128 * imgSingle.width + 80) * 4
+        #expect(imgSingle.rgba[centerOff + 3] < 10)
+        #expect(imgSingle.rgba[belowOff + 3] > 10)
+
+        // Past MAX_NATIVE_MATERIALS (4): 5th material falls back to drawing tinted fill
+        let rtOverflow = Runtime<S>(
+            state: S(),
+            viewport: Vec2(120, 40),
+            pixelScale: 1.0,
+            view: { _, _ in
+                var root: El<S> = row().size(120, 40)
+                for _ in 0..<5 {
+                    root = root.child(el().size(20, 20).systemMaterial(.hudWindow))
+                }
+                return root
+            }
+        )
+        rtOverflow.nativeMaterials = true
+        rtOverflow.clearColor = Color.transparent
+        let rfOverflow = rtOverflow.renderFrame(at: 0)
+        #expect(rfOverflow.materials.count == MAX_NATIVE_MATERIALS)
+        let imgOverflow = try renderer.renderOffscreen(rfOverflow)
+        // Slot 0 (x=10, y=10) is transparent hole; overflow #5 (x=90, y=10) renders fallback fill
+        let holeAlpha = imgOverflow.rgba[(10 * imgOverflow.width + 10) * 4 + 3]
+        let fallbackAlpha = imgOverflow.rgba[(10 * imgOverflow.width + 90) * 4 + 3]
+        #expect(holeAlpha < 10)
+        #expect(fallbackAlpha > 100)
     }
     #endif
 }
@@ -334,7 +461,9 @@ struct RenderGPUAndShaderParityTests {
         #expect(capturedSite?.mark == 0xCAFE_BABE)
         #expect(capturedSite?.data == SIMD4<Float>(1, 2, 3, 4))
         #expect(capturedSite?.inLayer == true)
-        #expect(abs((capturedSite?.instance.rect.z ?? 0) - 48) < 1e-3) // 40 + 2 * bleed(4)
+        #expect(abs((capturedSite?.instance.rect.z ?? 0) - 40) < 1e-3) // unexpanded rect; bleed(4) is in params.z
+        #expect(abs((capturedSite?.instance.params.z ?? 0) - 4) < 1e-3)
+        #expect(abs((capturedSite?.scale ?? 0) - 1.0) < 1e-6)
     }
 
     @Test("Backdrop blur, Gaussian layer blur, and LayersPool LRU + #819 giveBack operate cleanly")
@@ -427,6 +556,487 @@ struct RenderGPUAndShaderParityTests {
         #expect(sampleRGBA(img, x: 8, y: 20).r > 150)
         #expect(sampleRGBA(img, x: 25, y: 20).r > 200)
         #expect(sampleRGBA(img, x: 60, y: 20).r < 20)
+    }
+
+    @Test("Continuous squircle corners differ from circular arcs and pill clamps radius to half short side")
+    func continuousCornerAndCapsuleParity() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let rtCircular = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 80),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col().size(80, 80).bg(.black).child(el().size(80, 80).rounded(24).bg(.white))
+            }
+        )
+        let rtContinuous = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 80),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col().size(80, 80).bg(.black).child(el().size(80, 80).continuousRounded(24).bg(.white))
+            }
+        )
+
+        let imgCirc = try renderer.renderOffscreen(rtCircular.renderFrame(at: 0))
+        let imgCont = try renderer.renderOffscreen(rtContinuous.renderFrame(at: 0))
+        // Both are solid white in center and black at extreme corner (0, 0), but differ along corner shoulder
+        #expect(sampleRGBA(imgCirc, x: 40, y: 40).r > 240)
+        #expect(sampleRGBA(imgCont, x: 40, y: 40).r > 240)
+        #expect(sampleRGBA(imgCirc, x: 0, y: 0).r < 10)
+        #expect(sampleRGBA(imgCont, x: 0, y: 0).r < 10)
+        var maxDiff = 0
+        for y in 0..<28 {
+            for x in 0..<28 {
+                maxDiff = max(maxDiff, abs(Int(sampleRGBA(imgCirc, x: x, y: y).r) - Int(sampleRGBA(imgCont, x: x, y: y).r)))
+            }
+        }
+        #expect(maxDiff > 20)
+
+        // Pill clamps large radius to half short side (30 / 2 = 15)
+        let rtPill = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 30),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col().size(80, 30).bg(.black).child(el().size(80, 30).pill().bg(.white))
+            }
+        )
+        let imgPill = try renderer.renderOffscreen(rtPill.renderFrame(at: 0))
+        #expect(sampleRGBA(imgPill, x: 2, y: 15).r > 200)
+        #expect(sampleRGBA(imgPill, x: 1, y: 1).r < 20)
+    }
+
+    @Test("BackdropBlurSchedule levels continuity and GPU parity (stripes, tint, cap, edge clamp, clip, HiDPI)")
+    func backdropBlurScheduleAndGPUParity() throws {
+        // Level schedule continuity & bounds
+        var prevLevel = 0
+        for s in stride(from: Float(0.5), through: 200.0, by: 2.5) {
+            let (level, blend) = BackdropBlurSchedule.levels(sigma: s)
+            #expect(level >= prevLevel && level <= BackdropBlurSchedule.mips - 1)
+            #expect(blend >= 0 && blend <= 1)
+            prevLevel = level
+        }
+        #expect(BackdropBlurSchedule.levels(sigma: 0.0).count == 0)
+
+        let renderer = try MetalRenderer()
+        struct S {}
+
+        // 1. Stripes blend to mid-grey under blur, stay crisp outside, tinted fill tints result
+        let rtStripes = Runtime<S>(
+            state: S(),
+            viewport: Vec2(96, 64),
+            pixelScale: 1.0,
+            view: { _, _ in
+                var bgRow: El<S> = row().size(96, 64)
+                for i in 0..<48 {
+                    bgRow = bgRow.child(el().size(2, 64).bg(i % 2 == 0 ? .white : .black))
+                }
+                return col()
+                    .size(96, 64)
+                    .child(bgRow)
+                    .child(
+                        el()
+                            .size(40, 40)
+                            .absolute(x: 8, y: 12)
+                            .backdropBlur(16)
+                    )
+                    .child(
+                        el()
+                            .size(32, 40)
+                            .absolute(x: 56, y: 12)
+                            .backdropBlur(16)
+                            .bg(Color(r: 0, g: 0.4, b: 1.0, a: 0.5))
+                    )
+            }
+        )
+        let imgStripes = try renderer.renderOffscreen(rtStripes.renderFrame(at: 0))
+        // Linear 0.5 grey encodes to ~188 in sRGB output and flattens stripe contrast across neighbors
+        let blurCenter = sampleRGBA(imgStripes, x: 28, y: 32)
+        let blurNeighbor = sampleRGBA(imgStripes, x: 26, y: 32)
+        #expect(blurCenter.r > 150 && blurCenter.r < 215)
+        #expect(abs(Int(blurCenter.r) - Int(blurNeighbor.r)) < 12)
+        // Outside blurred rect at y=2: crisp alternating stripes preserved
+        #expect(Int(sampleRGBA(imgStripes, x: 0, y: 2).r) - Int(sampleRGBA(imgStripes, x: 2, y: 2).r) > 150)
+        // Tinted backdrop blur pushes blue channel above red
+        let tinted = sampleRGBA(imgStripes, x: 72, y: 32)
+        #expect(Int(tinted.b) > Int(tinted.r) + 30)
+
+        // 2. Window edge flush to (0, 0) over solid white stays bright (no black edge bleed) & ancestor clip works
+        let rtEdges = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 80),
+            pixelScale: 2.0,
+            view: { _, _ in
+                col()
+                    .size(80, 80)
+                    .child(el().size(80, 80).bg(.white))
+                    .child(el().size(40, 40).absolute(x: 0, y: 0).backdropBlur(16))
+                    .child(
+                        col()
+                            .size(40, 40)
+                            .absolute(x: 40, y: 40)
+                            .clipRounded(16)
+                            .child(el().size(40, 40).bg(.black).backdropBlur(16))
+                    )
+            }
+        )
+        let imgEdges = try renderer.renderOffscreen(rtEdges.renderFrame(at: 0))
+        #expect(imgEdges.width == 160 && imgEdges.height == 160)
+        #expect(sampleRGBA(imgEdges, x: 2, y: 2).r > 235)
+        // Outside rounded clip corner at (40*2 + 2, 40*2 + 2) remains white background instead of black panel
+        #expect(sampleRGBA(imgEdges, x: 82, y: 82).r > 230)
+
+        // 3. Past MAX_BACKDROP_BLURS cap draws own fill without crashing
+        let rtCap = Runtime<S>(
+            state: S(),
+            viewport: Vec2(120, 40),
+            pixelScale: 1.0,
+            view: { _, _ in
+                var root: El<S> = row().size(120, 40)
+                for _ in 0..<(MAX_BACKDROP_BLURS + 2) {
+                    root = root.child(el().size(20, 40).backdropBlur(10).bg(Color(r: 0, g: 1, b: 0, a: 0.8)))
+                }
+                return root
+            }
+        )
+        rtCap.clearColor = Color.black
+        let imgCap = try renderer.renderOffscreen(rtCap.renderFrame(at: 0))
+        // Overflow element #5 at x=90 still draws green fill
+        #expect(sampleRGBA(imgCap, x: 90, y: 20).g > 150)
+    }
+
+    @Test("Outer shadow cuts hole under translucent fill and adjacent KIND_TRIANGLE edges have zero seam")
+    func shadowHoleCutoutAndAdjacentTriangleSeam() throws {
+        let renderer = try MetalRenderer()
+
+        // 1. Shadow hole cutout under semi-transparent fill on white background
+        struct S {}
+        let rtShadow = Runtime<S>(
+            state: S(),
+            viewport: Vec2(100, 100),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(100, 100)
+                    .child(el().size(100, 100).bg(.white))
+                    .child(
+                        el()
+                            .size(40, 40)
+                            .absolute(x: 30, y: 30)
+                            .bg(Color(r: 1, g: 0, b: 0, a: 0.25))
+                            .shadow(Shadow(x: 0, y: 0, blur: 10, color: Color(r: 0, g: 0, b: 0, a: 0.9)))
+                    )
+            }
+        )
+        let imgShadow = try renderer.renderOffscreen(rtShadow.renderFrame(at: 0))
+        // Center at (50, 50): white * 0.75 + red * 0.25 -> clean bright pink (g >= 170), no shadow darkening underneath!
+        let inner = sampleRGBA(imgShadow, x: 50, y: 50)
+        // Outer shadow halo just outside box at (50, 74): darkened below pure white
+        let halo = sampleRGBA(imgShadow, x: 50, y: 74)
+        #expect(inner.r > 235 && inner.g >= 170)
+        #expect(halo.r < 245)
+
+        // 2. Quad polygon triangulated into two adjacent KIND_TRIANGLEs sharing diagonal (0,0)-(60,60) on blue background
+        let triShape = Shape()
+            .fill([Vec2(0, 0), Vec2(60, 0), Vec2(60, 60), Vec2(0, 60)], color: Color(r: 1, g: 0, b: 0, a: 1))
+        let rtTri = Runtime<S>(
+            state: S(),
+            viewport: Vec2(60, 60),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(60, 60)
+                    .child(el().size(60, 60).bg(Color(r: 0, g: 0, b: 1, a: 1)))
+                    .child(el().size(60, 60).absolute(x: 0, y: 0).shape(triShape))
+            }
+        )
+        let imgTri = try renderer.renderOffscreen(rtTri.renderFrame(at: 0))
+        for d in stride(from: 10, through: 50, by: 5) {
+            let diag = sampleRGBA(imgTri, x: d, y: d)
+            #expect(diag.r > 240 && diag.b < 15)
+        }
+    }
+
+    @Test("EffectSite bleed scissor, rounded/faded layer compositing, and sRGB blending parity")
+    func effectBleedScissorAndSrgbLayerParity() throws {
+        let renderer = try MetalRenderer()
+        let shaderSrc = """
+        #include <metal_stdlib>
+        using namespace metal;
+        vertex float4 eff_vs(uint vid [[vertex_id]]) {
+            float2 pos[3] = { float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0) };
+            return float4(pos[vid], 0.0, 1.0);
+        }
+        fragment float4 eff_fs() { return float4(0.0, 1.0, 0.0, 1.0); }
+        """
+        let lib = try renderer.device.makeLibrary(source: shaderSrc, options: nil)
+        let vsFn = lib.makeFunction(name: "eff_vs")
+        let fsFn = lib.makeFunction(name: "eff_fs")
+        var pipelines: [MTLPixelFormat: MTLRenderPipelineState] = [:]
+
+        struct S {}
+        let rt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(100, 100),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(100, 100)
+                    .bg(.black)
+                    .child(
+                        col()
+                            .size(60, 60)
+                            .absolute(x: 20, y: 20)
+                            .clipRounded(20)
+                            .opacity(0.5)
+                            .child(el().size(30, 30).absolute(x: 15, y: 15).effect(7).effectBleed(5))
+                    )
+            }
+        )
+
+        var hookFrame = rt.renderFrame(at: 0)
+        hookFrame.srgbBlend = true
+        let img = try renderer.renderOffscreen(hookFrame, hook: { encoder, site in
+            // Verify bleed bounds are exposed and site operates inside the rounded faded layer;
+            // renderer already armed encoder's scissor rect to bleed+clip bounds!
+            #expect(abs(site.instance.params.z - 5) < 1e-3)
+            #expect(site.inLayer == true)
+            let pso: MTLRenderPipelineState
+            if let cached = pipelines[site.pixelFormat] {
+                pso = cached
+            } else {
+                let pDesc = MTLRenderPipelineDescriptor()
+                pDesc.vertexFunction = vsFn
+                pDesc.fragmentFunction = fsFn
+                pDesc.colorAttachments[0].pixelFormat = site.pixelFormat
+                pso = try! renderer.device.makeRenderPipelineState(descriptor: pDesc)
+                pipelines[site.pixelFormat] = pso
+            }
+            encoder.setRenderPipelineState(pso)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        })
+        // Outside bleed rect (x=25, y=50 is inside parent 20..80 but left of effect 35-bleed 5 = 30) must stay black due to bleed scissor!
+        #expect(sampleRGBA(img, x: 25, y: 50).g < 20)
+        // Layer center (50, 50) draws green attenuated by parent opacity(0.5) with srgbBlend enabled
+        let mid = sampleRGBA(img, x: 50, y: 50)
+        #expect(mid.g > 100 && mid.g < 220)
+    }
+
+    @Test("El.cache matches uncached output, skips re-rasterization on ancestor Live offset, invalidates on state/animation, and updates imageRevision")
+    func layerCacheAndImageRevisionParity() throws {
+        let renderer = try MetalRenderer()
+
+        struct S {
+            var color: Color = Color(r: 0, g: 0.8, b: 0.2, a: 1)
+            var active: Bool = false
+        }
+        let liveShift = Live<Vec2>(.zero)
+
+        let rtCached = Runtime<S>(
+            state: S(),
+            viewport: Vec2(120, 80),
+            pixelScale: 1.0,
+            view: { state, _ in
+                col()
+                    .size(120, 80)
+                    .bg(.black)
+                    .child(
+                        col()
+                            .size(40, 40)
+                            .liveOffset(liveShift.binding)
+                            .child(
+                                col()
+                                    .size(40, 40)
+                                    .cache(true)
+                                    .cacheKey(0xABCD)
+                                    .child(
+                                        col()
+                                            .size(40, 40)
+                                            .rounded(8)
+                                            .bg(state.color)
+                                            .border(2, .white)
+                                            .child(
+                                                el()
+                                                    .size(8, 8)
+                                                    .bg(.white)
+                                                    .offset(state.active ? 20 : 0, 0)
+                                                    .animate(Spring(duration: 0.2, bounce: 0))
+                                            )
+                                    )
+                            )
+                    )
+            }
+        )
+
+        let rtUncached = Runtime<S>(
+            state: S(),
+            viewport: Vec2(120, 80),
+            pixelScale: 1.0,
+            view: { state, _ in
+                col()
+                    .size(120, 80)
+                    .bg(.black)
+                    .child(
+                        col()
+                            .size(40, 40)
+                            .liveOffset(liveShift.binding)
+                            .child(
+                                el()
+                                    .size(40, 40)
+                                    .rounded(8)
+                                    .bg(state.color)
+                                    .border(2, .white)
+                            )
+                    )
+            }
+        )
+
+        // 1. Frame 0 cache miss matches uncached baseline
+        let imgUncached = try renderer.renderOffscreen(rtUncached.renderFrame(at: 0))
+        let imgFirst = try renderer.renderOffscreen(rtCached.renderFrame(at: 0))
+        #expect(sampleRGBA(imgFirst, x: 20, y: 20) == sampleRGBA(imgUncached, x: 20, y: 20))
+        let statsMiss = renderer.layerStats()
+        #expect(statsMiss.misses >= 1)
+        #expect(statsMiss.cachedLayers >= 1)
+
+        // 2. Move ancestor Live<Vec2> offset: hits cached texture without extra layer pass & translates pixels
+        liveShift.snap(Vec2(40, 10))
+        let rfHit = rtCached.renderFrame(at: 0.02)
+        let imgHit = try renderer.renderOffscreen(rfHit)
+        let statsHit = renderer.layerStats()
+        #expect(statsHit.hits >= 1)
+        #expect(statsHit.extraPasses == 0)
+        #expect(sampleRGBA(imgHit, x: 60, y: 30).g > 150)
+        #expect(sampleRGBA(imgHit, x: 15, y: 15).g < 20)
+
+        // 3. State change invalidates signature -> re-rasterizes with new blue color
+        rtCached.update(at: 0.04) { s, _ in s.color = Color(r: 0, g: 0.2, b: 0.9, a: 1) }
+        let imgInvalidated = try renderer.renderOffscreen(rtCached.renderFrame(at: 0.04))
+        #expect(sampleRGBA(imgInvalidated, x: 60, y: 30).b > 150)
+        #expect(renderer.layerStats().misses > statsHit.misses)
+
+        // 4. Child spring active -> bypasses cache (extraPasses == 0, draws live); settles -> re-caches
+        rtCached.update(at: 0.05) { s, _ in s.active = true }
+        _ = try renderer.renderOffscreen(rtCached.renderFrame(at: 0.08))
+        #expect(renderer.layerStats().extraPasses == 0)
+
+        _ = try renderer.renderOffscreen(rtCached.renderFrame(at: 5.0))
+        let missesSettled = renderer.layerStats().misses
+        _ = try renderer.renderOffscreen(rtCached.renderFrame(at: 5.05))
+        #expect(renderer.layerStats().hits > statsHit.hits)
+        #expect(renderer.layerStats().misses == missesSettled)
+
+        // 5. Cache budget eviction + giveBack residentCaches
+        renderer.setLayerCacheBudget(1)
+        _ = try renderer.renderOffscreen(rtCached.renderFrame(at: 5.1))
+        renderer.giveBack(all: true, residentCaches: true)
+        #expect(renderer.layerStats().cachedLayers == 0)
+        renderer.setLayerCacheBudget(64 * 1024 * 1024)
+
+        // 6. RenderFrame.imageRevision uploads new atlas texels without recreating texture
+        let redAtlas = RGBA8Atlas(width: 4, height: 4, texels: Array(repeating: 0, count: 64).enumerated().map { idx, _ in
+            switch idx % 4 {
+            case 0: return 255
+            case 3: return 255
+            default: return 0
+            }
+        })
+        let blueAtlas = RGBA8Atlas(width: 4, height: 4, texels: Array(repeating: 0, count: 64).enumerated().map { idx, _ in
+            switch idx % 4 {
+            case 2, 3: return 255
+            default: return 0
+            }
+        })
+        let imgInst = RenderInstance(
+            rect: SIMD4<Float>(0, 0, 20, 20),
+            fill: SIMD4<Float>(1, 1, 1, 1),
+            params: SIMD4<Float>(0, KIND_IMAGE, 0.5, 1),
+            uv: SIMD4<Float>(0, 0, 1, 1)
+        )
+        let imgFrame1 = RenderFrame(width: 20, height: 20, clearColor: SIMD4<Float>(0, 0, 0, 1), images: redAtlas, imageRevision: 10, instances: [imgInst])
+        let outRed = try renderer.renderOffscreen(imgFrame1)
+        #expect(sampleRGBA(outRed, x: 10, y: 10).r > 200 && sampleRGBA(outRed, x: 10, y: 10).b < 20)
+
+        let imgFrame2 = RenderFrame(width: 20, height: 20, clearColor: SIMD4<Float>(0, 0, 0, 1), images: blueAtlas, imageRevision: 11, instances: [imgInst])
+        let outBlue = try renderer.renderOffscreen(imgFrame2)
+        #expect(sampleRGBA(outBlue, x: 10, y: 10).b > 200 && sampleRGBA(outBlue, x: 10, y: 10).r < 20)
+    }
+
+    @Test("All MSL render shader libraries compile via ShaderLibraryCache and analytic/crisp shadows match WGSL")
+    func analyticShadowAndShaderLibraryParity() throws {
+        // 1. shader_tests.rs equivalent: compile and verify required entrypoints for all core MSL shaders
+        let device = try #require(MTLCreateSystemDefaultDevice())
+        let shaderLib = try ShaderLibraryCache.load(named: "shader", source: RenderShaders.shaderMSL, requiredFunction: "vs_springs", on: device)
+        #expect(shaderLib.makeFunction(name: "vs") != nil)
+        #expect(shaderLib.makeFunction(name: "fs") != nil)
+
+        let layerBlurLib = try ShaderLibraryCache.load(named: "layer_blur", source: RenderShaders.layerBlurMSL, requiredFunction: "layer_blur_vs", on: device)
+        #expect(layerBlurLib.makeFunction(name: "layer_blur_fs") != nil)
+
+        let bBlurLib = try ShaderLibraryCache.load(named: "backdrop_blur", source: RenderShaders.backdropBlurMSL, requiredFunction: "backdrop_blur_vs", on: device)
+        #expect(bBlurLib.makeFunction(name: "backdrop_blur_down") != nil)
+        #expect(bBlurLib.makeFunction(name: "backdrop_blur_up") != nil)
+
+        let bCompLib = try ShaderLibraryCache.load(named: "backdrop_composite", source: RenderShaders.backdropCompositeMSL, requiredFunction: "backdrop_composite_vs", on: device)
+        #expect(bCompLib.makeFunction(name: "backdrop_composite_fs") != nil)
+
+        // 2. Analytic rounded shadow parity (#266 item 1): large straight edge vs corner curvature & symmetric blur falloff
+        let renderer = try MetalRenderer()
+        struct S {}
+        let rtAnalytic = Runtime<S>(
+            state: S(),
+            viewport: Vec2(120, 100),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(120, 100)
+                    .child(el().size(120, 100).bg(.white))
+                    .child(
+                        el()
+                            .size(80, 60)
+                            .absolute(x: 20, y: 20)
+                            .rounded(14)
+                            .shadow(Shadow(x: 0, y: 0, blur: 4, color: .black))
+                    )
+            }
+        )
+        let img = try renderer.renderOffscreen(rtAnalytic.renderFrame(at: 0))
+
+        // Interior center (60, 50) hits SHADOW_INSIDE (0.99863125 -> ~5 sRGB over white)
+        let center = sampleRGBA(img, x: 60, y: 50)
+        #expect(center.r >= 3 && center.r <= 7 && center.g <= 7 && center.b <= 7)
+
+        // Straight edge midpoint (60, 20) is symmetric with bottom edge (60, 79) and much darker than outer rounded corner (21, 21)
+        let topMid = sampleRGBA(img, x: 60, y: 20)
+        let botMid = sampleRGBA(img, x: 60, y: 79)
+        let cornerPx = sampleRGBA(img, x: 21, y: 21)
+        #expect(abs(Int(topMid.r) - Int(botMid.r)) <= 6)
+        #expect(cornerPx.r > topMid.r + 30)
+
+        // 3. Crisp outer shadow (blur == 0) via Runtime (#266 item 6)
+        let rtCrisp = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 80),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(80, 80)
+                    .child(el().size(80, 80).bg(.white))
+                    .child(
+                        el()
+                            .size(30, 30)
+                            .absolute(x: 20, y: 20)
+                            .bg(Color(r: 1, g: 0, b: 0, a: 1))
+                            .shadow(Shadow(x: 6, y: 6, blur: 0, color: .black))
+                    )
+            }
+        )
+        let crispImg = try renderer.renderOffscreen(rtCrisp.renderFrame(at: 0))
+        // Exposed crisp shadow offset (+6, +6) at (52, 52) is pure black; untouched (58, 58) is pure white
+        #expect(sampleRGBA(crispImg, x: 52, y: 52).r < 10)
+        #expect(sampleRGBA(crispImg, x: 58, y: 58).r > 245)
     }
 }
 #endif
