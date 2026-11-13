@@ -129,21 +129,60 @@ struct RuneStagingTests {
 
     @Test("Direct writer takes buffer writes in place and setDirect keeps first registration")
     func directWriterAndSetDirectFirstWins() {
+        final class SetDirectTargetBuffer: StagingBufferHandle, @unchecked Sendable {
+            var bytes: [UInt8]
+            var length: Int { bytes.count }
+            init(size: Int) { self.bytes = [UInt8](repeating: 0, count: size) }
+            func write(offset: Int, from data: UnsafeRawBufferPointer) {
+                for i in 0..<data.count { bytes[offset + i] = data[i] }
+            }
+        }
+        final class CallCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _count = 0
+            var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+            func increment() { lock.lock(); _count += 1; lock.unlock() }
+        }
+
         let backend = InMemoryStagingBackend()
-        let directHook: StagingDirect = { buf, offset, data in
-            guard let mem = buf as? InMemoryStagingBuffer else { return false }
-            mem.write(offset: offset, from: data)
+        let globalFirst = CallCounter()
+        let globalSecond = CallCounter()
+        Staging.setDirect { buf, offset, data in
+            guard let target = buf as? SetDirectTargetBuffer else { return false }
+            globalFirst.increment()
+            target.write(offset: offset, from: data)
             return true
         }
-        let staging = Staging(backend: backend, direct: directHook)
-        let dst = InMemoryStagingBuffer(size: 64)
-        staging.writeBuffer(dst, offset: 8, data: [42, 43, 44, 45])
-        #expect(Array(dst.readBytes()[8..<12]) == [42, 43, 44, 45])
-        #expect(staging.stats.direct == 1)
-        #expect(staging.stats.writes == 1)
-        #expect(staging.stats.bytes == 4)
-        #expect(staging.stats.chunks == 0)
-        #expect(!staging.busy)
+        Staging.setDirect { buf, _, _ in
+            guard buf is SetDirectTargetBuffer else { return false }
+            globalSecond.increment()
+            return true
+        }
+
+        let globalStaging = Staging(backend: backend)
+        let globalDst = SetDirectTargetBuffer(size: 64)
+        globalStaging.writeBuffer(globalDst, offset: 8, data: [42, 43, 44, 45])
+        #expect(Array(globalDst.bytes[8..<12]) == [42, 43, 44, 45])
+        #expect(globalFirst.count == 1)
+        #expect(globalSecond.count == 0)
+        #expect(globalStaging.stats.direct == 1)
+        #expect(globalStaging.stats.writes == 1)
+        #expect(globalStaging.stats.bytes == 4)
+        #expect(globalStaging.stats.chunks == 0)
+        #expect(!globalStaging.busy)
+
+        let instanceCalls = CallCounter()
+        let instanceStaging = Staging(backend: backend, direct: { buf, offset, data in
+            guard let mem = buf as? InMemoryStagingBuffer else { return false }
+            instanceCalls.increment()
+            mem.write(offset: offset, from: data)
+            return true
+        })
+        let dst = InMemoryStagingBuffer(size: 32)
+        instanceStaging.writeBuffer(dst, offset: 4, data: [9, 10, 11])
+        #expect(Array(dst.readBytes()[4..<7]) == [9, 10, 11])
+        #expect(instanceCalls.count == 1)
+        #expect(instanceStaging.stats.direct == 1)
     }
 
     @Test("Queue passthrough backend skips staging chunks")
@@ -155,6 +194,28 @@ struct RuneStagingTests {
         #expect(Array(dst.readBytes()[4..<8]) == [5, 6, 7, 8])
         #expect(staging.stats.chunks == 0)
         #expect(!staging.busy)
+    }
+
+    @Test("Direct callback false fallback and 0-byte writeBuffer early return")
+    func directFallbackAndZeroByteWrite() {
+        let backend = InMemoryStagingBackend()
+        let staging = Staging(backend: backend, direct: { _, _, _ in false })
+        let dst = InMemoryStagingBuffer(size: 16)
+
+        // 0-byte writeBuffer returns early without touching staging chunks or direct callback.
+        staging.writeBuffer(dst, offset: 0, data: [])
+        #expect(staging.stats.chunks == 0)
+        #expect(staging.stats.direct == 0)
+        #expect(!staging.busy)
+
+        // When direct returns false, writeBuffer falls back to chunked staging.
+        staging.writeBuffer(dst, offset: 2, data: [7, 8, 9])
+        #expect(staging.stats.chunks == 1)
+        #expect(staging.stats.direct == 0)
+        let enc = backend.createCommandEncoder()
+        staging.flush(into: enc)
+        backend.submit(enc)
+        #expect(Array(dst.readBytes()[2..<5]) == [7, 8, 9])
     }
 
     #if canImport(Metal)

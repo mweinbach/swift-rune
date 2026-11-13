@@ -537,7 +537,7 @@ final class PerfStoreWriter {
             windowId: sample.window,
             sourceId: sample.source
         ) {
-            recordIncident(nowMs: sample.timestampMs, incident: incident)
+            recordIncident(nowMs: sample.timestampMs, incident: incident, frameSample: sample)
         }
     }
 
@@ -546,7 +546,7 @@ final class PerfStoreWriter {
         stats.prune(nowMs: now)
         let usage = ProcessSampler.sampleUsage()
         for incident in detector.detectProcess(nowMs: now, usage: usage) {
-            recordIncident(nowMs: now, incident: incident)
+            recordIncident(nowMs: now, incident: incident, frameSample: nil)
         }
         if now >= memoryAtMs {
             let memCount = lines.filter { ($0["kind"] as? String) == "memory" }.count
@@ -650,7 +650,7 @@ final class PerfStoreWriter {
         }
     }
 
-    private func recordIncident(nowMs: UInt64, incident: Incident) {
+    private func recordIncident(nowMs: UInt64, incident: Incident, frameSample: FrameSample?) {
         guard detector.admit(nowMs: nowMs, incident: incident) else { return }
         let slot = Int(incidentsCount % UInt64(PerfFileRecorder.incidentSlots))
         let name = String(format: "perf-incident-%02d.json", slot)
@@ -662,6 +662,8 @@ final class PerfStoreWriter {
             hookDroppedCount += 1
         }
 
+        let evidenceJSON = Self.structuredEvidence(for: incident, frameSample: frameSample)
+
         let payload: [String: Any] = [
             "schema": 1,
             "app": config.app,
@@ -672,12 +674,35 @@ final class PerfStoreWriter {
             "rule": incident.kind.rawValue,
             "window": incident.window,
             "source": incident.source as Any? ?? NSNull(),
-            "evidence": incident.evidence,
+            "evidence": evidenceJSON,
             "history": stats.recentFrames.map(Self.sampleDictionary),
             "dropped_samples": health.droppedCount,
         ]
         pendingIncidents.append((name: name, payload: payload))
         flushDue = Date().addingTimeInterval(PerfFileRecorder.quietFlushSeconds)
+    }
+
+    internal static func structuredEvidence(for incident: Incident, frameSample: FrameSample?) -> [String: Any] {
+        switch incident.kind {
+        case .longFrames, .stall:
+            let frameObj: Any = frameSample.map(Self.sampleDictionary) ?? incident.evidence
+            return [
+                "frame": frameObj,
+                "confidence": incident.evidence["confidence"] ?? "measured work; cause unknown",
+                "next_measurement": incident.evidence["next_measurement"] ?? "capture update/compositor phases for this window and source",
+            ]
+        case .memoryGrowth, .fdGrowth:
+            let floors: [UInt64] = (incident.evidence["minute_floors"] ?? "")
+                .split(separator: ",")
+                .compactMap { UInt64($0) }
+            let growth = UInt64(incident.evidence["growth_bytes"] ?? incident.evidence["growth_fds"] ?? "") ?? 0
+            return [
+                "minute_floors": floors,
+                "growth": growth,
+                "confidence": incident.evidence["confidence"] ?? "suspected growth, not a proven leak",
+                "next_measurement": incident.evidence["next_measurement"] ?? "repeat view open/close cycles; check whether footprint and descriptors plateau",
+            ]
+        }
     }
 
     private func notifyHook(url: URL) {
@@ -753,7 +778,7 @@ final class PerfStoreWriter {
             "work_ms": s.workMs as Any? ?? NSNull(),
             "input_to_frame_ms": s.inputToFrameMs as Any? ?? NSNull(),
             "gpu_ms": s.gpuMs as Any? ?? NSNull(),
-            "allocated_bytes": s.allocatedBytes as Any? ?? NSNull(),
+            "ui_allocated_bytes": s.allocatedBytes as Any? ?? NSNull(),
             "source": s.source as Any? ?? NSNull(),
         ]
     }

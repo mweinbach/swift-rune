@@ -123,6 +123,12 @@ struct RunePerfUpstreamTests {
         }
         let fdFindings = fdDetector.detectProcess(nowMs: 300_000, usage: ProcessUsage(openFDs: 150))
         #expect(fdFindings.first?.kind == .fdGrowth)
+        if let fdFinding = fdFindings.first {
+            let structured = PerfStoreWriter.structuredEvidence(for: fdFinding, frameSample: nil)
+            #expect((structured["minute_floors"] as? [UInt64]) == [100, 110, 120, 130, 140])
+            #expect((structured["growth"] as? UInt64) == 40)
+            #expect((structured["confidence"] as? String) == "suspected growth, not a proven leak")
+        }
     }
 
     @Test func fileWriterPublishesBoundedIncidentsSnapshotAndRotatesLogs() throws {
@@ -167,10 +173,28 @@ struct RunePerfUpstreamTests {
         let snapData = try Data(contentsOf: dir.appendingPathComponent("perf.json"))
         let snap = try #require(try JSONSerialization.jsonObject(with: snapData) as? [String: Any])
         let frames = try #require(snap["frames"] as? [String: Any])
+        #expect(abs(((snap["slow_ms"] as? NSNumber)?.doubleValue ?? 0) - (1000.0 / 60.0)) < 1e-12)
         #expect((frames["total"] as? NSNumber)?.intValue == 40)
         #expect((snap["version"] as? String) == "1.0")
         #expect(frames["ui_allocated_bytes"] is NSNull)
         #expect((snap["write_errors"] as? NSNumber)?.intValue == 0)
+
+        let incident0Data = try Data(contentsOf: dir.appendingPathComponent("perf-incident-00.json"))
+        let incident0 = try #require(try JSONSerialization.jsonObject(with: incident0Data) as? [String: Any])
+        let evidence = try #require(incident0["evidence"] as? [String: Any])
+        let evidenceFrame = try #require(evidence["frame"] as? [String: Any])
+        #expect((evidenceFrame["work_ms"] as? NSNumber)?.doubleValue == 301.0)
+        #expect(evidenceFrame.keys.contains("ui_allocated_bytes"))
+        #expect(!evidenceFrame.keys.contains("allocated_bytes"))
+        #expect((evidence["confidence"] as? String) == "measured work; cause unknown")
+        #expect((evidence["next_measurement"] as? String) != nil)
+
+        let logText = try String(contentsOf: dir.appendingPathComponent("perf.log"), encoding: .utf8)
+        let firstLineData = try #require(logText.split(separator: "\n").first.map { Data($0.utf8) })
+        let firstLine = try #require(try JSONSerialization.jsonObject(with: firstLineData) as? [String: Any])
+        let logFrame = try #require(firstLine["frame"] as? [String: Any])
+        #expect(logFrame.keys.contains("ui_allocated_bytes"))
+        #expect(!logFrame.keys.contains("allocated_bytes"))
 
         // Draining the channel allows subsequent incident notifications to succeed (no lifetime cap).
         writer.accept(FrameSample(window: 99, seq: 99, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 200_000))
@@ -296,12 +320,13 @@ struct RunePerfUpstreamTests {
             close(lockFd)
         }
 
-        let blockedRecorder = try PerfFileRecorder.start(config: PerfConfig(directory: contendedDir, app: "replacement"))
+        var blockedRecorder: PerfFileRecorder? = try PerfFileRecorder.start(config: PerfConfig(directory: contendedDir, app: "replacement"))
         for i in 0..<1_000 {
-            _ = blockedRecorder.record(FrameSample(window: 1, seq: UInt64(i), outcome: .skipped))
+            _ = blockedRecorder?.record(FrameSample(window: 1, seq: UInt64(i), outcome: .skipped))
         }
-        #expect(blockedRecorder.droppedSamples >= 744)
-        blockedRecorder.shutdown()
+        #expect(blockedRecorder?.droppedSamples == 744)
+        // Drop without calling shutdown() so deinit cancels the blocked flock wait cleanly.
+        blockedRecorder = nil
         #expect(!FileManager.default.fileExists(atPath: contendedDir.appendingPathComponent("perf.json").path))
     }
 
@@ -337,8 +362,12 @@ struct RunePerfUpstreamTests {
         }
         #expect(reg.allValues().count == GaugeRegistry.maxGauges)
 
-        // Counting allocator parity
+        // Counting allocator parity (including unknown-before-install, takeAllocatedBytes delta, big blocks, 8-thread isolation)
         let alloc = ProcessCountingAllocator()
+        #expect(alloc.threadAllocatedBytes() == nil)
+        #expect(alloc.takeAllocatedBytes() == nil)
+        #expect(alloc.heap() == nil)
+
         alloc.tagThread("audio")
         alloc.recordAlloc(size: 128)
         alloc.recordRealloc(oldSize: 128, newSize: 256)
@@ -347,6 +376,39 @@ struct RunePerfUpstreamTests {
         #expect(alloc.threadAllocations() == 2)
         #expect(alloc.heap()?.liveBytes == 0)
         #expect(alloc.heap()?.peakBytes == 256)
+        #expect(alloc.heap()?.largestBytes == 256)
+
+        // First takeAllocatedBytes call establishes baseline and returns nil; subsequent calls return per-thread delta.
+        #expect(alloc.takeAllocatedBytes() == nil)
+        alloc.recordAlloc(size: 4096)
+        #expect(alloc.takeAllocatedBytes() == 4096)
+        #expect(alloc.takeAllocatedBytes() == 0)
+
+        let bigSize = ProcessCountingAllocator.bigBlockThreshold
+        alloc.recordAlloc(size: bigSize)
+        #expect(alloc.heap()?.bigLiveBytes == Int64(bigSize))
+        #expect(alloc.heap()?.bigBlocks == 1)
+        #expect(alloc.heap()?.largestBytes == bigSize)
+        alloc.recordDealloc(size: bigSize)
+        #expect(alloc.heap()?.bigLiveBytes == 0)
+
+        let isoAlloc = ProcessCountingAllocator()
+        isoAlloc.recordAlloc(size: 1)
+        _ = isoAlloc.takeAllocatedBytes()
+        let group = DispatchGroup()
+        let q = DispatchQueue(label: "runeperf.thread-iso", attributes: .concurrent)
+        for _ in 0..<8 {
+            group.enter()
+            q.async {
+                for _ in 0..<10_000 {
+                    isoAlloc.recordAlloc(size: 128)
+                }
+                group.leave()
+            }
+        }
+        group.wait()
+        #expect(isoAlloc.takeAllocatedBytes() == 0)
+        #expect((isoAlloc.heap()?.liveBytes ?? 0) >= Int64(8 * 10_000 * 128))
     }
 
     @Test func procwatchWatcherWarningsReportGateLateSamplesAndExitedThreadBusiest() {

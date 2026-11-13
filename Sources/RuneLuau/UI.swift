@@ -1057,6 +1057,7 @@ internal enum LuauUIBridge {
         var onPressVal: LuauValue? = nil
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
+        var isSelectable = false
     }
 
     private static func propNum(_ v: LuauValue, _ name: String) throws -> Float {
@@ -1101,8 +1102,10 @@ internal enum LuauUIBridge {
 
     private static func mapRole(_ s: String) -> ElementRole? {
         switch s {
-        case "none", "group", "region", "list": return .group
-        case "button", "link": return .button
+        case "none", "group", "list": return .group
+        case "region": return .region
+        case "button": return .button
+        case "link": return .link
         case "switch": return .switchControl
         case "checkbox": return .checkbox
         case "radio": return .radio
@@ -1112,7 +1115,8 @@ internal enum LuauUIBridge {
         case "progress", "progressbar": return .progress
         case "listitem": return .listItem
         case "heading": return .heading
-        case "dialog", "alert": return .dialog
+        case "dialog": return .dialog
+        case "alert": return .alert
         case "menu": return .menu
         case "menuitem": return .menuItem
         case "img": return .image
@@ -1203,7 +1207,13 @@ internal enum LuauUIBridge {
     @inline(never)
     private static func applyVisualProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>, state: inout ApplyPropState, env: UIRenderEnv) throws -> Bool {
         switch k {
-        case "key": state.keyStr = try propStr(v, k)
+        case "key":
+            switch v {
+            case .string(let s): state.keyStr = s
+            case .number(let n): state.keyStr = LuauValue.number(n).displayString
+            default:
+                throw LuauRuntimeError(value: .string("key must be a string or number, got \(v.typeName)"))
+            }
         case "opacity": el = el.opacity(try propNum(v, k))
         case "label": el = el.label(try propStr(v, k))
         case "help": el = el.help(try propStr(v, k))
@@ -1223,7 +1233,7 @@ internal enum LuauUIBridge {
             let c3 = Float(ct.rawGet(4).coercedNumber ?? 0)
             el = el.corners(c0, c1, c2, c3)
         case "clip":
-            if try propFlag(v, k) { el = el.clip(true) }
+            if try propFlag(v, k) { el = el.clipSoft(0) }
         case "scrollY": state.scrollY = try propFlag(v, k)
         case "scrollX": state.scrollX = try propFlag(v, k)
         case "stickBottom": state.stickBottom = try propFlag(v, k)
@@ -1269,8 +1279,10 @@ internal enum LuauUIBridge {
         case "tracking": state.textStyle.letterSpacing = try propNum(v, k)
         case "mono":
             if try propFlag(v, k) { state.textStyle.family = .monospace }
-        case "tabular", "selectable":
-            _ = try propFlag(v, k)
+        case "tabular":
+            if try propFlag(v, k) { state.textStyle = state.textStyle.features("'tnum' 1") }
+        case "selectable":
+            state.isSelectable = try propFlag(v, k)
         case "noWrap":
             if try propFlag(v, k) { state.textStyle.wrap = .noWrap }
         case "truncate":
@@ -1287,9 +1299,15 @@ internal enum LuauUIBridge {
             if try propFlag(v, k) { el = el.focusable(true) }
         case "disabled":
             state.isDisabled = try propFlag(v, k)
-            if state.isDisabled { el = el.inert(true) }
+            if state.isDisabled { el = el.disabled(true) }
         case "selected":
             let sel = try propFlag(v, k)
+            if sel {
+                if let c = env.palette("selected", env.dark) {
+                    el = el.bg(c)
+                }
+                el = el.focusSelected(true)
+            }
             el = el.itemSelected(sel).selected(sel ? "true" : nil)
         case "fadeOut":
             _ = try propFlag(v, k)
@@ -1307,20 +1325,19 @@ internal enum LuauUIBridge {
             }
             env.warnOnce("hoverTransition has no effect on Swift El yet")
         case "hoverGroup":
-            _ = try propFlag(v, k)
-            env.warnOnce("hoverGroup has no effect on Swift El yet")
+            if try propFlag(v, k) { el = el.hoverGroup() }
         case "hoverGroupColor":
-            _ = try env.resolveColor(try propStr(v, k))
-            env.warnOnce("hoverGroupColor has no effect on Swift El yet")
+            el = el.groupColor(try env.resolveColor(try propStr(v, k)))
         case "revealOnHover":
-            _ = try propFlag(v, k)
-            env.warnOnce("revealOnHover has no effect on Swift El yet")
+            if try propFlag(v, k) { el = el.groupOpacity(0, 1) }
         case "helpSide":
             switch try propStr(v, k) {
-            case "top", "right", "bottom", "left": break
+            case "top": el = el.helpSide(.top)
+            case "right": el = el.helpSide(.right)
+            case "bottom": el = el.helpSide(.bottom)
+            case "left": el = el.helpSide(.left)
             case let other: throw LuauRuntimeError(value: .string("helpSide must be top, right, bottom or left, got \(other)"))
             }
-            env.warnOnce("helpSide has no effect on Swift El yet")
         case "onPress": state.onPressVal = v
         case "onHover": state.onHoverVal = v
         case "role":
@@ -1360,6 +1377,9 @@ internal enum LuauUIBridge {
         }
         if isText {
             el = el.font(state.textStyle).color(state.textColor ?? env.defaultTextColor)
+            if state.isSelectable {
+                el = el.selectable(true)
+            }
         } else if let c = state.textColor {
             el = el.color(c)
         }

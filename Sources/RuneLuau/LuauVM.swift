@@ -101,6 +101,7 @@ public final class LuauVM: @unchecked Sendable {
         let thread = currentThread
         let targetFrameDepth = thread.frames.count
         let savedStackCount = thread.stack.count
+        let savedMarkCount = markStack.count
         pushFrame(thread: thread, closure: closure, args: args, expectedResults: -1)
         do {
             let result = try runLoop(thread: thread, stopAtFrameDepth: targetFrameDepth)
@@ -115,6 +116,9 @@ public final class LuauVM: @unchecked Sendable {
             }
         } catch {
             thread.closeUpvalues(fromStackIndex: savedStackCount)
+            if markStack.count > savedMarkCount {
+                markStack.removeLast(markStack.count - savedMarkCount)
+            }
             if thread.frames.count > targetFrameDepth {
                 thread.frames.removeLast(thread.frames.count - targetFrameDepth)
             }

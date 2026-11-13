@@ -441,10 +441,11 @@ struct RuneLuauParityTests {
         #expect(eachErr.contains("boom in each"))
 
         let propsEl = script.surface(cx, name: "propsCheck")
-        let rowEl = findElement(propsEl) { $0.role == .button }
+        let rowEl = findElement(propsEl) { $0.role == .link }
         #expect(rowEl != nil)
         let helloEl = findElement(propsEl) { $0.plainText == "hello" }
         #expect(helloEl?.textStyle.wrap == .noWrap)
+        #expect(helloEl?.textStyle.features == "'tnum' 1")
         #expect(script.log.contains { $0.level == .warn && $0.message == "unknown prop unknownPropOne" })
 
         let roleErr = collectTexts(script.surface(cx, name: "badRole")).joined(separator: " ")
@@ -580,5 +581,44 @@ struct RuneLuauParityTests {
 
         let badEl = script.renderUncached(name: "badVersion", dark: true, LuauTestState.self)
         #expect(findElement(badEl) { $0.keyId == "luau-error" } != nil)
+    }
+
+    @Test("Numeric element keys and markStack unwind after thrown call (#464)")
+    func numericElementKeysAndMarkStackUnwind() throws {
+        let script = Script(
+            name: "num_key_and_markstack",
+            sources: Sources.single("""
+                local ui = require("@rune/ui")
+                local function failVararg(...)
+                    error("boom")
+                end
+                return {
+                    render = function(cx)
+                        return ui.col({
+                            ui.col({ key = 42 }, {
+                                ui.text("item", { key = 7 }),
+                            }),
+                        })
+                    end,
+                    probe = function()
+                        local ok = pcall(function()
+                            return { 1, 2, failVararg("a", "b") }
+                        end)
+                        local after = { "x", "y" }
+                        return { ok = ok, count = #after, first = after[1], second = after[2] }
+                    end,
+                }
+                """)
+        )
+        let cx = Cx<LuauTestState>(viewport: Vec2(400, 200))
+        let root = script.surface(cx, name: "render")
+        #expect(findElement(root) { $0.keyId == "42" } != nil)
+        #expect(findElement(root) { $0.keyId == "7" }?.plainText == "item")
+
+        let probe = try script.query("probe")
+        #expect(probe.get("ok").asBool == false)
+        #expect(probe.get("count").asInt64 == 2)
+        #expect(probe.get("first").asString == "x")
+        #expect(probe.get("second").asString == "y")
     }
 }
