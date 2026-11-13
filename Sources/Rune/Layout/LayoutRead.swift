@@ -157,6 +157,7 @@ struct LayoutReadEntry {
 final class LayoutReadCollector {
     let rects: [String: [Float]?]
     var reads: [LayoutReadEntry] = []
+    var viewportRead: Bool = false
 
     init(rects: [String: [Float]?] = [:]) {
         self.rects = rects

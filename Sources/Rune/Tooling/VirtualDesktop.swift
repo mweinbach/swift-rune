@@ -190,6 +190,13 @@ public struct VirtualDesktop: Sendable, Equatable {
 
     /// Resolves `PlaceRequest` onto a virtual display and returns `(displayId, [x, y, width, height])`.
     public func place(request: PlaceRequest, size: (Float, Float)) -> (displayId: UInt32, frame: [Float]) {
+        if let overlayPlacement = request.placement {
+            return placeOverlay(
+                requested: request.display ?? .primary,
+                placement: overlayPlacement,
+                size: (request.size?.x ?? size.0, request.size?.y ?? size.1)
+            )
+        }
         let targetIndex = resolveDisplayIndex(target: request.display ?? .primary)
         let d = displays[targetIndex]
         let w = request.size?.x ?? size.0
@@ -712,6 +719,7 @@ public final class DesktopWindow<State>: DesktopMember {
     private var currentTime: Double = 0
     private var lastScene: RefScene?
     private var pendingClose = false
+    private let appShared: AppShared<State>?
     private let onCloseHook: ((inout State, inout Tx) -> Bool)?
     private let onReopenHook: ((inout State, Bool, inout Tx) -> Bool)?
     private let waker: Waker
@@ -750,6 +758,7 @@ public final class DesktopWindow<State>: DesktopMember {
         rt.onReopen = spec.onReopen
         rt.onFocus = onFocus
         self.runtime = rt
+        self.appShared = spec.appShared
         self.onCloseHook = onClose
         self.onReopenHook = spec.onReopen
         self.keepRunning = spec.keepRunning
@@ -788,23 +797,41 @@ public final class DesktopWindow<State>: DesktopMember {
     public var visible: Bool { life.isShown }
 
     public var hasPending: Bool {
-        runtime.closeWindowRequested || runtime.hasPendingCommit
+        runtime.closeWindowRequested
+            || runtime.hasPendingCommit
+            || runtime.hasPendingActions
     }
 
     public var isStale: Bool {
-        runtime.hasPendingCommit
+        runtime.hasPendingCommit || runtime.hasPendingActions
     }
 
     public func start(desktop: VirtualDesktop) {
         let f = desktop.openAt(position: position, size: (frame[2], frame[3]))
         frame = f
         runtime.viewport = Vec2(f[2], f[3])
+        _ = runtime.setWindowOrigin(Vec2(f[0], f[1]))
     }
 
     public func drain(desktop: VirtualDesktop, t: Double) -> DesktopChanges {
-        _ = desktop
         currentTime = t
-        let changes = DesktopChanges()
+        var changes = DesktopChanges()
+        if let appShared {
+            let drained = appShared.applyStateUpdates(to: runtime, at: t)
+            if let placeReq = drained.place {
+                let (_, placedFrame) = desktop.place(request: placeReq, size: (frame[2], frame[3]))
+                frame = placedFrame
+                runtime.setViewport(Vec2(placedFrame[2], placedFrame[3]))
+                _ = runtime.setWindowOrigin(Vec2(placedFrame[0], placedFrame[1]))
+                if placeReq.activate {
+                    changes.front = true
+                    changes.keys = true
+                }
+            } else if let pos = drained.position {
+                frame = [pos.x, pos.y, frame[2], frame[3]]
+                _ = runtime.setWindowOrigin(pos)
+            }
+        }
         if runtime.closeWindowRequested && !pendingClose {
             pendingClose = true
             close()

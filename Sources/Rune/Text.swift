@@ -651,6 +651,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     private struct IconKey: Hashable {
         var icon: SVGIcon
         var pixelSize: Int
+        var drawnSixtyFourths: UInt8 = 0
     }
 
     private let lock = NSLock()
@@ -1252,8 +1253,9 @@ public final class GlyphAtlas: @unchecked Sendable {
     }
     #endif
 
-    public static func rasterizeIconBitmap(_ icon: SVGIcon, pixelSize: Int) -> [UInt8] {
+    public static func rasterizeIconBitmap(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> [UInt8] {
         let px = max(1, pixelSize)
+        let drawn = min(Float(px), max(1e-4, drawnSize ?? Float(px)))
         #if canImport(CoreGraphics)
         var bitmap = Array<UInt8>(repeating: 0, count: px * px)
         let graySpace = CGColorSpaceCreateDeviceGray()
@@ -1270,7 +1272,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             ctx.setShouldAntialias(true)
             // Flip Y so SVG top-left (0,0) maps to top of bitmap!
             ctx.translateBy(x: 0, y: CGFloat(px))
-            let scale = CGFloat(px) / CGFloat(icon.viewBox)
+            let scale = CGFloat(drawn) / CGFloat(icon.viewBox)
             ctx.scaleBy(x: scale, y: -scale)
 
             for d in icon.paths {
@@ -1303,13 +1305,23 @@ public final class GlyphAtlas: @unchecked Sendable {
         } else {
             resolvedIcon = icon
         }
-        return PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px)
+        return PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px, drawnSize: drawn)
         #endif
     }
 
-    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int) -> Entry {
-        let px = max(4, pixelSize)
-        let key = IconKey(icon: icon, pixelSize: px)
+    public func rasterizeIcon(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> Entry {
+        let px = drawnSize != nil ? max(1, pixelSize) : max(4, pixelSize)
+        let q: UInt8
+        let rasterDrawn: Float?
+        if let d = drawnSize {
+            let clamped = min(Float(px), max(1e-4, d))
+            q = UInt8(min(63, max(0, Int(((Float(px) - clamped) * 64.0).rounded()))))
+            rasterDrawn = Float(px) - Float(q) / 64.0
+        } else {
+            q = 0
+            rasterDrawn = nil
+        }
+        let key = IconKey(icon: icon, pixelSize: px, drawnSixtyFourths: q)
         lock.lock()
         if var cached = iconCache[key] {
             accessCounter &+= 1
@@ -1321,7 +1333,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
         lock.unlock()
 
-        let bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px)
+        let bitmap = Self.rasterizeIconBitmap(icon, pixelSize: px, drawnSize: rasterDrawn)
 
         lock.lock()
         guard let placed = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
