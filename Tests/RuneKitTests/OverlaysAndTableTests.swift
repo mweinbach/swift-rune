@@ -514,11 +514,37 @@ struct OverlaysAndTableTests {
         #expect(rt.state.combo.search.text == "099")
     }
 
-    @Test(
-        "Combobox opening commits and clears prior TextEdit preedit on intra-window focus transfer",
-        .disabled("Blocked on @el: Runtime intra-window focus transfer / tx.focus does not invoke finishComposition() to commit previous TextEdit preedit")
-    )
-    func comboboxOpeningClearsPriorPreeditBlockedOnEl() {}
+    @Test("Combobox opening commits and clears prior TextEdit preedit on intra-window focus transfer")
+    func comboboxOpeningClearsPriorPreedit() throws {
+        var s = ComboApp()
+        s.chosen = "item-199"
+        let rt = makeComboRuntime(s, open: false)
+
+        _ = rt.keyDown(KeyEvent(key: .tab, mods: .none), at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.elements().first(where: \.focused)?.key == "other")
+
+        _ = rt.dispatchImeEvent(.preedit("pending", cursorUTF8: 7..<7, clauses: []), at: 0.08)
+        rt.frame(at: 0.09)
+        #expect(rt.state.other.preedit?.text == "pending")
+
+        let trig = try #require(rt.elements().first { $0.key == "models-value-trigger" }).rect
+        let cx = trig[0] + trig[2] * 0.5
+        let cy = trig[1] + trig[3] * 0.5
+        rt.pointerDown(at: Vec2(cx, cy), at: 0.1)
+        rt.pointerUp(at: Vec2(cx, cy), at: 0.11)
+        rt.frame(at: 0.12)
+        rt.frame(at: 0.13)
+
+        #expect(rt.state.combo.isOpen)
+        #expect(rt.elements().first(where: \.focused)?.key == "models-search")
+        #expect(rt.state.other.preedit == nil)
+
+        _ = rt.keyDown(KeyEvent(key: .text("099"), mods: .none), at: 0.2)
+        rt.frame(at: 0.21)
+        #expect(rt.state.combo.search.text == "099")
+        #expect(rt.state.other.text == "pending")
+    }
 
     @Test("Combobox loops skipping disabled, virtualizes rows, and handles IME/Escape/Scrim focus")
     func comboboxLoopsSkipsDisabledAndReturnsFocus() throws {
@@ -583,9 +609,8 @@ struct OverlaysAndTableTests {
         #expect(triggerAfterScrim.key == "models-value-trigger")
     }
 
-    @Test("Combobox unhandled key modal bubbling & focusVisible return (tests/combobox.rs:108)",
-          .disabled("Blocked on @el: Runtime.swift:6154 skips globalOnKey while modal is open and Runtime never applies tx.requestedFocusVisible"))
-    func comboboxModalKeyBubblingAndFocusVisibleBlockedOnEl() throws {
+    @Test("Combobox unhandled key modal bubbling & focusVisible return (tests/combobox.rs:108)")
+    func comboboxModalKeyBubblingAndFocusVisible() throws {
         let rt = makeComboRuntime()
         func send(_ key: Key, mods: Mods = .none, at t: Double = 0.2) {
             _ = rt.keyDown(KeyEvent(key: key, mods: mods), at: t)
