@@ -861,6 +861,254 @@ struct MarkdownFullParityTests {
         )
         #expect(crlfRoot.invokeSelectionCopy(crlfSel) == crlf)
     }
+
+    @MainActor
+    @Test("Markdown selectable & copySource end-to-end Runtime tests (tests/markdown_copy_source.rs & markdown_select.rs)")
+    func markdownRuntimeSelectAndCopySourceParity() throws {
+        let kit = Kit.neutral(dark: true)
+
+        func glyphCenters(_ rt: Runtime<some Sendable>, pathSuffix: String) -> [Vec2] {
+            guard let el = rt.elements().first(where: { $0.path.hasSuffix(pathSuffix) }) else {
+                return []
+            }
+            let scene = rt.frame(at: rt.currentTime)
+            let scale = max(rt.pixelScale, 1.0)
+            var out: [Vec2] = scene.primitives.compactMap { p -> Vec2? in
+                guard p.kind == .glyph else { return nil }
+                let cx = (p.rect.x + p.rect.z * 0.5) / scale
+                let cy = (p.rect.y + p.rect.w * 0.5) / scale
+                guard cx >= el.rect[0] && cx <= el.rect[0] + el.rect[2]
+                        && cy >= el.rect[1] && cy <= el.rect[1] + el.rect[3] else {
+                    return nil
+                }
+                return Vec2(cx, cy)
+            }
+            out.sort { a, b in
+                let ay = (a.y / 10.0).rounded()
+                let by = (b.y / 10.0).rounded()
+                return ay != by ? ay < by : a.x < b.x
+            }
+            return out
+        }
+
+        func drag(_ rt: Runtime<some Sendable>, from p0: Vec2, to p1: Vec2, t: inout Double) {
+            rt.pointerMove(to: p0, at: t)
+            rt.pointerDown(at: p0, button: .primary, mods: .none, at: t)
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+            for k in 1...6 {
+                let f = Float(k) / 6.0
+                rt.pointerMove(to: Vec2(p0.x + (p1.x - p0.x) * f, p0.y + (p1.y - p0.y) * f), at: t)
+                t += 1.0 / 60.0
+                _ = rt.frame(at: t)
+            }
+            rt.pointerUp(at: p1, button: .primary, mods: .none, at: t)
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+
+        // 1. markdown_copy_source: copying_takes_the_source_of_whole_blocks, a_drag_across_blocks_copies_each_whole,
+        //    without_copy_source_copying_takes_the_drawn_text
+        let copySrcDoc = "# Title\n\nHello **world** and [link](https://x.dev/a).\n\n- alpha\n- [x] beta\n\n```rust\nfn main() {}\n```\n\nLast *line*.\n"
+        struct CopyDocState { var source: Bool }
+        func copyThroughRuntime(_ rt: Runtime<CopyDocState>, t: inout Double, _ action: (inout Tx) -> Void) -> String {
+            rt.update(at: t) { _, tx in action(&tx) }
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+            _ = rt.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: t)
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+            return rt.clipboard.text
+        }
+
+        let copyRT = Runtime<CopyDocState>(state: CopyDocState(source: true), viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { s, _ in
+            col().wFull().p(10.0).child(Markdown(copySrcDoc).selectable(true).copySource(s.source).build(kit).key("note"))
+        }
+        var t = 0.0
+        _ = copyRT.frame(at: t)
+        let b1Path = copyRT.elements().first(where: { $0.path.hasSuffix("@note/@b1") })!.path
+        let b2Path = copyRT.elements().first(where: { $0.path.hasSuffix("@note/@b2") })!.path
+        let b3Path = copyRT.elements().first(where: { $0.path.hasSuffix("@note/@b3") })!.path
+        let alphaPath = copyRT.elements().first(where: { $0.path.hasSuffix("@note/@b2/@i0/@1/@b0") || $0.path.hasSuffix("@note/@b2/@i0/1/@b0") })?.path
+            ?? copyRT.elements().first(where: { $0.path.contains("@note/@b2/@i0") && $0.path.hasSuffix("@b0") })!.path
+
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectAllText("note") } == copySrcDoc)
+        #expect(copyRT.selectedText()?.hasPrefix("Title\n") == true)
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectAllText(b1Path) } == "Hello **world** and [link](https://x.dev/a).")
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectAllText(b2Path) } == "- alpha\n- [x] beta")
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectAllText(b3Path) } == "```rust\nfn main() {}\n```")
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectText(b1Path, range: 6..<11) } == "world")
+        #expect(copyThroughRuntime(copyRT, t: &t) { $0.selectAllText(alphaPath) } == "alpha")
+
+        // Drag across b1..b4 copies raw markdown slice from b1 onward.
+        let b1El = copyRT.elements().first(where: { $0.path == b1Path })!
+        let b4El = copyRT.elements().first(where: { $0.path.hasSuffix("@note/@b4") })!
+        drag(
+            copyRT,
+            from: Vec2(b1El.rect[0] + 30.0, b1El.rect[1] + b1El.rect[3] * 0.5),
+            to: Vec2(b4El.rect[0] + 10.0, b4El.rect[1] + b4El.rect[3] * 0.5),
+            t: &t
+        )
+        let midSel = copyRT.selectedText() ?? ""
+        #expect(midSel.contains("alpha") && !midSel.hasPrefix("Hello"))
+        _ = copyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: t)
+        t += 1.0 / 60.0
+        _ = copyRT.frame(at: t)
+        let expectedTail = String(copySrcDoc.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(copyRT.clipboard.text == expectedTail)
+
+        // Without copySource, Select All copies the drawn text rather than raw Markdown syntax.
+        copyRT.update(at: t) { s, _ in s.source = false }
+        t += 1.0 / 60.0
+        _ = copyRT.frame(at: t)
+        let plainAll = copyThroughRuntime(copyRT, t: &t) { $0.selectAllText("note") }
+        #expect(!plainAll.contains("**world**"))
+        #expect(plainAll.contains("Title") && plainAll.contains("Hello world and link.") && plainAll.contains("fn main() {}") && plainAll.contains("Last line."))
+
+        // 2. an_apps_on_key_sees_cmd_a_before_a_clicked_note
+        struct KeysState { var takes: Bool; var keys: [Key] = [] }
+        for takes in [true, false] {
+            let keyRT = Runtime<KeysState>(
+                state: KeysState(takes: takes),
+                viewport: Vec2(300, 200),
+                pixelScale: 2.0,
+                systemDark: true,
+                onKey: { s, ev, _ in
+                    s.keys.append(ev.key)
+                    return s.takes && ev.key == .command("a")
+                }
+            ) { _, _ in
+                col().wFull().p(10.0).child(Markdown("a\n\nb").selectable(true).build(kit).key("note"))
+            }
+            var kt = 0.0
+            _ = keyRT.frame(at: kt)
+            let p0 = keyRT.elements().first(where: { $0.path.hasSuffix("@note/@b0") })!
+            let clickPt = Vec2(p0.rect[0] + 3.0, p0.rect[1] + p0.rect[3] * 0.5)
+            keyRT.pointerMove(to: clickPt, at: kt)
+            keyRT.pointerDown(at: clickPt, button: .primary, mods: .none, at: kt)
+            keyRT.pointerUp(at: clickPt, button: .primary, mods: .none, at: kt)
+            kt += 1.0 / 60.0
+            _ = keyRT.frame(at: kt)
+            _ = keyRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: kt)
+            kt += 1.0 / 60.0
+            _ = keyRT.frame(at: kt)
+            #expect(keyRT.state.keys == [.command("a")])
+            if takes {
+                #expect(keyRT.selectedText() == nil)
+            } else {
+                #expect(keyRT.selectedText() == "a\nb")
+            }
+        }
+
+        // 3. inline_code_rule_and_crlf_blocks_copy_cleanly (ruled & CRLF portions via Runtime)
+        let ruled = "---\n\nHello **world**\n\n---\n"
+        let ruledRT = Runtime<Int>(state: 0, viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { _, _ in
+            col().wFull().p(10.0).child(Markdown(ruled).selectable(true).copySource(true).build(kit).key("note"))
+        }
+        _ = ruledRT.frame(at: 0.0)
+        ruledRT.update(at: 0.01) { _, tx in tx.selectAllText("note") }
+        _ = ruledRT.frame(at: 0.02)
+        _ = ruledRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
+        #expect(ruledRT.clipboard.text == ruled)
+
+        let crlf = "```rust\r\nfn main() {}\r\n```\r\n\r\n```diff\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```\r\n"
+        let crlfRT = Runtime<Int>(state: 0, viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { _, _ in
+            col().wFull().p(10.0).child(Markdown(crlf).selectable(true).copySource(true).build(kit).key("note"))
+        }
+        _ = crlfRT.frame(at: 0.0)
+        crlfRT.update(at: 0.01) { _, tx in tx.selectAllText("note") }
+        _ = crlfRT.frame(at: 0.02)
+        _ = crlfRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: 0.02)
+        #expect(crlfRT.clipboard.text == crlf)
+        #expect(crlfRT.selectedText() == "fn main() {}\n@@ -1 +1 @@\n-old\n+new")
+
+        // 4. markdown_select: without_selectable_nothing_selects
+        let firstMsg = "Hello **world** and [link](https://x.dev/a).\n\n- alpha\n- beta\n\n```\nfn main() {}\n```\n"
+        let nonSelRT = Runtime<Int>(state: 0, viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { _, _ in
+            col().wFull().gap(24.0).p(10.0).child(Markdown(firstMsg).selectable(false).build(kit).key("m0"))
+        }
+        var nt = 0.0
+        _ = nonSelRT.frame(at: nt)
+        let nPara = glyphCenters(nonSelRT, pathSuffix: "@m0/@b0")
+        let nCode = glyphCenters(nonSelRT, pathSuffix: "@m0/@b2")
+        try #require(nPara.count >= 2 && nCode.count >= 3, "nPara=\(nPara.count) nCode=\(nCode.count) paths=\(nonSelRT.elements().map(\.path))")
+        nonSelRT.pointerMove(to: nPara[1], at: nt)
+        #expect(nonSelRT.currentCursor() == .default)
+        drag(nonSelRT, from: Vec2(nPara[1].x - 3.0, nPara[1].y), to: Vec2(nCode[2].x - 3.0, nCode[2].y), t: &nt)
+        #expect(nonSelRT.selectedText() == nil)
+
+        // 5. markdown_select: highlighted_code_copies_as_plain_text
+        let pyCode = "def f(x):\n    return f\"{x!r}\"  # done"
+        let pyRT = Runtime<Int>(state: 0, viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { _, _ in
+            col().wFull().p(10.0).child(Markdown("```python\n\(pyCode)\n```\n").selectable(true).build(kit).key("m0"))
+        }
+        var pt = 0.0
+        _ = pyRT.frame(at: pt)
+        let pyGlyphs = glyphCenters(pyRT, pathSuffix: "@m0/@b0")
+        try #require(pyGlyphs.count > 4, "pyGlyphs=\(pyGlyphs.count) paths=\(pyRT.elements().map(\.path))")
+        for _ in 0..<2 {
+            pyRT.pointerMove(to: pyGlyphs[1], at: pt)
+            pyRT.pointerDown(at: pyGlyphs[1], button: .primary, mods: .none, at: pt)
+            pyRT.pointerUp(at: pyGlyphs[1], button: .primary, mods: .none, at: pt)
+            pt += 1.0 / 60.0
+            _ = pyRT.frame(at: pt)
+        }
+        #expect(pyRT.selectedText() == "def")
+        _ = pyRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: pt)
+        _ = pyRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: pt)
+        #expect(pyRT.clipboard.text == pyCode)
+
+        // 6. markdown_select: a_drag_selects_from_a_paragraph_into_a_code_block & a_selection_survives_its_message_and_the_next_streaming_in
+        struct StreamMsgs: Sendable, Hashable { var msgs: [String] }
+        let streamRT = Runtime<StreamMsgs>(
+            state: StreamMsgs(msgs: [firstMsg, "Second message"]),
+            viewport: Vec2(480, 800),
+            pixelScale: 2.0,
+            systemDark: true
+        ) { s, _ in
+            col().wFull().gap(24.0).p(10.0).children(
+                s.msgs.enumerated().map { i, m in
+                    memo("m\(i)", m) {
+                        Markdown(m).selectable(true).build(kit).key("m\(i)")
+                    }
+                }
+            )
+        }
+        var st = 0.0
+        _ = streamRT.frame(at: st)
+        let m0Para = glyphCenters(streamRT, pathSuffix: "@m0/@b0")
+        let m0Code = glyphCenters(streamRT, pathSuffix: "@m0/@b2")
+        try #require(m0Para.count >= 2 && m0Code.count >= 3, "m0Para=\(m0Para.count) m0Code=\(m0Code.count) paths=\(streamRT.elements().map(\.path))")
+        streamRT.pointerMove(to: m0Para[1], at: st)
+        #expect(streamRT.currentCursor() == .text)
+        drag(streamRT, from: Vec2(m0Para[1].x - 3.0, m0Para[1].y), to: Vec2(m0Code[2].x - 3.0, m0Code[2].y), t: &st)
+        let m0Dragged = streamRT.selectedText() ?? ""
+        #expect(m0Dragged.hasPrefix("ello world and link.") && m0Dragged.contains("alpha") && m0Dragged.contains("beta") && m0Dragged.contains("fn"))
+        _ = streamRT.keyDown(KeyEvent(key: .command("c"), mods: Mods(cmd: true)), at: st)
+        #expect(streamRT.clipboard.text == m0Dragged)
+        _ = streamRT.keyDown(KeyEvent(key: .command("a"), mods: Mods(cmd: true)), at: st)
+        #expect(streamRT.selectedText()?.contains("Second message") == false)
+        #expect(streamRT.selectedText()?.contains("Hello world and link.") == true)
+
+        // Streaming growth in memo'd messages preserves the active drag selection.
+        st += 0.5
+        _ = streamRT.frame(at: st)
+        let m0Para2 = glyphCenters(streamRT, pathSuffix: "@m0/@b0")
+        let m0Alpha = glyphCenters(streamRT, pathSuffix: "@m0/@b1/@i0")
+        try #require(m0Para2.count >= 2 && m0Alpha.count >= 3, "m0Para2=\(m0Para2.count) m0Alpha=\(m0Alpha.count) paths=\(streamRT.elements().map(\.path))")
+        drag(streamRT, from: Vec2(m0Para2[1].x - 3.0, m0Para2[1].y), to: Vec2(m0Alpha[3].x - 3.0, m0Alpha[3].y), t: &st)
+        let beforeStream = streamRT.selectedText()
+        #expect(beforeStream == "ello world and link.\nal")
+        for chunk in [" streams", " in\n\nand", " on"] {
+            streamRT.update(at: st) { s, _ in
+                s.msgs[1].append(chunk)
+                s.msgs[0].append(chunk)
+            }
+            st += 1.0 / 60.0
+            _ = streamRT.frame(at: st)
+            #expect(streamRT.selectedText() == beforeStream)
+        }
+    }
 }
 
 private final class LockedCollector: @unchecked Sendable {
