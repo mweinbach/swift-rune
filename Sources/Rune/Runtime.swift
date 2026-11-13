@@ -227,6 +227,18 @@ public final class Runtime<State> {
         var clip: MotionRect? = nil
     }
 
+    private struct LiftedFlightSubtree {
+        var node: Presented
+        var inh: PaintInh
+        var ancestorOpacity: Float
+        var ancestorTurn: Turn?
+        var outerTurnClip: MotionRect?
+        var localTurnClip: MotionRect?
+        var parentPath: String?
+        var nearestGroupHovered: Bool
+        var nearestGroupHoverFrac: Float
+    }
+
     private enum PaintScaleMotion: Int, Comparable {
         case still = 0
         case live = 1
@@ -245,18 +257,6 @@ public final class Runtime<State> {
             }
             return (k >= 1.0 / 16.0 && k <= 4.0) ? k : 1.0
         }
-    }
-
-    private struct LiftedFlightSubtree {
-        var node: Presented
-        var inh: PaintInh
-        var ancestorOpacity: Float
-        var ancestorTurn: Turn?
-        var outerTurnClip: MotionRect?
-        var localTurnClip: MotionRect?
-        var parentPath: String?
-        var nearestGroupHovered: Bool
-        var nearestGroupHoverFrac: Float
     }
 
     internal struct DragSession {
@@ -725,6 +725,10 @@ public final class Runtime<State> {
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
     internal var liveFillTargets: [NodeId: Color] = [:]
+    private var customLiveWaker: Waker? = nil
+    private var liveWake: LiveWake
+    private var liveSubscriptions: [LiveSubscription] = []
+    private var livePendingDirty: Bool = false
 
     internal struct VirtualInputEntry {
         var path: String
@@ -816,6 +820,8 @@ public final class Runtime<State> {
         self.reducedMotion = reducedMotion
         self.textSystem = textSystem
         self.waker = waker
+        let defaultWaker = waker
+        self.liveWake = LiveWake { [weak defaultWaker] in defaultWaker?.wake() }
         self.scene = Scene(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
@@ -824,6 +830,12 @@ public final class Runtime<State> {
             Recorder.headlessReset()
             VideoHeadless.reset()
             HeadlessClock.set(0.0)
+        }
+    }
+
+    deinit {
+        for sub in liveSubscriptions {
+            sub.isActive = false
         }
     }
 
@@ -1248,7 +1260,6 @@ public final class Runtime<State> {
         _ = runPoll(at: now)
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
-        _ = takeParityLivePending()
         applyPlaygroundIfNeeded(at: now)
         flushPendingPasteRequests(at: now)
         let (drainedFeedback, drainedExternal) = drainLayoutActions(at: now)
@@ -1441,7 +1452,14 @@ public final class Runtime<State> {
         // Sample Scene & Live property bindings using scaled animation clock
         refreshHoverAndSyncTracks(at: animNow, cut: false)
         let frameOut = scene.frame(at: animNow)
-        let liveActive = updateLiveBindings(at: animNow)
+        let liveActive: Bool
+        if liveVisible {
+            _ = liveWake.takeVisible()
+            liveActive = updateLiveBindings(at: animNow)
+            livePendingDirty = liveActive
+        } else {
+            liveActive = false
+        }
         liveStore.sample(at: animNow)
 
         if !activeTextFlights.isEmpty {
@@ -2877,21 +2895,32 @@ public final class Runtime<State> {
         let childExitOverrides = collectChildExitOverrides(prevNodes: flatNodes, newById: pass.byId, cut: cut)
         syncMotionLoops(specs: pass.loopSpecs, at: now, cut: commitCut)
 
+        for s in liveSubscriptions {
+            s.isActive = false
+        }
+        liveSubscriptions.removeAll(keepingCapacity: true)
         for node in pass.nodes {
             exitingSnapshots[node.nodeId] = node
             if let lt = node.el.liveText {
+                liveSubscriptions.append(lt.subscribe(liveWake))
                 liveTextSeenSeq[node.path] = lt.sequence
             }
             for b in node.el.liveBindings {
-                b.source.subscribe(waker)
+                liveSubscriptions.append(b.source.subscribe(liveWake))
             }
+            if let px = node.el.pixelsPayload {
+                liveSubscriptions.append(px.subscribe(liveWake))
+            }
+        }
+        if liveSubscriptions.isEmpty {
+            _ = liveWake.takeVisible()
+            livePendingDirty = false
         }
 
         let prevFlatNodesSnapshot = flatNodes
         flatNodes = pass.nodes
         nodeByPath = pass.byPath
         nodeById = pass.byId
-        refreshParityLiveSubscriptions()
         lastCommittedSpecs = specs
         layoutCommitGen &+= 1
         layoutKeyIndex.invalidate()
@@ -3401,6 +3430,7 @@ public final class Runtime<State> {
             }
         }
         scene.commit(lastCommittedSpecs, at: now, initialCut: false)
+        dispatchScrollCallbacks(at: now)
     }
 
     private func drainLayoutActions(at now: Double) -> (ranFeedback: Bool, ranExternal: Bool) {
@@ -6297,8 +6327,8 @@ public final class Runtime<State> {
                     )
                     var tx = makeTx(at: now, button: drag.button)
                     onDrag(&state, d, &tx)
-                    if !tx.askedMotion { tx.instant() }
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                    if !tx.askedMotion && !tx.liveOnlyRequested { tx.instant() }
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onDrag")
                     armKitDragRepeatIfRequested(path: drag.path, windowPos: pos, mods: mods, button: drag.button, now: now)
                 }
             }
@@ -6550,6 +6580,7 @@ public final class Runtime<State> {
                 focusedPath = nil
                 focusedKey = nil
                 imeReset = true
+                downFocusChanged = true
             }
         }
 
@@ -7739,7 +7770,13 @@ public final class Runtime<State> {
 
     // MARK: - Private Helpers
 
-    internal func applyTx(_ tx: Tx, at now: Double, markDirtyIfNotLiveOnly: Bool = true, external: Bool = true, liveOnlyLabel: String = "handler") {
+    internal func applyTx(
+        _ tx: Tx,
+        at now: Double,
+        markDirtyIfNotLiveOnly: Bool = true,
+        external: Bool = true,
+        liveOnlyLabel: String = "handler"
+    ) {
         if let cb = tx.clipboardWrite {
             clipboard = cb
             richClipboard = RichClipboardPayload(content: cb)
@@ -7863,15 +7900,17 @@ public final class Runtime<State> {
         for prefix in tx.invalidateMemoPrefixes {
             MemoCache.shared.invalidateByPrefix(prefix)
         }
-        pendingCommitKind = pendingCommitKind.merge(tx.commitKind)
-        if let m = tx.motionSource {
-            pendingCommitMotion = m
-        }
-        if let cm = tx.colorMotionSpring {
-            pendingColorMotionSpring = cm
-        }
-        if tx.followEdgeRequested {
-            pendingFollowEdge = true
+        if !tx.liveOnlyRequested {
+            pendingCommitKind = pendingCommitKind.merge(tx.commitKind)
+            if let m = tx.motionSource {
+                pendingCommitMotion = m
+            }
+            if let cm = tx.colorMotionSpring {
+                pendingColorMotionSpring = cm
+            }
+            if tx.followEdgeRequested {
+                pendingFollowEdge = true
+            }
         }
         if !tx.scrollRevealRequests.isEmpty {
             pendingScrollReveals.append(contentsOf: tx.scrollRevealRequests)
@@ -7885,21 +7924,22 @@ public final class Runtime<State> {
         if !tx.keepOnScreenKeys.isEmpty {
             pendingKeepOnScreenKeys.append(contentsOf: tx.keepOnScreenKeys)
         }
-        let nonOffsetCommitRequests = tx.followEdgeRequested
+        let nonOffsetCommitRequests = (!tx.liveOnlyRequested && tx.followEdgeRequested)
             || tx.pasteRequested
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty
             || !tx.scrollPageRequests.isEmpty
             || !tx.keepOnScreenKeys.isEmpty
             || !tx.invalidateMemoPrefixes.isEmpty
-            || tx.commitKind.lands
+            || (!tx.liveOnlyRequested && tx.commitKind.lands)
+        let allowFastLiveScroll = tx.liveOnlyRequested && activeVirtualPaths.isEmpty && !lastViewReadScroll
         let canFastApplyOffsets = !tx.scrollOffsetRequests.isEmpty
             && tx.scrollOffsetRequests.allSatisfy { !$0.anchor }
             && (!markDirtyIfNotLiveOnly || tx.liveOnlyRequested)
             && !tx.isForceCommitRequested
             && !nonOffsetCommitRequests
             && !flatNodes.isEmpty
-            && !scrollRequiresCommit
+            && (!scrollRequiresCommit || allowFastLiveScroll)
         if canFastApplyOffsets {
             var anySnapped = false
             for req in tx.scrollOffsetRequests {
@@ -7975,6 +8015,7 @@ public final class Runtime<State> {
         }
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {
+            livePendingDirty = true
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
                 dirtyCommit(at: now, external: external)
             }
@@ -8164,6 +8205,58 @@ public final class Runtime<State> {
         dirtyCommit(at: now ?? currentTime)
     }
 
+    /// Connects or replaces the waker notified when bound `Live`, `LiveText`, or `Pixels` sources publish (`Runtime::set_live_waker`).
+    public func setLiveWaker(_ waker: Waker) {
+        let prevVisible = liveVisible
+        let hadPending = livePendingDirty || liveWake.isVisiblePending
+        for sub in liveSubscriptions {
+            sub.isActive = false
+        }
+        liveSubscriptions.removeAll(keepingCapacity: true)
+        customLiveWaker = waker
+        let nextWake = LiveWake { [weak waker] in waker?.wake() }
+        nextWake.visible(prevVisible)
+        if hadPending {
+            nextWake.notify()
+        }
+        liveWake = nextWake
+        for node in flatNodes {
+            if let lt = node.el.liveText {
+                liveSubscriptions.append(lt.subscribe(liveWake))
+            }
+            for b in node.el.liveBindings {
+                liveSubscriptions.append(b.source.subscribe(liveWake))
+            }
+            if let px = node.el.pixelsPayload {
+                liveSubscriptions.append(px.subscribe(liveWake))
+            }
+        }
+        if liveSubscriptions.isEmpty {
+            _ = liveWake.takeVisible()
+            livePendingDirty = false
+        }
+    }
+
+    /// Connects or replaces a closure wake callback for coalesced `Live` updates (`Runtime::set_live_waker`).
+    public func setLiveWaker(_ callback: @escaping @Sendable () -> Void) {
+        setLiveWaker(Waker(callback))
+    }
+
+    /// Clears any pending visible latch on the installed `LiveWake`.
+    @discardableResult
+    internal func takeParityLivePending() -> Bool {
+        let took = liveWake.takeVisible()
+        let had = livePendingDirty
+        livePendingDirty = false
+        return took || had
+    }
+
+    /// True when the window is visible and a subscribed `Live` / `LiveText` / `Pixels` source
+    /// has pending work for the next frame (`Runtime::live_pending`).
+    public var livePending: Bool {
+        guard liveVisible else { return false }
+        return livePendingDirty || liveWake.isVisiblePending
+    }
     /// Runs `poll` while the window is hidden (`Runtime::poll_hidden`), returning `true` if
     /// the view or pending scroll/flight state became out of date.
     @discardableResult
@@ -8460,11 +8553,15 @@ public final class Runtime<State> {
         update(at: now) { s, tx in hook(&s, visible, &tx) }
     }
 
-    /// Updates host live visibility (`Runtime::set_live_visible`), notifying `onVisibility` after first commit.
+    /// Updates host live visibility (`Runtime::set_live_visible`), gating `Live` wakes and notifying `onVisibility` after first commit.
     public func setLiveVisible(_ visible: Bool, at now: Double? = nil) {
-        let changed = (visible != liveVisible)
+        let wasVisible = liveVisible
+        let changed = (visible != wasVisible)
         liveVisible = visible
-        setParityLiveWakeVisible(visible)
+        let wokeFromLiveWake = liveWake.visibleReturningWoke(visible)
+        if !wokeFromLiveWake && visible && !wasVisible && livePendingDirty {
+            (customLiveWaker ?? waker).wake()
+        }
         if changed && commitCount > 0 {
             dispatchVisibility(visible, at: now)
         }

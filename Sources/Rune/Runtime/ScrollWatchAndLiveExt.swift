@@ -29,9 +29,6 @@ public func scrollWatchState() -> ScrollWatchState {
 
 private final class ParityRuntimeSlot: @unchecked Sendable {
     weak var runtimeRef: AnyObject?
-    var liveWake: LiveWake?
-    var liveWaker: Waker?
-    var liveSubscriptions: [LiveSubscription] = []
     var movedByHandPaths: Set<String> = []
     var lastReportedOffsets: [String: Vec2] = [:]
 
@@ -61,70 +58,7 @@ private final class ParityRuntimeSideTable: @unchecked Sendable {
     }
 }
 
-public extension Runtime {
-    /// Installs a `Waker` for coalesced `Live` updates (`Runtime::set_live_waker`).
-    func setLiveWaker(_ waker: Waker) {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        for sub in slot.liveSubscriptions {
-            sub.isActive = false
-        }
-        slot.liveSubscriptions.removeAll(keepingCapacity: true)
-        slot.liveWaker = waker
-        slot.liveWake = LiveWake { [weak waker] in
-            waker?.wake()
-        }
-        slot.liveWake?.visible(liveVisible)
-        refreshParityLiveSubscriptions()
-    }
-
-    /// Installs a closure wake callback for coalesced `Live` updates (`Runtime::set_live_waker`).
-    func setLiveWaker(_ callback: @escaping @Sendable () -> Void) {
-        setLiveWaker(Waker(callback))
-    }
-
-    /// Whether a visible `Live` notification is pending on this runtime's live wake
-    /// (`Runtime::live_pending`).
-    var livePending: Bool {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        return slot.liveWake?.isVisiblePending ?? false
-    }
-}
-
 internal extension Runtime {
-    /// Re-subscribes active `Live` bindings and `LiveText` nodes to the installed `LiveWake`.
-    func refreshParityLiveSubscriptions() {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        guard let wake = slot.liveWake else { return }
-        for sub in slot.liveSubscriptions {
-            sub.isActive = false
-        }
-        slot.liveSubscriptions.removeAll(keepingCapacity: true)
-        for node in flatNodes {
-            if let lt = node.el.liveText {
-                slot.liveSubscriptions.append(lt.subscribe(wake))
-            }
-            for b in node.el.liveBindings {
-                slot.liveSubscriptions.append(b.source.subscribe(wake))
-            }
-            if let px = node.el.pixelsPayload {
-                slot.liveSubscriptions.append(px.subscribe(wake))
-            }
-        }
-    }
-
-    /// Updates `LiveWake` visibility gating from `Runtime.setLiveVisible(_:at:)`.
-    func setParityLiveWakeVisible(_ visible: Bool) {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        slot.liveWake?.visible(visible)
-    }
-
-    /// Clears any pending visible latch on the installed `LiveWake` when a frame samples `Live` values.
-    @discardableResult
-    func takeParityLivePending() -> Bool {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        return slot.liveWake?.takeVisible() ?? false
-    }
-
     /// Marks `path` as moved by user/direct scroll since the last `onScrollOffset` delivery.
     func markScrollMovedByHand(path: String) {
         let slot = ParityRuntimeSideTable.shared.slot(for: self)

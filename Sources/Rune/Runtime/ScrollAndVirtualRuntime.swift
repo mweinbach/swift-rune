@@ -1342,6 +1342,11 @@ extension Runtime {
             scrollRequestsState.stepDestination()
         }
 
+        dispatchScrollCallbacks(at: now)
+    }
+
+    /// Delivers `onAtBottom`, `onFarFromBottom`, and `onScrollOffset` callbacks for current scroll offsets.
+    internal func dispatchScrollCallbacks(at now: Double) {
         // Scroll callbacks: onAtBottom, onFarFromBottom, onScrollOffset
         for i in flatNodes.indices {
             let node = flatNodes[i]
