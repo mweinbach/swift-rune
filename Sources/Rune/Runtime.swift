@@ -70,7 +70,7 @@ public final class Runtime<State> {
     public typealias ViewFn = (State, inout Cx<State>) -> El<State>
     public typealias KeyHandlerFn = (inout State, KeyEvent, inout Tx) -> Bool
 
-    private struct FlatNode {
+    internal struct FlatNode {
         var index: Int
         var parentIndex: Int?
         var path: String
@@ -141,8 +141,9 @@ public final class Runtime<State> {
         case exit(EmitNodeExit)
     }
 
-    private struct ImageAtlasPacker {
+    internal struct ImageAtlasPacker {
         var atlas = RGBA8Atlas(width: 64, height: 64)
+        var revision: UInt64 = 1
         var shelfX: Int = 1
         var shelfY: Int = 1
         var shelfH: Int = 0
@@ -180,6 +181,7 @@ public final class Runtime<State> {
                     cache[k] = v
                 }
                 atlas = grown
+                revision &+= 1
             }
             if shelfX + bw + 1 >= atlas.width {
                 shelfX = 1
@@ -203,6 +205,7 @@ public final class Runtime<State> {
             shelfX += bw + 1
             shelfH = max(shelfH, bh)
             cache[h] = uv
+            revision &+= 1
             return uv
         }
     }
@@ -246,6 +249,8 @@ public final class Runtime<State> {
         }
     }
     public var srgbBlend: Bool = true
+    /// Enables native AppKit material views when backed by a transparent window; headless runs default to `false`.
+    public var nativeMaterials: Bool = false
     public var windowFocused: Bool = true {
         didSet {
             if windowFocused != oldValue { needsCommit = true }
@@ -257,10 +262,13 @@ public final class Runtime<State> {
     public let waker: Waker
     public private(set) var scene: Scene
     private var scrollStore: AnimationStore
-    private var liveStore: AnimationStore
+    internal var liveStore: AnimationStore
 
     public internal(set) var currentTime: Double = 0.0
     public private(set) var isAnimating: Bool = false
+    public internal(set) var surfaces: [SurfaceDraw] = []
+    private var videoSignature: UInt64 = 0
+    private var lastVideoSnapshots: [String: VideoSnapshot] = [:]
     public private(set) var viewCommitCount: Int = 0
     public private(set) var keyWarnings: [String] = []
     public var windowTitle: String? = nil
@@ -337,7 +345,7 @@ public final class Runtime<State> {
     private var activeDrag: DragSession? = nil
 
     // Scroll state keyed by element path
-    private var scrollOffsets: [String: Vec2] = [:]
+    internal var scrollOffsets: [String: Vec2] = [:]
     private var scrollMaxExtents: [String: Vec2] = [:]
     private var scrollViewportSizes: [String: Vec2] = [:]
     private var scrollContentSizes: [String: Vec2] = [:]
@@ -382,16 +390,17 @@ public final class Runtime<State> {
     private var livePulseRelease: [LiveKey: (releaseAt: Double, rest: MotionLanes, spring: Spring)] = [:]
     private var liveTextSeenSeq: [String: UInt64] = [:]
 
-    private var flatNodes: [FlatNode] = []
+    internal var flatNodes: [FlatNode] = []
     private var nodeByPath: [String: Int] = [:]
-    private var nodeById: [NodeId: FlatNode] = [:]
-    private var exitingSnapshots: [NodeId: FlatNode] = [:]
-    private var lastElements: [ElementInfo] = []
-    private var presentedRectByPath: [String: MotionRect] = [:]
-    private var presentedScaleByPath: [String: Vec2] = [:]
+    internal var nodeById: [NodeId: FlatNode] = [:]
+    internal var exitingSnapshots: [NodeId: FlatNode] = [:]
+    internal var lastElements: [ElementInfo] = []
+    internal var presentedRectByPath: [String: MotionRect] = [:]
+    internal var presentedScaleByPath: [String: Vec2] = [:]
     private var hitGeometryByPath: [String: HitGeometry] = [:]
     private var paintOrderPaths: [String] = []
-    private var imagePacker = ImageAtlasPacker()
+    internal var imagePacker = ImageAtlasPacker()
+    internal let residentCacheTracker = ResidentLayerTracker()
     private var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true
@@ -423,6 +432,7 @@ public final class Runtime<State> {
         self.cxSettings = RuntimeShellSettings(viewport: viewport, pixelScale: pixelScale, reducedMotion: reducedMotion)
         if !MediaPlaybackGate.isEnabled {
             Recorder.headlessReset()
+            VideoHeadless.reset()
             HeadlessClock.set(0.0)
         }
     }
@@ -605,10 +615,32 @@ public final class Runtime<State> {
     }
 
     private func frameWithBlendScope(at now: Double) -> RefScene {
+        let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
+        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            needsCommit = true
+        }
+        if cxSettings.caretReadByView,
+           let nextCaret = currentFocusedCaret(),
+           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
+            needsCommit = true
+        }
+        if rewindRecorder != nil {
+            captureRewindFrame(at: now)
+        }
+        return sceneOut
+    }
+
+    internal func stepToFrameOutput(at now: Double) -> FrameOutput {
+        stepToFrameOutputScaled(at: now).frameOut
+    }
+
+    private func stepToFrameOutputScaled(at now: Double) -> (frameOut: FrameOutput, animNow: Double) {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
             Recorder.headlessFrame(clock: now)
+            VideoHeadless.frame(at: now)
         }
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
@@ -700,19 +732,7 @@ public final class Runtime<State> {
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
-        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
-        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
-            needsCommit = true
-        }
-        if cxSettings.caretReadByView,
-           let nextCaret = currentFocusedCaret(),
-           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
-            needsCommit = true
-        }
-        if rewindRecorder != nil {
-            captureRewindFrame(at: now)
-        }
-        return sceneOut
+        return (frameOut, animNow)
     }
 
     // MARK: - View Commit, Reconciliation & Layout
@@ -1794,6 +1814,10 @@ public final class Runtime<State> {
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
+        var builtSurfaces: [SurfaceDraw] = []
+        var videosActive = false
+        var newVideoSig: UInt64 = 0
+        var newVideoSnaps: [String: VideoSnapshot] = [:]
 
         let flyingRootIds: Set<NodeId> = Set(frameOut.nodes.compactMap { p in
             guard let snap = nodeById[p.id],
@@ -2018,6 +2042,15 @@ public final class Runtime<State> {
                 return copy
             }
 
+            if let (surf, _) = el.surfacePayload {
+                if let vsnap = surf.videoSnapshot() {
+                    newVideoSnaps[snap.path] = vsnap
+                }
+                if !shouldEmit {
+                    newVideoSig = VideoSignature.foldUnpulled(newVideoSig, surface: surf)
+                }
+            }
+
             if shouldEmit {
                 let devRect = SIMD4<Float>(
                     rect.x * pxScale,
@@ -2108,8 +2141,61 @@ public final class Runtime<State> {
                     }
                 }
 
-                if hasFill || hasSolidBorder {
-                    let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                if let (surf, fit) = el.surfacePayload {
+                    if hasFill && el.gradient == nil {
+                        primitives.append(attachFade(.roundedRect(
+                            rect: devRect,
+                            radii: devRadii,
+                            fill: effectiveBoxFill.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderColor: .zero,
+                            borderWidth: 0,
+                            borderSides: nil,
+                            clip: devClip,
+                            turn: useLayer ? 0 : p.rotate
+                        )))
+                    }
+                    let wakeHandle = self.waker
+                    if let pulled = surf.pullVideo(clock: now, wake: { wakeHandle.wake() }) {
+                        if pulled.active {
+                            videosActive = true
+                        }
+                        newVideoSig = VideoSignature.fold(newVideoSig, generation: pulled.generation, surfaceKey: surf.key)
+                    }
+                    builtSurfaces.append(SurfaceDraw(
+                        surface: surf.placed(el.surfacePlace),
+                        fit: fit,
+                        beforeInstance: UInt32(primitives.count),
+                        rect: devRect,
+                        radii: devRadii,
+                        clip: SIMD4<Float>(devClip.x, devClip.y, devClip.x + devClip.z, devClip.y + devClip.w),
+                        fade: activeFadeEdges.first?.fade ?? .zero,
+                        fadeOrigin: activeFadeEdges.first?.origin ?? .zero,
+                        opacity: localAlpha
+                    ))
+                    if hasSolidBorder {
+                        let b4 = borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let sidePx = el.borderSides.map { s in
+                            SIMD4<Float>(
+                                snapBorderWidthPx(s.top, scale: pxScale),
+                                snapBorderWidthPx(s.right, scale: pxScale),
+                                snapBorderWidthPx(s.bottom, scale: pxScale),
+                                snapBorderWidthPx(s.left, scale: pxScale)
+                            )
+                        }
+                        let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
+                        primitives.append(attachFade(.roundedRect(
+                            rect: devRect,
+                            radii: devRadii,
+                            fill: .zero,
+                            borderColor: b4,
+                            borderWidth: bwPx,
+                            borderSides: sidePx,
+                            clip: devClip,
+                            turn: useLayer ? 0 : p.rotate
+                        )))
+                    }
+                } else if hasFill || hasSolidBorder {
                     let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
                     let sidePx = el.borderSides.map { s in
@@ -2669,6 +2755,13 @@ public final class Runtime<State> {
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives)
+        surfaces = builtSurfaces
+        videoSignature = newVideoSig
+        lastVideoSnapshots = newVideoSnaps
+        if videosActive {
+            isAnimating = true
+        }
+        _ = now
 
         return RefScene(
             width: devW,
@@ -3564,6 +3657,34 @@ public final class Runtime<State> {
             if e.hover > 0.001 { obj["hover"] = r2(e.hover) }
             if e.press > 0.001 { obj["press"] = r2(e.press) }
             if let caret = e.caret { obj["caret"] = caret.map(r2) }
+            if let v = lastVideoSnapshots[e.path] {
+                let (vState, vErr): (String, String?)
+                switch v.state {
+                case .loading: (vState, vErr) = ("loading", nil)
+                case .ready: (vState, vErr) = ("ready", nil)
+                case .playing: (vState, vErr) = ("playing", nil)
+                case .ended: (vState, vErr) = ("ended", nil)
+                case .failed(let msg): (vState, vErr) = ("failed", msg)
+                }
+                var vObj: [String: Any] = [
+                    "kind": v.kind.rawValue,
+                    "state": vState,
+                    "time": (v.time * 1000.0).rounded() / 1000.0,
+                    "rate": v.rate,
+                    "looping": v.looping,
+                    "muted": v.muted,
+                ]
+                if let dur = v.duration {
+                    vObj["duration"] = (dur * 1000.0).rounded() / 1000.0
+                }
+                if let sz = v.size {
+                    vObj["size"] = [sz.0, sz.1]
+                }
+                if let vErr {
+                    vObj["error"] = vErr
+                }
+                obj["video"] = vObj
+            }
             return obj
         }
 
@@ -4298,7 +4419,7 @@ public final class Runtime<State> {
 }
 
 @inline(__always)
-private func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
+internal func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
     let l = max(a.left, b.left)
     let t = max(a.top, b.top)
     let r = max(l, min(a.right, b.right))
@@ -4307,14 +4428,14 @@ private func intersectRects(_ a: MotionRect, _ b: MotionRect) -> MotionRect {
 }
 
 @inline(__always)
-private func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
+internal func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
     if widthPt <= 0 { return 0 }
     let raw = widthPt * scale
     return raw < 1.0 ? 1.0 : raw.rounded()
 }
 
 @inline(__always)
-private func blendColorOver(bottom: Color, top: Color) -> Color {
+internal func blendColorOver(bottom: Color, top: Color) -> Color {
     let ta = top.a.clamped(to: 0...1)
     let ba = bottom.a.clamped(to: 0...1)
     let outA = ta + ba * (1.0 - ta)

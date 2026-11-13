@@ -1823,6 +1823,25 @@ public struct MaterialDraw: Sendable, Equatable {
         self.opacity = opacity
     }
 
+    /// Converts physical-pixel `rect` and `radius` to logical points for AppKit hosting.
+    public func points(scale: Float) -> MaterialDraw {
+        let s = max(scale, 1e-3)
+        return MaterialDraw(
+            id: id,
+            material: material,
+            blending: blending,
+            rect: MotionRect(
+                left: rect.left / s,
+                top: rect.top / s,
+                right: rect.right / s,
+                bottom: rect.bottom / s
+            ),
+            radius: radius / s,
+            continuous: continuous,
+            opacity: opacity
+        )
+    }
+
     #if os(macOS)
     public var nsMaterial: NSVisualEffectView.Material {
         switch material {
@@ -1841,50 +1860,6 @@ public struct MaterialDraw: Sendable, Equatable {
         }
     }
     #endif
-}
-
-public enum NativeSurfaceFormat: String, Sendable, Equatable {
-    case rgba8
-    case bgra8
-    case nv12
-}
-
-public struct NativeSurfaceFrame: Sendable, Equatable {
-    public let width: UInt32
-    public let height: UInt32
-    public let format: NativeSurfaceFormat
-    public let bytes: Data
-    public let timestampSeconds: Double
-
-    public init(width: UInt32, height: UInt32, format: NativeSurfaceFormat = .rgba8, bytes: Data, timestampSeconds: Double = 0) {
-        self.width = width
-        self.height = height
-        self.format = format
-        self.bytes = bytes
-        self.timestampSeconds = timestampSeconds
-    }
-}
-
-public final class NativeSurface: @unchecked Sendable {
-    private let lock = NSLock()
-    public let id: UInt64
-    private var currentFrame: NativeSurfaceFrame?
-
-    public init(id: UInt64) {
-        self.id = id
-    }
-
-    public func publish(_ frame: NativeSurfaceFrame) {
-        lock.lock()
-        currentFrame = frame
-        lock.unlock()
-    }
-
-    public func latestFrame() -> NativeSurfaceFrame? {
-        lock.lock()
-        defer { lock.unlock() }
-        return currentFrame
-    }
 }
 
 // MARK: - 8. Multi-Window Manager

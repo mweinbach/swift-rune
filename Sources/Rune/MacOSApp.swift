@@ -42,6 +42,7 @@ public enum MacOSApp {
     ) throws {
         ReadySignal.runStarts()
         RelaunchController.waitForPrevious()
+        MediaPlaybackGate.enable()
         HeadlessRunner.registerFonts(appBuilder.fontData)
 
         var initialState = appBuilder.makeState()
@@ -403,6 +404,8 @@ private final class RuneMetalHostView<State>: NSView {
     private let popupPresenter = MacOSPopupMenuPresenter()
     private let fileDialogPresenter = MacOSFileDialogPresenter()
     private let dragOutCoordinator = MacOSDragOutCoordinator()
+    private var materialHost: RuneMaterialHost?
+    private var restingGiveBackDone: Bool = false
 
     init(
         frame: NSRect,
@@ -472,6 +475,11 @@ private final class RuneMetalHostView<State>: NSView {
         syncGeometryAndRender()
     }
 
+    override func viewWillStartLiveResize() {
+        super.viewWillStartLiveResize()
+        materialHost?.setLiveResizing(true, mode: MaterialMode.fromEnv())
+    }
+
     private func syncGeometryAndRender() {
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
         metalLayer.contentsScale = scale
@@ -521,10 +529,35 @@ private final class RuneMetalHostView<State>: NSView {
             metalLayer.pixelFormat = desiredFmt
         }
 
+        let materialMode = MaterialMode.fromEnv()
+        if let w = window {
+            runtime.nativeMaterials = (!w.isOpaque && materialMode != .fallback)
+        } else {
+            runtime.nativeMaterials = false
+        }
+
         let commitsBefore = runtime.viewCommitCount
         let updateStart = CACurrentMediaTime()
-        let refScene = runtime.frame(at: t)
+        let renderFrame = runtime.renderFrame(at: t)
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+
+        if let w = window {
+            if !w.isOpaque && materialMode != .fallback && !renderFrame.materials.isEmpty {
+                let mh: RuneMaterialHost
+                if let existing = materialHost {
+                    mh = existing
+                } else {
+                    mh = RuneMaterialHost(frame: bounds)
+                    materialHost = mh
+                }
+                mh.attach(to: w, below: self, metalLayer: metalLayer)
+                mh.setLiveResizing(inLiveResize, mode: materialMode)
+                mh.apply(renderFrame.materials, scale: CGFloat(runtime.pixelScale), mode: materialMode)
+            } else if let mh = materialHost {
+                mh.setLiveResizing(inLiveResize, mode: materialMode)
+                mh.hideAll(mode: materialMode)
+            }
+        }
 
         if let title = runtime.windowTitle, window?.title != title {
             window?.title = title
@@ -546,11 +579,23 @@ private final class RuneMetalHostView<State>: NSView {
         }
 
         let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false)
+        if isAnim {
+            restingGiveBackDone = false
+        } else if !restingGiveBackDone {
+            restingGiveBackDone = true
+            let hidden = window?.occlusionState.contains(.visible) == false
+            renderer.giveBack(all: hidden, residentCaches: false)
+        }
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
         _ = surfaceMeter?.redraw(paced: animTimer != nil)
 
         var drawCount = 0
         if let drawable = metalLayer.nextDrawable() {
+            let synced = metalLayer.presentsWithTransaction && materialMode != .unsynced
+            if synced {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+            }
             if let comp = compositor, let cmdBuf = renderer.commandQueue.makeCommandBuffer() {
                 let compFrame = CompositorFrame<State>(
                     deviceKey: DeviceKey(rawValue: renderer.device.registryID),
@@ -565,20 +610,29 @@ private final class RuneMetalHostView<State>: NSView {
                     targetTexture: drawable.texture,
                     pixelFormat: desiredFmt,
                     renderer: renderer,
-                    drawUI: { [renderer] in
+                    drawUI: { [renderer, renderFrame] in
                         drawCount += 1
-                        renderer.renderScene(refScene, into: drawable.texture, commandBuffer: cmdBuf)
+                        renderer.drawRange(frame: renderFrame, into: drawable.texture, commandBuffer: cmdBuf)
                     }
                 )
                 comp.render(frame: compFrame)
                 if !comp.drawsOwnContent && compFrame.uiDrawCount == 0 {
                     compFrame.drawUI()
                 }
-                cmdBuf.present(drawable)
-                cmdBuf.commit()
+                if synced {
+                    cmdBuf.commit()
+                    cmdBuf.waitUntilScheduled()
+                    drawable.present()
+                } else {
+                    cmdBuf.present(drawable)
+                    cmdBuf.commit()
+                }
             } else {
                 drawCount = 1
-                renderer.render(scene: refScene, to: drawable)
+                renderer.draw(frame: renderFrame, to: drawable, synchronized: synced)
+            }
+            if synced {
+                CATransaction.commit()
             }
             _ = surfaceMeter?.presented()
             if !didFireReady {
@@ -595,8 +649,8 @@ private final class RuneMetalHostView<State>: NSView {
                     updateMs: updateMs,
                     encodeMs: 0.0,
                     committed: runtime.viewCommitCount != commitsBefore,
-                    primitives: refScene.primitives.count,
-                    glyphs: refScene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) },
+                    primitives: renderFrame.instances.count,
+                    glyphs: renderFrame.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) },
                     animating: runtime.isAnimating,
                     compositorAnimating: compositor?.isAnimating ?? false,
                     drawCount: drawCount,
