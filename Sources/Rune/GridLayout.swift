@@ -1081,14 +1081,55 @@ public struct TerminalGridCell: Sendable, Hashable {
     }
 }
 
+/// Thread-safe per-row shaping & instance cache attached to `TerminalGridRow` (`DrawnRow` / `LaidRow`).
+internal final class TerminalGridRowCacheBox: @unchecked Sendable {
+    struct LaidRow {
+        var scaleBits: UInt32
+        var widthBits: UInt32
+        var contentHash: UInt64
+        var line: ShapedText
+        var cells: [ShapedText]
+    }
+
+    let lock = NSLock()
+    private var laid: LaidRow? = nil
+    var drawnStorage: AnyObject? = nil
+
+    func laidRow(
+        pixelScale: Float,
+        widthPt: Float,
+        contentHash: UInt64 = 0,
+        compute: () -> (ShapedText, [ShapedText])
+    ) -> (line: ShapedText, cells: [ShapedText]) {
+        let sBits = pixelScale.bitPattern
+        let wBits = widthPt.bitPattern
+        lock.lock()
+        if let existing = laid,
+           existing.scaleBits == sBits,
+           existing.widthBits == wBits,
+           existing.contentHash == contentHash {
+            let out = (existing.line, existing.cells)
+            lock.unlock()
+            return out
+        }
+        lock.unlock()
+        let (line, cells) = compute()
+        lock.lock()
+        laid = LaidRow(scaleBits: sBits, widthBits: wBits, contentHash: contentHash, line: line, cells: cells)
+        lock.unlock()
+        return (line, cells)
+    }
+}
+
 /// One row of a monospace terminal `TerminalGrid` (`rune::GridRow`).
 public struct TerminalGridRow: Sendable {
-    public var text: String
-    public var spans: [TextSpan]
-    public var style: TextStyle
-    public var cells: [TerminalGridCell] = []
-    public var fills: [TerminalGridFill] = []
-    public var overlayShape: Shape? = nil
+    public var text: String { didSet { cache = TerminalGridRowCacheBox() } }
+    public var spans: [TextSpan] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var style: TextStyle { didSet { cache = TerminalGridRowCacheBox() } }
+    public var cells: [TerminalGridCell] = [] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var fills: [TerminalGridFill] = [] { didSet { cache = TerminalGridRowCacheBox() } }
+    public var overlayShape: Shape? = nil { didSet { cache = TerminalGridRowCacheBox() } }
+    internal var cache = TerminalGridRowCacheBox()
 
     public init(text: String, spans: [TextSpan] = [], style: TextStyle = TextStyle()) {
         self.text = text
@@ -1113,6 +1154,78 @@ public struct TerminalGridRow: Sendable {
         var copy = self
         copy.overlayShape = shape.path.commands.isEmpty ? nil : shape
         return copy
+    }
+
+    /// Fingerprint of all row content and overlays so mutated or copied rows never alias stale cache entries.
+    internal var contentFingerprint: UInt64 {
+        var hasher = Hasher()
+        hasher.combine(text)
+        hasher.combine(spans)
+        hasher.combine(style)
+        hasher.combine(cells)
+        hasher.combine(fills)
+        if let over = overlayShape {
+            hasher.combine(true)
+            hasher.combine(over.viewBox?.x.bitPattern)
+            hasher.combine(over.viewBox?.y.bitPattern)
+            hasher.combine(over.trimStart.bitPattern)
+            hasher.combine(over.trimEnd.bitPattern)
+            hasher.combine(over.ops.count)
+            for op in over.ops {
+                switch op {
+                case let .stroke(points, closed, width, cap, color):
+                    hasher.combine(UInt8(0))
+                    hasher.combine(closed)
+                    hasher.combine(width.bitPattern)
+                    hasher.combine(cap)
+                    hasher.combine(color)
+                    hasher.combine(points.count)
+                    for p in points {
+                        hasher.combine(p.x.bitPattern)
+                        hasher.combine(p.y.bitPattern)
+                    }
+                case let .fill(points, color):
+                    hasher.combine(UInt8(1))
+                    hasher.combine(color)
+                    hasher.combine(points.count)
+                    for p in points {
+                        hasher.combine(p.x.bitPattern)
+                        hasher.combine(p.y.bitPattern)
+                    }
+                }
+            }
+            for cmd in over.path.commands {
+                switch cmd {
+                case let .moveTo(p):
+                    hasher.combine(UInt8(10))
+                    hasher.combine(p.x.bitPattern)
+                    hasher.combine(p.y.bitPattern)
+                case let .lineTo(p):
+                    hasher.combine(UInt8(11))
+                    hasher.combine(p.x.bitPattern)
+                    hasher.combine(p.y.bitPattern)
+                case let .quadTo(c, p):
+                    hasher.combine(UInt8(12))
+                    hasher.combine(c.x.bitPattern)
+                    hasher.combine(c.y.bitPattern)
+                    hasher.combine(p.x.bitPattern)
+                    hasher.combine(p.y.bitPattern)
+                case let .cubicTo(c1, c2, p):
+                    hasher.combine(UInt8(13))
+                    hasher.combine(c1.x.bitPattern)
+                    hasher.combine(c1.y.bitPattern)
+                    hasher.combine(c2.x.bitPattern)
+                    hasher.combine(c2.y.bitPattern)
+                    hasher.combine(p.x.bitPattern)
+                    hasher.combine(p.y.bitPattern)
+                case .close:
+                    hasher.combine(UInt8(14))
+                }
+            }
+        } else {
+            hasher.combine(false)
+        }
+        return UInt64(bitPattern: Int64(hasher.finalize()))
     }
 
     /// Accessibility reading of the row: pinned cells spliced into their columns, trailing whitespace trimmed.

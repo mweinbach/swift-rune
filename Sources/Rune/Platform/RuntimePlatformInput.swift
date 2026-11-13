@@ -124,6 +124,7 @@ extension Runtime {
     }
 
     internal func flushHiddenDropSteps(at now: Double) {
+        flushPendingKitWindowFocus(at: now)
         guard !pendingHiddenDrops.isEmpty else { return }
         let steps = pendingHiddenDrops
         pendingHiddenDrops.removeAll()

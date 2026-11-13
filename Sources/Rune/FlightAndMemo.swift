@@ -254,6 +254,21 @@ public final class MemoCache: @unchecked Sendable {
     private var passCounter: UInt64 = 1
     private var viewReads: [MemoRead] = []
     private var viewReadsPass: UInt64 = 0
+    private var buildCount: UInt64 = 0
+
+    /// Number of entries currently retained in the cache (`MemoCache::len`).
+    public var len: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+
+    /// Cumulative number of cache-miss subtree builds (`MemoCache::builds`).
+    public var builds: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return buildCount
+    }
 
     public init() {}
 
@@ -272,6 +287,13 @@ public final class MemoCache: @unchecked Sendable {
         return passCounter &+ 1
     }
 
+    /// Current pass counter without advancing.
+    public var currentPass: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return passCounter
+    }
+
     /// Marks cached entries so the next build re-verifies against a new pass (`memo::as_next_build`).
     @discardableResult
     public func asNextBuild() -> UInt64 {
@@ -283,6 +305,16 @@ public final class MemoCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         entries = entries.filter { $0.value.passBuilt >= minPass }
+    }
+
+    /// Removes specific scoped cache entries by key.
+    public func removeEntries(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        lock.lock()
+        for id in ids {
+            entries.removeValue(forKey: id)
+        }
+        lock.unlock()
     }
 
     public func getOrBuild<State, Deps: Equatable>(
@@ -308,7 +340,8 @@ public final class MemoCache: @unchecked Sendable {
         // Same-pass duplicate memo IDs bypass caching (`memo.rs:1067`).
         if !ignoreDuplicateGuard, let scope, !scope.isVerificationDryRun {
             if !scope.seenScopedIds.insert(scopedId).inserted {
-                let built = build()
+                var built = build()
+                if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
                 return (built, false)
             }
         }
@@ -322,16 +355,19 @@ public final class MemoCache: @unchecked Sendable {
            let cached = existing.element as? El<State> {
             let dryRun = scope?.isVerificationDryRun ?? false
             let recordedReads = existing.reads
+            var touchedNested: Set<String> = []
             if !dryRun {
                 let pass = scope?.pass ?? passCounter
                 existing.passBuilt = pass
                 entries[scopedId] = existing
-                markNestedTouchedLocked(existing.nestedIds, pass: pass)
+                touchedNested = markNestedTouchedLocked(existing.nestedIds, pass: pass)
             }
             lock.unlock()
             if !dryRun {
                 for r in recordedReads { scope?.record(r) }
                 scope?.recordNested(scopedId)
+                scope?.allTouchedScopedIds.insert(scopedId)
+                scope?.allTouchedScopedIds.formUnion(touchedNested)
             }
             return (cached, true)
         }
@@ -341,7 +377,8 @@ public final class MemoCache: @unchecked Sendable {
         scope?.prefixStack.append(rawId)
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
-        let built = build()
+        var built = build()
+        if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
         TrackedRecorder.resume(savedTracked)
         let capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
@@ -349,6 +386,7 @@ public final class MemoCache: @unchecked Sendable {
 
         let pass = scope?.pass ?? passCounter
         lock.lock()
+        buildCount &+= 1
         entries[scopedId] = Entry(
             deps: deps,
             equals: { other in (other as? Deps) == deps },
@@ -362,6 +400,7 @@ public final class MemoCache: @unchecked Sendable {
         lock.unlock()
         for r in capturedReads { scope?.record(r) }
         scope?.recordNested(scopedId)
+        scope?.allTouchedScopedIds.insert(scopedId)
         return (built, false)
     }
 
@@ -379,7 +418,8 @@ public final class MemoCache: @unchecked Sendable {
         // Same-pass duplicate region IDs bypass caching (`memo.rs:638,663-664`).
         if let scope, !scope.isVerificationDryRun {
             if !scope.seenScopedIds.insert(scopedId).inserted {
-                let built = build()
+                var built = build()
+                if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
                 return (built, false)
             }
         }
@@ -393,16 +433,19 @@ public final class MemoCache: @unchecked Sendable {
            let cached = existing.element as? El<State> {
             let dryRun = scope?.isVerificationDryRun ?? false
             let recordedReads = existing.reads
+            var touchedNested: Set<String> = []
             if !dryRun {
                 let pass = scope?.pass ?? passCounter
                 existing.passBuilt = pass
                 entries[scopedId] = existing
-                markNestedTouchedLocked(existing.nestedIds, pass: pass)
+                touchedNested = markNestedTouchedLocked(existing.nestedIds, pass: pass)
             }
             lock.unlock()
             if !dryRun {
                 for r in recordedReads { scope?.record(r) }
                 scope?.recordNested(scopedId)
+                scope?.allTouchedScopedIds.insert(scopedId)
+                scope?.allTouchedScopedIds.formUnion(touchedNested)
                 let savedTracked = TrackedRecorder.pause()
                 let prevDry = scope?.isVerificationDryRun ?? false
                 scope?.isVerificationDryRun = true
@@ -425,7 +468,8 @@ public final class MemoCache: @unchecked Sendable {
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
 
-        let built = build()
+        var built = build()
+        if !rawId.hasPrefix("cached:") && built.keyId == nil { built = built.key(rawId) }
 
         let trackedDeps = TrackedRecorder.pop()
         var capturedReads = scope?.readFrames.popLast() ?? []
@@ -438,6 +482,7 @@ public final class MemoCache: @unchecked Sendable {
 
         let pass = scope?.pass ?? passCounter
         lock.lock()
+        buildCount &+= 1
         entries[scopedId] = Entry(
             deps: inputs,
             equals: { other in (other as? Inputs) == inputs },
@@ -451,10 +496,12 @@ public final class MemoCache: @unchecked Sendable {
         lock.unlock()
         for r in capturedReads { scope?.record(r) }
         scope?.recordNested(scopedId)
+        scope?.allTouchedScopedIds.insert(scopedId)
         return (built, false)
     }
 
-    private func markNestedTouchedLocked(_ nestedIds: [String], pass: UInt64) {
+    @discardableResult
+    private func markNestedTouchedLocked(_ nestedIds: [String], pass: UInt64) -> Set<String> {
         var queue = nestedIds
         var visited: Set<String> = []
         while let nid = queue.popLast() {
@@ -463,6 +510,7 @@ public final class MemoCache: @unchecked Sendable {
             entries[nid] = child
             queue.append(contentsOf: child.nestedIds)
         }
+        return visited
     }
 
     /// Returns `true` if any cached entry from the most recent pass read layout/caret geometry that differs in `geometry`.

@@ -761,8 +761,8 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
         let configure = spec.configureRuntime
-        return try HeadlessRunner.runWithHooks(
-            spec: spec.appSpec,
+        return try HeadlessRunner.runHostedWindowSpec(
+            spec.appSpec,
             args: args,
             chrome: resolvedChrome,
             windowKey: spec.key,
@@ -771,6 +771,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
             appShared: spec.appShared,
             windowOptions: spec.options,
             menuItems: spec.menuItems,
+            fitContentHeight: spec.fitContentHeight,
+            onQuit: spec.onQuit,
+            onReopen: spec.onReopen,
+            onOpenUrl: spec.onOpenUrl,
             extraConfigure: { rt, _ in
                 configure?(rt)
             }
@@ -912,4 +916,26 @@ public enum RuneMultiWindow {
         _ = try runHeadless(flat, args: parsed)
         #endif
     }
+
+    /// Runs a multi-window application constructed with explicit `arguments` (`rune::run_windows_with_args`).
+    @MainActor
+    public static func runWindowsWithArgs(
+        options: RunOptions = RunOptions(),
+        arguments: [String],
+        _ factory: (ToolingArgs) -> [AnyWindowSpec]
+    ) throws {
+        let parsed = ToolingArgs.parse(arguments)
+        let windows = factory(parsed)
+        try runWindows(windows, options: options, arguments: arguments)
+    }
+}
+
+/// Top-level helper mirroring `rune::run_windows_with_args`.
+@MainActor
+public func runWindowsWithArgs(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) throws {
+    try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
 }

@@ -1110,12 +1110,58 @@ public enum HeadlessRunner {
         )
     }
 
+    internal static func runHostedWindowSpec<State>(
+        _ spec: AppSpec<State>,
+        args: ToolingArgs,
+        chrome: Chrome = .standard,
+        windowKey: String = "main",
+        availableWindows: [String] = ["main"],
+        onReady: ((WindowHandle) -> Void)? = nil,
+        appShared: AppShared<State>? = nil,
+        windowOptions: WindowOptions? = nil,
+        menuItems: [NativeMenuItem<State>] = [],
+        fitContentHeight: Bool = false,
+        onQuit: ((inout State, inout Tx) -> Void)? = nil,
+        onReopen: ((inout State, Bool, inout Tx) -> Bool)? = nil,
+        onOpenUrl: ((inout State, String, inout Tx) -> Void)? = nil,
+        shortcutRegistry: ShortcutRegistry? = nil,
+        extraConfigure: ((Runtime<State>, Waker) -> Void)? = nil
+    ) throws -> Output {
+        try runWithHooks(
+            spec: spec,
+            args: args,
+            chrome: chrome,
+            windowKey: windowKey,
+            availableWindows: availableWindows,
+            onReady: onReady,
+            appShared: appShared,
+            windowOptions: windowOptions,
+            menuItems: menuItems,
+            shortcutRegistry: shortcutRegistry,
+            extraConfigure: { runtime, waker in
+                runtime.fitHeight = fitContentHeight
+                runtime.windowResting = true
+                runtime.onQuit = onQuit
+                runtime.onReopen = onReopen
+                runtime.onOpenUrl = onOpenUrl
+                extraConfigure?(runtime, waker)
+            }
+        )
+    }
+
     /// Runs `app` deterministically under `args` (including `compositor`, `setup`, `poll`, `AppHandle` updates, and frame reports).
     @discardableResult
     public static func run<State>(_ app: App<State>, args: ToolingArgs, shortcutRegistry: ShortcutRegistry? = nil) throws -> Output {
         var effectiveArgs = args
         if app.gpuBackendPreference == .software {
             effectiveArgs.forceCPU = true
+        }
+        if !app.childWindows.isEmpty {
+            var rootApp = app
+            rootApp.childWindows = []
+            var rootSpec = AppWindowSpec.fromApp("main", rootApp)
+            rootSpec.childWindows = app.childWindows
+            return try RuneMultiWindow.runHeadless([rootSpec.boxed()], args: effectiveArgs)
         }
         let resolvedChrome = app.customTitlebar?.macChrome(app.chromeStyle) ?? app.chromeStyle
         let reports: FrameReports<State>? = (app.onFrameEncodedHook != nil || app.onFrameDrawnHook != nil || app.onFrameInspectHook != nil)
