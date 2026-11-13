@@ -647,7 +647,7 @@ public final class Runtime<State> {
     public internal(set) var playgroundRequests: [PlaygroundTxRequest] = []
     internal var playgroundLiveStorage: AnyObject? = nil
     public var shortcutRegistry: ShortcutRegistry? = nil
-    public private(set) var imeReset: Bool = false
+    public internal(set) var imeReset: Bool = false
 
     public let runtimeId: UInt64
     public var fitHeight: Bool = false
@@ -723,6 +723,7 @@ public final class Runtime<State> {
     public internal(set) var focusedPath: String? = nil
     public internal(set) var focusedKey: String? = nil
     public internal(set) var focusVisible: Bool = false
+    internal var hoveredHighlightActive: Bool = false
     internal var linkBoxesByPath: [String: [TextLinkBox]] = [:]
     internal var focusedLinkIndex: Int? = nil
     internal var hoveredLink: TextLinkTarget? = nil
@@ -3488,6 +3489,7 @@ public final class Runtime<State> {
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible
         )
+        syncFollows()
         if let prevPath = prevFocusedPath, prevPath != focusedPath {
             let prevNode = prevFlatNodesSnapshot.first(where: { $0.path == prevPath })
             handleKitFocusTransition(prevNode: prevNode, newPath: focusedPath, at: now)
@@ -4512,8 +4514,58 @@ public final class Runtime<State> {
         focusedKey = nextIdx.flatMap { flatNodes[$0].key }
         if prevFocusedPath != focusedPath {
             imeReset = true
+            hoveredHighlightActive = false
         }
         syncFocusedLinkIndex()
+    }
+
+    internal func isFocusWithin(_ path: String) -> Bool {
+        guard let fp = focusedPath else { return false }
+        return fp == path || fp.hasPrefix(path + "/")
+    }
+
+    internal func highlightRowIndex(for idx: Int) -> Int? {
+        var cur: Int? = idx
+        while let i = cur, flatNodes.indices.contains(i) {
+            let el = flatNodes[i].el
+            if nodeTakesFocus(el) {
+                return (el.focusHighlightColor != nil && canFocusIndex(i)) ? i : nil
+            }
+            cur = flatNodes[i].parentIndex
+        }
+        return nil
+    }
+
+    internal func isHighlightVisible(at idx: Int) -> Bool {
+        guard flatNodes.indices.contains(idx),
+              !flatNodes[idx].effectiveInert,
+              focusedPath == flatNodes[idx].path else {
+            return false
+        }
+        return focusVisible || (flatNodes[idx].el.focusHighlightColor != nil && hoveredHighlightActive)
+    }
+
+    /// Mirrors `focus.rs::sync_follows`: in a `.focusGroup().focusFollows()`, keeps focus on the selected item.
+    private func syncFollows() {
+        guard let fp = focusedPath,
+              let fIdx = nodeByPath[fp],
+              flatNodes.indices.contains(fIdx) else { return }
+        let focused = flatNodes[fIdx]
+        guard focused.el.handlers.editLens == nil,
+              !(focused.el.isFocusSelected || focused.el.itemSelected),
+              let gIdx = findFocusGroupAncestor(of: fIdx),
+              gIdx != fIdx,
+              flatNodes[gIdx].el.isFocusFollowsSelection else { return }
+        guard let selectedIdx = flatNodes.indices.first(where: { j in
+            j != gIdx &&
+            findFocusGroupAncestor(of: j) == gIdx &&
+            (flatNodes[j].el.isFocusSelected || flatNodes[j].el.itemSelected) &&
+            canFocusIndex(j)
+        }) else { return }
+        focusedPath = flatNodes[selectedIdx].path
+        focusedKey = flatNodes[selectedIdx].key
+        focusedLinkIndex = nil
+        imeReset = true
     }
 
     // MARK: - Live Property Evaluation
@@ -4621,8 +4673,97 @@ public final class Runtime<State> {
         }
     }
 
+    private func focusOwnerIndex(of idx: Int) -> Int? {
+        var cur: Int? = idx
+        while let i = cur, flatNodes.indices.contains(i) {
+            if canFocusIndex(i) { return i }
+            cur = flatNodes[i].parentIndex
+        }
+        return nil
+    }
+
+    private func hasChildRingOverride(forOwner ownerIdx: Int, ownerPath: String) -> Bool {
+        guard flatNodes.indices.contains(ownerIdx), flatNodes[ownerIdx].path == ownerPath else { return false }
+        let prefix = ownerPath + "/"
+        for j in (ownerIdx + 1)..<flatNodes.count {
+            let p = flatNodes[j].path
+            if !p.hasPrefix(prefix) { break }
+            let jel = flatNodes[j].el
+            if (jel.focusRingColor != nil || jel.noFocusRing) && focusOwnerIndex(of: j) == ownerIdx {
+                return true
+            }
+        }
+        return false
+    }
+
+    internal func resolvedFocusRingOverlay(
+        el: El<State>,
+        snapIndex: Int,
+        snapPath: String,
+        isExiting: Bool,
+        effectiveInert: Bool,
+        isFocused: Bool,
+        forceFocusRings: Bool,
+        defaultRingOutline: Outline?,
+        devRect: SIMD4<Float>,
+        devRadii: SIMD4<Float>,
+        pxScale: Float
+    ) -> (rect: SIMD4<Float>, radii: SIMD4<Float>, color: Color, widthPx: Float)? {
+        let suppressesDefaultRing = el.focusHighlightColor != nil ||
+            (el.focusRingColor == nil && (el.handlers.editLens != nil || el.role == .textInput))
+        let ownerIsFocused: Bool = {
+            if isFocused { return true }
+            guard !isExiting, !effectiveInert, el.focusRingColor != nil, !el.noFocusRing,
+                  !nodeTakesFocus(el),
+                  flatNodes.indices.contains(snapIndex),
+                  flatNodes[snapIndex].path == snapPath,
+                  let fp = focusedPath,
+                  let ownerIdx = focusOwnerIndex(of: snapIndex) else { return false }
+            return flatNodes[ownerIdx].path == fp
+        }()
+        let defaultSuppressedByChild = isFocused && el.focusRingColor == nil &&
+            !isExiting && hasChildRingOverride(forOwner: snapIndex, ownerPath: snapPath)
+        let forcedRing = forceFocusRings && nodeTakesFocus(el) && !suppressesDefaultRing &&
+            (isExiting || !hasChildRingOverride(forOwner: snapIndex, ownerPath: snapPath))
+        let keyboardRing = ownerIsFocused && !defaultSuppressedByChild && !suppressesDefaultRing &&
+            (focusVisible || (isFocused && el.role == .textInput))
+        let shouldShow = !el.noFocusRing && (forcedRing || keyboardRing)
+        if shouldShow,
+           let ringCol = el.focusRingColor ?? defaultRingOutline?.color {
+            let rawOff = el.focusRingColor != nil ? el.focusRingOffset : (defaultRingOutline?.offset ?? el.focusRingOffset)
+            let rawW = el.focusRingColor != nil ? el.focusRingWidth : (defaultRingOutline?.width ?? el.focusRingWidth)
+            let off = rawOff * pxScale
+            let ringW = rawW * pxScale
+            let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
+            let ringRadii = SIMD4<Float>(
+                devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
+                devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
+                devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
+                devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
+            )
+            return (ringRect, ringRadii, ringCol, ringW)
+        }
+        guard !isExiting, !effectiveInert, !el.noFocusRing, !el.focusWithinFlat,
+              let within = el.focusWithinRing,
+              let fp = focusedPath,
+              (fp == snapPath || fp.hasPrefix(snapPath + "/")) else {
+            return nil
+        }
+        let off = within.offset * pxScale
+        let ringW = within.width * pxScale
+        let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
+        let ringRadii = SIMD4<Float>(
+            devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
+            devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
+            devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
+            devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
+        )
+        return (ringRect, ringRadii, within.color, ringW)
+    }
+
     private func emitFocusRingIfNeeded(
         el: El<State>,
+        snapIndex: Int,
         snapPath: String,
         isExiting: Bool,
         effectiveInert: Bool,
@@ -4637,66 +4778,28 @@ public final class Runtime<State> {
         devH: Int,
         into primitives: inout [Primitive]
     ) {
+        guard let overlay = resolvedFocusRingOverlay(
+            el: el,
+            snapIndex: snapIndex,
+            snapPath: snapPath,
+            isExiting: isExiting,
+            effectiveInert: effectiveInert,
+            isFocused: isFocused,
+            forceFocusRings: forceFocusRings,
+            defaultRingOutline: defaultRingOutline,
+            devRect: devRect,
+            devRadii: devRadii,
+            pxScale: pxScale
+        ) else {
+            return
+        }
         let clipAll = SIMD4<Float>(0, 0, Float(devW), Float(devH))
-        let forcedRing = forceFocusRings && nodeTakesFocus(el)
-        let shouldShow = !el.noFocusRing && (forcedRing || (isFocused && (focusVisible || el.role == .textInput)))
-        if shouldShow,
-           let ringCol = el.focusRingColor ?? defaultRingOutline?.color {
-            let rawOff = el.focusRingColor != nil ? el.focusRingOffset : (defaultRingOutline?.offset ?? el.focusRingOffset)
-            let rawW = el.focusRingColor != nil ? el.focusRingWidth : (defaultRingOutline?.width ?? el.focusRingWidth)
-            let off = rawOff * pxScale
-            let ringW = rawW * pxScale
-            let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
-            let ringRadii = SIMD4<Float>(
-                devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
-                devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
-                devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
-                devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
-            )
-            primitives.append(.roundedRect(
-                rect: ringRect,
-                radii: ringRadii,
-                fill: .zero,
-                borderColor: ringCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                borderWidth: ringW,
-                clip: clipAll
-            ))
-            return
-        }
-        guard !isExiting, !effectiveInert, focusVisible, !el.noFocusRing, !el.focusWithinFlat,
-              let within = el.focusWithinRing,
-              let fp = focusedPath,
-              (fp == snapPath || fp.hasPrefix(snapPath + "/")) else {
-            return
-        }
-        var suppressed = false
-        if let fIdx = nodeByPath[fp] {
-            var cur: Int? = fIdx
-            while let c = cur {
-                if flatNodes[c].path == snapPath { break }
-                if flatNodes[c].el.focusWithinFlat || flatNodes[c].el.noFocusRing {
-                    suppressed = true
-                    break
-                }
-                cur = flatNodes[c].parentIndex
-            }
-        }
-        guard !suppressed else { return }
-        let off = within.offset * pxScale
-        let ringW = within.width * pxScale
-        let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
-        let ringRadii = SIMD4<Float>(
-            devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
-            devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
-            devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
-            devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
-        )
         primitives.append(.roundedRect(
-            rect: ringRect,
-            radii: ringRadii,
+            rect: overlay.rect,
+            radii: overlay.radii,
             fill: .zero,
-            borderColor: within.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-            borderWidth: ringW,
+            borderColor: overlay.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+            borderWidth: overlay.widthPx,
             clip: clipAll
         ))
     }
@@ -5279,7 +5382,9 @@ public final class Runtime<State> {
             let isFocused = (focusedPath == snap.path) && !p.isExiting
             let isHovered = (hoveredPath == snap.path) && !p.isExiting && !snap.effectiveInert
             let isPressed = (pressedPath == snap.path) && !p.isExiting && !snap.effectiveInert
+            let flatFocusWithin = el.focusWithinFlat && !snap.effectiveInert && !p.isExiting && isFocusWithin(snap.path)
             let hoverFrac: Float = {
+                if flatFocusWithin { return 0.0 }
                 if let tracked = liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) {
                     return tracked.clamped(to: 0...1)
                 }
@@ -5288,7 +5393,7 @@ public final class Runtime<State> {
                 }
                 return isHovered ? 1.0 : 0.0
             }()
-            if !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
+            if !flatFocusWithin, !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
                 fillColor = blendColorOver(bottom: fillColor, top: hBg.scaleAlpha(hoverFrac), srgb: srgbBlend)
             }
             let carriedScrolled: Vec2 = {
@@ -5535,20 +5640,22 @@ public final class Runtime<State> {
 
                 // 1. Outer drop shadows
                 let stuckShadowFactor = (el.stickyConfig != nil) ? StickyMath.stuckShadowFactor(shift: stickyMag) : 0.0
-                for sh in resolvedNodeShadows where !sh.inset {
-                    let shColor = liveShadowColor ?? sh.color
-                    guard shColor.a > 0.001 else { continue }
-                    let sc = shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    primitives.append(.dropShadow(
-                        rect: devRect,
-                        radii: devRadii,
-                        color: sc,
-                        blur: sh.blur * pxScale,
-                        spread: sh.spread * pxScale,
-                        offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
-                        cutoutInner: fillColor.a < 0.999 && sh.blur == 0 && sh.spread > 0,
-                        clip: devClip
-                    ))
+                if !flatFocusWithin {
+                    for sh in resolvedNodeShadows where !sh.inset {
+                        let shColor = liveShadowColor ?? sh.color
+                        guard shColor.a > 0.001 else { continue }
+                        let sc = shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        primitives.append(.dropShadow(
+                            rect: devRect,
+                            radii: devRadii,
+                            color: sc,
+                            blur: sh.blur * pxScale,
+                            spread: sh.spread * pxScale,
+                            offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
+                            cutoutInner: fillColor.a < 0.999 && sh.blur == 0 && sh.spread > 0,
+                            clip: devClip
+                        ))
+                    }
                 }
                 if stuckShadowFactor > 0.001, let stuckShadows = el.stickyConfig?.shadows {
                     for sh in stuckShadows where !sh.inset && sh.color.a > 0.001 {
@@ -5567,7 +5674,8 @@ public final class Runtime<State> {
                 }
 
                 // 2. Box background / gradient / solid border
-                let activeFocusFill = (isFocused && focusVisible) ? (el.focusFillColor ?? el.focusHighlightColor) : nil
+                let highlightActive = isFocused && (focusVisible || (el.focusHighlightColor != nil && hoveredHighlightActive))
+                let activeFocusFill = highlightActive ? (el.focusFillColor ?? el.focusHighlightColor) : nil
                 let hasFill = fillColor.a > 0.0005 || (activeFocusFill != nil)
                 let hasSolidBorder = el.dashedBorder == nil && borderColor.a > 0.0005 && (el.borderWidth > 0 || el.borderSides != nil)
 
@@ -5699,18 +5807,20 @@ public final class Runtime<State> {
                 }
 
                 // 4. Inset shadows
-                for sh in resolvedNodeShadows where sh.inset {
-                    let shColor = liveShadowColor ?? sh.color
-                    guard shColor.a > 0.001 else { continue }
-                    primitives.append(.insetShadow(
-                        rect: devRect,
-                        radii: devRadii,
-                        color: shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                        blur: sh.blur * pxScale,
-                        spread: sh.spread * pxScale,
-                        offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
-                        clip: devClip
-                    ))
+                if !flatFocusWithin {
+                    for sh in resolvedNodeShadows where sh.inset {
+                        let shColor = liveShadowColor ?? sh.color
+                        guard shColor.a > 0.001 else { continue }
+                        primitives.append(.insetShadow(
+                            rect: devRect,
+                            radii: devRadii,
+                            color: shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            blur: sh.blur * pxScale,
+                            spread: sh.spread * pxScale,
+                            offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
+                            clip: devClip
+                        ))
+                    }
                 }
                 if stuckShadowFactor > 0.001, let stuckShadows = el.stickyConfig?.shadows {
                     for sh in stuckShadows where sh.inset && sh.color.a > 0.001 {
@@ -6517,6 +6627,7 @@ public final class Runtime<State> {
                 if !hasActiveTextLinks(el) {
                     emitFocusRingIfNeeded(
                         el: el,
+                        snapIndex: snap.index,
                         snapPath: snap.path,
                         isExiting: p.isExiting,
                         effectiveInert: snap.effectiveInert,
@@ -7725,6 +7836,24 @@ public final class Runtime<State> {
             if let within = computeHoverWithin() {
                 applyHoverWithin(within.inside, held: false, at: now)
             }
+            let focusedIsInput = focusedPath.flatMap { focusedInputElement(at: $0) }
+                .map { $0.handlers.editLens != nil || $0.role == .textInput } ?? false
+            if isPointerEvent && !focusedIsInput {
+                if let rIdx = hit.flatMap({ highlightRowIndex(for: $0.node.index) }) {
+                    let rNode = flatNodes[rIdx]
+                    if focusedPath != rNode.path || !hoveredHighlightActive {
+                        focusedPath = rNode.path
+                        focusedKey = rNode.key
+                        hoveredHighlightActive = true
+                        dirtyCommit(at: now)
+                        changed = true
+                    }
+                } else if hoveredHighlightActive {
+                    hoveredHighlightActive = false
+                    dirtyCommit(at: now)
+                    changed = true
+                }
+            }
             settleKitHoverDelays(at: pos, now: now)
             return changed
         } else if helpTargetChanges(at: pos) {
@@ -7747,6 +7876,7 @@ public final class Runtime<State> {
         suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
+        hoveredHighlightActive = false
         pressHelp(at: pos, now: now)
 
         if button == .primary {
@@ -7787,7 +7917,9 @@ public final class Runtime<State> {
 
         if button == .secondary {
             if let (node, rect, local) = hitTestDetailed(at: pos, predicate: {
-                $0.el.handlers.onSecondaryClick != nil || ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el) && self.linkIndex(atPath: $0.path, at: pos) != nil)
+                $0.el.handlers.onSecondaryClick != nil ||
+                $0.el.handlers.editLens != nil ||
+                ($0.el.handlers.onLinkSecondary != nil && self.hasActiveTextLinks($0.el) && self.linkIndex(atPath: $0.path, at: pos) != nil)
             }) {
                 recordSecondaryTitlebarDown(at: pos, captured: true)
                 if self.hasActiveTextLinks(node.el),
@@ -7795,18 +7927,26 @@ public final class Runtime<State> {
                    dispatchLinkDown(node: node, linkIdx: linkIdx, at: pos, button: .secondary, mods: mods, at: now) {
                     return
                 }
-                let press = PointerPress(
-                    window: pos,
-                    local: local,
-                    elementSize: Vec2(rect.width, rect.height),
-                    button: .secondary,
-                    mods: mods,
-                    clicks: 1
-                )
-                var tx = makeTx(at: now, button: .secondary)
-                logEvent("secondary press \(node.path)")
-                node.el.handlers.onSecondaryClick?(&state, press, &tx)
-                applyTx(tx, at: now)
+                if let onSecondary = node.el.handlers.onSecondaryClick {
+                    let press = PointerPress(
+                        window: pos,
+                        local: local,
+                        elementSize: Vec2(rect.width, rect.height),
+                        button: .secondary,
+                        mods: mods,
+                        clicks: 1
+                    )
+                    var tx = makeTx(at: now, button: .secondary)
+                    logEvent("secondary press \(node.path)")
+                    onSecondary(&state, press, &tx)
+                    applyTx(tx, at: now)
+                    return
+                }
+                if node.el.handlers.editLens != nil {
+                    logEvent("secondary press \(node.path)")
+                    _ = openFieldMenu(node: node, at: pos, fromPointer: true, at: now)
+                    return
+                }
                 return
             } else {
                 let captured = isSecondaryTextOrInputHit(at: pos)
@@ -8614,9 +8754,36 @@ public final class Runtime<State> {
                     return true
                 }
             }
-            if ev.mods == .none && ev.key == .contextMenu && !isRepeat {
+            if ((ev.mods == .none && ev.key == .contextMenu) || (ev.mods == Mods(shift: true) && ev.key == .f(10))) && !isRepeat {
                 if activateFocusedLinkSecondary(at: now) {
                     return true
+                }
+                let r = presentedRectByPath[fNode.path] ?? fNode.targetRect
+                let anchorPos = Vec2(r.x, r.y + r.height)
+                if fNode.el.handlers.onSecondaryClick == nil && fNode.el.handlers.editLens != nil {
+                    if openFieldMenu(node: fNode, at: anchorPos, fromPointer: false, at: now) {
+                        return true
+                    }
+                }
+                var curIdx: Int? = fIdx
+                while let ci = curIdx, flatNodes.indices.contains(ci), !flatNodes[ci].effectiveInert {
+                    if let onSecondary = flatNodes[ci].el.handlers.onSecondaryClick {
+                        let cr = presentedRectByPath[flatNodes[ci].path] ?? flatNodes[ci].targetRect
+                        let press = PointerPress(
+                            window: anchorPos,
+                            local: Vec2(anchorPos.x - cr.x, anchorPos.y - cr.y),
+                            elementSize: Vec2(cr.width, cr.height),
+                            button: .secondary,
+                            mods: .none,
+                            clicks: 1
+                        )
+                        var tx = makeTx(at: now, button: .secondary)
+                        onSecondary(&state, press, &tx)
+                        applyTx(tx, at: now)
+                        return true
+                    }
+                    if flatNodes[ci].el.isModal { break }
+                    curIdx = flatNodes[ci].parentIndex
                 }
             }
             // Space activates non-input focused controls; Enter activates rows/links (`takesReturn`) or falls back when no `.defaultButton()` exists.
@@ -8656,20 +8823,38 @@ public final class Runtime<State> {
                 return true
             }
 
-            // Arrow-key roving inside `.focusGroup()` ancestor!
-            if ev.mods == .none,
-               (ev.key == .arrowRight || ev.key == .arrowDown || ev.key == .arrowLeft || ev.key == .arrowUp),
+            // Arrow-key & Home/End roving inside `.focusGroup()` ancestor!
+            if fNode.el.handlers.editLens == nil && ev.mods == .none,
+               (ev.key == .arrowRight || ev.key == .arrowDown || ev.key == .arrowLeft || ev.key == .arrowUp || ev.key == .home || ev.key == .end),
                let groupIdx = findFocusGroupAncestor(of: fIdx) {
                 let isRtl = flatNodes[groupIdx].flow == .rtl
+                let targetJump: Int?
                 let forward: Bool
                 switch ev.key {
-                case .arrowDown: forward = true
-                case .arrowUp: forward = false
-                case .arrowRight: forward = !isRtl
-                case .arrowLeft: forward = isRtl
-                default: forward = true
+                case .home:
+                    targetJump = 0
+                    forward = true
+                case .end:
+                    targetJump = -1
+                    forward = false
+                case .arrowDown:
+                    targetJump = nil
+                    forward = true
+                case .arrowUp:
+                    targetJump = nil
+                    forward = false
+                case .arrowRight:
+                    targetJump = nil
+                    forward = !isRtl
+                case .arrowLeft:
+                    targetJump = nil
+                    forward = isRtl
+                default:
+                    targetJump = nil
+                    forward = true
                 }
-                if moveFocusInGroup(groupIndex: groupIdx, forward: forward) {
+                if moveFocusInGroup(groupIndex: groupIdx, forward: forward, jumpEndpoint: targetJump, at: now) {
+                    hoveredHighlightActive = false
                     focusVisible = true
                     dirtyCommit(at: now)
                     return true
@@ -8706,8 +8891,12 @@ public final class Runtime<State> {
         // 3. Tab / Shift+Tab focus ring traversal (trapped inside `.modal()` automatically via `effectiveInert`!)
         if ev.key == .tab && !ev.mods.ctrl && !ev.mods.alt && !ev.mods.cmd {
             if advanceTabFocus(backward: ev.mods.shift) {
+                hoveredHighlightActive = false
                 focusVisible = true
                 dirtyCommit(at: now)
+                return true
+            }
+            if activeModalPath != nil {
                 return true
             }
         }
@@ -9288,6 +9477,7 @@ public final class Runtime<State> {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
             }
+            hoveredHighlightActive = false
             pendingTxBlurRequested = true
             pendingTxFocusKey = nil
             kitHooks.pendingTxFocusVisible = nil
@@ -9296,6 +9486,7 @@ public final class Runtime<State> {
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
         } else if let fk = tx.requestedFocusKey {
+            hoveredHighlightActive = false
             let matchedNode = flatNodes.first(where: { $0.key == fk })
             if let prevFp = focusedPath, matchedNode?.path != prevFp {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
@@ -9692,7 +9883,7 @@ public final class Runtime<State> {
         return virtualInputs[path]?.el
     }
 
-    private func applyFocusedTextEditKey(_ ev: KeyEvent, el: El<State>, layout: ShapedText?, at now: Double) -> Bool {
+    internal func applyFocusedTextEditKey(_ ev: KeyEvent, el: El<State>, layout: ShapedText?, at now: Double) -> Bool {
         guard let editLens = el.handlers.editLens else { return false }
         var edit = editLens.get(state)
         if el.isSecure {
@@ -10215,6 +10406,11 @@ public final class Runtime<State> {
                 ? (curPos - 1 + candidateIndices.count) % candidateIndices.count
                 : (curPos + 1) % candidateIndices.count
             nextIdx = candidateIndices[nextPos]
+        } else if let curPath = focusedPath,
+                  let outsideIdx = nodeByPath[curPath] {
+            nextIdx = backward
+                ? (candidateIndices.last(where: { $0 < outsideIdx }) ?? candidateIndices.last!)
+                : (candidateIndices.first(where: { $0 > outsideIdx }) ?? candidateIndices.first!)
         } else if cxSettings.viewDefaults.webFocus,
                   let startPath = webFocusTabStartPath,
                   let startIdx = flatNodes.firstIndex(where: { $0.path == startPath }) {
@@ -10262,27 +10458,68 @@ public final class Runtime<State> {
         return nil
     }
 
-    private func moveFocusInGroup(groupIndex: Int, forward: Bool) -> Bool {
+    private func moveFocusInGroup(
+        groupIndex: Int,
+        forward: Bool,
+        jumpEndpoint: Int? = nil,
+        at now: Double
+    ) -> Bool {
         let prefix = flatNodes[groupIndex].path + "/"
         let members = flatNodes.indices.filter { i in
             (flatNodes[i].path == flatNodes[groupIndex].path || flatNodes[i].path.hasPrefix(prefix)) &&
             canFocusIndex(i)
         }
-        guard members.count > 1,
+        guard !members.isEmpty,
               let curPath = focusedPath,
               let curIdx = members.firstIndex(where: { flatNodes[$0].path == curPath }) else {
             return false
         }
-        let nextPos = forward
-            ? (curIdx + 1) % members.count
-            : (curIdx - 1 + members.count) % members.count
+        let nextPos: Int
+        if let jump = jumpEndpoint {
+            nextPos = jump < 0 ? (members.count - 1) : 0
+        } else if members.count > 1 {
+            let groupRole = flatNodes[groupIndex].el.role
+            if groupRole == .list || groupRole == .listbox || groupRole == .tree || groupRole == .grid {
+                nextPos = forward ? min(curIdx + 1, members.count - 1) : max(curIdx - 1, 0)
+            } else {
+                nextPos = forward
+                    ? (curIdx + 1) % members.count
+                    : (curIdx - 1 + members.count) % members.count
+            }
+        } else {
+            return false
+        }
         let nextNode = flatNodes[members[nextPos]]
         focusedPath = nextNode.path
         focusedKey = nextNode.key
+        focusedLinkIndex = nil
+        pendingScrollReveals.append(.intoView(scope: nil, key: nextNode.key ?? nextNode.path))
+
+        let follows = nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[groupIndex].el.isFocusFollowsSelection
+        if follows && members[nextPos] != members[curIdx] {
+            if let onClick = nextNode.el.handlers.onClick {
+                var tx = makeTx(at: now)
+                onClick(&state, &tx)
+                applyTx(tx, at: now)
+            } else if let onClickPress = nextNode.el.handlers.onClickPress {
+                let r = presentedRectByPath[nextNode.path] ?? nextNode.targetRect
+                let press = PointerPress(
+                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
+                    local: Vec2(r.width * 0.5, r.height * 0.5),
+                    elementSize: Vec2(r.width, r.height),
+                    button: .primary,
+                    mods: .none,
+                    clicks: 1
+                )
+                var tx = makeTx(at: now)
+                onClickPress(&state, press, &tx)
+                applyTx(tx, at: now)
+            }
+        }
         return true
     }
 
-    private func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
+    internal func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
         var resolvedEdit = edit
         if node.el.isSecure {
             resolvedEdit.isSecure = true

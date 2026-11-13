@@ -282,6 +282,7 @@ extension El {
         lifted.onLinkSecondary = wrap2(h.onLinkSecondary)
         lifted.onBackgroundPress = wrap1(h.onBackgroundPress)
         lifted.onScreenLayout = wrap1(h.onScreenLayout)
+        lifted.onSpellcheckEnabled = h.onSpellcheckEnabled
         lifted.onSpellcheck = wrap1(h.onSpellcheck)
         lifted.onSpellcheckLanguages = wrap1(h.onSpellcheckLanguages)
         lifted.modalDismiss = wrap(h.modalDismiss)
