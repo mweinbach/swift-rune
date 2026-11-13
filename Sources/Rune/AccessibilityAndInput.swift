@@ -80,6 +80,10 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var scrollYMax: Float?
     public var textSelection: [Int]?
     public var characterCount: Int?
+    public var characterLengths: [UInt8]?
+    public var characterPositions: [Float]?
+    public var characterWidths: [Float]?
+    public var wordStarts: [UInt8]?
     public var isModal: Bool
     public var isSecure: Bool
     public var actions: [AccessibilityAction]
@@ -117,6 +121,10 @@ public struct AccessibilityNode: Sendable, Equatable {
         scrollYMax: Float? = nil,
         textSelection: [Int]? = nil,
         characterCount: Int? = nil,
+        characterLengths: [UInt8]? = nil,
+        characterPositions: [Float]? = nil,
+        characterWidths: [Float]? = nil,
+        wordStarts: [UInt8]? = nil,
         isModal: Bool = false,
         isSecure: Bool = false,
         actions: [AccessibilityAction] = [],
@@ -153,6 +161,10 @@ public struct AccessibilityNode: Sendable, Equatable {
         self.scrollYMax = scrollYMax
         self.textSelection = textSelection
         self.characterCount = characterCount
+        self.characterLengths = characterLengths
+        self.characterPositions = characterPositions
+        self.characterWidths = characterWidths
+        self.wordStarts = wordStarts
         self.isModal = isModal
         self.isSecure = isSecure
         self.actions = actions
@@ -222,6 +234,37 @@ public enum AccessibilityTreeBuilder {
                 path: childPath
             ) {
                 projectedChildren.append(childNode)
+            }
+        }
+        if let grid = element.terminalGridPayload {
+            let cw = grid.cellSize.x
+            let ch = grid.cellSize.y
+            for (k, row) in grid.rows.enumerated() {
+                let y = absRect.y + Float(k) * ch
+                if y >= absRect.y + absRect.height { break }
+                let (rowText, places) = row.readingText()
+                let chars = Array(rowText)
+                let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
+                let positions: [Float] = places.map { Float($0.column) * cw }
+                let widths: [Float] = places.map { Float($0.width) * cw }
+                var starts: [UInt8] = []
+                for idx in 0..<chars.count {
+                    let curWs = chars[idx].isWhitespace
+                    let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
+                    if !curWs && prevWs {
+                        starts.append(UInt8(min(idx, 255)))
+                    }
+                }
+                projectedChildren.append(AccessibilityNode(
+                    id: "\(nodeId)/line:\(k)",
+                    role: .text,
+                    value: rowText,
+                    frame: MotionRect.fromXYWH(absRect.x, y, Float(grid.columns) * cw, ch),
+                    characterLengths: lengths,
+                    characterPositions: positions,
+                    characterWidths: widths,
+                    wordStarts: starts
+                ))
             }
         }
 

@@ -139,6 +139,7 @@ internal struct RuntimeVirtualListState: Sendable {
     var rowKeyBySegment: [String: String] = [:]
     var wantsMoreFrames: Bool = false
     var missingOverscanRows: Int = 0
+    var isIndexed: Bool = false
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
         measuredByKey[key] ?? max(1, estimated)
@@ -260,6 +261,38 @@ internal struct RuntimeVirtualListState: Sendable {
         let edgeHi = offset + viewport * (1.0 + Self.indexedEdgeMultiplier)
         let edgeWanted = (chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi)
         return (chosenLo..<chosenHi, missing > 0 && edgeWanted, missing)
+    }
+
+    /// Re-evaluates overscan fill demand against post-commit measured row heights (`window.rs:52-87`).
+    func fillDemand(offset: Float, viewport: Float, prefix: [Float], count: Int) -> (wanted: Bool, missing: Int) {
+        guard count > 0, viewport > 0 else { return (false, 0) }
+        let lo = max(0, lastMountedRange.lowerBound)
+        let hi = min(count, lastMountedRange.upperBound)
+        guard lo <= hi, hi < prefix.count else { return (false, 0) }
+
+        let edgeLo = max(0, offset - viewport * Self.indexedEdgeMultiplier)
+        let edgeHi = offset + viewport * (1.0 + Self.indexedEdgeMultiplier)
+        let edgeWanted = (lo > 0 && prefix[lo] > edgeLo) || (hi < count && prefix[hi] < edgeHi)
+        guard edgeWanted else { return (false, 0) }
+
+        let osLo = max(0, offset - viewport * Self.overscanMultiplier)
+        let osHi = offset + viewport * (1.0 + Self.overscanMultiplier)
+        var targetLo = count
+        var targetHi = 0
+        for i in 0..<count {
+            let r0 = prefix[i]
+            let r1 = prefix[i + 1]
+            if r1 > osLo && r0 < osHi {
+                targetLo = min(targetLo, i)
+                targetHi = max(targetHi, i + 1)
+            }
+        }
+        if targetLo >= targetHi {
+            targetLo = 0
+            targetHi = min(count, 1)
+        }
+        let missing = max(0, lo - targetLo) + max(0, targetHi - hi)
+        return (missing > 0, missing)
     }
 
     mutating func pruneMeasurements(keeping activeKeys: Set<String>) {

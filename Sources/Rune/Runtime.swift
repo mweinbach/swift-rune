@@ -750,6 +750,7 @@ public final class Runtime<State> {
     internal var pendingScrollPages: [(key: String, pages: Int)] = []
     internal var pendingScrollOffsets: [ScrollOffsetRequest] = []
     internal var pendingKeepOnScreenKeys: [String] = []
+    internal var pendingCaretFollow: Bool = false
     internal var scrollRequestsState = ScrollRequestsState()
     internal var scrollGlidingPaths: Set<String> = []
     internal var directScrolledPaths: Set<String> = []
@@ -843,7 +844,7 @@ public final class Runtime<State> {
     private var pendingLaunches: [PendingFlightRequest] = []
     private var pendingUnclippedFlights: Bool = false
     internal var activeTextFlights: [ActiveTextFlight] = []
-    private var lastViewReadScroll: Bool = false
+    internal var lastViewReadScroll: Bool = false
     private struct FocusReturnEntry {
         var ownerPath: String
         var returnPath: String?
@@ -965,6 +966,9 @@ public final class Runtime<State> {
     internal var resizeReadMovedFlag: Bool = false
     internal var hasActiveExitingNodes: Bool = false
     internal var cachedResizeBuild: ResizeCachedViewBuild<State>? = nil
+    internal var virtualSelectionSources: [String: VirtualSelectionSource] = [:]
+    internal var lastViewMemoEnvHash: UInt64 = MemoScope.currentEnvironmentHash()
+    internal var lastViewOnlyMemoIds: Set<String> = []
 
     public init(
         state: State,
@@ -1692,13 +1696,14 @@ public final class Runtime<State> {
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
         launchedFlightIds = launchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
         unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
+        enterDelays = enterDelays.filter { activeIds.contains($0.key) }
 
         return (frameOut, animNow)
     }
 
     // MARK: - View Commit, Reconciliation & Layout
 
-    private func currentMemoGeometry(nodes: [FlatNode]? = nil) -> [String: MemoElementGeometry] {
+    internal func currentMemoGeometry(nodes: [FlatNode]? = nil) -> [String: MemoElementGeometry] {
         var caretsByKey: [String: MotionRect] = [:]
         for el in lastElements {
             if let k = el.key, let c = el.caret, c.count >= 4 {
@@ -1800,7 +1805,7 @@ public final class Runtime<State> {
         return nil
     }
 
-    private func hasScrollCallbacks() -> Bool {
+    internal func hasScrollCallbacks() -> Bool {
         flatNodes.contains {
             $0.el.handlers.onAtBottom != nil
                 || $0.el.handlers.onFarFromBottom != nil
@@ -2000,17 +2005,21 @@ public final class Runtime<State> {
             chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)],
             scrollerOverlay: cxSettings.scrollBarsState.isOverlay
         )
+        lastViewMemoEnvHash = envHash
+        let viewTouchedBox = MemoScope.TouchedIdsBox()
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
-            MemoScope.enter(
+            MemoScope.enterCollectingTouched(
                 cache: memo,
                 envHash: envHash,
-                geometry: currentMemoGeometry(nodes: memoNodes)
+                geometry: currentMemoGeometry(nodes: memoNodes),
+                touchedIdsOut: viewTouchedBox
             ) {
                 measureFramePhase(.view) {
                     buildPlaygroundViewIfAttached(cx: &cx)
                 }
             }
         }
+        lastViewOnlyMemoIds = viewTouchedBox.ids
         cxSettings.viewDefaults = cx.envState.defaults
         let passHelpLook = cx.helpLook ?? cx.envState.defaults.help
         cxSettings.captionColor = cx.envState.captionColor
@@ -2118,6 +2127,8 @@ public final class Runtime<State> {
     internal func buildMeasureResult(
         rootEl: El<State>,
         expandedContextOverride: VirtualExpansionContext? = nil,
+        remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
+        memoGeometryOverride: [String: MemoElementGeometry]? = nil,
         passHelpLook: HelpLook?,
         collector: LayoutReadCollector,
         at now: Double,
@@ -2137,7 +2148,13 @@ public final class Runtime<State> {
         if let override = expandedContextOverride {
             (expandedRoot, virtualExpansion) = (rootEl, override)
         } else {
-            (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
+            (expandedRoot, virtualExpansion) = expandVirtualSubtrees(
+                in: rootEl,
+                remountRowCache: remountRowCache,
+                memoGeometry: memoGeometryOverride ?? currentMemoGeometry(),
+                memoEnvHash: lastViewMemoEnvHash,
+                memoPass: memo.currentPass
+            )
         }
         var layoutRoot = expandedRoot
         var solvedRoot = measureFramePhase(.layout) {
@@ -2962,6 +2979,32 @@ public final class Runtime<State> {
             ? nextCommitKind()
             : .rebuild
 
+        if plannedKind == .remount,
+           let remountPass = tryVirtualRemountPass(
+               at: now,
+               cut: cut,
+               commitKind: commitKind,
+               commitMotion: commitMotion,
+               commitColorSpring: commitColorSpring,
+               commitCut: commitCut,
+               prevMountedIds: prevMountedIds
+           ) {
+            applyMeasurePass(
+                remountPass,
+                at: now,
+                cut: cut,
+                settlePass: settlePass,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitFollowEdge: commitFollowEdge,
+                commitCut: commitCut,
+                prevMountedIds: prevMountedIds,
+                didRunView: &didRunView
+            )
+            return
+        }
+
         if plannedKind == .relayout,
            let relayoutPass = tryRelayoutPass(
                at: now,
@@ -3060,6 +3103,9 @@ public final class Runtime<State> {
             viewport: viewport,
             viewportRead: pass.viewportRead
         )
+        cachedResizeBuild?.memoEnvHash = lastViewMemoEnvHash
+        cachedResizeBuild?.viewOnlyMemoIds = lastViewOnlyMemoIds
+        cachedResizeBuild?.virtualRowCache = pass.virtualExpansion.builtVirtualRows
         stateUnchangedSinceBuild = true
         pendingResizeRelayout = false
         pendingGrowthRelayout = false
@@ -3118,6 +3164,7 @@ public final class Runtime<State> {
         layoutSeen.rects = finalSeen
 
         viewHelpLook = pass.helpLook
+        virtualSelectionSources = pass.virtualExpansion.selectionSources
         if let bg = pass.rootBackground {
             clearColor = bg
         }
@@ -4395,6 +4442,7 @@ public final class Runtime<State> {
     }
 
     private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
+        let startShapedCount = textSystem.shapedCallCount
         textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
         var glyphPageEntries: [(index: Int, page: UInt16)] = []
         var usedGlyphMask: UInt32 = 0
@@ -5563,11 +5611,32 @@ public final class Runtime<State> {
                 if let grid = el.terminalGridPayload {
                     let gPadL = el.layout.padding.left * scaleVec.x
                     let gPadT = el.layout.padding.top * scaleVec.y
+                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                    if abs(scaleVec.x - 1.0) < 1e-4 && abs(scaleVec.y - 1.0) < 1e-4 {
+                        let padLx = gPadL * pxScale
+                        let padTy = gPadT * pxScale
+                        let gridDevRect = SIMD4<Float>(devRect.x + padLx, devRect.y + padTy, max(0, devRect.z - padLx), max(0, devRect.w - padTy))
+                        let gridExact = SIMD4<Float>(rExact.x + padLx, rExact.y + padTy, rExact.z, rExact.w)
+                        var gridGlyphCount = 0
+                        paintTerminalGrid(
+                            grid,
+                            devRect: gridDevRect,
+                            exactRectPx: gridExact,
+                            devClip: devClip,
+                            localAlpha: localAlpha,
+                            defaultColor: defaultGridColor,
+                            effRotate: effRotate,
+                            useLayer: useLayer,
+                            primitives: &primitives,
+                            glyphPageEntries: &glyphPageEntries,
+                            usedGlyphMask: &usedGlyphMask,
+                            glyphCount: &gridGlyphCount
+                        )
+                    } else {
                     let baseX = rect.x + gPadL
                     let baseY = rect.y + gPadT
                     let cellW = grid.cellSize.x * scaleVec.x
                     let cellH = grid.cellSize.y * scaleVec.y
-                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
                     for (rowIdx, row) in grid.rows.enumerated() {
                         let rowY = baseY + Float(rowIdx) * cellH
                         for fill in row.fills {
@@ -5675,6 +5744,7 @@ public final class Runtime<State> {
                                 }
                             }
                         }
+                    }
                     }
                 }
 
@@ -6712,6 +6782,10 @@ public final class Runtime<State> {
             }
         }
 
+        let totalGlyphs = primitives.count(where: { $0.kind == .glyph })
+        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- startShapedCount))
+        FrameStatsSidecar.set(self, glyphs: totalGlyphs, shaped: shapedDelta)
+
         return RefScene(
             width: devW,
             height: devH,
@@ -7685,7 +7759,7 @@ public final class Runtime<State> {
                     if scrollRequiresCommit {
                         directScrolledPaths.insert(path)
                         pendingCommitKind = pendingCommitKind.instant()
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, external: false)
                     } else {
                         directScrolledPaths.remove(path)
                         updateScrollPositions(at: now)
@@ -7992,6 +8066,7 @@ public final class Runtime<State> {
                     break
                 case .navigation:
                     editLens.set(&state, edit)
+                    pendingCaretFollow = true
                     dirtyCommit(at: now)
                     return true
                 case .modified:
@@ -9322,6 +9397,7 @@ public final class Runtime<State> {
                 break
             case .navigation:
                 editLens.set(&state, edit)
+                pendingCaretFollow = true
                 dirtyCommit(at: t)
                 handledByEdit = true
             case .modified:
@@ -9543,9 +9619,12 @@ public final class Runtime<State> {
         at now: Double
     ) {
         editLens.set(&state, newEdit)
+        pendingCaretFollow = true
         var tx = makeTx(at: now)
         if !el.animateEditLayoutEnabled {
             tx.instant()
+        } else if tx.motionSource == nil && !tx.commitKind.snaps && el.layoutAnim == nil {
+            tx.motionSource = .spring(el.styleSpring ?? MotionTokens.DEFAULT)
         }
         // Non-key callbacks (`onInputChange`) never inherit the key handler's physical key (`physical.rs:499`).
         tx.physicalKeyValue = nil

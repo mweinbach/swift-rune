@@ -37,6 +37,9 @@ internal final class ResizeCachedViewBuild<State> {
     var caretRead: Bool
     var viewport: Vec2
     var viewportRead: Bool
+    var memoEnvHash: UInt64
+    var viewOnlyMemoIds: Set<String>
+    var virtualRowCache: [String: [String: Runtime<State>.CachedVirtualRow]]
 
     init(
         viewRootEl: El<State>,
@@ -49,7 +52,10 @@ internal final class ResizeCachedViewBuild<State> {
         reads: [LayoutReadEntry],
         caretRead: Bool,
         viewport: Vec2,
-        viewportRead: Bool
+        viewportRead: Bool,
+        memoEnvHash: UInt64 = 0,
+        viewOnlyMemoIds: Set<String> = [],
+        virtualRowCache: [String: [String: Runtime<State>.CachedVirtualRow]] = [:]
     ) {
         self.viewRootEl = viewRootEl
         self.expandedRootEl = expandedRootEl
@@ -62,6 +68,9 @@ internal final class ResizeCachedViewBuild<State> {
         self.caretRead = caretRead
         self.viewport = viewport
         self.viewportRead = viewportRead
+        self.memoEnvHash = memoEnvHash
+        self.viewOnlyMemoIds = viewOnlyMemoIds
+        self.virtualRowCache = virtualRowCache
     }
 }
 
@@ -462,6 +471,126 @@ extension Runtime {
                 activeVirtualPaths.insert(mapping.listPath)
             }
         }
+        return pass
+    }
+
+    /// Re-expands active virtual lists without re-running `view` or rebuilding already-mounted
+    /// indexed rows (`runtime/commit/remount.rs`). Returns `nil` when fallback to full rebuild is needed.
+    internal func tryVirtualRemountPass(
+        at now: Double,
+        cut: Bool,
+        commitKind: TxCommit,
+        commitMotion: MotionSource?,
+        commitColorSpring: Spring?,
+        commitCut: Bool,
+        prevMountedIds: Set<NodeId>
+    ) -> MeasurePassResult? {
+        guard let cached = cachedResizeBuild,
+              cached.reusable,
+              !activeVirtualPaths.isEmpty,
+              !lastViewReadScroll,
+              !hasScrollCallbacks(),
+              playgroundHost == nil,
+              !cached.viewportRead || cached.viewport == viewport else {
+            return nil
+        }
+
+        let savedVirtuals = virtualLists
+        let savedActiveVirtualPaths = activeVirtualPaths
+        let savedScrollOffsets = scrollOffsets
+        let savedScrollMaxExtents = scrollMaxExtents
+        let savedScrollViewportSizes = scrollViewportSizes
+        let savedScrollContentSizes = scrollContentSizes
+        let savedWasPinned = wasPinnedToBottom
+        let savedGrowthRows = growthRows
+
+        func restoreSavedAndFallback() -> MeasurePassResult? {
+            virtualLists = savedVirtuals
+            activeVirtualPaths = savedActiveVirtualPaths
+            scrollOffsets = savedScrollOffsets
+            scrollMaxExtents = savedScrollMaxExtents
+            scrollViewportSizes = savedScrollViewportSizes
+            scrollContentSizes = savedScrollContentSizes
+            wasPinnedToBottom = savedWasPinned
+            growthRows = savedGrowthRows
+            return nil
+        }
+
+        let preGeom = currentMemoGeometry()
+        var pass = buildMeasureResult(
+            rootEl: cached.viewRootEl,
+            remountRowCache: cached.virtualRowCache,
+            memoGeometryOverride: preGeom,
+            passHelpLook: cached.helpLook,
+            collector: LayoutReadCollector(rects: layoutSeen.rects),
+            at: now,
+            cut: cut,
+            commitKind: commitKind,
+            commitMotion: commitMotion,
+            commitColorSpring: commitColorSpring,
+            commitCut: commitCut,
+            prevMountedIds: prevMountedIds
+        )
+        if pass.virtualExpansion.remountHitNestedVirtual {
+            return restoreSavedAndFallback()
+        }
+
+        if prepareVirtualRemeasureAfterFullPass(
+            pass,
+            savedVirtuals: savedVirtuals,
+            savedScrollOffsets: savedScrollOffsets,
+            savedScrollMaxExtents: savedScrollMaxExtents,
+            savedScrollViewportSizes: savedScrollViewportSizes,
+            savedScrollContentSizes: savedScrollContentSizes,
+            savedWasPinned: savedWasPinned,
+            savedGrowthRows: savedGrowthRows
+        ) {
+            let remeasureCache = pass.virtualExpansion.builtVirtualRows
+            pass = buildMeasureResult(
+                rootEl: cached.viewRootEl,
+                remountRowCache: remeasureCache,
+                memoGeometryOverride: preGeom,
+                passHelpLook: cached.helpLook,
+                collector: LayoutReadCollector(rects: layoutSeen.rects),
+                at: now,
+                cut: cut,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitCut: commitCut,
+                prevMountedIds: prevMountedIds
+            )
+            if pass.virtualExpansion.remountHitNestedVirtual {
+                return restoreSavedAndFallback()
+            }
+        }
+
+        if evaluateLayoutMoved(reads: cached.reads, nodes: pass.nodes, force: false)
+            || self.memo.hasInvalidatedReads(against: currentMemoGeometry(nodes: pass.nodes))
+            || (cached.caretRead && caretMoved(from: cxSettings.lastCommittedCaret, in: pass.nodes)) {
+            return restoreSavedAndFallback()
+        }
+
+        var keptMemoIds = cached.viewOnlyMemoIds
+        for rowMap in pass.virtualExpansion.builtVirtualRows.values {
+            for entry in rowMap.values {
+                keptMemoIds.formUnion(entry.memoIds)
+            }
+        }
+        var evictMemoIds: Set<String> = []
+        for (listPath, oldMap) in cached.virtualRowCache {
+            let newMap = pass.virtualExpansion.builtVirtualRows[listPath] ?? [:]
+            for (rowKey, oldEntry) in oldMap where newMap[rowKey] == nil {
+                evictMemoIds.formUnion(oldEntry.memoIds)
+            }
+        }
+        evictMemoIds.subtract(keptMemoIds)
+        self.memo.removeEntries(ids: evictMemoIds)
+
+        cached.expandedRootEl = pass.expandedRootEl
+        cached.virtualExpansion = pass.virtualExpansion
+        cached.virtualRowCache = pass.virtualExpansion.builtVirtualRows
+        pass.reads = cached.reads
         return pass
     }
 }

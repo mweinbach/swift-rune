@@ -14,6 +14,8 @@ internal struct KitRuntimeHooksState {
     var hoverDelayCallbacks: [String: (inout Any, Bool, inout Tx) -> Void] = [:]
     var hoverHoldAfterActionUntilMove: Bool = false
     var windowFocused: Bool = true
+    var windowFocusReportedState: Bool? = nil
+    var pendingWindowFocusTransitions: [(focused: Bool, at: Double)] = []
     var isDispatchingByKeys: Bool = false
     var isDispatchingFocusLost: Bool = false
     var pressRepeat = PressRepeatMachine()
@@ -101,10 +103,35 @@ extension Runtime {
 
     /// Notifies the runtime of OS window activation/blur (`Runtime::window_focus`).
     public func windowFocus(_ focused: Bool, at now: Double? = nil) {
-        dispatchFocus(focused, at: now)
+        let t = now ?? currentTime
+        let transitionChanged = kitHooks.windowFocusReportedState != focused
+        kitHooks.windowFocusReportedState = focused
+        if windowFocused != focused {
+            dispatchFocus(focused, at: t)
+            return
+        }
+        guard transitionChanged else { return }
+        if flatNodes.isEmpty {
+            kitHooks.pendingWindowFocusTransitions.append((focused, t))
+        } else {
+            _ = dispatchKitWindowFocusHandlers(focused, at: t)
+        }
+    }
+
+    internal func flushPendingKitWindowFocus(at now: Double) {
+        guard !kitHooks.pendingWindowFocusTransitions.isEmpty else { return }
+        let queued = kitHooks.pendingWindowFocusTransitions
+        kitHooks.pendingWindowFocusTransitions.removeAll()
+        for entry in queued {
+            _ = dispatchKitWindowFocusHandlers(entry.focused, at: entry.at)
+        }
     }
 
     internal func dispatchKitWindowFocusHandlers(_ focused: Bool, at now: Double) -> (ran: Bool, allLiveOnly: Bool) {
+        if flatNodes.isEmpty {
+            kitHooks.pendingWindowFocusTransitions.append((focused, now))
+            return (false, true)
+        }
         var ranHandler = false
         var allLiveOnly = true
         for node in flatNodes where !node.effectiveInert {
