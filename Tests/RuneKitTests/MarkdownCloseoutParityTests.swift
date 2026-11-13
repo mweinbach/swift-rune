@@ -132,6 +132,59 @@ struct MarkdownCloseoutParityTests {
         _ = rt.frame(at: 0.04)
         #expect(rt.element(byKey: "b2")?.role == .list)
 
+        // #13 full upstream cache parity (`src/markdown/tests.rs:288-362`): 3 siblings (2 unkeyed identical, 1 keyed),
+        // root path preservation (#0/#0/b0, #0/#1/b0, #0/third/b0), selective rebuilds, & MarkdownStyle invalidation.
+        struct PureState: Sendable {
+            var tick: Int = 0
+            var a: String = "Hello **world** from `rune`."
+            var b: String = "Hello **world** from `rune`."
+            var query: String = ""
+            var accent: Color = .white
+        }
+        Markdown.withRenderCounter { renders in
+            let pureRT = Runtime<PureState>(state: PureState(), viewport: Vec2(480, 400), pixelScale: 1.0, systemDark: true) { s, _ in
+                _ = s.tick
+                var style = MarkdownStyle.fromKit(kit)
+                style.text = s.accent
+                let hlA: [(ranges: [Range<Int>], style: MarkdownHighlight)] = s.query.isEmpty
+                    ? []
+                    : Markdown(s.a).findRanges(s.query, caseSensitivity: .insensitive).map { ($0, .match()) }
+                return col().wFull().hFull().children([
+                    Markdown(s.a).highlights(hlA).selectable(true).render(style),
+                    Markdown(s.b).selectable(true).render(style),
+                    Markdown("Third **card** note").render(style).key("third"),
+                ])
+            }
+            _ = renders.take()
+            _ = pureRT.frame(at: 0.0)
+            #expect(renders.take() == 3)
+            let purePaths = pureRT.elements().map(\.path)
+            #expect(purePaths.contains(where: { $0.hasSuffix("/0/0/@b0") }))
+            #expect(purePaths.contains(where: { $0.hasSuffix("/0/1/@b0") }))
+            #expect(purePaths.contains(where: { $0.hasSuffix("/0/@third/@b0") }))
+
+            for i in 1...5 {
+                pureRT.update(at: Double(i) * 0.01) { s, _ in s.tick += 1 }
+                _ = pureRT.frame(at: Double(i) * 0.01 + 0.005)
+            }
+            #expect(renders.take() == 0)
+
+            pureRT.update(at: 0.10) { s, _ in s.b = "Updated *second* paragraph." }
+            _ = pureRT.frame(at: 0.11)
+            #expect(renders.take() == 1)
+            #expect(pureRT.elements().contains(where: { $0.text == "Updated second paragraph." }))
+
+            pureRT.update(at: 0.12) { s, _ in s.query = "world" }
+            _ = pureRT.frame(at: 0.13)
+            #expect(renders.take() == 1)
+
+            let newInk = Color(r: 0.2, g: 0.6, b: 1.0, a: 1.0)
+            pureRT.update(at: 0.14) { s, _ in s.accent = newInk }
+            _ = pureRT.frame(at: 0.15)
+            #expect(renders.take() == 3)
+            #expect(pureRT.elements().contains(where: { $0.key == "b0" && $0.textColor == newInk }))
+        }
+
         // #14: multiple links each keep their own independent help tooltip
         let helpRT = Runtime<Int>(state: 0, viewport: Vec2(480, 200)) { _, _ in
             col().wFull().child(
@@ -431,9 +484,39 @@ struct MarkdownCloseoutParityTests {
         let optRT = runTable("| Item | Num |\n|---|---:|\n| First | 111 |\n| Second | 999 |", style: customTableStyle)
         #expect(optRT.element(byKey: "s-end") != nil)
         #expect(optRT.element(byKey: "th")?.fill == Color(r: 0.2, g: 0.3, b: 0.4, a: 1))
+        #expect(optRT.element(byKey: "th")?.opacity == 1)
         // Verify first column sits flush left (c0.x == th.x)
         if let thRect = optRT.element(byKey: "th")?.rect, let c0Rect = cell(optRT, row: "r0", col: 0)?.rect {
             #expect(abs(c0Rect[0] - thRect[0]) < 1.0)
+        }
+
+        // #74 (`tests/markdown.rs:338`): outline=nil drops frame radius & adds s-end, dims header text while keeping body textBase, and tnum aligns 1111 vs 0000
+        let defaultNumRT = runTable("| Name | Count |\n|---|--:|\n| a | 1111 |\n| b | 0000 |\n", style: MarkdownStyle.fromKit(kit))
+        #expect(defaultNumRT.element(byKey: "s-end") == nil)
+        let defEls = defaultNumRT.elements()
+        if let defTH = defEls.first(where: { $0.key == "th" }), let pIdx = defTH.parentIndex {
+            #expect(defEls[pIdx].radius == 6.0)
+        }
+        #expect(defEls.first(where: { $0.text == "Name" })?.textColor == defEls.first(where: { $0.text == "a" })?.textColor)
+
+        let dimHead = Color(r: 0.5, g: 0.5, b: 0.5, a: 1.0)
+        let blueRule = Color(r: 0.0, g: 0.0, b: 1.0, a: 1.0)
+        let noOutStyle = MarkdownStyle.fromKit(kit).tableOutline(nil).tableRules(blueRule).tableHeaderRule(blueRule).tableHeaderText(dimHead)
+        let noOutRT = runTable("| Name | Count |\n|---|--:|\n| a | 1111 |\n| b | 0000 |\n", style: noOutStyle)
+        #expect(noOutRT.element(byKey: "s0")?.fill == blueRule)
+        #expect(noOutRT.element(byKey: "s-end")?.fill == blueRule)
+        let noOutEls = noOutRT.elements()
+        if let nTH = noOutEls.first(where: { $0.key == "th" }), let pIdx = nTH.parentIndex {
+            #expect(noOutEls[pIdx].radius == 0.0)
+            #expect(nTH.opacity == 1)
+        }
+        #expect(noOutEls.first(where: { $0.text == "Name" })?.textColor == dimHead)
+        #expect(noOutEls.first(where: { $0.text == "a" })?.textColor == kit.c.textBase)
+        let c1111 = noOutEls.first(where: { $0.text == "1111" })
+        let c0000 = noOutEls.first(where: { $0.text == "0000" })
+        #expect(c1111 != nil && c0000 != nil)
+        if let w1 = c1111?.rect[2], let w0 = c0000?.rect[2] {
+            #expect(abs(w1 - w0) < 0.01)
         }
 
         // #77, #82, #96: narrow container stops columns; scrollWide keeps narrow table compact & lets fullWidth scroll wide
@@ -522,6 +605,47 @@ struct MarkdownCloseoutParityTests {
             _ = rt.frame(at: 0.04)
             #expect(rt.currentCursor() == .pointer)
         }
+
+        // #88 (`tests/markdown.rs:796`): linkStyle selectively styles only matching URLs (`session:`),
+        // preserves default look on non-matching URLs (`https://a.dev`), and paints hover rect only on matching URL.
+        let chipBg = Color(r: 0.18, g: 0.22, b: 0.32, a: 1.0)
+        let chipHover = Color(r: 0.28, g: 0.36, b: 0.52, a: 1.0)
+        let selRT = Runtime<Int>(state: 0, viewport: Vec2(400, 160), pixelScale: 1.0, systemDark: true) { _, _ in
+            col().wFull().child(
+                Markdown("See [Title](session:abc) and [Link](https://a.dev).")
+                    .linkStyle { url in
+                        url.hasPrefix("session:")
+                            ? MarkdownLinkStyle(color: .white, underline: false, weight: 500, bg: chipBg, hoverColor: .white, hoverBg: chipHover)
+                            : nil
+                    }
+                    .onLink { _, _, _ in }
+                    .build(kit)
+            )
+        }
+        let scene0 = selRT.frame(at: 0.0)
+        let chipBgFills = scene0.primitives.filter { $0.kind == .roundedRect && $0.fill == chipBg.simd4(srgb: scene0.srgbBlend) }
+        let chipHoverFills0 = scene0.primitives.filter { $0.kind == .roundedRect && $0.fill == chipHover.simd4(srgb: scene0.srgbBlend) }
+        #expect(chipBgFills.count == 1)
+        #expect(chipHoverFills0.isEmpty)
+
+        let selChip = selRT.elements().first(where: { $0.role == .link && $0.key == "session:abc" })!
+        let selExt = selRT.elements().first(where: { $0.role == .link && $0.key == "https://a.dev" })!
+        #expect(selChip.label == "Title")
+        #expect(abs(chipBgFills[0].rect.z - selChip.rect[2]) < 1.0)
+
+        // Hovering https://a.dev -> pointer cursor, NO chipHover fill
+        selRT.pointerMove(to: Vec2(selExt.rect[0] + selExt.rect[2] * 0.5, selExt.rect[1] + selExt.rect[3] * 0.5), at: 0.02)
+        let sceneExt = selRT.frame(at: 0.03)
+        #expect(selRT.currentCursor() == .pointer)
+        #expect(sceneExt.primitives.filter { $0.kind == .roundedRect && $0.fill == chipHover.simd4(srgb: sceneExt.srgbBlend) }.isEmpty)
+
+        // Hovering session:abc -> pointer cursor + chipHover rect on session:abc's bounds
+        selRT.pointerMove(to: Vec2(selChip.rect[0] + selChip.rect[2] * 0.5, selChip.rect[1] + selChip.rect[3] * 0.5), at: 0.05)
+        let sceneChip = selRT.frame(at: 0.06)
+        #expect(selRT.currentCursor() == .pointer)
+        let chipHoverFills = sceneChip.primitives.filter { $0.kind == .roundedRect && $0.fill == chipHover.simd4(srgb: sceneChip.srgbBlend) }
+        #expect(chipHoverFills.count == 1)
+        #expect(abs(chipHoverFills[0].rect.x - selChip.rect[0]) < 1.0 && abs(chipHoverFills[0].rect.z - selChip.rect[2]) < 1.0)
     }
 
     // MARK: - Highlight Marks, ScrollIntoView, Overflow & 2000 Scale (markdown_blocks_and_highlights.rs #117-#120, #122; markdown_find.rs #134)
@@ -624,6 +748,89 @@ struct MarkdownCloseoutParityTests {
         #expect(elsAfter.filter { $0.role != .mark }.count == nonMarkCountBefore)
         #expect(elsAfter.filter { $0.role == .mark }.count == 2000)
         #expect(elsAfter.contains(where: { $0.key == Markdown.highlightKey(1999) }))
+
+        // #117 (`markdown_blocks_and_highlights.rs:408-517`): multi-block + syntax byte mapping without reshaping glyphs,
+        // syntax-only omissions, cross-block highlight ("linked text." / "Second"), & active ring rect.
+        let hlDoc = """
+        # Heading Alpha
+
+        Plain **bold token** and `inline_code` plus ~~struck_word~~ and [linked text](https://example.org/hidden).
+
+        Second paragraph continues here.
+
+        - list item one
+        - [x] task needle done
+
+        > quoted thoughts
+
+        | Col A | Col B |
+        |---|---|
+        | cell_alpha | cell_beta |
+
+        ```rust
+        fn compute(value: i32) -> i32 {
+            value + 1
+        }
+        ```
+        """
+        func byteRange(_ needle: String) -> Range<Int> {
+            let r = hlDoc.range(of: needle)!
+            return hlDoc.utf8.distance(from: hlDoc.startIndex, to: r.lowerBound)..<hlDoc.utf8.distance(from: hlDoc.startIndex, to: r.upperBound)
+        }
+        let boldStarsOffset = byteRange("**bold").lowerBound
+        let linkDestOffset = byteRange("(https://example.org/hidden)").lowerBound
+        let hlItems: [(ranges: [Range<Int>], style: MarkdownHighlight)] = [
+            ([byteRange("Alpha")], .match()),
+            ([byteRange("Plain **bold")], .match()),
+            ([byteRange("inline_code")], .match()),
+            ([byteRange("struck")], .match()),
+            ([byteRange("linked text](https://example.org/hidden).\n\nSecond")], .match()),
+            ([byteRange("item one")], .match()),
+            ([byteRange("needle")], .match()),
+            ([byteRange("thoughts")], .match()),
+            ([byteRange("cell_beta")], .match()),
+            ([byteRange("compute(value")], .match().current(true).key("active-match")),
+            ([boldStarsOffset..<(boldStarsOffset + 2)], .match().key("syntax-only-stars")),
+            ([linkDestOffset..<(linkDestOffset + "(https://example.org/hidden)".utf8.count)], .match().key("syntax-only-url")),
+        ]
+        let ringColor = Color(r: 0.96, g: 0.62, b: 0.04, a: 1.0)
+        let hlStyle = MarkdownStyle.fromKit(kit)
+            .highlightBg(Color(r: 0.92, g: 0.70, b: 0.03, a: 0.22))
+            .highlightCurrent(bg: Color(r: 0.96, g: 0.62, b: 0.04, a: 0.40), fg: nil, ring: (ringColor, 1.5))
+
+        func renderHL(_ hls: [(ranges: [Range<Int>], style: MarkdownHighlight)]) -> (Runtime<Int>, RefScene) {
+            let r = Runtime<Int>(state: 0, viewport: Vec2(520, 900), pixelScale: 1.0, systemDark: true) { _, _ in
+                col().w(520).child(Markdown(hlDoc).highlights(hls).render(hlStyle))
+            }
+            return (r, r.frame(at: 0.0))
+        }
+        let (_, plainScene) = renderHL([])
+        let (hlRT, hlScene) = renderHL(hlItems)
+        let plainGlyphs = plainScene.primitives.filter { $0.kind == .glyph }.map { ($0.rect, $0.uv) }
+        let hlGlyphs = hlScene.primitives.filter { $0.kind == .glyph }.map { ($0.rect, $0.uv) }
+        #expect(plainGlyphs.count == hlGlyphs.count && zip(plainGlyphs, hlGlyphs).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 })
+
+        let markPairs = hlRT.elements().filter { $0.role == .mark }.map { ($0.key ?? "", $0.label ?? "") }
+        for (k, lbl) in [
+            (Markdown.highlightKey(0), "Alpha"),
+            (Markdown.highlightKey(1), "Plain bold"),
+            (Markdown.highlightKey(2), "inline_code"),
+            (Markdown.highlightKey(3), "struck"),
+            (Markdown.highlightKey(5), "item one"),
+            (Markdown.highlightKey(6), "needle"),
+            (Markdown.highlightKey(7), "thoughts"),
+            (Markdown.highlightKey(8), "cell_beta"),
+            ("active-match", "compute(value"),
+        ] {
+            #expect(markPairs.contains(where: { $0.0 == k && $0.1 == lbl }), "Missing mark (\(k), \(lbl)) in \(markPairs)")
+        }
+        let crossLabels = markPairs.filter { $0.0 == Markdown.highlightKey(4) }.map(\.1)
+        #expect(crossLabels == ["linked text.", "Second"])
+        #expect(!markPairs.contains(where: { $0.0.hasPrefix("syntax-only") }))
+
+        let wantRing = ringColor.simd4(srgb: hlScene.srgbBlend)
+        let ringed = hlScene.primitives.filter { $0.kind == .roundedRect && abs($0.params.x - 1.5) < 0.01 && $0.border == wantRing }
+        #expect(ringed.count == 1)
     }
 
     // MARK: - Selection, Tabs & Quote Copy (markdown_select.rs #149, #151, #152; markdown_copy_source.rs #157)
@@ -958,5 +1165,63 @@ struct MarkdownCloseoutParityTests {
             _ = a11yRT.frame(at: 0.05)
             #expect(a11yRT.state.taskChecked)
         }
+    }
+
+    @MainActor
+    @Test("tests/markdown_copy_source.rs #154: Runtime drag across blocks Cmd+C copies verbatim block source vs drawn text")
+    func markdownCopySourceDragAndSelectAllParity() {
+        let kit = Kit.neutral(dark: true)
+        let src = "# Title\n\nHello **world** and [link](https://x.dev/a).\n\n- alpha\n- [x] beta\n\n```rust\nfn main() {}\n```\n\nLast *line*.\n"
+        struct S: Sendable { var sourceCopy: Bool }
+
+        func makeRT(sourceCopy: Bool) -> (Runtime<S>, Clipboard) {
+            let board = Clipboard(kind: .memory)
+            let rt = Runtime<S>(state: S(sourceCopy: sourceCopy), viewport: Vec2(480, 800), pixelScale: 2.0, systemDark: true) { s, _ in
+                col().wFull().p(10).child(Markdown(src).selectable(true).copySource(s.sourceCopy).build(kit).key("note"))
+            }
+            rt.useClipboard(board)
+            _ = rt.frame(at: 0.0)
+            return (rt, board)
+        }
+
+        // 1. Select all + Cmd+C copies whole verbatim source when copySource(true), drawn text when false
+        let (rtTrue, boardTrue) = makeRT(sourceCopy: true)
+        rtTrue.update(at: 0.01) { _, tx in tx.selectAllText("note") }
+        _ = rtTrue.frame(at: 0.02)
+        #expect(rtTrue.selectedText()?.hasPrefix("Title\n\nHello world") == true)
+        _ = rtTrue.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = rtTrue.frame(at: 0.04)
+        #expect((rtTrue.copyRequest ?? boardTrue.readRich().content.text) == src)
+
+        let (rtFalse, boardFalse) = makeRT(sourceCopy: false)
+        rtFalse.update(at: 0.01) { _, tx in tx.selectAllText("note") }
+        _ = rtFalse.frame(at: 0.02)
+        _ = rtFalse.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.03)
+        _ = rtFalse.frame(at: 0.04)
+        #expect((rtFalse.copyRequest ?? boardFalse.readRich().content.text) == "Title\n\nHello world and link.\n\n- alpha\n- [x] beta\n\nfn main() {}\n\nLast line.")
+
+        // 2. Drag across blocks note/b1 .. note/b4 + Cmd+C copies exact touched-blocks Markdown source
+        let (dragRT, dragBoard) = makeRT(sourceCopy: true)
+        let b1 = dragRT.elements().first(where: { $0.path.hasSuffix("@note/@b1") })!
+        let b4 = dragRT.elements().first(where: { $0.path.hasSuffix("@note/@b4") })!
+        let x0 = b1.rect[0] + 30
+        let y0 = b1.rect[1] + b1.rect[3] * 0.5
+        let x1 = b4.rect[0] + 10
+        let y1 = b4.rect[1] + b4.rect[3] * 0.5
+        dragRT.pointerMove(to: Vec2(x0, y0), at: 0.02)
+        dragRT.pointerDown(at: Vec2(x0, y0), at: 0.02)
+        _ = dragRT.frame(at: 0.03)
+        for k in 1...6 {
+            let f = Float(k) / 6.0
+            dragRT.pointerMove(to: Vec2(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f), at: 0.03 + Double(k) * 0.01)
+            _ = dragRT.frame(at: 0.035 + Double(k) * 0.01)
+        }
+        dragRT.pointerUp(at: Vec2(x1, y1), at: 0.10)
+        _ = dragRT.frame(at: 0.11)
+        #expect(dragRT.selectedText()?.contains("alpha") == true)
+        _ = dragRT.keyDown(KeyEvent(key: .text("c"), mods: Mods(cmd: true)), at: 0.12)
+        _ = dragRT.frame(at: 0.13)
+        let expectedRange = String(src.dropFirst(9)).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect((dragRT.copyRequest ?? dragBoard.readRich().content.text) == expectedRange)
     }
 }

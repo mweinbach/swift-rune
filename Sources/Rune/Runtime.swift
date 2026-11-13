@@ -4443,6 +4443,11 @@ public final class Runtime<State> {
         } else if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
             nextIdx = rIdx
             focusVisible = false
+        } else if let fp = focusedPath,
+                  let idx = nodeByPath[fp],
+                  canFocusIndex(idx),
+                  focusedKey == nil || flatNodes[idx].key == focusedKey {
+            nextIdx = idx
         } else if let fk = focusedKey,
                   let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
             nextIdx = idx

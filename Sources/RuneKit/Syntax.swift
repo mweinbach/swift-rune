@@ -296,7 +296,7 @@ public struct SyntaxHighlight: Sendable, Equatable, Hashable {
 /// Cached syntax highlighter (`rune_kit::syntax::Highlighter`).
 public struct SyntaxHighlighter: Sendable {
     private let fn: (@Sendable (String?, String) -> [SyntaxHighlight])?
-    private var id: String
+    var id: String
 
     public static let builtin = SyntaxHighlighter(builtinID: "builtin")
 
@@ -305,9 +305,20 @@ public struct SyntaxHighlighter: Sendable {
         self.id = builtinID
     }
 
-    public init(id: String = "custom", _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]) {
+    private static let counterLock = NSLock()
+    private nonisolated(unsafe) static var nextCustomID: UInt64 = 0
+
+    public init(id: String? = nil, _ fn: @escaping @Sendable (String?, String) -> [SyntaxHighlight]) {
         self.fn = fn
-        self.id = "custom:\(id)"
+        if let id {
+            self.id = "custom:\(id)"
+        } else {
+            Self.counterLock.lock()
+            Self.nextCustomID &+= 1
+            let n = Self.nextCustomID
+            Self.counterLock.unlock()
+            self.id = "custom:#\(n)"
+        }
     }
 
     public var isBuiltin: Bool { fn == nil }

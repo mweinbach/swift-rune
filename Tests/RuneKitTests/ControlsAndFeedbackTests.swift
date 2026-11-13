@@ -304,4 +304,29 @@ struct ControlsAndFeedbackTests {
         #expect(abs(rt.element(byKey: "pr-ind-fill")!.rect[2] / rt.element(byKey: "pr-ind-track")!.rect[2] - 0.25) < 0.02)
         #expect(rt.element(byKey: "pc")!.rect[2] == 20)
     }
+
+    @Test("§2 #399: Switch lays out exact switchMetrics track sizes for all 5 ControlSize cases")
+    func switchAllControlSizesParity() {
+        let kit = Kit.neutral(dark: true)
+        let expected: [(ControlSize, Float, Float)] = [
+            (.mini, 36, 16),
+            (.small, 44, 20),
+            (.regular, 54, 24),
+            (.large, 64, 28),
+            (.extraLarge, 80, 36),
+        ]
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(320, 400)) { _, _ in
+            var c: El<Int> = col().gap(8).p(12)
+            for (sz, _, _) in expected {
+                c = c.child(Switch<Int>(checked: true).controlSize(sz).label("Mode").build(kit, key: "sw-\(sz)"))
+            }
+            return c
+        }
+        _ = rt.frame(at: 0)
+        for (sz, w, h) in expected {
+            let rect = rt.element(byKey: "sw-\(sz)-control")!.rect
+            #expect(abs(rect[2] - w) < 0.01)
+            #expect(abs(rect[3] - h) < 0.01)
+        }
+    }
 }

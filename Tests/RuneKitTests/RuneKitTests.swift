@@ -4,7 +4,7 @@ import Testing
 @testable import Rune
 @testable import RuneRef
 
-@Suite("RuneKit Palette, Controls, Markdown & Diff Tests")
+@MainActor @Suite("RuneKit Palette, Controls, Markdown & Diff Tests")
 struct RuneKitTests {
     @Test("Kit.fromPalette enforces WCAG 4.5:1 muted and 3.0:1 faint contrast and pure-black surface lift")
     func paletteContrastAndElevationLayers() {
@@ -257,6 +257,12 @@ struct RuneKitTests {
         rt.pointerDown(at: Vec2(b3[0] + 10, b3[1] + 10), at: 0.2)
         rt.pointerUp(at: Vec2(b3[0] + 10, b3[1] + 10), at: 0.25)
         #expect(rt.state.clicks == 1)
+
+        // IconButton ("ib1") with .accent variant is clickable and fires onPress
+        let ib1 = rt.element(byKey: "ib1")!.rect
+        rt.pointerDown(at: Vec2(ib1[0] + ib1[2] * 0.5, ib1[1] + ib1[3] * 0.5), at: 0.3)
+        rt.pointerUp(at: Vec2(ib1[0] + ib1[2] * 0.5, ib1[1] + ib1[3] * 0.5), at: 0.35)
+        #expect(rt.state.clicks == 2)
     }
 
     @Test("Accordion, List, Select, Dialog, TabStrip, Menu, Combobox, Tooltip & ToastStack")
@@ -353,6 +359,13 @@ struct RuneKitTests {
         #expect(rt.element(byKey: "cbx-popup") != nil)
         #expect(rt.element(byKey: "tip-tip") != nil)
         #expect(rt.element(byKey: "dlg-sheet") != nil)
+
+        // Kit.scrollBar ("sb") lays out track & proportional thumb
+        let sb = rt.element(byKey: "sb")!
+        let sbThumb = rt.element(byKey: "sb-thumb")!
+        #expect(abs(sb.rect[3] - 100) < 0.01)
+        #expect(sbThumb.rect[3] > 0 && sbThumb.rect[3] <= sb.rect[3])
+        #expect(sbThumb.rect[1] >= sb.rect[1] && sbThumb.rect[1] + sbThumb.rect[3] <= sb.rect[1] + sb.rect[3] + 0.01)
 
         // Escape dismisses modal dialog
         _ = rt.keyDown(KeyEvent(key: .escape), at: 0.1)

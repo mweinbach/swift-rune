@@ -311,6 +311,34 @@ struct MarkdownFullParityTests {
                 #expect(cached.maps == direct.maps)
             }
         }
+
+        // #20 (`stream_tests.rs:46-68`): 9-doc byte/char-prefix-by-prefix monotonic visibility
+        let streamDocs = [
+            "…and **Settings › Appearance**…",
+            "Open **Settings › Appearance** to change it.",
+            "**Note:** run `cargo test` and *then* ~~not~~ this.",
+            "Mix **bold _and em_** end, an __under__ and `` a`b `` here.",
+            "# Heading with **bold**\n\nSee https://example.com/a_b_c and 2 * 3 = 6, snake_case_name.",
+            "- item **one**\n- item `two`\n\n> quoted *em*",
+            "| a | **b** |\n|---|---|\n| `c` | *d* |",
+            "See [the **docs**](https://example.com/a_b \"t\") and ![a chart](x.png), then *[more](y)*.",
+            "- [ ] todo\n- [x] done",
+        ]
+        var strm = MarkdownTailStream()
+        for docText in streamDocs {
+            let stripWS = docText.contains("![")
+            func visible(_ blocks: [MarkdownDocBlock]) -> String {
+                let s = shownText(blocks)
+                return stripWS ? String(s.unicodeScalars.filter { !$0.properties.isWhitespace }) : s
+            }
+            let whole = visible(MarkdownParser.parseDocument(docText).blocks)
+            for endIdx in charPrefixEnds(docText) {
+                let prefix = String(docText[..<endIdx])
+                strm.reset(prefix)
+                let shown = visible(strm.document(streaming: true).blocks)
+                #expect(whole.hasPrefix(shown), "Prefix \(prefix) showed \(shown) which is not a prefix of \(whole)")
+            }
+        }
     }
 
     @Test("Reference definition invalidates cache properly and doc cache capacity preserves older docs")
@@ -404,6 +432,19 @@ struct MarkdownFullParityTests {
         #expect(sliceMatches(blocksDoc, codeHit) == [["fn compute() -> i32 {\n    42"]])
         let diffHit = Markdown(blocksDoc).findRanges("-old_val\n+new_val", caseSensitivity: .sensitive)
         #expect(sliceMatches(blocksDoc, diffHit) == [["-old_val\n+new_val"]])
+
+        // #123 (`tests/markdown_find.rs:44-55`): nested formatting inside link + multiline inline code in quotes/lists
+        let nestedLink = "See [**bold *em* `code`**](https://example.org/u) now"
+        #expect(sliceMatches(nestedLink, Markdown(nestedLink).findRanges("See bold em code now", caseSensitivity: .sensitive)) == [
+            ["See ", "bold ", "em", " ", "code", " now"]
+        ])
+        let quotedCode = "> prefix `one\n> two` suffix\n\n- item `three\n  four` tail"
+        #expect(sliceMatches(quotedCode, Markdown(quotedCode).findRanges("prefix one two suffix", caseSensitivity: .sensitive)) == [
+            ["prefix ", "one\n", "two", " suffix"]
+        ])
+        #expect(sliceMatches(quotedCode, Markdown(quotedCode).findRanges("item three four tail", caseSensitivity: .sensitive)) == [
+            ["item ", "three\n", "four", " tail"]
+        ])
     }
 
     @Test("MarkdownFind handles entities, backslash escapes, Unicode case/sigma folding, and empty inputs")
@@ -446,6 +487,61 @@ struct MarkdownFullParityTests {
             if case let .image(imgSrc, alt, _) = $0 { return imgSrc == "image.png" && alt == "https://image.example/alt" }
             return false
         })
+
+        // #116 (`markdown_blocks_and_highlights.rs:351-406`): GFM punctuation/parens/entity rules + .autolink(false) click test
+        let gfmSrc = "Visit https://example.org/docs?x=1#top, http://example.org:8080/a; and www.example.org/path/to_file! Also (see https://en.wikipedia.org/wiki/Rust_(programming_language)) and https://example.org/entity&nbsp; but not `https://in.code` or [explicit](https://explicit.example/x).\n\n```\nhttps://in.fence.example\n```\n"
+        let gfmDoc = MarkdownParser.parseDocument(gfmSrc, autolink: true)
+        if case let .para(p) = gfmDoc.blocks[0] {
+            let pairs = p.links.map { (utf8Slice(p.text, $0.start..<$0.end), $0.url) }
+            #expect(pairs.map(\.0) == [
+                "https://example.org/docs?x=1#top",
+                "http://example.org:8080/a",
+                "www.example.org/path/to_file",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://example.org/entity",
+                "explicit",
+            ])
+            #expect(pairs.map(\.1) == [
+                "https://example.org/docs?x=1#top",
+                "http://example.org:8080/a",
+                "http://www.example.org/path/to_file",
+                "https://en.wikipedia.org/wiki/Rust_(programming_language)",
+                "https://example.org/entity",
+                "https://explicit.example/x",
+            ])
+        } else {
+            Issue.record("Expected GFM paragraph block")
+        }
+
+        struct AutoState: Sendable {
+            var autolink = true
+            var opened: [String] = []
+        }
+        let kit = Kit.neutral(dark: true)
+        let autoRT = Runtime<AutoState>(state: AutoState(), viewport: Vec2(480, 120), pixelScale: 1.0, systemDark: true) { s, _ in
+            col().w(480).child(
+                Markdown("Try www.example.org/hello, or [named](https://named.example).")
+                    .autolink(s.autolink)
+                    .onLink { st, url, _ in st.opened.append(url) }
+                    .build(kit)
+            )
+        }
+        _ = autoRT.frame(at: 0.0)
+        let bareEl = autoRT.elements().first(where: { $0.role == .link && $0.key == "http://www.example.org/hello" })!
+        let barePt = Vec2(bareEl.rect[0] + bareEl.rect[2] * 0.5, bareEl.rect[1] + bareEl.rect[3] * 0.5)
+        autoRT.pointerMove(to: barePt, at: 0.01)
+        autoRT.pointerDown(at: barePt, at: 0.01)
+        autoRT.pointerUp(at: barePt, at: 0.01)
+        _ = autoRT.frame(at: 0.02)
+        #expect(autoRT.state.opened == ["http://www.example.org/hello"])
+
+        autoRT.update(at: 0.03) { s, _ in
+            s.autolink = false
+            s.opened.removeAll()
+        }
+        _ = autoRT.frame(at: 0.04)
+        #expect(autoRT.elements().first(where: { $0.role == .link && $0.key == "http://www.example.org/hello" }) == nil)
+        #expect(autoRT.elements().first(where: { $0.role == .link && $0.key == "https://named.example" }) != nil)
     }
 
     // MARK: - Block Parsing, Tables, Diffs, Code, Bidi, PlainText
@@ -492,6 +588,28 @@ struct MarkdownFullParityTests {
         }
         let iso = MarkdownBidi.isolateEmbeddedRuns("שלום world שלום", base: .rtl)
         #expect(iso.contains("\u{2066}") && iso.contains("\u{2069}"))
+
+        // #61 (`tests/markdown.rs:49-60`): inline code ending a line leaves no closing \u{2069}
+        let codeEndDoc = MarkdownParser.parseAST("Run `cargo test`\n\n- item `two`\n\n| `c` |\n|---|\n| `d ` |\n")
+        if case let .para(p) = codeEndDoc[0] {
+            #expect(p.text == "Run \u{202f}\u{202f}\u{2066}cargo test")
+            #expect(!p.text.contains("\u{2069}"))
+            #expect(p.spans.map(\.style) == [.codePad, .code])
+        } else {
+            Issue.record("Expected para block for inline code ending line")
+        }
+        if case let .list(_, items) = codeEndDoc[1], case let .para(itemPara) = items[0][0] {
+            #expect(itemPara.text == "item \u{202f}\u{202f}\u{2066}two")
+            #expect(!itemPara.text.contains("\u{2069}"))
+        } else {
+            Issue.record("Expected list item para")
+        }
+        if case let .table(tbl) = codeEndDoc[2] {
+            #expect(tbl.head[0].text == "\u{202f}\u{202f}\u{2066}c")
+            #expect(tbl.rows[0][0].text == "\u{202f}\u{202f}\u{2066}d")
+        } else {
+            Issue.record("Expected table block")
+        }
     }
 
     // MARK: - Runtime Rendering & Interactive Parity (tests/markdown*.rs)
@@ -588,6 +706,32 @@ struct MarkdownFullParityTests {
         _ = rt.frame(at: 0.032)
         let keys2 = rt.elements().compactMap(\.key)
         #expect(keys2.contains("sec-head") && keys2.contains("b3"))
+
+        // #65 (`tests/markdown.rs:104-126`): default b0/b1 keys & element.path stability without caller blockKeys
+        let defaultSteps = [
+            "# Plan\n\nFirst para",
+            "# Plan\n\nFirst para is done.\n\n- a",
+            "# Plan\n\nFirst para is done.\n\n- a\n- b\n\n```sh\nls",
+            "# Plan\n\nFirst para is done.\n\n- a\n- b\n\n```sh\nls -la\n",
+        ]
+        let defRT = Runtime<String>(state: defaultSteps[0], viewport: Vec2(360, 500), pixelScale: 1.0, systemDark: true) { src, _ in
+            Markdown(src).build(kit)
+        }
+        _ = defRT.frame(at: 0.0)
+        var seenDefaultKeys = Set(defRT.elements().compactMap(\.key))
+        let headPath = defRT.element(byKey: "b0")!.path
+        #expect(seenDefaultKeys.contains("b0") && seenDefaultKeys.contains("b1"))
+        for (i, step) in defaultSteps.dropFirst().enumerated() {
+            defRT.update(at: Double(i + 1) * 0.02) { s, _ in s = step }
+            _ = defRT.frame(at: Double(i + 1) * 0.02 + 0.01)
+            let nowKeys = Set(defRT.elements().compactMap(\.key))
+            for prev in seenDefaultKeys {
+                #expect(nowKeys.contains(prev), "Key \(prev) lost at step \(i + 1)")
+            }
+            #expect(defRT.element(byKey: "b0")!.path == headPath)
+            seenDefaultKeys = nowKeys
+        }
+        #expect(seenDefaultKeys.contains("b3"))
     }
 
     @MainActor
@@ -662,6 +806,57 @@ struct MarkdownFullParityTests {
         rt.pointerUp(at: p0, at: 0.07)
         _ = rt.frame(at: 0.08)
         #expect(rt.state.toggled.isEmpty)
+
+        // #112 (`markdown_blocks_and_highlights.rs:149-178`): nested tasks + Tab/Space keyboard nav & readOnly skip
+        let nestedSrc = "Préface\n\n- plain\n  - [ ] nested\n- [x] outer\n\nTail\n\n- [ ] last\n"
+        let nestRT = Runtime<TaskState>(
+            state: TaskState(src: nestedSrc),
+            viewport: Vec2(320, 400),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { s, _ in
+            var md = Markdown(s.src).view(for: TaskState.self)
+            if s.handled {
+                md = md.onTask { st, blockKey, offset, nextChecked, _ in
+                    st.toggled.append((blockKey, offset, nextChecked))
+                }
+            }
+            if s.readOnly {
+                md = md.tasksReadOnly(true)
+            }
+            return col().w(320).child(md.build(kit))
+        }
+        _ = nestRT.frame(at: 0.0)
+        // Space without focus does nothing
+        _ = nestRT.keyDown(KeyEvent(key: .space), at: 0.01)
+        _ = nestRT.frame(at: 0.02)
+        #expect(nestRT.state.toggled.isEmpty)
+
+        let expectedSteps: [(String, String, Bool)] = [
+            ("[ ] nested", "b1", true),
+            ("[x] outer", "b1", false),
+            ("[ ] last", "b3", true),
+        ]
+        var nt = 0.03
+        for (idx, (marker, wantKey, wantChecked)) in expectedSteps.enumerated() {
+            _ = nestRT.keyDown(KeyEvent(key: .tab), at: nt); nt += 0.01
+            _ = nestRT.frame(at: nt); nt += 0.01
+            _ = nestRT.keyDown(KeyEvent(key: .space), at: nt); nt += 0.01
+            _ = nestRT.frame(at: nt); nt += 0.01
+            #expect(nestRT.state.toggled.count == idx + 1)
+            let markerOff = nestedSrc.utf8.distance(from: nestedSrc.startIndex, to: nestedSrc.range(of: marker)!.lowerBound)
+            #expect(nestRT.state.toggled[idx] == (wantKey, markerOff, wantChecked))
+        }
+        nestRT.update(at: nt) { st, _ in st.readOnly = true; st.toggled.removeAll() }
+        nt += 0.01
+        _ = nestRT.frame(at: nt); nt += 0.01
+        for _ in 0..<4 {
+            _ = nestRT.keyDown(KeyEvent(key: .tab), at: nt); nt += 0.01
+            _ = nestRT.keyDown(KeyEvent(key: .space), at: nt); nt += 0.01
+            _ = nestRT.frame(at: nt); nt += 0.01
+        }
+        #expect(nestRT.state.toggled.isEmpty)
+        #expect(nestRT.elements().filter { $0.role == .checkbox }.allSatisfy { !$0.focusable })
     }
 
     @MainActor
@@ -705,6 +900,38 @@ struct MarkdownFullParityTests {
             _ = rt.frame(at: 0.04)
             #expect(rt.state.secondary == ["file://src/main.swift"])
         }
+
+        // #68 (`tests/markdown.rs:166-212`): Cursor.pointer, Tab+Enter opening links, and !focusable + .default cursor without onLink
+        struct LinksDocState: Sendable {
+            var handled: Bool
+            var opened: [String] = []
+        }
+        let linksDoc = "See [one](https://a.dev) and [two](https://b.dev).\n\n- an item with [three](https://c.dev)\n"
+        let navLinkRT = Runtime<LinksDocState>(state: LinksDocState(handled: true), viewport: Vec2(480, 400), pixelScale: 1.0, systemDark: true) { s, _ in
+            let md = Markdown(linksDoc)
+            let built: El<LinksDocState> = s.handled
+                ? md.onLink { st, url, _ in st.opened.append(url) }.build(kit)
+                : md.build(kit)
+            return col().wFull().p(10).child(built)
+        }
+        _ = navLinkRT.frame(at: 0.0)
+        let twoEl = navLinkRT.elements().first(where: { $0.role == .link && $0.key == "https://b.dev" })!
+        navLinkRT.pointerMove(to: Vec2(twoEl.rect[0] + twoEl.rect[2] * 0.5, twoEl.rect[1] + twoEl.rect[3] * 0.5), at: 0.01)
+        _ = navLinkRT.frame(at: 0.02)
+        #expect(navLinkRT.currentCursor() == .pointer)
+
+        _ = navLinkRT.keyDown(KeyEvent(key: .tab), at: 0.03)
+        _ = navLinkRT.frame(at: 0.04)
+        _ = navLinkRT.keyDown(KeyEvent(key: .enter), at: 0.05)
+        _ = navLinkRT.frame(at: 0.06)
+        #expect(navLinkRT.state.opened == ["https://a.dev"])
+
+        navLinkRT.update(at: 0.07) { s, _ in s.handled = false; s.opened.removeAll() }
+        _ = navLinkRT.frame(at: 0.08)
+        #expect(navLinkRT.elements().allSatisfy { !$0.focusable && !$0.path.contains("#link-") })
+        navLinkRT.pointerMove(to: Vec2(twoEl.rect[0] + twoEl.rect[2] * 0.5, twoEl.rect[1] + twoEl.rect[3] * 0.5), at: 0.09)
+        _ = navLinkRT.frame(at: 0.10)
+        #expect(navLinkRT.currentCursor() == .default)
     }
 
     @MainActor
@@ -796,6 +1023,44 @@ struct MarkdownFullParityTests {
         #expect(approxColor(l1?.fill, style.diffRemove))
         #expect(approxColor(l2?.fill, style.diffAdd))
 
+        // #78 (`tests/markdown.rs:468-503`): ```patch fence, line tint rect widths, hunk textColor, & diffTextTint(0.5)
+        if case .diff = MarkdownParser.parseAST("```patch\n+a\n```").first {} else {
+            Issue.record("Expected ```patch fence to parse as .diff")
+        }
+        let addC = Color(r: 0, g: 1, b: 0, a: 1)
+        let remC = Color(r: 1, g: 0, b: 0, a: 1)
+        let hunkC = Color(r: 0, g: 0, b: 1, a: 1)
+        let patchDoc = "```diff\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n```\n"
+        let styledDiffRT = Runtime<Int>(state: 0, viewport: Vec2(480, 400), pixelScale: 1.0, systemDark: false) { _, _ in
+            col().wFull().child(
+                Markdown(patchDoc).render(MarkdownStyle.neutral(dark: false).diff(added: addC, removed: remC).diffHunk(hunkC))
+            )
+        }
+        _ = styledDiffRT.frame(at: 0.0)
+        let sdEls = styledDiffRT.elements()
+        let blockRect = sdEls.first(where: { $0.key == "b0" })!.rect
+        for lk in ["l2", "l3"] {
+            let tint = sdEls.first(where: { $0.key == lk })!.rect
+            #expect(tint[2] >= blockRect[2] - 2.0 && tint[0] >= blockRect[0] && tint[0] + tint[2] <= blockRect[0] + blockRect[2] + 0.01)
+        }
+        let hunkEl = sdEls.first(where: { $0.text == "@@ -1,2 +1,2 @@" })!
+        #expect(hunkEl.textColor == hunkC)
+        let untintedBase = Kit.neutral(dark: false).c.textBase
+        #expect(sdEls.first(where: { $0.text == "+new" })?.textColor == untintedBase)
+        #expect(sdEls.first(where: { $0.text == "-old" })?.textColor == untintedBase)
+
+        let tintedDiffRT = Runtime<Int>(state: 0, viewport: Vec2(480, 400), pixelScale: 1.0, systemDark: false) { _, _ in
+            col().wFull().child(
+                Markdown(patchDoc).render(MarkdownStyle.neutral(dark: false).diffTextTint(0.5))
+            )
+        }
+        _ = tintedDiffRT.frame(at: 0.0)
+        let tdEls = tintedDiffRT.elements()
+        let addTextCol = tdEls.first(where: { $0.text == "+new" })!.textColor!
+        let remTextCol = tdEls.first(where: { $0.text == "-old" })!.textColor!
+        #expect(addTextCol.g > addTextCol.r && remTextCol.r > remTextCol.g)
+        #expect(tdEls.first(where: { $0.text == " keep" })?.textColor == untintedBase)
+
         // Streaming mermaid: incomplete lines wait before diagram appears; unsupported type falls back to "source".
         let mermaidRT = Runtime<(String, Bool)>(
             state: ("```mermaid\ngraph TD\n  A[Start] --> B[End]\n", true),
@@ -815,6 +1080,7 @@ struct MarkdownFullParityTests {
     }
 
     @Test("Markdown selectable, selectionGroup, selectionCopy, and sourceCopy parity")
+    @MainActor
     func markdownSelectableAndSourceCopyWiring() {
         func countSelectableTexts<S>(_ node: El<S>) -> Int {
             var count = node.isSelectable ? 1 : 0

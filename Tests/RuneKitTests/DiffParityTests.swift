@@ -1433,9 +1433,8 @@ struct DiffParityTests {
         _ = navRT.keyDown(KeyEvent(key: .text("]")), at: nt); nt += 0.01
         for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
         #expect(navRT.state.diff.visibleFile == 1)
-        if let f1Hdr = navRT.element(byKey: "dv-f1-header") {
-            #expect(f1Hdr.rect[1] <= 2.0)
-        }
+        let f1Hdr = navRT.element(byKey: "dv-f1-header")!
+        #expect(f1Hdr.rect[1] <= 2.0)
         _ = navRT.keyDown(KeyEvent(key: .text("j")), at: nt); nt += 0.01
         for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
         #expect(navRT.state.diff.visibleFile == 1)
@@ -1723,5 +1722,71 @@ struct DiffParityTests {
             #expect(rt.liveOnlyEvents > checks)
             #expect(rt.liveOnlyWarnings.isEmpty, "Unexpected liveOnly warnings for \(mode): \(rt.liveOnlyWarnings)")
         }
+    }
+
+    @Test("src/diff/model.rs #29: texts_make_hunks_with_three_lines_of_context")
+    func textsMakeHunksWithThreeLinesOfContext() {
+        let oldLines = (1...20).map { "line \($0)" }
+        var newLines = oldLines
+        newLines[4] = "five"
+        newLines[16] = "seventeen"
+
+        let diff = FileDiff.fromTexts(
+            path: "sample.txt",
+            old: oldLines.joined(separator: "\n"),
+            new: newLines.joined(separator: "\n"),
+            context: 3
+        )
+        #expect(diff.hunks.map(\.header) == [
+            "@@ -2,7 +2,7 @@ line 1",
+            "@@ -14,7 +14,7 @@ line 13",
+        ])
+        #expect(diff.additionsCount == 2)
+        #expect(diff.deletionsCount == 2)
+
+        let h0 = diff.hunks[0]
+        #expect(h0.oldStart == 2 && h0.oldCount == 7 && h0.newStart == 2 && h0.newCount == 7)
+        #expect(h0.lines.map(\.kind) == [
+            .context, .context, .context, .deletion, .addition, .context, .context, .context
+        ])
+        #expect(h0.lines[0].oldLine == 2 && h0.lines[0].newLine == 2)
+        #expect(h0.lines[3].oldLine == 5 && h0.lines[3].newLine == nil && h0.lines[3].text == "line 5")
+        let added = h0.lines[4]
+        #expect(added.oldLine == nil && added.newLine == 5 && added.text == "five")
+        #expect(added.changes.map { String(decoding: Array(added.text.utf8)[$0], as: UTF8.self) } == ["five"])
+
+        let h1 = diff.hunks[1]
+        #expect(h1.oldStart == 14 && h1.oldCount == 7 && h1.newStart == 14 && h1.newCount == 7)
+        #expect(h1.lines[3].oldLine == 17 && h1.lines[4].newLine == 17)
+        #expect(h1.lines[4].changes.map { String(decoding: Array(h1.lines[4].text.utf8)[$0], as: UTF8.self) } == ["seventeen"])
+    }
+
+    @Test("src/diff/view.rs #46: word_backgrounds_cut_syntax_colours")
+    func wordBackgroundsCutSyntaxColours() {
+        let kit = Kit.neutral(dark: false)
+        let theme = SyntaxTheme.fromKit(kit)
+        let kwColor = theme.color(for: .keyword)
+        let strColor = theme.color(for: .string)
+        let wordBg = kit.c.success.bg.alpha(0.35)
+
+        let spans = DiffViewHelpers.mergeCodeSpans(
+            code: "foobarbaz!",
+            rawCount: 10,
+            offsetMap: nil,
+            highlights: [
+                SyntaxHighlight(range: 0..<6, paint: .kind(.keyword)),
+                SyntaxHighlight(range: 6..<10, paint: .kind(.string)),
+            ],
+            changedRanges: [3..<8],
+            defaultColor: kit.c.textBase,
+            syntaxTheme: theme,
+            wordBg: wordBg,
+            wrap: false
+        )
+        #expect(spans.count == 4)
+        #expect(spans[0].text == "foo" && spans[0].color == kwColor && spans[0].background == nil)
+        #expect(spans[1].text == "bar" && spans[1].color == kwColor && spans[1].background == wordBg)
+        #expect(spans[2].text == "ba" && spans[2].color == strColor && spans[2].background == wordBg)
+        #expect(spans[3].text == "z!" && spans[3].color == strColor && spans[3].background == nil)
     }
 }

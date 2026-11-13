@@ -135,4 +135,63 @@ struct SyntaxAndMermaidTests {
         let rt = Runtime<Int>(state: 0, viewport: Vec2(500, 300)) { _, _ in fallbackEl }
         #expect(!rt.frame(at: 0).primitives.isEmpty)
     }
+
+    @Test("src/syntax.rs #49 & #53: distinct highlighters keep separate caches, and spans match SyntaxTheme colors & weights")
+    func distinctHighlightersAndSpansColorParity() {
+        final class Counter: @unchecked Sendable {
+            private let lock = NSLock()
+            var count = 0
+            func inc() {
+                lock.lock()
+                count += 1
+                lock.unlock()
+            }
+        }
+        let callsA = Counter()
+        let callsB = Counter()
+        let hlA = SyntaxHighlighter { _, _ in
+            callsA.inc()
+            return [SyntaxHighlight(range: 0..<3, paint: .kind(.keyword))]
+        }
+        let hlB = SyntaxHighlighter { _, _ in
+            callsB.inc()
+            return [SyntaxHighlight(range: 4..<5, paint: .kind(.string))]
+        }
+        // Distinct highlighters on identical ("js", "let x = 1") do not cross-hit cache
+        #expect(hlA.highlight(language: "js", code: "let x = 1") == [SyntaxHighlight(range: 0..<3, paint: .kind(.keyword))])
+        #expect(hlB.highlight(language: "js", code: "let x = 1") == [SyntaxHighlight(range: 4..<5, paint: .kind(.string))])
+        #expect(hlA.highlight(language: "js", code: "let x = 1") == [SyntaxHighlight(range: 0..<3, paint: .kind(.keyword))])
+        #expect(hlB.highlight(language: "js", code: "let x = 1") == [SyntaxHighlight(range: 4..<5, paint: .kind(.string))])
+        #expect(callsA.count == 1)
+        #expect(callsB.count == 1)
+
+        // #53: spans_colour_and_offset exact TextSpan colors, explicit .color, and weight/italic
+        let theme = SyntaxTheme.neutral(dark: true)
+        let weighted = theme.withWeight(.keyword, 700)
+        let explicitColor = Color(r: 0.12, g: 0.85, b: 0.34, a: 1.0)
+        let defaultFG = theme.color(for: .variable)
+        let spans = theme.spans(
+            for: "let x = 1",
+            highlights: [
+                SyntaxHighlight(range: 0..<3, paint: .kind(.keyword)),
+                SyntaxHighlight(range: 4..<5, paint: .color(explicitColor)),
+                SyntaxHighlight(range: 8..<9, paint: .kind(.number)),
+            ],
+            defaultColor: defaultFG
+        )
+        #expect(spans.count == 5)
+        #expect(spans[0].text == "let" && spans[0].color == theme.color(for: .keyword) && spans[0].weight == nil && !spans[0].italic)
+        #expect(spans[1].text == " " && spans[1].color == defaultFG && spans[1].weight == nil && !spans[1].italic)
+        #expect(spans[2].text == "x" && spans[2].color == explicitColor && spans[2].weight == nil && !spans[2].italic)
+        #expect(spans[3].text == " = " && spans[3].color == defaultFG && spans[3].weight == nil && !spans[3].italic)
+        #expect(spans[4].text == "1" && spans[4].color == theme.color(for: .number) && spans[4].weight == nil && !spans[4].italic)
+
+        let weightedSpans = weighted.spans(
+            for: "let x = 1",
+            highlights: [SyntaxHighlight(range: 0..<3, paint: .kind(.keyword)), SyntaxHighlight(range: 4..<5, paint: .color(explicitColor))],
+            defaultColor: defaultFG
+        )
+        #expect(weightedSpans[0].weight == 700 && !weightedSpans[0].italic)
+        #expect(weightedSpans[2].weight == nil && !weightedSpans[2].italic)
+    }
 }
