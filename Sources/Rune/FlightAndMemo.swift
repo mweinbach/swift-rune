@@ -507,6 +507,10 @@ public final class MemoCache: @unchecked Sendable {
         generation &+= 1
     }
 
+    public func invalidateByPrefix(_ prefix: String) {
+        evictPrefix(prefix)
+    }
+
     public var currentGeneration: UInt64 {
         lock.lock()
         defer { lock.unlock() }
