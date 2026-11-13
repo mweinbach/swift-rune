@@ -87,6 +87,35 @@ let package = Package(
         .executable(name: "rune-keep-stuck", targets: ["RuneKeepStuck"]),
         .executable(name: "rune-growth-reorder", targets: ["RuneGrowthReorder"]),
         .executable(name: "rune-window-resize", targets: ["RuneWindowResize"]),
+        .executable(name: "rune-popup-menu", targets: ["RunePopupMenu"]),
+        .executable(name: "rune-motion-bench", targets: ["RuneMotionBench"]),
+        .executable(name: "rune-interaction-cost", targets: ["RuneInteractionCost"]),
+        .executable(name: "rune-rewind-cost", targets: ["RuneRewindCost"]),
+        .executable(name: "rune-luau-bench", targets: ["RuneLuauBench"]),
+        .executable(name: "rune-cache-pan-zoom", targets: ["RuneCachePanZoom"]),
+        .executable(name: "rune-upload-bench", targets: ["RuneUploadBench"]),
+        .executable(name: "rune-taffy-adapter-bench", targets: ["RuneTaffyAdapterBench"]),
+        .executable(name: "rune-gpu-springs", targets: ["RuneGpuSprings"]),
+        .executable(name: "rune-zoom-sweep", targets: ["RuneZoomSweep"]),
+        .executable(name: "rune-text-gpu", targets: ["RuneTextGpu"]),
+        .executable(name: "rune-tree-swap", targets: ["RuneTreeSwap"]),
+        .executable(name: "rune-long-note", targets: ["RuneLongNote"]),
+        .executable(name: "rune-scroll-commits", targets: ["RuneScrollCommits"]),
+        .executable(name: "rune-kit-layout-text-cost", targets: ["RuneKitLayoutTextCost"]),
+        .executable(name: "rune-kit-markdown-resize", targets: ["RuneKitMarkdownResize"]),
+        .executable(name: "rune-kit-scroll-bench", targets: ["RuneKitScrollBench"]),
+        .executable(name: "rune-embed-cost", targets: ["RuneEmbedCost"]),
+        .executable(name: "rune-window-scroll-cost", targets: ["RuneWindowScrollCost"]),
+        .executable(name: "rune-overlay-hud-cost", targets: ["RuneOverlayHudCost"]),
+        .executable(name: "rune-pacing", targets: ["RunePacing"]),
+        .executable(name: "rune-pacing-overlay", targets: ["RunePacingOverlay"]),
+        .executable(name: "rune-material-check", targets: ["RuneMaterialCheck"]),
+        .executable(name: "rune-live-resize-check", targets: ["RuneLiveResizeCheck"]),
+        .executable(name: "rune-spaces-probe", targets: ["RuneSpacesProbe"]),
+        .executable(name: "rune-window-panel", targets: ["RuneWindowPanel"]),
+        .executable(name: "rune-menu-probe", targets: ["RuneMenuProbe"]),
+        .executable(name: "rune-dock-menu-probe", targets: ["RuneDockMenuProbe"]),
+        .executable(name: "rune-shortcut-probe", targets: ["RuneShortcutProbe"]),
     ],
     targets: [
         .target(
@@ -490,6 +519,151 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneWindowResize"
         ),
+        .executableTarget(
+            name: "RunePopupMenu",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePopupMenu"
+        ),
+        .executableTarget(
+            name: "RuneMotionBench",
+            dependencies: ["RuneMotion"],
+            path: "Sources/Examples/RuneMotionBench"
+        ),
+        .executableTarget(
+            name: "RuneInteractionCost",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneInteractionCost"
+        ),
+        .executableTarget(
+            name: "RuneRewindCost",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneRewindCost"
+        ),
+        .executableTarget(
+            name: "RuneLuauBench",
+            dependencies: ["Rune", "RuneLuau"],
+            path: "Sources/Examples/RuneLuauBench"
+        ),
+        .executableTarget(
+            name: "RuneCachePanZoom",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneCachePanZoom"
+        ),
+        .executableTarget(
+            name: "RuneUploadBench",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneUploadBench"
+        ),
+        .executableTarget(
+            name: "RuneTaffyAdapterBench",
+            dependencies: ["Rune", "RunePerf", "RuneTaffy"],
+            path: "Sources/Examples/RuneTaffyAdapterBench"
+        ),
+        .executableTarget(
+            name: "RuneGpuSprings",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneGpuSprings"
+        ),
+        .executableTarget(
+            name: "RuneZoomSweep",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneZoomSweep"
+        ),
+        .executableTarget(
+            name: "RuneTextGpu",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneTextGpu"
+        ),
+        .executableTarget(
+            name: "RuneTreeSwap",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneTreeSwap"
+        ),
+        .executableTarget(
+            name: "RuneLongNote",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLongNote"
+        ),
+        .executableTarget(
+            name: "RuneScrollCommits",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneScrollCommits"
+        ),
+        .executableTarget(
+            name: "RuneKitLayoutTextCost",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitLayoutTextCost"
+        ),
+        .executableTarget(
+            name: "RuneKitMarkdownResize",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitMarkdownResize"
+        ),
+        .executableTarget(
+            name: "RuneKitScrollBench",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitScrollBench"
+        ),
+        .executableTarget(
+            name: "RuneEmbedCost",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneEmbedCost"
+        ),
+        .executableTarget(
+            name: "RuneWindowScrollCost",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneWindowScrollCost"
+        ),
+        .executableTarget(
+            name: "RuneOverlayHudCost",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneOverlayHudCost"
+        ),
+        .executableTarget(
+            name: "RunePacing",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePacing"
+        ),
+        .executableTarget(
+            name: "RunePacingOverlay",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RunePacingOverlay"
+        ),
+        .executableTarget(
+            name: "RuneMaterialCheck",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneMaterialCheck"
+        ),
+        .executableTarget(
+            name: "RuneLiveResizeCheck",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLiveResizeCheck"
+        ),
+        .executableTarget(
+            name: "RuneSpacesProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneSpacesProbe"
+        ),
+        .executableTarget(
+            name: "RuneWindowPanel",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneWindowPanel"
+        ),
+        .executableTarget(
+            name: "RuneMenuProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneMenuProbe"
+        ),
+        .executableTarget(
+            name: "RuneDockMenuProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneDockMenuProbe"
+        ),
+        .executableTarget(
+            name: "RuneShortcutProbe",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneShortcutProbe"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -638,6 +812,35 @@ let package = Package(
                 "RuneLiveValues",
                 "RunePlayground",
                 "RuneGlassCard",
+                "RunePopupMenu",
+                "RuneMotionBench",
+                "RuneInteractionCost",
+                "RuneRewindCost",
+                "RuneLuauBench",
+                "RuneCachePanZoom",
+                "RuneUploadBench",
+                "RuneTaffyAdapterBench",
+                "RuneGpuSprings",
+                "RuneZoomSweep",
+                "RuneTextGpu",
+                "RuneTreeSwap",
+                "RuneLongNote",
+                "RuneScrollCommits",
+                "RuneKitLayoutTextCost",
+                "RuneKitMarkdownResize",
+                "RuneKitScrollBench",
+                "RuneEmbedCost",
+                "RuneWindowScrollCost",
+                "RuneOverlayHudCost",
+                "RunePacing",
+                "RunePacingOverlay",
+                "RuneMaterialCheck",
+                "RuneLiveResizeCheck",
+                "RuneSpacesProbe",
+                "RuneWindowPanel",
+                "RuneMenuProbe",
+                "RuneDockMenuProbe",
+                "RuneShortcutProbe",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
