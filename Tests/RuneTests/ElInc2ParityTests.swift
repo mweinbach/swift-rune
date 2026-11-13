@@ -86,10 +86,11 @@ struct ElInc2ParityTests {
         #expect(abs(badgeHoverPrims[0].fill.w - 1.0) < 0.02)
         #expect(abs(badgeHoverPrims[1].fill.w - 0.9) < 0.02)
 
-        // Move pointer over solo button (hoverAlone) -> parent row-a hover suppressed!
+        // Move pointer over solo button (hoverAlone) -> parent row-a hover fades out over 0.1s easeOut!
         let soloCenter = rt.find("solo")!
         rt.pointerMove(to: soloCenter, at: 0.2)
-        let soloScene = rt.frame(at: 0.2)
+        _ = rt.frame(at: 0.2)
+        let soloScene = rt.frame(at: 0.35)
         let badgePrim = soloScene.primitives.first { prim in
             prim.params.y == rrKind && prim.rect.z == 60
         }
@@ -350,6 +351,7 @@ struct ElInc2ParityTests {
         #expect(hovRt.element(byKey: "dot")!.opacity > 0.9)
         hovRt.pointerMove(to: Vec2(115, 10), at: 0.1)
         _ = hovRt.frame(at: 0.1)
+        _ = hovRt.frame(at: 0.25)
         #expect(hovRt.element(byKey: "dot")!.opacity < 0.1)
 
         // 5. `.enterDelay` WITHOUT explicit `.transition(...)` holds opacity at 0 until delay elapses

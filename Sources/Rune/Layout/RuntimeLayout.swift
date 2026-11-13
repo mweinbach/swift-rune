@@ -185,6 +185,14 @@ final class RetainedLayoutCoordinator {
                     style.height = .points(viewport.y)
                 }
             }
+            if style.aspectRatio == nil,
+               (style.width == .auto) != (style.height == .auto),
+               let px = el.pixelsPayload {
+                let sz = px.size
+                if sz.width > 0 && sz.height > 0 {
+                    style.aspectRatio = Float(sz.width) / Float(sz.height)
+                }
+            }
 
             let borderOverride: Sides?
             if style.borderLayout {

@@ -501,7 +501,9 @@ extension Runtime {
     @discardableResult
     public func renderFrame(at now: Double) -> RenderFrame {
         let frameOut = stepToFrameOutput(at: now)
-        return buildRenderFrame(frameOut: frameOut, now: now)
+        let rf = buildRenderFrame(frameOut: frameOut, now: now)
+        updatePostFrameLayoutWatches(at: now)
+        return rf
     }
 
     internal func buildRenderFrame(frameOut: FrameOutput, now: Double) -> RenderFrame {
@@ -587,6 +589,68 @@ extension Runtime {
             childrenByParent[k] = v.sorted { $0.zOrder == $1.zOrder ? $0.index < $1.index : $0.zOrder < $1.zOrder }
         }
 
+        let groupHoverChecker = makeGroupHoverPredicate()
+        func resolveNodeHoverFrac(_ n: FlatNode, inert: Bool) -> Float {
+            let nid = n.nodeId
+            if inert || exitingIds.contains(nid) { return 0.0 }
+            if let tracked = liveStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) {
+                return tracked.clamped(to: 0...1)
+            }
+            if n.el.isHoverGroup || n.el.hoverGroupShare != nil {
+                return groupHoverChecker(n) ? 1.0 : 0.0
+            }
+            return hoveredPath == n.path ? 1.0 : 0.0
+        }
+
+        var nodeOwnOpacityById: [NodeId: Float] = [:]
+        var nodeHoverFracById: [NodeId: Float] = [:]
+        var inheritedGroupFracById: [NodeId: Float] = [:]
+        func collectHoverAndOwnOpacity(_ n: FlatNode, inheritedInert: Bool, inheritedGroupFrac: Float) {
+            let effInert = inheritedInert || n.el.isInert
+            let nid = n.nodeId
+            let el = n.el
+            var liveOp: Float? = nil
+            var liveRect: MotionRect? = nil
+            for b in el.liveBindings {
+                let lnid = NodeId.hash("live:\(n.path):\(b.target)")
+                if b.target == .opacity, let v = liveStore.get(lnid, Props.OPACITY) { liveOp = v }
+                else if b.target == .rect, let r = liveStore.get(lnid, Props.RECT) { liveRect = r }
+            }
+            let baseSize = (liveRect ?? rectMap[nid] ?? n.targetRect).size
+            let loopOp = sampleLoopPresentation(id: nid, nodeSize: baseSize, wallNow: now)?.opacity ?? 1.0
+            let groupFactor: Float = el.groupOpacity.map { restOp, hovOp in
+                restOp + (hovOp - restOp) * inheritedGroupFrac
+            } ?? 1.0
+            let ownOp = ((liveOp ?? opacityMap[nid] ?? el.opacity) * groupFactor * loopOp).clamped(to: 0...1)
+            let ownHoverFrac = resolveNodeHoverFrac(n, inert: effInert)
+            nodeOwnOpacityById[nid] = ownOp
+            nodeHoverFracById[nid] = ownHoverFrac
+            inheritedGroupFracById[nid] = inheritedGroupFrac
+
+            let nextGroupFrac = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
+                ? ownHoverFrac
+                : inheritedGroupFrac
+            for child in childrenByParent[n.index] ?? [] {
+                collectHoverAndOwnOpacity(child, inheritedInert: effInert, inheritedGroupFrac: nextGroupFrac)
+            }
+        }
+        for r in roots {
+            collectHoverAndOwnOpacity(r, inheritedInert: false, inheritedGroupFrac: 0.0)
+        }
+
+        // Direct children with intermediate opacity activate `.plusLighter` dissolve (`runtime/paint/build.rs:81-89`).
+        var dissolveParentIds: Set<NodeId> = []
+        for n in renderNodes where n.el.isDissolve {
+            let children = childrenByParent[n.index] ?? []
+            let hasMidOpacity = children.contains { child in
+                let pOp = nodeOwnOpacityById[child.nodeId] ?? child.el.opacity
+                return pOp > 0.001 && pOp < 1.0
+            }
+            if hasMidOpacity {
+                dissolveParentIds.insert(n.nodeId)
+            }
+        }
+
         let initialClipPt = MotionRect(left: 0, top: 0, right: viewport.x, bottom: viewport.y)
         let rootClip = RenderClipState(rectPt: initialClipPt, clipPx: NO_CLIP, fade: .zero)
         let materialMode = MaterialMode.fromEnv()
@@ -616,7 +680,8 @@ extension Runtime {
             parentClip: RenderClipState,
             inheritedInert: Bool,
             parentOpacity: Float,
-            inheritedLiveOffset: Vec2
+            inheritedTransform: PresentedTransform,
+            parentIsDissolve: Bool
         ) -> (
             continueSubtree: Bool,
             subtreeDynamic: Bool,
@@ -627,7 +692,8 @@ extension Runtime {
             radiiPx: SIMD4<Float>,
             nextInert: Bool,
             nextChildClip: RenderClipState,
-            nextChildLiveOffset: Vec2,
+            nextChildTransform: PresentedTransform,
+            isDissolveScope: Bool,
             needsLayer: Bool,
             cacheEligible: Bool,
             layerStartIdx: Int,
@@ -662,16 +728,43 @@ extension Runtime {
             }
 
             let baseRect = liveRect ?? rectMap[nid] ?? node.targetRect
+            let pinh: PresentedTransform = (el.anchor == nil ? inheritedTransform : .identity)
             let lo = liveOffset ?? .zero
-            let totalLiveOffset = Vec2(inheritedLiveOffset.x + lo.x, inheritedLiveOffset.y + lo.y)
-            let rawOff = Vec2(totalLiveOffset.x + el.offset.x, totalLiveOffset.y + el.offset.y)
-            let sc = liveScale ?? (scaleMap[nid] ?? el.scale)
-            let effX = baseRect.x + rawOff.x
-            let effY = baseRect.y + rawOff.y
-            let effW = baseRect.width * sc.x
-            let effH = baseRect.height * sc.y
-            let effRect = MotionRect(left: effX, top: effY, right: effX + effW, bottom: effY + effH)
-            let effOpacity = (parentOpacity * (liveOpacity ?? opacityMap[nid] ?? el.opacity)).clamped(to: 0...1)
+            let baseSc = scaleMap[nid] ?? el.scale
+            let ownSc = liveScale.map { Vec2(baseSc.x * max(0, $0.x), baseSc.y * max(0, $0.y)) } ?? baseSc
+            let sc = Vec2(pinh.scale.x * ownSc.x, pinh.scale.y * ownSc.y)
+            let norm = node.anchorAttachNorm ?? el.origin
+            let pivot = Vec2(baseRect.x + baseRect.width * norm.x, baseRect.y + baseRect.height * norm.y)
+            let ownDx = pinh.dx + lo.x
+            let ownDy = pinh.dy + lo.y
+            let centre = Vec2(pivot.x + ownDx, pivot.y + ownDy)
+            let centreTo = Vec2(
+                pinh.anchorTo.x + (centre.x - pinh.anchor.x) * pinh.scale.x,
+                pinh.anchorTo.y + (centre.y - pinh.anchor.y) * pinh.scale.y
+            )
+            let hasOwnScale = abs(ownSc.x - 1.0) > 1e-5 || abs(ownSc.y - 1.0) > 1e-5
+            let (anchor, anchorTo) = hasOwnScale ? (centre, centreTo) : (pinh.anchor, pinh.anchorTo)
+            let nextChildTransform = PresentedTransform(
+                dx: ownDx,
+                dy: ownDy,
+                anchor: anchor,
+                anchorTo: anchorTo,
+                scale: sc
+            )
+            let shifted = baseRect.offsetBy(Vec2(ownDx + el.offset.x, ownDy + el.offset.y))
+            let effRect: MotionRect
+            if abs(sc.x - 1.0) > 1e-5 || abs(sc.y - 1.0) > 1e-5 || anchor != anchorTo {
+                effRect = MotionRect(
+                    left: anchorTo.x + (shifted.left - anchor.x) * sc.x,
+                    top: anchorTo.y + (shifted.top - anchor.y) * sc.y,
+                    right: anchorTo.x + (shifted.right - anchor.x) * sc.x,
+                    bottom: anchorTo.y + (shifted.bottom - anchor.y) * sc.y
+                )
+            } else {
+                effRect = shifted
+            }
+            let ownOpacity = nodeOwnOpacityById[nid] ?? (liveOpacity ?? opacityMap[nid] ?? el.opacity)
+            let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
             let effBlur = max(0, liveBlur ?? blurMap[nid] ?? el.blur)
             let baseRadii = SIMD4<Float>(
                 el.corners.topLeft,
@@ -690,13 +783,21 @@ extension Runtime {
             newPresentedRects[node.path] = effRect
             newPresentedScales[node.path] = sc
 
-            let hovered = (node.key != nil && hoveredKey == node.key)
-            let pressed = (node.key != nil && pressedKey == node.key)
+            let isExiting = exitingIds.contains(nid)
+            let hoverFrac = isExiting ? 0.0 : (nodeHoverFracById[nid] ?? 0.0)
+            let hovered = !isExiting && (hoverFrac > 0.0005 || (!effInert && node.key != nil && hoveredKey == node.key))
+            let pressed = !effInert && (pressedPath == node.path || (node.key != nil && pressedKey == node.key))
             let focused = (node.key != nil && focusedKey == node.key)
 
             var effBg = liveFill ?? fillMap[nid] ?? el.background
-            if pressed, let pbg = el.pressBg { effBg = pbg }
-            else if hovered, let hbg = el.hoverBg { effBg = hbg }
+            if pressed, let pbg = el.pressBg {
+                effBg = blendColorOver(bottom: effBg, top: pbg, srgb: srgbBlend)
+            } else if let hbg = el.hoverBg {
+                let effectiveHover = hoverFrac > 0.0005 ? hoverFrac : (hovered ? 1.0 : 0.0)
+                if effectiveHover > 0.0005 {
+                    effBg = blendColorOver(bottom: effBg, top: hbg.scaleAlpha(effectiveHover), srgb: srgbBlend)
+                }
+            }
 
             newElements.append(ElementInfo(
                 path: node.path,
@@ -724,15 +825,16 @@ extension Runtime {
                 focusVisible: focused && focusVisible,
                 inert: effInert,
                 moving: movingSet.contains(nid),
-                exiting: exitingIds.contains(nid),
-                hover: hovered ? 1 : 0,
+                exiting: isExiting,
+                hover: isExiting ? 0 : (hoverFrac > 0 ? hoverFrac : (hovered ? 1 : 0)),
                 press: pressed ? 1 : 0,
                 scrolled: [scrollOffsets[node.path]?.x ?? 0, scrollOffsets[node.path]?.y ?? 0],
                 caret: nil
             ))
 
-            if effOpacity <= 0.001 && !exitingIds.contains(nid) {
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, totalLiveOffset, false, false, 0, 0, 0, 0)
+            let isDissolveScope = dissolveParentIds.contains(nid)
+            if effOpacity <= 0.001 && !isExiting {
+                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, 0, 0, 0, 0)
             }
 
             let rectPx = SIMD4<Float>(effRect.x * scale, effRect.y * scale, effRect.width * scale, effRect.height * scale)
@@ -759,7 +861,7 @@ extension Runtime {
                 && el.runtimeExtras[RenderExtrasKey.effectSpec] == nil
                 && el.runtimeExtras["systemMaterial"] == nil
                 && !hasDynamicInSubtree(node)
-            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasFeatherClip || hasCutout
+            let needsLayer = el.isolatedLayer || cacheEligible || effBlur > 0.05 || abs(el.rotate) > 1e-4 || hasRoundedClip || hasFeatherClip || hasCutout || isDissolveScope || parentIsDissolve
 
             let scopeClipPx: SIMD4<Float>
             let scopeFade: SIMD4<UInt32>
@@ -866,7 +968,7 @@ extension Runtime {
                 var scopeInst = RenderInstance.beginLayer(
                     bounds: rectPx,
                     clip: layerClip,
-                    spec: LayerSpec(opacity: effOpacity, blend: .sourceOver, blur: effBlur * scale, clipRadius: 0)
+                    spec: LayerSpec(opacity: effOpacity, blend: isDissolveScope ? .plusLighter : .sourceOver, blur: effBlur * scale, clipRadius: 0)
                 )
                 scopeInst.fade = layerFade
                 if let hole = clipSpec?.cutoutCircle {
@@ -1265,7 +1367,7 @@ extension Runtime {
                 ))
             }
 
-            // 8. Image (`RGBA8Atlas`)
+            // 8. Image (`RGBA8Atlas` / `Pixels` + optional `SurfaceFit`)
             if let img = el.imagePayload, img.width > 0 && img.height > 0 {
                 let normUV = imagePacker.insert(img)
                 let idx = instances.count
@@ -1281,6 +1383,41 @@ extension Runtime {
                 ))
                 marks.append(0)
                 imageFixups.append((idx, normUV, Float(img.width), Float(img.height)))
+            } else if let px = el.pixelsPayload {
+                let sz = px.size
+                if sz.width > 0 && sz.height > 0 {
+                    let rgba = px.rgbaBytes()
+                    let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: rgba)
+                    let normUV = imagePacker.insert(atlas)
+                    let fitted = Runtime.fittedPixelsGeometry(
+                        box: rectPx,
+                        uv: normUV,
+                        imageWidth: Float(sz.width),
+                        imageHeight: Float(sz.height),
+                        fit: el.pixelsFitMode,
+                        place: el.surfacePlace,
+                        pixelScale: scale
+                    )
+                    let drawRect = fitted.rect
+                    let drawUV = fitted.uv
+                    let maxR = min(drawRect.z, drawRect.w) * 0.5
+                    let drawRadii: SIMD4<Float> = el.pixelsFitMode != nil
+                        ? SIMD4<Float>(min(radiiPx.x, maxR), min(radiiPx.y, maxR), min(radiiPx.z, maxR), min(radiiPx.w, maxR))
+                        : radiiPx
+                    let idx = instances.count
+                    instances.append(RenderInstance(
+                        rect: drawRect,
+                        radii: drawRadii,
+                        fill: SIMD4<Float>(localOpacity, localOpacity, localOpacity, localOpacity),
+                        border: .zero,
+                        params: SIMD4<Float>(0, KIND_IMAGE, 0, 1.0),
+                        uv: drawUV,
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                    imageFixups.append((idx, drawUV, Float(sz.width), Float(sz.height)))
+                }
             }
 
             // 9. Vector shapes (`Shape` with `trimmed`/`drawn`, `strokeWidth`, `LineCap`)
@@ -1415,7 +1552,7 @@ extension Runtime {
                 }
             }
 
-            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, totalLiveOffset, needsLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx)
+            return (true, subtreeDynamic, effOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx)
         }
 
         @inline(never)
@@ -1502,14 +1639,14 @@ extension Runtime {
         }
 
         @discardableResult
-        func paintSubtree(_ node: FlatNode, parentClip: RenderClipState, inheritedInert: Bool, parentOpacity: Float, inheritedLiveOffset: Vec2 = .zero) -> Bool {
-            let h = paintNodeHeader(node, parentClip: parentClip, inheritedInert: inheritedInert, parentOpacity: parentOpacity, inheritedLiveOffset: inheritedLiveOffset)
+        func paintSubtree(_ node: FlatNode, parentClip: RenderClipState, inheritedInert: Bool, parentOpacity: Float, inheritedTransform: PresentedTransform = .identity, parentIsDissolve: Bool = false) -> Bool {
+            let h = paintNodeHeader(node, parentClip: parentClip, inheritedInert: inheritedInert, parentOpacity: parentOpacity, inheritedTransform: inheritedTransform, parentIsDissolve: parentIsDissolve)
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
             let childOpacity = h.needsLayer ? 1.0 : h.effOpacity
             for child in childrenByParent[node.index] ?? [] {
-                if paintSubtree(child, parentClip: h.nextChildClip, inheritedInert: h.nextInert, parentOpacity: childOpacity, inheritedLiveOffset: h.nextChildLiveOffset) {
+                if paintSubtree(child, parentClip: h.nextChildClip, inheritedInert: h.nextInert, parentOpacity: childOpacity, inheritedTransform: h.nextChildTransform, parentIsDissolve: h.isDissolveScope) {
                     subtreeDynamic = true
                 }
             }

@@ -106,6 +106,40 @@ public struct WheelEvent: Sendable, Equatable {
     }
 }
 
+/// Trackpad pinch magnification event (`rune::MagnifyEvent`).
+public struct MagnifyEvent: Sendable, Equatable {
+    /// Change in magnification (`scale = 1.0 + delta`); positive zooms in.
+    public var delta: Float
+    /// Pointer x in element-local layout points (before `liveScale` transforms).
+    public var x: Float
+    /// Pointer y in element-local layout points.
+    public var y: Float
+    public var phase: GesturePhase
+
+    public init(delta: Float = 0, x: Float = 0, y: Float = 0, phase: GesturePhase = .changed) {
+        self.delta = delta
+        self.x = x
+        self.y = y
+        self.phase = phase
+    }
+}
+
+/// Two-finger trackpad rotation event (`rune::RotateEvent`).
+public struct RotateEvent: Sendable, Equatable {
+    /// Degrees turned since last event (positive counterclockwise).
+    public var degrees: Float
+    public var x: Float
+    public var y: Float
+    public var phase: GesturePhase
+
+    public init(degrees: Float = 0, x: Float = 0, y: Float = 0, phase: GesturePhase = .changed) {
+        self.degrees = degrees
+        self.x = x
+        self.y = y
+        self.phase = phase
+    }
+}
+
 /// Transaction handle passed into every event handler (`rune::Tx`).
 public struct Tx {
     public internal(set) var liveOnlyRequested: Bool = false
@@ -116,6 +150,8 @@ public struct Tx {
     public internal(set) var unprompted: Bool = false
     public internal(set) var colorMotionSpring: Spring? = nil
     public internal(set) var clock: Double = 0.0
+    public internal(set) var button: PointerButton = .primary
+    public internal(set) var pasteRequested: Bool = false
 
     public internal(set) var settleRequested: Bool {
         get { commitKind.snaps }
@@ -246,6 +282,11 @@ public struct Tx {
         clipboardWrite = ClipboardContent(text)
     }
 
+    /// Requests a paste delivery into the focused editor or `onPaste`/`onPasteContent` handler (`Tx::request_paste`).
+    public mutating func requestPaste() {
+        pasteRequested = true
+    }
+
     /// Scrolls the scroll container `.key(key)` to `offset`.
     public mutating func scrollTo(_ key: String, offset: Vec2, animated: Bool = true) {
         scrollOffsetRequests.append(
@@ -346,6 +387,7 @@ public struct Tx {
         launches.append(contentsOf: one.launches)
         unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
         if let cb = one.clipboardWrite { clipboardWrite = cb }
+        pasteRequested = pasteRequested || one.pasteRequested
         if let title = one.windowTitle { windowTitle = title }
         quitRequested = quitRequested || one.quitRequested
         blurFocusRequested = blurFocusRequested || one.blurFocusRequested
@@ -519,6 +561,11 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case region = "region"
     case main = "main"
     case link = "link"
+    case toolbar = "toolbar"
+    case splitter = "splitter"
+    case status = "status"
+    case list = "list"
+    case menuItemCheckbox = "menu-item-check-box"
     case passwordInput = "password-input"
 }
 
@@ -558,8 +605,13 @@ public struct ElementHandlers<State> {
     public var onDragStart: ((inout State, inout Tx) -> Void)?
     public var onDragOutEnd: ((inout State, DragOutcome, inout Tx) -> Void)?
     public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
+    public var onKeyUp: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var onPhysicalInput: ((inout State, PhysicalInput, inout Tx) -> Bool)?
     public var onWheel: ((inout State, WheelEvent, inout Tx) -> Bool)?
+    public var onMagnify: ((inout State, MagnifyEvent, inout Tx) -> Bool)?
+    public var onRotate: ((inout State, RotateEvent, inout Tx) -> Bool)?
+    public var onSmartMagnify: ((inout State, Float, Float, inout Tx) -> Bool)?
+    public var pointerButtons: Set<PointerButton>?
 
     /// Mutable projection into `State` for `textInput` elements!
     public var editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)?
@@ -567,11 +619,18 @@ public struct ElementHandlers<State> {
     public var onTextChange: ((inout State, String, inout Tx) -> Void)?
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
     public var modalDismiss: ((inout State, inout Tx) -> Void)?
+    public var onStep: ((inout State, Int, inout Tx) -> Void)?
+    public var onStepLimit: ((inout State, Bool, inout Tx) -> Void)?
 
     public var onAtBottom: ((inout State, Bool) -> Void)?
     public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)?
     public var onScrollOffset: ((ScrollPos) -> Void)?
     public var onVisibleRows: ((inout State, Range<Int>) -> Bool)?
+    public var onDrawnLayout: ((inout State, [Float], inout Tx) -> Void)?
+    public var onVisible: ((inout State, Bool, inout Tx) -> Void)?
+    public var onPaste: ((inout State, String, inout Tx) -> Void)?
+    public var onPasteContent: ((inout State, ClipboardContent, inout Tx) -> Void)?
+    public var onInputPaste: ((inout State, ClipboardContent, inout Tx) -> Bool)?
 
     public init() {}
 }
@@ -602,8 +661,12 @@ struct ElColdData<State> {
     var isHoverGroup: Bool = false
     var hoverGroupShare: String? = nil
     var isHoverAlone: Bool = false
+    var hoverMotion: (enter: Anim<Float>, exit: Anim<Float>)? = nil
+    var hoverWithin: (enter: Anim<Float>, exit: Anim<Float>)? = nil
     var groupOpacity: (rest: Float, hovered: Float)? = nil
     var groupColor: Color? = nil
+    var isDissolve: Bool = false
+    var drawnRectLive: Live<MotionRect>? = nil
     var focusRingColor: Color? = nil
     var focusRingWidth: Float = 2.0
     var focusRingOffset: Float = 2.0
@@ -652,6 +715,8 @@ struct ElColdData<State> {
     var selectionColor: Color? = nil
     var iconPayload: (SVGIcon, Float)? = nil
     var imagePayload: RGBA8Atlas? = nil
+    var pixelsPayload: Pixels? = nil
+    var pixelsFitMode: SurfaceFit? = nil
     var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? = nil
     var surfacePlace: SurfacePlace = .centered
     var gradient: Gradient? = nil
@@ -741,6 +806,8 @@ public struct El<State> {
     public var selectionColor: Color? { get { _cold?.data.selectionColor } set { ensureCold().data.selectionColor = newValue } }
     public var iconPayload: (SVGIcon, Float)? { get { _cold?.data.iconPayload } set { ensureCold().data.iconPayload = newValue } }
     public var imagePayload: RGBA8Atlas? { get { _cold?.data.imagePayload } set { ensureCold().data.imagePayload = newValue } }
+    public var pixelsPayload: Pixels? { get { _cold?.data.pixelsPayload } set { ensureCold().data.pixelsPayload = newValue } }
+    public var pixelsFitMode: SurfaceFit? { get { _cold?.data.pixelsFitMode } set { ensureCold().data.pixelsFitMode = newValue } }
     public var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? { get { _cold?.data.surfacePayload } set { ensureCold().data.surfacePayload = newValue } }
     public var surfacePlace: SurfacePlace { get { _cold?.data.surfacePlace ?? .centered } set { ensureCold().data.surfacePlace = newValue } }
     public var gradient: Gradient? { get { _cold?.data.gradient } set { ensureCold().data.gradient = newValue } }
@@ -770,8 +837,12 @@ public struct El<State> {
     public var isHoverGroup: Bool { get { _cold?.data.isHoverGroup ?? false } set { ensureCold().data.isHoverGroup = newValue } }
     public var hoverGroupShare: String? { get { _cold?.data.hoverGroupShare } set { ensureCold().data.hoverGroupShare = newValue } }
     public var isHoverAlone: Bool { get { _cold?.data.isHoverAlone ?? false } set { ensureCold().data.isHoverAlone = newValue } }
+    public var hoverMotionSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.data.hoverMotion } set { ensureCold().data.hoverMotion = newValue } }
+    public var hoverWithinSpec: (enter: Anim<Float>, exit: Anim<Float>)? { get { _cold?.data.hoverWithin } set { ensureCold().data.hoverWithin = newValue } }
     public var groupOpacity: (rest: Float, hovered: Float)? { get { _cold?.data.groupOpacity } set { ensureCold().data.groupOpacity = newValue } }
     public var groupColor: Color? { get { _cold?.data.groupColor } set { ensureCold().data.groupColor = newValue } }
+    public var isDissolve: Bool { get { _cold?.data.isDissolve ?? false } set { ensureCold().data.isDissolve = newValue } }
+    public var drawnRectLive: Live<MotionRect>? { get { _cold?.data.drawnRectLive } set { ensureCold().data.drawnRectLive = newValue } }
     public var focusRingColor: Color? { get { _cold?.data.focusRingColor } set { ensureCold().data.focusRingColor = newValue } }
     public var focusRingWidth: Float { get { _cold?.data.focusRingWidth ?? 2.0 } set { ensureCold().data.focusRingWidth = newValue } }
     public var focusRingOffset: Float { get { _cold?.data.focusRingOffset ?? 2.0 } set { ensureCold().data.focusRingOffset = newValue } }
@@ -1689,6 +1760,58 @@ public struct El<State> {
         return copy
     }
 
+    /// Curves used by this element's hover fill and `hoverGroup` transitions (`El::hover_motion`).
+    public func hoverMotion(_ enter: Anim<Float>, _ exit: Anim<Float>) -> Self {
+        var copy = self
+        copy.hoverMotionSpec = (enter, exit)
+        return copy
+    }
+
+    /// Curves used by this element's hover fill and `hoverGroup` transitions (`Spring` overload).
+    public func hoverMotion(_ enter: Spring, _ exit: Spring) -> Self {
+        hoverMotion(Anim(curve: .spring(enter)), Anim(curve: .spring(exit)))
+    }
+
+    /// Default hover curves for this element and descendants without their own `hoverMotion` (`El::hover_motion_within`).
+    public func hoverMotionWithin(_ enter: Anim<Float>, _ exit: Anim<Float>) -> Self {
+        var copy = self
+        copy.hoverWithinSpec = (enter, exit)
+        return copy
+    }
+
+    /// Default hover curves for this element and descendants (`Spring` overload).
+    public func hoverMotionWithin(_ enter: Spring, _ exit: Spring) -> Self {
+        hoverMotionWithin(Anim(curve: .spring(enter)), Anim(curve: .spring(exit)))
+    }
+
+    /// The `(enter, exit)` hover curves attached by `hoverMotionWithin` (`El::hover_within_curves`).
+    public func hoverWithinCurves() -> (enter: Anim<Float>, exit: Anim<Float>)? {
+        hoverWithinSpec
+    }
+
+    /// Adds children's premultiplied colors (`Blend::PlusLighter`) while a direct child has intermediate opacity (`El::dissolve`).
+    public func dissolve() -> Self {
+        var copy = self
+        copy.isDissolve = true
+        return copy
+    }
+
+    /// Displays `pixels` sized/stretched to fill this element's box (`El::pixels`).
+    public func pixels(_ pixels: Pixels) -> Self {
+        var copy = self
+        copy.pixelsPayload = pixels
+        copy.pixelsFitMode = nil
+        return copy
+    }
+
+    /// Displays `pixels` centered at its own aspect ratio (`SurfaceFit.fit` or `.fill`, `El::pixels_fit`).
+    public func pixelsFit(_ pixels: Pixels, _ fit: SurfaceFit) -> Self {
+        var copy = self
+        copy.pixelsPayload = pixels
+        copy.pixelsFitMode = fit
+        return copy
+    }
+
     public func press(_ bg: Color) -> Self {
         var copy = self
         copy.pressBg = bg
@@ -2243,6 +2366,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Handles logical key releases on the focused element, its ancestors, or root/modal (`El::on_key_up`).
+    public func onKeyUp(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onKeyUp = handler
+        return copy
+    }
+
     /// Handles a focused text field's key before `TextEdit` processes it; return `true` to consume (`El::on_input_key`).
     public func onInputKey(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
         var copy = self
@@ -2259,6 +2389,100 @@ public struct El<State> {
     public func onWheel(_ handler: @escaping (inout State, WheelEvent, inout Tx) -> Bool) -> Self {
         var copy = self
         copy.handlers.onWheel = handler
+        return copy
+    }
+
+    /// Handles trackpad pinch magnification gestures over this element (`El::on_magnify`).
+    public func onMagnify(_ handler: @escaping (inout State, MagnifyEvent, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onMagnify = handler
+        return copy
+    }
+
+    /// Handles two-finger trackpad rotation gestures over this element (`El::on_rotate`).
+    public func onRotate(_ handler: @escaping (inout State, RotateEvent, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onRotate = handler
+        return copy
+    }
+
+    /// Handles smart magnify (two-finger double tap) over this element (`El::on_smart_magnify`).
+    public func onSmartMagnify(_ handler: @escaping (inout State, Float, Float, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onSmartMagnify = handler
+        return copy
+    }
+
+    /// Opts additional mouse buttons (such as `.middle`) into `onPress` and `onDrag` (`El::pointer_buttons`).
+    public func pointerButtons<S: Sequence>(_ buttons: S) -> Self where S.Element == PointerButton {
+        var copy = self
+        var set = copy.handlers.pointerButtons ?? [.primary]
+        for b in buttons { set.insert(b) }
+        copy.handlers.pointerButtons = set
+        return copy
+    }
+
+    /// Slider/stepper keyboard increments while focused (`El::on_step`): Left/Down `-1`, Right/Up `+1`, PageDown `-10`, PageUp `+10`.
+    public func onStep(_ handler: @escaping (inout State, Int, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onStep = handler
+        copy.focusable = true
+        if copy.role == .group { copy.role = .slider }
+        return copy
+    }
+
+    /// Slider/stepper Home (`false`) and End (`true`) limit handler (`El::on_step_limit`).
+    public func onStepLimit(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onStepLimit = handler
+        return copy
+    }
+
+    /// Called when this element's drawn `[x, y, width, height]` moves (`El::on_drawn_layout`).
+    public func onDrawnLayout(_ handler: @escaping (inout State, [Float]) -> Void) -> Self {
+        onDrawnLayoutTx { s, rect, _ in handler(&s, rect) }
+    }
+
+    /// Called with a `Tx` when this element's drawn `[x, y, width, height]` moves (`El::on_drawn_layout_tx`).
+    public func onDrawnLayoutTx(_ handler: @escaping (inout State, [Float], inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onDrawnLayout = handler
+        return copy
+    }
+
+    /// Writes this element's drawn frame into `rect` on every frame without rebuilding the view (`El::drawn_rect_into`).
+    public func drawnRectInto(_ rect: Live<MotionRect>) -> Self {
+        var copy = self
+        copy.drawnRectLive = rect
+        return copy
+    }
+
+    /// Called when this element enters (`true`) or leaves (`false`) the visible viewport (`El::on_visible`).
+    public func onVisible(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onVisible = handler
+        return copy
+    }
+
+    /// Handles paste text at root/modal level or on an element (`El::on_paste`).
+    public func onPaste(_ handler: @escaping (inout State, String, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onPaste = handler
+        return copy
+    }
+
+    /// Handles rich clipboard paste payloads (`El::on_paste_content`).
+    public func onPasteContent(_ handler: @escaping (inout State, ClipboardContent, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onPasteContent = handler
+        return copy
+    }
+
+    /// Inspects or consumes a clipboard paste targeted at this focused input (`El::on_input_paste`).
+    /// Return `true` to consume the paste; return `false` to let `TextEdit` insert the text afterward.
+    public func onInputPaste(_ handler: @escaping (inout State, ClipboardContent, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onInputPaste = handler
         return copy
     }
 
@@ -2539,6 +2763,15 @@ public func image<State>(_ atlas: RGBA8Atlas) -> El<State> {
     if atlas.width > 0 && atlas.height > 0 {
         node.layout.aspectRatio = Float(atlas.width) / Float(atlas.height)
     }
+    return node
+}
+
+/// Element showing a `Pixels` buffer (`El::pixels` / `El::pixels_fit`).
+public func pixels<State>(_ buffer: Pixels, fit: SurfaceFit? = nil) -> El<State> {
+    var node = El<State>(direction: .row)
+    node.role = .image
+    node.pixelsPayload = buffer
+    node.pixelsFitMode = fit
     return node
 }
 

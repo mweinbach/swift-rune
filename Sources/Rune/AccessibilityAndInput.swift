@@ -294,8 +294,12 @@ public enum AppKitAccessibilityMapper {
         case .radiogroup: return .radioGroup
         case .tabList: return .tabGroup
         case .tooltip: return .helpTag
-        case .alert, .region, .main: return .group
+        case .alert, .region, .main, .status: return .group
         case .link: return .link
+        case .toolbar: return .toolbar
+        case .splitter: return .splitter
+        case .list: return .list
+        case .menuItemCheckbox: return .menuItem
         }
     }
 
@@ -383,14 +387,14 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
 public enum UIKitAccessibilityMapper {
     public static func traits(for role: ElementRole) -> UIAccessibilityTraits {
         switch role {
-        case .button, .menuItem: return .button
+        case .button, .menuItem, .menuItemCheckbox: return .button
         case .text, .listItem, .group, .dialog, .menu, .separator: return .staticText
+        case .toolbar, .list, .textInput, .passwordInput: return .none
+        case .splitter, .slider: return .adjustable
+        case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header
         case .image, .icon: return .image
-        case .slider: return .adjustable
         case .checkbox, .switchControl, .radio, .tab: return .button
-        case .textInput, .passwordInput: return .none
-        case .progress: return .updatesFrequently
         case .combobox, .option, .link: return .button
         case .listbox, .tree, .treeItem, .grid, .row, .gridCell, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main:
             return .staticText
