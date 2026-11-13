@@ -3,6 +3,7 @@ import Testing
 @testable import RuneKit
 @testable import Rune
 
+@MainActor
 @Suite("RuneKit Overlays, Table, Combobox, PopupList, Select, Dialog, Menu & List Tests")
 struct OverlaysAndTableTests {
 
@@ -1130,22 +1131,7 @@ struct OverlaysAndTableTests {
 
     @Test("Described MenuItem grows to show second description line and Menu opens submenus")
     func menuDescriptionAndSubmenu() throws {
-        // #204: Nested menu + description + submenu exceeds Swift Testing's 512KB Debug worker stack.
-        final class ErrorBox: @unchecked Sendable { var error: Error? }
-        let box = ErrorBox()
-        let sem = DispatchSemaphore(value: 0)
-        let thread = Thread {
-            defer { sem.signal() }
-            do {
-                try Self.runMenuDescriptionAndSubmenu()
-            } catch {
-                box.error = error
-            }
-        }
-        thread.stackSize = 4 * 1024 * 1024
-        thread.start()
-        sem.wait()
-        if let err = box.error { throw err }
+        try Self.runMenuDescriptionAndSubmenu()
     }
 
     private static func runMenuDescriptionAndSubmenu() throws {

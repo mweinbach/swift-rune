@@ -76,8 +76,7 @@ public struct WindowTitlebar<State> {
 
         var bar: El<State> = row()
             .key(keyId)
-            // Blocked on @el: upstream uses `.role("toolbar")`, not in ElementRole yet.
-            .role(.group)
+            .role(.toolbar)
             .wFull()
             .h(effectiveHeight)
             .pt(topPaddingValue)
@@ -170,7 +169,7 @@ public struct Toolbar<State> {
 
         var bar: El<State> = row()
             .key(keyId)
-            .role(.group) // Blocked on @el: ElementRole.toolbar
+            .role(.toolbar)
             .wFull()
             .h(Self.height)
             .itemsCenter()
@@ -667,7 +666,7 @@ public struct Sidebar<State> {
     public func build(_ k: Kit) -> El<State> {
         var body: El<State> = col()
             .key("\(keyId)-body")
-            .role(.group) // Blocked on @el: ElementRole.list
+            .role(.list)
             .wFull()
             .grow(1)
             .minH(0)
@@ -822,7 +821,7 @@ public struct SplitView<State> {
             let isActive = cfg.state.isResizing
             var handle: El<State> = col()
                 .key(gripKey)
-                .role(.separator) // Blocked on @el: ElementRole.splitter
+                .role(.splitter)
                 .label(positiveGrows ? "Resize sidebar" : "Resize inspector")
                 .rangeValue(cfg.state.width, min: cfg.state.minWidth, max: cfg.state.maxWidth)
                 .rangeStep(Self.gripStep)

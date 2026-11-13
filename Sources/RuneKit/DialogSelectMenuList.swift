@@ -782,8 +782,7 @@ public struct MenuItem<State> {
 
         var e: El<State> = row()
             .key(key)
-            // Blocked on @el: checked menu items use `.role(.menuItemCheckbox)` once ElementRole adds it.
-            .role(.menuItem)
+            .role(checkedState != nil ? .menuItemCheckbox : .menuItem)
             .label(labelText)
             .disabled(disabled)
             .rounded(standard ? k.radius.sm : 4.0)
@@ -1246,8 +1245,7 @@ public struct List<State> {
         let isListbox = itemList.contains { $0.selectHandler != nil }
         var scrollCol: El<State> = col()
             .key("scroll")
-            // Blocked on @el: non-listbox List uses `.role("list")`, not in ElementRole yet.
-            .role(isListbox ? .listbox : .group)
+            .role(isListbox ? .listbox : .list)
             .wFull()
             .gap(12.0)
         if isListbox {

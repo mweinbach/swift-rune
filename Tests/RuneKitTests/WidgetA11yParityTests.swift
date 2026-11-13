@@ -3,6 +3,7 @@ import Testing
 @testable import RuneKit
 @testable import Rune
 
+@MainActor
 @Suite("RuneKit Widget Accessibility Parity Tests (tests/a11y/{controls,overlays,data,shell}.rs)")
 struct WidgetA11yParityTests {
 
@@ -218,6 +219,7 @@ struct WidgetA11yParityTests {
             #expect(newEl?.a11yShortcutHint == "Ctrl+N")
 
             let wrapEl = findEl(root, key: "file-item1")
+            #expect(wrapEl?.role == .menuItemCheckbox)
             #expect(wrapEl?.a11yChecked == A11yChecked.falseState)
 
             let revertEl = findEl(root, key: "file-item2")
@@ -435,6 +437,7 @@ struct WidgetA11yParityTests {
         #expect(regionInfo?.label == "Notifications")
 
         let toastInfo = info(rt, "saved")
+        #expect(toastInfo?.role == .status)
         #expect(toastInfo?.label == "Saved")
         #expect(toastInfo?.a11yDescription == "3 files written")
 
@@ -507,6 +510,7 @@ struct WidgetA11yParityTests {
                 #expect(findEl(mailEl, key: "item2")?.a11yPosInSet?.size == 1)
             }
             if let plainEl = findEl(root, key: "plain") {
+                #expect(findEl(plainEl, key: "scroll")?.role == .list)
                 #expect(findEl(plainEl, key: "item1")?.role == .listItem)
                 #expect(findEl(plainEl, key: "item1")?.a11yPosInSet?.position == 2)
                 #expect(findEl(plainEl, key: "item1")?.a11yPosInSet?.size == 2)
@@ -565,6 +569,7 @@ struct WidgetA11yParityTests {
                 #expect(nameCol.role == .columnHeader)
                 #expect(nameCol.a11yLabel == "Name")
                 #expect(nameCol.a11ySorted == true)
+                #expect(findEl(header, key: "name-resize")?.role == .splitter)
             }
             if let f1El = findEl(root, key: "f1") {
                 #expect(f1El.a11yPosInSet?.position == 2)
@@ -628,7 +633,9 @@ struct WidgetA11yParityTests {
         #expect(info(rt, "split-sidebar-pane")?.role == .region)
         #expect(info(rt, "split-sidebar-pane")?.label == "Sidebar")
         #expect(info(rt, "split-main")?.role == .main)
+        #expect(info(rt, "toolbar")?.role == .toolbar)
         #expect(info(rt, "toolbar")?.label == "Project")
+        #expect(info(rt, "sidebar-body")?.role == .list)
         #expect(info(rt, "sec")?.role == .group)
         #expect(info(rt, "sec")?.label == "Today")
         #expect(info(rt, "sec-header")?.role == .button)
@@ -648,6 +655,7 @@ struct WidgetA11yParityTests {
         if let root = capturedRoot {
             assertNoEcho(root)
             let grip = findEl(root, key: "split-sidebar-grip")
+            #expect(grip?.role == .splitter)
             #expect(grip?.a11yLabel == "Resize sidebar")
             #expect(grip?.a11yRange?.value == 240.0)
             #expect(grip?.a11yRange?.min == 180.0)
@@ -729,17 +737,20 @@ struct WidgetA11yParityTests {
         rt.frame(at: 0.0)
 
         let src = info(rt, "src")
+        #expect(src?.role == .treeItem)
         #expect(src?.label == "src")
         #expect(src?.level == 1)
         #expect(src?.expanded == false)
         #expect(src?.itemSelected == false)
 
         let readme = info(rt, "README.md")
+        #expect(readme?.role == .treeItem)
         #expect(readme?.itemSelected == true)
         #expect(readme?.a11yDescription == "3 added, 1 removed, M")
 
         if let root = capturedRoot {
             assertNoEcho(root)
+            #expect(root.role == .tree)
             #expect(root.a11yLabel == "Files")
         }
 
@@ -753,11 +764,91 @@ struct WidgetA11yParityTests {
         #expect(main?.level == 2)
     }
 
-    // MARK: - Blocked Core @el Additions (`#387`)
+    // MARK: - Full AccessKit JSON & Assistive Action Parity (`#387`)
 
-    @Test(
-        "Full AccessKit JSON tree + assistive Action dispatch + missing ElementRole cases",
-        .disabled("Blocked on @el: missing ElementRole.{toolbar,splitter,status,list,menuItemCheckbox} and Runtime.accessibilityJSON() / accessibilityAction(_:_:)")
-    )
-    func blockedCoreElA11yParity() {}
+    @Test("Full AccessKit JSON tree + assistive Action dispatch + #387 ElementRole cases")
+    func fullAccessKitJSONAndActionParity() {
+        struct S {
+            var sidebar = PaneState(width: 240).range(180, 420)
+            var wrap = false
+            var clicks = 0
+            var accOpen = false
+            var token = TextEdit("tok")
+            var username = TextEdit("ada")
+        }
+        let k = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(800, 560), systemDark: false) { s, cx in
+            var layer: [El<S>] = []
+            let menuEl = Menu<S>("menu")
+                .trigger(testButton(key: "menu-trig", "Menu") { _, _ in })
+                .item(
+                    MenuItem<S>("Wrap")
+                        .checked(s.wrap)
+                        .onSelect { st in st.wrap.toggle() }
+                )
+                .open(true)
+                .build(kit: k, layer: &layer, cx: cx)
+            let body = col().key("content").gap(8).children([
+                Field<S>()
+                    .label("API Token")
+                    .prefix("From your account")
+                    .suffix("Kept in keychain")
+                    .control(TextInput(key: "tok", \.token).label("API Token").build(k))
+                    .build(k)
+                    .key("tok-field"),
+                TextField<S>(key: "tf", "Username", \.username)
+                    .error("Name is taken")
+                    .build(k),
+                Accordion<S>()
+                    .item(
+                        AccordionSection("Details")
+                            .expanded(s.accOpen)
+                            .onToggle { st, _ in st.accOpen.toggle() }
+                            .child(text("Inner detail").key("acc-body"))
+                    )
+                    .build(k)
+                    .key("acc"),
+                menuEl,
+                Toast<S>(key: "toast", title: "Saved").build(using: k),
+                testButton(key: "act-btn", "Run") { st, _ in st.clicks += 1 }
+            ])
+            let split = SplitView<S>(key: "split") { _ in body }
+                .sidebar(\.sidebar, current: s.sidebar) { _ in
+                    Sidebar<S>(key: "sb")
+                        .section(SidebarSection<S>(key: "sec", title: "Nav").build(k))
+                        .build(k)
+                }
+                .toolbar(Toolbar<S>(key: "tb", title: "Workspace").build(k))
+                .build(s, kit: k)
+            return col().wFull().hFull().child(split).children(layer)
+        }
+        rt.frame(at: 0.0)
+
+        let json = rt.accessibilityJSON(pretty: false)
+        #expect(json.contains("\"toolbar\""))
+        #expect(json.contains("\"splitter\""))
+        #expect(json.contains("\"status\""))
+        #expect(json.contains("\"list\""))
+        #expect(json.contains("\"menu-item-check-box\""))
+        #expect(json.contains("\"textbox\""))
+        #expect(json.contains("\"API Token\""))
+        #expect(json.contains("\"From your account. Kept in keychain\""))
+        #expect(json.contains("\"Name is taken\""))
+        #expect(json.contains("\"invalid\""))
+
+        #expect(rt.accessibilityAction("menu-item0", .press, at: 0.04))
+        rt.frame(at: 0.05)
+        #expect(rt.state.wrap)
+
+        // When menu modal overlay is closed via a second toggle/press or modal check: test act-btn & acc trigger
+        let triggerPath = rt.elements().first { $0.path.contains("item0") && $0.key == "trigger" }?.path
+        if let triggerPath {
+            #expect(rt.accessibilityAction(triggerPath, .press, at: 0.07))
+            rt.frame(at: 0.08)
+            #expect(rt.state.accOpen)
+        }
+        #expect(rt.accessibilityAction("act-btn", .press, at: 0.09))
+        rt.frame(at: 0.10)
+        #expect(rt.state.clicks == 1)
+    }
 }

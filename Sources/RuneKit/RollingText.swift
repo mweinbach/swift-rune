@@ -382,6 +382,8 @@ private let rollingTextShaper = TextSystem()
 
 /// Fluent animated rolling text builder (`rune_kit::rolling_text::RollingText`).
 public struct RollingText<State> {
+    public static var defaultSpring: Spring { Spring(duration: 0.36, bounce: 0.12) }
+
     private static var shaper: TextSystem { rollingTextShaper }
 
     public var key: String
@@ -413,7 +415,7 @@ public struct RollingText<State> {
         self.color = color ?? kit.c.textBase
         self.trailing = trailing
         self.slideFrom = slideFrom
-        self.spring = spring ?? kit.motion.control
+        self.spring = spring ?? Self.defaultSpring
         self.store = store
     }
 
@@ -453,18 +455,31 @@ public struct RollingText<State> {
             trailing: trailing
         )
         let effectiveFrom = falling ? slideFrom.opposite : slideFrom
+        let resolvedStyle = font ?? TextStyle()
+        let edge = max(1.0, resolvedStyle.linePx() * 0.12)
+        let side = max(2.0, resolvedStyle.size * 0.3)
         let push = Transition.push(from: effectiveFrom.transitionEdge)
+        let exit = push.springs(SpringPair(enter: spring, exit: spring))
 
         var container: El<State> = row()
             .key(key)
             .role(.text)
             .label(value)
-            .clip(true)
-            .animateLayout(spring)
+            .h(resolvedStyle.linePx() + 2.0 * edge)
+            .px(side)
+            .py(edge)
+            .ml(-side)
+            .mr(-side)
+            .mt(-edge)
+            .mb(-edge)
+            .clipFade(left: side, top: edge, right: side, bottom: edge)
+            .childExit(exit)
+        container = trailing
+            ? container.rideTrailing().animateLayout(spring)
+            : container.animateLayout(LayoutAnim.widthLeads(spring))
 
         let advances: [Float] = {
             guard !slots.isEmpty else { return [] }
-            let resolvedStyle = font ?? TextStyle()
             let shaped = Self.shaper.shape(
                 text: value,
                 style: resolvedStyle,
@@ -503,7 +518,7 @@ public struct RollingText<State> {
                 ? spring
                 : Spring(duration: spring.duration + Float(slot.enterDelay), bounce: spring.bounce)
             let slotTransition = slot.retained
-                ? Transition.asymmetric(insertion: .identity, removal: push.spring(spring))
+                ? Transition.asymmetric(insertion: .identity, removal: push)
                 : push.springs(SpringPair(enter: enterSpring, exit: spring))
 
             var glyphEl: El<State> = text(slot.glyph)
@@ -512,6 +527,9 @@ public struct RollingText<State> {
                 .a11yHidden()
                 .animate(enterSpring)
                 .transition(slotTransition)
+            glyphEl = trailing
+                ? glyphEl.rideTrailing()
+                : glyphEl.animateLayout(LayoutAnim.widthLeads(enterSpring))
             if slotIdx < advances.count, advances[slotIdx] > 0 {
                 glyphEl = glyphEl.w(advances[slotIdx])
             }

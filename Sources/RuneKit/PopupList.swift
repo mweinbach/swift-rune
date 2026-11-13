@@ -373,12 +373,14 @@ public struct PopupList<State> {
 
         let rh = Self.rowHeight
         let viewportKey = "\(key)-viewport"
-        let viewportH = min(Float(itemList.count) * rh, maxHeightValue)
+        let naturalVpH = min(Float(itemList.count) * rh, maxHeightValue)
+        let measuredVpH = cx?.layoutSize(viewportKey)?[1]
+        let renderVpH = (measuredVpH ?? 0) > 0 ? min(measuredVpH!, naturalVpH) : naturalVpH
         let cxScrollY = cx?.scrollOffset(of: viewportKey).y ?? 0.0
         let scrollY = max(trackedScrollYValue, cxScrollY)
         let overscan: Float = 265.0
         let start = itemList.isEmpty ? 0 : max(0, Int(floor((scrollY - overscan) / rh)))
-        let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(viewportH, rh) + overscan) / rh)))
+        let end = itemList.isEmpty ? 0 : min(itemList.count, Int(ceil((scrollY + max(renderVpH, rh) + overscan) / rh)))
         let safeStart = min(start, end)
         let beforeH = Float(safeStart) * rh
         let afterH = Float(max(0, itemList.count - end)) * rh
@@ -483,7 +485,8 @@ public struct PopupList<State> {
             .key(viewportKey)
             .role(.listbox)
             .wFull()
-            .h(viewportH)
+            .shrink(1.0)
+            .h(naturalVpH)
             .minH(isEmpty ? 0.0 : rh)
             .clipSoft(0.0)
             .scrollY()

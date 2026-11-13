@@ -274,6 +274,7 @@ public struct Combobox<State> {
         let viewportKey = "\(key)-viewport"
         let open = comboState.isOpen && !isDisabled
         let maxH = maxHeightValue
+        let measuredVpH = cx?.layoutSize(viewportKey)?[1]
         let upd = update
         let opts = options
         let curID = currentID
@@ -281,7 +282,8 @@ public struct Combobox<State> {
         func scrollToOption(state st: inout ComboboxState, id: String, choices: [Int], tx: inout Tx) {
             guard let pos = choices.firstIndex(where: { opts[$0].id == id }) else { return }
             let rh = PopupList<State>.rowHeight
-            let vpH = min(Float(choices.count) * rh, maxH)
+            let naturalH = min(Float(choices.count) * rh, maxH)
+            let vpH = (measuredVpH ?? 0) > 0 ? min(measuredVpH!, naturalH) : naturalH
             let rowTop = Float(pos) * rh
             let rowBot = rowTop + rh
             if rowTop < st.trackedScrollY {

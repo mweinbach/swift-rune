@@ -233,7 +233,7 @@ public struct TreeRowItem<State> {
         let chevronW: Float = 16.0
 
         var e: El<State> = row()
-            .role(.listItem)
+            .role(.treeItem)
             .label(labelText)
             .itemSelected(r.selected)
             .wFull()
@@ -539,7 +539,7 @@ public struct Tree<State, T: Sendable> {
 
         var root: El<State> = col()
             .key(treeKey)
-            .role(.listItem) // will be .tree once ElementRole adds it
+            .role(.tree)
             .focusable(true)
             .wFull()
             .child(viewport)

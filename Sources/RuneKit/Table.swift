@@ -979,8 +979,7 @@ public struct TableView<State> {
 
         return row()
             .key("\(colId)-resize")
-            // Blocked on @el: upstream uses `.role("splitter")`, not in ElementRole yet.
-            .role(.separator)
+            .role(.splitter)
             .label("Resize \(c.title)")
             .pin(top: 6.0, right: -4.0, bottom: 6.0)
             .w(9.0)

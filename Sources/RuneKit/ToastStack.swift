@@ -648,7 +648,7 @@ public struct Toast<State> {
 
         var root: El<State> = col()
             .key(key)
-            .role(.alert) // Blocked on @el: ElementRole.status
+            .role(.status)
             .liveRegion(.polite)
             .label(titleText)
             .w(ToastMetrics.toastWidth)

@@ -4,6 +4,7 @@ import Testing
 @testable import RuneKit
 @testable import RuneRef
 
+@MainActor
 @Suite("RuneKit Increment 3: ToastStack, ScrollBar, RollingText & ShortcutRecorder Tests")
 struct FeedbackAndInputsTests {
 
@@ -878,6 +879,15 @@ struct FeedbackAndInputsTests {
         #expect(risingThree.rect[1] > risingThree.target[1] + 1.0)
     }
 
+    private func rollingSpanWidth<S>(_ rt: Runtime<S>, prefix: String) throws -> Float {
+        let cells = rt.elements()
+            .filter { !$0.exiting && ($0.key?.hasPrefix("\(prefix)#") ?? false) }
+            .sorted { $0.rect[0] < $1.rect[0] }
+        let first = try #require(cells.first)
+        let last = try #require(cells.last)
+        return last.rect[0] + last.rect[2] - first.rect[0]
+    }
+
     @Test("RollingText width matches plain text, ZWJ emoji is one cell, and kept glyphs advance (tests/rolling_text.rs:182,200,211)")
     func rollingTextWidthMatchesPlainEmojiAndAdvance() throws {
         struct S { var text: String; var font: TextStyle }
@@ -888,11 +898,12 @@ struct FeedbackAndInputsTests {
 
         for (sample, font) in [("Copy password", plex), ("Copy password", inter), ("AVATAR Tokyo, WAVE", inter)] {
             let rt = Runtime(state: S(text: sample, font: font), viewport: Vec2(400, 120), pixelScale: 2.0, systemDark: false) { s, _ in
-                col().p(20).child(RollingText<S>(key: "rolled", value: s.text, font: s.font, kit: kit, store: store).build())
-                    .child(text(s.text).key("plain").font(s.font).noWrap())
+                col().p(20)
+                    .child(row().child(RollingText<S>(key: "rolled", value: s.text, font: s.font, kit: kit, store: store).build()))
+                    .child(row().child(text(s.text).key("plain").font(s.font).noWrap()))
             }
             _ = rt.frame(at: 0.0)
-            let rolledW = try #require(rt.element(byKey: "rolled")).rect[2]
+            let rolledW = try rollingSpanWidth(rt, prefix: "rolled")
             let plainW = try #require(rt.element(byKey: "plain")).rect[2]
             #expect(abs(rolledW - plainW) <= 0.5)
         }
@@ -902,8 +913,9 @@ struct FeedbackAndInputsTests {
         let emojiLine = "\(family) 2 👍🏽 e\u{301}"
         let emojiStore = RollingTextStore()
         let emojiRt = Runtime(state: S(text: emojiLine, font: inter), viewport: Vec2(400, 120), pixelScale: 2.0, systemDark: false) { s, _ in
-            col().p(20).child(RollingText<S>(key: "emoji", value: s.text, font: s.font, kit: kit, store: emojiStore).build())
-                .child(text(s.text).key("plain").font(s.font).noWrap())
+            col().p(20)
+                .child(row().child(RollingText<S>(key: "emoji", value: s.text, font: s.font, kit: kit, store: emojiStore).build()))
+                .child(row().child(text(s.text).key("plain").font(s.font).noWrap()))
         }
         _ = emojiRt.frame(at: 0.0)
         let cells = emojiRt.elements()
@@ -911,15 +923,16 @@ struct FeedbackAndInputsTests {
             .sorted { $0.rect[0] < $1.rect[0] }
             .compactMap(\.text)
         #expect(cells == [family, " ", "2", " ", "👍🏽", " ", "e\u{301}"])
-        let emojiRolledW = try #require(emojiRt.element(byKey: "emoji")).rect[2]
+        let emojiRolledW = try rollingSpanWidth(emojiRt, prefix: "emoji")
         let emojiPlainW = try #require(emojiRt.element(byKey: "plain")).rect[2]
         #expect(abs(emojiRolledW - emojiPlainW) <= 0.5)
 
         // Kept glyphs settle to new advance when width changes (1:00 -> 11:00)
         let advStore = RollingTextStore()
         let advRt = Runtime(state: S(text: "1:00", font: inter), viewport: Vec2(400, 120), pixelScale: 2.0, systemDark: false) { s, _ in
-            col().p(20).child(RollingText<S>(key: "adv", value: s.text, font: s.font, kit: kit, store: advStore).build())
-                .child(text(s.text).key("plain").font(s.font).noWrap())
+            col().p(20)
+                .child(row().child(RollingText<S>(key: "adv", value: s.text, font: s.font, kit: kit, store: advStore).build()))
+                .child(row().child(text(s.text).key("plain").font(s.font).noWrap()))
         }
         _ = advRt.frame(at: 0.0)
         advRt.update { s, _ in s.text = "11:00" }
@@ -928,7 +941,7 @@ struct FeedbackAndInputsTests {
             now += 1.0 / 120.0
             _ = advRt.frame(at: now)
         }
-        let advRolledW = try #require(advRt.element(byKey: "adv")).rect[2]
+        let advRolledW = try rollingSpanWidth(advRt, prefix: "adv")
         let advPlainW = try #require(advRt.element(byKey: "plain")).rect[2]
         #expect(abs(advRolledW - advPlainW) <= 0.5)
     }

@@ -257,6 +257,14 @@ struct InputsAndContainersTests {
         click(rt, at: Vec2(ta.rect[0] + 2.0, ta.rect[1] + 4.0), t: &t)
         #expect(rt.focusedKey == "ta-input")
         #expect(rt.state.area.selectedUTF8Range == 0..<0)
+
+        // 6. Each text field / area exposes exactly one focusable/reachable textbox editor (`textbox_padding_requires_exactly_one_reachable_editor`).
+        let json = rt.accessibilityJSON(pretty: false)
+        #expect(json.contains("\"key\":\"ti-input\""))
+        #expect(json.contains("\"key\":\"tf-input\""))
+        #expect(json.contains("\"key\":\"ta-input\""))
+        let focusableTextboxes = rt.elements().filter { !$0.exiting && $0.role == .textInput && $0.focusable }
+        #expect(focusableTextboxes.compactMap(\.key).sorted() == ["ta-input", "tf-input", "ti-input"])
     }
 
     @MainActor
@@ -633,6 +641,23 @@ struct InputsAndContainersTests {
     }
 
     @MainActor
+    @Test("Sibling Cards without keys mount without duplicate-key warnings (tests/sibling_roots.rs)")
+    func siblingCardsHaveNoDuplicateKeys() {
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(400, 320), pixelScale: 1.0, systemDark: true) { _, _ in
+            col()
+                .gap(8.0)
+                .child(Card<Int>().title("First card").description("Body one").build(kit))
+                .child(Card<Int>().title("Second card").description("Body two").build(kit))
+        }
+        _ = rt.frame(at: 0.0)
+        #expect(rt.keyWarnings.isEmpty)
+        let titles = rt.elements().filter { !$0.exiting && $0.role == .group }
+        #expect(titles.map(\.label).contains("First card"))
+        #expect(titles.map(\.label).contains("Second card"))
+    }
+
+    @MainActor
     @Test("Collapsible and Accordion toggle expanded state on click and expose region/button roles")
     func collapsibleAndAccordionParity() {
         struct S {
@@ -689,5 +714,47 @@ struct InputsAndContainersTests {
         click(rt, at: center(of: colTriggerNow.rect), t: &t)
         #expect(rt.state.colOpen)
         #expect(rt.element(byKey: "col-body") != nil)
+
+        // Keyboard Tab -> Space/Enter activation on focused Accordion trigger (`accordions_and_collapsibles_read_open_and_open_by_any_input`)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: t + 0.01)
+        t += 0.02
+        _ = rt.frame(at: t)
+        #expect(rt.elements().first(where: \.focused)?.path.contains("item0") == true)
+        _ = rt.keyDown(KeyEvent(key: .space), at: t + 0.01)
+        t += 0.02
+        _ = rt.frame(at: t)
+        #expect(!rt.state.open)
+        _ = rt.keyDown(KeyEvent(key: .enter), at: t + 0.01)
+        t += 0.02
+        _ = rt.frame(at: t)
+        #expect(rt.state.open)
+
+        // Collapsible trigger opens/closes on Tab -> Space / Enter and accessibilityAction(.press)
+        let colRt = Runtime<Bool>(state: false, viewport: Vec2(320, 160), pixelScale: 1.0, systemDark: true) { open, _ in
+            Collapsible<Bool>("Details", isOpen: open)
+                .onToggle { s, _ in s.toggle() }
+                .child(text("More words").key("col-body"))
+                .build(kit)
+                .key("col")
+        }
+        var ct = 0.0
+        _ = colRt.frame(at: ct)
+        _ = colRt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        ct = 0.02
+        _ = colRt.frame(at: ct)
+        #expect(colRt.elements().first(where: \.focused)?.path.contains("@col") == true)
+        _ = colRt.keyDown(KeyEvent(key: .space), at: 0.03)
+        ct = 0.04
+        _ = colRt.frame(at: ct)
+        #expect(colRt.state)
+        _ = colRt.keyDown(KeyEvent(key: .enter), at: 0.05)
+        ct = 0.06
+        _ = colRt.frame(at: ct)
+        #expect(!colRt.state)
+        if let path = colRt.elements().first(where: { $0.key == "trigger" })?.path {
+            #expect(colRt.accessibilityAction(path, .press, at: 0.07))
+            _ = colRt.frame(at: 0.08)
+            #expect(colRt.state)
+        }
     }
 }

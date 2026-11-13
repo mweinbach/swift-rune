@@ -735,18 +735,20 @@ public struct TabStrip<State> {
 
                 // Middle-click closes closable unpinned tabs
                 if item.isClosable && !item.isPinned, let onCloseFn {
-                    tab = tab.onPointerDown { s, press, tx in
-                        if press.button == .middle {
-                            onCloseFn(&s, idCopy, &tx)
-                        } else if let dragKeyPath, press.button == .primary {
-                            s[keyPath: dragKeyPath].press(
-                                id: idCopy,
-                                index: index,
-                                at: press.window,
-                                tabWidth: computedUnpinnedWidth
-                            )
+                    tab = tab
+                        .pointerButtons([.primary, .middle])
+                        .onPointerDown { s, press, tx in
+                            if press.button == .middle {
+                                onCloseFn(&s, idCopy, &tx)
+                            } else if let dragKeyPath, press.button == .primary {
+                                s[keyPath: dragKeyPath].press(
+                                    id: idCopy,
+                                    index: index,
+                                    at: press.window,
+                                    tabWidth: computedUnpinnedWidth
+                                )
+                            }
                         }
-                    }
                 } else if let dragKeyPath {
                     tab = tab.onPointerDown { s, press, _ in
                         guard press.button == .primary else { return }

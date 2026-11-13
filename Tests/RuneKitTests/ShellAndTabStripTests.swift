@@ -216,6 +216,34 @@ struct ShellAndTabStripTests {
         rt.frame(at: 0.15)
         #expect(rt.state.items.map(\.id) == ["c", "a"])
 
+        // Escape mid-drag cancels reorder cleanly without changing items; a subsequent press starts fresh
+        let rowCRect = try #require(rt.element(byKey: "row-c")).rect
+        let cStart = Vec2(rowCRect[0] + 24, rowCRect[1] + rowCRect[3] * 0.5)
+        rt.pointerDown(at: cStart, at: 0.16)
+        rt.pointerMove(to: Vec2(cStart.x, cStart.y + 30), at: 0.17)
+        rt.frame(at: 0.18)
+        #expect(rt.state.reorder.isDragging)
+        _ = rt.keyDown(KeyEvent(key: .escape), at: 0.185)
+        rt.frame(at: 0.19)
+        #expect(!rt.state.reorder.isDragging)
+        #expect(rt.state.items.map(\.id) == ["c", "a"])
+
+        // Lost pointer release (another press without pointerUp) lets go and drags the new row
+        rt.pointerDown(at: cStart, at: 0.191)
+        rt.pointerMove(to: Vec2(cStart.x, cStart.y + 10), at: 0.192)
+        rt.frame(at: 0.193)
+        let rowA2 = try #require(rt.element(byKey: "row-a")).rect
+        let a2Start = Vec2(rowA2[0] + 24, rowA2[1] + rowA2[3] * 0.5)
+        rt.pointerDown(at: a2Start, at: 0.194)
+        rt.pointerMove(to: Vec2(a2Start.x, a2Start.y - 30), at: 0.195)
+        rt.pointerUp(at: Vec2(a2Start.x, a2Start.y - 30), at: 0.196)
+        rt.frame(at: 0.197)
+        #expect(rt.state.items.map(\.id) == ["a", "c"])
+        // Swap back to ["c", "a"] so rename index stays untouched below
+        rt.state.items.swapAt(0, 1)
+        rt.markNeedsCommit()
+        rt.frame(at: 0.198)
+
         // Rename submit commits updated title
         rt.state.renamingId = "a"
         rt.markNeedsCommit()
