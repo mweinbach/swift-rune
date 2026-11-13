@@ -294,11 +294,11 @@ struct GrowthParityTests {
 @Suite("Memo, Snapshot & Region Parity Tests", .serialized)
 struct MemoSnapshotParityTests {
     @Test func snapshotValuesStayStableAcrossCommitRetriesAndRestoreOnThrow() {
-        let hist = MemoSnapshotHistory()
         var seen = false
         var count = 9
 
-        MemoSnapshot.enter(history: hist) {
+        // Within one commit, settle retries freeze the first value seen per key/type.
+        MemoSnapshot.enter {
             for _ in 0..<4 {
                 #expect(!snapshot("item", seen))
                 #expect(snapshot("item", count) == 9)
@@ -307,22 +307,24 @@ struct MemoSnapshotParityTests {
             }
         }
 
-        MemoSnapshot.enter(history: hist) {
+        // Each new commit starts with a fresh scope and picks up updated inputs.
+        MemoSnapshot.enter {
             #expect(snapshot("item", seen))
             #expect(snapshot("item", count) == 8)
             #expect(snapshot("other", 12) == 12)
         }
 
+        // Throwing out of a nested scope leaves the outer commit scope intact.
         enum TestErr: Error { case abort }
-        MemoSnapshot.enter(history: hist) {
-            #expect(snapshot("item", 77) == 8)
+        MemoSnapshot.enter {
+            #expect(snapshot("item", 77) == 77)
             do {
-                try MemoSnapshot.enter(history: hist) {
+                try MemoSnapshot.enter {
                     #expect(snapshot("item", 99) == 99)
                     throw TestErr.abort
                 }
             } catch {}
-            #expect(snapshot("item", 77) == 8)
+            #expect(snapshot("item", 123) == 77)
         }
     }
 
@@ -428,6 +430,57 @@ struct MemoSnapshotParityTests {
         rtNest.invalidateMemos(byPrefix: "outer")
         _ = rtNest.frame(at: 0.06)
         #expect(nestedBuilds.n == 5)
+        rtNest.invalidateMemos(byPrefix: "inner")
+        rtNest.update { st, _ in st.0 += 1 }
+        _ = rtNest.frame(at: 0.08)
+        #expect(nestedBuilds.n == 7)
+    }
+
+    @Test func staleMemoEvictionViaKeepSinceAndTrackedIsolationInsideMemo() {
+        final class Counter: @unchecked Sendable { var branchBuilds = 0; var regionBuilds = 0; var innerMemoBuilds = 0 }
+        let c = Counter()
+        let t = Tracked(10)
+
+        let rt = Runtime(state: true, viewport: Vec2(200, 200), pixelScale: 1.0) { show, _ in
+            col().children([
+                show
+                    ? memo("branch", 0) {
+                        c.branchBuilds += 1
+                        return text("on")
+                    }
+                    : text("off"),
+                regionWith("outer-reg", inputs: 0) {
+                    c.regionBuilds += 1
+                    return memo("inner-memo", 0) {
+                        c.innerMemoBuilds += 1
+                        return text("t=\(t.value)")
+                    }
+                }
+            ])
+        }
+
+        _ = rt.frame(at: 0.0)
+        #expect(c.branchBuilds == 1)
+        #expect(c.regionBuilds == 1)
+        #expect(c.innerMemoBuilds == 1)
+
+        // Hide branch -> `keepSince` evicts unvisited `branch`; outer region must not capture `t` from inner memo.
+        t.value = 20
+        rt.update { s, _ in s = false }
+        _ = rt.frame(at: 0.02)
+        #expect(c.branchBuilds == 1)
+        #if DEBUG
+        // Debug builds re-invoke the reused region body once to verify no untracked reads, while inner memo still hits.
+        #expect(c.regionBuilds == 2)
+        #else
+        #expect(c.regionBuilds == 1)
+        #endif
+        #expect(c.innerMemoBuilds == 1)
+
+        // Show branch again -> evicted entry rebuilds!
+        rt.update { s, _ in s = true }
+        _ = rt.frame(at: 0.04)
+        #expect(c.branchBuilds == 2)
     }
 
     @Test func layoutSizeAndWindowLayoutThresholdInsideMemo() {
@@ -641,6 +694,8 @@ struct RewindAndLiveParityTests {
         #expect(summary == bundle.summary)
         #expect(summary.contains("> the title hops"))
         #expect(summary.contains("## Jumps") && summary.contains("title ↓7.5 pt"))
+        #expect(summary.contains("## Moved most") && summary.contains("at frame"))
+        #expect(summary.contains("## Files") && summary.contains("`trace.jsonl`") && summary.contains("`contact.png`"))
 
         // Blip out and back produces only 1 jump frame
         let rtBlip = makeApp()

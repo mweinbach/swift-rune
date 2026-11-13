@@ -954,6 +954,11 @@ public final class UrlOpener: @unchecked Sendable {
         #endif
     }
 
+    /// Validates an outbound or web same-tab link (`open_url::check_same_tab`).
+    public static func validateSameTab(_ raw: String, allowRelative: Bool = false) throws -> String {
+        try checkLink(raw, relative: allowRelative)
+    }
+
     internal static func checkLink(_ raw: String, relative: Bool) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw OpenUrlError.empty }
@@ -979,7 +984,8 @@ public final class UrlOpener: @unchecked Sendable {
         guard let colonIdx = trimmed.firstIndex(of: ":") else {
             throw OpenUrlError.invalid
         }
-        let scheme = String(trimmed[..<colonIdx]).lowercased()
+        let rawScheme = String(trimmed[..<colonIdx])
+        let scheme = rawScheme.lowercased()
         let rest = String(trimmed[trimmed.index(after: colonIdx)...])
         guard
             let first = scheme.first,
@@ -1098,7 +1104,6 @@ public final class UrlOpener: @unchecked Sendable {
         }
         return out
     }
-
     @discardableResult
     public func open(_ raw: String, sameTab: Bool = false) throws -> String {
         let normalized = sameTab ? try Self.checkSameTab(raw) : try Self.validate(raw)
@@ -1772,10 +1777,50 @@ public struct AppDirs: Sendable, Equatable {
     public let state: URL
     public let logs: URL
     public let downloads: URL
+    public let isRooted: Bool
 
+    public init(
+        id: String,
+        home: URL,
+        config: URL,
+        data: URL,
+        cache: URL,
+        state: URL,
+        logs: URL,
+        downloads: URL,
+        isRooted: Bool = false
+    ) {
+        self.id = id
+        self.home = home
+        self.config = config
+        self.data = data
+        self.cache = cache
+        self.state = state
+        self.logs = logs
+        self.downloads = downloads
+        self.isRooted = isRooted
+    }
+
+    /// Sanitizes an app id into a safe single directory component (`rune::prefs::sanitize`).
     public static func sanitize(_ appId: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/\\:*?\"<>|")
-        return appId.unicodeScalars.map { invalid.contains($0) ? "_" : String($0) }.joined()
+        let invalid = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/\\:*?\"<>|"))
+        let mapped = appId
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .unicodeScalars
+            .map { invalid.contains($0) ? "_" : String($0) }
+            .joined()
+        var end = mapped.endIndex
+        while end > mapped.startIndex {
+            let prev = mapped.index(before: end)
+            let ch = mapped[prev]
+            if ch.isWhitespace || ch == "." {
+                end = prev
+            } else {
+                break
+            }
+        }
+        let cleaned = String(mapped[..<end])
+        return cleaned.isEmpty ? "app" : cleaned
     }
 
     public static var defaultHomeURL: URL {
@@ -1786,19 +1831,37 @@ public struct AppDirs: Sendable, Equatable {
         #endif
     }
 
+    /// Resolves standard directories via `lookup`, returning `nil` if no home folder is available (`AppDirs::from_env`).
+    public static func fromEnv(appId: String, lookup: (String) -> String?) -> AppDirs? {
+        func nonEmpty(_ k: String) -> String? {
+            guard let v = lookup(k), !v.isEmpty else { return nil }
+            return v
+        }
+        let homeURL = nonEmpty("HOME").map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let root = nonEmpty(rootEnv) {
+            return rooted(at: URL(fileURLWithPath: root, isDirectory: true), appId: appId, home: homeURL ?? defaultHomeURL)
+        }
+        guard let homeURL else { return nil }
+        return resolveWithHome(appId: appId, homeURL: homeURL, lookup: nonEmpty, isRooted: false)
+    }
+
     public static func resolve(appId: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> AppDirs {
+        if let resolved = fromEnv(appId: appId, lookup: { environment[$0] }) {
+            return resolved
+        }
+        return resolveWithHome(appId: appId, homeURL: defaultHomeURL, lookup: {
+            guard let v = environment[$0], !v.isEmpty else { return nil }
+            return v
+        }, isRooted: false)
+    }
+
+    private static func resolveWithHome(
+        appId: String,
+        homeURL: URL,
+        lookup: (String) -> String?,
+        isRooted: Bool
+    ) -> AppDirs {
         let cleanId = sanitize(appId)
-        let homeURL: URL
-        if let h = environment["HOME"], !h.isEmpty {
-            homeURL = URL(fileURLWithPath: h, isDirectory: true)
-        } else {
-            homeURL = defaultHomeURL
-        }
-
-        if let root = environment[rootEnv], !root.isEmpty {
-            return rooted(at: URL(fileURLWithPath: root, isDirectory: true), appId: appId, home: homeURL)
-        }
-
         #if os(macOS) || os(iOS)
         let appSupport = homeURL.appendingPathComponent("Library/Application Support/\(cleanId)", isDirectory: true)
         let caches = homeURL.appendingPathComponent("Library/Caches/\(cleanId)", isDirectory: true)
@@ -1812,13 +1875,21 @@ public struct AppDirs: Sendable, Equatable {
             cache: caches,
             state: appSupport,
             logs: logsDir,
-            downloads: downloadsDir
+            downloads: downloadsDir,
+            isRooted: isRooted
         )
         #else
-        let xdgConfig = environment["XDG_CONFIG_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? homeURL.appendingPathComponent(".config", isDirectory: true)
-        let xdgData = environment["XDG_DATA_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? homeURL.appendingPathComponent(".local/share", isDirectory: true)
-        let xdgCache = environment["XDG_CACHE_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? homeURL.appendingPathComponent(".cache", isDirectory: true)
-        let xdgState = environment["XDG_STATE_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) } ?? homeURL.appendingPathComponent(".local/state", isDirectory: true)
+        let absXdg: (String, String) -> URL = { key, fallbackRel in
+            if let v = lookup(key), v.hasPrefix("/") {
+                return URL(fileURLWithPath: v, isDirectory: true)
+            }
+            return homeURL.appendingPathComponent(fallbackRel, isDirectory: true)
+        }
+        let xdgConfig = absXdg("XDG_CONFIG_HOME", ".config")
+        let xdgData = absXdg("XDG_DATA_HOME", ".local/share")
+        let xdgCache = absXdg("XDG_CACHE_HOME", ".cache")
+        let xdgState = absXdg("XDG_STATE_HOME", ".local/state")
+        let xdgDownload = absXdg("XDG_DOWNLOAD_DIR", "Downloads")
         return AppDirs(
             id: cleanId,
             home: homeURL,
@@ -1827,7 +1898,8 @@ public struct AppDirs: Sendable, Equatable {
             cache: xdgCache.appendingPathComponent(cleanId, isDirectory: true),
             state: xdgState.appendingPathComponent(cleanId, isDirectory: true),
             logs: xdgState.appendingPathComponent("\(cleanId)/logs", isDirectory: true),
-            downloads: homeURL.appendingPathComponent("Downloads", isDirectory: true)
+            downloads: xdgDownload,
+            isRooted: isRooted
         )
         #endif
     }
@@ -1842,12 +1914,21 @@ public struct AppDirs: Sendable, Equatable {
             cache: root.appendingPathComponent("cache/\(cleanId)", isDirectory: true),
             state: root.appendingPathComponent("state/\(cleanId)", isDirectory: true),
             logs: root.appendingPathComponent("logs/\(cleanId)", isDirectory: true),
-            downloads: root.appendingPathComponent("downloads", isDirectory: true)
+            downloads: root.appendingPathComponent("downloads", isDirectory: true),
+            isRooted: true
         )
     }
 
     public func sibling(_ appId: String) -> AppDirs {
         let cleanId = Self.sanitize(appId)
+        #if os(macOS) || os(iOS) || os(Windows)
+        let siblingLogs = logs.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true)
+        #else
+        let siblingLogs: URL = isRooted
+            ? logs.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true)
+            : logs.deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("\(cleanId)/logs", isDirectory: true)
+        #endif
         return AppDirs(
             id: cleanId,
             home: home,
@@ -1855,8 +1936,9 @@ public struct AppDirs: Sendable, Equatable {
             data: data.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true),
             cache: cache.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true),
             state: state.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true),
-            logs: logs.deletingLastPathComponent().appendingPathComponent(cleanId, isDirectory: true),
-            downloads: downloads
+            logs: siblingLogs,
+            downloads: downloads,
+            isRooted: isRooted
         )
     }
 }
@@ -2060,6 +2142,28 @@ public enum RuneTask {
                 work()
             }
         }
+    }
+
+    /// Consumes messages from `stream` in order until `each` returns `false` or the stream finishes (`task::serve`).
+    @discardableResult
+    public static func serve<T: Sendable>(
+        name: String,
+        stream: AsyncStream<T>,
+        each: @escaping @Sendable (T) -> Bool
+    ) -> Task<Void, Never> {
+        Task.detached(priority: .userInitiated) {
+            for await msg in stream {
+                if Task.isCancelled || !each(msg) {
+                    break
+                }
+            }
+        }
+    }
+
+    /// Suspends the current task for `seconds` (`task::sleep`).
+    public static func sleep(seconds: Double) async {
+        guard seconds > 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
     }
 }
 

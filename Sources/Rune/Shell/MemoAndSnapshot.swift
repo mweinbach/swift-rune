@@ -3,26 +3,9 @@ import RuneMotion
 
 // MARK: - Snapshot Across Retries (`rune::memo::snapshot`)
 
-/// Per-runtime/standalone commit history for `snapshot(_:_:)`.
+/// Deprecated no-op handle kept for source compatibility; `MemoSnapshot` scopes strictly per commit (`memo::snapshot`).
 public final class MemoSnapshotHistory: @unchecked Sendable {
-    private let lock = NSLock()
-    fileprivate var previous: [SnapshotKey: Any] = [:]
-
     public init() {}
-
-    fileprivate func snapshotPrevious() -> [SnapshotKey: Any] {
-        lock.lock()
-        defer { lock.unlock() }
-        return previous
-    }
-
-    fileprivate func commit(_ next: [SnapshotKey: Any]) {
-        lock.lock()
-        defer { lock.unlock() }
-        for (k, v) in next {
-            previous[k] = v
-        }
-    }
 }
 
 struct SnapshotKey: Hashable, @unchecked Sendable {
@@ -31,50 +14,33 @@ struct SnapshotKey: Hashable, @unchecked Sendable {
 }
 
 final class MemoSnapshotSession: @unchecked Sendable {
-    let previous: [SnapshotKey: Any]
     var seenInCommit: [SnapshotKey: Any] = [:]
-    var nextValues: [SnapshotKey: Any] = [:]
-
-    init(previous: [SnapshotKey: Any]) {
-        self.previous = previous
-    }
 
     func value<T>(key: String, current: T) -> T {
         let sk = SnapshotKey(name: key, typeId: ObjectIdentifier(T.self))
-        nextValues[sk] = current
         if let frozen = seenInCommit[sk] as? T {
             return frozen
         }
-        let chosen = (previous[sk] as? T) ?? current
-        seenInCommit[sk] = chosen
-        return chosen
+        seenInCommit[sk] = current
+        return current
     }
 }
 
-/// Scoped snapshot state across measurement retries within one commit (`rune::memo::snapshot`).
+/// Scoped snapshot state across settle retries within a single commit (`rune::memo::snapshot`).
 public enum MemoSnapshot {
     @TaskLocal static var currentSession: MemoSnapshotSession?
-    private static let sharedHistory = MemoSnapshotHistory()
 
-    /// Runs `body` inside one snapshot commit scope over `history` (retrying/throwing discards updates).
+    /// Runs `body` inside a fresh per-commit snapshot scope; freezes the first value seen per key for this commit only.
     public static func enter<R>(
         history: MemoSnapshotHistory? = nil,
         _ body: () throws -> R
     ) rethrows -> R {
-        let hist = history ?? sharedHistory
-        // A nested `enter` begins its own commit against empty/prior commit state and
-        // discards its updates on throw, leaving outer scopes untouched (`snapshot/tests.rs:23`).
-        let basePrev: [SnapshotKey: Any] = (currentSession != nil) ? [:] : hist.snapshotPrevious()
-        let session = MemoSnapshotSession(previous: basePrev)
-        let result = try $currentSession.withValue(session, operation: body)
-        if currentSession == nil {
-            hist.commit(session.nextValues)
-        }
-        return result
+        _ = history
+        let session = MemoSnapshotSession()
+        return try $currentSession.withValue(session, operation: body)
     }
 
-    /// Reads the commit-stable value for `key` (`previous` if present, otherwise first seen in this commit)
-    /// while recording `value` for the next commit.
+    /// Freezes the first value seen for `key` within the active commit scope (`memo::snapshot`).
     public static func snapshot<T>(_ key: String, _ value: T) -> T {
         guard let session = currentSession else { return value }
         return session.value(key: key, current: value)
@@ -225,6 +191,7 @@ final class MemoBuildScope: @unchecked Sendable {
     var topLevelReads: [MemoRead] = []
     var nestedFrames: [[String]] = []
     var regionWarnings: [String] = []
+    var isVerificationDryRun: Bool = false
 
     init(cache: MemoCache, envHash: UInt64, geometry: [String: MemoElementGeometry], pass: UInt64) {
         self.cache = cache
@@ -360,22 +327,30 @@ public func caretRect(_ key: String) -> [Float]? {
 extension Cx {
     /// Last committed `[x, y, width, height]` of `.key(key)` in window space, recording a layout read.
     public func layout(_ key: String) -> [Float]? {
-        MemoScope.readLayout(key)
+        let rect = MemoScope.readLayout(key)
+        envState.reads.layoutReads.append(.layout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
+        return rect
     }
 
     /// Last committed `[width, height]` of `.key(key)`, invalidating memos only on size changes.
     public func layoutSize(_ key: String) -> [Float]? {
-        MemoScope.readLayoutSize(key)
+        let size = MemoScope.readLayoutSize(key)
+        envState.reads.layoutReads.append(.layoutSize(key: key, size: size.map { Vec2($0[0], $0[1]) }))
+        return size
     }
 
     /// Last committed `[x, y, width, height]` of `.key(key)` in window coordinates (0.5 pt hysteresis).
     public func windowLayout(_ key: String) -> [Float]? {
-        MemoScope.readWindowLayout(key)
+        let rect = MemoScope.readWindowLayout(key)
+        envState.reads.layoutReads.append(.windowLayout(key: key, rect: rect.map { MotionRect.fromXYWH($0[0], $0[1], $0[2], $0[3]) }))
+        return rect
     }
 
     /// Last rendered `[x, y, width, height]` caret rect of text field `.key(key)`.
     public func caret(_ key: String) -> [Float]? {
-        MemoScope.readCaret(key)
+        envState.reads.caretRead = true
+        let scoped = MemoScope.readCaret(key)
+        return caretRectForKey(envState.caret, key: key) ?? scoped
     }
 }
 

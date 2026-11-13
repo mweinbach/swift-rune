@@ -252,6 +252,13 @@ public final class MemoCache: @unchecked Sendable {
         return passCounter
     }
 
+    /// Returns the pass number that the next `advancePass()` / `MemoScope.enter` will receive (`memo::next_pass`).
+    public func nextPass() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return passCounter &+ 1
+    }
+
     /// Marks cached entries so the next build re-verifies against a new pass (`memo::as_next_build`).
     @discardableResult
     public func asNextBuild() -> UInt64 {
@@ -286,7 +293,7 @@ public final class MemoCache: @unchecked Sendable {
         let curGeometry = scope?.geometry ?? [:]
 
         // Same-pass duplicate memo IDs bypass caching (`memo.rs:1067`).
-        if !ignoreDuplicateGuard, let scope {
+        if !ignoreDuplicateGuard, let scope, !scope.isVerificationDryRun {
             if !scope.seenScopedIds.insert(scopedId).inserted {
                 let built = build()
                 return (built, false)
@@ -300,22 +307,29 @@ public final class MemoCache: @unchecked Sendable {
            existing.equals(deps),
            existing.reads.allSatisfy({ $0.matches(curGeometry) }),
            let cached = existing.element as? El<State> {
-            let pass = scope?.pass ?? passCounter
-            existing.passBuilt = pass
-            entries[scopedId] = existing
-            markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            let dryRun = scope?.isVerificationDryRun ?? false
             let recordedReads = existing.reads
+            if !dryRun {
+                let pass = scope?.pass ?? passCounter
+                existing.passBuilt = pass
+                entries[scopedId] = existing
+                markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            }
             lock.unlock()
-            for r in recordedReads { scope?.record(r) }
-            scope?.recordNested(scopedId)
+            if !dryRun {
+                for r in recordedReads { scope?.record(r) }
+                scope?.recordNested(scopedId)
+            }
             return (cached, true)
         }
         lock.unlock()
 
+        let savedTracked = TrackedRecorder.pause()
         scope?.prefixStack.append(rawId)
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
         let built = build()
+        TrackedRecorder.resume(savedTracked)
         let capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
         _ = scope?.prefixStack.popLast()
@@ -356,31 +370,43 @@ public final class MemoCache: @unchecked Sendable {
            existing.equals(inputs),
            existing.reads.allSatisfy({ $0.matches(curGeometry) }),
            let cached = existing.element as? El<State> {
-            let pass = scope?.pass ?? passCounter
-            existing.passBuilt = pass
-            entries[scopedId] = existing
-            markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            let dryRun = scope?.isVerificationDryRun ?? false
             let recordedReads = existing.reads
+            if !dryRun {
+                let pass = scope?.pass ?? passCounter
+                existing.passBuilt = pass
+                entries[scopedId] = existing
+                markNestedTouchedLocked(existing.nestedIds, pass: pass)
+            }
             lock.unlock()
-            for r in recordedReads { scope?.record(r) }
-            scope?.recordNested(scopedId)
-            MemoRegionWarningsStore.recordIfMismatch(id: rawId, reused: cached, rebuild: build)
+            if !dryRun {
+                for r in recordedReads { scope?.record(r) }
+                scope?.recordNested(scopedId)
+                let savedTracked = TrackedRecorder.pause()
+                let prevDry = scope?.isVerificationDryRun ?? false
+                scope?.isVerificationDryRun = true
+                scope?.prefixStack.append("region:\(rawId)")
+                scope?.readFrames.append([])
+                scope?.nestedFrames.append([])
+                MemoRegionWarningsStore.recordIfMismatch(id: rawId, reused: cached, rebuild: build)
+                _ = scope?.nestedFrames.popLast()
+                _ = scope?.readFrames.popLast()
+                _ = scope?.prefixStack.popLast()
+                scope?.isVerificationDryRun = prevDry
+                TrackedRecorder.resume(savedTracked)
+            }
             return (cached, true)
         }
         lock.unlock()
 
-        TrackedRecorder.lock.lock()
-        TrackedRecorder.stack.append([:])
-        TrackedRecorder.lock.unlock()
+        TrackedRecorder.pushEmpty()
         scope?.prefixStack.append("region:\(rawId)")
         scope?.readFrames.append([])
         scope?.nestedFrames.append([])
 
         let built = build()
 
-        TrackedRecorder.lock.lock()
-        let trackedDeps = TrackedRecorder.stack.popLast() ?? [:]
-        TrackedRecorder.lock.unlock()
+        let trackedDeps = TrackedRecorder.pop()
         var capturedReads = scope?.readFrames.popLast() ?? []
         let capturedNested = scope?.nestedFrames.popLast() ?? []
         _ = scope?.prefixStack.popLast()
@@ -462,15 +488,20 @@ public final class MemoCache: @unchecked Sendable {
         entries.removeValue(forKey: id)
     }
 
-    /// Removes all cached entries matching `prefix` or nested under `prefix/` or `region:prefix`.
+    /// Removes all cached entries where the full key or any `/`-delimited segment starts with `prefix` (including `region:` segments).
     public func evictPrefix(_ prefix: String) {
         lock.lock()
         defer { lock.unlock() }
         entries = entries.filter { key, _ in
-            let matchesDirect = key == prefix || key.hasPrefix(prefix + "/") || key.hasPrefix(prefix)
-            let regionPref = "region:\(prefix)"
-            let matchesRegion = key == regionPref || key.hasPrefix(regionPref + "/")
-            return !(matchesDirect || matchesRegion)
+            let matchesWhole = key.hasPrefix(prefix) || key.hasPrefix("region:\(prefix)")
+            let matchesSegment = key.split(separator: "/").contains { seg in
+                if seg.hasPrefix(prefix) { return true }
+                if seg.hasPrefix("region:") {
+                    return seg.dropFirst(7).hasPrefix(prefix)
+                }
+                return false
+            }
+            return !(matchesWhole || matchesSegment)
         }
         generation &+= 1
     }
@@ -525,8 +556,50 @@ public func memo<State, Deps: Equatable>(
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)
 
 private enum TrackedRecorder {
-    static let lock = NSLock()
-    nonisolated(unsafe) static var stack: [[UInt32: UInt64]] = []
+    private static let threadKey = "rune.trackedRecorderStack"
+
+    private final class Box: @unchecked Sendable {
+        var stack: [[UInt32: UInt64]] = []
+    }
+
+    private static var box: Box {
+        let dict = Thread.current.threadDictionary
+        if let existing = dict[threadKey] as? Box {
+            return existing
+        }
+        let created = Box()
+        dict[threadKey] = created
+        return created
+    }
+
+    static var stack: [[UInt32: UInt64]] {
+        box.stack
+    }
+
+    static func pushEmpty() {
+        box.stack.append([:])
+    }
+
+    static func pop() -> [UInt32: UInt64] {
+        box.stack.popLast() ?? [:]
+    }
+
+    static func record(id: UInt32, version: UInt64) {
+        let b = box
+        guard !b.stack.isEmpty else { return }
+        b.stack[b.stack.count - 1][id] = version
+    }
+
+    static func pause() -> [[UInt32: UInt64]] {
+        let b = box
+        let saved = b.stack
+        b.stack = []
+        return saved
+    }
+
+    static func resume(_ saved: [[UInt32: UInt64]]) {
+        box.stack = saved
+    }
 }
 
 private enum TrackedIDGenerator {
@@ -576,11 +649,7 @@ public final class Tracked<T>: @unchecked Sendable {
             let ver = _version
             lock.unlock()
 
-            TrackedRecorder.lock.lock()
-            if !TrackedRecorder.stack.isEmpty {
-                TrackedRecorder.stack[TrackedRecorder.stack.count - 1][id] = ver
-            }
-            TrackedRecorder.lock.unlock()
+            TrackedRecorder.record(id: id, version: ver)
             return v
         }
         set {

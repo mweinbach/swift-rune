@@ -36,10 +36,41 @@ public enum Attempt<Value, Err> {
         if case .failed(let e) = self { return e }
         return nil
     }
+
+    public func map<T>(_ transform: (Value) -> T) -> Attempt<T, Err> {
+        switch self {
+        case .idle: return .idle
+        case .loading: return .loading
+        case .ready(let v): return .ready(transform(v))
+        case .failed(let e): return .failed(e)
+        }
+    }
+
+    public func mapError<NewErr>(_ transform: (Err) -> NewErr) -> Attempt<Value, NewErr> {
+        switch self {
+        case .idle: return .idle
+        case .loading: return .loading
+        case .ready(let v): return .ready(v)
+        case .failed(let e): return .failed(transform(e))
+        }
+    }
 }
 
 extension Attempt: Sendable where Value: Sendable, Err: Sendable {}
 extension Attempt: Equatable where Value: Equatable, Err: Equatable {}
+
+/// Fencing token issued by `Seq` so answers to earlier requests never match later states (`rune::machine::Attempt`).
+public struct AttemptToken: Sendable, Equatable, Hashable, Comparable {
+    public let rawValue: UInt64
+
+    public init(_ rawValue: UInt64 = 0) {
+        self.rawValue = rawValue
+    }
+
+    public static func < (lhs: AttemptToken, rhs: AttemptToken) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
 
 /// Monotonic sequence counter for discarding stale async completions (`rune::Seq`).
 public struct Seq: Sendable, Equatable, Hashable {
@@ -53,9 +84,24 @@ public struct Seq: Sendable, Equatable, Hashable {
         return current
     }
 
+    /// Advances the counter and returns a typed `AttemptToken`.
+    public mutating func nextAttempt() -> AttemptToken {
+        AttemptToken(next())
+    }
+
+    /// Current typed fencing token.
+    public var currentAttempt: AttemptToken {
+        AttemptToken(current)
+    }
+
     /// True only if `token` matches the most recently issued request.
     public func isCurrent(_ token: UInt64) -> Bool {
         token != 0 && token == current
+    }
+
+    /// True only if `token` matches the most recently issued request.
+    public func isCurrent(_ token: AttemptToken) -> Bool {
+        isCurrent(token.rawValue)
     }
 
     /// Invalidates any in-flight token without starting a new request.

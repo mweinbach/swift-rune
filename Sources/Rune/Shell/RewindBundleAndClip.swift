@@ -79,7 +79,8 @@ extension RewindClip {
         let summary = buildSummaryMarkdown(
             range: clampedRange,
             note: note,
-            changesByFrame: sliceChanges
+            changesByFrame: sliceChanges,
+            tiles: tiles
         )
         try Data(summary.utf8).write(to: dir.appendingPathComponent("summary.md"))
         return RewindBundle(dir: dir, summary: summary, frames: clampedRange)
@@ -281,7 +282,8 @@ extension RewindClip {
     private func buildSummaryMarkdown(
         range: Range<Int>,
         note: String,
-        changesByFrame: [[RewindChange]]
+        changesByFrame: [[RewindChange]],
+        tiles: [Int]
     ) -> String {
         var s = "# Rewind clip\n\n"
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -299,15 +301,63 @@ extension RewindClip {
         )
 
         var jumpLines: [String] = []
+        struct ElementPeak {
+            var framesCount: Int
+            var maxDistance: Float
+            var bestFrame: Int
+            var bestLabel: String
+        }
+        var peaksById: [UInt32: ElementPeak] = [:]
+
         for (k, cs) in zip(range, changesByFrame) {
-            for c in cs where c.jump {
-                jumpLines.append(String(format: "- frame %d (%.2f s): %@", k, time(k), c.label()))
+            for c in cs {
+                if c.jump {
+                    jumpLines.append(String(format: "- frame %d (%.2f s): %@", k, time(k), c.label()))
+                }
+                let dist = c.distance
+                if var existing = peaksById[c.id] {
+                    existing.framesCount += 1
+                    if dist > existing.maxDistance {
+                        existing.maxDistance = dist
+                        existing.bestFrame = k
+                        existing.bestLabel = c.label()
+                    }
+                    peaksById[c.id] = existing
+                } else {
+                    peaksById[c.id] = ElementPeak(
+                        framesCount: 1,
+                        maxDistance: dist,
+                        bestFrame: k,
+                        bestLabel: c.label()
+                    )
+                }
             }
         }
         if !jumpLines.isEmpty {
             s += "## Jumps\n\nMoved much further in one frame than in the frames either side.\n\n"
-            s += jumpLines.joined(separator: "\n") + "\n"
+            s += jumpLines.joined(separator: "\n") + "\n\n"
         }
+
+        let movedMost = peaksById
+            .sorted { lhs, rhs in
+                if lhs.value.maxDistance != rhs.value.maxDistance {
+                    return lhs.value.maxDistance > rhs.value.maxDistance
+                }
+                return lhs.key < rhs.key
+            }
+            .prefix(12)
+        if !movedMost.isEmpty {
+            s += "## Moved most\n\n"
+            for (_, peak) in movedMost {
+                s += "- \(peak.bestLabel) at frame \(peak.bestFrame) (changed in \(peak.framesCount) frames)\n"
+            }
+            s += "\n"
+        }
+
+        let tileList = tiles.map(String.init).joined(separator: ", ")
+        s += "## Files\n\n"
+        s += "- `trace.jsonl`: every element's rect and opacity per frame, motion-lint's format (`motion-lint analyze trace.jsonl`).\n"
+        s += "- `contact.png`: frames \(tileList) drawn from the recorded rects, left to right. Grey: on screen. Yellow: changed in that frame, its old place dimmer. Red: jumped.\n"
         return s
     }
 }
