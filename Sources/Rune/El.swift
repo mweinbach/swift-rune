@@ -179,21 +179,22 @@ public struct Tx {
 
 /// Read-only view-building context (`rune::Cx`).
 public struct Cx<State> {
-    public let viewport: Vec2
-    public let pixelScale: Float
-    public let systemDark: Bool
-    public let reducedMotion: Bool
+    public internal(set) var viewport: Vec2
+    public internal(set) var pixelScale: Float
+    public internal(set) var systemDark: Bool
+    public internal(set) var reducedMotion: Bool
     public let windowFocused: Bool
     public let focusedKey: String?
     public let hoveredKey: String?
     public let pressedKey: String?
     public let waker: Waker
     public var helpLook: HelpLook?
-    fileprivate let scrollLookup: (String) -> Vec2
-    fileprivate let scrollMaxLookup: (String) -> Vec2
-    fileprivate let viewportSizeLookup: (String) -> Vec2
-    fileprivate let contentSizeLookup: (String) -> Vec2
-    fileprivate let layoutRectLookup: (String) -> MotionRect?
+    internal let scrollLookup: (String) -> Vec2
+    internal let scrollMaxLookup: (String) -> Vec2
+    internal let viewportSizeLookup: (String) -> Vec2
+    internal let contentSizeLookup: (String) -> Vec2
+    internal let layoutRectLookup: (String) -> MotionRect?
+    internal var envState = CxEnvironmentState()
 
     public init(
         viewport: Vec2,
@@ -244,7 +245,6 @@ public struct Cx<State> {
     public func scrollOffset(of key: String) -> Vec2 {
         scrollLookup(key)
     }
-
     public func scrollMax(of key: String) -> Vec2 {
         scrollMaxLookup(key)
     }
@@ -266,12 +266,9 @@ public struct Cx<State> {
         return Vec2(r.width, r.height)
     }
 
-    public func focusColor() -> Color {
-        Tok.accent(0, dark: systemDark)
-    }
-
     public mutating func setHelpLook(_ look: HelpLook) {
         helpLook = look
+        envState.defaults.help = look
     }
 }
 
@@ -488,6 +485,7 @@ public struct El<State> {
     public var zIndex: Int = 0
     public var isolatedLayer: Bool = false
     public var focusable: Bool = false
+    public var focusOptOut: Bool = false
     public var autofocus: Bool = false
     public var focusGroup: Bool = false
     public var isModal: Bool = false
@@ -1364,6 +1362,7 @@ public struct El<State> {
     public func focusable(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.focusable = enabled
+        copy.focusOptOut = !enabled
         return copy
     }
 

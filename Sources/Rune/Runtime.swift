@@ -213,6 +213,9 @@ public final class Runtime<State> {
 
     public var viewport: Vec2 {
         didSet {
+            if !cxSettings.isApplyingZoom {
+                cxSettings.zoomState.window = viewport
+            }
             if viewport != oldValue {
                 needsCommit = true
             }
@@ -220,6 +223,9 @@ public final class Runtime<State> {
     }
     public var pixelScale: Float {
         didSet {
+            if !cxSettings.isApplyingZoom {
+                cxSettings.zoomState.windowScale = max(pixelScale, 0.5)
+            }
             scene.pixelScale = pixelScale
             if pixelScale != oldValue {
                 needsCommit = true
@@ -235,10 +241,11 @@ public final class Runtime<State> {
         didSet {
             scene.reducedMotion = reducedMotion
             scrollStore.reducedMotion = reducedMotion
+            liveStore.reducedMotion = reducedMotion
             if reducedMotion != oldValue { needsCommit = true }
         }
     }
-    public var srgbBlend: Bool = false
+    public var srgbBlend: Bool = true
     public var windowFocused: Bool = true {
         didSet {
             if windowFocused != oldValue { needsCommit = true }
@@ -284,6 +291,8 @@ public final class Runtime<State> {
     public let flightRecorder = FlightRecorder()
     public let matchedFlightRegistry = MatchedFlightRegistry()
     public var rewindRecorder: RewindRecorder? = nil
+    public let memo = MemoCache()
+    internal var cxSettings = RuntimeShellSettings()
 
     // Input & focus state
     public private(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
@@ -294,6 +303,7 @@ public final class Runtime<State> {
     public private(set) var focusedPath: String? = nil
     public private(set) var focusedKey: String? = nil
     public private(set) var focusVisible: Bool = false
+    private var webFocusTabStartPath: String? = nil
 
     private var lastClickTime: Double = -10.0
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
@@ -384,6 +394,7 @@ public final class Runtime<State> {
         self.scene = Scene(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.scrollStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
         self.liveStore = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
+        self.cxSettings = RuntimeShellSettings(viewport: viewport, pixelScale: pixelScale, reducedMotion: reducedMotion)
         if !MediaPlaybackGate.isEnabled {
             Recorder.headlessReset()
             HeadlessClock.set(0.0)
@@ -562,6 +573,12 @@ public final class Runtime<State> {
     /// updates `elements()`, and emits the complete `RefScene` primitive stream!
     @discardableResult
     public func frame(at now: Double) -> RefScene {
+        Theme.withBlend(srgbBlend) {
+            frameWithBlendScope(at: now)
+        }
+    }
+
+    private func frameWithBlendScope(at now: Double) -> RefScene {
         currentTime = now
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
@@ -601,8 +618,11 @@ public final class Runtime<State> {
             forceInitialSettle = false
         }
 
+        // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
+        let animNow = cxSettings.advanceClock(to: now)
+
         // Sample inertial scroll decay tracks and re-commit layout positions if scroll is moving
-        scrollStore.sample(at: now)
+        scrollStore.sample(at: animNow)
         if scrollStore.isAnimating {
             var anyScrollMoved = false
             for (path, maxExt) in scrollMaxExtents {
@@ -627,28 +647,62 @@ public final class Runtime<State> {
             }
         }
 
-        // Sample Scene & Live property bindings
-        let frameOut = scene.frame(at: now)
-        let liveActive = updateLiveBindings(at: now)
-        liveStore.sample(at: now)
+        // Sample Scene & Live property bindings using scaled animation clock
+        let frameOut = scene.frame(at: animNow)
+        let liveActive = updateLiveBindings(at: animNow)
+        liveStore.sample(at: animNow)
 
-        isAnimating = frameOut.isAnimating
+        let rawAnimating = frameOut.isAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
             || liveActive
             || !enterDelays.isEmpty
             || tooltipFading(at: now)
             || loopRuntime.hasActiveLoops(at: now, reducedMotion: reducedMotion)
+        isAnimating = rawAnimating && cxSettings.viewTimeScale > 0.0
 
         // Prune snapshots of exiting nodes that have finished exiting
         let activeIds = Set(frameOut.nodes.map(\.id))
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
-        return buildRefScene(frameOut: frameOut, now: now)
+        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
+        if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            needsCommit = true
+        }
+        if cxSettings.caretReadByView,
+           let nextCaret = currentFocusedCaret(),
+           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
+            needsCommit = true
+        }
+        if rewindRecorder != nil {
+            captureRewindFrame(at: now)
+        }
+        return sceneOut
     }
 
     // MARK: - View Commit, Reconciliation & Layout
+
+    private func currentMemoGeometry() -> [String: MemoElementGeometry] {
+        var caretsByKey: [String: MotionRect] = [:]
+        for el in lastElements {
+            if let k = el.key, let c = el.caret, c.count >= 4 {
+                caretsByKey[k] = MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+            }
+        }
+        var out: [String: MemoElementGeometry] = [:]
+        out.reserveCapacity(flatNodes.count)
+        for node in flatNodes {
+            if let k = node.key {
+                out[k] = MemoElementGeometry(
+                    rect: node.targetRect,
+                    windowRect: node.targetRect,
+                    caretRect: caretsByKey[k]
+                )
+            }
+        }
+        return out
+    }
 
     private func commitTree(at now: Double, cut: Bool) {
         if cut {
@@ -656,12 +710,35 @@ public final class Runtime<State> {
             releasedEnterDelays.removeAll()
             activeFlightIds.removeAll()
         }
+        let sincePass = memo.nextPass()
+        MemoSnapshot.enter {
+            commitTreePass(at: now, cut: cut, settlePass: 0)
+        }
+        memo.keepSince(sincePass)
+    }
+
+    private func currentFocusedCaret() -> (keyPath: String, rect: [Float])? {
+        if let fk = focusedKey, let el = lastElements.first(where: { $0.key == fk }), let c = el.caret {
+            return (el.path, c)
+        }
+        if let fp = focusedPath, let el = lastElements.first(where: { $0.path == fp }), let c = el.caret {
+            return (el.path, c)
+        }
+        return nil
+    }
+
+    private func commitTreePass(at now: Double, cut: Bool, settlePass: Int) {
         viewCommitCount += 1
+        if settlePass == 0 {
+            CommitGenerationStore.increment()
+        }
+        let focusedCaret = currentFocusedCaret()
+        cxSettings.lastCommittedCaret = focusedCaret
         var cx = Cx<State>(
             viewport: viewport,
             pixelScale: pixelScale,
             systemDark: systemDark,
-            reducedMotion: reducedMotion,
+            reducedMotion: cxSettings.hostReducedMotion,
             windowFocused: windowFocused,
             focusedKey: focusedKey,
             hoveredKey: hoveredKey,
@@ -700,7 +777,56 @@ public final class Runtime<State> {
                 return self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) })?.targetRect
             }
         )
-        let rootEl = view(state, &cx)
+        cx.envState.titlebarInset = cxSettings.titlebarInset / cxSettings.zoomState.k
+        cx.envState.chrome = chromeInsets()
+        cx.envState.systemAccent = cxSettings.systemAccent
+        cx.envState.systemContrast = cxSettings.systemContrast
+        cx.envState.systemScrollBars = cxSettings.scrollBarsState
+        cx.envState.systemReducedMotion = cxSettings.hostReducedMotion
+        cx.envState.zoom = 1.0
+        cx.envState.caret = focusedCaret
+        let envHash = MemoScope.environmentHash(
+            systemDark: systemDark,
+            pixelScale: pixelScale,
+            reducedMotion: cxSettings.hostReducedMotion,
+            srgbBlend: srgbBlend,
+            accent: cx.accent(),
+            focusColor: cx.focusColor(),
+            chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)]
+        )
+        let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
+            MemoScope.enter(
+                cache: memo,
+                envHash: envHash,
+                geometry: currentMemoGeometry()
+            ) {
+                view(state, &cx)
+            }
+        }
+        cxSettings.viewDefaults = cx.envState.defaults
+        viewHelpLook = cx.helpLook ?? cx.envState.defaults.help
+        cxSettings.captionColor = cx.envState.captionColor
+        cxSettings.titlebarOverride = cx.envState.titlebar
+        cxSettings.caretReadByView = cx.envState.reads.caretRead
+        let effReducedMotion = cx.envState.reducedMotionOverride ?? cxSettings.hostReducedMotion
+        if effReducedMotion != self.reducedMotion {
+            self.reducedMotion = effReducedMotion
+            self.needsCommit = false
+        }
+        cxSettings.setTimeScale(cx.envState.timeScale, at: now)
+        if cx.envState.zoom != cxSettings.zoomState.k {
+            cxSettings.zoomState.k = cx.envState.zoom
+            let (zVp, zScale) = cxSettings.zoomState.view()
+            cxSettings.isApplyingZoom = true
+            viewport = zVp
+            pixelScale = zScale
+            cxSettings.isApplyingZoom = false
+            needsCommit = false
+            if settlePass == 0 {
+                commitTreePass(at: now, cut: cut, settlePass: 1)
+                return
+            }
+        }
         viewHelpLook = cx.helpLook
         if rootEl.background.a >= 0.999 {
             clearColor = rootEl.background
@@ -1107,6 +1233,11 @@ public final class Runtime<State> {
             keyWarnings = warnings
         }
 
+        if settlePass == 0 && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
+            commitTreePass(at: now, cut: cut, settlePass: 1)
+            return
+        }
+
         // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
         reconcileFocusAfterCommit(
             prevFocusedPath: prevFocusedPath,
@@ -1160,13 +1291,24 @@ public final class Runtime<State> {
             }
         }
 
-        scene.commit(specs, at: now, initialCut: cut, matchedStarts: matchedStarts)
+        scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: cut, matchedStarts: matchedStarts)
+    }
+
+    private func nodeTakesFocus(_ el: El<State>) -> Bool {
+        if el.focusable { return true }
+        let pressableRoles: Set<ElementRole> = [
+            .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
+        ]
+        return cxSettings.viewDefaults.webFocus &&
+            !el.focusOptOut &&
+            (el.handlers.onClick != nil || el.handlers.onClickPress != nil || el.handlers.onPointerDown != nil) &&
+            pressableRoles.contains(el.role)
     }
 
     private func canFocusIndex(_ idx: Int) -> Bool {
         guard idx >= 0 && idx < flatNodes.count else { return false }
         let node = flatNodes[idx]
-        guard node.el.focusable && !node.effectiveInert && !node.el.a11yDisabled else { return false }
+        guard nodeTakesFocus(node.el) && !node.effectiveInert && !node.el.a11yDisabled else { return false }
         var walk: Int? = idx
         while let cur = walk {
             if flatNodes[cur].el.opacity <= 0.001 || flatNodes[cur].el.isInert {
@@ -1287,7 +1429,7 @@ public final class Runtime<State> {
             }
         }
 
-        if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty) {
+        if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty || cxSettings.viewDefaults.webFocus) {
             nextIdx = tabOrderIndices().first
         }
 
@@ -1390,12 +1532,95 @@ public final class Runtime<State> {
         }
     }
 
+    private func emitFocusRingIfNeeded(
+        el: El<State>,
+        snapPath: String,
+        isExiting: Bool,
+        effectiveInert: Bool,
+        isFocused: Bool,
+        forceFocusRings: Bool,
+        defaultRingOutline: Outline?,
+        devRect: SIMD4<Float>,
+        devRadii: SIMD4<Float>,
+        pxScale: Float,
+        localAlpha: Float,
+        devW: Int,
+        devH: Int,
+        into primitives: inout [Primitive]
+    ) {
+        let clipAll = SIMD4<Float>(0, 0, Float(devW), Float(devH))
+        let forcedRing = forceFocusRings && nodeTakesFocus(el)
+        let shouldShow = !el.noFocusRing && (forcedRing || (isFocused && (focusVisible || el.role == .textInput)))
+        if shouldShow,
+           let ringCol = el.focusRingColor ?? defaultRingOutline?.color {
+            let rawOff = el.focusRingColor != nil ? el.focusRingOffset : (defaultRingOutline?.offset ?? el.focusRingOffset)
+            let rawW = el.focusRingColor != nil ? el.focusRingWidth : (defaultRingOutline?.width ?? el.focusRingWidth)
+            let off = rawOff * pxScale
+            let ringW = rawW * pxScale
+            let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
+            let ringRadii = SIMD4<Float>(
+                devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
+                devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
+                devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
+                devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
+            )
+            primitives.append(.roundedRect(
+                rect: ringRect,
+                radii: ringRadii,
+                fill: .zero,
+                borderColor: ringCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                borderWidth: ringW,
+                clip: clipAll
+            ))
+            return
+        }
+        guard !isExiting, !effectiveInert, focusVisible, !el.noFocusRing, !el.focusWithinFlat,
+              let within = el.focusWithinRing,
+              let fp = focusedPath,
+              (fp == snapPath || fp.hasPrefix(snapPath + "/")) else {
+            return
+        }
+        var suppressed = false
+        if let fIdx = nodeByPath[fp] {
+            var cur: Int? = fIdx
+            while let c = cur {
+                if flatNodes[c].path == snapPath { break }
+                if flatNodes[c].el.focusWithinFlat || flatNodes[c].el.noFocusRing {
+                    suppressed = true
+                    break
+                }
+                cur = flatNodes[c].parentIndex
+            }
+        }
+        guard !suppressed else { return }
+        let off = within.offset * pxScale
+        let ringW = within.width * pxScale
+        let ringRect = SIMD4<Float>(devRect.x - off, devRect.y - off, devRect.z + off * 2.0, devRect.w + off * 2.0)
+        let ringRadii = SIMD4<Float>(
+            devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
+            devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
+            devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
+            devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
+        )
+        primitives.append(.roundedRect(
+            rect: ringRect,
+            radii: ringRadii,
+            fill: .zero,
+            borderColor: within.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+            borderWidth: ringW,
+            clip: clipAll
+        ))
+    }
+
     // MARK: - Primitive Emission & ElementInfo Snapshot
 
     private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
         let pxScale = pixelScale
         let devW = max(1, Int((viewport.x * pxScale).rounded()))
         let devH = max(1, Int((viewport.y * pxScale).rounded()))
+        let defaultViewFg = cxSettings.viewDefaults.foreground
+        let defaultRingOutline = cxSettings.viewDefaults.focusRing
+        let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
 
         // Precompute presented rect, scale, and node lookup for every node in `frameOut.nodes`
         var presentedRectById: [NodeId: MotionRect] = [:]
@@ -1929,7 +2154,7 @@ public final class Runtime<State> {
                 if let (svg, _) = el.iconPayload {
                     let pxSize = max(4, Int((min(rect.width, rect.height) * pxScale).rounded()))
                     let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
-                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? .white
+                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
                     let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     primitives.append(attachFade(.glyph(
                         rect: devRect,
@@ -1996,7 +2221,7 @@ public final class Runtime<State> {
                 let innerW = max(0, rect.width - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
                 let textOriginX = rect.x + padL
                 let textOriginY = rect.y + padT
-                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? Tok.theme(dark: systemDark).text
+                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
                     let displayStr = edit.displayString
@@ -2148,69 +2373,23 @@ public final class Runtime<State> {
                     }
                 }
 
-                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or focused textInput with explicit focusRing)
-                if isFocused, !el.noFocusRing, let ringCol = el.focusRingColor, (focusVisible || el.role == .textInput) {
-                    let off = el.focusRingOffset * pxScale
-                    let ringW = el.focusRingWidth * pxScale
-                    let ringRect = SIMD4<Float>(
-                        devRect.x - off,
-                        devRect.y - off,
-                        devRect.z + off * 2.0,
-                        devRect.w + off * 2.0
-                    )
-                    let ringRadii = SIMD4<Float>(
-                        devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
-                        devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
-                        devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
-                        devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
-                    )
-                    primitives.append(.roundedRect(
-                        rect: ringRect,
-                        radii: ringRadii,
-                        fill: .zero,
-                        borderColor: ringCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                        borderWidth: ringW,
-                        clip: SIMD4<Float>(0, 0, Float(devW), Float(devH))
-                    ))
-                } else if !p.isExiting, !snap.effectiveInert, focusVisible, !el.noFocusRing, !el.focusWithinFlat,
-                          let within = el.focusWithinRing,
-                          let fp = focusedPath,
-                          (fp == snap.path || fp.hasPrefix(snap.path + "/")) {
-                    let suppressed: Bool = {
-                        guard let fIdx = nodeByPath[fp] else { return false }
-                        var cur: Int? = fIdx
-                        while let c = cur {
-                            if flatNodes[c].path == snap.path { break }
-                            if flatNodes[c].el.focusWithinFlat || flatNodes[c].el.noFocusRing { return true }
-                            cur = flatNodes[c].parentIndex
-                        }
-                        return false
-                    }()
-                    if !suppressed {
-                        let off = within.offset * pxScale
-                        let ringW = within.width * pxScale
-                        let ringRect = SIMD4<Float>(
-                            devRect.x - off,
-                            devRect.y - off,
-                            devRect.z + off * 2.0,
-                            devRect.w + off * 2.0
-                        )
-                        let ringRadii = SIMD4<Float>(
-                            devRadii.x >= 0 ? devRadii.x + off : devRadii.x - off,
-                            devRadii.y >= 0 ? devRadii.y + off : devRadii.y - off,
-                            devRadii.z >= 0 ? devRadii.z + off : devRadii.z - off,
-                            devRadii.w >= 0 ? devRadii.w + off : devRadii.w - off
-                        )
-                        primitives.append(.roundedRect(
-                            rect: ringRect,
-                            radii: ringRadii,
-                            fill: .zero,
-                            borderColor: within.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                            borderWidth: ringW,
-                            clip: SIMD4<Float>(0, 0, Float(devW), Float(devH))
-                        ))
-                    }
-                }
+                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput)
+                emitFocusRingIfNeeded(
+                    el: el,
+                    snapPath: snap.path,
+                    isExiting: p.isExiting,
+                    effectiveInert: snap.effectiveInert,
+                    isFocused: isFocused,
+                    forceFocusRings: forceFocusRings,
+                    defaultRingOutline: defaultRingOutline,
+                    devRect: devRect,
+                    devRadii: devRadii,
+                    pxScale: pxScale,
+                    localAlpha: localAlpha,
+                    devW: devW,
+                    devH: devH,
+                    into: &primitives
+                )
             }
 
             let hasVisualBlocker = fillColor.a > 0.001 || el.gradient != nil ||
@@ -2278,7 +2457,7 @@ public final class Runtime<State> {
                 blur: blurPt,
                 radius: p.corners.maxMagnitude,
                 fill: fillColor,
-                textColor: el.textColor,
+                textColor: el.textColor ?? (elementTextValue != nil ? cxSettings.viewDefaults.foreground : nil),
                 text: elementTextValue,
                 label: el.a11yLabel,
                 help: resolvedRawHelp.map(runeHelpWords),
@@ -2286,9 +2465,9 @@ public final class Runtime<State> {
                 expanded: el.a11yExpanded,
                 level: el.a11yLevel,
                 itemSelected: el.itemSelected,
-                focusable: el.focusable,
+                focusable: nodeTakesFocus(el),
                 focused: isFocused,
-                focusVisible: isFocused && focusVisible,
+                focusVisible: (isFocused && focusVisible) || (forceFocusRings && nodeTakesFocus(el)),
                 inert: snap.effectiveInert,
                 moving: p.isMoving,
                 exiting: p.isExiting,
@@ -2696,11 +2875,14 @@ public final class Runtime<State> {
             let h = node.el.handlers
             return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
                    h.onPointerDown != nil || h.onDrag != nil || h.editLens != nil ||
-                   node.el.focusable || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
+                   self.nodeTakesFocus(node.el) || node.el.pressBg != nil || node.el.pressScaleFactor != nil ||
                    node.el.isModal || (node.el.role == .button && node.el.explicitHit)
         }
 
         guard let (node, rect, local) = interactiveHit else {
+            if cxSettings.viewDefaults.webFocus, let bgHit = hitTest(at: pos, predicate: { _ in true }) {
+                webFocusTabStartPath = bgHit.node.path
+            }
             if focusedPath != nil {
                 focusedPath = nil
                 focusedKey = nil
@@ -2711,7 +2893,10 @@ public final class Runtime<State> {
 
         pressedPath = node.path
         pressedKey = node.key
-        if node.el.focusable {
+        if cxSettings.viewDefaults.webFocus {
+            webFocusTabStartPath = node.path
+        }
+        if nodeTakesFocus(node.el) {
             focusedPath = node.path
             focusedKey = node.key
         }
@@ -2917,7 +3102,7 @@ public final class Runtime<State> {
         let cur = scrollOffsets[path] ?? .zero
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
-        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(-vx, -vy)), decay: .IOS_NORMAL, at: now)
+        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(-vx, -vy)), decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: now))
     }
 
     /// Routes keyboard `KeyEvent` through active drag cancel (`Escape`), focused `TextEdit`,
@@ -3287,13 +3472,26 @@ public final class Runtime<State> {
     /// Records the current keyed elements into `rewindRecorder` if attached.
     public func captureRewindFrame(at now: Double) {
         guard let rewind = rewindRecorder else { return }
-        let snapshots: [RewindElementSnapshot] = flatNodes.compactMap { node -> RewindElementSnapshot? in
-            guard let key = node.key else { return nil }
-            return RewindElementSnapshot(
-                key: key,
-                rect: node.targetRect,
-                opacity: node.el.opacity
-            )
+        rewind.setViewport(viewport)
+        let snapshots: [RewindElementSnapshot]
+        if !lastElements.isEmpty {
+            snapshots = lastElements.compactMap { el -> RewindElementSnapshot? in
+                guard let key = el.key, !key.hasPrefix("rewind"), el.rect.count >= 4 else { return nil }
+                return RewindElementSnapshot(
+                    key: key,
+                    rect: MotionRect.fromXYWH(el.rect[0], el.rect[1], el.rect[2], el.rect[3]),
+                    opacity: el.opacity
+                )
+            }
+        } else {
+            snapshots = flatNodes.compactMap { node -> RewindElementSnapshot? in
+                guard let key = node.key, !key.hasPrefix("rewind") else { return nil }
+                return RewindElementSnapshot(
+                    key: key,
+                    rect: node.targetRect,
+                    opacity: node.el.opacity
+                )
+            }
         }
         rewind.recordFrame(at: now, elements: snapshots)
     }
@@ -3319,6 +3517,9 @@ public final class Runtime<State> {
         }
         if let rewind = tx.runtimeActions["rewindRecorder"] as? RewindRecorder {
             rewindRecorder = rewind
+            rewind.setViewport(viewport)
+        } else if (tx.runtimeActions["detachRewind"] as? Bool) == true {
+            rewindRecorder = nil
         }
         if let title = tx.windowTitle {
             windowTitle = title
@@ -3372,7 +3573,7 @@ public final class Runtime<State> {
                 scrollOffsets[match.path] = clamped
                 let nid = NodeId.hash("scroll:" + match.path)
                 if req.animated {
-                    scrollStore.set(nid, Props.SCROLL, to: clamped, anim: .spring(MotionTokens.SETTLE), at: now)
+                    scrollStore.set(nid, Props.SCROLL, to: clamped, anim: .spring(MotionTokens.SETTLE), at: cxSettings.scaledTime(at: now))
                 } else {
                     scrollStore.snap(nid, Props.SCROLL, to: clamped)
                 }
@@ -3526,7 +3727,15 @@ public final class Runtime<State> {
     }
 
     private func advanceTabFocus(backward: Bool) -> Bool {
-        let candidateIndices = tabOrderIndices()
+        let restrictToInputsAndLists = !cxSettings.fullKeyboardAccess && !tabVisitsControls
+        let candidateIndices = tabOrderIndices().filter { idx in
+            guard restrictToInputsAndLists else { return true }
+            let node = flatNodes[idx]
+            return node.el.handlers.editLens != nil ||
+                node.el.role == .textInput ||
+                node.el.handlers.onKey != nil ||
+                findFocusGroupAncestor(of: idx) != nil
+        }
         guard !candidateIndices.isEmpty else { return false }
         let nextIdx: Int
         if let curPath = focusedPath,
@@ -3535,6 +3744,12 @@ public final class Runtime<State> {
                 ? (curPos - 1 + candidateIndices.count) % candidateIndices.count
                 : (curPos + 1) % candidateIndices.count
             nextIdx = candidateIndices[nextPos]
+        } else if cxSettings.viewDefaults.webFocus,
+                  let startPath = webFocusTabStartPath,
+                  let startIdx = flatNodes.firstIndex(where: { $0.path == startPath }) {
+            nextIdx = backward
+                ? (candidateIndices.last(where: { $0 < startIdx }) ?? candidateIndices.last!)
+                : (candidateIndices.first(where: { $0 > startIdx }) ?? candidateIndices.first!)
         } else {
             nextIdx = backward ? candidateIndices.last! : candidateIndices.first!
         }
