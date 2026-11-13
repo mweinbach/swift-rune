@@ -6214,7 +6214,12 @@ public final class Runtime<State> {
             return
         }
 
-        _ = refreshHover(at: now, isPointerEvent: true)
+        _ = refreshHover(
+            at: now,
+            isPointerEvent: true,
+            moveDispatched: moveDispatched,
+            moveAllLiveOnly: moveAllLiveOnly
+        )
     }
 
     private func hasHoverVisualInChain(_ path: String?) -> Bool {
@@ -6230,7 +6235,12 @@ public final class Runtime<State> {
     }
 
     @discardableResult
-    private func refreshHover(at now: Double, isPointerEvent: Bool) -> Bool {
+    private func refreshHover(
+        at now: Double,
+        isPointerEvent: Bool,
+        moveDispatched: Bool = false,
+        moveAllLiveOnly: Bool = true
+    ) -> Bool {
         let pos = pointerPosition
         let hit = hitTest(at: pos) { node in
             Self.hoverHitPredicate(node) || self.hasActiveTextLinks(node.el)
