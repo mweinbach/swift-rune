@@ -91,7 +91,12 @@ public final class MetalRenderer {
 
         let library: MTLLibrary
         do {
-            library = try dev.makeLibrary(source: Self.mslSource, options: nil)
+            library = try ShaderLibraryCache.load(
+                named: "legacy_rune",
+                source: Self.mslSource,
+                requiredFunction: "rune_vertex",
+                on: dev
+            )
         } catch {
             throw RendererError.shaderCompileFailed("\(error)")
         }
@@ -591,7 +596,7 @@ public final class MetalRenderer {
 
     // MARK: - Metal Shading Language (MSL) Uber-Shader matching `RefShader` 1:1
 
-    private static let mslSource = """
+    internal static let mslSource = """
     #include <metal_stdlib>
     using namespace metal;
 

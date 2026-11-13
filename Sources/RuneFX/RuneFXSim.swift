@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 #if canImport(Metal)
 import Metal
 #endif
@@ -59,7 +60,13 @@ public struct FireSimPipelines: @unchecked Sendable {
         if let library {
             lib = library
         } else {
-            lib = try device.makeLibrary(source: RuneFXShaders.fireSimShader, options: nil)
+            lib = try ShaderLibraryCache.load(
+                named: "fx_firesim",
+                source: RuneFXShaders.fireSimShader,
+                requiredFunction: "fx_firesim_step_kernel",
+                bundle: .module,
+                on: device
+            )
         }
         func make(_ name: String) throws -> MTLComputePipelineState {
             guard let fn = lib.makeFunction(name: name) else {

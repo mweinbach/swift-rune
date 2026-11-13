@@ -455,7 +455,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
 
     // MARK: - Faithful translation of `crates/rune/src/native_surface/video.wgsl`
 
-    private static let mslSource = """
+    internal static let mslSource = """
     #include <metal_stdlib>
     using namespace metal;
 

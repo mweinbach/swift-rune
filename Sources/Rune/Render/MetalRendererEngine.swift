@@ -13,35 +13,42 @@ internal final class RenderFrameEngine {
     let device: MTLDevice
 
     // Main uber-shader pipelines (`vs` and `vs_springs`) across pixel formats & blend modes
+    let uberVert: MTLFunction
+    let uberVertSprings: MTLFunction
+    let uberFrag: MTLFunction
+
     let pipelineSRGB: MTLRenderPipelineState
     let pipelineGamma: MTLRenderPipelineState
-    let pipelineFloat: MTLRenderPipelineState
-    let pipelineAddSRGB: MTLRenderPipelineState
-    let pipelineAddGamma: MTLRenderPipelineState
-    let pipelineAddFloat: MTLRenderPipelineState
+    var pipelineFloat: MTLRenderPipelineState?
+    var pipelineAddSRGB: MTLRenderPipelineState?
+    var pipelineAddGamma: MTLRenderPipelineState?
+    var pipelineAddFloat: MTLRenderPipelineState?
 
     let pipelineSpringsSRGB: MTLRenderPipelineState
     let pipelineSpringsGamma: MTLRenderPipelineState
-    let pipelineSpringsFloat: MTLRenderPipelineState
-    let pipelineSpringsAddSRGB: MTLRenderPipelineState
-    let pipelineSpringsAddGamma: MTLRenderPipelineState
-    let pipelineSpringsAddFloat: MTLRenderPipelineState
+    var pipelineSpringsFloat: MTLRenderPipelineState?
+    var pipelineSpringsAddSRGB: MTLRenderPipelineState?
+    var pipelineSpringsAddGamma: MTLRenderPipelineState?
+    var pipelineSpringsAddFloat: MTLRenderPipelineState?
 
-    let layerBlur: LayerBlurPipeline
+    var layerBlur: LayerBlurPipeline?
     let backdropBlur: BackdropBlurPass
     let layersPool: LayersPool = LayersPool()
     let uploader: AtlasUploader = AtlasUploader()
+    let breakers: PipelineBreakers = PipelineBreakers()
+    let gpuLoss: GpuDeviceTracker
 
     var springBindings: GPUSpringBindings?
     var springTimeSeconds: Double = 0
 
     var hasCompiledShaders: Bool {
-        _ = (pipelineSRGB, pipelineSpringsSRGB, layerBlur, backdropBlur)
+        _ = (pipelineSRGB, pipelineSpringsSRGB, backdropBlur)
         return true
     }
 
     init(device: MTLDevice) throws {
         self.device = device
+        self.gpuLoss = GpuDeviceTracker(device: device)
         let lib: MTLLibrary
         do {
             lib = try ShaderLibraryCache.load(
@@ -60,58 +67,150 @@ internal final class RenderFrameEngine {
             throw MetalRenderer.RendererError.shaderCompileFailed("Missing vs/vs_springs/fs in RenderShaders.shaderMSL")
         }
 
-        func makePipe(vert: MTLFunction, format: MTLPixelFormat, additive: Bool) throws -> MTLRenderPipelineState {
-            let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = vert
-            desc.fragmentFunction = fs
-            let att = desc.colorAttachments[0]!
-            att.pixelFormat = format
-            att.isBlendingEnabled = true
-            att.rgbBlendOperation = .add
-            att.alphaBlendOperation = .add
-            att.sourceRGBBlendFactor = .one
-            att.sourceAlphaBlendFactor = .one
-            att.destinationRGBBlendFactor = additive ? .one : .oneMinusSourceAlpha
-            att.destinationAlphaBlendFactor = additive ? .one : .oneMinusSourceAlpha
-            return try device.makeRenderPipelineState(descriptor: desc)
-        }
+        self.uberVert = vs
+        self.uberVertSprings = vsSprings
+        self.uberFrag = fs
 
-        self.pipelineSRGB = try makePipe(vert: vs, format: .bgra8Unorm_srgb, additive: false)
-        self.pipelineGamma = try makePipe(vert: vs, format: .bgra8Unorm, additive: false)
-        self.pipelineFloat = try makePipe(vert: vs, format: .rgba16Float, additive: false)
-        self.pipelineAddSRGB = try makePipe(vert: vs, format: .bgra8Unorm_srgb, additive: true)
-        self.pipelineAddGamma = try makePipe(vert: vs, format: .bgra8Unorm, additive: true)
-        self.pipelineAddFloat = try makePipe(vert: vs, format: .rgba16Float, additive: true)
-
-        self.pipelineSpringsSRGB = try makePipe(vert: vsSprings, format: .bgra8Unorm_srgb, additive: false)
-        self.pipelineSpringsGamma = try makePipe(vert: vsSprings, format: .bgra8Unorm, additive: false)
-        self.pipelineSpringsFloat = try makePipe(vert: vsSprings, format: .rgba16Float, additive: false)
-        self.pipelineSpringsAddSRGB = try makePipe(vert: vsSprings, format: .bgra8Unorm_srgb, additive: true)
-        self.pipelineSpringsAddGamma = try makePipe(vert: vsSprings, format: .bgra8Unorm, additive: true)
-        self.pipelineSpringsAddFloat = try makePipe(vert: vsSprings, format: .rgba16Float, additive: true)
+        self.pipelineSRGB = try Self.makePipeline(device: device, vert: vs, frag: fs, format: .bgra8Unorm_srgb, additive: false)
+        self.pipelineGamma = try Self.makePipeline(device: device, vert: vs, frag: fs, format: .bgra8Unorm, additive: false)
+        self.pipelineSpringsSRGB = try Self.makePipeline(device: device, vert: vsSprings, frag: fs, format: .bgra8Unorm_srgb, additive: false)
+        self.pipelineSpringsGamma = try Self.makePipeline(device: device, vert: vsSprings, frag: fs, format: .bgra8Unorm, additive: false)
 
         do {
-            self.layerBlur = try LayerBlurPipeline(device: device, pixelFormat: .rgba16Float)
             self.backdropBlur = try BackdropBlurPass(device: device)
         } catch {
             throw MetalRenderer.RendererError.shaderCompileFailed("Sub-pass compilation failed: \(error)")
         }
     }
 
+    private static func makePipeline(
+        device: MTLDevice,
+        vert: MTLFunction,
+        frag: MTLFunction,
+        format: MTLPixelFormat,
+        additive: Bool
+    ) throws -> MTLRenderPipelineState {
+        let desc = MTLRenderPipelineDescriptor()
+        desc.vertexFunction = vert
+        desc.fragmentFunction = frag
+        let att = desc.colorAttachments[0]!
+        att.pixelFormat = format
+        att.isBlendingEnabled = true
+        att.rgbBlendOperation = .add
+        att.alphaBlendOperation = .add
+        att.sourceRGBBlendFactor = .one
+        att.sourceAlphaBlendFactor = .one
+        att.destinationRGBBlendFactor = additive ? .one : .oneMinusSourceAlpha
+        att.destinationAlphaBlendFactor = additive ? .one : .oneMinusSourceAlpha
+        return try device.makeRenderPipelineState(descriptor: desc)
+    }
+
+    private func dropFeature(_ feature: BreakerFeature) {
+        switch feature {
+        case .isolation:
+            pipelineFloat = nil
+            pipelineSpringsFloat = nil
+        case .plusLighter:
+            pipelineAddSRGB = nil
+            pipelineAddGamma = nil
+            pipelineAddFloat = nil
+            pipelineSpringsAddSRGB = nil
+            pipelineSpringsAddGamma = nil
+            pipelineSpringsAddFloat = nil
+        case .layerBlur:
+            layerBlur = nil
+        }
+    }
+
+    private static func failRealMetalBuildForTesting(device: MTLDevice, feature: BreakerFeature) throws -> Never {
+        _ = try device.makeLibrary(source: "invalid_msl_for_\(feature.rawValue) { return ;", options: nil)
+        throw MetalRenderer.RendererError.shaderCompileFailed("Forced build failure for \(feature.rawValue)")
+    }
+
+    private func ensureIsolationPipelines() throws -> Bool {
+        let forceInvalid = breakers.shouldForceBuildFailureForTesting(.isolation)
+        if !forceInvalid, pipelineFloat != nil, pipelineSpringsFloat != nil {
+            return true
+        }
+        do {
+            if forceInvalid {
+                try Self.failRealMetalBuildForTesting(device: device, feature: .isolation)
+            }
+            let pf = try Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .rgba16Float, additive: false)
+            let psf = try Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .rgba16Float, additive: false)
+            self.pipelineFloat = pf
+            self.pipelineSpringsFloat = psf
+            return true
+        } catch {
+            dropFeature(.isolation)
+            throw error
+        }
+    }
+
+    private func ensurePlusLighterPipelines() throws -> Bool {
+        let forceInvalid = breakers.shouldForceBuildFailureForTesting(.plusLighter)
+        if !forceInvalid,
+           pipelineAddSRGB != nil, pipelineAddGamma != nil, pipelineAddFloat != nil,
+           pipelineSpringsAddSRGB != nil, pipelineSpringsAddGamma != nil, pipelineSpringsAddFloat != nil {
+            return true
+        }
+        do {
+            if forceInvalid {
+                try Self.failRealMetalBuildForTesting(device: device, feature: .plusLighter)
+            }
+            let p1 = try Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .bgra8Unorm_srgb, additive: true)
+            let p2 = try Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .bgra8Unorm, additive: true)
+            let p3 = try Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .rgba16Float, additive: true)
+            let p4 = try Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .bgra8Unorm_srgb, additive: true)
+            let p5 = try Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .bgra8Unorm, additive: true)
+            let p6 = try Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .rgba16Float, additive: true)
+            self.pipelineAddSRGB = p1
+            self.pipelineAddGamma = p2
+            self.pipelineAddFloat = p3
+            self.pipelineSpringsAddSRGB = p4
+            self.pipelineSpringsAddGamma = p5
+            self.pipelineSpringsAddFloat = p6
+            return true
+        } catch {
+            dropFeature(.plusLighter)
+            throw error
+        }
+    }
+
+    private func ensureLayerBlurPipeline() throws -> LayerBlurPipeline {
+        let forceInvalid = breakers.shouldForceBuildFailureForTesting(.layerBlur)
+        if !forceInvalid, let existing = layerBlur {
+            return existing
+        }
+        do {
+            if forceInvalid {
+                try Self.failRealMetalBuildForTesting(device: device, feature: .layerBlur)
+            }
+            let built = try LayerBlurPipeline(device: device, pixelFormat: .rgba16Float)
+            self.layerBlur = built
+            return built
+        } catch {
+            dropFeature(.layerBlur)
+            throw error
+        }
+    }
+
     private func pipelineFor(format: MTLPixelFormat, additive: Bool, springs: Bool) -> MTLRenderPipelineState {
         switch (springs, additive, format) {
-        case (false, false, .rgba16Float): return pipelineFloat
+        case (false, false, .rgba16Float):
+            return pipelineFloat ?? ((try? Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .rgba16Float, additive: false)) ?? pipelineSRGB)
         case (false, false, .bgra8Unorm): return pipelineGamma
         case (false, false, _): return pipelineSRGB
-        case (false, true, .rgba16Float): return pipelineAddFloat
-        case (false, true, .bgra8Unorm): return pipelineAddGamma
-        case (false, true, _): return pipelineAddSRGB
-        case (true, false, .rgba16Float): return pipelineSpringsFloat
+        case (false, true, .rgba16Float): return pipelineAddFloat ?? pipelineFloat ?? pipelineSRGB
+        case (false, true, .bgra8Unorm): return pipelineAddGamma ?? pipelineGamma
+        case (false, true, _): return pipelineAddSRGB ?? pipelineSRGB
+        case (true, false, .rgba16Float):
+            return pipelineSpringsFloat ?? ((try? Self.makePipeline(device: device, vert: uberVertSprings, frag: uberFrag, format: .rgba16Float, additive: false)) ?? pipelineSpringsSRGB)
         case (true, false, .bgra8Unorm): return pipelineSpringsGamma
         case (true, false, _): return pipelineSpringsSRGB
-        case (true, true, .rgba16Float): return pipelineSpringsAddFloat
-        case (true, true, .bgra8Unorm): return pipelineSpringsAddGamma
-        case (true, true, _): return pipelineSpringsAddSRGB
+        case (true, true, .rgba16Float): return pipelineSpringsAddFloat ?? pipelineSpringsFloat ?? pipelineSpringsSRGB
+        case (true, true, .bgra8Unorm): return pipelineSpringsAddGamma ?? pipelineSpringsGamma
+        case (true, true, _): return pipelineSpringsAddSRGB ?? pipelineSpringsSRGB
         }
     }
 
@@ -202,6 +301,7 @@ internal final class RenderFrameEngine {
         var backdropBlurCount = 0
         var effectCounter: UInt32 = 0
         var surfaceCursor = 0
+        var layerIsolatedStack: [Bool] = []
 
         func encodeBatch(start: Int, end: Int, scope: inout TargetScope) {
             let count = end - start
@@ -341,6 +441,15 @@ internal final class RenderFrameEngine {
                 flushPendingUpTo(i)
                 batchStart = i + 1
 
+                let allowIsolation = breakers.checkingGpu(.isolation) {
+                    try ensureIsolationPipelines()
+                } ?? false
+                guard allowIsolation else {
+                    layerIsolatedStack.append(false)
+                    i += 1
+                    continue
+                }
+
                 let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
                 let pad: Float = sigma > 0 ? ceilf(min(sigma * 3.0, 96.0)) : 0
                 let ox = floorf(inst.rect.x - pad)
@@ -368,11 +477,14 @@ internal final class RenderFrameEngine {
                         }
                         matchEnd += 1
                     }
+                    let useAdditive = additive && (breakers.checkingGpu(.plusLighter) {
+                        try ensurePlusLighterPipelines()
+                    } ?? false)
                     compositeLayer(
                         source: cachedTex,
                         origin: SIMD2<Float>(ox, oy),
                         scopeInst: inst,
-                        additive: additive,
+                        additive: useAdditive,
                         radiiOverride: .zero,
                         clearIndex: i
                     )
@@ -404,6 +516,9 @@ internal final class RenderFrameEngine {
                             cacheSignature: cacheSig
                         )
                     )
+                    layerIsolatedStack.append(true)
+                } else {
+                    layerIsolatedStack.append(false)
                 }
                 i += 1
                 continue
@@ -412,7 +527,8 @@ internal final class RenderFrameEngine {
             if kind == KIND_LAYER_END {
                 flushPendingUpTo(i)
                 batchStart = i + 1
-                guard stack.count > 1 else {
+                let wasIsolated = layerIsolatedStack.popLast() ?? false
+                guard wasIsolated, stack.count > 1 else {
                     i += 1
                     continue
                 }
@@ -424,8 +540,9 @@ internal final class RenderFrameEngine {
 
                 layersPool.recordExtraPass(1)
                 var compositedSource = finished.texture
-                if finished.blurSigma > 0.05 {
-                    if let blurred = layerBlur.encode(
+                if finished.blurSigma > 0.05,
+                   let blurPipeline = breakers.checkingGpu(.layerBlur, { try ensureLayerBlurPipeline() }) {
+                    if let blurred = blurPipeline.encode(
                         device: device,
                         commandBuffer: commandBuffer,
                         pool: layersPool,
@@ -446,11 +563,14 @@ internal final class RenderFrameEngine {
                     frame.residentTracker?.markResident(nodeId: nid, signature: sig)
                 }
 
+                let useAdditive = finished.additive && (breakers.checkingGpu(.plusLighter) {
+                    try ensurePlusLighterPipelines()
+                } ?? false)
                 compositeLayer(
                     source: compositedSource,
                     origin: finished.origin,
                     scopeInst: scopeInst,
-                    additive: finished.additive,
+                    additive: useAdditive,
                     radiiOverride: finished.cacheNodeId != nil ? .zero : scopeInst.radii,
                     clearIndex: i
                 )
@@ -623,6 +743,7 @@ internal final class RenderFrameEngine {
             hook: hook,
             backdropHook: backdropHook
         )
+        gpuLoss.attach(to: cmdBuf)
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
@@ -679,6 +800,7 @@ extension MetalRenderer {
             hook: hook,
             backdropHook: backdropHook
         )
+        renderEngine.gpuLoss.attach(to: cmdBuf)
         if synchronized {
             cmdBuf.commit()
             cmdBuf.waitUntilScheduled()
@@ -687,6 +809,7 @@ extension MetalRenderer {
             cmdBuf.present(drawable)
             cmdBuf.commit()
         }
+        GpuEvents.presented()
     }
 
     /// Encodes a `RenderFrame` into `target` without committing (matches `render::Renderer::draw_range`).
@@ -805,6 +928,14 @@ extension MetalRenderer {
 
     public func setLayerCacheBudget(_ bytes: Int) {
         renderEngine.layersPool.setCacheBudget(bytes)
+    }
+
+    public var pipelineBreakers: PipelineBreakers {
+        renderEngine.breakers
+    }
+
+    public var gpuTracker: GpuDeviceTracker {
+        renderEngine.gpuLoss
     }
 }
 #endif

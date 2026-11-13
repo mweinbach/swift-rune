@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 #if canImport(Metal)
 import Metal
 #endif
@@ -176,7 +177,13 @@ public final class GlassRenderer: @unchecked Sendable {
 
         let library: MTLLibrary
         do {
-            library = try device.makeLibrary(source: RuneLightShaders.glassShader, options: nil)
+            library = try ShaderLibraryCache.load(
+                named: "light_glass",
+                source: RuneLightShaders.glassShader,
+                requiredFunction: "glass_vertex",
+                bundle: .module,
+                on: device
+            )
         } catch {
             throw LightRendererError.shaderCompileFailed("glass: \(error)")
         }

@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 #if canImport(Metal)
 import Metal
 #endif
@@ -501,7 +502,13 @@ public final class FxRenderer: @unchecked Sendable {
         if let lib = libraries[kind] { return lib }
         let lib: MTLLibrary
         do {
-            lib = try device.makeLibrary(source: RuneFXShaders.source(for: kind), options: nil)
+            lib = try ShaderLibraryCache.load(
+                named: "fx_\(kind.shaderName)",
+                source: RuneFXShaders.source(for: kind),
+                requiredFunction: "fx_vertex",
+                bundle: .module,
+                on: device
+            )
         } catch {
             throw FxRendererError.shaderCompileFailed("\(kind.shaderName): \(error)")
         }
@@ -543,7 +550,13 @@ public final class FxRenderer: @unchecked Sendable {
 
     public func compileUtilityPipelines() throws {
         if blurDownPipeline == nil || blurUpPipeline == nil {
-            let lib = try device.makeLibrary(source: RuneFXShaders.blurShader, options: nil)
+            let lib = try ShaderLibraryCache.load(
+                named: "fx_blur",
+                source: RuneFXShaders.blurShader,
+                requiredFunction: "fx_blur_vertex",
+                bundle: .module,
+                on: device
+            )
             blurLibrary = lib
             guard let v = lib.makeFunction(name: "fx_blur_vertex"),
                   let fd = lib.makeFunction(name: "fx_blur_down_fragment"),
@@ -564,7 +577,13 @@ public final class FxRenderer: @unchecked Sendable {
         }
 
         if mipPipeline == nil {
-            let lib = try device.makeLibrary(source: RuneFXShaders.mipShader, options: nil)
+            let lib = try ShaderLibraryCache.load(
+                named: "fx_mip",
+                source: RuneFXShaders.mipShader,
+                requiredFunction: "fx_mip_vertex",
+                bundle: .module,
+                on: device
+            )
             mipLibrary = lib
             guard let v = lib.makeFunction(name: "fx_mip_vertex"),
                   let f = lib.makeFunction(name: "fx_mip_fragment") else {
@@ -578,7 +597,13 @@ public final class FxRenderer: @unchecked Sendable {
         }
 
         if fireSimPipeline == nil || fireSimPipelines == nil {
-            let lib = try device.makeLibrary(source: RuneFXShaders.fireSimShader, options: nil)
+            let lib = try ShaderLibraryCache.load(
+                named: "fx_firesim",
+                source: RuneFXShaders.fireSimShader,
+                requiredFunction: "fx_firesim_step_kernel",
+                bundle: .module,
+                on: device
+            )
             if fireSimPipeline == nil {
                 guard let k = lib.makeFunction(name: "fx_firesim_step_kernel") else {
                     throw FxRendererError.shaderCompileFailed("Missing firesim kernel")

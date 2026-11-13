@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 
 public enum RuneFXShaders: Sendable {
     public static let commonPrelude: String = """
@@ -2510,4 +2511,34 @@ public enum RuneFXShaders: Sendable {
     public static func fragmentEntryPoint(for kind: FxEffectKind) -> String {
         "fx_\(kind.shaderName)_fragment"
     }
+
+    #if canImport(Metal)
+    public static var resourceBundle: Bundle { Bundle.module }
+
+    public static var precompileEntries: [PrecompiledMetallib.ShaderEntry] {
+        var entries = FxEffectKind.allCases.map { kind in
+            PrecompiledMetallib.ShaderEntry(
+                name: "fx_\(kind.shaderName)",
+                source: source(for: kind),
+                requiredFunction: "fx_vertex"
+            )
+        }
+        entries.append(PrecompiledMetallib.ShaderEntry(
+            name: "fx_blur",
+            source: blurShader,
+            requiredFunction: "fx_blur_vertex"
+        ))
+        entries.append(PrecompiledMetallib.ShaderEntry(
+            name: "fx_mip",
+            source: mipShader,
+            requiredFunction: "fx_mip_vertex"
+        ))
+        entries.append(PrecompiledMetallib.ShaderEntry(
+            name: "fx_firesim",
+            source: fireSimShader,
+            requiredFunction: "fx_firesim_step_kernel"
+        ))
+        return entries
+    }
+    #endif
 }
