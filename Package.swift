@@ -83,6 +83,7 @@ let package = Package(
         .executable(name: "rune-light-reel", targets: ["RuneLightReel"]),
         .executable(name: "rune-kit-diff", targets: ["RuneKitDiff"]),
         .executable(name: "rune-one-snap", targets: ["RuneOneSnap"]),
+        .executable(name: "rune-custom-titlebar", targets: ["RuneCustomTitlebar"]),
     ],
     targets: [
         .target(
@@ -457,6 +458,11 @@ let package = Package(
             dependencies: ["Rune", "RuneMotion"],
             path: "Sources/Examples/RuneOneSnap"
         ),
+        .executableTarget(
+            name: "RuneCustomTitlebar",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneCustomTitlebar"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -591,6 +597,7 @@ let package = Package(
                 "RuneMotionCurves",
                 "RuneKitDiff",
                 "RuneOneSnap",
+                "RuneCustomTitlebar",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

@@ -18,17 +18,17 @@ public func formatNames(_ files: [DroppedFile]) -> String {
     files.map(\.name).joined(separator: ", ")
 }
 
-public func dropZone(
+private func dropZone(
     _ s: DropFilesState,
     accent: Color,
     key: String,
     title: String,
     detail: String,
-    extensions: Set<String>? = nil
+    extensions: [String]? = nil
 ) -> El<DropFilesState> {
     let t = Tok.theme(dark: true)
     let over = s.over == key
-    return col()
+    var zone: El<DropFilesState> = col()
         .key(key)
         .size(200, 120)
         .p(12)
@@ -39,26 +39,28 @@ public func dropZone(
         .border(over ? 2 : 1, over ? accent : t.cardBorder)
         .child(text(title).size(15).semibold().color(t.text))
         .child(text(detail).size(12).medium().color(t.textSecondary))
-        .onHover { state, hovered, _ in
+        .onDropHover { state, hovered, _ in
             if hovered {
                 state.over = key
             } else if state.over == key {
                 state.over = nil
             }
         }
-        .onClick { state in
-            let sample = extensions != nil
-                ? DroppedFile(path: "/tmp/sunset.png", name: "sunset.png", sizeBytes: 42_180)
-                : DroppedFile(path: "/tmp/notes.txt", name: "notes.txt", sizeBytes: 1_024)
-            state.dropState.handle(.dropped([sample], at: Vec2(260, 120)))
-            print("drop \(key) \(sample.name)")
-            state.last = (key, [sample])
+        .onDropFiles { state, urls, _ in
+            let files = urls.map { DroppedFile(url: $0) }
+            state.dropState.handle(.dropped(files, at: .zero))
+            print("drop \(key) \(formatNames(files))")
+            state.last = (key, files)
         }
+    if let extensions {
+        zone = zone.acceptsExtensions(extensions)
+    }
+    return zone
 }
 
 public func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -> El<DropFilesState> {
     let t = Tok.theme(dark: true)
-    let accent = cx.focusColor()
+    let accent = cx.accent()
     let status: String = if let (target, files) = s.last {
         "Dropped on \(target): \(formatNames(files))"
     } else {
@@ -70,6 +72,12 @@ public func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -
         .center()
         .gap(24)
         .bg(t.bg)
+        .onDropFiles { state, urls, _ in
+            let files = urls.map { DroppedFile(url: $0) }
+            state.dropState.handle(.dropped(files, at: .zero))
+            print("drop window \(formatNames(files))")
+            state.last = ("window", files)
+        }
         .child(
             row()
                 .gap(12)
@@ -79,7 +87,7 @@ public func dropFilesView(_ s: DropFilesState, _ cx: inout Cx<DropFilesState>) -
                     key: "pictures",
                     title: "Pictures",
                     detail: "PNG, JPEG, GIF or HEIC",
-                    extensions: s.acceptedImageExtensions
+                    extensions: Array(s.acceptedImageExtensions).sorted()
                 ))
                 .child(dropZone(
                     s,
