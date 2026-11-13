@@ -122,6 +122,9 @@ let package = Package(
         .executable(name: "rune-coretext-compare", targets: ["RuneCoretextCompare"]),
         .executable(name: "rune-occluded-timer", targets: ["RuneOccludedTimer"]),
         .executable(name: "rune-layer-filter-overlay", targets: ["RuneLayerFilterOverlay"]),
+        .executable(name: "rune-kit-table", targets: ["RuneKitTable"]),
+        .executable(name: "rune-kit-tab-strip", targets: ["RuneKitTabStrip"]),
+        .executable(name: "rune-kit-shell", targets: ["RuneKitShell"]),
     ],
     targets: [
         .target(
@@ -701,6 +704,21 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneLayerFilterOverlay"
         ),
+        .executableTarget(
+            name: "RuneKitTable",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneKitTable"
+        ),
+        .executableTarget(
+            name: "RuneKitTabStrip",
+            dependencies: ["Rune", "RuneKit", "RuneMotion", "OpenCodeTheme"],
+            path: "Sources/Examples/RuneKitTabStrip"
+        ),
+        .executableTarget(
+            name: "RuneKitShell",
+            dependencies: ["Rune", "RuneKit", "RuneMotion"],
+            path: "Sources/Examples/RuneKitShell"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -892,6 +910,10 @@ let package = Package(
                 "RuneCoretextCompare",
                 "RuneOccludedTimer",
                 "RuneLayerFilterOverlay",
+                "RuneOdometer",
+                "RuneKitTable",
+                "RuneKitTabStrip",
+                "RuneKitShell",
                 "RuneSiteScenes",
                 "OpenCodeTheme",
             ],
