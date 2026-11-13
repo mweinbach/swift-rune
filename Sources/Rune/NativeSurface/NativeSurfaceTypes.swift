@@ -192,6 +192,7 @@ public struct SurfaceColorInfo: Sendable, Equatable, Hashable, Codable {
 /// Errors thrown by `ByteFrame` or `NativeSurface` pixel imports.
 public enum NativeSurfaceError: Error, Sendable, Equatable, CustomStringConvertible {
     case zeroDimensions
+    case dimensionsOutOfRange(width: UInt32, height: UInt32)
     case oddNv12Dimensions(width: UInt32, height: UInt32)
     case wrongPlaneCount(expected: Int, got: Int)
     case wrongPlaneByteCount(plane: Int, expected: Int, got: Int)
@@ -201,6 +202,8 @@ public enum NativeSurfaceError: Error, Sendable, Equatable, CustomStringConverti
         switch self {
         case .zeroDimensions:
             return "native surface frame dimensions must be non-zero"
+        case .dimensionsOutOfRange(let w, let h):
+            return "video size must be 1..16384, got \(w)x\(h)"
         case .oddNv12Dimensions(let w, let h):
             return "NV12 frame dimensions must be even, got \(w)x\(h)"
         case .wrongPlaneCount(let expected, let got):
@@ -320,28 +323,61 @@ public struct ByteFrame: Sendable, Equatable {
         }
     }
 
-    /// Generates an animated synthetic test pattern BGRA frame (`native_surface::synthetic`).
+    /// Synthetic bars, gradient and one-pixel text-like strokes (`native_surface::synthetic`).
     public static func synthetic(width: UInt32, height: UInt32, index: UInt64) -> ByteFrame {
-        let w = max(1, Int(width))
-        let h = max(1, Int(height))
-        var bytes = Data(count: w * h * 4)
-        bytes.withUnsafeMutableBytes { raw in
+        precondition(width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0,
+                     "ByteFrame.synthetic requires non-zero even dimensions")
+        let bars: [(UInt8, UInt8, UInt8)] = [
+            (235, 128, 128),
+            (210, 16, 146),
+            (170, 166, 16),
+            (145, 54, 34),
+            (106, 202, 222),
+            (81, 90, 240),
+            (41, 240, 110),
+            (16, 128, 128),
+        ]
+        let w = Int(width)
+        let h = Int(height)
+        let phase = UInt32(truncatingIfNeeded: index)
+        var yPlane = Data(count: w * h)
+        var uvPlane = Data(repeating: 128, count: (w * h) / 2)
+        yPlane.withUnsafeMutableBytes { raw in
             let ptr = raw.bindMemory(to: UInt8.self)
-            let phase = Int((index * 7) % 256)
-            for y in 0..<h {
+            for row in 0..<h {
                 for x in 0..<w {
-                    let off = (y * w + x) * 4
-                    let r = UInt8((x * 255 / max(1, w - 1) + phase) & 0xFF)
-                    let g = UInt8((y * 255 / max(1, h - 1)) & 0xFF)
-                    let b = UInt8(((phase * 3) ^ (x + y)) & 0xFF)
-                    ptr[off + 0] = b
-                    ptr[off + 1] = g
-                    ptr[off + 2] = r
-                    ptr[off + 3] = 255
+                    let val: UInt8
+                    if row < h / 3 {
+                        val = bars[(x * 8) / w].0
+                    } else if row < (2 * h) / 3 {
+                        val = UInt8(16 + (x * 219) / w)
+                    } else if ((UInt32(x) &+ phase) % 8 == 0) || (row % 9 == 0) {
+                        val = 235
+                    } else {
+                        val = 16
+                    }
+                    ptr[row * w + x] = val
                 }
             }
         }
-        return try! ByteFrame(width: UInt32(w), height: UInt32(h), format: .bgra, color: .srgb, planes: [bytes])
+        uvPlane.withUnsafeMutableBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self)
+            for row in 0..<(h / 6) {
+                for x in 0..<(w / 2) {
+                    let bar = bars[(x * 16) / w]
+                    let i = row * w + x * 2
+                    ptr[i] = bar.1
+                    ptr[i + 1] = bar.2
+                }
+            }
+        }
+        return try! ByteFrame(
+            width: width,
+            height: height,
+            format: .nv12Video,
+            color: .bt709,
+            planes: [yPlane, uvPlane]
+        )
     }
 }
 
@@ -517,6 +553,9 @@ public final class NativeSurface: @unchecked Sendable {
         var legacyFrame: NativeSurfaceFrame?
         var video: SurfaceVideoAttachment?
         var error: String?
+        var timing: FrameTiming?
+        var submitted: UInt64 = 0
+        var completed: UInt64 = 0
     }
 
     private let state: State
@@ -621,6 +660,20 @@ public final class NativeSurface: @unchecked Sendable {
         state.lock.unlock()
     }
 
+    /// Latest submission/completion GPU timing recorded for this surface (`NativeSurface::timing`).
+    public func timing() -> FrameTiming? {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        return state.timing
+    }
+
+    /// Counts draws submitted/completed (`NativeSurface::counts`).
+    public func counts() -> (UInt64, UInt64) {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        return (state.submitted, state.completed)
+    }
+
     /// Installs a wake callback notified whenever a new frame or mirror toggle arrives.
     /// The previously installed closure is always dropped AFTER releasing the lock.
     public func setWaker(_ callback: (@Sendable () -> Void)?) {
@@ -652,6 +705,9 @@ public final class NativeSurface: @unchecked Sendable {
 
     /// Pushes CPU bytes with explicit orientation matrix.
     public func pushBytesOriented(_ frame: ByteFrame, orient: Orient, frameId: UInt64) throws {
+        guard frame.width >= 1 && frame.height >= 1 && frame.width <= 16_384 && frame.height <= 16_384 else {
+            throw NativeSurfaceError.dimensionsOutOfRange(width: frame.width, height: frame.height)
+        }
         let videoFrame = NativeSurfaceVideoFrame(
             id: frameId,
             size: (frame.width, frame.height),
@@ -674,6 +730,9 @@ public final class NativeSurface: @unchecked Sendable {
         let size = buffer.size
         guard size.0 > 0 && size.1 > 0 else {
             throw NativeSurfaceError.zeroDimensions
+        }
+        guard size.0 <= 16_384 && size.1 <= 16_384 else {
+            throw NativeSurfaceError.dimensionsOutOfRange(width: size.0, height: size.1)
         }
         let fmt = try buffer.surfaceFormat()
         let col = buffer.colorInfo()
@@ -725,6 +784,12 @@ public final class NativeSurface: @unchecked Sendable {
     public func report(_ timing: FrameTiming) {
         let obs: FrameObserver?
         state.lock.lock()
+        state.timing = timing
+        if timing.completedAt == nil {
+            state.submitted &+= 1
+        } else {
+            state.completed &+= 1
+        }
         obs = state.observer
         state.lock.unlock()
         obs?(timing)

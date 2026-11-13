@@ -335,6 +335,9 @@ public struct AppWindowSpec<State> {
     public var onQuit: ((inout State, inout Tx) -> Void)?
     public var onReopen: ((inout State, Bool, inout Tx) -> Bool)?
     public var onOpenUrl: ((inout State, String, inout Tx) -> Void)?
+    public var onFrameEncoded: ((FrameEncoded) -> Void)?
+    public var onFrameDrawn: ((Runtime<State>) -> Void)?
+    public var windowless: Bool
     public var fitContentHeight: Bool
     public var menuItems: [NativeMenuItem<State>]
     public var appShared: AppShared<State>?
@@ -363,6 +366,9 @@ public struct AppWindowSpec<State> {
         self.onQuit = app.onQuitHook
         self.onReopen = app.onReopenHook
         self.onOpenUrl = app.onOpenUrlHook
+        self.onFrameEncoded = app.onFrameEncodedHook
+        self.onFrameDrawn = app.onFrameInspectHook
+        self.windowless = app.isWindowless
         self.fitContentHeight = app.isFitContentHeight
         self.menuItems = app.menuItems
         self.appShared = app.sharedHandle.shared
@@ -389,6 +395,9 @@ public struct AppWindowSpec<State> {
         self.onQuit = nil
         self.onReopen = nil
         self.onOpenUrl = nil
+        self.onFrameEncoded = nil
+        self.onFrameDrawn = nil
+        self.windowless = false
         self.fitContentHeight = false
         self.menuItems = []
         self.appShared = nil
@@ -493,6 +502,18 @@ public struct AppWindowSpec<State> {
     public func onOpenUrl(_ body: @escaping (inout State, String, inout Tx) -> Void) -> AppWindowSpec<State> {
         var copy = self
         copy.onOpenUrl = body
+        return copy
+    }
+
+    public func onFrameEncoded(_ body: @escaping (FrameEncoded) -> Void) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onFrameEncoded = body
+        return copy
+    }
+
+    public func onFrameDrawn(_ body: @escaping (Runtime<State>) -> Void) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onFrameDrawn = body
         return copy
     }
 
@@ -652,6 +673,7 @@ public struct App<State> {
     public var onReadyHook: ((WindowHandle) -> Void)? = nil
     public var onFrameEncodedHook: ((FrameEncoded) -> Void)? = nil
     public var onFrameDrawnHook: ((inout State, FrameEncoded, inout Tx) -> Void)? = nil
+    public var onFrameInspectHook: ((Runtime<State>) -> Void)? = nil
     public var devStatsReceiver: ((SurfaceStats) -> Void)? = nil
 
     public let sharedHandle: AppHandle<State>
@@ -986,6 +1008,13 @@ public struct App<State> {
     public func onFrameDrawn(_ hook: @escaping (inout State, FrameEncoded, inout Tx) -> Void) -> App<State> {
         var copy = self
         copy.onFrameDrawnHook = hook
+        return copy
+    }
+
+    /// Unthrottled post-draw inspector reading the presented `Runtime` (`App::on_frame_drawn`).
+    public func onFrameDrawn(_ hook: @escaping (Runtime<State>) -> Void) -> App<State> {
+        var copy = self
+        copy.onFrameInspectHook = hook
         return copy
     }
 

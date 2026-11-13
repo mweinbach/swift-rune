@@ -325,6 +325,7 @@ public final class RuneMaterialHost: NSView {
     private var currentIds: [UInt64] = []
     private var isLiveResizing: Bool = false
     private weak var observedWindow: NSWindow?
+    private weak var attachedMetalLayer: CAMetalLayer?
     public let syncWatcher = MaterialPresentWatcher()
 
     public override var isFlipped: Bool { true }
@@ -356,6 +357,8 @@ public final class RuneMaterialHost: NSView {
             autoresizingMask = [.width, .height]
             contentView.addSubview(self, positioned: .below, relativeTo: metalView)
         }
+        attachedMetalLayer = metalLayer
+        metalLayer?.zPosition = 1.0
         syncWatcher.attach(window: window, metalLayer: metalLayer)
         if observedWindow !== window {
             NotificationCenter.default.removeObserver(self, name: NSWindow.didEndLiveResizeNotification, object: observedWindow)
@@ -404,6 +407,7 @@ public final class RuneMaterialHost: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
+        attachedMetalLayer?.zPosition = 1.0
 
         var activeSlotSet = Set<Int>()
         var nextIds = [UInt64](repeating: 0, count: MAX_NATIVE_MATERIALS)
@@ -435,13 +439,15 @@ public final class RuneMaterialHost: NSView {
             } else if let vev = view as? NSVisualEffectView {
                 vev.material = Self.nsMaterial(for: binding.draw.material)
                 vev.blendingMode = binding.draw.blending == .withinWindow ? .withinWindow : .behindWindow
-                vev.state = .followsWindowActiveState
+                vev.state = .active
                 if let layer = vev.layer {
                     layer.cornerRadius = CGFloat(binding.clampedRadius)
                     layer.cornerCurve = binding.draw.continuous ? .continuous : .circular
                     layer.masksToBounds = binding.clampedRadius > 0
                 }
             }
+            view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
         }
 
         // Hide inactive slots with `alphaValue = 0.0` rather than `isHidden = true` so Core Animation keeps slots warm.
@@ -477,6 +483,7 @@ public final class RuneMaterialHost: NSView {
         let view = dequeueOrMakeView(kind: kind)
         if view.superview !== self {
             addSubview(view)
+            view.displayIfNeeded()
         }
         slots[index] = SlotEntry(kind: kind, view: view)
         return view
@@ -491,6 +498,7 @@ public final class RuneMaterialHost: NSView {
             if let glassClass = NSClassFromString("NSGlassEffectView") as? NSView.Type {
                 let view = glassClass.init(frame: .zero)
                 view.wantsLayer = true
+                Self.setGlassStyle(view, style: 0)
                 return view
             }
             fallthrough
@@ -502,7 +510,7 @@ public final class RuneMaterialHost: NSView {
             vev.wantsLayer = true
             vev.material = .hudWindow
             vev.blendingMode = .behindWindow
-            vev.state = .followsWindowActiveState
+            vev.state = .active
             return vev
         }
     }
@@ -543,10 +551,19 @@ public final class RuneMaterialHost: NSView {
         fn(view, sel, radius)
     }
 
+    private static func setGlassStyle(_ view: NSView, style: Int) {
+        let sel = NSSelectorFromString("setStyle:")
+        guard view.responds(to: sel), let cls = object_getClass(view) else { return }
+        let imp = class_getMethodImplementation(cls, sel)
+        typealias SetStyleFn = @convention(c) (AnyObject, Selector, Int) -> Void
+        let fn = unsafeBitCast(imp, to: SetStyleFn.self)
+        fn(view, sel, style)
+    }
+
     private static func nsMaterial(for material: SystemMaterial) -> NSVisualEffectView.Material {
         switch material {
         case .glass:
-            return .hudWindow
+            return .popover
         case .popover:
             return .popover
         case .hudWindow:

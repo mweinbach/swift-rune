@@ -1935,6 +1935,7 @@ public final class TextSystem: @unchecked Sendable {
         var sizePx10: Int
         var weight10: Int
         var italic: Bool
+        var fontScopeEpoch: UInt64
         var variations: String
         var features: String
     }
@@ -1945,6 +1946,7 @@ public final class TextSystem: @unchecked Sendable {
         var maxWidthHalfPt: Int
         var scale100: Int
         var pillsHash: UInt64 = 0
+        var fontEpoch: UInt64 = 1
     }
 
     private struct PreparedPill {
@@ -2176,6 +2178,9 @@ public final class TextSystem: @unchecked Sendable {
     /// Updates `sans` and `mono` family slots (`TextSystem::set_families`). Drops cached shapes/fonts when changed.
     @discardableResult
     public func setFamilies(sans: String, mono: String) -> Bool {
+        if FontFamiliesRegistry.threadOverrideFamilies() != nil {
+            return FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
+        }
         lock.lock()
         let unchanged = (sansFamilyOverride == sans && monoFamilyOverride == mono)
         if unchanged {
@@ -2199,10 +2204,11 @@ public final class TextSystem: @unchecked Sendable {
     }
 
     private func syncGlobalFamiliesIfNeeded() {
-        let globalEpoch = fontEpoch()
         let langEpoch = TextLanguageRegistry.currentEpoch()
+        let inThreadScope = (FontFamiliesRegistry.threadOverrideFamilies() != nil)
+        let globalEpoch = inThreadScope ? 0 : fontEpoch()
         lock.lock()
-        if lastObservedFontEpoch != globalEpoch {
+        if !inThreadScope && lastObservedFontEpoch != globalEpoch {
             let (sans, mono) = FontFamiliesRegistry.currentFamilies()
             sansFamilyOverride = sans
             monoFamilyOverride = mono
@@ -2308,12 +2314,15 @@ public final class TextSystem: @unchecked Sendable {
 
     internal func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
         syncGlobalFamiliesIfNeeded()
+        let threadFamilies = FontFamiliesRegistry.threadOverrideFamilies()
+        let scopeEpoch = fontEpoch()
         let sizePx = style.size * pixelScale
         let key = FontKey(
             family: style.family,
             sizePx10: Int((sizePx * 10.0).rounded()),
             weight10: Int(style.weight.rounded()),
             italic: style.italic,
+            fontScopeEpoch: scopeEpoch,
             variations: style.variations,
             features: style.features
         )
@@ -2322,8 +2331,8 @@ public final class TextSystem: @unchecked Sendable {
             lock.unlock()
             return cached
         }
-        let sansList = sansFamilyOverride
-        let monoList = monoFamilyOverride
+        let sansList = threadFamilies?.sans ?? sansFamilyOverride
+        let monoList = threadFamilies?.mono ?? monoFamilyOverride
         lock.unlock()
 
         let ctWeight = Self.coreTextWeight(for: style.weight)
@@ -2444,7 +2453,8 @@ public final class TextSystem: @unchecked Sendable {
             style: effectiveStyle,
             maxWidthHalfPt: maxWKey,
             scale100: Int((pixelScale * 100).rounded()),
-            pillsHash: pHash
+            pillsHash: pHash,
+            fontEpoch: fontEpoch()
         )
         lock.lock()
         if let cached = measureCache[key] {
@@ -3571,7 +3581,8 @@ public final class TextSystem: @unchecked Sendable {
             style: effectiveStyle,
             maxWidthHalfPt: maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1,
             scale100: Int((pixelScale * 100.0).rounded()),
-            pillsHash: Self.hashPills(pills)
+            pillsHash: Self.hashPills(pills),
+            fontEpoch: fontEpoch()
         )
         lock.lock()
         if let cached = measureCache[key] {

@@ -106,6 +106,9 @@ internal extension Runtime {
             for b in node.el.liveBindings {
                 slot.liveSubscriptions.append(b.source.subscribe(wake))
             }
+            if let px = node.el.pixelsPayload {
+                slot.liveSubscriptions.append(px.subscribe(wake))
+            }
         }
     }
 

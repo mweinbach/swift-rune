@@ -74,6 +74,11 @@ public final class LiveWake: @unchecked Sendable {
     }
 
     public func visible(_ visible: Bool) {
+        _ = visibleReturningWoke(visible)
+    }
+
+    @discardableResult
+    internal func visibleReturningWoke(_ visible: Bool) -> Bool {
         lock.lock()
         let old = flags
         if visible {
@@ -86,6 +91,7 @@ public final class LiveWake: @unchecked Sendable {
         if shouldWake {
             callback()
         }
+        return shouldWake
     }
 
     public func notify() {
@@ -102,8 +108,8 @@ public final class LiveWake: @unchecked Sendable {
     @discardableResult
     public func takeVisible() -> Bool {
         lock.lock()
-        let had = flags != 0
-        flags = 0
+        let had = (flags & Self.pendingFlag) != 0 && (flags & Self.hiddenFlag) == 0
+        flags &= ~Self.pendingFlag
         lock.unlock()
         return had
     }
@@ -253,7 +259,7 @@ final class LiveSource: @unchecked Sendable {
 
     func subscribe(_ wake: LiveWake) -> LiveSubscription {
         lock.lock()
-        subscriptions.removeAll { $0.wake == nil }
+        subscriptions.removeAll { !$0.isActive || $0.wake == nil }
         if let existing = subscriptions.first(where: { $0.wake === wake }) {
             lock.unlock()
             return existing
@@ -412,7 +418,7 @@ public final class LiveText: @unchecked Sendable {
 
     public func subscribe(_ wake: LiveWake) -> LiveSubscription {
         lock.lock()
-        subscriptions.removeAll { $0.wake == nil }
+        subscriptions.removeAll { !$0.isActive || $0.wake == nil }
         if let existing = subscriptions.first(where: { $0.wake === wake }) {
             lock.unlock()
             return existing

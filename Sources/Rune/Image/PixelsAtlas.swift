@@ -118,9 +118,15 @@ public final class Pixels: @unchecked Sendable {
     private var rgbaData: [UInt8] = []
     private var decodedMips: DecodedImage?
     private var generationValue: UInt64 = 0
+    private var wakers: [WeakWaker] = []
+    private var subscriptions: [LiveSubscription] = []
     internal var cacheRetainOwner: AnyObject?
     public private(set) var sourceURLString: String?
     public private(set) var sourceSetString: String?
+
+    private struct WeakWaker {
+        weak var ref: Waker?
+    }
 
     public init() {
         self.id = Self.idGenerator.take()
@@ -145,24 +151,68 @@ public final class Pixels: @unchecked Sendable {
         guard width > 0, height > 0, width <= IMAGE_MAX_SIDE, height <= IMAGE_MAX_SIDE, rgba.count >= needed else {
             return
         }
+        var toWake: [Waker] = []
+        var wakesToNotify: [LiveWake] = []
         lock.lock()
         widthValue = width
         heightValue = height
         rgbaData = rgba.count == needed ? rgba : Array(rgba.prefix(needed))
         decodedMips = nil
         generationValue &+= 1
+        wakers.removeAll { $0.ref == nil }
+        toWake = wakers.compactMap(\.ref)
+        subscriptions.removeAll { $0.wake == nil }
+        wakesToNotify = subscriptions.compactMap { sub in
+            guard sub.isActive, let w = sub.wake else { return nil }
+            return w
+        }
         lock.unlock()
+        for w in toWake { w.wake() }
+        for w in wakesToNotify { w.notify() }
     }
 
     public func setDecoded(_ image: DecodedImage) {
         guard let base = image.mips.first else { return }
+        var toWake: [Waker] = []
+        var wakesToNotify: [LiveWake] = []
         lock.lock()
         widthValue = base.width
         heightValue = base.height
         rgbaData = Array(base.rgba)
         decodedMips = image
         generationValue &+= 1
+        wakers.removeAll { $0.ref == nil }
+        toWake = wakers.compactMap(\.ref)
+        subscriptions.removeAll { $0.wake == nil }
+        wakesToNotify = subscriptions.compactMap { sub in
+            guard sub.isActive, let w = sub.wake else { return nil }
+            return w
+        }
         lock.unlock()
+        for w in toWake { w.wake() }
+        for w in wakesToNotify { w.notify() }
+    }
+
+    public func subscribe(_ waker: Waker) {
+        lock.lock()
+        wakers.removeAll { $0.ref == nil }
+        if !wakers.contains(where: { $0.ref === waker }) {
+            wakers.append(WeakWaker(ref: waker))
+        }
+        lock.unlock()
+    }
+
+    public func subscribe(_ wake: LiveWake) -> LiveSubscription {
+        lock.lock()
+        subscriptions.removeAll { !$0.isActive || $0.wake == nil }
+        if let existing = subscriptions.first(where: { $0.wake === wake }) {
+            lock.unlock()
+            return existing
+        }
+        let sub = LiveSubscription(sourceId: id, wake: wake)
+        subscriptions.append(sub)
+        lock.unlock()
+        return sub
     }
 
     public var size: (width: UInt32, height: UInt32) {
@@ -181,6 +231,12 @@ public final class Pixels: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return rgbaData
+    }
+
+    public var isPremultiplied: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return decodedMips != nil
     }
 
     fileprivate func snapshot() -> (width: UInt32, height: UInt32, rgba: [UInt8], mips: DecodedImage?, generation: UInt64) {
@@ -274,7 +330,7 @@ public struct ImageAtlas: Sendable {
         let sourceBytes: [UInt8]
         let isPremultiplied: Bool
         if let decoded = snap.mips, !decoded.mips.isEmpty {
-            isPremultiplied = false
+            isPremultiplied = true
             while level + 1 < decoded.mips.count {
                 let next = decoded.mips[level + 1]
                 let minW = min(max(1.0, drawnSize.x), Float(snap.width))

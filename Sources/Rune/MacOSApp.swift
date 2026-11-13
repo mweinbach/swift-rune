@@ -56,7 +56,9 @@ public enum MacOSApp {
         app.setActivationPolicy(appBuilder.isAccessory ? .accessory : .regular)
         if !appBuilder.isAccessory {
             _ = RuneDefaultMacMenus.ensure(app)
-            RuneDefaultMacMenus.addStandardMenus(app)
+            if appBuilder.usesStandardMenus {
+                RuneDefaultMacMenus.addStandardMenus(app)
+            }
         }
 
         let respectSystemAppearance = (parsed.darkOverride == nil && appBuilder.dark == nil)
@@ -115,8 +117,12 @@ public enum MacOSApp {
         )
 
         let renderer = try MetalRenderer()
-        let reports = (appBuilder.onFrameEncodedHook != nil || appBuilder.onFrameDrawnHook != nil)
-            ? FrameReports<State>(onFrameEncoded: appBuilder.onFrameEncodedHook, onFrameDrawn: appBuilder.onFrameDrawnHook)
+        let reports = (appBuilder.onFrameEncodedHook != nil || appBuilder.onFrameDrawnHook != nil || appBuilder.onFrameInspectHook != nil)
+            ? FrameReports<State>(
+                onFrameEncoded: appBuilder.onFrameEncodedHook,
+                onFrameDrawn: appBuilder.onFrameDrawnHook,
+                onInspectDrawn: appBuilder.onFrameInspectHook
+            )
             : nil
         let meter = appBuilder.devStatsReceiver != nil ? SurfaceMeter(name: appBuilder.title) : nil
 
@@ -762,6 +768,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                 _ = runtime.updateIf(at: t) { s, tx in
                     reports.flush(state: &s, tx: &tx, at: t)
                 }
+                reports.inspect(runtime)
             }
         }
         if let stats = surfaceMeter?.currentStats() {

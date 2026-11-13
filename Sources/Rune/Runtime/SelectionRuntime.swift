@@ -551,7 +551,7 @@ internal extension Runtime {
     }
 
     func handleSelectableKeyDown(_ ev: KeyEvent, at now: Double) -> Bool {
-        if let fPath = focusedPath, let fIdx = nodeByPath[fPath], flatNodes[fIdx].el.handlers.editLens != nil {
+        if let fPath = focusedPath, focusedInputElement(at: fPath)?.handlers.editLens != nil {
             return false
         }
         let plain = ev.mods.primaryCommand && !ev.mods.shift && !ev.mods.alt && !(ev.mods.ctrl && ev.mods.cmd)
