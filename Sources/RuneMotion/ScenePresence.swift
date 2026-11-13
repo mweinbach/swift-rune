@@ -144,6 +144,29 @@ extension Scene {
         return false
     }
 
+    /// Returns whether any ancestor of `id` currently has an active entering presence transition.
+    public func hasEnteringAncestor(_ id: NodeId) -> Bool {
+        guard let i = slot(id), nodes[i].alive else { return false }
+        var p = nodes[i].parent
+        while p != Self.noneIdx {
+            let pi = Int(p)
+            if nodes[pi].presence.isEntering {
+                if let tid = nodes[pi].tracks[Int(Props.PRESENCE.id.rawValue)] {
+                    if store.isActive(tid) {
+                        return true
+                    }
+                    if let (vals, _) = sample(tid), let pv = vals.first, pv < 0.999 {
+                        return true
+                    }
+                } else {
+                    return true
+                }
+            }
+            p = nodes[pi].parent
+        }
+        return false
+    }
+
     internal mutating func applyPhaseActs(_ i: Int, _ acts: [PhaseAct]) {
         let id = nodes[i].id
         for act in acts {

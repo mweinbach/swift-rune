@@ -48,6 +48,30 @@ public struct PointerPress: Sendable, Equatable {
     }
 }
 
+/// Element-local pointer coordinates for `onPointerMoveLocal` / `onSecondaryPressLocal` (`rune::PointerEvent`).
+public struct PointerEvent: Sendable, Equatable {
+    public var x: Float
+    public var y: Float
+    public var windowX: Float
+    public var windowY: Float
+
+    public init(x: Float = 0, y: Float = 0, windowX: Float = 0, windowY: Float = 0) {
+        self.x = x
+        self.y = y
+        self.windowX = windowX
+        self.windowY = windowY
+    }
+
+    /// Window-space coordinates matching `PointerPress` (`PointerEvent::window`).
+    public func window() -> PointerPress {
+        PointerPress(
+            window: Vec2(windowX, windowY),
+            local: Vec2(x, y),
+            elementSize: .zero
+        )
+    }
+}
+
 /// Drag event payload delivered to `onDrag` (`rune::Drag`).
 public struct Drag: Sendable, Equatable {
     /// Current pointer position in window points.
@@ -63,6 +87,10 @@ public struct Drag: Sendable, Equatable {
     /// Click count on press (`1` = normal drag, `2` = double-click-and-drag word selection).
     public var clicks: Int
     public var mods: Mods
+    /// Whether the gesture ended cancelled (Escape / focus loss / taken away, `Drag::cancelled`).
+    public var isCancelled: Bool
+    /// Pointer in desktop pixels when hosted in a native window (`Drag::screen_point`).
+    public var screen: (Int32, Int32)?
 
     public init(
         window: Vec2,
@@ -71,7 +99,9 @@ public struct Drag: Sendable, Equatable {
         startLocal: Vec2,
         size: Vec2,
         clicks: Int = 1,
-        mods: Mods = .none
+        mods: Mods = .none,
+        isCancelled: Bool = false,
+        screen: (Int32, Int32)? = nil
     ) {
         self.window = window
         self.local = local
@@ -80,6 +110,36 @@ public struct Drag: Sendable, Equatable {
         self.size = size
         self.clicks = clicks
         self.mods = mods
+        self.isCancelled = isCancelled
+        self.screen = screen
+    }
+
+    public static func == (lhs: Drag, rhs: Drag) -> Bool {
+        lhs.window == rhs.window
+            && lhs.local == rhs.local
+            && lhs.delta == rhs.delta
+            && lhs.startLocal == rhs.startLocal
+            && lhs.size == rhs.size
+            && lhs.clicks == rhs.clicks
+            && lhs.mods == rhs.mods
+            && lhs.isCancelled == rhs.isCancelled
+            && lhs.screen?.0 == rhs.screen?.0
+            && lhs.screen?.1 == rhs.screen?.1
+    }
+
+    /// True on gesture termination when aborted without a drop (`Drag::cancelled`).
+    public func cancelled() -> Bool {
+        isCancelled
+    }
+
+    /// Pointer coordinates from the window's top-left (`Drag::window_point`).
+    public func windowPoint() -> [Float] {
+        [window.x, window.y]
+    }
+
+    /// Pointer in physical desktop pixels when hosted natively (`Drag::screen_point`).
+    public func screenPoint() -> (Int32, Int32)? {
+        screen
     }
 }
 
@@ -940,13 +1000,24 @@ final class ElColdData<State> {
     var scaleMotionAnim: Anim<Vec2>? = nil
     var rotateMotionAnim: Anim<Float>? = nil
     var textCaseValue: TextCase? = nil
-    var spanRings: [(range: Range<Int>, color: Color, width: Float)] = []
+    var spanRings: [(range: Range<Int>, color: Color, width: Float)]? = nil
     var advanceInRun: (run: TextRun, byteOffset: Int)? = nil
     var isTruncateFadeEnabled: Bool = false
     var truncateFadeEm: Float = 1.5
-    var liveBindings: [BoundLiveProperty] = []
+    var isolates: [(range: Range<Int>, dir: Direction)]? = nil
+    var liveBindings: [BoundLiveProperty]? = nil
     var handlersBox: ElHandlersBox<State>? = nil
-    var runtimeExtras: [String: Any] = [:]
+    private var _runtimeExtras: [String: Any]? = nil
+    var runtimeExtras: [String: Any] {
+        get { _runtimeExtras ?? [:] }
+        set { _runtimeExtras = newValue.isEmpty ? nil : newValue }
+        _modify {
+            var dict = _runtimeExtras ?? [:]
+            _runtimeExtras = nil
+            defer { _runtimeExtras = dict.isEmpty ? nil : dict }
+            yield &dict
+        }
+    }
 
     func clone() -> ElColdData<State> {
         let c = ElColdData<State>()
@@ -1076,9 +1147,10 @@ final class ElColdData<State> {
         c.advanceInRun = advanceInRun
         c.isTruncateFadeEnabled = isTruncateFadeEnabled
         c.truncateFadeEm = truncateFadeEm
+        c.isolates = isolates
         c.liveBindings = liveBindings
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
-        c.runtimeExtras = runtimeExtras
+        c._runtimeExtras = _runtimeExtras
         return c
     }
 }
@@ -1291,11 +1363,12 @@ public struct El<State> {
     public var scaleMotionAnim: Anim<Vec2>? { get { _cold?.data.scaleMotionAnim } set { ensureCold().data.scaleMotionAnim = newValue } }
     public var rotateMotionAnim: Anim<Float>? { get { _cold?.data.rotateMotionAnim } set { ensureCold().data.rotateMotionAnim = newValue } }
     public var textCaseValue: TextCase? { get { _cold?.data.textCaseValue } set { ensureCold().data.textCaseValue = newValue } }
-    public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.data.spanRings ?? [] } set { ensureCold().data.spanRings = newValue } }
+    public var spanRingsSpec: [(range: Range<Int>, color: Color, width: Float)] { get { _cold?.data.spanRings ?? [] } set { ensureCold().data.spanRings = newValue.isEmpty ? nil : newValue } }
     public var advanceInRun: (run: TextRun, byteOffset: Int)? { get { _cold?.data.advanceInRun } set { ensureCold().data.advanceInRun = newValue } }
     public var isTruncateFadeEnabled: Bool { get { _cold?.data.isTruncateFadeEnabled ?? false } set { ensureCold().data.isTruncateFadeEnabled = newValue } }
     public var truncateFadeEm: Float { get { _cold?.data.truncateFadeEm ?? 1.5 } set { ensureCold().data.truncateFadeEm = newValue } }
-    var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue } }
+    public var isolatesSpec: [(range: Range<Int>, dir: Direction)] { get { _cold?.data.isolates ?? [] } set { ensureCold().data.isolates = newValue.isEmpty ? nil : newValue } }
+    var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue.isEmpty ? nil : newValue } }
     public var handlers: ElementHandlers<State> {
         get { _cold?.data.handlersBox?.value ?? ElementHandlers<State>() }
         set {
@@ -1310,6 +1383,10 @@ public struct El<State> {
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }
         set { ensureCold().data.runtimeExtras = newValue }
+        _modify {
+            let box = ensureCold()
+            yield &box.data.runtimeExtras
+        }
     }
 
     public init(direction: FlexDirection = .row) {
@@ -2816,9 +2893,27 @@ public struct El<State> {
         onSecondaryClick(handler)
     }
 
+    /// Handles secondary (right-click) press with `PointerEvent` coordinates (`El::on_secondary_press_local`).
+    @_disfavoredOverload
+    public func onSecondaryPressLocal(_ handler: @escaping (inout State, PointerEvent, inout Tx) -> Void) -> Self {
+        onSecondaryClick { state, press, tx in
+            let ev = PointerEvent(x: press.local.x, y: press.local.y, windowX: press.window.x, windowY: press.window.y)
+            handler(&state, ev, &tx)
+        }
+    }
+
     /// Observes pointer movement in element-local coordinates (`El::on_pointer_move_local`).
     public func onPointerMoveLocal(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         onPointerMove(handler)
+    }
+
+    /// Observes pointer movement with `PointerEvent` coordinates (`El::on_pointer_move_local`).
+    @_disfavoredOverload
+    public func onPointerMoveLocal(_ handler: @escaping (inout State, PointerEvent, inout Tx) -> Void) -> Self {
+        onPointerMove { state, press, tx in
+            let ev = PointerEvent(x: press.local.x, y: press.local.y, windowX: press.window.x, windowY: press.window.y)
+            handler(&state, ev, &tx)
+        }
     }
 
     /// Drag callback that does not read or mutate `State` (`El::on_drag_any`).
@@ -2928,6 +3023,17 @@ public struct El<State> {
     public func onPointerMoveAny(_ handler: @escaping (PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onPointerMove = { _, press, tx in handler(press, &tx) }
+        return copy
+    }
+
+    /// Observes pointer movement with `PointerEvent` without reading `State`.
+    @_disfavoredOverload
+    public func onPointerMoveAny(_ handler: @escaping (PointerEvent, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onPointerMove = { _, press, tx in
+            let ev = PointerEvent(x: press.local.x, y: press.local.y, windowX: press.window.x, windowY: press.window.y)
+            handler(ev, &tx)
+        }
         return copy
     }
 
