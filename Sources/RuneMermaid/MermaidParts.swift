@@ -104,7 +104,6 @@ struct ScenePiece {
         default: .none
         }
         var node = El<State>(direction: .row)
-            .role(.image)
             .key(key)
             .absolute(x: 0, y: 0)
             .offset(at.x * scale, at.y * scale)
