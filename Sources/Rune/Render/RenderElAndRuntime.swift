@@ -743,6 +743,8 @@ extension Runtime {
         func hasDynamicInSubtree(_ n: FlatNode) -> Bool {
             if movingSet.contains(n.nodeId)
                 || exitingIds.contains(n.nodeId)
+                || n.el.isSecure
+                || (n.el.handlers.editLens?.get(state).isSecure == true)
                 || !n.el.liveBindings.isEmpty
                 || n.el.surfacePayload != nil
                 || n.el.runtimeExtras[RenderExtrasKey.effectSpec] != nil
@@ -1000,19 +1002,25 @@ extension Runtime {
                 ?? el.clipRadius.map { SIMD4<Float>(repeating: $0) }
             let gKey = el.foldGlideSpec != nil ? "fold:\(node.path)" : "growth:\(node.path)"
             let growthMaskPt: Float? = {
-                guard el.isStreaming || el.isArrivesWhole || el.foldGlideSpec != nil else { return nil }
-                guard let gEntry = growthRows[gKey], gEntry.track.moving else { return nil }
+                guard let gEntry = growthRows[gKey] else { return nil }
                 let t = gEntry.track
+                let overflows = gEntry.edge.overflow && (t.streaming || t.isPaced)
+                guard gEntry.edge.clip && !overflows else { return nil }
+                guard t.h < t.target - 0.01 || t.mask > 0.01 || gEntry.withheld > 0.01 || t.isShuttingFold || (el.foldGlideSpec != nil && abs(t.h - t.target) > 0.25) else {
+                    return nil
+                }
+                let withheldMask: Float = gEntry.withheld > 0.01 ? min(gEntry.withheld, gEntry.edge.floor) : 0
+                let combinedMask = max(t.mask, withheldMask)
                 let featherH: Float
-                if t.mask > 0.5 {
-                    featherH = t.mask
+                if combinedMask > 0.01 {
+                    featherH = combinedMask
                 } else if let fg = el.foldGlideSpec?.feather, abs(t.h - t.target) > 0.25 {
                     featherH = fg
                 } else {
                     return nil
                 }
                 let clamped = min(featherH, max(1, t.h))
-                return clamped > 0.5 ? clamped : nil
+                return clamped > 0.01 ? clamped : nil
             }()
             let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
                 ?? growthMaskPt.map { SIMD4<Float>(0, 0, 0, $0) }

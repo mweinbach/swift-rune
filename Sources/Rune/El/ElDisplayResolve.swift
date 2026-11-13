@@ -144,8 +144,12 @@ internal enum ElDisplayResolver {
         }
         if isSingle {
             inputStyle.wrap = .noWrap
+            inputStyle.wrapAnywhere = false
         } else if edit.multiline {
             inputStyle.wrap = .wrap
+            if edit.isSecure {
+                inputStyle.wrapAnywhere = true
+            }
         }
         if let fDir = edit.forcedDir {
             inputStyle.direction = fDir

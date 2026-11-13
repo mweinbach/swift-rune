@@ -258,6 +258,14 @@ public final class ResidentLayerTracker: @unchecked Sendable {
         defer { lock.unlock() }
         entries.removeAll()
     }
+
+    public var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+
+    public var isEmpty: Bool { count == 0 }
 }
 
 // MARK: - IEEE-754 f16 + Fade & Clip Radii Packing

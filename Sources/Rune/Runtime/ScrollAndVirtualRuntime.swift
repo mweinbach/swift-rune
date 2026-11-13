@@ -716,8 +716,9 @@ extension Runtime {
             res: LayoutEngine.ResultNode
         ) -> (el: El<State>, res: LayoutEngine.ResultNode)? {
             var found: (el: El<State>, res: LayoutEngine.ResultNode)? = nil
-            if el.plainText != nil || el.richSpans != nil || el.liveText != nil {
-                if let wf = el.runtimeExtras["shell.revealWordFade"] as? Float, wf >= 0 {
+            if el.textStyle.wrap != .noWrap && (el.plainText != nil || el.richSpans != nil || el.liveText != nil) {
+                let hasReveal = ((el.runtimeExtras["shell.revealWordFade"] as? Float).map { $0 >= 0 } ?? false) || el.textReveal >= 0.0
+                if hasReveal {
                     found = (el, res)
                 }
             }
@@ -812,15 +813,22 @@ extension Runtime {
                     existing.track.setKind(streaming: streaming, whole: whole, glide: glideArg)
                     if instantGrowth {
                         existing.track = existing.track.restarted(at: naturalH)
+                        existing.withheld = 0
+                        existing.lastWidth = res.layout.localRect.width
                         existing.contentSlide = nil
                         if let sp = parentStackPath {
                             growthStacks[sp]?.pendingHeights.removeValue(forKey: gKey)
                         }
                     } else {
                         let holdState = parentStackPath.flatMap { growthStacks[$0]?.widthHold } ?? .off
-                        let effectiveH = (streaming && !isRelayoutPass && holdState.mayShrink(at: now))
+                        var effectiveH = (streaming && !isRelayoutPass && holdState.mayShrink(at: now))
                             ? max(naturalH, min(existing.track.h, existing.track.target))
                             : naturalH
+                        if streaming && abs(res.layout.localRect.width - existing.lastWidth) < 0.01 {
+                            effectiveH = max(effectiveH, min(existing.track.h, existing.track.target))
+                        }
+                        existing.lastWidth = res.layout.localRect.width
+                        existing.withheld = max(0, unlaggedH - effectiveH)
                         if let sp = parentStackPath, holdState.defers(at: now) {
                             if abs(effectiveH - existing.track.target) > 0.1 || growthStacks[sp]?.pendingHeights[gKey] != nil {
                                 growthStacks[sp]?.pendingHeights[gKey] = effectiveH
@@ -829,7 +837,7 @@ extension Runtime {
                             if let sp = parentStackPath {
                                 growthStacks[sp]?.pendingHeights.removeValue(forKey: gKey)
                             }
-                            if abs(existing.track.target - effectiveH) > 0.1 {
+                            if abs(existing.track.target - effectiveH) > 1e-4 {
                                 existing.track.retarget(effectiveH)
                                 if let prevTop, let curTop = firstChildTop {
                                     let topDelta = curTop - prevTop
@@ -856,8 +864,8 @@ extension Runtime {
                     if existing.track.moving {
                         result.activeCount += 1
                     }
-                    let hasStreamingLagClamp = streaming && existing.track.h < unlaggedH - 0.1
-                    if (existing.track.moving && (abs(existing.track.h - existing.track.target) > 0.1 || existing.track.isShuttingFold)) || hasStreamingLagClamp {
+                    let hasStreamingLagClamp = streaming && (existing.track.h < unlaggedH - 0.1 || existing.withheld > 0.01)
+                    if (existing.track.moving && (abs(existing.track.h - existing.track.target) > 1e-4 || existing.track.isShuttingFold)) || hasStreamingLagClamp {
                         result.needsClampedRelayout = true
                     }
                 } else {
@@ -895,6 +903,8 @@ extension Runtime {
                         spring: spring,
                         foldLimit: limit,
                         naturalHeight: unlaggedH,
+                        withheld: 0,
+                        lastWidth: res.layout.localRect.width,
                         lastFirstChildTop: firstChildTop,
                         contentSlide: nil
                     )
@@ -966,6 +976,25 @@ extension Runtime {
     }
 
     internal func applyGrowthConstraints(in rootEl: El<State>) -> El<State> {
+        func findLastRevealingWrappedText(
+            el: El<State>,
+            res: LayoutEngine.ResultNode
+        ) -> (El<State>, LayoutEngine.ResultNode)? {
+            if !el.children.isEmpty && el.children.count == res.children.count {
+                for i in el.children.indices.reversed() {
+                    if let match = findLastRevealingWrappedText(el: el.children[i], res: res.children[i]) {
+                        return match
+                    }
+                }
+            }
+            if el.textStyle.wrap != .noWrap,
+               el.textReveal >= 0.0,
+               (el.liveText != nil || el.plainText != nil || el.richSpans != nil) {
+                return (el, res)
+            }
+            return nil
+        }
+
         func walk(_ el: El<State>, parentPath: String, siblingIndex: Int, siblingKeysSeen: inout [String: Int], inGrowthSpec: GrowthSpec?) -> El<State> {
             let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
             let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
@@ -977,18 +1006,23 @@ extension Runtime {
                 if let entry = growthRows[gKey] {
                     let t = entry.track
                     let diff = abs(t.h - t.target)
-                    let hasStreamingLagClamp = el.isStreaming && t.h < entry.naturalHeight - 0.1
+                    let hasStreamingLagClamp = el.isStreaming && (t.h < entry.naturalHeight - 0.1 || entry.withheld > 0.01)
                     let clampCollapse = (el.foldGlideSpec != nil && t.h > t.target + 0.1) || t.isShuttingFold
+                    let overflows = entry.edge.overflow && (t.streaming || t.isPaced)
                     if t.moving || hasStreamingLagClamp {
-                        if t.h < t.target - 0.1 || hasStreamingLagClamp || clampCollapse || diff > 0.1 {
+                        if t.h < t.target - 1e-4 || hasStreamingLagClamp || clampCollapse || diff > 1e-4 {
                             out.layout.height = .points(max(0, t.h))
                             out.layout.maxHeight = .points(max(0, t.h))
-                            out.layout.clipOverflow = true
+                            if entry.edge.clip && !overflows {
+                                out.layout.clipOverflow = true
+                            }
                         }
-                        if t.moving {
+                        if t.moving && entry.edge.clip && !overflows {
+                            let withheldMask: Float = entry.withheld > 0.01 ? min(entry.withheld, entry.edge.floor) : 0
+                            let combinedMask = max(t.mask, withheldMask)
                             let featherH: Float
-                            if t.mask > 0.5 {
-                                featherH = t.mask
+                            if combinedMask > 0.5 {
+                                featherH = combinedMask
                             } else if let fg = el.foldGlideSpec?.feather, diff > 0.25 {
                                 featherH = fg
                             } else {
@@ -1053,7 +1087,7 @@ extension Runtime {
             return hasPending || growthRows.values.contains { $0.track.moving } || closingMoving
         }
 
-        let stepSize = 1.0 / 240.0
+        let stepSize = GrowthCaps.fixedSubstep
         growthSubstepAccumulator += dt
         var substeps = Int(floor((growthSubstepAccumulator + 1e-9) / stepSize))
         growthSubstepAccumulator = max(0, growthSubstepAccumulator - Double(substeps) * stepSize)
@@ -1090,7 +1124,7 @@ extension Runtime {
                         entry.contentSlide = nil
                     }
                     working[k] = entry
-                    if abs(entry.track.h - prevH) > 1e-5 || abs(entry.track.mask - prevM) > 0.05 || (wasMoving && !entry.track.moving) {
+                    if abs(entry.track.h - prevH) > 1e-5 || abs(entry.track.mask - prevM) > 1e-5 || (wasMoving && !entry.track.moving) {
                         anyChanged = true
                     }
                 }

@@ -895,6 +895,7 @@ final class ElColdData<State> {
     var growthSpec: GrowthSpec? = nil
     var isStreaming: Bool = false
     var isArrivesWhole: Bool = false
+    var textReveal: Float = -1.0
     var foldGlideSpec: FoldGlide? = nil
     var virtualEstimate: Float? = nil
     var virtualRowsSource: VirtualRowSource<State>? = nil
@@ -1276,6 +1277,7 @@ public struct El<State> {
     public var noWindowDrag: Bool { get { _cold?.data.noWindowDrag ?? false } set { ensureCold().data.noWindowDrag = newValue } }
     public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
     public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
+    public var textReveal: Float { get { _cold?.data.textReveal ?? -1.0 } set { ensureCold().data.textReveal = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
     internal var virtualizeSite: String? {
@@ -2589,6 +2591,12 @@ public struct El<State> {
         return copy
     }
 
+    public func reveal(_ wordFade: Float) -> Self {
+        var copy = self
+        copy.textReveal = max(0, wordFade)
+        return copy
+    }
+
     public func arrivesWhole() -> Self {
         var copy = self
         copy.isArrivesWhole = true
@@ -2705,6 +2713,15 @@ public struct El<State> {
     public func secure(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isSecure = enabled
+        if enabled {
+            if !copy.textLinks.isEmpty && copy.handlers.editLens == nil && copy.role == .text {
+                copy.focusable = false
+            }
+            copy.textLinks = []
+            copy.handlers.onLink = nil
+            copy.handlers.onLinkSecondary = nil
+            copy.runtimeExtras[Self.selectableExtraKey] = false
+        }
         return copy
     }
 
