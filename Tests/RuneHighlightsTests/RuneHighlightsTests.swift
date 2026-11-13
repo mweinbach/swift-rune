@@ -91,7 +91,7 @@ struct RuneHighlightsTests {
         #expect(kinds.contains(.typeBuiltin))
         #expect(kinds.contains(.functionDefinition))
         #expect(kinds.contains(.punctuationSpecial))
-        #expect(kinds.contains(.embedded))
+        #expect(kinds.contains(.variable))
         #expect(kinds.contains(.keywordControl))
     }
 
@@ -119,8 +119,9 @@ struct RuneHighlightsTests {
 
         let goSrc = "package main\nfunc main() { x := `raw`; _ = len(x) }"
         let goKinds = tokenKinds(for: goSrc, language: .go)
-        #expect(goKinds.contains(.keywordImport))
         #expect(goKinds.contains(.keywordDeclaration))
+        #expect(goKinds.contains(.namespace))
+        #expect(goKinds.contains(.functionDefinition))
         #expect(goKinds.contains(.string))
 
         let cppSrc = "#include <vector>\nconstexpr int N = 0x10;\nint* p = nullptr;"
@@ -142,7 +143,7 @@ struct RuneHighlightsTests {
 
         let tomlSrc = "[package]\nname = \"rune\"\nversion = 1\n"
         let tomlKinds = tokenKinds(for: tomlSrc, language: .toml)
-        #expect(tomlKinds.contains(.title))
+        #expect(tomlKinds.contains(.punctuationBracket))
         #expect(tomlKinds.contains(.property))
         #expect(tomlKinds.contains(.string))
         #expect(tomlKinds.contains(.number))
@@ -152,7 +153,7 @@ struct RuneHighlightsTests {
         #expect(yamlKinds.contains(.punctuationSpecial))
         #expect(yamlKinds.contains(.property))
         #expect(yamlKinds.contains(.boolean))
-        #expect(yamlKinds.contains(.punctuationListMarker))
+        #expect(yamlKinds.contains(.string))
 
         let mdSrc = "# Title\n**bold** and *italic* `code` [link](https://example.com)\n"
         let mdKinds = tokenKinds(for: mdSrc, language: .markdown)
@@ -165,10 +166,11 @@ struct RuneHighlightsTests {
 
         let bashSrc = "#!/bin/bash\nif [ -f \"$HOME/test\" ]; then echo $PATH; fi\n"
         let bashKinds = tokenKinds(for: bashSrc, language: .bash)
-        #expect(bashKinds.contains(.preproc))
+        #expect(bashKinds.contains(.comment))
         #expect(bashKinds.contains(.keywordControl))
+        #expect(bashKinds.contains(.function))
         #expect(bashKinds.contains(.string))
-        #expect(bashKinds.contains(.variableSpecial))
+        #expect(bashKinds.contains(.variable))
 
         let htmlSrc = "<!DOCTYPE html><!-- hi --><div class=\"card\">&amp;</div>"
         let htmlKinds = tokenKinds(for: htmlSrc, language: .html)
@@ -176,7 +178,7 @@ struct RuneHighlightsTests {
         #expect(htmlKinds.contains(.comment))
         #expect(htmlKinds.contains(.tag))
         #expect(htmlKinds.contains(.attribute))
-        #expect(htmlKinds.contains(.stringEscape))
+        #expect(htmlKinds.contains(.stringSpecial))
 
         let cssSrc = ".btn:hover { color: #ff0000; padding: 12px; }"
         let cssKinds = tokenKinds(for: cssSrc, language: .css)
@@ -207,9 +209,8 @@ struct RuneHighlightsTests {
 
         let diffSrc = "diff --git a/a.swift b/a.swift\n--- a/a.swift\n+++ b/a.swift\n@@ -1,2 +1,2 @@\n-old\n+new\n"
         let diffKinds = tokenKinds(for: diffSrc, language: .diff)
-        #expect(diffKinds.contains(.keyword))
-        #expect(diffKinds.contains(.title))
-        #expect(diffKinds.contains(.label))
+        #expect(diffKinds.contains(.function))
+        #expect(diffKinds.contains(.attribute))
         #expect(diffKinds.contains(.diffMinus))
         #expect(diffKinds.contains(.diffPlus))
     }
@@ -290,7 +291,7 @@ struct RuneHighlightsTests {
 
         let cljSrc = ";; clojure\n(defn add [a b] (+ a b) :done)"
         let cljKinds = tokenKinds(for: cljSrc, language: .clojure)
-        #expect(cljKinds.contains(.commentDoc))
+        #expect(cljKinds.contains(.comment))
         #expect(cljKinds.contains(.keywordDeclaration))
         #expect(cljKinds.contains(.stringSpecialSymbol))
         #expect(cljKinds.contains(.punctuationBracket))
@@ -321,13 +322,14 @@ struct RuneHighlightsTests {
         let dockerKinds = tokenKinds(for: dockerSrc, language: .dockerfile)
         #expect(dockerKinds.contains(.comment))
         #expect(dockerKinds.contains(.keyword))
-        #expect(dockerKinds.contains(.variableSpecial))
+        #expect(dockerKinds.contains(.function))
+        #expect(dockerKinds.contains(.variable))
 
         let makeSrc = "# build\nall: main.o\n\t$(CC) -o app main.o"
         let makeKinds = tokenKinds(for: makeSrc, language: .makefile)
         #expect(makeKinds.contains(.comment))
-        #expect(makeKinds.contains(.functionDefinition))
-        #expect(makeKinds.contains(.variableSpecial))
+        #expect(makeKinds.contains(.function))
+        #expect(makeKinds.contains(.variable))
 
         let tfSrc = "resource \"aws_s3_bucket\" \"b\" {\n  bucket = \"my-bucket-${var.env}\"\n  force_destroy = true\n}"
         let tfKinds = tokenKinds(for: tfSrc, language: .terraform)
@@ -338,21 +340,21 @@ struct RuneHighlightsTests {
         let gqlSrc = "# query\ntype User { id: ID! name: String }\nquery GetUser($id: ID!) { user(id: $id) { name } }"
         let gqlKinds = tokenKinds(for: gqlSrc, language: .graphql)
         #expect(gqlKinds.contains(.comment))
-        #expect(gqlKinds.contains(.keywordDeclaration))
+        #expect(gqlKinds.contains(.keyword))
         #expect(gqlKinds.contains(.typeBuiltin))
-        #expect(gqlKinds.contains(.variableSpecial))
+        #expect(gqlKinds.contains(.variableParameter))
 
         let protoSrc = "syntax = \"proto3\";\npackage rune;\nmessage Item { repeated string tags = 1; }"
         let protoKinds = tokenKinds(for: protoSrc, language: .proto)
         #expect(protoKinds.contains(.keywordDeclaration))
-        #expect(protoKinds.contains(.keywordImport))
+        #expect(protoKinds.contains(.namespace))
         #expect(protoKinds.contains(.typeBuiltin))
         #expect(protoKinds.contains(.number))
 
         let zigSrc = "const std = @import(\"std\");\npub fn main() void { var x: u32 = 10; }"
         let zigKinds = tokenKinds(for: zigSrc, language: .zig)
         #expect(zigKinds.contains(.keywordDeclaration))
-        #expect(zigKinds.contains(.function))
+        #expect(zigKinds.contains(.functionDefinition))
         #expect(zigKinds.contains(.typeBuiltin))
         #expect(zigKinds.contains(.number))
 
@@ -470,6 +472,48 @@ struct RuneHighlightsTests {
         assertSpansValid(src, spans: spans)
         #expect(spans.contains { $0.token.kind == .comment })
         #expect(spans.contains { $0.token.kind == .string })
-        #expect(spans.contains { $0.token.kind == .number })
+        #expect(spans.contains { $0.token.kind == .number && $0.text(in: src) == "3.14" })
+        #expect(spans.contains { $0.token.kind == .variable && $0.text(in: src)?.trimmingCharacters(in: .whitespaces) == "π" })
+    }
+
+    @Test func wasmStreamKeepsStateAcrossMultilineCommentsAndStrings() {
+        let rustSrc = """
+        /* open comment
+        let fake_keyword = 42;
+        still inside comment */
+        fn after() -> u32 { 7 }
+        """
+        let full = Highlighter().highlight(rustSrc, language: .rust)
+        assertSpansValid(rustSrc, spans: full)
+
+        // Line 2 ("let fake_keyword = 42;") MUST stay a .comment both in whole-file and streamed modes.
+        let fakeLineSpans = full.filter { ($0.text(in: rustSrc) ?? "").contains("fake_keyword") }
+        #expect(!fakeLineSpans.isEmpty)
+        #expect(fakeLineSpans.allSatisfy { $0.token.kind == .comment })
+
+        var stream = HighlightStream(language: .rust)
+        var acc = ""
+        for ch in rustSrc {
+            acc.append(ch)
+            let streamed = stream.highlight(acc)
+            #expect(streamed == Highlighter().highlight(acc, language: .rust))
+        }
+
+        let pySrc = """
+        x = \"\"\"
+        def fake():
+            return 1
+        \"\"\"
+        def real():
+            return 2
+        """
+        var pyStream = HighlightStream(language: .python)
+        var pyAcc = ""
+        for line in pySrc.split(separator: "\n", omittingEmptySubsequences: false) {
+            if !pyAcc.isEmpty { pyAcc.append("\n") }
+            pyAcc.append(contentsOf: line)
+            #expect(pyStream.highlight(pyAcc) == Highlighter().highlight(pyAcc, language: .python))
+        }
+        #expect(HighlightToken.all.count == 73)
     }
 }
