@@ -12,6 +12,10 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
     public var isFocusedTextInput: Bool
     public var text: String
     public var rect: MotionRect
+    public var uncopied: [Range<Int>]
+    public var copyBreakBefore: UInt8
+    public var copyBreakAfter: UInt8
+    public var copyPrefix: String?
 
     public init(
         path: String,
@@ -21,7 +25,11 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
         isSelectionGroup: Bool = false,
         isFocusedTextInput: Bool = false,
         text: String = "",
-        rect: MotionRect = .zero
+        rect: MotionRect = .zero,
+        uncopied: [Range<Int>] = [],
+        copyBreakBefore: UInt8 = 1,
+        copyBreakAfter: UInt8 = 1,
+        copyPrefix: String? = nil
     ) {
         self.path = path
         self.key = key
@@ -31,6 +39,10 @@ public struct SelectableNodeSnapshot: Sendable, Equatable {
         self.isFocusedTextInput = isFocusedTextInput
         self.text = text
         self.rect = rect
+        self.uncopied = uncopied
+        self.copyBreakBefore = copyBreakBefore
+        self.copyBreakAfter = copyBreakAfter
+        self.copyPrefix = copyPrefix
     }
 }
 
@@ -114,8 +126,20 @@ public enum SelectAllResolver {
         }
         guard let group = chosenGroup else { return .none }
         let texts = groupTexts(groupPath: group.path, in: nodes)
-        let pieces = texts.map { (rect: $0.rect, text: $0.text) }
-        let joined = CopyJoin.join(pieces)
+        let entries: [CopyJoin.Entry] = texts.compactMap { node in
+            let utf8Count = node.text.utf8.count
+            guard utf8Count > 0 else { return nil }
+            let slice = CopyJoin.copySlice(in: node.text, range: 0..<utf8Count, uncopied: node.uncopied)
+            return CopyJoin.Entry(
+                rect: node.rect,
+                pieceText: slice,
+                fromStart: true,
+                copyBreakBefore: node.copyBreakBefore,
+                copyBreakAfter: node.copyBreakAfter,
+                copyPrefix: node.copyPrefix
+            )
+        }
+        let joined = CopyJoin.join(entries)
         return .selectGroup(
             groupPath: group.path,
             nodePaths: texts.map(\.path),
