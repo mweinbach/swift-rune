@@ -136,6 +136,7 @@ internal struct RuntimeVirtualListState: Sendable {
     var lastSelectedKey: String? = nil
     var lastAnchorKey: String? = nil
     var lastAnchorLocalY: Float = 0
+    var lastAnchorPrefixY: Float = 0
     var rowKeyBySegment: [String: String] = [:]
     var wantsMoreFrames: Bool = false
     var missingOverscanRows: Int = 0
@@ -174,17 +175,16 @@ internal struct RuntimeVirtualListState: Sendable {
         return start < end ? start..<end : 0..<0
     }
 
-    func overscanWindow(
+    private func overscanBounds(
         offset: Float,
         viewport: Float,
         prefix: [Float],
-        count: Int,
-        indexed: Bool,
-        pinnedIndices: Set<Int>
-    ) -> (mounted: Range<Int>, wantedMore: Bool, missing: Int) {
-        guard count > 0, viewport > 0 else { return (0..<0, false, 0) }
-        let lo = max(0, offset - viewport * Self.overscanMultiplier)
-        let hi = offset + viewport * (1.0 + Self.overscanMultiplier)
+        count: Int
+    ) -> (effOffset: Float, targetLo: Int, targetHi: Int, edgeLo: Float, edgeHi: Float) {
+        let totalH = prefix.last ?? 0
+        let effOffset = max(0, min(max(0, totalH - viewport), offset))
+        let lo = max(0, effOffset - viewport * Self.overscanMultiplier)
+        let hi = effOffset + viewport * (1.0 + Self.overscanMultiplier)
 
         var targetLo = count
         var targetHi = 0
@@ -200,6 +200,45 @@ internal struct RuntimeVirtualListState: Sendable {
             targetLo = 0
             targetHi = min(count, 1)
         }
+        let edgeLo = max(0, effOffset - viewport * Self.indexedEdgeMultiplier)
+        let edgeHi = effOffset + viewport * (1.0 + Self.indexedEdgeMultiplier)
+        return (effOffset, targetLo, targetHi, edgeLo, edgeHi)
+    }
+
+    private func windowNeed(
+        chosenLo: Int,
+        chosenHi: Int,
+        targetLo: Int,
+        targetHi: Int,
+        edgeLo: Float,
+        edgeHi: Float,
+        prefix: [Float],
+        count: Int
+    ) -> (wantedMore: Bool, missing: Int) {
+        let missing = max(0, chosenLo - targetLo) + max(0, targetHi - chosenHi)
+        let edgeWanted = (chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi)
+        return (missing > 0 && edgeWanted, missing)
+    }
+
+    func overscanWindow(
+        offset: Float,
+        viewport: Float,
+        prefix: [Float],
+        count: Int,
+        indexed: Bool,
+        pinnedIndices: Set<Int>,
+        pinned: Bool = false,
+        bypassBudget: Bool = false,
+        forceAll: Bool = false
+    ) -> (mounted: Range<Int>, wantedMore: Bool, missing: Int) {
+        guard count > 0, viewport > 0 else { return (0..<0, false, 0) }
+        if forceAll {
+            return (0..<count, false, 0)
+        }
+        let bounds = overscanBounds(offset: offset, viewport: viewport, prefix: prefix, count: count)
+        let effOffset = bounds.effOffset
+        var targetLo = bounds.targetLo
+        var targetHi = bounds.targetHi
 
         // Preserve pinned indices near edges within overscan.
         for idx in pinnedIndices where idx >= 0 && idx < count {
@@ -211,13 +250,18 @@ internal struct RuntimeVirtualListState: Sendable {
             }
         }
 
-        guard indexed else {
+        if pinned {
+            let pinnedLo = min(targetLo, max(0, targetHi - 32))
+            return (pinnedLo..<targetHi, false, 0)
+        }
+
+        guard indexed && !bypassBudget else {
             return (targetLo..<targetHi, false, 0)
         }
 
         // Budget off-screen fills on indexed virtualRows to `0.5 * viewport` per edge per frame
         // when jumping/mounting fresh ranges so huge jumps spread cleanly across frames.
-        let visRange = visibleRange(offset: offset, viewport: viewport, prefix: prefix, count: count)
+        let visRange = visibleRange(offset: effOffset, viewport: viewport, prefix: prefix, count: count)
         let visLo = visRange.isEmpty ? targetLo : visRange.lowerBound
         let visHi = visRange.isEmpty ? targetHi : visRange.upperBound
 
@@ -238,8 +282,14 @@ internal struct RuntimeVirtualListState: Sendable {
             while hiIdx < targetHi && (prefix[hiIdx] - prefix[visHi]) <= budget {
                 hiIdx += 1
             }
-            chosenLo = loIdx
-            chosenHi = hiIdx
+            var cLo = loIdx
+            var cHi = hiIdx
+            for idx in pinnedIndices where idx >= targetLo && idx < targetHi {
+                cLo = min(cLo, idx)
+                cHi = max(cHi, idx + 1)
+            }
+            chosenLo = cLo
+            chosenHi = cHi
         } else {
             let budget = viewport * Self.indexedBudgetMultiplier
             var loIdx = min(visLo, max(targetLo, prevLo))
@@ -251,16 +301,50 @@ internal struct RuntimeVirtualListState: Sendable {
             while hiIdx < targetHi && (prefix[hiIdx] - prefix[max(prevHi, visHi)]) < budget {
                 hiIdx += 1
             }
-            chosenLo = min(loIdx, visLo)
-            chosenHi = max(hiIdx, visHi)
+            var cLo = min(loIdx, visLo)
+            var cHi = max(hiIdx, visHi)
+            for idx in pinnedIndices where idx >= targetLo && idx < targetHi {
+                cLo = min(cLo, idx)
+                cHi = max(cHi, idx + 1)
+            }
+            chosenLo = cLo
+            chosenHi = cHi
         }
 
-        let missing = max(0, chosenLo - targetLo) + max(0, targetHi - chosenHi)
-        // Only ask for more frames while edge rows beyond `1.75 * viewport` still aren't mounted.
-        let edgeLo = max(0, offset - viewport * Self.indexedEdgeMultiplier)
-        let edgeHi = offset + viewport * (1.0 + Self.indexedEdgeMultiplier)
-        let edgeWanted = (chosenLo > 0 && prefix[chosenLo] > edgeLo) || (chosenHi < count && prefix[chosenHi] < edgeHi)
-        return (chosenLo..<chosenHi, missing > 0 && edgeWanted, missing)
+        let need = windowNeed(
+            chosenLo: chosenLo,
+            chosenHi: chosenHi,
+            targetLo: targetLo,
+            targetHi: targetHi,
+            edgeLo: bounds.edgeLo,
+            edgeHi: bounds.edgeHi,
+            prefix: prefix,
+            count: count
+        )
+        return (chosenLo..<chosenHi, need.wantedMore, need.missing)
+    }
+
+    func postMeasureWindowNeed(
+        offset: Float,
+        viewport: Float,
+        prefix: [Float],
+        count: Int,
+        mounted: Range<Int>,
+        indexed: Bool,
+        pinned: Bool
+    ) -> (wantedMore: Bool, missing: Int) {
+        guard indexed && !pinned && count > 0 && viewport > 0 else { return (false, 0) }
+        let bounds = overscanBounds(offset: offset, viewport: viewport, prefix: prefix, count: count)
+        return windowNeed(
+            chosenLo: mounted.lowerBound,
+            chosenHi: mounted.upperBound,
+            targetLo: bounds.targetLo,
+            targetHi: bounds.targetHi,
+            edgeLo: bounds.edgeLo,
+            edgeHi: bounds.edgeHi,
+            prefix: prefix,
+            count: count
+        )
     }
 
     /// Re-evaluates overscan fill demand against post-commit measured row heights (`window.rs:52-87`).

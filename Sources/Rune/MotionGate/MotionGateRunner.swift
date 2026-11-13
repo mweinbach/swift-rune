@@ -482,8 +482,13 @@ private enum MotionGateSampleHelper {
                     isMoving: e.moving
                 ))
             }
-            let synthFrameOut = FrameOutput(changed: [], exited: [], events: [], animating: rt.isAnimating, nodes: presentedNodes)
-            let rf = rt.buildRenderFrame(frameOut: synthFrameOut, now: rt.currentTime)
+            let rf: RenderFrame
+            if let cachedFrameOut = rt.lastFrameOutput {
+                rf = rt.buildRenderFrame(frameOut: cachedFrameOut, now: rt.currentTime)
+            } else {
+                let synthFrameOut = FrameOutput(changed: [], exited: [], events: [], animating: rt.isAnimating, nodes: presentedNodes)
+                rf = rt.buildRenderFrame(frameOut: synthFrameOut, now: rt.currentTime)
+            }
             rt.lastElements = savedElements
             rt.presentedRectByPath = savedRects
             rt.presentedScaleByPath = savedScales

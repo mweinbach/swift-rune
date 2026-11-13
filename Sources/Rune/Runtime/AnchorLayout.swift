@@ -89,9 +89,10 @@ enum AnchorLayoutHelper {
         anchorScale: Float,
         localSize: Vec2,
         overlayOwnScale: Vec2,
+        hasScaleTrack: Bool = false,
         viewport: Vec2
     ) -> (unscaledOrigin: Vec2, zoom: Float, attachNorm: Vec2) {
-        let zoom = (!anchor.unscaled && overlayOwnScale == Vec2(1, 1)) ? max(0.001, anchorScale) : 1.0
+        let zoom = (!anchor.unscaled && !hasScaleTrack && overlayOwnScale == Vec2(1, 1)) ? max(0.001, anchorScale) : 1.0
         var zoomedAnchor = anchor
         zoomedAnchor.gap = anchor.gap * zoom
         let w = localSize.x * zoom
@@ -212,6 +213,51 @@ enum AnchorLayoutHelper {
             mutateInput(&rootInput, path: idxPath[...], vertical: vertical, maxLen: bound)
         }
         solved = LayoutEngine.compute(root: rootInput, viewport: viewport)
+    }
+
+    /// Computes paint-time inherited transform for an anchored overlay from its anchor's currently drawn rect
+    /// and ancestor zoom (`src/runtime/anchor.rs:240-269`).
+    static func anchoredPaintTransform(
+        anchor: Anchor,
+        baseRect: MotionRect,
+        ownElScale: Vec2,
+        hasScaleTrack: Bool = false,
+        anchorDrawnRect: MotionRect,
+        anchorInheritedZoom: Float,
+        viewport: Vec2
+    ) -> PresentedTransform {
+        let k = (!anchor.unscaled && !hasScaleTrack && ownElScale == Vec2(1, 1)) ? max(0.001, anchorInheritedZoom) : 1.0
+        let zoomedAnchor: Anchor
+        if abs(k - 1.0) <= 1e-5 {
+            zoomedAnchor = anchor
+        } else {
+            var za = anchor
+            za.gap = anchor.gap * k
+            zoomedAnchor = za
+        }
+        let w = baseRect.width * ownElScale.x * k
+        let h = baseRect.height * ownElScale.y * k
+        let trigger = [anchorDrawnRect.left, anchorDrawnRect.top, anchorDrawnRect.right, anchorDrawnRect.bottom]
+        let (ax, ay) = anchorPosition(zoomedAnchor, trigger: trigger, size: (w, h), viewport: (viewport.x, viewport.y))
+        let pivot = attachPoint(zoomedAnchor, trigger: trigger, box: [ax, ay, ax + w, ay + h])
+        if abs(k - 1.0) <= 1e-5 {
+            return PresentedTransform(
+                dx: ax - baseRect.x,
+                dy: ay - baseRect.y,
+                anchor: .zero,
+                anchorTo: .zero,
+                scale: Vec2(1, 1)
+            )
+        }
+        let dx = pivot.x + (ax - pivot.x) / k - baseRect.x
+        let dy = pivot.y + (ay - pivot.y) / k - baseRect.y
+        return PresentedTransform(
+            dx: dx,
+            dy: dy,
+            anchor: pivot,
+            anchorTo: pivot,
+            scale: Vec2(k, k)
+        )
     }
 
     /// Upstream `partial(width, strength)` (`scroll/edge.rs:11-18`).

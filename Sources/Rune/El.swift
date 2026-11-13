@@ -344,9 +344,9 @@ public struct Tx {
     public var tracing: Bool { tracingEnabled }
 
     /// Appends a trace event marker on the next traced frame (`Tx::trace_event`).
-    public mutating func traceEvent(_ event: String) {
+    public mutating func traceEvent(_ event: @autoclosure () -> String) {
         guard tracingEnabled else { return }
-        traceEvents.append(event)
+        traceEvents.append(event())
     }
 
     /// Records a sample-and-hold scalar trace channel (`Tx::trace_channel`).
@@ -525,7 +525,41 @@ public struct Tx {
             wakeAfter(wake)
         }
         for (k, v) in one.runtimeActions where k != "wakeAfter" && k != "wakeAfterList" {
-            runtimeActions[k] = v
+            switch k {
+            case Tx.pickReadsKey:
+                var existing = (runtimeActions[k] as? [ErasedPickRead]) ?? []
+                if let added = v as? [ErasedPickRead] {
+                    existing.append(contentsOf: added)
+                }
+                runtimeActions[k] = existing
+            case Tx.sentKeysKey:
+                var existing = (runtimeActions[k] as? [KeyEvent]) ?? []
+                if let added = v as? [KeyEvent] {
+                    existing.append(contentsOf: added)
+                }
+                runtimeActions[k] = existing
+            case Tx.traceEventsKey:
+                var existing = (runtimeActions[k] as? [String]) ?? []
+                if let added = v as? [String] {
+                    existing.append(contentsOf: added)
+                }
+                runtimeActions[k] = existing
+            case Tx.traceChannelsKey:
+                var existing = (runtimeActions[k] as? [TraceChannelRecord]) ?? []
+                if let added = v as? [TraceChannelRecord] {
+                    existing.append(contentsOf: added)
+                }
+                runtimeActions[k] = existing
+            case Tx.shellKey:
+                if let incoming = v as? Shell {
+                    if let cur = runtimeActions[k] as? Shell, cur > incoming {
+                        break
+                    }
+                    runtimeActions[k] = incoming
+                }
+            default:
+                runtimeActions[k] = v
+            }
         }
         commitKind = commitKind.merge(one.commitKind)
         followEdgeRequested = followEdgeRequested || one.followEdgeRequested

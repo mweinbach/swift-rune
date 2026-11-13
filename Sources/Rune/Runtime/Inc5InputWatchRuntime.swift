@@ -609,7 +609,7 @@ extension Runtime {
         let within = computeHoverWithin()
 
         let groupHovered = makeGroupHoverPredicate()
-        let shouldHold = decideHoverHold(
+        let shouldHold = isHoverHeldByNudge(at: currentTime) || decideHoverHold(
             candidatePath: candidatePath,
             candidateIndex: candidateIndex,
             within: within,

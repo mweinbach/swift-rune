@@ -92,7 +92,28 @@ private struct SelectableBand {
 public extension Runtime {
     /// Current `TextSelection` snapshot across mounted `El.selectable` elements (`Runtime::selection`).
     func currentTextSelection() -> TextSelection? {
-        guard selectionState.coordinator.phase.selection != nil else { return nil }
+        guard let sel = selectionState.coordinator.phase.selection else { return nil }
+        if !slice2State.virtualSelectionHosts.isEmpty {
+            let snaps = selectableSnapshots()
+            let lists = slice2State.virtualSelectionHosts
+            let anchorState = slice2State.virtualSelectionAnchorState
+            let h = VirtualSelectionCollector.selectionHolderEnd(phase: selectionState.coordinator.phase, anchorState: anchorState, nodes: snaps, lists: lists)
+            let f = h.flatMap { VirtualSelectionCollector.focusHolderEnd(holder: $0, phase: selectionState.coordinator.phase, anchorState: anchorState, nodes: snaps, lists: lists) }
+            let backward: Bool = {
+                guard let h, let f else { return false }
+                if h == f { return sel.focus < sel.anchor }
+                return VirtualSelectionCollector.treeOrder(h, nodes: snaps, lists: lists) > VirtualSelectionCollector.treeOrder(f, nodes: snaps, lists: lists)
+            }()
+            if let vs = VirtualSelectionCollector.collectVirtualSelection(
+                phase: selectionState.coordinator.phase,
+                anchorState: anchorState,
+                nodes: snaps,
+                lists: lists,
+                backward: backward
+            ) {
+                return vs
+            }
+        }
         return selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals())
     }
 
@@ -106,6 +127,29 @@ public extension Runtime {
     /// Clipboard string produced by copying the active `El.selectable` selection, honoring the
     /// nearest `El.selectionCopy` handler spanning the selection (`Runtime::copy_text`).
     func copySelectionText() -> String? {
+        let baseSnaps = selectableSnapshots()
+        if !slice2State.virtualSelectionHosts.isEmpty,
+           let sel = selectionState.coordinator.phase.selection {
+            let lists = slice2State.virtualSelectionHosts
+            let anchorState = slice2State.virtualSelectionAnchorState
+            let h = VirtualSelectionCollector.selectionHolderEnd(phase: selectionState.coordinator.phase, anchorState: anchorState, nodes: baseSnaps, lists: lists)
+            let f = h.flatMap { VirtualSelectionCollector.focusHolderEnd(holder: $0, phase: selectionState.coordinator.phase, anchorState: anchorState, nodes: baseSnaps, lists: lists) }
+            let backward: Bool = {
+                guard let h, let f else { return false }
+                if h == f { return sel.focus < sel.anchor }
+                return VirtualSelectionCollector.treeOrder(h, nodes: baseSnaps, lists: lists) > VirtualSelectionCollector.treeOrder(f, nodes: baseSnaps, lists: lists)
+            }()
+            if let vs = VirtualSelectionCollector.copyVirtualText(
+                phase: selectionState.coordinator.phase,
+                anchorState: anchorState,
+                nodes: baseSnaps,
+                lists: lists,
+                copyProviders: virtualCopyProvidersByPath(),
+                backward: backward
+            ), !vs.isEmpty {
+                return vs
+            }
+        }
         let snaps = selectableSnapshotsWithVirtuals()
         guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               let firstSel = sel.texts.first,
@@ -876,17 +920,20 @@ internal extension Runtime {
         }
         let snaps = selectableSnapshots()
         let anchorMountedIdx: Int?
-        let edgeScrollIdx: Int
+        let anchorOffscreenEnd: VirtualEndRef?
+        let edgeScrollIdx: Int?
         let anchorGroup: String?
         let anchorOrder: VirtualTreeOrder
         if let idx = resolvedNodeIndex(forPath: sel.path) {
             anchorMountedIdx = idx
+            anchorOffscreenEnd = nil
             edgeScrollIdx = idx
             sel.path = flatNodes[idx].path
             anchorGroup = SelectAllResolver.groupPath(forNodeAt: idx, in: snaps)
             anchorOrder = selectionTreeOrder(mountedIdx: idx)
         } else if let info = resolveVirtualEndpointInfo(forPath: sel.path) {
             anchorMountedIdx = nil
+            anchorOffscreenEnd = nil
             edgeScrollIdx = info.listIdx
             sel.path = info.snapshot.path
             if let rg = info.rowGroupPath {
@@ -897,14 +944,29 @@ internal extension Runtime {
                 anchorGroup = SelectAllResolver.groupPath(forNodeAt: info.listIdx, in: snaps)
             }
             anchorOrder = VirtualTreeOrder(slot: info.listIdx * 2 + 1, row: info.rowIndex, sub: info.orderInRow)
+        } else if !slice2State.virtualSelectionHosts.isEmpty,
+                  let aEnd = VirtualSelectionCollector.selectionHolderEnd(
+                      phase: selectionState.coordinator.phase,
+                      anchorState: slice2State.virtualSelectionAnchorState,
+                      nodes: snaps,
+                      lists: slice2State.virtualSelectionHosts
+                  ) {
+            anchorMountedIdx = nil
+            anchorOffscreenEnd = aEnd
+            edgeScrollIdx = nil
+            anchorGroup = VirtualSelectionCollector.endGroupPath(aEnd, nodes: snaps, lists: slice2State.virtualSelectionHosts)
+            anchorOrder = VirtualTreeOrder(slot: 0, row: 0, sub: 0)
         } else {
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
             selectionState.coordinator.phase.clear()
+            syncVirtualSelectionPins(snaps: snaps)
             dirtyCommit(at: now, external: false)
             return false
         }
-        updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
+        if let edgeScrollIdx {
+            updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
+        }
 
         let resolvedTarget: (idx: Int, offset: Int)?
         if let gPath = anchorGroup {
@@ -931,7 +993,15 @@ internal extension Runtime {
             sel.focus = ext.focus
             sel.far = nil
         } else {
-            if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
+            let isAfterAnchor: Bool
+            if let aEnd = anchorOffscreenEnd {
+                let targetOrd = VirtualSelectionCollector.treeOrder(.mounted(targetIdx), nodes: snaps, lists: slice2State.virtualSelectionHosts)
+                let anchorOrd = VirtualSelectionCollector.treeOrder(aEnd, nodes: snaps, lists: slice2State.virtualSelectionHosts)
+                isAfterAnchor = targetOrd > anchorOrd
+            } else {
+                isAfterAnchor = selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder
+            }
+            if isAfterAnchor {
                 sel.anchor = sel.originStart
                 sel.focus = targetUnit.1
             } else {
@@ -941,6 +1011,15 @@ internal extension Runtime {
             sel.far = SelectionFar(path: flatNodes[targetIdx].path, content: targetContent)
         }
         selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
+        syncVirtualSelectionPins(snaps: snaps)
+        if !slice2State.virtualSelectionHosts.isEmpty {
+            VirtualSelectionCollector.sealBetween(
+                phase: selectionState.coordinator.phase,
+                anchorState: &slice2State.virtualSelectionAnchorState,
+                nodes: snaps,
+                lists: &slice2State.virtualSelectionHosts
+            )
+        }
         if hypot(pos.x - selectionState.dragStartPos.x, pos.y - selectionState.dragStartPos.y) > 4.0,
            selectedText() != nil {
             selectionState.suppressedClickOnRelease = true
@@ -980,11 +1059,49 @@ internal extension Runtime {
             return true
         }
         if isA {
+            let snaps = selectableSnapshots()
             let outcome = selectionState.coordinator.handleSelectAll(
-                in: selectableSnapshots(),
+                in: snaps,
                 appHandledCmdA: false
             )
-            if case .selectGroup = outcome {
+            if case .selectGroup(let groupPath, _, _) = outcome {
+                if !slice2State.virtualSelectionHosts.isEmpty,
+                   let gIdx = snaps.firstIndex(where: { $0.path == groupPath }),
+                   let (firstEnd, lastEnd) = VirtualSelectionCollector.virtualSpanUnder(
+                       rootIndex: gIdx,
+                       nodes: snaps,
+                       lists: &slice2State.virtualSelectionHosts
+                   ) {
+                    VirtualSelectionCollector.selectSpanEnds(
+                        first: firstEnd,
+                        last: lastEnd,
+                        phase: &selectionState.coordinator.phase,
+                        anchorState: &slice2State.virtualSelectionAnchorState,
+                        nodes: snaps,
+                        lists: &slice2State.virtualSelectionHosts
+                    )
+                }
+                syncVirtualSelectionPins(snaps: snaps)
+                dirtyCommit(at: now, external: false)
+                dispatchSelectionChanges(at: now)
+                return true
+            }
+            if !slice2State.virtualSelectionHosts.isEmpty,
+               let rootIdx = snaps.indices.first,
+               let (firstEnd, lastEnd) = VirtualSelectionCollector.virtualSpanUnder(
+                   rootIndex: rootIdx,
+                   nodes: snaps,
+                   lists: &slice2State.virtualSelectionHosts
+               ) {
+                VirtualSelectionCollector.selectSpanEnds(
+                    first: firstEnd,
+                    last: lastEnd,
+                    phase: &selectionState.coordinator.phase,
+                    anchorState: &slice2State.virtualSelectionAnchorState,
+                    nodes: snaps,
+                    lists: &slice2State.virtualSelectionHosts
+                )
+                syncVirtualSelectionPins(snaps: snaps)
                 dirtyCommit(at: now, external: false)
                 dispatchSelectionChanges(at: now)
                 return true
@@ -999,25 +1116,26 @@ internal extension Runtime {
             selectionState.pendingSelectTextRequest = nil
             selectionState.pendingSelectAllKey = nil
             selectionState.coordinator.phase.clear()
+            syncVirtualSelectionPins()
             dirtyCommit(at: now)
             return
         }
         if let key = tx.pendingSelectAllTextKey {
             selectionState.pendingSelectTextRequest = nil
             let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectAllText(key: key, in: snaps) == nil {
-                selectionState.pendingSelectAllKey = key
-            } else {
+            if selectAllIncludingVirtual(key: key, snaps: snaps) {
                 selectionState.pendingSelectAllKey = nil
+            } else {
+                selectionState.pendingSelectAllKey = key
             }
             dirtyCommit(at: now)
         } else if let req = tx.pendingSelectTextRequest {
             selectionState.pendingSelectAllKey = nil
             let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectText(key: req.key, range: req.range, in: snaps) == nil {
-                selectionState.pendingSelectTextRequest = req
-            } else {
+            if selectTextIncludingVirtual(key: req.key, range: req.range, snaps: snaps) {
                 selectionState.pendingSelectTextRequest = nil
+            } else {
+                selectionState.pendingSelectTextRequest = req
             }
             dirtyCommit(at: now)
         }
@@ -1027,13 +1145,90 @@ internal extension Runtime {
         let snaps = selectableSnapshotsWithVirtuals()
         if let pendingAll = selectionState.pendingSelectAllKey {
             selectionState.pendingSelectAllKey = nil
-            _ = selectionState.coordinator.selectAllText(key: pendingAll, in: snaps)
+            _ = selectAllIncludingVirtual(key: pendingAll, snaps: snaps)
         } else if let pendingReq = selectionState.pendingSelectTextRequest {
             selectionState.pendingSelectTextRequest = nil
-            _ = selectionState.coordinator.selectText(key: pendingReq.key, range: pendingReq.range, in: snaps)
+            _ = selectTextIncludingVirtual(key: pendingReq.key, range: pendingReq.range, snaps: snaps)
         }
         reconcileSelectionPhaseAgainstTree()
+        syncVirtualSelectionPins(snaps: snaps)
         dispatchSelectionChanges(at: now)
+    }
+
+    private func syncVirtualSelectionPins(snaps: [SelectableNodeSnapshot]? = nil) {
+        guard !slice2State.virtualSelectionHosts.isEmpty else {
+            if selectionState.coordinator.phase.selection == nil {
+                slice2State.virtualSelectionAnchorState = VirtualSelectionAnchorState()
+            }
+            return
+        }
+        let s = snaps ?? selectableSnapshots()
+        VirtualSelectionCollector.syncSelectionPins(
+            phase: selectionState.coordinator.phase,
+            anchorState: &slice2State.virtualSelectionAnchorState,
+            nodes: s,
+            lists: &slice2State.virtualSelectionHosts
+        )
+    }
+
+    private func selectAllIncludingVirtual(key: String, snaps: [SelectableNodeSnapshot]) -> Bool {
+        guard !snaps.isEmpty else { return false }
+        if !slice2State.virtualSelectionHosts.isEmpty {
+            if let rootIdx = snaps.firstIndex(where: { $0.key == key || $0.path == key || selectsElementSelector(key, path: $0.path, key: $0.key) }),
+               let (firstEnd, lastEnd) = VirtualSelectionCollector.virtualSpanUnder(
+                   rootIndex: rootIdx,
+                   nodes: snaps,
+                   lists: &slice2State.virtualSelectionHosts
+               ) {
+                VirtualSelectionCollector.selectSpanEnds(
+                    first: firstEnd,
+                    last: lastEnd,
+                    phase: &selectionState.coordinator.phase,
+                    anchorState: &slice2State.virtualSelectionAnchorState,
+                    nodes: snaps,
+                    lists: &slice2State.virtualSelectionHosts
+                )
+                syncVirtualSelectionPins(snaps: snaps)
+                return true
+            }
+            if VirtualSelectionCollector.selectUnmountedRequest(
+                selector: key,
+                range: nil,
+                phase: &selectionState.coordinator.phase,
+                anchorState: &slice2State.virtualSelectionAnchorState,
+                nodes: snaps,
+                lists: &slice2State.virtualSelectionHosts
+            ) {
+                syncVirtualSelectionPins(snaps: snaps)
+                return true
+            }
+        }
+        if selectionState.coordinator.selectAllText(key: key, in: snaps) != nil {
+            syncVirtualSelectionPins(snaps: snaps)
+            return true
+        }
+        return false
+    }
+
+    private func selectTextIncludingVirtual(key: String, range: Range<Int>, snaps: [SelectableNodeSnapshot]) -> Bool {
+        guard !snaps.isEmpty else { return false }
+        if selectionState.coordinator.selectText(key: key, range: range, in: snaps) != nil {
+            syncVirtualSelectionPins(snaps: snaps)
+            return true
+        }
+        if !slice2State.virtualSelectionHosts.isEmpty,
+           VirtualSelectionCollector.selectUnmountedRequest(
+               selector: key,
+               range: range,
+               phase: &selectionState.coordinator.phase,
+               anchorState: &slice2State.virtualSelectionAnchorState,
+               nodes: snaps,
+               lists: &slice2State.virtualSelectionHosts
+           ) {
+            syncVirtualSelectionPins(snaps: snaps)
+            return true
+        }
+        return false
     }
 
     func computeActiveSelectionRangesByPath() -> [String: Range<Int>] {
@@ -1120,6 +1315,54 @@ internal extension Runtime {
         } else if let vSnap = resolveVirtualEndpoint(forPath: sel.path) {
             anchorTextNow = vSnap.text
             anchorResolvedPath = vSnap.path
+        } else if !slice2State.virtualSelectionHosts.isEmpty {
+            let snaps = selectableSnapshots()
+            let lists = slice2State.virtualSelectionHosts
+            let anchorState = slice2State.virtualSelectionAnchorState
+            guard let h = VirtualSelectionCollector.selectionHolderEnd(
+                phase: selectionState.coordinator.phase,
+                anchorState: anchorState,
+                nodes: snaps,
+                lists: lists
+            ) else {
+                selectionState.coordinator.phase.clear()
+                selectionState.isDraggingSelection = false
+                return
+            }
+            if sel.far != nil,
+               VirtualSelectionCollector.focusHolderEnd(
+                   holder: h,
+                   phase: selectionState.coordinator.phase,
+                   anchorState: anchorState,
+                   nodes: snaps,
+                   lists: lists
+               ) == nil {
+                selectionState.coordinator.phase.clear()
+                selectionState.isDraggingSelection = false
+                return
+            }
+            var updated = sel
+            if case .mounted(let ai) = h {
+                updated.path = snaps[ai].path
+            }
+            if let f = VirtualSelectionCollector.focusHolderEnd(
+                holder: h,
+                phase: selectionState.coordinator.phase,
+                anchorState: anchorState,
+                nodes: snaps,
+                lists: lists
+            ), case .mounted(let fi) = f, var far = updated.far {
+                far.path = snaps[fi].path
+                updated.far = far
+            }
+            if updated != sel {
+                if case .dragging(_, let unit) = selectionState.coordinator.phase {
+                    selectionState.coordinator.phase.startDrag(selection: updated, unit: unit)
+                } else {
+                    selectionState.coordinator.phase.place(updated)
+                }
+            }
+            return
         } else {
             selectionState.coordinator.phase.clear()
             selectionState.isDraggingSelection = false

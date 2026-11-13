@@ -600,11 +600,25 @@ extension Runtime {
             if animNode.isExiting { exitingIds.insert(animNode.id) }
         }
 
-        // Build effective render list matching `buildRefScene` (mounted + exiting)
+        // Build effective render list matching `buildRefScene` (mounted + exiting subtrees)
         var renderNodes: [FlatNode] = []
         var idToFlat: [NodeId: FlatNode] = [:]
         for n in flatNodes { idToFlat[n.nodeId] = n }
-        for (_, snap) in exitingSnapshots { idToFlat[snap.nodeId] = snap }
+        for (_, snap) in exitingSnapshots where idToFlat[snap.nodeId] == nil { idToFlat[snap.nodeId] = snap }
+
+        let mountedIds = Set(flatNodes.map(\.nodeId))
+        var parentIdByNodeId: [NodeId: NodeId] = [:]
+        for n in flatNodes {
+            if let pIdx = n.parentIndex, flatNodes.indices.contains(pIdx) {
+                parentIdByNodeId[n.nodeId] = flatNodes[pIdx].nodeId
+            }
+        }
+        var animParentById: [NodeId: NodeId] = [:]
+        for animNode in frameOut.nodes {
+            if let p = animNode.parent {
+                animParentById[animNode.id] = p
+            }
+        }
 
         func collectVisibleNodes(from node: FlatNode) {
             renderNodes.append(node)
@@ -615,11 +629,16 @@ extension Runtime {
         if let root = flatNodes.first {
             collectVisibleNodes(from: root)
         }
-        for animNode in frameOut.nodes where animNode.isExiting {
+        for animNode in frameOut.nodes where !mountedIds.contains(animNode.id) {
             if let snap = exitingSnapshots[animNode.id] {
                 var exitSnap = snap
-                exitSnap.zOrder = snap.zOrder + 1000
+                if animNode.isExiting {
+                    exitSnap.zOrder = snap.zOrder + 1000
+                }
                 renderNodes.append(exitSnap)
+                if let p = animParentById[animNode.id] {
+                    parentIdByNodeId[animNode.id] = p
+                }
             }
         }
         renderNodes.sort { a, b in
@@ -633,6 +652,7 @@ extension Runtime {
         var newElements: [ElementInfo] = []
         var newPresentedRects: [String: MotionRect] = [:]
         var newPresentedScales: [String: Vec2] = [:]
+        var newPresentedScaleMotionById: [NodeId: PaintScaleMotion] = [:]
         var newDrawnRectByPath: [String: MotionRect] = [:]
         var newRectSpringingById: [NodeId: Bool] = [:]
         var instances: [RenderInstance] = []
@@ -645,11 +665,12 @@ extension Runtime {
         var glyphFixups: [(index: Int, normUV: SIMD4<Float>, texW: Float, texH: Float, page: UInt16, forceScaled: Bool)] = []
         var imageFixups: [(index: Int, normUV: SIMD4<Float>, imgW: Float, imgH: Float)] = []
 
-        var childrenByParent: [Int: [FlatNode]] = [:]
+        let renderIds = Set(renderNodes.map(\.nodeId))
+        var childrenByParent: [NodeId: [FlatNode]] = [:]
         var roots: [FlatNode] = []
         for n in renderNodes {
-            if let pIdx = n.parentIndex {
-                childrenByParent[pIdx, default: []].append(n)
+            if let pId = parentIdByNodeId[n.nodeId], renderIds.contains(pId) {
+                childrenByParent[pId, default: []].append(n)
             } else {
                 roots.append(n)
             }
@@ -705,7 +726,7 @@ extension Runtime {
 
             let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
             let nextGroupFrac = isGroupScope ? ownHoverFrac : inheritedGroupFrac
-            for child in childrenByParent[n.index] ?? [] {
+            for child in childrenByParent[n.nodeId] ?? [] {
                 collectHoverAndOwnOpacity(
                     child,
                     inheritedInert: effInert,
@@ -725,10 +746,7 @@ extension Runtime {
         let dissolveParentIds = refreshDissolvePrepass(
             nodeIds: renderNodes.map(\.nodeId),
             isDissolve: { nid in renderNodes.first(where: { $0.nodeId == nid })?.el.isDissolve ?? false },
-            childIds: { nid in
-                guard let parentIdx = renderNodes.first(where: { $0.nodeId == nid })?.index else { return [] }
-                return (childrenByParent[parentIdx] ?? []).map(\.nodeId)
-            },
+            childIds: { nid in (childrenByParent[nid] ?? []).map(\.nodeId) },
             ownOpacity: { nid in
                 nodeOwnOpacityById[nid] ?? renderNodes.first(where: { $0.nodeId == nid })?.el.opacity ?? 1.0
             }
@@ -751,7 +769,7 @@ extension Runtime {
             {
                 return true
             }
-            for child in childrenByParent[n.index] ?? [] {
+            for child in childrenByParent[n.nodeId] ?? [] {
                 if hasDynamicInSubtree(child) { return true }
             }
             return false
@@ -765,7 +783,8 @@ extension Runtime {
             parentOpacity: Float,
             inheritedTransform: PresentedTransform,
             parentIsDissolve: Bool,
-            parentScaleMotion: PaintScaleMotion
+            parentScaleMotion: PaintScaleMotion,
+            parentElementIndex: Int?
         ) -> (
             continueSubtree: Bool,
             subtreeDynamic: Bool,
@@ -781,6 +800,7 @@ extension Runtime {
             needsLayer: Bool,
             extraClipLayer: Bool,
             cacheEligible: Bool,
+            elementIndex: Int,
             layerStartIdx: Int,
             surfaceStartIdx: Int,
             glyphFixupStartIdx: Int,
@@ -820,7 +840,46 @@ extension Runtime {
             }
 
             let baseRect = liveRect ?? rectMap[nid] ?? node.targetRect
-            let pinh: PresentedTransform = (el.anchor == nil ? inheritedTransform : .identity)
+            let pinh: PresentedTransform
+            var anchorScaleMotion: PaintScaleMotion = .still
+            if let a = el.anchor,
+               let anchorNode = renderNodes.first(where: { $0.key == a.key }) ?? flatNodes.first(where: { $0.key == a.key }) {
+                let anchorRect = newPresentedRects[anchorNode.path]
+                    ?? presentedRectByPath[anchorNode.path]
+                    ?? anchorNode.zoomedTargetRect
+                let anchorParentId = parentIdByNodeId[anchorNode.nodeId]
+                    ?? anchorNode.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].nodeId : nil }
+                let anchorParentPath: String? = anchorParentId.flatMap { idToFlat[$0]?.path }
+                let anchorZoom: Float = anchorParentPath.flatMap {
+                    newPresentedScales[$0]?.x
+                        ?? presentedScaleByPath[$0]?.x
+                        ?? anchorNode.parentIndex.flatMap { flatNodes.indices.contains($0) ? flatNodes[$0].inheritedScale : nil }
+                } ?? 1.0
+                pinh = AnchorLayoutHelper.anchoredPaintTransform(
+                    anchor: a,
+                    baseRect: baseRect,
+                    ownElScale: el.scale,
+                    hasScaleTrack: anchoredOverlayHasScaleTrack(el, nodeId: nid),
+                    anchorDrawnRect: anchorRect,
+                    anchorInheritedZoom: anchorZoom,
+                    viewport: viewport
+                )
+                if (abs(pinh.scale.x - 1.0) > 1e-5 || abs(pinh.scale.y - 1.0) > 1e-5),
+                   let aid = anchorParentId {
+                    if let cached = newPresentedScaleMotionById[aid] {
+                        anchorScaleMotion = cached
+                    } else if let prev = presentedScaleMotionById[aid] {
+                        anchorScaleMotion = prev
+                    } else if scene.store.isAnimating(aid, Props.SCALE)
+                        || scene.store.isAnimating(aid, Props.UNIFORM_SCALE)
+                        || scene.store.isAnimating(aid, Props.PRESENCE)
+                        || scene.store.isAnimating(aid, Props.PRESS_SCALE) {
+                        anchorScaleMotion = .moving
+                    }
+                }
+            } else {
+                pinh = (el.anchor == nil ? inheritedTransform : .identity)
+            }
             let lo = liveOffset ?? .zero
             let baseScNoPress = scaleMap[nid] ?? el.scale
             let ownScNoPress = liveScale.map { Vec2(baseScNoPress.x * max(0, $0.x), baseScNoPress.y * max(0, $0.y)) } ?? baseScNoPress
@@ -883,12 +942,14 @@ extension Runtime {
                 b.target == .scale
                     && (liveStore.isMoving(NodeId.hash("live:\(node.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
             }
-            let isOwnAnimatedScale = ownScaleSpringMoving || ownLiveScaleMoving || parentScaleMotion == .moving
+            let effectiveParentScaleMotion = max(parentScaleMotion, anchorScaleMotion)
+            let isOwnAnimatedScale = ownScaleSpringMoving || ownLiveScaleMoving || effectiveParentScaleMotion == .moving
             let settleResult = resolveScaleSettle(nodeId: nid, scale: sc.x, isAnimated: isOwnAnimatedScale, animNow: now)
             let nodeScaleMotion: PaintScaleMotion = max(
-                parentScaleMotion,
+                effectiveParentScaleMotion,
                 max(ownScaleSpringMoving ? .moving : (ownLiveScaleMoving ? .live : .still), settleResult.motion)
             )
+            newPresentedScaleMotionById[nid] = nodeScaleMotion
             let rasterScale = nodeScaleMotion.raster(sc: sc.x, rest: settleResult.raster)
             let ownOpacity = nodeOwnOpacityById[nid] ?? (liveOpacity ?? opacityMap[nid] ?? el.opacity)
             let effOpacity = (parentOpacity * ownOpacity).clamped(to: 0...1)
@@ -948,10 +1009,11 @@ extension Runtime {
                 effBg = activeFocusFill
             }
 
+            let myElementIndex = newElements.count
             newElements.append(ElementInfo(
                 path: node.path,
                 key: node.key,
-                parentIndex: node.parentIndex,
+                parentIndex: parentElementIndex,
                 role: el.role,
                 rect: [effRect.x, effRect.y, effRect.width, effRect.height],
                 target: [node.targetRect.x, node.targetRect.y, node.targetRect.width, node.targetRect.height],
@@ -983,7 +1045,7 @@ extension Runtime {
 
             let isDissolveScope = dissolveParentIds.contains(nid)
             if effOpacity <= 0.001 && !isExiting {
-                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, false, 0, 0, 0, 0, nodeScaleMotion)
+                return (false, subtreeDynamic, effOpacity, effBlur, effRect, .zero, .zero, effInert, parentClip, nextChildTransform, isDissolveScope, false, false, false, myElementIndex, 0, 0, 0, 0, nodeScaleMotion)
             }
 
             let rectPx = SIMD4<Float>(effRect.x * scale, effRect.y * scale, effRect.width * scale, effRect.height * scale)
@@ -1032,7 +1094,7 @@ extension Runtime {
             }
             let hasRoundedClip = clipRadiiPt != nil || (el.layout.clipOverflow && el.corners.maxMagnitude != 0)
             let hasCutout = clipSpec?.cutoutCircle != nil
-            let hasChildren = !(childrenByParent[node.index]?.isEmpty ?? true)
+            let hasChildren = !(childrenByParent[node.nodeId]?.isEmpty ?? true)
             let hasOverlappingShape = el.shapes.count > 1 || (el.shapes.first?.ops.count ?? 0) > 1
             let opacityNeedsLayer = effOpacity > 0.001 && ownOpacity > 0.001 && ownOpacity < 0.999 && (hasChildren || hasOverlappingShape)
             let cacheRequested = (el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false
@@ -2190,7 +2252,7 @@ extension Runtime {
                 }
             }
 
-            return (true, subtreeDynamic, paintEffOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion)
+            return (true, subtreeDynamic, paintEffOpacity, effBlur, effRect, rectPx, radiiPx, effInert, nextChildClip, nextChildTransform, isDissolveScope, needsLayer, extraClipLayer, cacheEligible, myElementIndex, layerStartIdx, surfaceStartIdx, glyphFixupStartIdx, imageFixupStartIdx, nodeScaleMotion)
         }
 
         @inline(never)
@@ -2308,7 +2370,8 @@ extension Runtime {
             parentOpacity: Float,
             inheritedTransform: PresentedTransform = .identity,
             parentIsDissolve: Bool = false,
-            parentScaleMotion: PaintScaleMotion = .still
+            parentScaleMotion: PaintScaleMotion = .still,
+            parentElementIndex: Int? = nil
         ) -> Bool {
             let savedMark = currentInheritedMark
             let activeNodeMark = node.el.elMark ?? savedMark
@@ -2321,13 +2384,14 @@ extension Runtime {
                 parentOpacity: parentOpacity,
                 inheritedTransform: inheritedTransform,
                 parentIsDissolve: parentIsDissolve,
-                parentScaleMotion: parentScaleMotion
+                parentScaleMotion: parentScaleMotion,
+                parentElementIndex: parentElementIndex
             )
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
             let childOpacity = (h.needsLayer ? 1.0 : h.effOpacity).clamped(to: 0...1)
-            for child in childrenByParent[node.index] ?? [] {
+            for child in childrenByParent[node.nodeId] ?? [] {
                 if paintSubtree(
                     child,
                     parentClip: h.nextChildClip,
@@ -2335,7 +2399,8 @@ extension Runtime {
                     parentOpacity: childOpacity,
                     inheritedTransform: h.nextChildTransform,
                     parentIsDissolve: h.isDissolveScope,
-                    parentScaleMotion: h.scaleMotion
+                    parentScaleMotion: h.scaleMotion,
+                    parentElementIndex: h.elementIndex
                 ) {
                     subtreeDynamic = true
                 }
@@ -2395,6 +2460,7 @@ extension Runtime {
         self.lastElements = newElements
         self.presentedRectByPath = newPresentedRects
         self.presentedScaleByPath = newPresentedScales
+        self.presentedScaleMotionById = newPresentedScaleMotionById
         self.drawnRectByPath = newDrawnRectByPath
         self.rectSpringingById = newRectSpringingById
         self.surfaces = newSurfaces
