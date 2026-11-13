@@ -193,6 +193,28 @@ struct TextClipboardImageParityTests {
         #expect(r3)
         #expect(e.text == "abcd @sam ")
 
+        // clearHistory and clear inside undoGroup rebase group baseline without recording spurious steps (#248).
+        var clearGroup = TextEdit("hello", multiline: true)
+        clearGroup.insert("!")
+        clearGroup.undoGroup { ed in
+            ed.clear()
+        }
+        #expect(clearGroup.text == "")
+        let clearGroupUndo = clearGroup.undo()
+        let clearGroupRedo = clearGroup.redo()
+        #expect(!clearGroupUndo)
+        #expect(!clearGroupRedo)
+
+        clearGroup.undoGroup { ed in
+            ed.insert("drop")
+            ed.clearHistory()
+            ed.insert("after")
+        }
+        #expect(clearGroup.text == "dropafter")
+        let didUndoAfterClear = clearGroup.undo()
+        #expect(didUndoAfterClear)
+        #expect(clearGroup.text == "drop")
+
         // clearHistory wipes undo/redo stacks while keeping content.
         e.clearHistory()
         let clearedUndo = e.undo()
@@ -216,31 +238,50 @@ struct TextClipboardImageParityTests {
 
     // MARK: - Clipboard HTML Sanitizer, Secret Clipboard Hold & Collation
 
-    @Test("ClipboardHTMLSanitizer keeps benign formatting and strips active XSS/CSS/URLs + CF_HTML roundtrip")
+    @Test("ClipboardHTMLSanitizer matches upstream html.rs XSS/CSS/URL/CDATA/DROP_TAG rules + CF_HTML roundtrip")
     func clipboardHTMLSanitizerParity() {
-        let dirty = """
-        <p style="color: #112233; background-image: url(https://evil.test)"><b>Hi</b>
-        <script>alert(1)</script><svg onload="alert(2)"><circle/></svg>
-        <a href="java&#x09;script:alert(3)" onclick="x()">bad</a>
-        <a href="https://rune.dev/docs">good</a>
-        <img src="data:text/html,<script>" srcset="https://cdn.rune.dev/a.png 2x, javascript:alert(4) 1x" alt="pic">
-        <!-->ghost<!-- hidden --!></p>
-        """
-        let clean = ClipboardHTMLSanitizer.sanitize(dirty)
-        #expect(clean.contains("<b>Hi</b>"))
-        #expect(clean.contains("href=\"https://rune.dev/docs\""))
-        #expect(clean.contains("srcset=\"https://cdn.rune.dev/a.png 2x\""))
-        #expect(!clean.contains("script"))
-        #expect(!clean.contains("onload"))
-        #expect(!clean.contains("onclick"))
-        #expect(!clean.contains("javascript:"))
-        #expect(!clean.contains("data:text/html"))
-        #expect(!clean.contains("url("))
-        #expect(clean.contains("ghost"))
-        #expect(!clean.contains("hidden"))
+        // Formatting & benign attributes/CSS/<style>/entities/data:image survive.
+        let html = #"<p class="p1"><b>Bold</b> <i>it</i> <a href="https://example.com/a?b=1">link</a><br/><span style="font-weight: 700; color: #333">x</span></p>"#
+        let expected = #"<p class="p1"><b>Bold</b> <i>it</i> <a href="https://example.com/a?b=1">link</a><br /><span style="font-weight: 700; color: #333">x</span></p>"#
+        #expect(ClipboardHTMLSanitizer.sanitize(html) == expected)
+        #expect(ClipboardHTMLSanitizer.sanitize("<ul><li>1 &lt; 2 &amp; 3 > 0</li></ul>") == "<ul><li>1 &lt; 2 &amp; 3 > 0</li></ul>")
+        #expect(ClipboardHTMLSanitizer.sanitize("<style>p.p1 {margin: 0; font: 12px Helvetica}</style><p>a</p>") == "<style>p.p1 {margin: 0; font: 12px Helvetica}</style><p>a</p>")
+        #expect(ClipboardHTMLSanitizer.sanitize("a < b") == "a &lt; b")
+        #expect(ClipboardHTMLSanitizer.sanitize(#"<img src="data:image/png;base64,AAAA" alt='a "q"'>"#) == #"<img src="data:image/png;base64,AAAA" alt="a &quot;q&quot;">"#)
+        #expect(ClipboardHTMLSanitizer.sanitize(#"<img srcset="data:image/png;base64,AAAA 1x, https://example.com/a.png 2x">"#) == #"<img srcset="data:image/png;base64,AAAA 1x, https://example.com/a.png 2x">"#)
+        #expect(ClipboardHTMLSanitizer.sanitize(#"<img src="cid:att-1">"#) == #"<img src="cid:att-1">"#)
+
+        // XSS, protocol-relative URLs, CSS smuggling, CDATA, DROP_TAG, entities with >8 leading zeros, unterminated tags.
+        let xssCases: [(String, String)] = [
+            ("<a href=\"//evil.example/x\">x</a>", "<a>x</a>"),
+            ("<a href=\"javascript&#0000000000000000000000000000000000058;alert(1)\">x</a>", "<a>x</a>"),
+            ("<div style=\"background:url (https://evil.example/x)\">t</div>", "<div>t</div>"),
+            ("<div style=\"background:image-set('x.png')\">t</div>", "<div>t</div>"),
+            ("<div style=\"x: ex/**/pression(1)\">t</div>", "<div>t</div>"),
+            ("<div style=\"font-family:'/*';background:url(https://evil.example/x);/*'\">t</div>", "<div>t</div>"),
+            ("<div style=\"&commat;import 'https://evil.example/x.css'\">t</div>", "<div>t</div>"),
+            ("<div style=\"color:red<script>\">t</div>", "<div>t</div>"),
+            ("<![CDATA[<script>x</script>]]>t", "t"),
+            ("<title><!--</title><script>x</script>-->t", "t"),
+            ("<textarea><div title=\"</textarea><script>x</script>\"></div></textarea>t", "<div title=\"&lt;/textarea&gt;&lt;script&gt;x&lt;/script&gt;\"></div>t"),
+            ("<xmp><script>x</script></xmp>t", "t"),
+            ("<plaintext><script>x</script>", ""),
+            ("<scr<script>ipt>alert(1)</script>", "<scr>ipt>alert(1)"),
+            ("<details open ontoggle=x>t</details>", "<details open>t</details>"),
+            ("t<img src=x", "t"),
+            ("t<a href=\"unterminated>", "t"),
+            ("<!--><script>x</script>t", "t"),
+            ("<!-- --!><script>x</script>t", "t")
+        ]
+        for (dirty, want) in xssCases {
+            #expect(ClipboardHTMLSanitizer.sanitize(dirty) == want)
+        }
 
         let packed = ClipboardHTMLSanitizer.packCFHTML("<b>Hi</b>")
         #expect(ClipboardHTMLSanitizer.unpackCFHTML(packed) == "<b>Hi</b>")
+
+        let negOffsets = "Version:0.9\r\nStartHTML:-1\r\nEndHTML:-1\r\nStartFragment:-1\r\nEndFragment:-1\r\n<html><body><!--StartFragment--><b>Ok</b><!--EndFragment--></body></html>\0\0"
+        #expect(ClipboardHTMLSanitizer.unpackCFHTML(Data(negOffsets.utf8)) == "<b>Ok</b>")
     }
 
     @Test("SecretClipboardHold hides secret text, clears on clearNow/expiry, detects replacement, and breaks retain cycle (r131)")
@@ -313,7 +354,16 @@ struct TextClipboardImageParityTests {
                         p[off] = UInt8((x * 37 + y * 13) & 0xFF)
                         p[off + 1] = UInt8((x * 19 + y * 53) & 0xFF)
                         p[off + 2] = UInt8((x * 7 + y * 97) & 0xFF)
-                        p[off + 3] = UInt8(((x + y) % 5 == 0) ? 128 : 255)
+                        let mod = (x / 7 + y / 5) % 5
+                        let alpha: UInt8
+                        switch mod {
+                        case 0: alpha = 255
+                        case 1: alpha = 0
+                        case 2: alpha = UInt8((x * 255 / max(1, w)) & 0xFF)
+                        case 3: alpha = 1 + UInt8(y % 3)
+                        default: alpha = 128
+                        }
+                        p[off + 3] = alpha
                     }
                 }
             }
@@ -322,6 +372,23 @@ struct TextClipboardImageParityTests {
             let sliced = LinearMipGenerator.generateSlicedChain(width: UInt32(w), height: UInt32(h), straightRGBA: straight)
             #expect(levels == sliced.levels)
             #expect(levels.last?.width == 1 && levels.last?.height == 1)
+
+            // Incremental slicing with tiny pixel budgets matches whole-chain output identically.
+            if let stepper = MipStepper(width: UInt32(w), height: UInt32(h), straightRGBA: straight) {
+                while !stepper.step(budgetPixels: 7) {}
+                #expect(stepper.mips == levels)
+            }
+
+            // Clear pixels (a == 0) never emit non-zero RGB light on any mip level.
+            for level in levels {
+                for off in stride(from: 0, to: level.rgba.count, by: 4) {
+                    if level.rgba[off + 3] == 0 {
+                        #expect(level.rgba[off] == 0)
+                        #expect(level.rgba[off + 1] == 0)
+                        #expect(level.rgba[off + 2] == 0)
+                    }
+                }
+            }
 
             // Reference double-precision mip 0 and mip 1
             var refLin = [Double](repeating: 0, count: w * h * 4)
@@ -365,15 +432,18 @@ struct TextClipboardImageParityTests {
                             }
                         }
                         let dstOff = (dy * nw + dx) * 4
-                        #expect(abs(Int(mip1.rgba[dstOff]) - Int(linToSrgbRef(accR))) <= 1)
-                        #expect(abs(Int(mip1.rgba[dstOff + 1]) - Int(linToSrgbRef(accG))) <= 1)
-                        #expect(abs(Int(mip1.rgba[dstOff + 2]) - Int(linToSrgbRef(accB))) <= 1)
                         let refA = UInt8(max(0, min(255, Int((accA * 255.0).rounded()))))
+                        let capA = Double(refA) / 255.0
+                        #expect(abs(Int(mip1.rgba[dstOff]) - Int(linToSrgbRef(min(accR, capA)))) <= 1)
+                        #expect(abs(Int(mip1.rgba[dstOff + 1]) - Int(linToSrgbRef(min(accG, capA)))) <= 1)
+                        #expect(abs(Int(mip1.rgba[dstOff + 2]) - Int(linToSrgbRef(min(accB, capA)))) <= 1)
                         #expect(abs(Int(mip1.rgba[dstOff + 3]) - Int(refA)) <= 1)
                     }
                 }
             }
         }
+        // MipStepper rejects dimensions above 8192 (#248).
+        #expect(MipStepper(width: 8193, height: 1, straightRGBA: Data(count: 8193 * 4)) == nil)
     }
 
     // MARK: - r371, #830, #807, FontSmoothing & GlyphAtlas LRU Eviction
@@ -443,16 +513,28 @@ struct TextClipboardImageParityTests {
         #expect(!smoothed.glyphs.isEmpty && !unsmoothed.glyphs.isEmpty)
 
         #if canImport(CoreText)
-        let emojiFont = CTFontCreateWithName("Apple Color Emoji" as CFString, 32, nil)
-        #expect(GlyphAtlas.isColorFont(emojiFont))
-        var utf16 = Array("😀".utf16)
-        var glyphs = Array<CGGlyph>(repeating: 0, count: utf16.count)
-        let mapped = CTFontGetGlyphsForCharacters(emojiFont, &utf16, &glyphs, utf16.count)
-        if mapped, glyphs[0] != 0 {
-            let colorEntry = ts.glyphAtlas.rasterizeColorGlyph(font: emojiFont, glyph: glyphs[0], fontSizePx: 32)
-            #expect(colorEntry != nil)
-            #expect((colorEntry?.pixelSize.x ?? 0) > 0 && (colorEntry?.rgba.count ?? 0) > 0)
+        // Shaping color emoji routes through GlyphAtlas color cache + PositionedGlyph.colorGlyphIndex (#807).
+        let emojiShaped = ts.shape(text: "😀🎉🚀", style: TextStyle(size: 32), maxWidth: nil, pixelScale: 1.0, emitGlyphs: true)
+        #expect(!emojiShaped.glyphs.isEmpty)
+        let colorQuads = emojiShaped.glyphs.filter { $0.colorGlyphIndex != nil }
+        #expect(!colorQuads.isEmpty)
+        for q in colorQuads {
+            #expect(q.uv == .zero)
+            let bitmap = q.colorGlyphIndex.flatMap { ts.colorGlyph($0) }
+            #expect(bitmap != nil)
+            #expect((bitmap?.rgba.count ?? 0) > 0)
         }
+
+        // Color glyph cache enforces maxColorGlyphBytes budget via LRU eviction (16 MiB default).
+        let budgetedAtlas = GlyphAtlas(width: 256, height: 256, maxCachedEntries: 4096, colorGlyphBudget: 8 * 1024)
+        let budgetedTS = TextSystem(glyphAtlas: budgetedAtlas)
+        _ = budgetedTS.shape(text: "😀🎉🚀🔥✨🎨", style: TextStyle(size: 48), maxWidth: nil, pixelScale: 1.0, emitGlyphs: true)
+        #expect(budgetedAtlas.currentColorGlyphBytes <= 8 * 1024 || budgetedAtlas.colorGlyphEntryCount <= 1)
+
+        // Oversized icon exceeding maxAtlasDimension fails gracefully without crashing out of bounds.
+        let hugeIcon = SVGIcon(viewBox: 24, paths: ["M0 0 L24 24"])
+        let hugeEntry = budgetedAtlas.rasterizeIcon(hugeIcon, pixelSize: 4096)
+        #expect(hugeEntry.uv == .zero)
         #endif
     }
 }

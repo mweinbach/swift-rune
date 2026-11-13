@@ -7,185 +7,157 @@ import CoreFoundation
 
 /// Sanitizes untrusted HTML fragments from the OS clipboard and packs/unpacks Windows `CF_HTML`.
 public enum ClipboardHTMLSanitizer: Sendable {
-    /// Maximum untrusted clipboard HTML payload processed (4 MiB, matching upstream `MAX_HTML_BYTES`).
+    /// Maximum untrusted clipboard HTML payload processed (4 MiB, matching upstream `MAX_RICH_BYTES`).
     public static let maxInputBytes = 4 * 1024 * 1024
 
+    /// Elements dropped with everything inside them (`DROP_WITH_CONTENT`).
     private static let dropWithContentTags: Set<String> = [
-        "script", "style", "noscript", "template", "iframe", "frame", "frameset",
-        "object", "embed", "applet", "svg", "math", "title", "textarea", "select",
-        "xmp", "plaintext", "noembed", "noframes"
+        "script", "iframe", "object", "applet", "noscript", "noembed", "noframes", "template", "frameset",
+        "svg", "math", "xml", "portal", "fencedframe"
     ]
 
-    private static let unwrapOnlyTags: Set<String> = [
-        "html", "head", "body", "meta", "link", "base", "form", "input", "button",
-        "fieldset", "legend", "label", "canvas", "video", "audio", "source", "track",
-        "picture", "portal", "slot", "marquee", "blink", "details", "summary", "dialog",
-        "optgroup", "option"
+    /// Elements dropped on their own; their content (if any) is sanitized as ordinary markup (`DROP_TAG`).
+    private static let dropTag: Set<String> = [
+        "base", "link", "meta", "embed", "frame", "param", "form",
+        "title", "textarea", "xmp", "plaintext", "listing"
     ]
 
-    private static let voidTags: Set<String> = ["br", "hr", "img", "wbr"]
-
-    private static let keepTags: Set<String> = [
-        "p", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6",
-        "b", "strong", "i", "em", "u", "s", "strike", "del", "ins", "mark",
-        "code", "pre", "kbd", "samp", "var", "sub", "sup", "small", "big",
-        "blockquote", "q", "cite", "ul", "ol", "li", "dl", "dt", "dd",
-        "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col",
-        "a", "img", "br", "hr", "wbr", "font"
+    /// Attributes that hold a URL (or, for `srcset`, a list of them) (`URL_ATTRIBUTES`).
+    private static let urlAttributes: Set<String> = [
+        "href", "src", "xlink:href", "background", "poster", "cite", "longdesc", "lowsrc",
+        "dynsrc", "data", "codebase", "ping", "srcset", "manifest", "icon", "profile", "classid", "archive"
     ]
 
-    private static let safeCSSProperties: Set<String> = [
-        "color", "background-color", "background", "font-weight", "font-style",
-        "font-family", "font-size", "text-decoration", "text-decoration-line",
-        "text-align", "white-space", "vertical-align", "list-style-type",
-        "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
-        "padding", "padding-top", "padding-right", "padding-bottom", "padding-left"
+    private static let dropAttributes: Set<String> = [
+        "srcdoc", "http-equiv", "action", "formaction"
     ]
 
-    /// Strips active content, unsafe URLs, unsafe CSS, and disallowed elements from untrusted HTML.
+    /// Named entities decoded during URL / CSS / `srcset` checks (`decode_entities`).
+    private static let namedEntities: [String: UnicodeScalar] = [
+        "colon": ":", "tab": "\t", "newline": "\n", "lpar": "(", "rpar": ")",
+        "sol": "/", "bsol": "\\", "amp": "&", "lt": "<", "nvlt": "<", "gt": ">", "nvgt": ">",
+        "quot": "\"", "apos": "'", "nbsp": " ", "num": "#", "period": ".",
+        "commat": "@", "semi": ";", "equals": "=", "grave": "`",
+        "plus": "+", "comma": ",", "dollar": "$"
+    ]
+
+    private static let unsafeCSSTokens: [String] = [
+        "expression(", "javascript:", "vbscript:", "data:", "@import",
+        "url(", "image-set(", "behavior:", "-moz-binding", "</", "\\", "<"
+    ]
+
+    private static let allowedRasterDataTypes: [String] = [
+        "png", "jpeg", "jpg", "gif", "webp"
+    ]
+
+    /// Strips active content, unsafe URLs, unsafe CSS, comments, CDATA, PIs, and raw-text tags while keeping ordinary text, attributes (`class`, `style`), and inert `<style>...</style>`.
     public static func sanitize(_ raw: String) -> String {
         guard !raw.isEmpty else { return "" }
         let bounded = truncateUTF8Prefix(raw, maxBytes: maxInputBytes)
-        let strippedNul = bounded.replacingOccurrences(of: "\0", with: "")
-        let bytes = Array(strippedNul.utf8)
+        let html = bounded.contains("\0") ? bounded.replacingOccurrences(of: "\0", with: "") : bounded
+        let bytes = Array(html.utf8)
         let count = bytes.count
 
         var out = ""
         out.reserveCapacity(min(count, 64 * 1024))
         var i = 0
-        var openStack: [String] = []
 
-        while i < count {
-            if bytes[i] != 0x3C { // '<'
-                let start = i
-                while i < count && bytes[i] != 0x3C {
-                    i += 1
+        while let lt = findByte(0x3C, in: bytes, from: i) { // '<'
+            if lt > i {
+                out.append(String(decoding: bytes[i..<lt], as: UTF8.self))
+            }
+
+            let next1 = lt + 1 < count ? bytes[lt + 1] : 0
+            let next2 = lt + 2 < count ? bytes[lt + 2] : 0
+
+            if startsWithASCII(bytes, at: lt, pattern: [0x3C, 0x21, 0x2D, 0x2D]) { // <!--
+                guard let end = commentEnd(bytes, from: lt) else { return out }
+                i = end
+            } else if startsWithASCIICaseInsensitive(bytes, at: lt, lowerPattern: [0x3C, 0x21, 0x5B, 0x63, 0x64, 0x61, 0x74, 0x61, 0x5B]) { // <![cdata[
+                guard let end = findPattern([0x5D, 0x5D, 0x3E], in: bytes, from: lt + 9) else { return out }
+                i = end + 3
+            } else if next1 == 0x21 || next1 == 0x3F || (next1 == 0x2F && !isASCIILetter(next2)) {
+                guard let end = findByte(0x3E, in: bytes, from: lt) else { return out }
+                i = end + 1
+            } else if next1 == 0x2F {
+                guard let tag = parseTag(bytes, nameStart: lt + 2) else { return out }
+                i = lt + 2 + tag.len
+                if !isDroppedTag(tag.name) && tag.name != "style" {
+                    out.append("</\(tag.name)>")
                 }
-                let textChunk = String(decoding: bytes[start..<i], as: UTF8.self)
-                out.append(escapeText(decodeEntities(textChunk)))
-                continue
-            }
-
-            // Comment: <!-- ... -->, <!-->, <!--->, or --!>
-            if startsWithASCII(bytes, at: i, pattern: [0x3C, 0x21, 0x2D, 0x2D]) {
-                i = skipHTMLComment(bytes, from: i + 4)
-                continue
-            }
-
-            // Declaration / PI: <!...> or <?...>
-            if i + 1 < count && (bytes[i + 1] == 0x21 || bytes[i + 1] == 0x3F) {
-                i = skipUntilGreaterThan(bytes, from: i + 2)
-                continue
-            }
-
-            guard let parsed = parseTag(bytes, at: i) else {
-                // Lone '<' not starting a valid tag name or closing tag.
-                out.append("&lt;")
-                i += 1
-                continue
-            }
-            i = parsed.nextIndex
-            let tag = parsed.name
-
-            if parsed.isClosing {
-                if dropWithContentTags.contains(tag) || unwrapOnlyTags.contains(tag) || voidTags.contains(tag) {
-                    continue
-                }
-                if keepTags.contains(tag), let idx = openStack.lastIndex(of: tag) {
-                    while openStack.count > idx {
-                        let closing = openStack.removeLast()
-                        out.append("</\(closing)>")
+            } else if isASCIILetter(next1) {
+                guard let tag = parseTag(bytes, nameStart: lt + 1) else { return out }
+                i = lt + 1 + tag.len
+                if dropWithContentTags.contains(tag.name) || tag.name == "style" {
+                    guard let close = untilClose(bytes, from: i, tagName: tag.name) else { return out }
+                    if tag.name == "style" && !tag.closed {
+                        let inner = String(decoding: bytes[i..<close.innerEnd], as: UTF8.self)
+                        if cssIsInert(inner) && cssIsInert(decodeEntities(inner)) {
+                            writeTag(tag, into: &out)
+                            out.append(inner)
+                            out.append("</style>")
+                        }
                     }
+                    i = close.afterCloseTag
+                } else if !dropTag.contains(tag.name) {
+                    writeTag(tag, into: &out)
                 }
-                continue
-            }
-
-            if dropWithContentTags.contains(tag) {
-                if !parsed.isSelfClosing {
-                    i = skipRawElementContent(bytes, from: i, tagName: tag)
-                }
-                continue
-            }
-
-            if unwrapOnlyTags.contains(tag) || !keepTags.contains(tag) {
-                continue
-            }
-
-            var attrsOut = ""
-            for (rawKey, rawVal) in parsed.attributes {
-                guard let sanitizedAttr = sanitizeAttribute(tag: tag, name: rawKey, rawValue: rawVal) else {
-                    continue
-                }
-                attrsOut.append(" \(sanitizedAttr.0)=\"\(escapeAttribute(sanitizedAttr.1))\"")
-            }
-
-            out.append("<\(tag)\(attrsOut)>")
-            if !voidTags.contains(tag) && !parsed.isSelfClosing {
-                openStack.append(tag)
+            } else {
+                out.append("&lt;")
+                i = lt + 1
             }
         }
-
-        while let remaining = openStack.popLast() {
-            out.append("</\(remaining)>")
+        if i < count {
+            out.append(String(decoding: bytes[i..<count], as: UTF8.self))
         }
         return out
     }
 
-    /// Returns true if `raw` resolves to an allowed URL scheme (`http`, `https`, `mailto`, `tel`) or relative URL.
-    public static func isSafeURL(_ raw: String) -> Bool {
+    /// Returns true if `raw` is a relative URL (excluding protocol-relative `//` / `\\` and `&` entities),
+    /// an allowed web/mail/phone/attachment scheme (`http`, `https`, `mailto`, `tel`, `cid`),
+    /// or (when `image == true`) a raster `data:image/{png,jpeg,jpg,gif,webp}` URL.
+    public static func isSafeURL(_ raw: String, image: Bool = false) -> Bool {
         let decoded = decodeEntities(raw)
-        var cleanedScalars = ""
-        for scalar in decoded.unicodeScalars {
-            // HTML URL parser ignores ASCII tabs/newlines and leading/trailing C0 controls.
-            if scalar.value == 0x09 || scalar.value == 0x0A || scalar.value == 0x0D {
-                continue
-            }
-            cleanedScalars.unicodeScalars.append(scalar)
+        var filtered = ""
+        filtered.reserveCapacity(decoded.unicodeScalars.count)
+        for scalar in decoded.unicodeScalars where !isRustControl(scalar) && !isRustWhitespace(scalar) {
+            filtered.unicodeScalars.append(scalar)
         }
-        let trimmedScalars = Array(cleanedScalars.unicodeScalars)
-        var lo = 0
-        while lo < trimmedScalars.count && (trimmedScalars[lo].value <= 0x20 || trimmedScalars[lo].value == 0x7F) {
-            lo += 1
+        let url = filtered.lowercased()
+        guard let colon = url.firstIndex(of: ":") else {
+            return !url.hasPrefix("//") && !url.hasPrefix("\\\\") && !url.contains("&")
         }
-        var hi = trimmedScalars.count
-        while hi > lo && (trimmedScalars[hi - 1].value <= 0x20 || trimmedScalars[hi - 1].value == 0x7F) {
-            hi -= 1
+        let beforeColon = url[..<colon]
+        if beforeColon.contains(where: { $0 == "/" || $0 == "?" || $0 == "#" || $0 == "&" }) {
+            return !url.hasPrefix("//") && !url.hasPrefix("\\\\") && !beforeColon.contains("&")
         }
-        let trimmed = String(String.UnicodeScalarView(trimmedScalars[lo..<hi]))
-        guard !trimmed.isEmpty, !trimmed.contains("\\") else { return false }
-
-        // Check scheme prefix before ':', '/', '?', '#'
-        for (idx, scalar) in trimmed.unicodeScalars.enumerated() {
-            if scalar == ":" {
-                if idx == 0 { return false }
-                let scheme = String(trimmed.unicodeScalars.prefix(idx)).lowercased()
-                return scheme == "http" || scheme == "https" || scheme == "mailto" || scheme == "tel"
+        switch beforeColon {
+        case "http", "https", "mailto", "tel", "cid":
+            return true
+        case "data":
+            guard image else { return false }
+            let urlBytes = Array(url.utf8)
+            for ext in allowedRasterDataTypes {
+                let prefix = "data:image/\(ext)"
+                let pCount = prefix.utf8.count
+                if url.hasPrefix(prefix), urlBytes.count > pCount {
+                    let delim = urlBytes[pCount]
+                    if delim == 0x3B || delim == 0x2C { // ';' or ','
+                        return true
+                    }
+                }
             }
-            if scalar == "/" || scalar == "?" || scalar == "#" {
-                return true
-            }
-            let validSchemeChar = (scalar.value >= 0x41 && scalar.value <= 0x5A)
-                || (scalar.value >= 0x61 && scalar.value <= 0x7A)
-                || (idx > 0 && ((scalar.value >= 0x30 && scalar.value <= 0x39) || scalar == "+" || scalar == "-" || scalar == "."))
-            if !validSchemeChar {
-                return false
-            }
+            return false
+        default:
+            return false
         }
-        return true
     }
 
     /// Packs an HTML fragment into the Windows `CF_HTML` clipboard payload format.
     public static func packCFHTML(_ fragment: String) -> Data {
-        let prefix = "<!DOCTYPE html><html><body><!--StartFragment-->"
-        let suffix = "<!--EndFragment--></body></html>"
-        let template =
-            "Version:0.9\r\n" +
-            "StartHTML:0000000000\r\n" +
-            "EndHTML:0000000000\r\n" +
-            "StartFragment:0000000000\r\n" +
-            "EndFragment:0000000000\r\n"
-        let headerLen = template.utf8.count
-        let startHTML = headerLen
+        let prefix = "<html>\r\n<body>\r\n<!--StartFragment-->"
+        let suffix = "<!--EndFragment-->\r\n</body>\r\n</html>"
+        let startHTML = 105
         let startFragment = startHTML + prefix.utf8.count
         let endFragment = startFragment + fragment.utf8.count
         let endHTML = endFragment + suffix.utf8.count
@@ -199,43 +171,88 @@ public enum ClipboardHTMLSanitizer: Sendable {
     /// Extracts the fragment (or HTML body) from a Windows `CF_HTML` clipboard payload.
     public static func unpackCFHTML(_ data: Data) -> String? {
         guard !data.isEmpty else { return nil }
-        let bytes = [UInt8](data)
-        let headerLimit = min(bytes.count, 512)
-        let headerString = String(decoding: bytes[0..<headerLimit], as: UTF8.self)
+        let rawBytes = [UInt8](data)
+        let nulIdx = rawBytes.firstIndex(of: 0) ?? rawBytes.count
+        let cappedLen = min(nulIdx, maxInputBytes)
+        guard cappedLen > 0 else { return nil }
+        let sliceBytes = Array(rawBytes[..<cappedLen])
+        guard let text = String(bytes: sliceBytes, encoding: .utf8) else { return nil }
 
-        func parseOffset(_ key: String) -> Int? {
-            guard let range = headerString.range(of: key) else { return nil }
-            let rest = headerString[range.upperBound...]
-            let digits = rest.prefix { $0.isASCII && $0.isNumber }
-            return Int(digits)
+        var startHTML: Int?
+        var endHTML: Int?
+        var startFrag: Int?
+        var endFrag: Int?
+        var headerEnd = 0
+        var sawHeader = false
+
+        var lineStart = 0
+        while lineStart < sliceBytes.count {
+            let lineEnd: Int
+            if let nl = sliceBytes[lineStart...].firstIndex(of: 0x0A) {
+                lineEnd = nl + 1
+            } else {
+                lineEnd = sliceBytes.count
+            }
+            var trimmedEnd = lineEnd
+            while trimmedEnd > lineStart && (sliceBytes[trimmedEnd - 1] == 0x0A || sliceBytes[trimmedEnd - 1] == 0x0D) {
+                trimmedEnd -= 1
+            }
+            if trimmedEnd > lineStart && sliceBytes[lineStart] == 0x3C { // '<'
+                break
+            }
+            let lineStr = String(decoding: sliceBytes[lineStart..<trimmedEnd], as: UTF8.self)
+            guard let colon = lineStr.firstIndex(of: ":") else { break }
+            sawHeader = true
+            headerEnd += (lineEnd - lineStart)
+            let key = lineStr[..<colon].trimmingCharacters(in: .whitespaces)
+            let val = lineStr[lineStr.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            let parsedOffset = Int64(val).flatMap { $0 >= 0 && $0 <= Int64(Int.max) ? Int($0) : nil }
+            switch key {
+            case "StartHTML": startHTML = parsedOffset
+            case "EndHTML": endHTML = parsedOffset
+            case "StartFragment": startFrag = parsedOffset
+            case "EndFragment": endFrag = parsedOffset
+            default: break
+            }
+            lineStart = lineEnd
         }
 
-        if let sf = parseOffset("StartFragment:"),
-           let ef = parseOffset("EndFragment:"),
-           sf >= 0, ef >= sf, ef <= bytes.count {
-            return String(decoding: bytes[sf..<ef], as: UTF8.self)
+        func utf8Slice(_ s: Int, _ e: Int) -> String? {
+            guard s >= headerEnd, s <= e, e <= sliceBytes.count else { return nil }
+            let startIdx = text.utf8.index(text.startIndex, offsetBy: s)
+            let endIdx = text.utf8.index(text.startIndex, offsetBy: e)
+            guard startIdx.samePosition(in: text) != nil, endIdx.samePosition(in: text) != nil else { return nil }
+            return String(text[startIdx..<endIdx])
         }
-        if let sh = parseOffset("StartHTML:"),
-           let eh = parseOffset("EndHTML:"),
-           sh >= 0, eh >= sh, eh <= bytes.count {
-            return String(decoding: bytes[sh..<eh], as: UTF8.self)
+
+        if let s = startFrag, let e = endFrag, let frag = utf8Slice(s, e), !frag.isEmpty {
+            return frag
         }
-        let full = String(decoding: bytes, as: UTF8.self)
-        if let sRange = full.range(of: "<!--StartFragment-->"),
-           let eRange = full.range(of: "<!--EndFragment-->", range: sRange.upperBound..<full.endIndex) {
-            return String(full[sRange.upperBound..<eRange.lowerBound])
+        let startMark = "<!--StartFragment-->"
+        let endMark = "<!--EndFragment-->"
+        if let sRange = text.range(of: startMark),
+           let eRange = text.range(of: endMark, range: sRange.upperBound..<text.endIndex) {
+            return String(text[sRange.upperBound..<eRange.lowerBound])
         }
-        return nil
+        if let s = startHTML, let e = endHTML, let doc = utf8Slice(s, e), !doc.isEmpty {
+            return doc
+        }
+        let bodyBytes = sawHeader ? sliceBytes[headerEnd...] : sliceBytes[...]
+        let body = String(decoding: bodyBytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.isEmpty ? nil : body
     }
 
     // MARK: - Internal Scanner Helpers
 
     private struct ParsedTag {
         let name: String
-        let isClosing: Bool
-        let isSelfClosing: Bool
-        let attributes: [(String, String)]
-        let nextIndex: Int
+        let attributes: [(String, String?)]
+        let closed: Bool
+        let len: Int
+    }
+
+    private static func isDroppedTag(_ name: String) -> Bool {
+        dropWithContentTags.contains(name) || dropTag.contains(name)
     }
 
     private static func truncateUTF8Prefix(_ string: String, maxBytes: Int) -> String {
@@ -251,6 +268,31 @@ public enum ClipboardHTMLSanitizer: Sendable {
         return String(string[..<end])
     }
 
+    private static func findByte(_ target: UInt8, in bytes: [UInt8], from start: Int) -> Int? {
+        var i = start
+        while i < bytes.count {
+            if bytes[i] == target { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    private static func findPattern(_ pattern: [UInt8], in bytes: [UInt8], from start: Int) -> Int? {
+        guard !pattern.isEmpty, start + pattern.count <= bytes.count else { return nil }
+        let limit = bytes.count - pattern.count
+        var i = start
+        while i <= limit {
+            var matched = true
+            for k in 0..<pattern.count where bytes[i + k] != pattern[k] {
+                matched = false
+                break
+            }
+            if matched { return i }
+            i += 1
+        }
+        return nil
+    }
+
     private static func startsWithASCII(_ bytes: [UInt8], at index: Int, pattern: [UInt8]) -> Bool {
         guard index + pattern.count <= bytes.count else { return false }
         for k in 0..<pattern.count where bytes[index + k] != pattern[k] {
@@ -259,351 +301,300 @@ public enum ClipboardHTMLSanitizer: Sendable {
         return true
     }
 
-    private static func skipHTMLComment(_ bytes: [UInt8], from start: Int) -> Int {
-        // Immediate close: <!--> or <!--->
-        if start < bytes.count && bytes[start] == 0x3E { return start + 1 }
-        if startsWithASCII(bytes, at: start, pattern: [0x2D, 0x3E]) { return start + 2 }
-        var i = start
-        while i < bytes.count {
-            if startsWithASCII(bytes, at: i, pattern: [0x2D, 0x2D, 0x3E]) { // -->
-                return i + 3
-            }
-            if startsWithASCII(bytes, at: i, pattern: [0x2D, 0x2D, 0x21, 0x3E]) { // --!>
-                return i + 4
-            }
-            i += 1
+    private static func startsWithASCIICaseInsensitive(_ bytes: [UInt8], at index: Int, lowerPattern: [UInt8]) -> Bool {
+        guard index + lowerPattern.count <= bytes.count else { return false }
+        for k in 0..<lowerPattern.count {
+            let b = bytes[index + k]
+            let lower = (b >= 0x41 && b <= 0x5A) ? (b + 32) : b
+            if lower != lowerPattern[k] { return false }
         }
-        return bytes.count
+        return true
     }
 
-    private static func skipUntilGreaterThan(_ bytes: [UInt8], from start: Int) -> Int {
-        var i = start
-        var quote: UInt8 = 0
-        while i < bytes.count {
-            let b = bytes[i]
-            if quote != 0 {
-                if b == quote { quote = 0 }
-            } else if b == 0x22 || b == 0x27 {
-                quote = b
-            } else if b == 0x3E {
-                return i + 1
+    private static func commentEnd(_ bytes: [UInt8], from start: Int) -> Int? {
+        if startsWithASCII(bytes, at: start, pattern: [0x3C, 0x21, 0x2D, 0x2D, 0x3E]) { return start + 5 } // <!-->
+        if startsWithASCII(bytes, at: start, pattern: [0x3C, 0x21, 0x2D, 0x2D, 0x2D, 0x3E]) { return start + 6 } // <!--->
+        var j = start + 4
+        while j + 2 < bytes.count {
+            if bytes[j] == 0x2D && bytes[j + 1] == 0x2D {
+                if bytes[j + 2] == 0x3E { return j + 3 } // -->
+                if bytes[j + 2] == 0x21 && j + 3 < bytes.count && bytes[j + 3] == 0x3E { return j + 4 } // --!>
             }
-            i += 1
+            j += 1
         }
-        return bytes.count
+        return nil
+    }
+
+    private static func untilClose(_ bytes: [UInt8], from start: Int, tagName: String) -> (innerEnd: Int, afterCloseTag: Int)? {
+        let needle = Array(tagName.utf8)
+        var i = start
+        while let rel = findByte(0x3C, in: bytes, from: i) {
+            let afterName = rel + 2 + needle.count
+            if rel + 1 < bytes.count && bytes[rel + 1] == 0x2F && afterName <= bytes.count {
+                var matched = true
+                for k in 0..<needle.count {
+                    let b = bytes[rel + 2 + k]
+                    let lower = (b >= 0x41 && b <= 0x5A) ? (b + 32) : b
+                    if lower != needle[k] {
+                        matched = false
+                        break
+                    }
+                }
+                if matched {
+                    let boundary = afterName < bytes.count ? bytes[afterName] : 0x3E
+                    if !isTagNameChar(boundary) {
+                        guard let gt = findByte(0x3E, in: bytes, from: afterName) else { return nil }
+                        return (rel, gt + 1)
+                    }
+                }
+            }
+            i = rel + 1
+        }
+        return nil
     }
 
     private static func isASCIILetter(_ b: UInt8) -> Bool {
         (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
     }
 
-    private static func isTagNameChar(_ b: UInt8) -> Bool {
-        isASCIILetter(b) || (b >= 0x30 && b <= 0x39) || b == 0x2D || b == 0x5F || b == 0x3A
+    private static func isASCIIAlnum(_ b: UInt8) -> Bool {
+        isASCIILetter(b) || (b >= 0x30 && b <= 0x39)
     }
 
-    private static func isWhitespace(_ b: UInt8) -> Bool {
+    private static func isTagNameChar(_ b: UInt8) -> Bool {
+        isASCIIAlnum(b) || b == 0x2D || b == 0x5F || b == 0x3A
+    }
+
+    private static func isAttrNameChar(_ b: UInt8) -> Bool {
+        isTagNameChar(b) || b == 0x2E
+    }
+
+    private static func isASCIIWhitespace(_ b: UInt8) -> Bool {
         b == 0x20 || b == 0x09 || b == 0x0A || b == 0x0D || b == 0x0C
     }
 
-    private static func parseTag(_ bytes: [UInt8], at start: Int) -> ParsedTag? {
+    private static func parseTag(_ bytes: [UInt8], nameStart: Int) -> ParsedTag? {
         let n = bytes.count
-        var i = start + 1
-        guard i < n else { return nil }
-        var isClosing = false
-        if bytes[i] == 0x2F { // '/'
-            isClosing = true
-            i += 1
-        }
-        guard i < n, isASCIILetter(bytes[i]) else { return nil }
-        let nameStart = i
+        var i = nameStart
         while i < n && isTagNameChar(bytes[i]) { i += 1 }
         let name = String(decoding: bytes[nameStart..<i], as: UTF8.self).lowercased()
+        var attributes: [(String, String?)] = []
+        var closed = false
 
-        var attributes: [(String, String)] = []
-        var isSelfClosing = false
-        while i < n {
-            while i < n && isWhitespace(bytes[i]) { i += 1 }
-            guard i < n else { break }
+        while true {
+            while i < n && (isASCIIWhitespace(bytes[i]) || bytes[i] == 0x2F) {
+                closed = (bytes[i] == 0x2F)
+                i += 1
+            }
+            guard i < n else { return nil }
             if bytes[i] == 0x3E { // '>'
-                i += 1
-                break
+                return ParsedTag(name: name, attributes: attributes, closed: closed, len: (i + 1) - nameStart)
             }
-            if bytes[i] == 0x2F { // '/'
-                i += 1
-                if i < n && bytes[i] == 0x3E {
-                    isSelfClosing = true
-                    i += 1
-                    break
-                }
-                continue
-            }
+            closed = false
 
-            let keyStart = i
-            while i < n && !isWhitespace(bytes[i]) && bytes[i] != 0x3D && bytes[i] != 0x3E && bytes[i] != 0x2F {
+            let attrStart = i
+            while i < n && !isASCIIWhitespace(bytes[i]) && bytes[i] != 0x2F && bytes[i] != 0x3E && bytes[i] != 0x3D {
                 i += 1
             }
-            if i == keyStart {
-                i += 1
-                continue
-            }
-            let attrName = String(decoding: bytes[keyStart..<i], as: UTF8.self).lowercased()
-            while i < n && isWhitespace(bytes[i]) { i += 1 }
-            var attrVal = ""
+            if i == attrStart { i += 1 } // A stray '='
+            let attr = String(decoding: bytes[attrStart..<i], as: UTF8.self).lowercased()
+            while i < n && isASCIIWhitespace(bytes[i]) { i += 1 }
+            var value: String? = nil
             if i < n && bytes[i] == 0x3D { // '='
                 i += 1
-                while i < n && isWhitespace(bytes[i]) { i += 1 }
+                while i < n && isASCIIWhitespace(bytes[i]) { i += 1 }
                 if i < n && (bytes[i] == 0x22 || bytes[i] == 0x27) {
                     let q = bytes[i]
-                    i += 1
-                    let vStart = i
-                    while i < n && bytes[i] != q { i += 1 }
-                    attrVal = String(decoding: bytes[vStart..<i], as: UTF8.self)
-                    if i < n && bytes[i] == q { i += 1 }
+                    guard let end = findByte(q, in: bytes, from: i + 1) else { return nil }
+                    value = String(decoding: bytes[(i + 1)..<end], as: UTF8.self)
+                    i = end + 1
                 } else {
                     let vStart = i
-                    while i < n && !isWhitespace(bytes[i]) && bytes[i] != 0x3E { i += 1 }
-                    attrVal = String(decoding: bytes[vStart..<i], as: UTF8.self)
+                    while i < n && !isASCIIWhitespace(bytes[i]) && bytes[i] != 0x3E { i += 1 }
+                    value = String(decoding: bytes[vStart..<i], as: UTF8.self)
                 }
             }
-            if !isClosing {
-                attributes.append((attrName, attrVal))
+            if keepAttribute(name: attr, value: value) {
+                attributes.append((attr, value))
             }
         }
-        return ParsedTag(
-            name: name,
-            isClosing: isClosing,
-            isSelfClosing: isSelfClosing,
-            attributes: attributes,
-            nextIndex: i
-        )
     }
 
-    private static func skipRawElementContent(_ bytes: [UInt8], from start: Int, tagName: String) -> Int {
-        let needle = Array(("</" + tagName).utf8)
-        var i = start
-        while i + needle.count <= bytes.count {
-            if bytes[i] == 0x3C && bytes[i + 1] == 0x2F {
-                var match = true
-                for k in 2..<needle.count {
-                    let b = bytes[i + k]
-                    let lower = (b >= 0x41 && b <= 0x5A) ? (b + 32) : b
-                    if lower != needle[k] {
-                        match = false
-                        break
+    private static func writeTag(_ tag: ParsedTag, into out: inout String) {
+        out.append("<")
+        out.append(tag.name)
+        for (name, value) in tag.attributes {
+            out.append(" ")
+            out.append(name)
+            if let value {
+                out.append("=\"")
+                for c in value {
+                    switch c {
+                    case "\"": out.append("&quot;")
+                    case "<": out.append("&lt;")
+                    case ">": out.append("&gt;")
+                    default: out.append(c)
                     }
                 }
-                if match {
-                    let after = i + needle.count
-                    if after == bytes.count || isWhitespace(bytes[after]) || bytes[after] == 0x3E || bytes[after] == 0x2F {
-                        return skipUntilGreaterThan(bytes, from: after)
-                    }
-                }
+                out.append("\"")
             }
-            i += 1
         }
-        return bytes.count
+        if tag.closed { out.append(" /") }
+        out.append(">")
     }
 
-    private static func sanitizeAttribute(tag: String, name: String, rawValue: String) -> (String, String)? {
-        if name.hasPrefix("on") { return nil }
-        let decoded = decodeEntities(rawValue)
-
-        switch name {
-        case "dir":
-            let lower = decoded.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard lower == "ltr" || lower == "rtl" || lower == "auto" else { return nil }
-            return ("dir", lower)
-        case "style":
-            guard let css = sanitizeInlineCSS(decoded) else { return nil }
-            return ("style", css)
-        case "href":
-            guard tag == "a", isSafeURL(decoded) else { return nil }
-            return ("href", decoded.trimmingCharacters(in: .whitespacesAndNewlines))
-        case "src":
-            guard tag == "img", isSafeURL(decoded) else { return nil }
-            return ("src", decoded.trimmingCharacters(in: .whitespacesAndNewlines))
-        case "srcset":
-            guard tag == "img" else { return nil }
-            let filtered = sanitizeSrcSet(decoded)
-            return filtered.isEmpty ? nil : ("srcset", filtered)
-        case "alt", "title":
-            return (name, decoded)
-        case "width", "height", "colspan", "rowspan", "start", "value":
-            let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == "%" || $0 == "p" || $0 == "x") }) else {
-                return nil
-            }
-            return (name, trimmed)
-        case "type":
-            guard tag == "ol" || tag == "ul" || tag == "li" else { return nil }
-            let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }) else {
-                return nil
-            }
-            return ("type", trimmed)
-        case "color", "face", "size":
-            guard tag == "font" else { return nil }
-            let lower = decoded.lowercased()
-            if lower.contains("url(") || lower.contains("expression(") || lower.contains("javascript:") {
-                return nil
-            }
-            return (name, decoded)
-        default:
-            return nil
-        }
+    private static func keepAttribute(name: String, value: String?) -> Bool {
+        guard !name.isEmpty, name.utf8.allSatisfy(isAttrNameChar) else { return false }
+        if name.hasPrefix("on") || dropAttributes.contains(name) { return false }
+        let val = value ?? ""
+        if name == "style" { return cssIsInert(val) && cssIsInert(decodeEntities(val)) }
+        if name == "srcset" { return srcsetIsSafe(val) }
+        if urlAttributes.contains(name) { return isSafeURL(val, image: name == "src") }
+        return true
     }
 
-    private static func sanitizeSrcSet(_ raw: String) -> String {
-        let candidates = raw.split(separator: ",", omittingEmptySubsequences: true)
-        var kept: [String] = []
-        for cand in candidates {
-            let trimmed = cand.trimmingCharacters(in: .whitespacesAndNewlines)
-            let parts = trimmed.split(maxSplits: 1, omittingEmptySubsequences: true, whereSeparator: \.isWhitespace)
-            guard let urlPart = parts.first else { continue }
-            let urlStr = String(urlPart)
-            guard isSafeURL(urlStr) else { continue }
-            if parts.count == 2 {
-                let desc = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
-                if desc.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == "." || $0 == "w" || $0 == "x") }) {
-                    kept.append("\(urlStr) \(desc)")
-                    continue
-                }
+    private static func srcsetIsSafe(_ raw: String) -> Bool {
+        let decoded = decodeEntities(raw)
+        var rest = decoded.trimmingCharacters(in: .whitespacesAndNewlines)[...]
+        guard !rest.isEmpty else { return false }
+        while !rest.isEmpty {
+            rest = rest.drop { $0.isWhitespace || $0 == "," }
+            guard !rest.isEmpty else { break }
+            let urlEnd: Substring.Index
+            if rest.count >= 5 && rest.prefix(5).lowercased() == "data:" {
+                let afterComma = rest.firstIndex(of: ",").map { rest.index(after: $0) } ?? rest.startIndex
+                urlEnd = rest[afterComma...].firstIndex(where: { $0.isWhitespace || $0 == "," }) ?? rest.endIndex
+            } else {
+                urlEnd = rest.firstIndex(where: { $0.isWhitespace || $0 == "," }) ?? rest.endIndex
             }
-            kept.append(urlStr)
+            if !isSafeURL(String(rest[..<urlEnd]), image: true) { return false }
+            rest = rest[urlEnd...]
+            if let comma = rest.firstIndex(of: ",") {
+                rest = rest[rest.index(after: comma)...]
+            } else {
+                break
+            }
         }
-        return kept.joined(separator: ", ")
+        return true
     }
 
-    private static func sanitizeInlineCSS(_ raw: String) -> String? {
-        // Reject CSS escapes or comments so active tokens cannot hide across boundaries.
-        let lower = raw.lowercased()
-        if lower.contains("\\") || lower.contains("/*") || lower.contains("url(")
-            || lower.contains("expression(") || lower.contains("-moz-binding")
-            || lower.contains("behavior") || lower.contains("@import")
-            || lower.contains("javascript:") || lower.contains("vbscript:")
-            || lower.contains("data:") {
-            return nil
+    private static func cssIsInert(_ css: String) -> Bool {
+        var stripped = ""
+        stripped.reserveCapacity(css.count)
+        var rest = css[...]
+        while let start = rest.range(of: "/*") {
+            stripped.append(contentsOf: rest[..<start.lowerBound])
+            let afterCommentStart = rest[start.upperBound...]
+            guard let end = afterCommentStart.range(of: "*/") else { return false }
+            rest = afterCommentStart[end.upperBound...]
         }
-        var kept: [String] = []
-        for decl in raw.split(separator: ";", omittingEmptySubsequences: true) {
-            let parts = decl.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2 else { continue }
-            let prop = parts[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let val = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard safeCSSProperties.contains(prop), !val.isEmpty else { continue }
-            kept.append("\(prop): \(val)")
+        stripped.append(contentsOf: rest)
+        return cssTokensClean(css) && cssTokensClean(stripped)
+    }
+
+    private static func cssTokensClean(_ css: String) -> Bool {
+        var compact = ""
+        compact.reserveCapacity(css.unicodeScalars.count)
+        for scalar in css.unicodeScalars where !isRustWhitespace(scalar) && !isRustControl(scalar) {
+            compact.unicodeScalars.append(scalar)
         }
-        return kept.isEmpty ? nil : kept.joined(separator: "; ")
+        let plain = compact.lowercased()
+        for bad in unsafeCSSTokens where plain.contains(bad) {
+            return false
+        }
+        return true
+    }
+
+    private static func isRustControl(_ scalar: UnicodeScalar) -> Bool {
+        let v = scalar.value
+        return v <= 0x1F || (v >= 0x7F && v <= 0x9F)
+    }
+
+    private static func isRustWhitespace(_ scalar: UnicodeScalar) -> Bool {
+        Character(scalar).isWhitespace
     }
 
     private static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
         var out = ""
         out.reserveCapacity(text.count)
-        let scalars = Array(text.unicodeScalars)
+        let bytes = Array(text.utf8)
+        let n = bytes.count
         var i = 0
-        while i < scalars.count {
-            if scalars[i] == "&" {
-                if let (decoded, next) = parseEntity(scalars, from: i + 1) {
-                    out.unicodeScalars.append(decoded)
-                    i = next
-                    continue
+
+        while let amp = findByte(0x26, in: bytes, from: i) {
+            if amp > i {
+                out.append(String(decoding: bytes[i..<amp], as: UTF8.self))
+            }
+            var bodyEnd = amp + 1
+            while bodyEnd < n && (isASCIIAlnum(bytes[bodyEnd]) || bytes[bodyEnd] == 0x23) {
+                bodyEnd += 1
+            }
+            let bodyStart = amp + 1
+            var matched: (UnicodeScalar, Int)? = nil
+
+            if bodyStart < bodyEnd && bytes[bodyStart] == 0x23 { // '#'
+                var cursor = bodyStart + 1
+                var radix: UInt32 = 10
+                var prefixLen = 1
+                if cursor < bodyEnd && (bytes[cursor] == 0x78 || bytes[cursor] == 0x58) { // 'x'/'X'
+                    radix = 16
+                    prefixLen = 2
+                    cursor += 1
+                }
+                let digitsStart = cursor
+                while cursor < bodyEnd && isDigit(bytes[cursor], radix: radix) {
+                    cursor += 1
+                }
+                if cursor > digitsStart {
+                    var nonZeroStart = digitsStart
+                    while nonZeroStart < cursor && bytes[nonZeroStart] == 0x30 {
+                        nonZeroStart += 1
+                    }
+                    let scalar: UnicodeScalar
+                    if nonZeroStart == cursor {
+                        scalar = UnicodeScalar(0xFFFD)!
+                    } else {
+                        let digitStr = String(decoding: bytes[nonZeroStart..<cursor], as: UTF8.self)
+                        if let val = UInt32(digitStr, radix: Int(radix)), val != 0, let valid = UnicodeScalar(val) {
+                            scalar = valid
+                        } else {
+                            scalar = UnicodeScalar(0xFFFD)!
+                        }
+                    }
+                    matched = (scalar, prefixLen + (cursor - digitsStart))
+                }
+            } else if bodyStart < bodyEnd {
+                let name = String(decoding: bytes[bodyStart..<bodyEnd], as: UTF8.self).lowercased()
+                if let c = namedEntities[name] {
+                    matched = (c, bodyEnd - bodyStart)
                 }
             }
-            out.unicodeScalars.append(scalars[i])
-            i += 1
-        }
-        return out
-    }
 
-    private static func parseEntity(_ scalars: [UnicodeScalar], from start: Int) -> (UnicodeScalar, Int)? {
-        guard start < scalars.count else { return nil }
-        if scalars[start] == "#" {
-            var i = start + 1
-            guard i < scalars.count else { return nil }
-            let isHex = scalars[i] == "x" || scalars[i] == "X"
-            if isHex { i += 1 }
-            let digitStart = i
-            var value: UInt32 = 0
-            while i < scalars.count && i - digitStart < 8 {
-                let v = scalars[i].value
-                let digit: UInt32?
-                if v >= 0x30 && v <= 0x39 {
-                    digit = v - 0x30
-                } else if isHex && v >= 0x41 && v <= 0x46 {
-                    digit = 10 + (v - 0x41)
-                } else if isHex && v >= 0x61 && v <= 0x66 {
-                    digit = 10 + (v - 0x61)
-                } else {
-                    digit = nil
+            if let (ch, used) = matched {
+                out.unicodeScalars.append(ch)
+                i = amp + 1 + used
+                if i < n && bytes[i] == 0x3B { // ';'
+                    i += 1
                 }
-                guard let d = digit else { break }
-                value = value &* (isHex ? 16 : 10) &+ d
-                i += 1
+            } else {
+                out.append("&")
+                i = amp + 1
             }
-            guard i > digitStart else { return nil }
-            if i < scalars.count && scalars[i] == ";" { i += 1 }
-            if value == 0 || value > 0x10FFFF {
-                return (UnicodeScalar(0xFFFD)!, i)
-            }
-            return (UnicodeScalar(value) ?? UnicodeScalar(0xFFFD)!, i)
         }
 
-        var end = start
-        while end < scalars.count && end - start < 16 {
-            let v = scalars[end].value
-            if !((v >= 0x41 && v <= 0x5A) || (v >= 0x61 && v <= 0x7A) || (v >= 0x30 && v <= 0x39)) {
-                break
-            }
-            end += 1
-        }
-        guard end > start, end < scalars.count, scalars[end] == ";" else { return nil }
-        let name = String(String.UnicodeScalarView(scalars[start..<end]))
-        let mapped: UnicodeScalar?
-        switch name.lowercased() {
-        case "amp": mapped = "&"
-        case "lt": mapped = "<"
-        case "gt": mapped = ">"
-        case "quot": mapped = "\""
-        case "apos": mapped = "'"
-        case "nbsp": mapped = UnicodeScalar(0x00A0)
-        case "colon": mapped = ":"
-        case "tab": mapped = "\t"
-        case "newline": mapped = "\n"
-        default: mapped = nil
-        }
-        guard let scalar = mapped else { return nil }
-        return (scalar, end + 1)
-    }
-
-    private static func escapeText(_ text: String) -> String {
-        var out = ""
-        out.reserveCapacity(text.count)
-        for ch in text {
-            switch ch {
-            case "&": out.append("&amp;")
-            case "<": out.append("&lt;")
-            case ">": out.append("&gt;")
-            default: out.append(ch)
-            }
+        if i < n {
+            out.append(String(decoding: bytes[i..<n], as: UTF8.self))
         }
         return out
     }
 
-    private static func escapeAttribute(_ text: String) -> String {
-        var out = ""
-        out.reserveCapacity(text.count)
-        for ch in text {
-            switch ch {
-            case "&": out.append("&amp;")
-            case "<": out.append("&lt;")
-            case ">": out.append("&gt;")
-            case "\"": out.append("&quot;")
-            case "'": out.append("&#39;")
-            default: out.append(ch)
-            }
+    private static func isDigit(_ b: UInt8, radix: UInt32) -> Bool {
+        if b >= 0x30 && b <= 0x39 { return true }
+        if radix == 16 {
+            return (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66)
         }
-        return out
+        return false
     }
 }
 

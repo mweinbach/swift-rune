@@ -208,9 +208,23 @@ public struct SVGIcon: Sendable, Hashable {
 public struct PositionedGlyph: Sendable, Equatable {
     /// Quad `[x, y, width, height]` in logical points relative to the text box origin.
     public var rect: SIMD4<Float>
-    /// Normalized `[u0, v0, u1, v1]` in `GlyphAtlas`.
+    /// Normalized `[u0, v0, u1, v1]` in `GlyphAtlas` (`.zero` for RGBA color glyphs).
     public var uv: SIMD4<Float>
     public var color: Color?
+    /// Non-nil index into `GlyphAtlas.colorGlyph(_:)` for RGBA color/emoji glyphs (`#807`).
+    public var colorGlyphIndex: UInt32?
+
+    public init(
+        rect: SIMD4<Float>,
+        uv: SIMD4<Float>,
+        color: Color? = nil,
+        colorGlyphIndex: UInt32? = nil
+    ) {
+        self.rect = rect
+        self.uv = uv
+        self.color = color
+        self.colorGlyphIndex = colorGlyphIndex
+    }
 }
 
 /// Shaped multi-line text result with metrics, glyph quads, and caret lookup helpers.
@@ -240,10 +254,21 @@ public final class GlyphAtlas: @unchecked Sendable {
 
     /// Cached RGBA8 color glyph bitmap (`#807`, Apple Color Emoji / COLR / CBDT / sbix).
     public struct ColorGlyphEntry: Sendable, Equatable {
+        public var index: UInt32
         public var pixelSize: SIMD2<Int>
         public var bearingPx: SIMD2<Float>
         public var rgba: Data
+
+        public init(index: UInt32 = 0, pixelSize: SIMD2<Int>, bearingPx: SIMD2<Float>, rgba: Data) {
+            self.index = index
+            self.pixelSize = pixelSize
+            self.bearingPx = bearingPx
+            self.rgba = rgba
+        }
     }
+
+    /// Upstream CPU byte budget for cached RGBA color glyphs (`atlas.rs:52`, `COLOR_GLYPH_BUDGET`).
+    public static let colorGlyphBudgetBytes: Int = 16 * 1024 * 1024
 
     #if canImport(CoreText) && canImport(CoreGraphics)
     private struct GlyphKey: Hashable {
@@ -278,6 +303,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     public private(set) var atlas: R8Atlas
     public private(set) var generation: UInt64 = 1
     public let maxCachedEntries: Int
+    public let maxColorGlyphBytes: Int
     public let maxAtlasDimension: Int = 4096
     private let targetWidth: Int
     private let targetHeight: Int
@@ -289,17 +315,68 @@ public final class GlyphAtlas: @unchecked Sendable {
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
     private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64)] = [:]
+    private var colorGlyphByIndex: [UInt32: ColorGlyphEntry] = [:]
     private var colorGlyphBytes: Int = 0
+    private var nextColorGlyphIndex: UInt32 = 1
     #endif
     private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
     private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
 
     /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
-    public init(width: Int = 1024, height: Int = 1024, maxCachedEntries: Int = 4096) {
+    public convenience init(width: Int = 1024, height: Int = 1024, maxCachedEntries: Int = 4096) {
+        self.init(
+            width: width,
+            height: height,
+            maxCachedEntries: maxCachedEntries,
+            colorGlyphBudget: GlyphAtlas.colorGlyphBudgetBytes
+        )
+    }
+
+    /// Initializes the atlas with an explicit color-glyph CPU memory budget (`#807`, default 16 MiB).
+    public init(
+        width: Int = 1024,
+        height: Int = 1024,
+        maxCachedEntries: Int = 4096,
+        colorGlyphBudget: Int
+    ) {
         self.targetWidth = max(1, width)
         self.targetHeight = max(1, height)
         self.atlas = R8Atlas(width: 1, height: 1)
         self.maxCachedEntries = max(1, maxCachedEntries)
+        self.maxColorGlyphBytes = max(0, colorGlyphBudget)
+    }
+
+    /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
+    public var currentColorGlyphBytes: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphBytes
+        #else
+        return 0
+        #endif
+    }
+
+    /// Number of currently cached RGBA color glyphs (`#807`).
+    public var colorGlyphEntryCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphCache.count
+        #else
+        return 0
+        #endif
+    }
+
+    /// Looks up a previously emitted color glyph bitmap by its `PositionedGlyph.colorGlyphIndex` (`#807`).
+    public func colorGlyph(_ index: UInt32) -> ColorGlyphEntry? {
+        lock.lock()
+        defer { lock.unlock() }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        return colorGlyphByIndex[index]
+        #else
+        return nil
+        #endif
     }
 
     /// True once at least one mask/glyph/icon has triggered CPU backing allocation (`#830`).
@@ -417,7 +494,10 @@ public final class GlyphAtlas: @unchecked Sendable {
             italic: italic
         )
         lock.lock()
-        let uv = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap)
+        guard let uv = allocateAndBlit(width: r.width, height: r.height, bitmap: r.bitmap) else {
+            lock.unlock()
+            return Entry(uv: .zero, pixelSize: SIMD2<Int>(r.width, r.height), bearingPx: SIMD2<Float>(0, r.bearingY))
+        }
         let entry = Entry(
             uv: uv,
             pixelSize: SIMD2<Int>(r.width, r.height),
@@ -498,15 +578,21 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
         guard drawn else { return nil }
 
+        lock.lock()
+        let idx = nextColorGlyphIndex == 0 ? 1 : nextColorGlyphIndex
+        nextColorGlyphIndex = idx &+ 1
+        if nextColorGlyphIndex == 0 { nextColorGlyphIndex = 1 }
         let entry = ColorGlyphEntry(
+            index: idx,
             pixelSize: SIMD2<Int>(bw, bh),
             bearingPx: SIMD2<Float>(Float(minX), Float(-maxY)),
             rgba: rgba
         )
-        lock.lock()
         accessCounter &+= 1
         colorGlyphCache[key] = (entry, accessCounter)
+        colorGlyphByIndex[idx] = entry
         colorGlyphBytes += rgba.count
+        evictColorGlyphBudgetLocked(preserving: key)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -586,7 +672,10 @@ public final class GlyphAtlas: @unchecked Sendable {
         CTFontDrawGlyphs(font, &g, &pos, 1, ctx)
 
         lock.lock()
-        let uv = allocateAndBlit(width: bw, height: bh, bitmap: bitmap)
+        guard let uv = allocateAndBlit(width: bw, height: bh, bitmap: bitmap) else {
+            lock.unlock()
+            return nil
+        }
         // CoreGraphics row 0 in `bitmap` is the TOP row (`y = maxY` above baseline)!
         let entry = Entry(
             uv: uv,
@@ -666,7 +755,10 @@ public final class GlyphAtlas: @unchecked Sendable {
         #endif
 
         lock.lock()
-        let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap)
+        guard let uv = allocateAndBlit(width: px, height: px, bitmap: bitmap) else {
+            lock.unlock()
+            return Entry(uv: .zero, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
+        }
         let entry = Entry(uv: uv, pixelSize: SIMD2<Int>(px, px), bearingPx: .zero)
         accessCounter &+= 1
         iconCache[key] = (entry, accessCounter)
@@ -682,10 +774,14 @@ public final class GlyphAtlas: @unchecked Sendable {
         }
     }
 
-    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float> {
+    private func allocateAndBlit(width bw: Int, height bh: Int, bitmap: [UInt8]) -> SIMD4<Float>? {
+        guard bw > 0, bh > 0 else { return nil }
         ensureBackingLocked()
-        if bw + 2 > atlas.width {
-            growAtlas(minWidth: bw + 4, minHeight: atlas.height)
+        if bw + 2 > atlas.width || bh + 2 > atlas.height {
+            growAtlas(minWidth: max(atlas.width, bw + 4), minHeight: max(atlas.height, bh + 4))
+        }
+        guard bw + 2 <= atlas.width && bh + 2 <= atlas.height else {
+            return nil
         }
         if shelfX + bw + 1 >= atlas.width {
             shelfX = 1
@@ -693,11 +789,14 @@ public final class GlyphAtlas: @unchecked Sendable {
             shelfHeight = 0
         }
         if shelfY + bh + 1 >= atlas.height {
-            if atlas.height >= maxAtlasDimension && shelfY + bh + 1 >= maxAtlasDimension {
+            if atlas.height >= maxAtlasDimension {
                 resetShelfLocked()
             } else {
                 growAtlas(minWidth: atlas.width, minHeight: shelfY + bh + 2)
             }
+        }
+        guard shelfX + bw + 1 <= atlas.width && shelfY + bh + 1 <= atlas.height else {
+            return nil
         }
 
         let dstX = shelfX
@@ -787,6 +886,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             case .glyph(let k, _): glyphCache.removeValue(forKey: k)
             case .color(let k, _):
                 if let removed = colorGlyphCache.removeValue(forKey: k) {
+                    colorGlyphByIndex.removeValue(forKey: removed.entry.index)
                     colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
                 }
             #endif
@@ -794,6 +894,26 @@ public final class GlyphAtlas: @unchecked Sendable {
             total -= 1
         }
     }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private func evictColorGlyphBudgetLocked(preserving keepKey: ColorGlyphKey) {
+        while colorGlyphBytes > maxColorGlyphBytes {
+            var oldestKey: ColorGlyphKey?
+            var oldestSeq: UInt64 = .max
+            for (k, v) in colorGlyphCache where k != keepKey {
+                if oldestKey == nil || v.lastUsed < oldestSeq {
+                    oldestKey = k
+                    oldestSeq = v.lastUsed
+                }
+            }
+            guard let victim = oldestKey, let removed = colorGlyphCache.removeValue(forKey: victim) else {
+                break
+            }
+            colorGlyphByIndex.removeValue(forKey: removed.entry.index)
+            colorGlyphBytes = max(0, colorGlyphBytes - removed.entry.rgba.count)
+        }
+    }
+    #endif
 
     private func growAtlas(minWidth: Int, minHeight: Int) {
         let oldW = atlas.width
@@ -1183,6 +1303,11 @@ public final class TextSystem: @unchecked Sendable {
         return lastObservedFontEpoch
     }
 
+    /// Looks up a cached RGBA color glyph bitmap emitted during `shape(...)` (`#807`).
+    public func colorGlyph(_ index: UInt32) -> GlyphAtlas.ColorGlyphEntry? {
+        glyphAtlas.colorGlyph(index)
+    }
+
     /// CSS font family lists backing `.systemUI` (`sans`) and `.monospace` (`mono`).
     public func families() -> (sans: String, mono: String) {
         syncGlobalFamiliesIfNeeded()
@@ -1563,6 +1688,7 @@ public final class TextSystem: @unchecked Sendable {
                 let attrs = CTRunGetAttributes(run) as NSDictionary
                 let runFont = (attrs[kCTFontAttributeName] as! CTFont)
                 let runFontSizePx = Float(CTFontGetSize(runFont))
+                let runIsColor = GlyphAtlas.isColorFont(runFont)
                 let runColor: Color? = (attrs[spanColorKey] as? Int).flatMap { idx in
                     (0..<spanPalette.count).contains(idx) ? spanPalette[idx] : nil
                 }
@@ -1572,11 +1698,33 @@ public final class TextSystem: @unchecked Sendable {
                 CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
                 CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
 
+                let invS = 1.0 / scale
                 for i in 0..<glyphCount {
                     let gxPx = alignOffsetPx + Float(positions[i].x)
                     let gyPx = baselineYPx - Float(positions[i].y)
                     let floorX = floorf(gxPx)
                     let subX = gxPx - floorX
+                    if runIsColor, let colorEntry = glyphAtlas.rasterizeColorGlyph(
+                        font: runFont,
+                        glyph: glyphs[i],
+                        fontSizePx: runFontSizePx
+                    ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
+                        let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
+                        let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                        glyphsOut.append(PositionedGlyph(
+                            rect: SIMD4<Float>(
+                                quadXPx * invS,
+                                quadYPx * invS,
+                                Float(colorEntry.pixelSize.x) * invS,
+                                Float(colorEntry.pixelSize.y) * invS
+                            ),
+                            uv: .zero,
+                            color: runColor,
+                            colorGlyphIndex: colorEntry.index
+                        ))
+                        continue
+                    }
+
                     guard let entry = glyphAtlas.rasterizeGlyph(
                         font: runFont,
                         glyph: glyphs[i],
@@ -1589,7 +1737,6 @@ public final class TextSystem: @unchecked Sendable {
 
                     let quadXPx = floorX + subX + entry.bearingPx.x
                     let quadYPx = gyPx + entry.bearingPx.y
-                    let invS = 1.0 / scale
                     glyphsOut.append(PositionedGlyph(
                         rect: SIMD4<Float>(
                             quadXPx * invS,

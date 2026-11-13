@@ -28,6 +28,7 @@ public struct MenuKeyEquivalent: Sendable, Equatable {
         case .arrowDown: scalar = 0xf701
         case .arrowLeft: scalar = 0xf702
         case .arrowRight: scalar = 0xf703
+        case .insert: scalar = 0xf727
         case .delete: scalar = 0xf728
         case .home: scalar = 0xf729
         case .end: scalar = 0xf72b
@@ -35,7 +36,7 @@ public struct MenuKeyEquivalent: Sendable, Equatable {
         case .pageDown: scalar = 0xf72d
         case .f(let n) where (1...24).contains(n):
             scalar = 0xf704 + UInt32(n - 1)
-        case .command, .text, .f:
+        case .command, .text, .f, .contextMenu, .printScreen, .scrollLock, .pause, .modifier:
             scalar = 0
         }
 

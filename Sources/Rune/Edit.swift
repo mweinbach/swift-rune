@@ -572,10 +572,7 @@ public struct TextEdit: Sendable, Equatable {
 
     public mutating func clear() {
         setText("", recordUndo: false)
-        undoStack.removeAll()
-        redoStack.removeAll()
-        historyBytes = 0
-        historyRun = .closed
+        clearHistory()
     }
 
     public mutating func selectAll() {
