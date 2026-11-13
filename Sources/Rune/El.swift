@@ -109,11 +109,36 @@ public struct WheelEvent: Sendable, Equatable {
 /// Transaction handle passed into every event handler (`rune::Tx`).
 public struct Tx {
     public internal(set) var liveOnlyRequested: Bool = false
-    public internal(set) var settleRequested: Bool = false
+    public internal(set) var commitKind: TxCommit = .animate
+    public internal(set) var motionSource: MotionSource? = nil
+    public internal(set) var followEdgeRequested: Bool = false
+    public internal(set) var askedMotion: Bool = false
+    public internal(set) var unprompted: Bool = false
+    public internal(set) var colorMotionSpring: Spring? = nil
+    public internal(set) var clock: Double = 0.0
+
+    public internal(set) var settleRequested: Bool {
+        get { commitKind.snaps }
+        set { commitKind = newValue ? .settle : .animate }
+    }
+
     public internal(set) var requestedFocusKey: String? = nil
+    public internal(set) var requestedFocusVisible: Bool = true
+    public internal(set) var focusAskedByReturn: Bool = false
     public internal(set) var blurFocusRequested: Bool = false
     public internal(set) var clipboardWrite: ClipboardContent? = nil
-    public internal(set) var scrollToRequests: [(key: String, offset: Vec2, animated: Bool)] = []
+    public var scrollToRequests: [(key: String, offset: Vec2, animated: Bool)] {
+        scrollOffsetRequests.compactMap { req in
+            guard !req.anchor, let x = req.x, let y = req.y else { return nil }
+            return (req.key, Vec2(x, y), req.glide != nil)
+        }
+    }
+    public internal(set) var scrollRevealRequests: [ScrollRevealRequest] = []
+    public internal(set) var scrollBottomRequests: [(key: String, animated: Bool)] = []
+    public internal(set) var scrollPageRequests: [(key: String, pages: Int)] = []
+    public internal(set) var scrollOffsetRequests: [ScrollOffsetRequest] = []
+    public internal(set) var keepOnScreenKeys: [String] = []
+    public internal(set) var invalidateMemoPrefixes: [String] = []
     public internal(set) var windowTitle: String? = nil
     public internal(set) var quitRequested: Bool = false
     public internal(set) var textFlights: [(source: String, destination: String)] = []
@@ -129,14 +154,84 @@ public struct Tx {
         liveOnlyRequested = true
     }
 
-    /// Cuts all animations created by this state commit immediately to rest without springing.
+    /// Reverts `liveOnlyRequested` when a handler declines an event (`Tx::took`).
+    @discardableResult
+    public static func took(_ taken: Bool, _ tx: inout Tx) -> Bool {
+        if !taken { tx.liveOnlyRequested = false }
+        return taken
+    }
+
+    /// Applies this change at once (snaps its own layout) while leaving other running tracks alone.
+    public mutating func instant() {
+        commitKind = commitKind.instant()
+    }
+
+    /// Animates this change even where the runtime would otherwise snap, preserving any `settle()` land flag.
+    public mutating func animated() {
+        commitKind = commitKind.animated()
+        askedMotion = true
+    }
+
+    /// Cuts all animations created by this state commit and lands every running track.
     public mutating func settle() {
-        settleRequested = true
+        commitKind = .settle
+    }
+
+    /// Lands every running track while allowing this change's own layout to animate.
+    public mutating func settleAnimated() {
+        commitKind = .settleAnimated
+    }
+
+    /// Animates this change's layout using `spring`.
+    public mutating func motion(_ spring: Spring) {
+        motionSource = .spring(spring)
+    }
+
+    /// Animates this change's layout using `anim` (spring or eased tween).
+    public mutating func motionCurve(_ anim: Anim<Float>) {
+        motionSource = .fromAnim(anim)
+    }
+
+    /// Animates this change's layout using `curve`.
+    public mutating func motionCurve(_ curve: Curve, delay: Float = 0) {
+        motionSource = .fromAnim(Anim<Float>(curve: curve, delay: delay))
+    }
+
+    /// Rows pinned to a `stickBottom` viewport's bottom ride its edge through this change (`Tx::follow_edge`).
+    public mutating func followEdge() {
+        followEdgeRequested = true
+    }
+
+    /// Animates this change's color transitions with `spring`.
+    public mutating func colorMotion(_ spring: Spring) {
+        colorMotionSpring = spring
+    }
+
+    /// Requests a wake deadline `seconds` from now (`Tx::wake_after`).
+    public mutating func wakeAfter(_ seconds: Double) {
+        let clamped = max(0.0, seconds)
+        if let existing = runtimeActions["wakeAfter"] as? Double {
+            runtimeActions["wakeAfter"] = min(existing, clamped)
+        } else {
+            runtimeActions["wakeAfter"] = clamped
+        }
+    }
+
+    /// Requests a wake once the logical `clock` reaches `due` (`Tx::wake_at`).
+    public mutating func wakeAt(_ due: Double) {
+        wakeAfter(max(0.0, due - clock))
+    }
+
+    /// Evicts memoized subtrees whose keys begin with `prefix` (`Tx::invalidate_memos_by_prefix`).
+    public mutating func invalidateMemosByPrefix(_ prefix: String) {
+        invalidateMemoPrefixes.append(prefix)
     }
 
     /// Moves keyboard focus to the element with `.key(targetKey)`.
     public mutating func focus(_ targetKey: String) {
         requestedFocusKey = targetKey
+        requestedFocusVisible = true
+        focusAskedByReturn = false
         blurFocusRequested = false
     }
 
@@ -153,7 +248,123 @@ public struct Tx {
 
     /// Scrolls the scroll container `.key(key)` to `offset`.
     public mutating func scrollTo(_ key: String, offset: Vec2, animated: Bool = true) {
-        scrollToRequests.append((key, offset, animated))
+        scrollOffsetRequests.append(
+            ScrollOffsetRequest(
+                key: key,
+                x: offset.x,
+                y: offset.y,
+                glide: animated ? MotionTokens.GLIDE : nil,
+                anchor: false
+            )
+        )
+    }
+
+    /// Reveals a keyed element (including an unrealized virtual row) in its scroll viewports.
+    public mutating func scrollIntoView(_ key: String) {
+        scrollRevealRequests.append(.intoView(scope: nil, key: key))
+    }
+
+    /// Reveals `key` inside `scope` only.
+    public mutating func scrollIntoViewIn(_ scope: String, _ key: String) {
+        scrollRevealRequests.append(.intoView(scope: scope, key: key))
+    }
+
+    /// Reveals and vertically centers a keyed element or highlight.
+    public mutating func scrollCenter(_ key: String) {
+        scrollRevealRequests.append(.center(scope: nil, key: key, animated: true))
+    }
+
+    /// Vertically centers `key` inside `scope` only.
+    public mutating func scrollCenterIn(_ scope: String, _ key: String) {
+        scrollRevealRequests.append(.center(scope: scope, key: key, animated: true))
+    }
+
+    /// Instantly centers `key` inside `scope` only.
+    public mutating func scrollCenterInInstant(_ scope: String, _ key: String) {
+        scrollRevealRequests.append(.center(scope: scope, key: key, animated: false))
+    }
+
+    /// Glides the scroll viewport `key` (or nearest enclosing one) to its bottom.
+    public mutating func scrollToBottom(_ key: String) {
+        scrollBottomRequests.append((key, true))
+    }
+
+    /// Instantly jumps the scroll viewport `key` (or nearest enclosing one) to its bottom.
+    public mutating func scrollToBottomInstant(_ key: String) {
+        scrollBottomRequests.append((key, false))
+    }
+
+    /// Pages the scroll viewport `key` by `pages` pages (90% of viewport height per page).
+    public mutating func scrollPage(_ key: String, _ pages: Int) {
+        scrollPageRequests.append((key, pages))
+    }
+
+    /// Instantly moves the horizontal scroll viewport `key` to `x`.
+    public mutating func scrollToX(_ key: String, _ x: Float) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: x, y: nil, glide: nil, anchor: false))
+    }
+
+    /// Instantly moves the vertical scroll viewport `key` to `y`.
+    public mutating func scrollToY(_ key: String, _ y: Float) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: y, glide: nil, anchor: false))
+    }
+
+    /// Glides the scroll viewport `key` to `(x, y)` using `MotionTokens.GLIDE`.
+    public mutating func scrollTo(_ key: String, x: Float, y: Float) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: x, y: y, glide: MotionTokens.GLIDE, anchor: false))
+    }
+
+    /// Glides the scroll viewport `key` to `(x, y)` using `spring`.
+    public mutating func scrollToWith(_ key: String, x: Float, y: Float, spring: Spring) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: x, y: y, glide: spring, anchor: false))
+    }
+
+    /// Instantly moves the scroll viewport `key` to `(x, y)`.
+    public mutating func scrollToInstant(_ key: String, x: Float, y: Float) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: x, y: y, glide: nil, anchor: false))
+    }
+
+    /// Moves the vertical scroll viewport around `key` so its top sits `at` points below the viewport top.
+    public mutating func scrollKeyTo(_ key: String, at: Float) {
+        scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: at, glide: nil, anchor: true))
+    }
+
+    /// Holds the top edge of `key` in its drawn screen position across this commit.
+    public mutating func keepOnScreen(_ key: String) {
+        keepOnScreenKeys.append(key)
+    }
+
+    /// Merges another handler's transaction intent into `self` (`runtime/input/action.rs::merge`).
+    public mutating func merge(_ one: Tx) {
+        scrollRevealRequests.append(contentsOf: one.scrollRevealRequests)
+        scrollBottomRequests.append(contentsOf: one.scrollBottomRequests)
+        scrollPageRequests.append(contentsOf: one.scrollPageRequests)
+        scrollOffsetRequests.append(contentsOf: one.scrollOffsetRequests)
+        keepOnScreenKeys.append(contentsOf: one.keepOnScreenKeys)
+        invalidateMemoPrefixes.append(contentsOf: one.invalidateMemoPrefixes)
+        textFlights.append(contentsOf: one.textFlights)
+        launches.append(contentsOf: one.launches)
+        unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
+        if let cb = one.clipboardWrite { clipboardWrite = cb }
+        if let title = one.windowTitle { windowTitle = title }
+        quitRequested = quitRequested || one.quitRequested
+        blurFocusRequested = blurFocusRequested || one.blurFocusRequested
+        if let fk = one.requestedFocusKey {
+            requestedFocusKey = fk
+            requestedFocusVisible = one.requestedFocusVisible
+            focusAskedByReturn = one.focusAskedByReturn
+        }
+        if let wake = one.runtimeActions["wakeAfter"] as? Double {
+            wakeAfter(wake)
+        }
+        for (k, v) in one.runtimeActions where k != "wakeAfter" {
+            runtimeActions[k] = v
+        }
+        commitKind = commitKind.merge(one.commitKind)
+        followEdgeRequested = followEdgeRequested || one.followEdgeRequested
+        askedMotion = askedMotion || one.askedMotion
+        if let m = one.motionSource { motionSource = m }
+        if let cm = one.colorMotionSpring { colorMotionSpring = cm }
     }
 
     public mutating func setTitle(_ title: String) {
@@ -351,9 +562,15 @@ public struct ElementHandlers<State> {
 
     /// Mutable projection into `State` for `textInput` elements!
     public var editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void)?
+    public var onInputKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
     public var onTextChange: ((inout State, String, inout Tx) -> Void)?
     public var onTextSubmit: ((inout State, String, inout Tx) -> Void)?
     public var modalDismiss: ((inout State, inout Tx) -> Void)?
+
+    public var onAtBottom: ((inout State, Bool) -> Void)?
+    public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)?
+    public var onScrollOffset: ((ScrollPos) -> Void)?
+    public var onVisibleRows: ((inout State, Range<Int>) -> Bool)?
 
     public init() {}
 }
@@ -364,7 +581,19 @@ struct ElColdData<State> {
     var clipCorners: Corners? = nil
     var clipFade: SIMD4<Float>? = nil
     var scrollEdgeFadeWidth: Float = 0
+    var scrollFadeStyle: ScrollFadeStyle = .smooth
     var scrollMarginPts: Float = 0
+    var scrollAnchorEnabled: Bool = false
+    var stickyConfig: StickyConfig? = nil
+    var growthSpec: GrowthSpec? = nil
+    var isStreaming: Bool = false
+    var isArrivesWhole: Bool = false
+    var foldGlideSpec: FoldGlide? = nil
+    var virtualEstimate: Float? = nil
+    var virtualRowsSource: VirtualRowSource<State>? = nil
+    var virtualRowsVersion: UInt64? = nil
+    var focusSelected: Bool = false
+    var revealSelected: Bool = false
 
     var hoverBg: Color? = nil
     var pressBg: Color? = nil
@@ -521,7 +750,19 @@ public struct El<State> {
     public var clipCorners: Corners? { get { _cold?.data.clipCorners } set { ensureCold().data.clipCorners = newValue } }
     public var clipFade: SIMD4<Float>? { get { _cold?.data.clipFade } set { ensureCold().data.clipFade = newValue } }
     public var scrollEdgeFadeWidth: Float { get { _cold?.data.scrollEdgeFadeWidth ?? 0 } set { ensureCold().data.scrollEdgeFadeWidth = newValue } }
+    public var scrollFadeStyle: ScrollFadeStyle { get { _cold?.data.scrollFadeStyle ?? .smooth } set { ensureCold().data.scrollFadeStyle = newValue } }
     public var scrollMarginPts: Float { get { _cold?.data.scrollMarginPts ?? 0 } set { ensureCold().data.scrollMarginPts = newValue } }
+    public var scrollAnchorEnabled: Bool { get { _cold?.data.scrollAnchorEnabled ?? false } set { ensureCold().data.scrollAnchorEnabled = newValue } }
+    internal var stickyConfig: StickyConfig? { get { _cold?.data.stickyConfig } set { ensureCold().data.stickyConfig = newValue } }
+    public var growthSpec: GrowthSpec? { get { _cold?.data.growthSpec } set { ensureCold().data.growthSpec = newValue } }
+    public var isStreaming: Bool { get { _cold?.data.isStreaming ?? false } set { ensureCold().data.isStreaming = newValue } }
+    public var isArrivesWhole: Bool { get { _cold?.data.isArrivesWhole ?? false } set { ensureCold().data.isArrivesWhole = newValue } }
+    public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
+    public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
+    internal var virtualRowsSource: VirtualRowSource<State>? { get { _cold?.data.virtualRowsSource } set { ensureCold().data.virtualRowsSource = newValue } }
+    internal var virtualRowsVersionHash: UInt64? { get { _cold?.data.virtualRowsVersion } set { ensureCold().data.virtualRowsVersion = newValue } }
+    public var isFocusSelected: Bool { get { _cold?.data.focusSelected ?? false } set { ensureCold().data.focusSelected = newValue } }
+    public var isRevealSelected: Bool { get { _cold?.data.revealSelected ?? false } set { ensureCold().data.revealSelected = newValue } }
     public var hoverBg: Color? { get { _cold?.data.hoverBg } set { ensureCold().data.hoverBg = newValue } }
     public var pressBg: Color? { get { _cold?.data.pressBg } set { ensureCold().data.pressBg = newValue } }
     public var pressScaleFactor: Float? { get { _cold?.data.pressScaleFactor } set { ensureCold().data.pressScaleFactor = newValue } }
@@ -899,6 +1140,10 @@ public struct El<State> {
         return copy
     }
 
+    public func scroll(_ spec: ScrollSpec) -> Self {
+        scroll(stickBottom: spec.stickBottom)
+    }
+
     public func scrollY(stickBottom: Bool = false) -> Self {
         scroll(stickBottom: stickBottom)
     }
@@ -923,15 +1168,121 @@ public struct El<State> {
         return copy
     }
 
+    public func onAtBottom(_ handler: @escaping (inout State, Bool) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onAtBottom = handler
+        return copy
+    }
+
+    public func onFarFromBottom(_ min: Float, _ handler: @escaping (inout State, Bool) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onFarFromBottom = (min, nil, handler)
+        return copy
+    }
+
+    public func onFarFromBottomUnder(_ min: Float, frame: String, _ handler: @escaping (inout State, Bool) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onFarFromBottom = (min, frame, handler)
+        return copy
+    }
+
+    public func onScrollOffset(_ handler: @escaping (ScrollPos) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onScrollOffset = handler
+        return copy
+    }
+
+    public func chainScrollOffset(_ handler: @escaping (ScrollPos) -> Void) -> Self {
+        var copy = self
+        if let prev = copy.handlers.onScrollOffset {
+            copy.handlers.onScrollOffset = { pos in
+                prev(pos)
+                handler(pos)
+            }
+        } else {
+            copy.handlers.onScrollOffset = handler
+        }
+        return copy
+    }
+
+    public func scrollAnchor(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.scrollAnchorEnabled = enabled
+        return copy
+    }
+
+    public func scrollFade(_ fade: ScrollFade) -> Self {
+        var copy = self
+        copy.scrollEdgeFadeWidth = fade.width
+        copy.scrollFadeStyle = fade.style
+        return copy
+    }
+
     public func stickyTop(_ offset: Float = 0) -> Self {
         var copy = self
-        copy.layout.sticky = .top(offset)
+        let clean = offset.isFinite ? offset : 0
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.edge = .top(clean)
+        cfg.inset = clean
+        cfg.tail = false
+        copy.stickyConfig = cfg
+        copy.layout.sticky = .top(clean)
+        return copy
+    }
+
+    public func stickyTopShowing(_ show: Float) -> Self {
+        var copy = stickyTop(show)
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.tail = true
+        copy.stickyConfig = cfg
         return copy
     }
 
     public func stickyBottom(_ offset: Float = 0) -> Self {
         var copy = self
-        copy.layout.sticky = .bottom(offset)
+        let clean = offset.isFinite ? offset : 0
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.edge = .bottom(clean)
+        cfg.inset = clean
+        cfg.tail = false
+        copy.stickyConfig = cfg
+        copy.layout.sticky = .bottom(clean)
+        return copy
+    }
+
+    public func stickyLeft(_ offset: Float = 0) -> Self {
+        var copy = self
+        let clean = offset.isFinite ? offset : 0
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.edge = .left(clean)
+        cfg.inset = clean
+        cfg.tail = false
+        copy.stickyConfig = cfg
+        copy.layout.sticky = .left(clean)
+        return copy
+    }
+
+    public func stuckShadow(_ shadow: Shadow) -> Self {
+        var copy = self
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.shadows.append(shadow)
+        copy.stickyConfig = cfg
+        return copy
+    }
+
+    public func stuckFade(lead: Float, span: Float) -> Self {
+        var copy = self
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.fade = (lead, max(0, span))
+        copy.stickyConfig = cfg
+        return copy
+    }
+
+    public func stuckReveal(_ span: Float) -> Self {
+        var copy = self
+        var cfg = copy.stickyConfig ?? StickyConfig()
+        cfg.reveal = max(1e-3, span)
+        copy.stickyConfig = cfg
         return copy
     }
 
@@ -1169,9 +1520,7 @@ public struct El<State> {
     }
 
     public func scrollEdgeFade(_ width: Float) -> Self {
-        var copy = self
-        copy.scrollEdgeFadeWidth = max(0, width)
-        return copy
+        scrollFade(.strength(width))
     }
 
     public func scrollMargin(_ pts: Float) -> Self {
@@ -1430,6 +1779,95 @@ public struct El<State> {
         return copy
     }
 
+    public func focusSelected(_ selected: Bool = true) -> Self {
+        var copy = self
+        copy.isFocusSelected = selected
+        return copy
+    }
+
+    public func revealSelected(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isRevealSelected = enabled
+        return copy
+    }
+
+    // MARK: - Growth & Virtualization Modifiers
+
+    public func growth(_ spec: GrowthSpec = .default) -> Self {
+        var copy = self
+        copy.growthSpec = spec
+        return copy
+    }
+
+    public func streaming(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isStreaming = enabled
+        return copy
+    }
+
+    public func arrivesWhole() -> Self {
+        var copy = self
+        copy.isArrivesWhole = true
+        return copy
+    }
+
+    public func foldGlide(_ spring: Spring) -> Self {
+        var copy = self
+        copy.isArrivesWhole = true
+        copy.foldGlideSpec = FoldGlide(spring: spring, feather: copy.foldGlideSpec?.feather)
+        return copy
+    }
+
+    public func foldFeather(_ pt: Float) -> Self {
+        var copy = self
+        if var g = copy.foldGlideSpec {
+            g.feather = max(0, pt)
+            copy.foldGlideSpec = g
+        }
+        return copy
+    }
+
+    public func virtualize(_ estimatedRowHeight: Float = 32) -> Self {
+        var copy = self
+        copy.virtualEstimate = max(1, estimatedRowHeight)
+        return copy
+    }
+
+    public func virtualRows(
+        count: Int,
+        estimatedRowHeight: Float,
+        key: @escaping (State, Int) -> String,
+        build: @escaping (State, Int) -> El<State>
+    ) -> Self {
+        var copy = self
+        copy.virtualRowsSource = VirtualRowSource(count: count, key: key, build: build)
+        return copy.virtualize(estimatedRowHeight)
+    }
+
+    public func virtualRows(
+        _ count: Int,
+        _ estimatedRowHeight: Float,
+        key: @escaping (State, Int) -> String,
+        build: @escaping (State, Int) -> El<State>
+    ) -> Self {
+        virtualRows(count: count, estimatedRowHeight: estimatedRowHeight, key: key, build: build)
+    }
+
+    public func virtualRowsVersion<H: Hashable>(_ version: H) -> Self {
+        var copy = self
+        var hasher = Hasher()
+        hasher.combine(version)
+        let signed = hasher.finalize()
+        copy.virtualRowsVersionHash = UInt64(bitPattern: Int64(signed))
+        return copy
+    }
+
+    public func onVisibleRows(_ handler: @escaping (inout State, Range<Int>) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onVisibleRows = handler
+        return copy
+    }
+
     public func focusGroup(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.focusGroup = enabled
@@ -1679,6 +2117,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Observes pointer movement over this element without reading `State` (`El::on_pointer_move_any`).
+    public func onPointerMoveAny(_ handler: @escaping (PointerPress, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onPointerMove = { _, press, tx in handler(press, &tx) }
+        return copy
+    }
+
     public func onHover(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onHover = handler
@@ -1794,6 +2239,13 @@ public struct El<State> {
     public func onKey(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
         var copy = self
         copy.handlers.onKey = handler
+        return copy
+    }
+
+    /// Handles a focused text field's key before `TextEdit` processes it; return `true` to consume (`El::on_input_key`).
+    public func onInputKey(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
+        var copy = self
+        copy.handlers.onInputKey = handler
         return copy
     }
 

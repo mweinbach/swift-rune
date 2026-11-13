@@ -62,6 +62,42 @@ public struct ElementInfo: Sendable, Equatable {
     public var a11yValue: String? = nil
     public var a11yDescription: String? = nil
     public var a11yHidden: Bool = false
+    public var stuck: Float = 0.0
+
+    public static func stub(_ key: String) -> ElementInfo {
+        ElementInfo(
+            path: "/0/@\(key)",
+            key: key,
+            parentIndex: 0,
+            role: .group,
+            rect: [0, 0, 0, 0],
+            target: [0, 0, 0, 0],
+            visible: [0, 0, 0, 0],
+            opacity: 1.0,
+            scale: 1.0,
+            blur: 0.0,
+            radius: 0.0,
+            fill: .transparent,
+            textColor: nil,
+            text: nil,
+            label: nil,
+            help: nil,
+            selected: nil,
+            expanded: nil,
+            level: nil,
+            itemSelected: false,
+            focusable: false,
+            focused: false,
+            focusVisible: false,
+            inert: false,
+            moving: false,
+            exiting: false,
+            hover: 0.0,
+            press: 0.0,
+            scrolled: [0, 0],
+            caret: nil
+        )
+    }
 }
 
 /// Retained stateful coordinator driving declarative `El<State>` views, layout, `Scene` motion,
@@ -86,6 +122,12 @@ public final class Runtime<State> {
         var inheritedScale: Float = 1.0
         var anchorAttachNorm: Vec2? = nil
         var activeClipFades: [EdgeFadeSpec] = []
+        var ownScrollFade: EdgeFadeSpec? = nil
+        var ownClipFade: EdgeFadeSpec? = nil
+        var enclosingScrollIndex: Int? = nil
+        var enclosingVScrollIndex: Int? = nil
+        var enclosingHScrollIndex: Int? = nil
+        var isSticky: Bool { el.stickyConfig?.edge != nil }
     }
 
     private struct WalkItem {
@@ -103,6 +145,9 @@ public final class Runtime<State> {
         var inheritedZ: Int
         var inInstantSubtree: Bool
         var inheritedClipFades: [EdgeFadeSpec]
+        var enclosingScrollIndex: Int?
+        var enclosingVScrollIndex: Int?
+        var enclosingHScrollIndex: Int?
     }
 
     private struct DragSession {
@@ -129,6 +174,9 @@ public final class Runtime<State> {
         let flightCover: FlightCoverTransform?
         let flightClipOverride: MotionRect?
         let emitLiftedNow: Bool
+        let parentStickyShift: Vec2
+        let parentStickyMag: Float
+        let kidsFadeOpacity: Float
     }
 
     private struct EmitNodeExit {
@@ -261,7 +309,7 @@ public final class Runtime<State> {
     public let textSystem: TextSystem
     public let waker: Waker
     public private(set) var scene: Scene
-    private var scrollStore: AnimationStore
+    internal var scrollStore: AnimationStore
     internal var liveStore: AnimationStore
 
     public internal(set) var currentTime: Double = 0.0
@@ -336,8 +384,8 @@ public final class Runtime<State> {
     public private(set) var hoveredKey: String? = nil
     public private(set) var pressedPath: String? = nil
     public private(set) var pressedKey: String? = nil
-    public private(set) var focusedPath: String? = nil
-    public private(set) var focusedKey: String? = nil
+    public internal(set) var focusedPath: String? = nil
+    public internal(set) var focusedKey: String? = nil
     public private(set) var focusVisible: Bool = false
     private var webFocusTabStartPath: String? = nil
 
@@ -348,11 +396,49 @@ public final class Runtime<State> {
 
     // Scroll state keyed by element path
     internal var scrollOffsets: [String: Vec2] = [:]
-    private var scrollMaxExtents: [String: Vec2] = [:]
-    private var scrollViewportSizes: [String: Vec2] = [:]
-    private var scrollContentSizes: [String: Vec2] = [:]
-    private var wasPinnedToBottom: Set<String> = []
+    internal var scrollMaxExtents: [String: Vec2] = [:]
+    internal var scrollViewportSizes: [String: Vec2] = [:]
+    internal var scrollContentSizes: [String: Vec2] = [:]
+    internal var wasPinnedToBottom: Set<String> = []
     private var autofocusAppliedPaths: Set<String> = []
+
+    // Increment 4 parity state (`TxCommit`, `ScrollRequests`, `VirtualFill`, `GrowthStack`, `Sticky`)
+    internal var pendingCommitKind: TxCommit = .animate
+    internal var pendingCommitMotion: MotionSource? = nil
+    internal var pendingColorMotionSpring: Spring? = nil
+    internal var pendingFollowEdge: Bool = false
+    internal var pendingUnprompted: Bool = false
+    internal var pendingScrollReveals: [ScrollRevealRequest] = []
+    internal var pendingScrollBottoms: [(key: String, animated: Bool)] = []
+    internal var pendingScrollPages: [(key: String, pages: Int)] = []
+    internal var pendingScrollOffsets: [ScrollOffsetRequest] = []
+    internal var pendingKeepOnScreenKeys: [String] = []
+    internal var scrollRequestsState = ScrollRequestsState()
+    internal var scrollGlidingPaths: Set<String> = []
+    internal var virtualLists: [String: RuntimeVirtualListState] = [:]
+    internal var activeVirtualPaths: Set<String> = []
+    internal var virtualFill = VirtualFillStateMachine()
+    internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]
+    internal struct RuntimeGrowthEntry: Sendable {
+        var track: GrowTrack
+        var edge: StreamEdge
+        var spring: Spring
+        var foldLimit: Float
+    }
+    internal var growthRows: [String: RuntimeGrowthEntry] = [:]
+    internal var growthSubstepAccumulator: Double = 0
+    internal var lastGrowthStepTime: Double? = nil
+    internal var atBottomStates: [String: Bool] = [:]
+    internal var farFromBottomStates: [String: Bool] = [:]
+    internal var lastScrollOffsetReports: [String: ScrollPos] = [:]
+    internal var stuckShiftsByPath: [String: Vec2] = [:]
+    internal var isDispatchingHover: Bool = false
+    internal var suppressRevealFromHoverCommit: Bool = false
+    internal var lastVirtualFillWanted: Bool = false
+    internal var lastVirtualFillMissing: Int = 0
+    internal var lastVirtualFillMoved: Bool = false
+    internal var lastFocusSelectedPaths: Set<String> = []
+    internal var lastRevealSelectedPaths: Set<String> = []
     private var loopRuntime = LoopRuntime()
     private var enterDelays: [NodeId: Double] = [:]
     private var releasedEnterDelays: Set<NodeId> = []
@@ -422,17 +508,17 @@ public final class Runtime<State> {
     private var liveTextSeenSeq: [String: UInt64] = [:]
 
     internal var flatNodes: [FlatNode] = []
-    private var nodeByPath: [String: Int] = [:]
+    internal var nodeByPath: [String: Int] = [:]
     internal var nodeById: [NodeId: FlatNode] = [:]
     internal var exitingSnapshots: [NodeId: FlatNode] = [:]
     internal var lastElements: [ElementInfo] = []
     internal var presentedRectByPath: [String: MotionRect] = [:]
     internal var presentedScaleByPath: [String: Vec2] = [:]
-    private var hitGeometryByPath: [String: HitGeometry] = [:]
-    private var paintOrderPaths: [String] = []
+    internal var hitGeometryByPath: [String: HitGeometry] = [:]
+    internal var paintOrderPaths: [String] = []
     internal var imagePacker = ImageAtlasPacker()
     internal let residentCacheTracker = ResidentLayerTracker()
-    private var retainedLayout = RetainedLayoutCoordinator()
+    internal var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
     private var forceInitialSettle: Bool = true
     private var pendingEventTime: Double? = nil
@@ -627,6 +713,9 @@ public final class Runtime<State> {
             let t = now + loopInterval
             best = best.map { min($0, t) } ?? t
         }
+        if let fillDue = virtualFill.armedWake?.due, fillDue > now {
+            best = best.map { min($0, fillDue) } ?? fillDue
+        }
         return best
     }
 
@@ -679,6 +768,13 @@ public final class Runtime<State> {
         liveStore.pixelScale = pixelScale
         _ = runPoll(at: now)
         flushPlatformFrameWork(at: now)
+
+        if let attempt = virtualFill.wake(at: now) {
+            if virtualFill.step(.due(attempt: attempt, now: now)) == .draw {
+                needsCommit = true
+            }
+        }
+        let growthMoving = advanceGrowthRows(at: now)
 
         // Release any `enterDelay` elements whose wait window has elapsed
         var releasedAny = false
@@ -744,7 +840,16 @@ public final class Runtime<State> {
             if anyScrollMoved {
                 commitTree(at: now, cut: false)
             }
+        } else if !scrollGlidingPaths.isEmpty {
+            scrollGlidingPaths.removeAll(keepingCapacity: true)
         }
+        scrollRequestsState.stepFinish(
+            gliding: { scrollGlidingPaths.contains($0) },
+            animating: { _ in scrollStore.isAnimating },
+            mounted: { target in
+                flatNodes.contains { selectsElementSelector(target.key, path: $0.path, key: $0.key) }
+            }
+        )
 
         // Sample Scene & Live property bindings using scaled animation clock
         let frameOut = scene.frame(at: animNow)
@@ -770,6 +875,9 @@ public final class Runtime<State> {
             || scrollStore.isAnimating
             || liveStore.isAnimating
             || liveActive
+            || growthMoving
+            || growthRows.values.contains { $0.track.moving }
+            || virtualFill.isFilling
             || !enterDelays.isEmpty
             || tooltipFading(at: now)
             || loopRuntime.hasActiveLoops(at: now, reducedMotion: reducedMotion)
@@ -811,7 +919,17 @@ public final class Runtime<State> {
 
     private func commitTree(at now: Double, cut: Bool) {
         measureFramePhase(.commit) {
-            if cut {
+            let commitKind = pendingCommitKind
+            pendingCommitKind = .animate
+            let commitMotion = pendingCommitMotion
+            pendingCommitMotion = nil
+            let commitColorSpring = pendingColorMotionSpring
+            pendingColorMotionSpring = nil
+            let commitFollowEdge = pendingFollowEdge
+            pendingFollowEdge = false
+            let commitCut = cut || commitKind == .settle
+
+            if commitCut {
                 enterDelays.removeAll()
                 releasedEnterDelays.removeAll()
                 activeFlightIds.removeAll()
@@ -820,7 +938,16 @@ public final class Runtime<State> {
             }
             let sincePass = memo.nextPass()
             MemoSnapshot.enter {
-                commitTreePass(at: now, cut: cut, settlePass: 0)
+                commitTreePass(
+                    at: now,
+                    cut: cut,
+                    settlePass: 0,
+                    commitKind: commitKind,
+                    commitMotion: commitMotion,
+                    commitColorSpring: commitColorSpring,
+                    commitFollowEdge: commitFollowEdge,
+                    commitCut: commitCut
+                )
             }
             memo.keepSince(sincePass)
         }
@@ -836,10 +963,20 @@ public final class Runtime<State> {
         return nil
     }
 
-    private func commitTreePass(at now: Double, cut: Bool, settlePass: Int) {
+    private func commitTreePass(
+        at now: Double,
+        cut: Bool,
+        settlePass: Int,
+        commitKind: TxCommit,
+        commitMotion: MotionSource?,
+        commitColorSpring: Spring?,
+        commitFollowEdge: Bool,
+        commitCut: Bool
+    ) {
         viewCommitCount += 1
         if settlePass == 0 {
             CommitGenerationStore.increment()
+            captureKeepAnchorsBeforeCommit()
         }
         let focusedCaret = currentFocusedCaret()
         cxSettings.lastCommittedCaret = focusedCaret
@@ -934,7 +1071,16 @@ public final class Runtime<State> {
             cxSettings.isApplyingZoom = false
             needsCommit = false
             if settlePass == 0 {
-                commitTreePass(at: now, cut: cut, settlePass: 1)
+                commitTreePass(
+                    at: now,
+                    cut: cut,
+                    settlePass: 1,
+                    commitKind: commitKind,
+                    commitMotion: commitMotion,
+                    commitColorSpring: commitColorSpring,
+                    commitFollowEdge: commitFollowEdge,
+                    commitCut: commitCut
+                )
                 return
             }
         }
@@ -943,14 +1089,36 @@ public final class Runtime<State> {
             clearColor = rootEl.background
         }
 
-        let solvedRoot = measureFramePhase(.layout) {
+        let (expandedRoot, virtualExpansion) = expandVirtualSubtrees(in: rootEl)
+        var layoutRoot = expandedRoot
+        var solvedRoot = measureFramePhase(.layout) {
             retainedLayout.compute(
-                root: rootEl,
+                root: layoutRoot,
                 state: state,
                 viewport: viewport,
                 pixelScale: pixelScale,
                 textSystem: textSystem
             )
+        }
+        let growthCapture = updateGrowthRowsPostLayout(
+            rootResult: solvedRoot,
+            rootEl: layoutRoot,
+            cut: cut,
+            snaps: commitKind.snaps,
+            lands: commitKind.lands,
+            at: now
+        )
+        if growthCapture.needsClampedRelayout {
+            layoutRoot = applyGrowthConstraints(in: layoutRoot)
+            solvedRoot = measureFramePhase(.layout) {
+                retainedLayout.compute(
+                    root: layoutRoot,
+                    state: state,
+                    viewport: viewport,
+                    pixelScale: pixelScale,
+                    textSystem: textSystem
+                )
+            }
         }
 
         // Flatten tree, assign unique structural/keyed paths, clamp scroll offsets, and collect NodeSpecs
@@ -964,11 +1132,11 @@ public final class Runtime<State> {
 
         let fullWindowClip = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
 
-        let rootResolvedKey: String? = rootEl.keyId
+        let rootResolvedKey: String? = layoutRoot.keyId
         let rootPath: String = rootResolvedKey.map { "/@\($0)" } ?? "/0"
         var walkStack: [WalkItem] = [
             WalkItem(
-                el: rootEl,
+                el: layoutRoot,
                 solved: solvedRoot,
                 resolvedKey: rootResolvedKey,
                 path: rootPath,
@@ -981,7 +1149,10 @@ public final class Runtime<State> {
                 inheritedInert: false,
                 inheritedZ: 0,
                 inInstantSubtree: false,
-                inheritedClipFades: []
+                inheritedClipFades: [],
+                enclosingScrollIndex: nil,
+                enclosingVScrollIndex: nil,
+                enclosingHScrollIndex: nil
             )
         ]
 
@@ -1032,19 +1203,7 @@ public final class Runtime<State> {
                 }
             }
 
-            // Apply sticky pinning inside scroll viewport if `.stickyTop` / `.stickyBottom` is set
-            if let sticky = el.layout.sticky {
-                switch sticky {
-                case .top(let pinOffset):
-                    let minTop = inheritedClip.top + pinOffset
-                    if worldY < minTop { worldY = minTop }
-                case .bottom(let pinOffset):
-                    let maxBottom = inheritedClip.bottom - pinOffset
-                    if worldY + localRect.height > maxBottom {
-                        worldY = maxBottom - localRect.height
-                    }
-                }
-            }
+            // Sticky push-out is evaluated at paint time in `buildRefScene` using presented rects.
 
             let targetRect = MotionRect.fromXYWH(worldX, worldY, localRect.width, localRect.height)
             let zoomedTargetRect = AnchorLayoutHelper.zoomedRect(targetRect, chain: scaleChain)
@@ -1089,27 +1248,22 @@ public final class Runtime<State> {
                 scrollOffsets[path] = curScroll
                 ownScroll = curScroll
 
-                if el.scrollEdgeFadeWidth > 0 {
-                    let w = el.scrollEdgeFadeWidth
-                    let hidTop = curScroll.y
-                    let hidBot = max(0, maxSY - curScroll.y)
-                    let hidLeft = curScroll.x
-                    let hidRight = max(0, maxSX - curScroll.x)
-                    let topW: Float = (el.layout.scrollAxes.contains(.vertical) && hidTop > 0.5) ? w : 0
-                    let botW: Float = (el.layout.scrollAxes.contains(.vertical) && hidBot > 0.5) ? w : 0
-                    let leftW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidLeft > 0.5) ? w : 0
-                    let rightW: Float = (el.layout.scrollAxes.contains(.horizontal) && hidRight > 0.5) ? w : 0
-                    if topW > 0 || botW > 0 || leftW > 0 || rightW > 0 {
-                        let sTop = min(1.0, hidTop / 15.0)
-                        let sBot = min(1.0, hidBot / 15.0)
-                        let sLeft = min(1.0, hidLeft / 15.0)
-                        let sRight = min(1.0, hidRight / 15.0)
-                        scrollFadeInfo = EdgeFadeSpec(
-                            rect: intersectRects(inheritedClip, targetRect),
-                            widths: SIMD4<Float>(leftW, topW, rightW, botW),
-                            strengths: SIMD4<Float>(sLeft, sTop, sRight, sBot)
-                        )
-                    }
+                if el.scrollEdgeFadeWidth > 0 || el.scrollFadeStyle.end != nil {
+                    let dummyNode = FlatNode(
+                        index: 0,
+                        parentIndex: parentIdx,
+                        path: path,
+                        key: resolvedKey,
+                        nodeId: nid,
+                        el: el,
+                        targetRect: targetRect,
+                        zoomedTargetRect: zoomedTargetRect,
+                        contentSize: solved.layout.contentSize,
+                        clipRect: inheritedClip,
+                        effectiveInert: false,
+                        zOrder: 0
+                    )
+                    scrollFadeInfo = computeScrollFadeSpec(for: dummyNode)
                 }
             }
 
@@ -1124,18 +1278,19 @@ public final class Runtime<State> {
                 childClip = inheritedClip
             }
 
+            let ownClipFadeSpec: EdgeFadeSpec? = el.clipFade.map { cf in
+                EdgeFadeSpec(
+                    rect: intersectRects(inheritedClip, targetRect),
+                    widths: cf,
+                    strengths: SIMD4<Float>(repeating: 1.0)
+                )
+            }
             var childClipFades = inheritedClipFades
             if let sf = scrollFadeInfo {
                 childClipFades.append(sf)
             }
-            if let cf = el.clipFade {
-                childClipFades.append(
-                    EdgeFadeSpec(
-                        rect: intersectRects(inheritedClip, targetRect),
-                        widths: cf,
-                        strengths: SIMD4<Float>(repeating: 1.0)
-                    )
-                )
+            if let cfSpec = ownClipFadeSpec {
+                childClipFades.append(cfSpec)
             }
 
             let myIndex = newFlat.count
@@ -1154,7 +1309,12 @@ public final class Runtime<State> {
                 zOrder: ownZ,
                 inheritedScale: nodeInheritedScale,
                 anchorAttachNorm: anchorAttachNorm,
-                activeClipFades: inheritedClipFades
+                activeClipFades: inheritedClipFades,
+                ownScrollFade: scrollFadeInfo,
+                ownClipFade: ownClipFadeSpec,
+                enclosingScrollIndex: item.enclosingScrollIndex,
+                enclosingVScrollIndex: item.enclosingVScrollIndex,
+                enclosingHScrollIndex: item.enclosingHScrollIndex
             )
             newFlat.append(flat)
             newByPath[path] = myIndex
@@ -1188,15 +1348,56 @@ public final class Runtime<State> {
 
             let ancestorInstant = inInstantSubtree && !el.hasAnimatedChanges
             let childInstant = ancestorInstant || el.hasInstantChanges
-            let selfInstantLayoutOrStyle = childInstant
+            let selfInstantLayoutOrStyle = childInstant || commitKind.snaps || commitCut || reducedMotion
 
             let parentNid = parentIdx.map { newFlat[$0].nodeId }
             // Provide a subtle default interactive spring when pressScale / hover / press is used
-            var styleSp = selfInstantLayoutOrStyle
-                ? ((el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
-                : (el.styleSpring ?? ((el.pressScaleFactor != nil || el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil))
-            var layoutAnimSpec = selfInstantLayoutOrStyle ? nil : el.layoutAnim
-            var specTransition = ancestorInstant ? nil : el.transition
+            var styleSp: Spring?
+            if selfInstantLayoutOrStyle {
+                styleSp = (el.hoverBg != nil || el.pressBg != nil) && !commitKind.snaps && !commitCut && !reducedMotion
+                    ? MotionTokens.INSTANT
+                    : nil
+            } else {
+                styleSp = el.styleSpring
+                    ?? commitColorSpring
+                    ?? commitMotion?.spring
+                    ?? ((el.pressScaleFactor != nil || el.hoverBg != nil || el.pressBg != nil) ? MotionTokens.INSTANT : nil)
+            }
+            let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
+            func isRunningSameSceneFrame() -> Bool {
+                guard self.scene.hasNode(nid),
+                      self.scene.store.isAnimating(nid, Props.FRAME),
+                      let curTarget = self.scene.store.target(nid, Props.FRAME) else {
+                    return false
+                }
+                let parentOriginRect = parentNid.flatMap { newById[$0]?.targetRect }
+                let localTarget = parentOriginRect.map {
+                    MotionRect.fromEdges(
+                        targetRect.left - $0.x,
+                        targetRect.top - $0.y,
+                        targetRect.right - $0.x,
+                        targetRect.bottom - $0.y
+                    )
+                } ?? targetRect
+                return abs(curTarget.x - localTarget.x) < 0.1
+                    && abs(curTarget.y - localTarget.y) < 0.1
+                    && abs(curTarget.width - localTarget.width) < 0.1
+                    && abs(curTarget.height - localTarget.height) < 0.1
+            }
+            var layoutAnimSpec: LayoutAnim?
+            if commitCut || reducedMotion {
+                layoutAnimSpec = nil
+            } else if selfInstantLayoutOrStyle {
+                layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
+            } else if commitKind.lands, el.layoutAnim != nil, isRunningSameSceneFrame() {
+                layoutAnimSpec = .instant
+            } else {
+                layoutAnimSpec = el.layoutAnim
+            }
+            if !selfInstantLayoutOrStyle, layoutAnimSpec == nil, let cm = commitMotion {
+                layoutAnimSpec = LayoutAnim(x: cm.anim, y: cm.anim)
+            }
+            var specTransition = (ancestorInstant || commitKind.snaps || commitCut || reducedMotion) ? nil : el.transition
             var specRect = targetRect
             var specOpacity = el.opacity
             var specScale = effectiveScale
@@ -1280,13 +1481,16 @@ public final class Runtime<State> {
                     inheritedInert: effectiveInert,
                     inheritedZ: ownZ,
                     inInstantSubtree: childInstant,
-                    inheritedClipFades: childClipFades
+                    inheritedClipFades: childClipFades,
+                    enclosingScrollIndex: !el.layout.scrollAxes.isEmpty ? myIndex : item.enclosingScrollIndex,
+                    enclosingVScrollIndex: el.layout.scrollAxes.contains(.vertical) ? myIndex : item.enclosingVScrollIndex,
+                    enclosingHScrollIndex: el.layout.scrollAxes.contains(.horizontal) ? myIndex : item.enclosingHScrollIndex
                 ))
             }
             walkStack.append(contentsOf: childItems.reversed())
         }
-        loopRuntime.sync(specs: loopSpecs, at: now, reducedMotion: reducedMotion, cut: cut)
-        if cut {
+        loopRuntime.sync(specs: loopSpecs, at: now, reducedMotion: reducedMotion, cut: commitCut)
+        if commitCut {
             loopRuntime.settleAll(at: now)
         }
 
@@ -1347,7 +1551,16 @@ public final class Runtime<State> {
         }
 
         if settlePass == 0 && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
-            commitTreePass(at: now, cut: cut, settlePass: 1)
+            commitTreePass(
+                at: now,
+                cut: cut,
+                settlePass: 1,
+                commitKind: commitKind,
+                commitMotion: commitMotion,
+                commitColorSpring: commitColorSpring,
+                commitFollowEdge: commitFollowEdge,
+                commitCut: commitCut
+            )
             return
         }
 
@@ -1407,7 +1620,7 @@ public final class Runtime<State> {
             }
         }
         committedMatchedByFlightId = newCommittedMatched
-        if cut {
+        if commitCut {
             seenMatchedByFlightId = newCommittedMatched
             for (fid, snap) in newCommittedMatched {
                 matchedFlightRegistry.recordPrevious(flightId: fid, rect: snap.rect)
@@ -1505,8 +1718,41 @@ public final class Runtime<State> {
             pendingUnclippedFlights = false
         }
 
+        checkFocusAndRevealSelected()
+        let preScrollOffsets = scrollOffsets
+        processScrollRequestsAndCallbacks(
+            at: now,
+            cut: commitCut,
+            followEdge: commitFollowEdge,
+            snaps: commitKind.snaps
+        )
+        var changedScrollDeltas: [String: Vec2] = [:]
+        for (sPath, newOff) in scrollOffsets {
+            let oldOff = preScrollOffsets[sPath] ?? .zero
+            if abs(newOff.x - oldOff.x) > 1e-4 || abs(newOff.y - oldOff.y) > 1e-4 {
+                changedScrollDeltas[sPath] = Vec2(newOff.x - oldOff.x, newOff.y - oldOff.y)
+            }
+        }
+        if !changedScrollDeltas.isEmpty {
+            shiftFlatAndSpecsForScrollDeltas(changedScrollDeltas, specs: &specs)
+        }
+        let keepDeltas = applyKeepCompensation(at: now, cut: commitCut, specs: &specs)
+        if !keepDeltas.isEmpty {
+            for (kPath, kd) in keepDeltas {
+                let prev = changedScrollDeltas[kPath] ?? .zero
+                changedScrollDeltas[kPath] = Vec2(prev.x + kd.x, prev.y + kd.y)
+            }
+        }
+        let keepsFlights = commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
+        scene.keepFlights(keepsFlights)
         measureFramePhase(.apply) {
-            scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: cut, matchedStarts: matchedStarts)
+            scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: commitCut, matchedStarts: matchedStarts)
+        }
+        scene.keepFlights(false)
+        recordVirtualMeasurementsAndCallbacks(expansion: virtualExpansion, at: now)
+        stepVirtualFillAfterCommit(now: now)
+        if virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty {
+            needsCommit = true
         }
     }
 
@@ -1932,6 +2178,7 @@ public final class Runtime<State> {
         let defaultViewFg = cxSettings.viewDefaults.foreground
         let defaultRingOutline = cxSettings.viewDefaults.focusRing
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
+        stuckShiftsByPath.removeAll(keepingCapacity: true)
 
         // Precompute presented rect, scale, and node lookup for every node in `frameOut.nodes`
         var presentedRectById: [NodeId: MotionRect] = [:]
@@ -2052,9 +2299,14 @@ public final class Runtime<State> {
 
         func sortByZOrder(_ nodes: [Presented]) -> [Presented] {
             nodes.enumerated().sorted { a, b in
-                let za = (nodeById[a.element.id] ?? exitingSnapshots[a.element.id])?.zOrder ?? 0
-                let zb = (nodeById[b.element.id] ?? exitingSnapshots[b.element.id])?.zOrder ?? 0
+                let na = nodeById[a.element.id] ?? exitingSnapshots[a.element.id]
+                let nb = nodeById[b.element.id] ?? exitingSnapshots[b.element.id]
+                let za = na?.zOrder ?? 0
+                let zb = nb?.zOrder ?? 0
                 if za != zb { return za < zb }
+                let sa = (na?.isSticky == true) ? 1 : 0
+                let sb = (nb?.isSticky == true) ? 1 : 0
+                if sa != sb { return sa < sb }
                 return a.offset < b.offset
             }.map(\.element)
         }
@@ -2139,9 +2391,13 @@ public final class Runtime<State> {
                 }
                 return 1.0
             }()
-            let alpha = (ownOp * ancestorOpacity * groupFactor).clamped(to: 0...1)
+            let revealFactor: Float = {
+                guard let span = el.stickyConfig?.reveal else { return 1.0 }
+                return StickyMath.stuckRevealFactor(parentShift: input.parentStickyMag, span: span)
+            }()
+            let alpha = (ownOp * ancestorOpacity * groupFactor * input.kidsFadeOpacity * revealFactor).clamped(to: 0...1)
             let rawScaleVec = presentedScaleById[p.id] ?? p.scale
-            let rect: MotionRect
+            var rect: MotionRect
             let scaleVec: Vec2
             if let fc = flightCover {
                 rect = MotionRect.fromXYWH(
@@ -2155,6 +2411,36 @@ public final class Runtime<State> {
                 rect = rawRect
                 scaleVec = rawScaleVec
             }
+            let (stickyShift, stickyMag): (Vec2, Float) = {
+                if !p.isExiting && snap.index < flatNodes.count && flatNodes[snap.index].nodeId == snap.nodeId {
+                    return computePaintStickyShift(
+                        nodeIndex: snap.index,
+                        parentStickyShift: input.parentStickyShift,
+                        presentedRectByNodeId: presentedRectById
+                    )
+                }
+                return (input.parentStickyShift, input.parentStickyMag)
+            }()
+            if stickyShift != .zero {
+                rect = MotionRect.fromXYWH(
+                    rect.x + stickyShift.x,
+                    rect.y + stickyShift.y,
+                    rect.width,
+                    rect.height
+                )
+            } else if let ak = el.anchor?.key,
+                      !snap.isSticky,
+                      let aNode = flatNodes.first(where: { $0.key == ak }),
+                      let aShift = stuckShiftsByPath[aNode.path],
+                      aShift != .zero {
+                rect = MotionRect.fromXYWH(
+                    rect.x + aShift.x,
+                    rect.y + aShift.y,
+                    rect.width,
+                    rect.height
+                )
+            }
+            stuckShiftsByPath[snap.path] = stickyShift
             let effRotate = ownRotateById[p.id] ?? p.rotate
 
             let ownHasTurn = abs(effRotate) > 1e-6
@@ -2302,9 +2588,24 @@ public final class Runtime<State> {
 
             let activeFadeEdges: [(fade: SIMD4<Float>, origin: SIMD2<Float>)] = {
                 guard !snap.activeClipFades.isEmpty else { return [] }
+                let effectiveFades: [EdgeFadeSpec]
+                if let stickyEdge = el.stickyConfig?.edge, stickyMag > 0.01 {
+                    effectiveFades = snap.activeClipFades.map { spec in
+                        guard spec.scrollPath != nil, !spec.belowSticky else { return spec }
+                        var copy = spec
+                        switch stickyEdge {
+                        case .left: copy.widths.x = 0
+                        case .top: copy.widths.y = 0
+                        case .bottom: copy.widths.w = 0
+                        }
+                        return copy
+                    }
+                } else {
+                    effectiveFades = snap.activeClipFades
+                }
                 let primRect = SIMD4<Float>(rect.x * pxScale, rect.y * pxScale, rect.width * pxScale, rect.height * pxScale)
                 return AnchorLayoutHelper.edgeFadeEdges(
-                    specs: snap.activeClipFades,
+                    specs: effectiveFades,
                     primRectPx: primRect,
                     pxScale: pxScale
                 )
@@ -2375,6 +2676,7 @@ public final class Runtime<State> {
                 }
 
                 // 1. Outer drop shadows
+                let stuckShadowFactor = (el.stickyConfig != nil) ? StickyMath.stuckShadowFactor(shift: stickyMag) : 0.0
                 for sh in el.shadows where !sh.inset && sh.color.a > 0.001 {
                     let sc = sh.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     primitives.append(.dropShadow(
@@ -2387,6 +2689,21 @@ public final class Runtime<State> {
                         cutoutInner: fillColor.a < 0.999 && sh.blur == 0 && sh.spread > 0,
                         clip: devClip
                     ))
+                }
+                if stuckShadowFactor > 0.001, let stuckShadows = el.stickyConfig?.shadows {
+                    for sh in stuckShadows where !sh.inset && sh.color.a > 0.001 {
+                        let sc = sh.color.scaleAlpha(localAlpha * stuckShadowFactor).simd4(srgb: srgbBlend)
+                        primitives.append(.dropShadow(
+                            rect: devRect,
+                            radii: devRadii,
+                            color: sc,
+                            blur: sh.blur * pxScale,
+                            spread: sh.spread * pxScale,
+                            offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
+                            cutoutInner: fillColor.a < 0.999 && sh.blur == 0 && sh.spread > 0,
+                            clip: devClip
+                        ))
+                    }
                 }
 
                 // 2. Box background / gradient / solid border
@@ -2529,6 +2846,19 @@ public final class Runtime<State> {
                         offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
                         clip: devClip
                     ))
+                }
+                if stuckShadowFactor > 0.001, let stuckShadows = el.stickyConfig?.shadows {
+                    for sh in stuckShadows where sh.inset && sh.color.a > 0.001 {
+                        primitives.append(.insetShadow(
+                            rect: devRect,
+                            radii: devRadii,
+                            color: sh.color.scaleAlpha(localAlpha * stuckShadowFactor).simd4(srgb: srgbBlend),
+                            blur: sh.blur * pxScale,
+                            spread: sh.spread * pxScale,
+                            offset: SIMD2<Float>(sh.x * pxScale, sh.y * pxScale),
+                            clip: devClip
+                        ))
+                    }
                 }
 
                 // 5. Image payload
@@ -2878,7 +3208,8 @@ public final class Runtime<State> {
                 checked: el.a11yChecked,
                 a11yValue: el.a11yValue,
                 a11yDescription: el.a11yDescription,
-                a11yHidden: el.isA11yHidden
+                a11yHidden: el.isA11yHidden,
+                stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x
             ))
 
             let ownClipCorners: Corners? = el.clipCorners ?? el.clipRadius.map { r in
@@ -2924,6 +3255,34 @@ public final class Runtime<State> {
                 : nearestGroupHovered
             var childSteps: [EmitStepInput] = []
             if let children = childrenByParent[p.id] {
+                let firstChildFade: Float = {
+                    guard let fadeSpec = el.stickyConfig?.fade,
+                          case .top = el.stickyConfig?.edge,
+                          stickyShift.y > 0.01,
+                          let pId = snap.parentIndex.map({ flatNodes[$0].nodeId }),
+                          let siblings = childrenByParent[pId],
+                          let mySibIdx = siblings.firstIndex(where: { $0.id == p.id }) else {
+                        return 1.0
+                    }
+                    for nextIdx in (mySibIdx + 1)..<siblings.count {
+                        let sib = siblings[nextIdx]
+                        if sib.isExiting { continue }
+                        guard let sibFlat = nodeById[sib.id],
+                              case .top = sibFlat.el.stickyConfig?.edge else {
+                            continue
+                        }
+                        if let sibRect = presentedRectById[sib.id] {
+                            return StickyMath.stuckFadeFactor(
+                                nextSiblingTop: sibRect.top,
+                                currentDrawnTop: rect.top,
+                                lead: fadeSpec.lead,
+                                span: fadeSpec.span
+                            )
+                        }
+                    }
+                    return 1.0
+                }()
+                let firstTreeChildId = children.first?.id
                 let sorted = sortByZOrder(children)
                 childSteps.reserveCapacity(sorted.count)
                 for child in sorted {
@@ -2937,7 +3296,10 @@ public final class Runtime<State> {
                         nearestGroupHovered: nextGroupHovered,
                         flightCover: childFlightCover,
                         flightClipOverride: childFlightClip,
-                        emitLiftedNow: emitLiftedNow
+                        emitLiftedNow: emitLiftedNow,
+                        parentStickyShift: stickyShift,
+                        parentStickyMag: stickyMag,
+                        kidsFadeOpacity: (child.id == firstTreeChildId) ? firstChildFade : 1.0
                     ))
                 }
             }
@@ -2977,7 +3339,10 @@ public final class Runtime<State> {
                     nearestGroupHovered: nearestGroupHovered,
                     flightCover: flightCover,
                     flightClipOverride: flightClipOverride,
-                    emitLiftedNow: emitLiftedNow
+                    emitLiftedNow: emitLiftedNow,
+                    parentStickyShift: .zero,
+                    parentStickyMag: 0,
+                    kidsFadeOpacity: 1.0
                 ))
             ]
             while let item = workStack.popLast() {
@@ -3218,6 +3583,66 @@ public final class Runtime<State> {
         return nil
     }
 
+    private func hitTestAll(
+        at point: Vec2,
+        predicate: (FlatNode) -> Bool
+    ) -> [(node: FlatNode, rect: MotionRect, localPoint: Vec2)] {
+        let orderedPaths: [String]
+        if !paintOrderPaths.isEmpty {
+            orderedPaths = paintOrderPaths
+        } else {
+            let sortedIndices = flatNodes.indices.sorted { a, b in
+                let za = flatNodes[a].zOrder
+                let zb = flatNodes[b].zOrder
+                if za != zb { return za < zb }
+                return a < b
+            }
+            orderedPaths = sortedIndices.map { flatNodes[$0].path }
+        }
+
+        var firstBlockerPath: String? = nil
+        var matches: [(node: FlatNode, rect: MotionRect, localPoint: Vec2)] = []
+
+        for path in orderedPaths.reversed() {
+            guard let idx = nodeByPath[path], idx < flatNodes.count else { continue }
+            let node = flatNodes[idx]
+            if node.effectiveInert { continue }
+
+            let geom = hitGeometryByPath[path]
+            if let geom {
+                if geom.isExiting || geom.opacity <= 0.001 { continue }
+                guard let localWindowPt = geom.unturnedLocalPoint(for: point) else { continue }
+                if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
+                    continue
+                }
+                if predicate(node) {
+                    matches.append((node, geom.rect, Vec2(localWindowPt.x - geom.rect.x, localWindowPt.y - geom.rect.y)))
+                }
+                if firstBlockerPath == nil && (geom.hasVisualBlocker || geom.isInteractiveBlocker) {
+                    firstBlockerPath = path
+                }
+            } else {
+                if node.el.opacity <= 0.001 { continue }
+                let infoRect = presentedRectByPath[path] ?? node.targetRect
+                let hitBox = intersectRects(node.clipRect, infoRect)
+                guard halfOpenContains(hitBox, point) else { continue }
+                if let blocker = firstBlockerPath, !blocker.hasPrefix(path + "/") {
+                    continue
+                }
+                if predicate(node) {
+                    matches.append((node, infoRect, Vec2(point.x - infoRect.x, point.y - infoRect.y)))
+                }
+                let hasVis = node.el.background.a > 0.001 || node.el.gradient != nil ||
+                    (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001) ||
+                    node.el.imagePayload != nil || node.el.backdropBlur >= 0.5 || !node.el.shapes.isEmpty
+                if firstBlockerPath == nil && (hasVis || node.el.explicitHit || node.el.isModal) {
+                    firstBlockerPath = path
+                }
+            }
+        }
+        return matches
+    }
+
     // MARK: - Internal Platform Input Bridges
 
     internal func dropTargetHitTest(at point: Vec2, for urls: [URL]) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
@@ -3273,7 +3698,7 @@ public final class Runtime<State> {
             hoveredPath = nil
             hoveredKey = nil
             if let idx = nodeByPath[old], let cb = flatNodes[idx].el.handlers.onHover {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 cb(&state, false, &tx)
                 applyTx(tx, at: now)
             }
@@ -3318,7 +3743,7 @@ public final class Runtime<State> {
             hoveredPath = nil
             hoveredKey = nil
             if let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 cb(&state, false, &tx)
                 applyTx(tx, at: now)
             }
@@ -3328,6 +3753,23 @@ public final class Runtime<State> {
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
         pointerPosition = pos
+
+        let moveHits = hitTestAll(at: pos, predicate: { $0.el.handlers.onPointerMove != nil })
+        for moveHit in moveHits {
+            if let onMove = moveHit.node.el.handlers.onPointerMove {
+                let press = PointerPress(
+                    window: pos,
+                    local: moveHit.localPoint,
+                    elementSize: Vec2(moveHit.rect.width, moveHit.rect.height),
+                    button: .primary,
+                    mods: mods,
+                    clicks: 0
+                )
+                var tx = makeTx(at: now)
+                onMove(&state, press, &tx)
+                applyTx(tx, at: now)
+            }
+        }
 
         if checkArmedDragOutMove(to: pos, at: now) {
             return
@@ -3342,6 +3784,7 @@ public final class Runtime<State> {
                     let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
                     edit.setCursor(utf8Offset: offset, extendSelection: true)
                     editLens.set(&state, edit)
+                    pendingCommitKind = pendingCommitKind.instant()
                     dirtyCommit(at: now)
                 } else if let onDrag = node.el.handlers.onDrag {
                     let d = Drag(
@@ -3353,8 +3796,9 @@ public final class Runtime<State> {
                         clicks: drag.clicks,
                         mods: mods
                     )
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     onDrag(&state, d, &tx)
+                    if !tx.askedMotion { tx.instant() }
                     applyTx(tx, at: now)
                 }
             }
@@ -3375,38 +3819,27 @@ public final class Runtime<State> {
             let oldPath = hoveredPath
             hoveredPath = newPath
             hoveredKey = newKey
+            isDispatchingHover = true
+            defer { isDispatchingHover = false }
             if let old = oldPath, let oldIdx = nodeByPath[old], let cb = flatNodes[oldIdx].el.handlers.onHover {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 cb(&state, false, &tx)
                 applyTx(tx, at: now)
             }
             if let np = newPath, let newIdx = nodeByPath[np], let cb = flatNodes[newIdx].el.handlers.onHover {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 cb(&state, true, &tx)
                 applyTx(tx, at: now)
             }
+            suppressRevealFromHoverCommit = true
             dirtyCommit(at: now)
         } else if helpTargetChanges(at: pos) {
             dirtyCommit(at: now)
         }
-
-        if let moveHit = hitTest(at: pos, predicate: { $0.el.handlers.onPointerMove != nil }),
-           let onMove = moveHit.node.el.handlers.onPointerMove {
-            let press = PointerPress(
-                window: pos,
-                local: Vec2(pos.x - moveHit.rect.x, pos.y - moveHit.rect.y),
-                elementSize: Vec2(moveHit.rect.width, moveHit.rect.height),
-                button: .primary,
-                mods: mods,
-                clicks: 0
-            )
-            var tx = Tx()
-            onMove(&state, press, &tx)
-            applyTx(tx, at: now)
-        }
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
+        suppressRevealFromHoverCommit = false
         pointerPosition = pos
         focusVisible = false
         pressHelp(at: pos, now: now)
@@ -3438,7 +3871,7 @@ public final class Runtime<State> {
             }
             if !hitInsideModalMember {
                 if flatNodes[mIdx].el.modalClickOutside, let dismiss = flatNodes[mIdx].el.handlers.modalDismiss {
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     dismiss(&state, &tx)
                     applyTx(tx, at: now)
                 }
@@ -3456,7 +3889,7 @@ public final class Runtime<State> {
                     mods: mods,
                     clicks: 1
                 )
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 node.el.handlers.onSecondaryClick?(&state, press, &tx)
                 applyTx(tx, at: now)
             }
@@ -3510,7 +3943,7 @@ public final class Runtime<State> {
         )
 
         if let onDown = node.el.handlers.onPointerDown {
-            var tx = Tx()
+            var tx = makeTx(at: now)
             onDown(&state, press, &tx)
             applyTx(tx, at: now)
         }
@@ -3567,7 +4000,7 @@ public final class Runtime<State> {
                 stateSnapshotBeforeDrag: snapshot
             )
             // Deliver initial drag at delta 0 so sliders jump/latch under pointer immediately!
-            var tx = Tx()
+            var tx = makeTx(at: now)
             node.el.handlers.onDrag?(
                 &state,
                 Drag(
@@ -3599,7 +4032,7 @@ public final class Runtime<State> {
             draggedPastThreshold = !drag.isTextSelectionDrag &&
                 hypot(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0
             if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 onEnd(&state, false, &tx)
                 applyTx(tx, at: now)
             }
@@ -3619,7 +4052,7 @@ public final class Runtime<State> {
         )
 
         if let onUp = node.el.handlers.onPointerUp {
-            var tx = Tx()
+            var tx = makeTx(at: now)
             onUp(&state, press, &tx)
             applyTx(tx, at: now)
         }
@@ -3628,17 +4061,17 @@ public final class Runtime<State> {
         let inside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
         if inside && button == .primary && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
             if clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 onDbl(&state, &tx)
                 applyTx(tx, at: now)
             } else {
                 if let onClick = node.el.handlers.onClick {
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     onClick(&state, &tx)
                     applyTx(tx, at: now)
                 }
                 if let onClickP = node.el.handlers.onClickPress {
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     onClickP(&state, press, &tx)
                     applyTx(tx, at: now)
                 }
@@ -3654,8 +4087,10 @@ public final class Runtime<State> {
 
         // Check custom `onWheel` handler first
         if let (customNode, _) = hitTest(at: targetPos, predicate: { $0.el.handlers.onWheel != nil }) {
-            var tx = Tx()
-            if customNode.el.handlers.onWheel?(&state, event, &tx) == true {
+            var tx = makeTx(at: now)
+            let taken = customNode.el.handlers.onWheel?(&state, event, &tx) == true
+            Tx.took(taken, &tx)
+            if taken {
                 applyTx(tx, at: now)
                 return
             }
@@ -3688,6 +4123,9 @@ public final class Runtime<State> {
                     let nid = NodeId.hash("scroll:" + path)
                     scrollOffsets[path] = cur
                     scrollStore.snap(nid, Props.SCROLL, to: cur)
+                    scrollGlidingPaths.remove(path)
+                    scrollRequestsState.stepCancel()
+                    pendingCommitKind = pendingCommitKind.instant()
                     dirtyCommit(at: now)
                     return
                 }
@@ -3706,6 +4144,8 @@ public final class Runtime<State> {
         let path = scrollNode.path
         let nid = NodeId.hash("scroll:" + path)
         let cur = scrollOffsets[path] ?? .zero
+        scrollGlidingPaths.remove(path)
+        scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
         _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(-vx, -vy)), decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: now))
@@ -3728,7 +4168,7 @@ public final class Runtime<State> {
             while let curIdx = walkIdx {
                 if flatNodes[curIdx].effectiveInert { break }
                 if let onPhys = flatNodes[curIdx].el.handlers.onPhysicalInput {
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     if onPhys(&state, event, &tx) {
                         applyTx(tx, at: now)
                         return true
@@ -3741,7 +4181,7 @@ public final class Runtime<State> {
             // If no element has focus, dispatch to non-inert physical handlers from innermost/root
             for node in flatNodes.reversed() where !node.effectiveInert {
                 if let onPhys = node.el.handlers.onPhysicalInput {
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     if onPhys(&state, event, &tx) {
                         applyTx(tx, at: now)
                         return true
@@ -3762,6 +4202,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        suppressRevealFromHoverCommit = false
         dismissHelp(at: now)
         // 1. Escape cancels an in-progress drag and restores pre-drag state!
         if ev.key == .escape, let drag = activeDrag {
@@ -3770,7 +4211,7 @@ public final class Runtime<State> {
             pressedPath = nil
             pressedKey = nil
             if let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 onEnd(&state, true, &tx)
                 applyTx(tx, at: now)
             }
@@ -3789,7 +4230,7 @@ public final class Runtime<State> {
                 while let curIdx = walkIdx {
                     if flatNodes[curIdx].effectiveInert { break }
                     if let onKey = flatNodes[curIdx].el.handlers.onKey {
-                        var tx = Tx()
+                        var tx = makeTx(at: now)
                         if onKey(&state, ev, &tx) {
                             applyTx(tx, at: now)
                             return true
@@ -3800,8 +4241,17 @@ public final class Runtime<State> {
                 }
             }
 
-            // Focused TextInput editing
+            // Focused TextInput editing (`on_input_key` runs before `TextEdit.handleKey`)
             if let editLens = fNode.el.handlers.editLens {
+                if let onInputKey = fNode.el.handlers.onInputKey {
+                    var tx = makeTx(at: now)
+                    let handled = onInputKey(&state, ev, &tx)
+                    if Tx.took(handled, &tx) {
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
+                        return true
+                    }
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
+                }
                 if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
                     paste(clipboard, at: now)
                     return true
@@ -3827,17 +4277,21 @@ public final class Runtime<State> {
                     return true
                 case .modified:
                     editLens.set(&state, edit)
-                    if let onChange = fNode.el.handlers.onTextChange {
-                        var tx = Tx()
-                        onChange(&state, edit.text, &tx)
-                        applyTx(tx, at: now)
+                    var tx = makeTx(at: now)
+                    if fNode.el.layoutAnim == nil {
+                        tx.instant()
                     }
+                    if let onChange = fNode.el.handlers.onTextChange {
+                        onChange(&state, edit.text, &tx)
+                    }
+                    applyTx(tx, at: now)
                     dirtyCommit(at: now)
                     return true
                 case .submit:
                     editLens.set(&state, edit)
                     if let onSubmit = fNode.el.handlers.onTextSubmit {
-                        var tx = Tx()
+                        var tx = makeTx(at: now)
+                        tx.animated()
                         onSubmit(&state, edit.text, &tx)
                         applyTx(tx, at: now)
                         dirtyCommit(at: now)
@@ -3848,7 +4302,7 @@ public final class Runtime<State> {
                     editLens.set(&state, edit)
                     clipboard = ClipboardContent(copied)
                     if let onChange = fNode.el.handlers.onTextChange {
-                        var tx = Tx()
+                        var tx = makeTx(at: now)
                         onChange(&state, edit.text, &tx)
                         applyTx(tx, at: now)
                     }
@@ -3867,7 +4321,7 @@ public final class Runtime<State> {
                 if isRepeat { return true }
                 if let onClick = fNode.el.handlers.onClick {
                     focusVisible = true
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     onClick(&state, &tx)
                     applyTx(tx, at: now)
                     return true
@@ -3883,7 +4337,7 @@ public final class Runtime<State> {
                         mods: .none,
                         clicks: 1
                     )
-                    var tx = Tx()
+                    var tx = makeTx(at: now)
                     onClickPress(&state, press, &tx)
                     applyTx(tx, at: now)
                     return true
@@ -3913,7 +4367,7 @@ public final class Runtime<State> {
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
             if let dismiss = flatNodes[mIdx].el.handlers.modalDismiss {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 dismiss(&state, &tx)
                 applyTx(tx, at: now)
             }
@@ -3934,7 +4388,7 @@ public final class Runtime<State> {
         if ev.key == .enter && ev.mods == .none && !isRepeat,
            let defNode = defaultButtonNode() {
             if let onClick = defNode.el.handlers.onClick {
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 onClick(&state, &tx)
                 applyTx(tx, at: now)
                 return true
@@ -3949,7 +4403,7 @@ public final class Runtime<State> {
                     mods: .none,
                     clicks: 1
                 )
-                var tx = Tx()
+                var tx = makeTx(at: now)
                 onClickPress(&state, press, &tx)
                 applyTx(tx, at: now)
                 return true
@@ -3958,8 +4412,10 @@ public final class Runtime<State> {
 
         // 4. Root / global `onKey` handler (only when no active modal blocks background shortcuts)
         if activeModalPath == nil, let globalOnKey {
-            var tx = Tx()
-            if globalOnKey(&state, ev, &tx) {
+            var tx = makeTx(at: now)
+            let taken = globalOnKey(&state, ev, &tx)
+            Tx.took(taken, &tx)
+            if taken {
                 applyTx(tx, at: now)
                 return true
             }
@@ -3988,11 +4444,14 @@ public final class Runtime<State> {
         var edit = editLens.get(state)
         edit.paste(content.text)
         editLens.set(&state, edit)
-        if let onChange = flatNodes[fIdx].el.handlers.onTextChange {
-            var tx = Tx()
-            onChange(&state, edit.text, &tx)
-            applyTx(tx, at: now)
+        var tx = makeTx(at: now)
+        if flatNodes[fIdx].el.layoutAnim == nil {
+            tx.instant()
         }
+        if let onChange = flatNodes[fIdx].el.handlers.onTextChange {
+            onChange(&state, edit.text, &tx)
+        }
+        applyTx(tx, at: now)
         dirtyCommit(at: now)
     }
 
@@ -4039,6 +4498,7 @@ public final class Runtime<State> {
             if e.exiting { obj["exiting"] = true }
             if e.hover > 0.001 { obj["hover"] = r2(e.hover) }
             if e.press > 0.001 { obj["press"] = r2(e.press) }
+            if abs(e.stuck) > 0.01 { obj["stuck"] = r2(e.stuck) }
             if let caret = e.caret { obj["caret"] = caret.map(r2) }
             if let v = lastVideoSnapshots[e.path] {
                 let (vState, vErr): (String, String?)
@@ -4116,7 +4576,7 @@ public final class Runtime<State> {
         flightRecorder.record(kind: "fileDrop", at: now)
         routeFileDropPhase(phase, at: now)
         if let handler = onFileDrop {
-            var tx = Tx()
+            var tx = makeTx(at: now)
             handler(&state, phase, &tx)
             applyTx(tx, at: now)
             if !tx.liveOnlyRequested {
@@ -4292,20 +4752,35 @@ public final class Runtime<State> {
                 focusedPath = match.path
             }
         }
-        for req in tx.scrollToRequests {
-            if let match = flatNodes.first(where: { $0.key == req.key }) {
-                let maxExt = scrollMaxExtents[match.path] ?? .zero
-                let clamped = Vec2(req.offset.x.clamped(to: 0...maxExt.x), req.offset.y.clamped(to: 0...maxExt.y))
-                scrollOffsets[match.path] = clamped
-                let nid = NodeId.hash("scroll:" + match.path)
-                if req.animated {
-                    scrollStore.set(nid, Props.SCROLL, to: clamped, anim: .spring(MotionTokens.SETTLE), at: cxSettings.scaledTime(at: now))
-                } else {
-                    scrollStore.snap(nid, Props.SCROLL, to: clamped)
-                }
-            }
+        for prefix in tx.invalidateMemoPrefixes {
+            MemoCache.shared.invalidateByPrefix(prefix)
         }
-        if tx.settleRequested {
+        pendingCommitKind = pendingCommitKind.merge(tx.commitKind)
+        if let m = tx.motionSource {
+            pendingCommitMotion = m
+        }
+        if let cm = tx.colorMotionSpring {
+            pendingColorMotionSpring = cm
+        }
+        if tx.followEdgeRequested {
+            pendingFollowEdge = true
+        }
+        if !tx.scrollRevealRequests.isEmpty {
+            pendingScrollReveals.append(contentsOf: tx.scrollRevealRequests)
+        }
+        if !tx.scrollBottomRequests.isEmpty {
+            pendingScrollBottoms.append(contentsOf: tx.scrollBottomRequests)
+        }
+        if !tx.scrollPageRequests.isEmpty {
+            pendingScrollPages.append(contentsOf: tx.scrollPageRequests)
+        }
+        if !tx.scrollOffsetRequests.isEmpty {
+            pendingScrollOffsets.append(contentsOf: tx.scrollOffsetRequests)
+        }
+        if !tx.keepOnScreenKeys.isEmpty {
+            pendingKeepOnScreenKeys.append(contentsOf: tx.keepOnScreenKeys)
+        }
+        if tx.commitKind == .settle {
             forceInitialSettle = true
         }
         if !tx.textFlights.isEmpty {
@@ -4325,7 +4800,15 @@ public final class Runtime<State> {
         if tx.unclippedFlightsRequested {
             pendingUnclippedFlights = true
         }
-        if !tx.liveOnlyRequested && (markDirtyIfNotLiveOnly || tx.isForceCommitRequested) {
+        let hasCommitRequests = tx.followEdgeRequested
+            || !tx.scrollRevealRequests.isEmpty
+            || !tx.scrollBottomRequests.isEmpty
+            || !tx.scrollPageRequests.isEmpty
+            || !tx.scrollOffsetRequests.isEmpty
+            || !tx.keepOnScreenKeys.isEmpty
+            || !tx.invalidateMemoPrefixes.isEmpty
+            || tx.commitKind.lands
+        if !tx.liveOnlyRequested && (markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests) {
             dirtyCommit(at: now)
         }
     }
@@ -4340,7 +4823,7 @@ public final class Runtime<State> {
     @discardableResult
     public func runPoll(at now: Double) -> Bool {
         guard let pollFn = poll else { return false }
-        var tx = Tx()
+        var tx = makeTx(at: now)
         let changed: Bool
         if let scope = turnScope {
             var res = false
@@ -4358,8 +4841,9 @@ public final class Runtime<State> {
 
     /// Mutates state via `body`, always rebuilding unless `tx.liveOnlyRequested` is true.
     public func update(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Void) {
+        suppressRevealFromHoverCommit = false
         let t = now ?? currentTime
-        var tx = Tx()
+        var tx = makeTx(at: t)
         if let scope = turnScope {
             scope(&state) { s in body(&s, &tx) }
         } else {
@@ -4373,8 +4857,9 @@ public final class Runtime<State> {
     /// etc.) still apply without forcing a rebuild (`app.rs:1240-1251`).
     @discardableResult
     public func updateIf(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Bool) -> Bool {
+        suppressRevealFromHoverCommit = false
         let t = now ?? currentTime
-        var tx = Tx()
+        var tx = makeTx(at: t)
         let changed: Bool
         if let scope = turnScope {
             var res = false

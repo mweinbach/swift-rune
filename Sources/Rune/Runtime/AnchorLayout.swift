@@ -7,6 +7,12 @@ struct EdgeFadeSpec {
     var rect: MotionRect
     var widths: SIMD4<Float>
     var strengths: SIMD4<Float>
+    /// Precomputed `(offsetLeft, offsetTop, offsetRight, offsetBottom)` from `ScrollEdgeMath.edgeRamp`.
+    /// When set, `widths` holds the signed effective ramp widths directly.
+    var packedOffsets: SIMD4<Float>? = nil
+    /// Enclosing scroll path if emitted by `.scrollFade` (used to interact with `sticky*` / `belowSticky`).
+    var scrollPath: String? = nil
+    var belowSticky: Bool = false
 }
 
 /// Re-solves `LayoutEngine` once when any `.anchoredFit(...)` overlay fits on neither side
@@ -245,12 +251,18 @@ enum AnchorLayoutHelper {
             let clipLeftPx = spec.rect.left * pxScale
             let clipRightPx = spec.rect.right * pxScale
 
-            func appendEdge(rawWidth: Float, strength: Float, touches: Bool, dir: SIMD2<Float>, baseOrigin: SIMD2<Float>) {
-                guard touches, abs(rawWidth) > 0.5, strength > 0 else { return }
+            func appendEdge(rawWidth: Float, strength: Float, preOffset: Float?, touches: Bool, dir: SIMD2<Float>, baseOrigin: SIMD2<Float>) {
+                guard touches, abs(rawWidth) > 0.05 else { return }
                 let widthPx = abs(rawWidth) * pxScale
-                let (effW, offset) = (rawWidth < 0)
-                    ? partialLinearEdge(width: widthPx, strength: strength)
-                    : partialEdge(width: widthPx, strength: strength)
+                let (effW, offset): (Float, Float)
+                if let preOffset {
+                    (effW, offset) = (widthPx, preOffset)
+                } else {
+                    guard strength > 0, abs(rawWidth) > 0.5 else { return }
+                    (effW, offset) = (rawWidth < 0)
+                        ? partialLinearEdge(width: widthPx, strength: strength)
+                        : partialEdge(width: widthPx, strength: strength)
+                }
                 guard effW > 0 else { return }
                 let shiftedOrigin = baseOrigin - dir * (offset * effW)
                 out.append((
@@ -260,9 +272,11 @@ enum AnchorLayoutHelper {
             }
 
             // widths = [left, top, right, bottom]; strengths = [left, top, right, bottom]
+            let po = spec.packedOffsets
             appendEdge(
                 rawWidth: spec.widths.y,
                 strength: spec.strengths.y,
+                preOffset: po?.y,
                 touches: primTop < clipTopPx + abs(spec.widths.y) * pxScale,
                 dir: SIMD2<Float>(0, 1),
                 baseOrigin: SIMD2<Float>(0, clipTopPx)
@@ -270,6 +284,7 @@ enum AnchorLayoutHelper {
             appendEdge(
                 rawWidth: spec.widths.w,
                 strength: spec.strengths.w,
+                preOffset: po?.w,
                 touches: primBot > clipBotPx - abs(spec.widths.w) * pxScale,
                 dir: SIMD2<Float>(0, -1),
                 baseOrigin: SIMD2<Float>(0, clipBotPx)
@@ -277,6 +292,7 @@ enum AnchorLayoutHelper {
             appendEdge(
                 rawWidth: spec.widths.x,
                 strength: spec.strengths.x,
+                preOffset: po?.x,
                 touches: primLeft < clipLeftPx + abs(spec.widths.x) * pxScale,
                 dir: SIMD2<Float>(1, 0),
                 baseOrigin: SIMD2<Float>(clipLeftPx, 0)
@@ -284,6 +300,7 @@ enum AnchorLayoutHelper {
             appendEdge(
                 rawWidth: spec.widths.z,
                 strength: spec.strengths.z,
+                preOffset: po?.z,
                 touches: primRight > clipRightPx - abs(spec.widths.z) * pxScale,
                 dir: SIMD2<Float>(-1, 0),
                 baseOrigin: SIMD2<Float>(clipRightPx, 0)

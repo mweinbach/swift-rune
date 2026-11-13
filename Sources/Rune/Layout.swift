@@ -58,6 +58,7 @@ public struct ScrollAxes: OptionSet, Sendable, Hashable, Codable {
 public enum StickyEdge: Sendable, Hashable, Codable {
     case top(Float)
     case bottom(Float)
+    case left(Float)
 }
 
 /// Complete CSS Flexbox + Grid + Block + Absolute + Scroll layout style for a single `El`.

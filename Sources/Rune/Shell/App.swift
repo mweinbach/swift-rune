@@ -1141,21 +1141,6 @@ public extension Tx {
         runtimeActions["fontSmoothing"] = mode
     }
 
-    /// Marks the resulting commit as an instant snap without animating (`Tx::instant`).
-    mutating func instant() {
-        settle()
-    }
-
-    /// Requests a wake deadline `seconds` from now (`Tx::wake_after`).
-    mutating func wakeAfter(_ seconds: Double) {
-        let clamped = max(0.0, seconds)
-        if let existing = runtimeActions["wakeAfter"] as? Double {
-            runtimeActions["wakeAfter"] = min(existing, clamped)
-        } else {
-            runtimeActions["wakeAfter"] = clamped
-        }
-    }
-
     /// Sets the native window title (`Tx::set_window_title`).
     mutating func setWindowTitle(_ title: String) {
         windowTitle = title
@@ -1171,13 +1156,8 @@ public extension Tx {
         runtimeActions["forceCommit"] = true
     }
 
-    /// Overrides the spring used by layout/flight animations created by this commit (`Tx::motion`).
-    mutating func motion(_ spring: Spring) {
-        runtimeActions["motionSpring"] = spring
-    }
-
     internal var motionSpringRequest: Spring? {
-        runtimeActions["motionSpring"] as? Spring
+        motionSource?.spring ?? (runtimeActions["motionSpring"] as? Spring)
     }
 
     internal var isCloseWindowRequested: Bool {
