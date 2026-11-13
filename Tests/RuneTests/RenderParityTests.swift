@@ -1620,5 +1620,49 @@ struct RenderGPUAndShaderParityTests {
         let rEmpty = prepareStep([])
         #expect(rEmpty.deltaRuns == 1 && rEmpty.batches.isEmpty && rEmpty.effects.isEmpty)
     }
+
+    @Test("Clipped-out and offscreen KIND_EFFECT slots skip hook cleanly without hanging and preserve later draws")
+    func clippedOutAndOffscreenEffectSlotsSkipWithoutHanging() throws {
+        let renderer = try MetalRenderer()
+        let instances = [
+            RenderInstance(
+                rect: SIMD4<Float>(2, 2, 10, 16),
+                fill: SIMD4<Float>(0, 1, 0, 1),
+                params: SIMD4<Float>(0, KIND_RECT, 0.5, 1)
+            ),
+            // Clipped-out effect slot (rect completely outside clip rect)
+            RenderInstance(
+                rect: SIMD4<Float>(10, 10, 10, 10),
+                params: SIMD4<Float>(0, KIND_EFFECT, 0, 1),
+                clip: SIMD4<Float>(0, 0, 5, 5)
+            ),
+            // Offscreen effect slot (rect completely outside 40x20 viewport)
+            RenderInstance(
+                rect: SIMD4<Float>(50, 50, 10, 10),
+                params: SIMD4<Float>(0, KIND_EFFECT, 0, 2)
+            ),
+            RenderInstance(
+                rect: SIMD4<Float>(25, 2, 10, 16),
+                fill: SIMD4<Float>(0, 0, 1, 1),
+                params: SIMD4<Float>(0, KIND_RECT, 0.5, 1)
+            ),
+        ]
+        let frame = RenderFrame(
+            width: 40,
+            height: 20,
+            clearColor: SIMD4<Float>(0, 0, 0, 1),
+            instances: instances
+        )
+        var hookCalls = 0
+        let img = try renderer.renderOffscreen(frame, hook: { _, _ in
+            hookCalls += 1
+        })
+        #expect(hookCalls == 0)
+        // Green rect at (6, 10) and blue rect at (30, 10) still render cleanly after skipped effects
+        let g = img.pixel(x: 6, y: 10)
+        #expect(g.y > 200 && g.x < 20 && g.z < 20)
+        let b = img.pixel(x: 30, y: 10)
+        #expect(b.z > 200 && b.x < 20 && b.y < 20)
+    }
 }
 #endif

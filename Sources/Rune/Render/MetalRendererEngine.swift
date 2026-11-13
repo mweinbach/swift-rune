@@ -612,7 +612,10 @@ internal final class RenderFrameEngine {
                 let y0 = edge(sy0, cur.origin.y, cur.texture.height)
                 let x1 = edge(sx1, cur.origin.x, cur.texture.width)
                 let y1 = edge(sy1, cur.origin.y, cur.texture.height)
-                if x1 <= x0 || y1 <= y0 { continue }
+                if x1 <= x0 || y1 <= y0 {
+                    i += 1
+                    continue
+                }
 
                 let mark = i < frame.marks.count ? frame.marks[i] : effectMark(inst)
                 let wantsBackdrop = inst.params.x >= 0.5 && (hook != nil || backdropHook != nil)

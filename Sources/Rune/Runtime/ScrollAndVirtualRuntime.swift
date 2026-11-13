@@ -793,7 +793,7 @@ extension Runtime {
                 if let pSF = flatNodes[pIdx].ownScrollFade {
                     inheritedFades.append(pSF)
                 }
-                if let pCF = p.ownClipFade {
+                if let pCF = flatNodes[pIdx].ownClipFade {
                     inheritedFades.append(pCF)
                 }
                 flatNodes[i].activeClipFades = inheritedFades

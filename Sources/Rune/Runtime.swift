@@ -599,6 +599,7 @@ public final class Runtime<State> {
     internal var activeVirtualPaths: Set<String> = []
     internal var virtualFill = VirtualFillStateMachine()
     internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]
+    private var lastHoverScrollOffsets: [String: Vec2] = [:]
     internal struct RuntimeGrowthEntry: Sendable {
         var track: GrowTrack
         var edge: StreamEdge
@@ -5813,13 +5814,16 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
-        if activeDrag == nil,
-           pointerPosition.x >= 0,
-           pointerPosition.y >= 0,
-           pointerPosition.x < viewport.x,
-           pointerPosition.y < viewport.y {
-            if refreshHover(at: currentTime, isPointerEvent: false) {
-                isAnimating = true
+        if scrollOffsets != lastHoverScrollOffsets {
+            lastHoverScrollOffsets = scrollOffsets
+            if activeDrag == nil,
+               pointerPosition.x >= 0,
+               pointerPosition.y >= 0,
+               pointerPosition.x < viewport.x,
+               pointerPosition.y < viewport.y {
+                if refreshHover(at: currentTime, isPointerEvent: false) {
+                    isAnimating = true
+                }
             }
         }
         helpState.hits = newHelpHits

@@ -172,7 +172,7 @@ public final class MotionGateRun<S>: @unchecked Sendable {
                 return changed
             }
         }
-        _ = rt.renderFrame(at: tel.virtualTime)
+        _ = rt.frame(at: tel.virtualTime)
         if originalPoll != nil {
             rt.poll = originalPoll
         }
@@ -284,40 +284,38 @@ private enum MotionGateSampleHelper {
         tel.lastScrollOffsets = curScrollOffsets
         rec.commits(scrolling: anyScrollChanged, why: why)
 
-        var els = rt.elements()
+        let els = rt.elements()
         let now = rt.currentTime
 
+        var nodeByPath: [String: Runtime<S>.FlatNode] = [:]
         var elByPath: [String: El<S>] = [:]
+        nodeByPath.reserveCapacity(rt.flatNodes.count + rt.exitingSnapshots.count)
         elByPath.reserveCapacity(rt.flatNodes.count + rt.exitingSnapshots.count)
         for n in rt.exitingSnapshots.values {
+            nodeByPath[n.path] = n
             elByPath[n.path] = n.el
         }
         for n in rt.flatNodes {
+            nodeByPath[n.path] = n
             elByPath[n.path] = n.el
         }
 
-        // Accumulate ancestor scroll offsets (in window points, matching each ancestor's scale)
-        // and ancestor scrolling state onto descendants (`runtime/elements.rs`).
+        // Track ancestor scrolling state onto descendants without mutating per-node `els[i].scrolled`
+        // (so `carriedScrolled` below can single-count nested scroll containers cleanly).
         var ancScrolling = Array(repeating: false, count: els.count)
         for i in 0..<els.count {
-            var acc = Vec2.zero
             var scrolling = false
             var cur = els[i].parentIndex
             var hops = 0
             while let p = cur, p >= 0, p < els.count, hops <= els.count {
-                let pPath = els[p].path
-                if let so = curScrollOffsets[pPath] {
-                    let scale = nodeByPath[pPath]?.inheritedScale ?? 1.0
-                    acc = Vec2(acc.x + so.x * scale, acc.y + so.y * scale)
-                }
-                if movedScrollPaths.contains(pPath) {
+                if movedScrollPaths.contains(els[p].path) {
                     scrolling = true
+                    break
                 }
                 cur = els[p].parentIndex
                 hops += 1
             }
             ancScrolling[i] = scrolling
-            els[i].scrolled = [acc.x, acc.y]
         }
 
         // Clean stale loop/sequence entries
@@ -336,6 +334,7 @@ private enum MotionGateSampleHelper {
         for (i, e) in els.enumerated() {
             let pIntent = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedIntent[p] : nil } ?? 0
             let pInstant = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedInstant[p] : nil } ?? false
+            let node = nodeByPath[e.path]
             let el = elByPath[e.path]
 
             let ownIntent = (el?.runtimeExtras[MotionGateExtraKey.motionIntent] as? UInt16) ?? 0
@@ -373,11 +372,13 @@ private enum MotionGateSampleHelper {
             var carriedY: Float = 0
             var curParentIdx = e.parentIndex
             while let pIdx = curParentIdx, pIdx >= 0, pIdx < els.count {
-                if let pEl = elByPath[els[pIdx].path], !pEl.layout.scrollAxes.isEmpty {
+                let pPath = els[pIdx].path
+                if let pEl = elByPath[pPath], !pEl.layout.scrollAxes.isEmpty {
                     let sc = els[pIdx].scrolled
                     if sc.count >= 2 {
-                        carriedX += sc[0]
-                        carriedY += sc[1]
+                        let scale = nodeByPath[pPath]?.inheritedScale ?? 1.0
+                        carriedX += sc[0] * scale
+                        carriedY += sc[1] * scale
                     }
                 }
                 curParentIdx = els[pIdx].parentIndex
