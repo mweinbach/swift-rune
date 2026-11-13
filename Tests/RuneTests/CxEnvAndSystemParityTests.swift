@@ -422,6 +422,142 @@ struct CxEnvAndSystemParityTests {
         #expect(sib.state.path == "/tmp/rune-root/state/SecondApp")
         #expect(sib.logs.path == "/tmp/rune-root/logs/SecondApp")
     }
+
+    @Test func sceneClockDefaultsToZeroAndScopesInitSceneAndSetup() throws {
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+
+        struct State: @unchecked Sendable {
+            var initClock = SceneClock(now: -1, dt: -1)
+            var sceneClockVal = SceneClock(now: -1, dt: -1)
+        }
+        final class ClockBox: @unchecked Sendable {
+            private let lock = NSLock()
+            var setupClock = SceneClock(now: -1, dt: -1)
+            func set(_ c: SceneClock) { lock.lock(); setupClock = c; lock.unlock() }
+            var value: SceneClock { lock.lock(); defer { lock.unlock() }; return setupClock }
+        }
+        let box = ClockBox()
+
+        let app = App<State> {
+            State(initClock: sceneClock(), sceneClockVal: SceneClock(now: -1, dt: -1))
+        } view: { _, _ in
+            text("hi")
+        }
+        .scene("zero") { state, _ in
+            state.sceneClockVal = sceneClock()
+        }
+        .setup { _ in
+            box.set(sceneClock())
+        }
+
+        let spec = app.intoSpec()
+        var args = ToolingArgs()
+        args.sceneName = "zero"
+        _ = try HeadlessRunner.run(spec, args: args)
+        #expect(box.value == SceneClock(now: 0.0, dt: 0.0))
+
+        let scoped = withSceneClock(SceneClock(now: 2.5, dt: 0.016)) {
+            sceneClock()
+        }
+        #expect(scoped == SceneClock(now: 2.5, dt: 0.016))
+        #expect(sceneClock() == SceneClock(now: 0.0, dt: 0.0))
+    }
+
+    @Test func taskbarBuilderAndAppDirsHome() {
+        let tb = Taskbar()
+            .progress(.paused)
+            .badge(3, "3 alerts")
+        #expect(tb.shownProgress == .paused)
+        #expect(tb.count == 3)
+        #expect(tb.badgeDescription == "3 alerts")
+
+        let cleared = tb.badge(0, "should clear")
+        #expect(cleared.count == 0)
+        #expect(cleared.badgeDescription == "")
+
+        #expect(AppDirs.homeFrom { $0 == "HOME" ? "/tmp/test-home" : nil }?.path == "/tmp/test-home")
+        #expect(AppDirs.homeFrom { _ in nil } == nil)
+    }
+
+    @Test func txLaunchAndFlyTextDriveFlightsAndUnclippedAnimation() {
+        struct State {
+            var launched = false
+            var flew = false
+        }
+        let rt = Runtime<State>(
+            state: State(),
+            viewport: Vec2(400, 300),
+            pixelScale: 1.0
+        ) { state, _ in
+            let src: El<State> = text("hello").key("src-text").absolute(x: 40, y: 220).size(80, 24)
+            var root = col().size(400, 300).clip(true).child(src)
+            if state.launched {
+                let launchText: El<State> = text("hello")
+                let launchRow = row().children([launchText])
+                    .key("dst-launch")
+                    .absolute(x: 220, y: 40)
+                    .size(100, 32)
+                root = root.child(launchRow)
+            }
+            if state.flew {
+                let flyTextEl: El<State> = text("hello")
+                    .key("dst-fly")
+                    .absolute(x: 180, y: 60)
+                    .size(100, 24)
+                root = root.child(flyTextEl)
+            }
+            return root
+        }
+
+        _ = rt.frame(at: 0.0)
+        #expect(!rt.isAnimating)
+
+        rt.update(at: 0.1) { state, tx in
+            state.launched = true
+            tx.launch("src-text", to: "dst-launch")
+            tx.unclippedFlights()
+        }
+        _ = rt.frame(at: 0.1)
+        #expect(rt.isAnimating)
+        let launchMid = rt.element(byKey: "dst-launch")
+        #expect(launchMid != nil)
+        if let rect = launchMid?.rect, rect.count >= 2 {
+            // Starts near source (40, 220) on REFLOW spring toward (220, 40)
+            #expect(rect[0] < 219.0)
+            #expect(rect[1] > 41.0)
+        }
+
+        _ = rt.frame(at: 2.0)
+        #expect(!rt.isAnimating)
+
+        rt.update(at: 2.1) { state, tx in
+            state.flew = true
+            tx.flyText("src-text", to: "dst-fly")
+        }
+        _ = rt.frame(at: 2.15)
+        #expect(rt.isAnimating)
+        let flyMid = rt.element(byKey: "dst-fly")
+        #expect(flyMid != nil)
+
+        _ = rt.frame(at: 4.5)
+        #expect(!rt.isAnimating)
+    }
+
+    @Test func frameProfileThreadCpuAndTakePhases() {
+        _ = takeFramePhases()
+        let t0 = threadCpuMs()
+        #expect(t0 >= 0.0)
+        recordFramePhase(.commit, wallMs: 1.25, cpuMs: 0.75)
+        recordFramePhase(.paint, wallMs: 2.5, cpuMs: 1.5)
+        let taken = takeFramePhases()
+        #expect(taken.count == 2 * FRAME_PHASES)
+        #expect(taken[FramePhase.commit.rawValue] == 1.25)
+        #expect(taken[FramePhase.commit.rawValue + FRAME_PHASES] == 0.75)
+        #expect(taken[FramePhase.paint.rawValue] == 2.5)
+        #expect(taken[FramePhase.paint.rawValue + FRAME_PHASES] == 1.5)
+        let cleared = takeFramePhases()
+        #expect(cleared.allSatisfy { $0 == 0.0 })
+    }
 }
 
 private final class LockedRectPair: @unchecked Sendable {

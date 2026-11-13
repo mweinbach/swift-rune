@@ -864,10 +864,13 @@ public enum HeadlessRunner {
 
         registerFonts(spec.fonts)
 
-        var initialState = spec.makeState()
         var initTx = Tx()
-        if let sceneName = args.sceneName, let applyScene = spec.scenes[sceneName] {
-            applyScene(&initialState, &initTx)
+        let initialState = withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
+            var s = spec.makeState()
+            if let sceneName = args.sceneName, let applyScene = spec.scenes[sceneName] {
+                applyScene(&s, &initTx)
+            }
+            return s
         }
 
         let waker = Waker()
@@ -891,7 +894,9 @@ public enum HeadlessRunner {
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
         appShared?.setWaker(waker)
-        spec.setup?(waker)
+        withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
+            spec.setup?(waker)
+        }
         _ = appShared?.applyStateUpdates(to: runtime, at: 0.0)
 
         // Load script steps if `--script` was passed (supports file path OR inline JSON string)

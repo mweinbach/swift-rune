@@ -488,6 +488,63 @@ public final class FrameClock {
     }
 }
 
+// MARK: - Opt-in Headless Frame Phase Profiling (`crates/rune/src/frame/profile.rs`)
+
+/// Number of timed frame phases (`rune::frame::profile::PHASES`).
+public let FRAME_PHASES: Int = 6
+
+/// Named frame phase slots in `takeFramePhases()`.
+public enum FramePhase: Int, CaseIterable, Sendable {
+    case view = 0
+    case commit = 1
+    case layout = 2
+    case text = 3
+    case paint = 4
+    case apply = 5
+}
+
+private enum FramePhaseStorage {
+    private static let key = "rune.frameProfile.phases"
+
+    static func record(_ phase: FramePhase, wallMs: Double, cpuMs: Double) {
+        var row = (Thread.current.threadDictionary[key] as? [Double])
+            ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
+        row[phase.rawValue] += wallMs
+        row[phase.rawValue + FRAME_PHASES] += cpuMs
+        Thread.current.threadDictionary[key] = row
+    }
+
+    static func take() -> [Double] {
+        let current = (Thread.current.threadDictionary[key] as? [Double])
+            ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
+        Thread.current.threadDictionary[key] = Array(repeating: 0.0, count: 2 * FRAME_PHASES)
+        return current
+    }
+}
+
+/// CPU time consumed by the calling thread in milliseconds (`rune::thread_cpu_ms`).
+public func threadCpuMs() -> Double {
+    #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+    return Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1_000_000.0
+    #elseif os(Linux)
+    var ts = timespec()
+    guard clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 else { return 0.0 }
+    return Double(ts.tv_sec) * 1000.0 + Double(ts.tv_nsec) / 1_000_000.0
+    #else
+    return 0.0
+    #endif
+}
+
+/// Returns and clears the current thread's `[wall(6), cpu(6)]` phase timings (`rune::take_frame_phases`).
+public func takeFramePhases() -> [Double] {
+    FramePhaseStorage.take()
+}
+
+/// Accumulates wall + CPU duration into a `FramePhase` slot on the current thread.
+public func recordFramePhase(_ phase: FramePhase, wallMs: Double, cpuMs: Double = 0.0) {
+    FramePhaseStorage.record(phase, wallMs: wallMs, cpuMs: cpuMs)
+}
+
 // MARK: - Window / Shell / Options Types (window/spec.rs, window/titlebar.rs, lib.rs)
 
 /// Glyph rasterization smoothing preference (`rune::FontSmoothing`).

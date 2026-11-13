@@ -1024,10 +1024,13 @@ public struct App<State> {
         waker: Waker = Waker(),
         sceneName: String? = nil
     ) -> Runtime<State> {
-        var initial = makeState()
         var initTx = Tx()
-        if let sceneName, let applyScene = scenes[sceneName] {
-            applyScene(&initial, &initTx)
+        let initial = withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
+            var s = makeState()
+            if let sceneName, let applyScene = scenes[sceneName] {
+                applyScene(&s, &initTx)
+            }
+            return s
         }
         let runtime = Runtime<State>(
             state: initial,
@@ -1055,7 +1058,9 @@ public struct App<State> {
         runtime.tabVisitsControls = tabVisitsControlsEnabled
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         sharedHandle.shared.setWaker(waker)
-        setupHook?(waker)
+        withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
+            setupHook?(waker)
+        }
         return runtime
     }
 

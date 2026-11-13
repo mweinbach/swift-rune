@@ -2050,6 +2050,30 @@ public struct AppDirs: Sendable, Equatable {
         #endif
     }
 
+    /// Resolves the user's home folder from the process environment (`rune::dirs::home`).
+    public static func home() -> URL? {
+        homeFrom { ProcessInfo.processInfo.environment[$0] }
+    }
+
+    /// Resolves the user's home folder via `lookup` (`rune::dirs::home_from`).
+    public static func homeFrom(_ lookup: (String) -> String?) -> URL? {
+        func nonEmpty(_ k: String) -> String? {
+            guard let v = lookup(k), !v.isEmpty else { return nil }
+            return v
+        }
+        #if os(Windows)
+        if let profile = nonEmpty("USERPROFILE") {
+            return URL(fileURLWithPath: profile, isDirectory: true)
+        }
+        if let drive = nonEmpty("HOMEDRIVE"), let path = nonEmpty("HOMEPATH") {
+            return URL(fileURLWithPath: drive + path, isDirectory: true)
+        }
+        return nil
+        #else
+        return nonEmpty("HOME").map { URL(fileURLWithPath: $0, isDirectory: true) }
+        #endif
+    }
+
     /// Resolves standard directories via `lookup`, returning `nil` if no home folder is available (`AppDirs::from_env`).
     public static func fromEnv(appId: String, lookup: (String) -> String?) -> AppDirs? {
         func nonEmpty(_ k: String) -> String? {
@@ -2393,6 +2417,8 @@ public enum TaskbarProgress: String, Sendable, Equatable {
     case error
 }
 
+public typealias Taskbar = TaskbarState
+
 public struct TaskbarState: Sendable, Equatable {
     public var progress: TaskbarProgress
     public var badgeCount: UInt32
@@ -2403,6 +2429,27 @@ public struct TaskbarState: Sendable, Equatable {
         self.badgeCount = badgeCount
         self.badgeDescription = badgeCount == 0 ? "" : badgeDescription
     }
+
+    /// Returns a copy with `progress` set (`Taskbar::progress`).
+    public func progress(_ progress: TaskbarProgress) -> TaskbarState {
+        var copy = self
+        copy.progress = progress
+        return copy
+    }
+
+    /// Returns a copy with `count` and screen-reader `description` (`Taskbar::badge`); clears `badgeDescription` when `count == 0`.
+    public func badge(_ count: UInt32, _ description: String = "") -> TaskbarState {
+        var copy = self
+        copy.badgeCount = count
+        copy.badgeDescription = count == 0 ? "" : description
+        return copy
+    }
+
+    /// Badge count (`Taskbar::count`).
+    public var count: UInt32 { badgeCount }
+
+    /// Shown progress bar state (`Taskbar::shown_progress`).
+    public var shownProgress: TaskbarProgress { progress }
 
     #if os(macOS)
     @MainActor
