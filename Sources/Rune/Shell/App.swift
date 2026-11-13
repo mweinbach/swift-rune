@@ -1314,6 +1314,16 @@ public extension Tx {
         runtimeActions["wakeAfter"] as? Double
     }
 
+    internal var wakeAfterSecondsList: [Double] {
+        if let list = runtimeActions["wakeAfterList"] as? [Double] {
+            return list
+        }
+        if let single = runtimeActions["wakeAfter"] as? Double {
+            return [single]
+        }
+        return []
+    }
+
     internal var isForceCommitRequested: Bool {
         (runtimeActions["forceCommit"] as? Bool) == true
     }

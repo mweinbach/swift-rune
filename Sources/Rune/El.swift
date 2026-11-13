@@ -319,6 +319,9 @@ public struct Tx {
         } else {
             runtimeActions["wakeAfter"] = clamped
         }
+        var list = (runtimeActions["wakeAfterList"] as? [Double]) ?? []
+        list.append(clamped)
+        runtimeActions["wakeAfterList"] = list
     }
 
     internal var physicalKeyValue: PhysicalKeyCode? = nil
@@ -514,10 +517,14 @@ public struct Tx {
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }
-        if let wake = one.runtimeActions["wakeAfter"] as? Double {
+        if let wakeList = one.runtimeActions["wakeAfterList"] as? [Double] {
+            for wake in wakeList {
+                wakeAfter(wake)
+            }
+        } else if let wake = one.runtimeActions["wakeAfter"] as? Double {
             wakeAfter(wake)
         }
-        for (k, v) in one.runtimeActions where k != "wakeAfter" {
+        for (k, v) in one.runtimeActions where k != "wakeAfter" && k != "wakeAfterList" {
             runtimeActions[k] = v
         }
         commitKind = commitKind.merge(one.commitKind)
