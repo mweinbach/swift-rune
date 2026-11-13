@@ -49,49 +49,66 @@ internal extension Runtime {
     }
 
     /// Synchronizes periodic / finite `LoopSpec`s with `LoopClock` so frame advances and
-    /// `cx.timeScale` changes preserve periodic phase without jumps (`loop_clock.rs`).
-    func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at appNow: Double, cut: Bool) {
-        if cut {
-            loopClock.reset(to: appNow, scale: cxSettings.viewTimeScale)
-            loopRuntime.sync(specs: specs, at: appNow, reducedMotion: reducedMotion, cut: true)
-            loopRuntime.settleAll(at: appNow)
-            return
-        }
-        _ = loopClock.syncTracks(&loopRuntime.tracks, to: appNow, scale: cxSettings.viewTimeScale)
-        loopRuntime.sync(specs: specs, at: appNow, reducedMotion: reducedMotion, cut: false)
+    /// Syncs `el.looping` specs after `scene.commit` using `LoopClock`'s per-node animation lead time.
+    /// `cut` (`settleAll`) only finishes finite sequences; periodic loops preserve phase across commits and settles.
+    func syncMotionLoops(specs: [(id: NodeId, spec: LoopSpec)], at _: Double, cut: Bool) {
+        loopRuntime.sync(
+            specs: specs,
+            startFor: { elSliceRenderState.loopCatchUp.loopStart(id: $0, scene: scene) },
+            sceneContains: { scene.contains($0) },
+            reducedMotion: reducedMotion,
+            cut: cut
+        )
     }
 
-    /// Advances `LoopClock` on frame ticks (including clean frames without layout commits) so
-    /// active `LoopTrack` timestamps shift cleanly when `cx.timeScale != 1.0`.
-    func syncMotionLoopClock(to appNow: Double) {
-        _ = loopClock.syncTracks(&loopRuntime.tracks, to: appNow, scale: cxSettings.viewTimeScale)
+    /// Catches running periodic loop tracks up to wall-clock time when animation frames stall or sleep (`loop_clock.rs`).
+    func syncMotionLoopClock(to appNow: Double, animNow: Double) {
+        elSliceRenderState.loopCatchUp.catchLoopsUp(
+            hostNow: appNow,
+            animNow: animNow,
+            timeScale: cxSettings.viewTimeScale,
+            scene: scene,
+            tracks: &loopRuntime.tracks
+        )
     }
 
-    /// Samples a node's active loop track (periodic tracks kept on scaled `LoopClock`; `Cycle` uses
+    /// Samples a node's active loop track (periodic tracks sample `scene.store.nodeTime(id)`; `Cycle` uses
     /// unscaled wall-clock time so it retains its cadence even when animation time is paused).
     func sampleLoopPresentation(id: NodeId, nodeSize: Vec2, wallNow: Double) -> LoopSampleResult? {
-        loopRuntime.sample(id: id, nodeSize: nodeSize, at: wallNow, wall: wallNow, reducedMotion: reducedMotion)
+        loopRuntime.sample(
+            id: id,
+            nodeSize: nodeSize,
+            at: scene.store.nodeTime(id),
+            wall: wallNow,
+            reducedMotion: reducedMotion
+        )
     }
 
     /// True when any non-sleeping loop needs frame advances (`isAnimating`).
     func hasActiveMotionLoops(at appNow: Double) -> Bool {
-        loopRuntime.hasActiveLoops(at: appNow, reducedMotion: reducedMotion)
+        loopRuntime.hasActiveLoops(
+            nodeTime: { scene.store.nodeTime($0) },
+            wall: appNow,
+            reducedMotion: reducedMotion
+        )
     }
 
-    /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`
-    /// (`LoopClock.nextPendingStart`).
+    /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`.
     func nextLoopWakeDeadline(after now: Double) -> Double? {
         var best: Double? = nil
         if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
             best = now + loopInterval
         }
-        if let pendingWake = LoopClock.nextPendingStart(
-            tracks: loopRuntime.tracks.values,
-            at: now,
-            reducedMotion: reducedMotion,
-            timeScale: cxSettings.viewTimeScale
-        ) {
-            best = best.map { min($0, pendingWake) } ?? pendingWake
+        let viewScale = Double(max(0.0, cxSettings.viewTimeScale.isFinite ? cxSettings.viewTimeScale : 1.0))
+        if !reducedMotion, viewScale > 0.0 {
+            for (id, track) in loopRuntime.tracks {
+                let nt = scene.store.nodeTime(id)
+                let ns = Double(max(0.0, scene.store.nodeTimeScale(id)))
+                let effectiveScale = viewScale * ns
+                guard effectiveScale > 0.0, let startAt = track.pendingStart(at: nt) else { continue }
+                let wakeAt = now + max(0.0, (startAt - nt) / effectiveScale)
+                best = best.map { min($0, wakeAt) } ?? wakeAt
+            }
         }
         return best
     }

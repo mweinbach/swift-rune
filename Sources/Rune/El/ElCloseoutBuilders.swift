@@ -86,7 +86,9 @@ extension El {
 
     /// `hoverGroup()`, which follows keyboard focus as well (`El::hover_group_focus`).
     public func hoverGroupFocus() -> Self {
-        hoverGroup()
+        var copy = hoverGroup()
+        copy.runtimeExtras[RenderExtrasKey.hoverGroupFocus] = true
+        return copy
     }
 
     /// Paints this element and its subtree above everything else in the window and gives it hit priority (`El::raise`).

@@ -588,7 +588,22 @@ extension Runtime {
             hoverHoldState = .free
         }
         let ptrInWindow = pointerPosition.x > -9000 && pointerPosition.y > -9000
-        let candidateHit = ptrInWindow ? hitTest(at: pointerPosition, predicate: Self.hoverHitPredicate) : nil
+        let candidateHit: (node: FlatNode, rect: MotionRect)?
+        if !ptrInWindow {
+            candidateHit = nil
+        } else if let pp = pressedPath {
+            if pressRestingContains(path: pp, at: pointerPosition),
+               let pIdx = nodeByPath[pp],
+               flatNodes.indices.contains(pIdx),
+               !flatNodes[pIdx].effectiveInert {
+                let pNode = flatNodes[pIdx]
+                candidateHit = (pNode, presentedRectByPath[pp] ?? pNode.targetRect)
+            } else {
+                candidateHit = nil
+            }
+        } else {
+            candidateHit = hitTest(at: pointerPosition, predicate: Self.hoverHitPredicate)
+        }
         let candidatePath = candidateHit?.node.path
         let candidateIndex = candidateHit?.node.index
         let within = computeHoverWithin()
@@ -713,6 +728,7 @@ extension Runtime {
             }
         }
         lastHoverTargetById = lastHoverTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+        syncPressScale(at: now, cut: cut)
     }
 
     internal struct GroupHoverContext {
@@ -771,7 +787,10 @@ extension Runtime {
             if let share = node.el.hoverGroupShare, sharedHoverKeys.contains(share) {
                 return true
             }
-            if focusVisible, let fp = focusedPath, (fp == node.path || fp.hasPrefix(node.path + "/")) {
+            if (node.el.runtimeExtras[RenderExtrasKey.hoverGroupFocus] as? Bool) == true,
+               focusVisible,
+               let fp = focusedPath,
+               (fp == node.path || fp.hasPrefix(node.path + "/")) {
                 return true
             }
             return false

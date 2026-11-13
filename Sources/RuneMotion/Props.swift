@@ -147,4 +147,6 @@ public enum Props {
     public static let TRANSFORM = Prop<Transform2D>(id: PropId(20), propClass: .spatial, name: "transform")
     public static let BORDER_BOTTOM = Prop<MotionColor>(id: PropId(21), propClass: .color, name: "borderBottom")
     public static let ICON_TURN = Prop<Float>(id: PropId(22), propClass: .rotation, name: "iconTurn")
+    public static let GROUP_REST = Prop<Float>(id: PropId(94), propClass: .opacity, name: "groupRest")
+    public static let PRESS_SCALE = Prop<Float>(id: PropId(96), propClass: .scale, name: "pressScale")
 }
