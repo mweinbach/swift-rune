@@ -29,6 +29,13 @@ extension Runtime {
     // MARK: - Per-Frame Flush & Reconciliation
 
     internal func flushPlatformFrameWork(at now: Double) {
+        pendingDropHoverChanged = false
+
+        // 0. If no commit is pending, replay any hidden drop steps on the current tree
+        if !needsCommit {
+            flushHiddenDropSteps(at: now)
+        }
+
         // 1. Deliver queued file dialog results on frame (`file_dialog.rs`)
         if !pendingFileDialogAnswers.isEmpty {
             let answers = pendingFileDialogAnswers
@@ -116,14 +123,45 @@ extension Runtime {
         }
     }
 
+    internal func flushHiddenDropSteps(at now: Double) {
+        guard !pendingHiddenDrops.isEmpty else { return }
+        let steps = pendingHiddenDrops
+        pendingHiddenDrops.removeAll()
+        for step in steps {
+            switch step {
+            case .drag(let urls, let pt, let t):
+                performDragFiles(urls, at: pt, at: t)
+            case .dragTo(let pt, let t):
+                _ = performDragFilesTo(pt, at: t)
+            case .leave(let t):
+                performDragFilesLeave(at: t)
+            case .drop(let urls, let pt, let t):
+                _ = performDropFiles(urls, at: pt, at: t)
+            }
+        }
+    }
+
     /// Updates active drop hover/move state for `urls` dragged at `point` in window coordinates.
     public func dragFiles(_ urls: [URL], at point: Vec2?, at now: Double = 0.0) {
+        if !liveVisible {
+            pendingHiddenDrops.append(.drag(urls: urls, point: point, at: now))
+            return
+        }
+        performDragFiles(urls, at: point, at: now)
+    }
+
+    private func performDragFiles(_ urls: [URL], at point: Vec2?, at now: Double) {
         currentTime = now
+        let oldPath = dropHoverPath
+        let oldAccepted = dropHoverAccepted
         draggedFiles = urls
         draggedFilesPoint = point
         guard !filesHeld else { return }
         guard let pt = point, let hit = dropTargetHitTest(at: pt, for: urls) else {
             endDropHover(at: now)
+            if dropHoverPath != oldPath || dropHoverAccepted != oldAccepted {
+                pendingDropHoverChanged = true
+            }
             return
         }
 
@@ -162,25 +200,53 @@ extension Runtime {
             if acceptsSome && spec.onDropMove != nil {
                 pendingDropMovePoint = pt
             }
-        } else if acceptsSome && hit.spec.onDropMove != nil {
+        } else if acceptsSome && hit.spec.onDropMove != nil && pt != lastEmittedDropMovePoint {
             pendingDropMovePoint = pt
+        }
+        if dropHoverPath != oldPath || dropHoverAccepted != oldAccepted {
+            pendingDropHoverChanged = true
         }
     }
 
     /// Updates cursor position while dragging files previously supplied to `dragFiles`.
-    public func dragFilesTo(_ point: Vec2, at now: Double = 0.0) {
+    /// Returns `true` only when hover state changed or a new per-frame `onDropMove` wake is needed.
+    @discardableResult
+    public func dragFilesTo(_ point: Vec2, at now: Double = 0.0) -> Bool {
+        if !liveVisible {
+            pendingHiddenDrops.append(.dragTo(point: point, at: now))
+            return true
+        }
+        return performDragFilesTo(point, at: now)
+    }
+
+    private func performDragFilesTo(_ point: Vec2, at now: Double) -> Bool {
+        let oldPath = dropHoverPath
+        let oldAccepted = dropHoverAccepted
+        let hadMove = pendingDropMovePoint != nil
         draggedFilesPoint = point
-        guard let urls = draggedFiles else { return }
-        dragFiles(urls, at: point, at: now)
+        guard let urls = draggedFiles else { return false }
+        performDragFiles(urls, at: point, at: now)
+        let hoverChanged = (dropHoverPath != oldPath) || (dropHoverAccepted != oldAccepted)
+        let scheduledMove = !hadMove && pendingDropMovePoint != nil
+        return hoverChanged || scheduledMove
     }
 
     /// Clears active file drag hover state when the drag exits the window or is cancelled.
     public func dragFilesLeave(at now: Double = 0.0) {
+        if !liveVisible {
+            pendingHiddenDrops.append(.leave(at: now))
+            return
+        }
+        performDragFilesLeave(at: now)
+    }
+
+    private func performDragFilesLeave(at now: Double) {
         currentTime = now
         draggedFiles = nil
         draggedFilesPoint = nil
         pendingDropMovePoint = nil
         lastEmittedDropMovePoint = nil
+        pendingDropHoverChanged = false
         endDropHover(at: now)
     }
 
@@ -204,12 +270,38 @@ extension Runtime {
     /// and falling back to `onAppFileDrop` if no drop zone handled accepted files.
     @discardableResult
     public func dropFiles(_ urls: [URL], at point: Vec2? = nil, at now: Double = 0.0) -> Bool {
+        if !liveVisible {
+            pendingHiddenDrops.append(.drop(urls: urls, point: point, at: now))
+            return false
+        }
+        return performDropFiles(urls, at: point, at: now)
+    }
+
+    private func performDropFiles(_ urls: [URL], at point: Vec2?, at now: Double) -> Bool {
         currentTime = now
         let targetPt = point ?? draggedFilesPoint
+        if let movePt = pendingDropMovePoint,
+           let hoverPath = dropHoverPath,
+           dropHoverAccepted,
+           let files = draggedFiles,
+           !filesHeld,
+           let hit = dropTarget(byPath: hoverPath),
+           let onMove = hit.spec.onDropMove,
+           movePt != lastEmittedDropMovePoint {
+            lastEmittedDropMovePoint = movePt
+            var tx = Tx()
+            tx.dropPoint = makeDropPoint(windowPos: movePt, rect: hit.rect)
+            onMove(&state, files, &tx)
+            applyTx(tx, at: now)
+            if !tx.liveOnlyRequested {
+                dirtyCommit(at: now)
+            }
+        }
         draggedFiles = nil
         draggedFilesPoint = nil
         pendingDropMovePoint = nil
         lastEmittedDropMovePoint = nil
+        pendingDropHoverChanged = false
         endDropHover(at: now)
 
         var handledByElement = false

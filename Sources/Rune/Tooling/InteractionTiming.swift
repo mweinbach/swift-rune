@@ -322,6 +322,266 @@ public final class InteractionSymbolCache {
     }
 }
 
+/// Demangling & frame classification helpers (`tooling/interaction/stack.rs`).
+public enum InteractionDemangle {
+    private typealias SwiftDemangleFn = @convention(c) (
+        UnsafePointer<CChar>?,
+        Int,
+        UnsafeMutablePointer<CChar>?,
+        UnsafeMutablePointer<Int>?,
+        UInt32
+    ) -> UnsafeMutablePointer<CChar>?
+
+    #if canImport(Darwin)
+    private static let swiftDemangleFn: SwiftDemangleFn? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "swift_demangle") else { // RTLD_DEFAULT
+            return nil
+        }
+        return unsafeBitCast(sym, to: SwiftDemangleFn.self)
+    }()
+    #endif
+
+    /// Demangles a symbol name (Swift `$s...`, Darwin leading `_`, or Rust hash suffix).
+    public static func demangled(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        var name = raw
+        #if canImport(Darwin)
+        let checkSwift = name.hasPrefix("_$s") || name.hasPrefix("$s") || name.hasPrefix("_$S") || name.hasPrefix("$S") || name.hasPrefix("_T")
+        if checkSwift, let fn = swiftDemangleFn {
+            let result = name.withCString { cstr -> String? in
+                let len = strlen(cstr)
+                guard let out = fn(cstr, len, nil, nil, 0) else { return nil }
+                defer { free(out) }
+                return String(cString: out)
+            }
+            if let result, !result.isEmpty {
+                return result
+            }
+        }
+        if name.hasPrefix("_") && !name.hasPrefix("__") {
+            name.removeFirst()
+        }
+        #endif
+        // Strip Rust trailing `::h<16-hex>` hash suffix when present.
+        if let range = name.range(of: "::h"), name.distance(from: range.upperBound, to: name.endIndex) == 16 {
+            let suffix = name[range.upperBound...]
+            if suffix.allSatisfy({ $0.isHexDigit }) {
+                name = String(name[..<range.lowerBound])
+            }
+        }
+        return name
+    }
+
+    /// Returns `true` when `name` belongs to Rune, Swift/Rust stdlib, or system libraries rather than app code.
+    public static func isLibrary(_ name: String) -> Bool {
+        let prefixes = [
+            "rune::", "rune_scene::", "rune_text::", "rune_layout::",
+            "Rune.", "RuneScene.", "RuneText.", "RuneLayout.", "RuneMotion.", "RuneMac.",
+            "std::", "core::", "alloc::", "Swift.", "Foundation.", "AppKit.", "UIKit.",
+            "CoreFoundation", "CoreGraphics", "QuartzCore", "Metal", "Dispatch",
+            "libsystem_", "libdyld", "dyld", "libobjc", "libswift",
+            "_pthread", "pthread_", "mach_msg", "start", "main",
+        ]
+        if prefixes.contains(where: { name.hasPrefix($0) || name.contains(" \($0)") }) {
+            return true
+        }
+        // Swift closure/thunk wrappers inside Rune modules: e.g. `closure #1 in Rune.`
+        if name.contains("in Rune.") || name.contains("in RuneScene.") || name.contains("in RuneMac.") {
+            return true
+        }
+        return false
+    }
+}
+
+/// Bounded caught-sample store for the watchdog thread (`MOST = 64`, `watchdog.rs` / `watchdog_tests.rs`).
+public final class InteractionCaughtSamples {
+    public static let maxSamples: Int = InteractionWatchdog.maxSamples
+
+    public struct Entry: Sendable, Equatable {
+        public var seq: UInt64
+        public var sample: InteractionSampledStack
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    private var currentSeq: UInt64 = 0
+
+    public init() {}
+
+    public func push(seq: UInt64, sample: InteractionSampledStack) {
+        lock.lock()
+        defer { lock.unlock() }
+        if seq != currentSeq {
+            entries.removeAll(keepingCapacity: true)
+            currentSeq = seq
+        }
+        if entries.count < Self.maxSamples {
+            entries.append(Entry(seq: seq, sample: sample))
+        }
+    }
+
+    public func take(for seq: UInt64) -> [InteractionSampledStack] {
+        lock.lock()
+        defer { lock.unlock() }
+        guard seq == currentSeq else { return [] }
+        let out = entries.map(\.sample)
+        entries.removeAll(keepingCapacity: true)
+        return out
+    }
+
+    public var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.count
+    }
+}
+
+/// Live target thread handle for cross-thread sampling (`tooling/interaction/stack.rs`).
+public final class InteractionThreadSamplerTarget: @unchecked Sendable {
+    public static let maxCapturedFrames: Int = 48
+
+    #if os(macOS) && arch(arm64)
+    private let machThread: thread_t
+    private let stackLow: UInt
+    private let stackHigh: UInt
+    #endif
+
+    #if os(macOS) && arch(arm64)
+    private init(machThread: thread_t, stackLow: UInt, stackHigh: UInt) {
+        self.machThread = machThread
+        self.stackLow = stackLow
+        self.stackHigh = stackHigh
+    }
+    #else
+    private init() {}
+    #endif
+
+    /// Captures the calling thread so the watchdog can suspend and walk its stack from another thread.
+    public static func current() -> InteractionThreadSamplerTarget? {
+        #if os(macOS) && arch(arm64)
+        let selfPthread = pthread_self()
+        let machThread = pthread_mach_thread_np(selfPthread)
+        guard machThread != MACH_PORT_NULL else {
+            return nil
+        }
+        let stackTopPtr = pthread_get_stackaddr_np(selfPthread)
+        let stackSize = UInt(pthread_get_stacksize_np(selfPthread))
+        let stackHigh = UInt(bitPattern: stackTopPtr)
+        let stackLow = stackHigh >= stackSize ? stackHigh - stackSize : 0
+        return InteractionThreadSamplerTarget(machThread: machThread, stackLow: stackLow, stackHigh: stackHigh)
+        #else
+        return nil
+        #endif
+    }
+
+    /// Samples this target thread's call stack and CPU usage from a background watchdog thread.
+    /// Returns `nil` if called on the target thread itself or if `still()` returns `false`.
+    public func sample(still: () -> Bool) -> InteractionRawStack? {
+        #if os(macOS) && arch(arm64)
+        let callerMach = pthread_mach_thread_np(pthread_self())
+        guard callerMach != machThread, still() else { return nil }
+
+        // Read thread CPU time & run state via THREAD_BASIC_INFO BEFORE suspending the thread
+        // (`stack.rs:168-214`) so we observe real wait state and perform zero Mach/heap calls while suspended.
+        var basic = thread_basic_info()
+        var basicCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let basicKr = withUnsafeMutablePointer(to: &basic) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(basicCount)) { intPtr in
+                thread_info(machThread, thread_flavor_t(THREAD_BASIC_INFO), intPtr, &basicCount)
+            }
+        }
+        let cpuUs: UInt64
+        let waiting: Bool
+        if basicKr == KERN_SUCCESS {
+            cpuUs = UInt64(basic.user_time.seconds) * 1_000_000 + UInt64(basic.user_time.microseconds)
+                + UInt64(basic.system_time.seconds) * 1_000_000 + UInt64(basic.system_time.microseconds)
+            waiting = (basic.run_state == TH_STATE_WAITING || basic.run_state == TH_STATE_UNINTERRUPTIBLE)
+        } else {
+            cpuUs = 0
+            waiting = false
+        }
+
+        // Pre-allocate fixed PC buffer before suspending the target thread so zero heap
+        // allocations or locks occur between `thread_suspend` and `thread_resume`.
+        let maxFrames = Self.maxCapturedFrames
+        let rawPCs = UnsafeMutablePointer<UInt>.allocate(capacity: maxFrames)
+        defer { rawPCs.deallocate() }
+        var pcCount = 0
+
+        guard thread_suspend(machThread) == KERN_SUCCESS else { return nil }
+        var state = arm_thread_state64_t()
+        var stateCount = mach_msg_type_number_t(MemoryLayout<arm_thread_state64_t>.stride / MemoryLayout<natural_t>.stride)
+        let stateKr: kern_return_t
+        if still() {
+            stateKr = withUnsafeMutablePointer(to: &state) { ptr in
+                ptr.withMemoryRebound(to: natural_t.self, capacity: Int(stateCount)) { natPtr in
+                    thread_get_state(machThread, ARM_THREAD_STATE64, natPtr, &stateCount)
+                }
+            }
+            if stateKr == KERN_SUCCESS {
+                let pc0 = UInt(state.__pc) & 0x0000_7fff_ffff_ffff
+                if pc0 != 0 && pcCount < maxFrames {
+                    rawPCs[pcCount] = pc0
+                    pcCount += 1
+                }
+                var fp = UInt(state.__fp)
+                var prevFp: UInt = 0
+                while pcCount < maxFrames,
+                      fp > prevFp,
+                      (fp & 0x7) == 0,
+                      fp >= stackLow,
+                      fp + UInt(MemoryLayout<UInt>.stride * 2) <= stackHigh,
+                      let fpPtr = UnsafePointer<UInt>(bitPattern: fp) {
+                    let nextFp = fpPtr[0]
+                    let lr = fpPtr[1] & 0x0000_7fff_ffff_ffff
+                    if lr != 0 {
+                        rawPCs[pcCount] = lr
+                        pcCount += 1
+                    }
+                    if nextFp == 0 { break }
+                    prevFp = fp
+                    fp = nextFp
+                }
+            }
+        } else {
+            stateKr = KERN_ABORTED
+        }
+        _ = thread_resume(machThread)
+
+        guard stateKr == KERN_SUCCESS else { return nil }
+
+        var pcs: [UInt] = []
+        pcs.reserveCapacity(pcCount)
+        for i in 0..<pcCount {
+            pcs.append(rawPCs[i])
+        }
+        return InteractionRawStack(pcs: pcs, waiting: waiting, cpuUs: cpuUs, imagesGeneration: 0)
+        #else
+        return nil
+        #endif
+    }
+
+    /// Resolves a raw stack using `dladdr` + `InteractionDemangle` and caches resolved frames.
+    public static func resolveFrames(
+        for raw: InteractionRawStack,
+        cache: InteractionSymbolCache
+    ) -> [InteractionStackFrame] {
+        cache.frames(for: raw, generation: { 0 }) { addr in
+            #if canImport(Darwin)
+            var info = Dl_info()
+            if let ptr = UnsafeRawPointer(bitPattern: addr),
+               dladdr(ptr, &info) != 0,
+               let sname = info.dli_sname {
+                let rawName = String(cString: sname)
+                let demangled = InteractionDemangle.demangled(rawName)
+                return InteractionStackFrame(name: demangled, isApp: !InteractionDemangle.isLibrary(demangled))
+            }
+            #endif
+            return InteractionStackFrame(name: String(format: "0x%lx", addr), isApp: false)
+        }
+    }
+}
+
 public struct InteractionSampledStack: Sendable, Equatable {
     public var raw: InteractionRawStack
     public var atNs: UInt64
@@ -690,6 +950,13 @@ public enum InteractionGate {
         otelEnv.flatMap(loopback) ?? ("127.0.0.1", 27686)
     }
 
+    nonisolated(unsafe) public static var forceOnForTesting: Bool? = nil
+
+    public static var isOn: Bool {
+        if let forced = forceOnForTesting { return forced }
+        return isEnabled()
+    }
+
     public static func isEnabled(headless: Bool = false) -> Bool {
         let env = ProcessInfo.processInfo.environment
         return wanted(perfEnv: env["RUNE_PERF"], otelEnv: env["OTEL_EXPORTER_OTLP_ENDPOINT"], headless: headless)
@@ -958,6 +1225,30 @@ public final class InteractionTracker {
     private var activePhases = false
     private var phaseTimes = [Double](repeating: 0, count: InteractionPhase.allCases.count)
 
+    private static let phaseDictKey = "rune.interaction.activePhases"
+
+    public static func recordActiveThreadPhase(_ index: Int, ms: Double) {
+        guard index >= 0, index < InteractionPhase.allCases.count else { return }
+        guard let box = Thread.current.threadDictionary[phaseDictKey] as? ActivePhaseBox else { return }
+        box.times[index] += ms
+    }
+
+    private final class ActivePhaseBox {
+        var times = [Double](repeating: 0, count: InteractionPhase.allCases.count)
+    }
+
+    nonisolated(unsafe) public static var testSlowReports: [SlowInteractionReport] = []
+    nonisolated(unsafe) public static var testSlowFrameReports: [SlowFrameReport] = []
+    nonisolated(unsafe) public static var testRollups: [(rolls: [InteractionRollup.Roll], fromNs: UInt64, toNs: UInt64)] = []
+
+    public static func resetForTesting() {
+        InteractionGate.forceOnForTesting = nil
+        testSlowReports.removeAll()
+        testSlowFrameReports.removeAll()
+        testRollups.removeAll()
+        Thread.current.threadDictionary.removeObject(forKey: phaseDictKey)
+    }
+
     public init() {}
 
     public func isBreached(_ note: InteractionNote) -> Bool {
@@ -993,6 +1284,7 @@ public final class InteractionTracker {
         if fx.contains(where: { if case .startPhases = $0 { return true }; return false }) {
             phaseTimes = [Double](repeating: 0, count: InteractionPhase.allCases.count)
             activePhases = true
+            Thread.current.threadDictionary[Self.phaseDictKey] = ActivePhaseBox()
         }
     }
 
@@ -1010,7 +1302,12 @@ public final class InteractionTracker {
         overloaded: Bool = false
     ) -> SlowFrameReport? {
         if case .open = frameState {
-            let captured = phaseTimes
+            var captured = phaseTimes
+            if let box = Thread.current.threadDictionary[Self.phaseDictKey] as? ActivePhaseBox {
+                for i in 0..<captured.count {
+                    captured[i] += box.times[i]
+                }
+            }
             phaseTimes = [Double](repeating: 0, count: InteractionPhase.allCases.count)
             let fx = InteractionFrameMachine.step(
                 &frameState,
@@ -1018,6 +1315,7 @@ public final class InteractionTracker {
             )
             if fx.contains(where: { if case .stopPhases = $0 { return true }; return false }) {
                 activePhases = false
+                Thread.current.threadDictionary.removeObject(forKey: Self.phaseDictKey)
             }
             return nil
         }

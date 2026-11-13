@@ -31,6 +31,44 @@ internal struct PresentedTransform {
     static let identity = PresentedTransform()
 }
 
+/// Trace namespace metadata `(className, host)` attached via `El.traceNamespace`.
+public struct TraceNamespace: Sendable, Equatable {
+    public var className: String
+    public var host: String
+
+    public init(className: String, host: String) {
+        self.className = className
+        self.host = host
+    }
+}
+
+/// Reasons the last frame reported `isAnimating == true`, mirroring `rune::runtime::AnimSource`.
+public enum AnimSource {
+    public static let tracks: UInt32 = 1 << 0
+    public static let growth: UInt32 = 1 << 1
+    public static let scroll: UInt32 = 1 << 2
+    public static let reveal: UInt32 = 1 << 3
+    public static let loop: UInt32 = 1 << 4
+    public static let scaleSettle: UInt32 = 1 << 5
+    public static let video: UInt32 = 1 << 6
+    public static let textFlight: UInt32 = 1 << 7
+    public static let live: UInt32 = 1 << 8
+    public static let virtualFill: UInt32 = 1 << 9
+
+    private static let allNames: [String] = [
+        "tracks", "growth", "scroll", "reveal", "loop",
+        "scale-settle", "video", "text-flight", "live", "virtual-fill",
+    ]
+
+    public static func names(_ bits: UInt32) -> [String] {
+        var out: [String] = []
+        for (i, name) in allNames.enumerated() where (bits & (1 << UInt32(i))) != 0 {
+            out.append(name)
+        }
+        return out
+    }
+}
+
 /// Snapshot of a mounted or exiting UI element exposed to tests, accessibility, and `--tree` JSON.
 public struct ElementInfo: Sendable, Equatable {
     public var path: String
@@ -65,6 +103,7 @@ public struct ElementInfo: Sendable, Equatable {
     public var hover: Float
     public var press: Float
     public var scrolled: [Float]
+    internal var carriedScrolled: [Float] = [0, 0]
     public var caret: [Float]?
     public var secure: Bool = false
     public var disabled: Bool = false
@@ -73,6 +112,10 @@ public struct ElementInfo: Sendable, Equatable {
     public var a11yDescription: String? = nil
     public var a11yHidden: Bool = false
     public var stuck: Float = 0.0
+    public var traceName: String? = nil
+    public var traceNamespace: TraceNamespace? = nil
+    public var virtualExtent: Bool = false
+    public var editRange: [Int]? = nil
 
     public static func stub(_ key: String) -> ElementInfo {
         ElementInfo(
@@ -203,6 +246,7 @@ public final class Runtime<State> {
         var clicks: Int
         var button: PointerButton
         var isTextSelectionDrag: Bool
+        var movedBeyondSlop: Bool = false
         var stateSnapshotBeforeDrag: State
     }
 
@@ -370,6 +414,13 @@ public final class Runtime<State> {
     public private(set) var viewCommitCount: Int = 0
     public private(set) var viewCallCount: Int = 0
     public private(set) var keyWarnings: [String] = []
+    public let perfWatch = PerfWarn.Watch()
+    public var interactionTracker: InteractionTracker { perfWatch.interaction }
+    internal var frameInstantScrollKey: String? = nil
+    internal var frameHadCommitted: Bool = false
+    internal var frameHadInputSinceLastFrame: Bool = false
+    internal var frameHadLiveWake: Bool = false
+    internal var frameHadScrollSinceLastFrame: Bool = false
     public var windowTitle: String? = nil
     public private(set) var quitRequested: Bool = false
     public var fontSmoothing: FontSmoothing = .systemDefault
@@ -423,6 +474,18 @@ public final class Runtime<State> {
     internal var runtimeFileDialogState: RuntimeFileDialogState = .closed
     internal var nextFileDialogId: UInt64 = 1
     internal var pendingFileDialogAnswers: [((inout Any, FileDialogResult, inout Tx) -> Void, FileDialogResult)] = []
+    internal enum PendingHiddenDropStep {
+        case drag(urls: [URL], point: Vec2?, at: Double)
+        case dragTo(point: Vec2, at: Double)
+        case leave(at: Double)
+        case drop(urls: [URL], point: Vec2?, at: Double)
+    }
+
+    public private(set) var commitCount: UInt64 = 0
+    public private(set) var liveVisible: Bool = true
+    public internal(set) var minimizeState: WindowMinimize = .none
+    internal var pendingDropHoverChanged: Bool = false
+    internal var pendingHiddenDrops: [PendingHiddenDropStep] = []
     internal var dropHoverPath: String? = nil
     internal var dropHoverKey: String? = nil
     internal var dropHoverAccepted: Bool = false
@@ -435,9 +498,27 @@ public final class Runtime<State> {
     internal var armedDragOut: (path: String, key: String?, startWindow: Vec2, bounds: MotionRect, threshold: Float)? = nil
     internal var activeDragOut: (path: String, key: String?, onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?)? = nil
     internal var pendingDragOutStart: DragOutStart? = nil
+    /// Whether standalone physical modifier transitions (`ModifierKey`) are tracked and dispatched (`keys.rs`).
+    public var modifierKeysEnabled: Bool = false
+    internal var heldModifierKeys: [ModifierKey] = []
+    public var traceChannels: [String: (kind: TraceChannels.Kind, value: Float)]? = nil {
+        didSet {
+            scene.store.auditRetargets(traceChannels != nil)
+        }
+    }
+    public var traceEvents: [String] = []
+    public private(set) var animSources: UInt32 = 0
+    public private(set) var imeArea: [Float]? = nil
+    internal var currentPhysicalKey: PhysicalKeyCode? = nil
+    internal var currentKeyBase: Character? = nil
+    internal var currentKeyRepeat: Bool = false
 
     public var hasPendingInput: Bool {
-        !pendingFileDialogAnswers.isEmpty || pendingDropMovePoint != nil || !popupQueue.isEmpty
+        !pendingFileDialogAnswers.isEmpty
+            || pendingDropMovePoint != nil
+            || pendingDropHoverChanged
+            || !pendingHiddenDrops.isEmpty
+            || !popupQueue.isEmpty
     }
 
     // Input & focus state
@@ -920,6 +1001,18 @@ public final class Runtime<State> {
     }
 
     private func frameWithBlendScope(at now: Double) -> RefScene {
+        let wasQuiet = !frameHadInputSinceLastFrame && !isAnimating
+        let dueTimer = nextWakeDeadline.map { now >= $0 } ?? false
+        let wasLive = frameHadLiveWake
+        frameHadInputSinceLastFrame = false
+        frameHadLiveWake = false
+        frameHadCommitted = false
+        frameInstantScrollKey = nil
+        perfWatch.idle.begins(quiet: wasQuiet, timer: dueTimer, live: wasLive)
+        if InteractionGate.isOn {
+            interactionFrameBegins()
+        }
+
         let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
         let sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
@@ -932,6 +1025,12 @@ public final class Runtime<State> {
         pendingLayoutFeedbackRan = pendingLayoutFeedbackRan || postFeedback
         pendingExternalLayoutActionRan = pendingExternalLayoutActionRan || postExternal
         isAnimating = isAnimating || ((pixelSnapGlides.isEasing || wroteDrawn) && cxSettings.viewTimeScale > 0.0)
+        if pixelSnapGlides.isEasing && cxSettings.viewTimeScale > 0.0 {
+            animSources |= AnimSource.scaleSettle
+        }
+        if !isAnimating {
+            animSources = 0
+        }
         if layoutFeedback.isOpen && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
         }
@@ -943,7 +1042,131 @@ public final class Runtime<State> {
         if rewindRecorder != nil {
             captureRewindFrame(at: now)
         }
+        let wasScrolling = frameHadScrollSinceLastFrame || scrollMovedSinceLastFrame || scrollStore.isAnimating
+        frameHadScrollSinceLastFrame = false
+        perfWatch.meter.frameEnds(scrolling: wasScrolling, committed: frameHadCommitted, instantKey: frameInstantScrollKey)
+        if PerfWarn.isEnabled {
+            perfWatch.idle.ends(
+                clock: now,
+                animating: isAnimating,
+                drawn: makeIdleDrawnSnapshot(sceneOut),
+                windowName: windowTitle
+            )
+        }
+        if InteractionGate.isOn {
+            interactionBuilt(sceneOut: sceneOut)
+        }
         return sceneOut
+    }
+
+    private func makeIdleDrawnSnapshot(_ scene: RefScene) -> IdleMeter.DrawnSnapshot {
+        var data: [UInt8] = []
+        data.reserveCapacity(32 + scene.primitives.count * 32)
+        func appendBits(_ f: Float) {
+            var bits = f.bitPattern
+            for _ in 0..<4 {
+                data.append(UInt8(bits & 0xFF))
+                bits >>= 8
+            }
+        }
+        func appendVec4(_ v: SIMD4<Float>) {
+            appendBits(v.x); appendBits(v.y); appendBits(v.z); appendBits(v.w)
+        }
+        appendBits(Float(scene.width))
+        appendBits(Float(scene.height))
+        appendVec4(scene.clearColor)
+        for p in scene.primitives {
+            appendVec4(p.rect)
+            appendVec4(p.fill)
+            appendVec4(p.border)
+            appendVec4(p.params)
+            appendVec4(p.uv)
+            appendVec4(p.clip)
+        }
+        var surfaceKey: UInt64 = UInt64(scene.glyphs.texels.count) &* 0x9e37_79b9_7f4a_7c15
+        surfaceKey ^= UInt64(imagePacker.revision) &* 0xbf58_476d_1ce4_e5b9
+        return IdleMeter.DrawnSnapshot(
+            instances: data,
+            surfaceKey: surfaceKey,
+            opaque: !surfaces.isEmpty || !lastVideoSnapshots.isEmpty
+        )
+    }
+
+    private func interactionFrameBegins() {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let cpuMs = PerfWarn.threadCpuMs()
+        if let finished = perfWatch.interaction.frameBegins(queued: false, nowNs: nowNs, cpuMs: cpuMs) {
+            handleInteractionFinished(finished)
+        }
+    }
+
+    private func interactionBuilt(sceneOut: RefScene) {
+        let nowNs = DispatchTime.now().uptimeNanoseconds
+        let cpuMs = PerfWarn.threadCpuMs()
+        if let slowFrame = perfWatch.interaction.built(
+            shaped: UInt32(sceneOut.primitives.count),
+            nodes: flatNodes.count,
+            nowNs: nowNs,
+            cpuMs: cpuMs,
+            stacks: nil
+        ) {
+            InteractionTracker.testSlowFrameReports.append(slowFrame)
+        }
+    }
+
+    public func interactionPresented(
+        submittedNs: UInt64 = DispatchTime.now().uptimeNanoseconds,
+        presentsAtNs: UInt64? = nil,
+        slowMs: Double = InteractionTracker.defaultSlowMs,
+        overloaded: Bool = false
+    ) {
+        guard InteractionGate.isOn else { return }
+        if let finished = perfWatch.interaction.finish(
+            submittedNs: submittedNs,
+            presentsAtNs: presentsAtNs,
+            slowMs: slowMs,
+            overloaded: overloaded
+        ) {
+            handleInteractionFinished(finished)
+        }
+    }
+
+    private func handleInteractionFinished(_ f: InteractionTracker.Finished) {
+        if f.slow {
+            let report = SlowInteractionReport(
+                route: f.timed.note.route.text,
+                control: f.timed.note.control.text,
+                action: f.timed.note.action,
+                arrivedNs: f.timed.arrivedNs,
+                frameStartNs: f.timed.frameStartNs,
+                builtNs: f.builtNs,
+                submittedNs: f.submittedNs,
+                presentNs: f.presentNs,
+                handlerMs: f.timed.handlerMs,
+                phases: f.phases,
+                why: f.timed.why,
+                commits: f.timed.commits,
+                shaped: f.shaped,
+                nodes: flatNodes.count,
+                reused: 0,
+                rebuilt: [],
+                cpuMs: f.cpuMs,
+                cause: f.cause ?? .queued,
+                stacks: f.stacks
+            )
+            InteractionTracker.testSlowReports.append(report)
+        }
+        if let rollup = perfWatch.interaction.takeRollupIfDue(nowNs: f.presentNs, force: false) {
+            InteractionTracker.testRollups.append(rollup)
+        }
+    }
+
+    private func interactionNote(action: String, rank: UInt8, path: String?) -> InteractionNote? {
+        guard InteractionGate.isOn else { return nil }
+        let names = perfWatch.interaction.names
+        let control = path.map { names.control(path: $0) } ?? names.fixed("window")
+        let route = names.route(page: nil, modal: nil)
+        return InteractionNote(route: route, control: control, action: action, rank: rank)
     }
 
     internal func stepToFrameOutput(at now: Double) -> FrameOutput {
@@ -1040,6 +1263,7 @@ public final class Runtime<State> {
             forceInitialSettle = false
             commitTree(at: commitAt, cut: shouldCut)
             reconcileDropHoverAfterCommit(at: now)
+            flushHiddenDropSteps(at: now)
             if didEdgeScroll {
                 laidSelectableEdgeScroll(at: now)
             }
@@ -1117,6 +1341,7 @@ public final class Runtime<State> {
 
         let isScrolling = isInitiallyScrolling || scrollMovedSinceLastFrame || scrollStore.isAnimating
         if isScrolling {
+            frameHadScrollSinceLastFrame = true
             layoutFeedback.step(.reopened)
         }
         if layoutReadsMoved() {
@@ -1164,7 +1389,20 @@ public final class Runtime<State> {
             || hasActiveMotionLoops(at: now)
             || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
+        var sources: UInt32 = 0
+        if frameOut.isAnimating { sources |= AnimSource.tracks }
+        if growthMoving || growthRows.values.contains(where: { $0.track.moving }) { sources |= AnimSource.growth }
+        if scrollStore.isAnimating { sources |= AnimSource.scroll }
+        if !enterDelays.isEmpty { sources |= AnimSource.reveal }
+        if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
+        if virtualFill.isFilling { sources |= AnimSource.virtualFill }
+        if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }
+        if !activeTextFlights.isEmpty { sources |= AnimSource.textFlight }
+        if lastVideoSnapshots.values.contains(where: { if case .playing = $0.state { return true }; return false }) {
+            sources |= AnimSource.video
+        }
         isAnimating = rawAnimating && cxSettings.viewTimeScale > 0.0
+        animSources = isAnimating ? sources : 0
 
         // Prune snapshots of exiting nodes that have finished exiting
         let activeIds = Set(frameOut.nodes.map(\.id))
@@ -1237,6 +1475,11 @@ public final class Runtime<State> {
             memo.keepSince(sincePass)
             lastLiveCommitClock = now
             compareLiveOnlyCheck(liveCheck)
+            commitCount &+= 1
+            frameHadCommitted = true
+            if InteractionGate.isOn {
+                perfWatch.interaction.committed(why: 1)
+            }
         }
     }
 
@@ -2158,6 +2401,7 @@ public final class Runtime<State> {
             let cur = rectForRead(key: entry.key, nodes: flatNodes, index: idx)
             let prev = layoutSeen.rects[entry.key] ?? nil
             if entry.moved(prev, cur) {
+                perfWatch.meter.read(key: entry.key)
                 return true
             }
         }
@@ -2600,6 +2844,16 @@ public final class Runtime<State> {
                 matchedStarts: matchedStarts
             )
         }
+        if scene.isTracing {
+            var resolvedNS = [(String, String)?](repeating: nil, count: pass.nodes.count)
+            for i in pass.nodes.indices {
+                let n = pass.nodes[i]
+                let ns = n.el.traceNamespaceValue ?? n.parentIndex.flatMap { resolvedNS[$0] }
+                resolvedNS[i] = ns
+                scene.traceName(n.nodeId, n.el.traceNameValue ?? n.key)
+                scene.traceNamespace(n.nodeId, ns)
+            }
+        }
         scene.keepFlights(false)
         if applyUnseenPresenceAfterCommit(specs: specs, cut: commitCut, to: &scene) {
             isAnimating = true
@@ -2861,6 +3115,14 @@ public final class Runtime<State> {
             let didRequestCommit = !tx.liveOnlyRequested
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, external: action.external)
             if didRequestCommit {
+                let handlerName: String
+                switch action.kind {
+                case .layout: handlerName = "on_layout"
+                case .screenLayout: handlerName = "on_screen_layout"
+                case .drawnLayout: handlerName = "on_drawn_layout"
+                case .visible: handlerName = "on_visible"
+                }
+                perfWatch.meter.handler(name: handlerName, path: action.nodePath)
                 if action.external {
                     ranExternal = true
                 } else {
@@ -3371,6 +3633,7 @@ public final class Runtime<State> {
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         unseenPresence.beginPaint()
+        imeArea = nil
         let activeSelectionRanges = computeActiveSelectionRangesByPath()
         pixelSnapGlides.beginFrame(t: now, size: SIMD2<Float>(Float(devW), Float(devH)))
 
@@ -3871,10 +4134,7 @@ public final class Runtime<State> {
             if !(isPressed && el.pressBg != nil), let hBg = el.hoverBg, hoverFrac > 0.0005 {
                 fillColor = blendColorOver(bottom: fillColor, top: hBg.scaleAlpha(hoverFrac), srgb: srgbBlend)
             }
-            let scrolled: Vec2 = {
-                if !el.layout.scrollAxes.isEmpty {
-                    return scrollOffsets[snap.path] ?? .zero
-                }
+            let carriedScrolled: Vec2 = {
                 var sum = Vec2.zero
                 var cur = snap.parentIndex
                 while let pIdx = cur, flatNodes.indices.contains(pIdx) {
@@ -3886,6 +4146,12 @@ public final class Runtime<State> {
                     cur = pNode.parentIndex
                 }
                 return sum
+            }()
+            let scrolled: Vec2 = {
+                if !el.layout.scrollAxes.isEmpty {
+                    return scrollOffsets[snap.path] ?? .zero
+                }
+                return carriedScrolled
             }()
 
             // Compute resting rect for PixelSnap motion tracking (`build.rs:435-445`)
@@ -4740,6 +5006,18 @@ public final class Runtime<State> {
                 isInteractiveBlocker: isInteractiveBlocker
             )
 
+            var nodeEditRange: [Int]? = nil
+            if let lens = el.handlers.editLens {
+                let r = lens.get(state).selectedUTF8Range
+                nodeEditRange = [r.lowerBound, r.upperBound]
+            }
+            if isFocused && !nodeIsSecure && el.handlers.editLens != nil {
+                if let caretOut {
+                    imeArea = caretOut
+                } else {
+                    imeArea = rect.xywh
+                }
+            }
             infos.append(ElementInfo(
                 path: snap.path,
                 key: snap.key,
@@ -4770,6 +5048,7 @@ public final class Runtime<State> {
                 hover: p.isExiting ? 0.0 : hoverFrac,
                 press: isPressed ? 1.0 : 0.0,
                 scrolled: [scrolled.x, scrolled.y],
+                carriedScrolled: [carriedScrolled.x, carriedScrolled.y],
                 caret: caretOut,
                 secure: nodeIsSecure,
                 disabled: el.a11yDisabled,
@@ -4777,7 +5056,23 @@ public final class Runtime<State> {
                 a11yValue: el.a11yValue,
                 a11yDescription: el.a11yDescription,
                 a11yHidden: el.isA11yHidden,
-                stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x
+                stuck: abs(stickyShift.y) >= abs(stickyShift.x) ? stickyShift.y : stickyShift.x,
+                traceName: el.traceNameValue,
+                traceNamespace: {
+                    if let own = el.traceNamespaceValue {
+                        return TraceNamespace(className: own.className, host: own.host)
+                    }
+                    var cur = snap.parentIndex
+                    while let pIdx = cur, flatNodes.indices.contains(pIdx) {
+                        if let anc = flatNodes[pIdx].el.traceNamespaceValue {
+                            return TraceNamespace(className: anc.className, host: anc.host)
+                        }
+                        cur = flatNodes[pIdx].parentIndex
+                    }
+                    return nil
+                }(),
+                virtualExtent: false,
+                editRange: nodeEditRange
             ))
             if let hls = el.textHighlights, !hls.isEmpty,
                let txt = elementTextValue, !txt.isEmpty,
@@ -5530,6 +5825,10 @@ public final class Runtime<State> {
 
         // Active drag capture takes priority over hover
         if let drag = activeDrag {
+            if !drag.movedBeyondSlop,
+               hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0 {
+                activeDrag?.movedBeyondSlop = true
+            }
             if let idx = nodeByPath[drag.path] {
                 let node = flatNodes[idx]
                 if drag.isTextSelectionDrag, let editLens = node.el.handlers.editLens {
@@ -5593,6 +5892,9 @@ public final class Runtime<State> {
                    let cb = flatNodes[oldIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, false, &tx)
+                    if !tx.liveOnlyRequested {
+                        perfWatch.meter.handler(name: "on_hover", path: old)
+                    }
                     ranAnyHover = true
                     hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
@@ -5602,6 +5904,9 @@ public final class Runtime<State> {
                    let cb = flatNodes[newIdx].el.handlers.onHover {
                     var tx = makeTx(at: now)
                     cb(&state, true, &tx)
+                    if !tx.liveOnlyRequested {
+                        perfWatch.meter.handler(name: "on_hover", path: np)
+                    }
                     ranAnyHover = true
                     hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
@@ -5625,6 +5930,7 @@ public final class Runtime<State> {
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
+        frameHadInputSinceLastFrame = true
         releaseHoverHold()
         cancelKitHoverAndRepeatOnPress()
         kitHooks.dragRepeat = nil
@@ -5870,10 +6176,13 @@ public final class Runtime<State> {
     }
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
+        frameHadInputSinceLastFrame = true
         pointerPosition = pos
         armedDragOut = nil
         kitHooks.dragRepeat = nil
         let releasedPath = pressedPath
+        let notePath = releasedPath
+        let startedNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         pressedPath = nil
         pressedKey = nil
         let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
@@ -5885,7 +6194,11 @@ public final class Runtime<State> {
         if let drag = activeDrag {
             activeDrag = nil
             draggedPastThreshold = suppressedClickFromSelDrag || (!drag.isTextSelectionDrag &&
-                hypot(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0)
+                (drag.movedBeyondSlop || hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0))
+            if drag.button == .primary && draggedPastThreshold {
+                clickCount = 0
+                lastClickTime = -.infinity
+            }
             if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
                 var tx = makeTx(at: now, button: drag.button)
                 onEnd(&state, false, &tx)
@@ -5952,11 +6265,49 @@ public final class Runtime<State> {
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
                 }
             }
+            if InteractionGate.isOn {
+                let action = (button == .primary && clickCount == 2 && node.el.handlers.onDoubleClick != nil)
+                    ? "on_double_press"
+                    : "on_press"
+                if let note = interactionNote(action: action, rank: 3, path: notePath) {
+                    let endedNs = DispatchTime.now().uptimeNanoseconds
+                    let handlerMs = Double(endedNs >= startedNs ? endedNs - startedNs : 0) / 1_000_000.0
+                    perfWatch.interaction.noted(note: note, arrivedNs: startedNs, startedNs: startedNs, handlerMs: handlerMs)
+                }
+            }
         }
 
         if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
             dirtyCommit(at: now)
         }
+    }
+
+    /// Recovers a lost primary pointer release (`platform/macos/pointer.rs::pointer_release_lost`).
+    /// Cancels an active primary drag at `pos` (preserving click run if within drag slop),
+    /// or falls back to `pointerUp`.
+    public func pointerReleaseLost(at pos: Vec2, at now: Double = 0.0) {
+        if let drag = activeDrag, drag.button == .primary {
+            let moved = drag.movedBeyondSlop || hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0
+            activeDrag = nil
+            armedDragOut = nil
+            pressedPath = nil
+            pressedKey = nil
+            pointerPosition = pos
+            if moved {
+                clickCount = 0
+                lastClickTime = -.infinity
+            }
+            if !drag.isTextSelectionDrag,
+               let idx = nodeByPath[drag.path],
+               let onEnd = flatNodes[idx].el.handlers.onDragEnd {
+                var tx = makeTx(at: now, button: .primary)
+                onEnd(&state, true, &tx)
+                applyTx(tx, at: now)
+            }
+            dirtyCommit(at: now)
+            return
+        }
+        pointerUp(at: pos, button: .primary, mods: .none, at: now)
     }
 
     /// Routes wheel / trackpad scroll deltas to custom `onWheel` handlers or the nearest scrollable ancestor.
@@ -6061,7 +6412,20 @@ public final class Runtime<State> {
     }
 
     @discardableResult
-    public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, at now: Double) -> Bool {
+    public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
+        let prevCode = currentPhysicalKey
+        let prevBase = currentKeyBase
+        let prevRepeat = currentKeyRepeat
+        defer {
+            currentPhysicalKey = prevCode
+            currentKeyBase = prevBase
+            currentKeyRepeat = prevRepeat
+        }
+        if case .key(let code, _, _, let isRepeat) = event {
+            currentPhysicalKey = code
+            currentKeyBase = baseChar
+            currentKeyRepeat = isRepeat
+        }
         currentTime = now
         if needsCommit {
             commitTree(at: now, cut: forceInitialSettle)
@@ -6120,6 +6484,17 @@ public final class Runtime<State> {
                     dirtyCommit(at: now)
                     return true
                 }
+                if modifierKeysEnabled {
+                    if pressed {
+                        if !heldModifierKeys.contains(modKey) {
+                            heldModifierKeys.append(modKey)
+                        }
+                    } else if let idx = heldModifierKeys.firstIndex(of: modKey) {
+                        heldModifierKeys.remove(at: idx)
+                    }
+                    let kev = KeyEvent(key: .modifier(modKey, pressed: pressed), mods: mods)
+                    return keyDown(kev, isRepeat: false, at: now)
+                }
             } else if pressed {
                 dirChord = .idle
             }
@@ -6127,7 +6502,9 @@ public final class Runtime<State> {
 
         if let fallbackKey {
             if case .key(_, _, let pressed, let isRepeat) = event {
-                if !pressed { return false }
+                if !pressed {
+                    return keyUp(fallbackKey, at: now)
+                }
                 return keyDown(fallbackKey, isRepeat: isRepeat, at: now)
             }
             return keyDown(fallbackKey, at: now)
@@ -6135,11 +6512,28 @@ public final class Runtime<State> {
         return false
     }
 
+    /// Synthesizes key-up modifier events for all currently held modifier keys (`overlay::hide` / blur).
+    public func releaseHeldModifiers(at now: Double = 0.0) {
+        guard !heldModifierKeys.isEmpty else { return }
+        let held = heldModifierKeys
+        heldModifierKeys.removeAll(keepingCapacity: true)
+        for modKey in held {
+            let kev = KeyEvent(key: .modifier(modKey, pressed: false), mods: .none)
+            _ = keyDown(kev, isRepeat: false, at: now)
+        }
+    }
+
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        frameHadInputSinceLastFrame = true
         let prevByKeys = kitHooks.isDispatchingByKeys
         kitHooks.isDispatchingByKeys = true
-        defer { kitHooks.isDispatchingByKeys = prevByKeys }
+        let prevRepeat = currentKeyRepeat
+        currentKeyRepeat = isRepeat
+        defer {
+            kitHooks.isDispatchingByKeys = prevByKeys
+            currentKeyRepeat = prevRepeat
+        }
         suppressRevealFromHoverCommit = false
         dismissHelp(at: now)
         // 1. Escape cancels an in-progress drag and restores pre-drag state!
@@ -6576,6 +6970,7 @@ public final class Runtime<State> {
             if e.press > 0.001 { obj["press"] = r2(e.press) }
             if abs(e.stuck) > 0.01 { obj["stuck"] = r2(e.stuck) }
             if let caret = e.caret { obj["caret"] = caret.map(r2) }
+            if let er = e.editRange { obj["selection"] = er }
             if let v = lastVideoSnapshots[e.path] {
                 let (vState, vErr): (String, String?)
                 switch v.state {
@@ -6627,7 +7022,156 @@ public final class Runtime<State> {
         if let dialog = fileDialogJSONObject() {
             out["fileDialog"] = dialog
         }
+        if let area = imeArea, area.count == 4 {
+            out["imeArea"] = area.map(r2)
+        }
+        if let (preText, preCursor) = focusedPreedit() {
+            var preObj: [String: Any] = ["text": preText]
+            if let preCursor { preObj["cursor"] = preCursor }
+            out["preedit"] = preObj
+        }
+        if let tip = helpTooltip() {
+            out["tooltip"] = [
+                "text": tip.text,
+                "rect": [r2(tip.rect.x), r2(tip.rect.y), r2(tip.rect.z), r2(tip.rect.w)],
+            ]
+        }
+        #if os(macOS) && canImport(AppKit)
+        out["accessibility"] = AccessibilityDump.dictionary(from: accessibilitySnapshot(), isRoot: true)
+        #endif
         return out
+    }
+
+    /// Active open preedit composition on the focused input element, if any (`Runtime::focused_preedit`).
+    public func focusedPreedit() -> (text: String, cursor: [Int]?)? {
+        guard let fp = focusedPath,
+              let idx = nodeByPath[fp],
+              !flatNodes[idx].effectiveInert,
+              let editLens = flatNodes[idx].el.handlers.editLens else {
+            return nil
+        }
+        let edit = editLens.get(state)
+        guard !edit.isSecure, let pre = edit.preedit else { return nil }
+        return (pre.text, pre.cursor.map { [$0.lowerBound, $0.upperBound] })
+    }
+
+    /// Perceived luminance of an opaque root background, matching `Runtime::backdrop_dark`.
+    public func backdropDark() -> Bool? {
+        guard !flatNodes.isEmpty else { return nil }
+        let c = flatNodes[0].el.background
+        guard c.a > 0.5 else { return nil }
+        return (0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b) < 0.25
+    }
+
+    /// Attaches or detaches a `MotionTrace` on the underlying scene (`Runtime::scene_mut().set_trace`).
+    public func setTrace(_ trace: MotionTrace?) {
+        scene.setTrace(trace)
+    }
+
+    /// Detaches and returns the active `MotionTrace` from the underlying scene, if any.
+    public func takeTrace() -> MotionTrace? {
+        scene.takeTrace()
+    }
+
+    /// Audits retarget velocity continuity in the scene store (`Runtime::scene_mut().store_mut().audit_retargets(_:)`).
+    public func auditRetargets(_ enabled: Bool) {
+        scene.store.auditRetargets(enabled)
+    }
+
+    /// Consumes and resets accumulated retarget audit counters from the scene store (`take_retarget_audit`).
+    public func takeRetargetAudit() -> RetargetAudit {
+        scene.store.takeRetargetAudit()
+    }
+
+    /// Appends a trace marker directly when tracing is active (`Runtime::trace_event`).
+    public func traceEvent(_ event: String) {
+        if traceChannels != nil {
+            traceEvents.append(event)
+        }
+        scene.traceEvent(event)
+    }
+
+    /// Records a scalar trace channel directly when tracing is active (`Runtime::trace_channel`).
+    public func traceChannel(_ name: String, kind: TraceChannels.Kind, value: Float) {
+        if traceChannels != nil {
+            traceChannels?[name] = (kind, value)
+        }
+        scene.traceChannel(name, kind: kind, value: value)
+    }
+
+    /// Layout & visual goal snapshots per element path for trace retarget detection (`Runtime::trace_goals`).
+    public func traceGoals() -> [(path: String, goal: [Float])] {
+        flatNodes.map { node in
+            (
+                node.path,
+                [
+                    node.localRect.x,
+                    node.localRect.y,
+                    node.localRect.width,
+                    node.localRect.height,
+                    node.el.offset.x,
+                    node.el.offset.y,
+                    node.el.scale.x,
+                ]
+            )
+        }
+    }
+
+    /// Tracks sampled in the last frame step (`Runtime::touched_tracks`).
+    public func touchedTracks() -> [(path: String, prop: String, active: Bool)] {
+        let builtinNames = [
+            "opacity", "frame", "offset", "scale", "rotation", "blur",
+            "radius", "fill", "mask", "scroll", "presence", "travel",
+        ]
+        var seen = Set<String>()
+        var out: [(path: String, prop: String, active: Bool)] = []
+        for (track, node, prop) in scene.store.touchedTracks() {
+            let path = nodeById[node]?.path ?? "node:\(node.rawValue)"
+            let propName: String
+            let raw = Int(prop.rawValue)
+            if raw < builtinNames.count {
+                propName = builtinNames[raw]
+            } else {
+                propName = "prop:\(raw)"
+            }
+            let active = scene.store.isActive(track)
+            let dedupKey = "\(path)\u{0}\(propName)\u{0}\(active ? 1 : 0)"
+            if seen.insert(dedupKey).inserted {
+                out.append((path, propName, active))
+            }
+        }
+        for (nodeId, g) in growthRows where g.track.mask > 0.01 {
+            guard let match = flatNodes.first(where: { $0.path == nodeId }) else { continue }
+            let dedupKey = "\(match.path)\u{0}mask\u{0}1"
+            if seen.insert(dedupKey).inserted {
+                out.append((match.path, "mask", true))
+            }
+        }
+        out.sort { ($0.path, $0.prop, $0.active ? 1 : 0) < ($1.path, $1.prop, $1.active ? 1 : 0) }
+        return out
+    }
+
+    /// Leaf element paths with no painted content or interactivity (`Runtime::blank_leaves`).
+    public func blankLeaves() -> Set<String> {
+        var hasChild = Set<Int>()
+        for n in flatNodes {
+            if let p = n.parentIndex {
+                hasChild.insert(p)
+            }
+        }
+        var blanks = Set<String>()
+        for (idx, n) in flatNodes.enumerated() where !hasChild.contains(idx) {
+            let el = n.el
+            let hasBorder = el.borderWidth > 0 && el.borderColor.a > 0
+            let hasSurface = el.surfacePayload != nil || el.iconPayload != nil || el.imagePayload != nil
+                || el.pixelsPayload != nil || el.gradient != nil || !el.shapes.isEmpty
+            let isVisual = el.plainText != nil || el.handlers.editLens != nil || el.focusable
+                || el.background.a > 0 || hasBorder || !el.shadows.isEmpty || hasSurface
+            if !isVisual {
+                blanks.insert(n.path)
+            }
+        }
+        return blanks
     }
 
     /// JSON representation of the currently open or queued popup menu for `--tree`.
@@ -6735,9 +7279,11 @@ public final class Runtime<State> {
             for action in actions {
                 switch action {
                 case .popup(let req):
-                    enqueuePopupRequest(req)
-                    if !tx.liveOnlyRequested {
-                        popupNeedsLayout = true
+                    if let claimed = req.take() {
+                        enqueuePopupRequest(claimed)
+                        if !tx.liveOnlyRequested {
+                            popupNeedsLayout = true
+                        }
                     }
                 case .fileDialog(let req):
                     requestFileDialog(req, at: now)
@@ -6778,6 +7324,12 @@ public final class Runtime<State> {
         }
         if tx.quitRequested {
             quitRequested = true
+        }
+        for ev in tx.traceEvents {
+            traceEvent(ev)
+        }
+        for (name, kind, value) in tx.traceChannels {
+            traceChannel(name, kind: kind, value: value)
         }
         if (tx.runtimeActions["relaunchRequested"] as? Bool) == true {
             relaunchRequested = true
@@ -7041,17 +7593,22 @@ public final class Runtime<State> {
         RuntimeIdScope.$current.withValue(runtimeId) {
             guard let pollFn = poll else { return false }
             var tx = makeTx(at: now)
-            let changed: Bool
-            if let scope = turnScope {
-                var res = false
-                scope(&state) { s in
-                    res = pollFn(&s, now, &tx)
+            let changed: Bool = PerfWarn.Stall.timed("poll") {
+                if let scope = turnScope {
+                    var res = false
+                    scope(&state) { s in
+                        res = pollFn(&s, now, &tx)
+                    }
+                    return res
+                } else {
+                    return pollFn(&state, now, &tx)
                 }
-                changed = res
-            } else {
-                changed = pollFn(&state, now, &tx)
             }
+            _ = perfWatch.idle.polled(changed)
             let shouldDirty = changed || tx.isForceCommitRequested
+            if shouldDirty {
+                perfWatch.meter.poll()
+            }
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty)
             return changed
         }
@@ -7195,6 +7752,8 @@ public final class Runtime<State> {
     /// Applies an AppKit/OS `ImeEvent` to the focused `TextEdit` and forwards to `onIme` (`Runtime::ime`).
     @discardableResult
     public func dispatchImeEvent(_ event: ImeEvent, at now: Double? = nil) -> Bool {
+        frameHadInputSinceLastFrame = true
+        let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime
         var handledByEdit = false
         if let fp = focusedPath,
@@ -7244,6 +7803,12 @@ public final class Runtime<State> {
             shellIme = .disabled
         }
         let handledByHook = dispatchIme(shellIme, at: t)
+        if InteractionGate.isOn,
+           let note = interactionNote(action: "key_edit", rank: 3, path: focusedPath) {
+            let endedNs = DispatchTime.now().uptimeNanoseconds
+            let handlerMs = Double(endedNs >= imeStartNs ? endedNs - imeStartNs : 0) / 1_000_000.0
+            perfWatch.interaction.noted(note: note, arrivedNs: imeStartNs, startedNs: imeStartNs, handlerMs: handlerMs)
+        }
         return handledByEdit || handledByHook
     }
 
@@ -7305,6 +7870,54 @@ public final class Runtime<State> {
     public func dispatchVisibility(_ visible: Bool, at now: Double? = nil) {
         guard let hook = onVisibility else { return }
         update(at: now) { s, tx in hook(&s, visible, &tx) }
+    }
+
+    /// Updates host live visibility (`Runtime::set_live_visible`), notifying `onVisibility` after first commit.
+    public func setLiveVisible(_ visible: Bool, at now: Double? = nil) {
+        let changed = (visible != liveVisible)
+        liveVisible = visible
+        setParityLiveWakeVisible(visible)
+        if changed && commitCount > 0 {
+            dispatchVisibility(visible, at: now)
+        }
+    }
+
+    /// Executes a hidden or covered wake (`Runtime::hidden_wake`): flushes queued input on a zero-advance frame
+    /// or runs `poll` without building the view tree, returning whether the drawn frame is invalidated.
+    @discardableResult
+    public func hiddenWake(at now: Double? = nil) -> Bool {
+        let t = now ?? currentTime
+        if hasPendingInput {
+            let prevCommits = commitCount
+            _ = frame(at: t)
+            if hasPendingInput {
+                _ = frame(at: t)
+            }
+            return commitCount != prevCommits
+        }
+        let pollChanged = runPoll(at: t)
+        return pollChanged || needsCommit
+    }
+
+    /// Snaps all in-flight transitions and reveals before the next frame (`Runtime::settle_all`).
+    public func settleAll() {
+        forceInitialSettle = true
+        needsCommit = true
+    }
+
+    /// Advances the app-requested minimize latch (`window/minimize.rs::Runtime::minimize_step`).
+    @discardableResult
+    public func minimizeStep(_ event: MinimizeEvent) -> Bool {
+        var next = minimizeState
+        let effects = WindowMinimize.step(&next, event: event)
+        minimizeState = next
+        return effects.contains(.minimize)
+    }
+
+    /// Executes one shell minimize step, taking any ready minimize ask (`minimize::shell_take`).
+    @discardableResult
+    public func shellTakeMinimize() -> Bool {
+        minimizeStep(.taken)
     }
 
     @discardableResult

@@ -25,6 +25,10 @@ extension Runtime {
         tx.button = button
         tx.runtimeActions["focusVisible"] = focusVisible
         tx.runtimeActions["byKeys"] = kitHooks.isDispatchingByKeys
+        tx.physicalKeyValue = currentPhysicalKey
+        tx.keyBaseValue = currentKeyBase
+        tx.keyRepeatValue = currentKeyRepeat
+        tx.tracingEnabled = (traceChannels != nil) || scene.isTracing
         return tx
     }
 
@@ -239,6 +243,9 @@ extension Runtime {
         vState.wantsMoreFrames = wantedMore
         vState.missingOverscanRows = missing
         virtualLists[path] = vState
+        if !isIndexed {
+            PerfWarn.overbuilt(path: path, site: el.virtualizeSite, built: count, mounted: mounted.count)
+        }
 
         var built: [El<State>] = []
         let topSpacerH = mounted.lowerBound > 0 ? prefix[mounted.lowerBound] : 0
@@ -941,6 +948,7 @@ extension Runtime {
                 scrollStore.snap(nid, Props.SCROLL, to: clamped)
                 scrollOffsets[path] = clamped
                 scrollGlidingPaths.remove(path)
+                frameInstantScrollKey = path
             }
             if maxExt.y > 0.5 && abs(clamped.y - maxExt.y) <= 1.0 {
                 wasPinnedToBottom.insert(path)

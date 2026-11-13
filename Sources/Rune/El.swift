@@ -253,6 +253,43 @@ public struct Tx {
         }
     }
 
+    internal var physicalKeyValue: PhysicalKeyCode? = nil
+    internal var keyBaseValue: Character? = nil
+    internal var keyRepeatValue: Bool = false
+    internal var tracingEnabled: Bool = false
+    internal var traceEvents: [String] = []
+    internal var traceChannels: [(name: String, kind: TraceChannels.Kind, value: Float)] = []
+
+    /// Physical key position for the current key/key-up handler (`Tx::physical_key`).
+    public func physicalKey() -> PhysicalKeyCode? { physicalKeyValue }
+
+    /// Unmodified base character for the current key/key-up handler (`Tx::key_base`).
+    public func keyBase() -> Character? { keyBaseValue }
+
+    /// Whether the current key event is an auto-repeat (`Tx::key_repeat`).
+    public func keyRepeat() -> Bool { keyRepeatValue }
+
+    /// Whether this runtime has an attached motion or tooling trace (`Tx::tracing`).
+    public var tracing: Bool { tracingEnabled }
+
+    /// Appends a trace event marker on the next traced frame (`Tx::trace_event`).
+    public mutating func traceEvent(_ event: String) {
+        guard tracingEnabled else { return }
+        traceEvents.append(event)
+    }
+
+    /// Records a sample-and-hold scalar trace channel (`Tx::trace_channel`).
+    public mutating func traceChannel(_ name: String, kind: TraceChannels.Kind, value: Float) {
+        guard tracingEnabled else { return }
+        traceChannels.append((name, kind, value))
+    }
+
+    /// String-kind convenience overload matching Rust `"position"`, `"level"`, `"phase"`.
+    public mutating func traceChannel(_ name: String, kind: String, value: Float) {
+        guard tracingEnabled, let parsed = TraceChannels.Kind(rawValue: kind) else { return }
+        traceChannels.append((name, parsed, value))
+    }
+
     /// Requests a wake once the logical `clock` reaches `due` (`Tx::wake_at`).
     public mutating func wakeAt(_ due: Double) {
         wakeAfter(max(0.0, due - clock))
@@ -787,14 +824,24 @@ struct ElColdData<State> {
     var terminalGridPayload: TerminalGrid? = nil
     var spellcheck: Bool = false
     var liveBindings: [BoundLiveProperty] = []
-    var handlers = ElementHandlers<State>()
+    var handlersBox: ElHandlersBox<State>? = nil
     var runtimeExtras: [String: Any] = [:]
+}
+
+final class ElHandlersBox<State> {
+    var value: ElementHandlers<State>
+    init(_ value: ElementHandlers<State>) {
+        self.value = value
+    }
 }
 
 final class ElColdBox<State> {
     var data: ElColdData<State>
-    init(_ data: ElColdData<State> = ElColdData<State>()) {
-        self.data = data
+    init() {
+        self.data = ElColdData<State>()
+    }
+    init(copying other: ElColdBox<State>) {
+        self.data = other.data
     }
 }
 
@@ -803,13 +850,17 @@ public struct El<State> {
     private var _cold: ElColdBox<State>? = nil
 
     private mutating func ensureCold() -> ElColdBox<State> {
-        if !isKnownUniquelyReferenced(&_cold) {
-            _cold = ElColdBox(_cold?.data ?? ElColdData<State>())
+        if let box = _cold {
+            if !isKnownUniquelyReferenced(&_cold) {
+                let copy = ElColdBox(copying: box)
+                _cold = copy
+                return copy
+            }
+            return box
         }
-        if _cold == nil {
-            _cold = ElColdBox(ElColdData<State>())
-        }
-        return _cold!
+        let fresh = ElColdBox<State>()
+        _cold = fresh
+        return fresh
     }
 
     public var keyId: String? = nil
@@ -882,6 +933,18 @@ public struct El<State> {
     public var isArrivesWhole: Bool { get { _cold?.data.isArrivesWhole ?? false } set { ensureCold().data.isArrivesWhole = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
+    internal var virtualizeSite: String? {
+        get { _cold?.data.runtimeExtras["virtualizeSite"] as? String }
+        set { ensureCold().data.runtimeExtras["virtualizeSite"] = newValue }
+    }
+    public var traceNameValue: String? {
+        get { _cold?.data.runtimeExtras["traceName"] as? String }
+        set { ensureCold().data.runtimeExtras["traceName"] = newValue }
+    }
+    public var traceNamespaceValue: (className: String, host: String)? {
+        get { _cold?.data.runtimeExtras["traceNamespace"] as? (className: String, host: String) }
+        set { ensureCold().data.runtimeExtras["traceNamespace"] = newValue }
+    }
     internal var virtualRowsSource: VirtualRowSource<State>? { get { _cold?.data.virtualRowsSource } set { ensureCold().data.virtualRowsSource = newValue } }
     internal var virtualRowsVersionHash: UInt64? { get { _cold?.data.virtualRowsVersion } set { ensureCold().data.virtualRowsVersion = newValue } }
     public var isFocusSelected: Bool { get { _cold?.data.focusSelected ?? false } set { ensureCold().data.focusSelected = newValue } }
@@ -956,8 +1019,15 @@ public struct El<State> {
     public var spellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
     var liveBindings: [BoundLiveProperty] { get { _cold?.data.liveBindings ?? [] } set { ensureCold().data.liveBindings = newValue } }
     public var handlers: ElementHandlers<State> {
-        get { _cold?.data.handlers ?? ElementHandlers<State>() }
-        set { ensureCold().data.handlers = newValue }
+        get { _cold?.data.handlersBox?.value ?? ElementHandlers<State>() }
+        set {
+            let box = ensureCold()
+            if isKnownUniquelyReferenced(&box.data.handlersBox) {
+                box.data.handlersBox?.value = newValue
+            } else {
+                box.data.handlersBox = ElHandlersBox(newValue)
+            }
+        }
     }
     internal var runtimeExtras: [String: Any] {
         get { _cold?.data.runtimeExtras ?? [:] }
@@ -1821,6 +1891,20 @@ public struct El<State> {
         bindLive(.trim, binding)
     }
 
+    /// Names this element explicitly in tooling traces (`El::trace_name`).
+    public func traceName(_ name: String) -> Self {
+        var copy = self
+        copy.traceNameValue = name
+        return copy
+    }
+
+    /// Assigns the `(class, host)` metadata namespace in tooling traces (`El::trace_namespace`).
+    public func traceNamespace(_ className: String, _ host: String) -> Self {
+        var copy = self
+        copy.traceNamespaceValue = (className, host)
+        return copy
+    }
+
     private func bindLive<T: LiveValue>(_ target: BoundLiveProperty.Target, _ b: Binding<T>) -> Self {
         var copy = self
         let entry = BoundLiveProperty(target: target, source: b.live.source, spring: b.spring, restSpring: b.restSpring)
@@ -2046,9 +2130,12 @@ public struct El<State> {
         return copy
     }
 
-    public func virtualize(_ estimatedRowHeight: Float = 32) -> Self {
+    public func virtualize(_ estimatedRowHeight: Float = 32, file: String = #fileID, line: Int = #line) -> Self {
         var copy = self
         copy.virtualEstimate = max(1, estimatedRowHeight)
+        if copy.virtualizeSite == nil {
+            copy.virtualizeSite = "\(file):\(line)"
+        }
         return copy
     }
 

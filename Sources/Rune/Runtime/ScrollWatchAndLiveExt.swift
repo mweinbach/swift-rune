@@ -73,18 +73,13 @@ public extension Runtime {
         slot.liveWake = LiveWake { [weak waker] in
             waker?.wake()
         }
+        slot.liveWake?.visible(liveVisible)
         refreshParityLiveSubscriptions()
     }
 
     /// Installs a closure wake callback for coalesced `Live` updates (`Runtime::set_live_waker`).
     func setLiveWaker(_ callback: @escaping @Sendable () -> Void) {
         setLiveWaker(Waker(callback))
-    }
-
-    /// Updates visibility gating on the runtime's `LiveWake` (`Runtime::set_live_visible`).
-    func setLiveVisible(_ visible: Bool) {
-        let slot = ParityRuntimeSideTable.shared.slot(for: self)
-        slot.liveWake?.visible(visible)
     }
 
     /// Whether a visible `Live` notification is pending on this runtime's live wake
@@ -112,6 +107,12 @@ internal extension Runtime {
                 slot.liveSubscriptions.append(b.source.subscribe(wake))
             }
         }
+    }
+
+    /// Updates `LiveWake` visibility gating from `Runtime.setLiveVisible(_:at:)`.
+    func setParityLiveWakeVisible(_ visible: Bool) {
+        let slot = ParityRuntimeSideTable.shared.slot(for: self)
+        slot.liveWake?.visible(visible)
     }
 
     /// Clears any pending visible latch on the installed `LiveWake` when a frame samples `Live` values.
