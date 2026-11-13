@@ -27,19 +27,21 @@
           "upstream": "src/a11y/macos.rs",
           "swift": [
             "Sources/Rune/A11y/MacOSAccessibility.swift",
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "Bridge complete in MacOSAccessibility.swift; blocked on @platform MacOSApp.swift NSView wiring"
+          "status": "ported",
+          "note": "Ported MacOSAccessibilityHost (VoiceOver tree, focus changes, liveRegion & dialog announcements) and wired into MacOSApp.swift (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/a11y/mod.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/Accessibility/A11yTreeAndDump.swift"
+            "Sources/Rune/Accessibility/A11yTreeAndDump.swift",
+            "Sources/Rune/A11y/MacOSAccessibility.swift"
           ],
-          "status": "partial",
-          "note": "Tree/node/announcement/service ported; blocked on @platform host integration"
+          "status": "ported",
+          "note": "Accessibility tree, live announcements, dump, and VoiceOver NSView bridge ported and wired"
         },
         {
           "upstream": "src/a11y/node.rs",
@@ -60,10 +62,11 @@
           "upstream": "src/a11y/tests.rs",
           "swift": [
             "Tests/RuneTests/TextEditInputParityTests.swift",
-            "Tests/RuneTests/TextCloseoutRemainingTests.swift"
+            "Tests/RuneTests/TextCloseoutRemainingTests.swift",
+            "Tests/RuneTests/TextUnblockAllTests.swift"
           ],
-          "status": "partial",
-          "note": "Core tree/update/dump/secure-redaction tests ported; host announcement tests blocked on @platform"
+          "status": "ported",
+          "note": "Full tree/diff/dump/secure-redaction/liveRegion announcement parity tests ported"
         },
         {
           "upstream": "src/a11y/text.rs",
@@ -337,10 +340,11 @@
           "upstream": "src/edit/ime.rs",
           "swift": [
             "Sources/Rune/Edit.swift",
-            "Sources/Rune/Text/MacOSTextInput.swift"
+            "Sources/Rune/Text/MacOSTextInput.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "Model + MacOSTextInput NSTextInputClient bridge complete; blocked on @platform MacOSApp.swift NSView forwarding"
+          "status": "ported",
+          "note": "TextEdit IME + MacOSTextInputBridge NSTextInputClient wired into MacOSApp.swift (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/edit/input.rs",
@@ -580,9 +584,11 @@
         {
           "upstream": "src/el/pills.rs",
           "swift": [
-            "Sources/Rune/El.swift"
+            "Sources/Rune/Text/InlineIcon.swift",
+            "Sources/Rune/Text/RichTextAndColorIcons.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "El.pill, El.pills, El.inlineIcon, InlineIconLayout word-width & copy-exclusion ported"
         },
         {
           "upstream": "src/el/pills/tests.rs",
@@ -1064,19 +1070,21 @@
         {
           "upstream": "src/image/from_url.rs",
           "swift": [
+            "Sources/Rune/Image/ImageFromURL.swift",
             "Sources/Rune/MediaPipeline.swift",
             "Sources/Rune/Image/PixelsAtlas.swift"
           ],
-          "status": "partial",
-          "note": "ImageURLSet & ImagePool ported; network image caching complete in MediaPipeline.swift"
+          "status": "ported",
+          "note": "ImageCache, CachedImage, FetchedImage, filePath, land, url, urlSet, rgba, load, URLSession/SVG rasterization ported"
         },
         {
           "upstream": "src/image/from_url_tests.rs",
           "swift": [
+            "Tests/RuneTests/TextUnblockAllTests.swift",
             "Tests/RuneTests/TextCloseoutRemainingTests.swift"
           ],
-          "status": "partial",
-          "note": "ImageURLSet.select tests ported; async HTTP fixture tests depend on URLProtocol mocking"
+          "status": "ported",
+          "note": "All 5 from_url_tests + URLProtocol async HTTP & file:// tests ported"
         },
         {
           "upstream": "src/image/mip_tests.rs",
@@ -1104,16 +1112,22 @@
         {
           "upstream": "src/input.rs",
           "swift": [
+            "Sources/Rune/Input/CanvasInputExtensions.swift",
+            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
             "Sources/Rune/Runtime.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "Core input types, canvas gestures/buttons/keyUp, PointerObserver, DropPointer, KeyDiagnostics ported"
         },
         {
           "upstream": "src/input/canvas_input.rs",
           "swift": [
+            "Sources/Rune/Input/CanvasInputExtensions.swift",
+            "Sources/Rune/El.swift",
             "Sources/Rune/Runtime.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "MagnifyEvent, RotateEvent, SmartMagnifyEvent, PointerButtonEvent, El modifiers, Tx.button, Runtime dispatch ported"
         },
         {
           "upstream": "src/input/chord.rs",
@@ -1135,10 +1149,11 @@
           "upstream": "src/input/cursor.rs",
           "swift": [
             "Sources/Rune/Input/Cursor.swift",
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "Cursor enum & NSCursor mapping ported in Cursor.swift; blocked on @platform MacOSApp.swift cursor push"
+          "status": "ported",
+          "note": "Cursor enum & NSCursor push wired via MacOSCursorCache & Runtime.currentCursor (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/input/cursor/image.rs",
@@ -1157,10 +1172,11 @@
         {
           "upstream": "src/input/cursor/os.rs",
           "swift": [
-            "Sources/Rune/Input/Cursor.swift"
+            "Sources/Rune/Input/Cursor.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "macOS NSCursor bridge in Cursor.swift; blocked on @platform MacOSApp.swift hook"
+          "status": "ported",
+          "note": "macOS NSCursor bridge wired in MacOSApp.swift (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/input/cursor/web.rs",
@@ -1173,9 +1189,11 @@
         {
           "upstream": "src/input/drop_pointer.rs",
           "swift": [
+            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
             "Sources/Rune/Runtime.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "DropPointer OS drag-drop pointer state machine & coalesced pending move ported"
         },
         {
           "upstream": "src/input/fn_key.rs",
@@ -1187,11 +1205,11 @@
         {
           "upstream": "src/input/key_diagnostics.rs",
           "swift": [
-            "Sources/Rune/Input/InputTimeAndKeycaps.swift",
-            "Sources/Rune/AccessibilityAndInput.swift"
+            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift",
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift"
           ],
-          "status": "partial",
-          "note": "Key diagnostics formatting ported; MacOSApp keyboard hook owned by @platform"
+          "status": "ported",
+          "note": "DuplicateKeyWarning, KeyDiagnostics.warnings/isClean/renameDuplicates ported"
         },
         {
           "upstream": "src/input/keycaps.rs",
@@ -1204,24 +1222,28 @@
         {
           "upstream": "src/input/physical_input.rs",
           "swift": [
+            "Sources/Rune/El/PhysicalInput.swift",
             "Sources/Rune/Runtime.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "PhysicalKeyCode, PhysicalInput, and Runtime.physicalInput focus-chain routing ported"
         },
         {
           "upstream": "src/input/pointer_observer.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Input/PointerObserverAndDiagnostics.swift"
           ],
-          "status": "partial"
+          "status": "ported",
+          "note": "PointerObserver needsGeometry/configure/take/observe ported"
         },
         {
           "upstream": "src/input/secure_input.rs",
           "swift": [
-            "Sources/Rune/Input/InputTimeAndKeycaps.swift"
+            "Sources/Rune/Input/InputTimeAndKeycaps.swift",
+            "Sources/Rune/Edit/HostInputAndPasteExtensions.swift"
           ],
-          "status": "partial",
-          "note": "SecureInputClaim ported; Carbon EnableSecureEventInput hook owned by @platform"
+          "status": "ported",
+          "note": "SecureInputClaim + Runtime.syncSecureInput(_:windowFocused:) Carbon secure input helper ported"
         },
         {
           "upstream": "src/input/time.rs",
@@ -4454,10 +4476,11 @@
           "upstream": "src/shortcuts/mod.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "Registry & Carbon global hotkeys ported; per-window NSView dispatch blocked on @platform MacOSApp.swift"
+          "status": "ported",
+          "note": "ShortcutRegistry + Carbon hotkeys + MacOSHostShortcutBridge wired (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/shortcuts/parse.rs",
@@ -4471,10 +4494,11 @@
           "upstream": "src/shortcuts/service.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/Input/MacOSGlobalHotKey.swift"
+            "Sources/Rune/Input/MacOSGlobalHotKey.swift",
+            "Sources/Rune/MacOSApp.swift"
           ],
-          "status": "partial",
-          "note": "ShortcutRegistry & host handler hook ported; blocked on @platform MacOSApp.swift wiring"
+          "status": "ported",
+          "note": "ShortcutRegistry + MacOSHostShortcutBridge host dispatch wired (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/shortcuts/service/host_handler_tests.rs",
@@ -4547,10 +4571,11 @@
           "upstream": "src/spell.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
-            "Sources/Rune/Edit/SpellPause.swift"
+            "Sources/Rune/Edit/SpellPause.swift",
+            "Sources/Rune/Edit/HostInputAndPasteExtensions.swift"
           ],
-          "status": "partial",
-          "note": "SpellChecker & SpellPause ported; blocked on @platform MacOSApp.swift host wiring"
+          "status": "ported",
+          "note": "SpellChecker, SpellPauseWatch, and Runtime.spellCheckWhenSettled ported"
         },
         {
           "upstream": "src/spell/macos.rs",
@@ -5029,10 +5054,11 @@
         {
           "upstream": "src/text/quality_tests.rs",
           "swift": [
+            "Tests/RuneTests/TextUnblockAllTests.swift",
             "Tests/RuneTests/TextP0WiringTests.swift"
           ],
-          "status": "partial",
-          "note": "TextSystem measurement/line-height quality checks ported; HarfBuzz font rasterizer harness N/A"
+          "status": "ported",
+          "note": "Centered symmetry, TextQualityLayout justified/RTL wrapping, inline code chip pad, wrap/lineHeight tests ported"
         },
         {
           "upstream": "src/text/rewrap_tests.rs",
