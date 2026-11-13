@@ -294,14 +294,14 @@ struct GlyphAtlasLazyAllocationTests {
     @Test("GlyphAtlas starts unallocated until first glyph or icon blit")
     func lazyFirstPage() {
         let atlas = GlyphAtlas(width: 512, height: 512)
-        #expect(atlas.isAllocated == false)
-        #expect(atlas.backingByteCount == 0)
+        #expect(atlas.hasAllocatedBacking == false)
+        #expect(atlas.allocatedBackingBytes == 0)
         #expect(atlas.atlas.width == 1 && atlas.atlas.height == 1)
 
         let checkIcon = SVGIcon(viewBox: 24, paths: ["M 4 12 L 10 18 L 20 6"], strokeWidth: 2)
         _ = atlas.rasterizeIcon(checkIcon, pixelSize: 16)
-        #expect(atlas.isAllocated == true)
-        #expect(atlas.backingByteCount == 512 * 512)
+        #expect(atlas.hasAllocatedBacking == true)
+        #expect(atlas.allocatedBackingBytes == 512 * 512)
         #expect(atlas.atlas.width == 512 && atlas.atlas.height == 512)
     }
 }
@@ -651,6 +651,7 @@ struct RenderGPUAndShaderParityTests {
                     )
             }
         )
+        rtStripes.srgbBlend = false
         let imgStripes = try renderer.renderOffscreen(rtStripes.renderFrame(at: 0))
         // Linear 0.5 grey encodes to ~188 in sRGB output and flattens stripe contrast across neighbors
         let blurCenter = sampleRGBA(imgStripes, x: 28, y: 32)
@@ -1002,6 +1003,7 @@ struct RenderGPUAndShaderParityTests {
                     )
             }
         )
+        rtAnalytic.srgbBlend = false
         let img = try renderer.renderOffscreen(rtAnalytic.renderFrame(at: 0))
 
         // Interior center (60, 50) hits SHADOW_INSIDE (0.99863125 -> ~5 sRGB over white)

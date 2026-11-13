@@ -11,16 +11,15 @@ private enum MotionGateExtraKey {
     static let motionIntent = "motionGate.motionIntent"
     static let ownMotionNone = "motionGate.ownMotionNone"
     static let ownBlurNone = "motionGate.ownBlurNone"
-    static let loopSpec = "motionGate.loopSpec"
-    static let sequenceSpec = "motionGate.sequenceSpec"
     static let growingRow = "motionGate.inGrowingRow"
     static let revealing = "motionGate.revealing"
 }
 
 extension El {
-    /// Marks this element's changes as landing at once by design (`El::instant_changes`).
-    public func instantChanges(_ enabled: Bool = true) -> Self {
+    /// Marks or clears `El::instant_changes` when passing an explicit boolean; zero-arg `.instantChanges()` lives on `El`.
+    public func instantChanges(_ enabled: Bool) -> Self {
         var copy = self
+        copy.hasInstantChanges = enabled
         copy.runtimeExtras[MotionGateExtraKey.instantChanges] = enabled
         return copy
     }
@@ -55,20 +54,6 @@ extension El {
     public func blurMotion(_ spring: Spring) -> Self {
         var copy = self
         copy.runtimeExtras[MotionGateExtraKey.ownBlurNone] = (spring == .none)
-        return copy
-    }
-
-    /// Attaches a periodic `LoopSpec` (`El::looping`) so `MotionGate` tracks its continuous phase.
-    public func looping(_ spec: LoopSpec) -> Self {
-        var copy = self
-        copy.runtimeExtras[MotionGateExtraKey.loopSpec] = spec
-        return copy
-    }
-
-    /// Attaches a finite `MotionSequence` (`El::sequence`) so `MotionGate` tracks its 0..1 phase.
-    public func sequence(_ seq: MotionSequence) -> Self {
-        var copy = self
-        copy.runtimeExtras[MotionGateExtraKey.sequenceSpec] = seq
         return copy
     }
 }
@@ -288,30 +273,31 @@ private enum MotionGateSampleHelper {
             let totalIntent = pIntent | ownIntent
             inheritedIntent[i] = totalIntent
 
-            let ownInstant = (el?.runtimeExtras[MotionGateExtraKey.instantChanges] as? Bool) ?? false
+            let ownInstant = (el?.hasInstantChanges ?? false)
+                || ((el?.runtimeExtras[MotionGateExtraKey.instantChanges] as? Bool) ?? false)
             let totalInstant = pInstant || ownInstant
             inheritedInstant[i] = totalInstant
 
             var phase: Double? = nil
-            if let loopSpec = el?.runtimeExtras[MotionGateExtraKey.loopSpec] as? LoopSpec {
-                if let existing = tel.loopTracks[e.path], existing.1 == loopSpec {
+            if let loopSpec = el?.loopingSpec {
+                if case .sequence(let seq) = loopSpec.kind {
+                    let t0: Double
+                    if let existing = tel.seqStarts[e.path], existing.1 == seq {
+                        t0 = existing.0
+                    } else {
+                        t0 = now
+                        tel.seqStarts[e.path] = (t0, seq)
+                    }
+                    let elapsed = max(0.0, now - t0 - seq.delay)
+                    let dur = max(1e-6, seq.duration)
+                    phase = min(1.0, elapsed / dur)
+                } else if let existing = tel.loopTracks[e.path], existing.1 == loopSpec {
                     phase = existing.0.phase(at: now)
                 } else {
                     let track = LoopTrack(spec: loopSpec, now: now)
                     tel.loopTracks[e.path] = (track, loopSpec)
                     phase = track.phase(at: now)
                 }
-            } else if let seq = el?.runtimeExtras[MotionGateExtraKey.sequenceSpec] as? MotionSequence {
-                let t0: Double
-                if let existing = tel.seqStarts[e.path], existing.1 == seq {
-                    t0 = existing.0
-                } else {
-                    t0 = now
-                    tel.seqStarts[e.path] = (t0, seq)
-                }
-                let elapsed = max(0.0, now - t0 - seq.delay)
-                let dur = max(1e-6, seq.duration)
-                phase = min(1.0, elapsed / dur)
             }
 
             let meta = ElementMotionMeta(

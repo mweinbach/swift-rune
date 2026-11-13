@@ -10,12 +10,7 @@ import simd
 import CoreGraphics
 #endif
 
-/// One axis of surface placement inside an element's box (`rune::Align`).
-public enum Align: UInt8, Sendable, Equatable, Hashable, Codable {
-    case start
-    case center
-    case end
-
+extension Align {
     internal var factor: Float {
         switch self {
         case .start: return 0.0

@@ -130,11 +130,6 @@ extension El {
         return copy
     }
 
-    /// Uniform rounded SDF clip (`El::clip_rounded`). Negative values draw continuous corners.
-    public func clipRounded(_ radius: Float) -> Self {
-        clipRounded(tl: radius, tr: radius, br: radius, bl: radius)
-    }
-
     /// Per-corner rounded SDF clip (`El::clip_corners`). Negative corners use continuous superellipses.
     public func clipRounded(tl: Float, tr: Float, br: Float, bl: Float) -> Self {
         var copy = self
@@ -148,7 +143,7 @@ extension El {
 
     /// Uniform continuous squircle clip (`El::clip_continuous`).
     public func clipContinuous(_ radius: Float) -> Self {
-        clipRounded(-abs(radius))
+        clipRounded(tl: -abs(radius), tr: -abs(radius), br: -abs(radius), bl: -abs(radius))
     }
 
     /// Per-corner clip alias matching `El::clip_corners`.
@@ -158,28 +153,6 @@ extension El {
 
     public func clipCorners(tl: Float, tr: Float, br: Float, bl: Float) -> Self {
         clipRounded(tl: tl, tr: tr, br: br, bl: bl)
-    }
-
-    /// Edge softness / feathering on rounded clip boundaries (`El::clip_soft`).
-    public func clipSoft(_ soft: Float = 1.0) -> Self {
-        var copy = self
-        var spec = (copy.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec) ?? RenderClipSpec()
-        spec.clipRect = true
-        spec.soft = max(0, soft)
-        copy.runtimeExtras[RenderExtrasKey.clipSpec] = spec
-        copy.layout.clipOverflow = true
-        return copy
-    }
-
-    /// Rectangular feathered clip mask in logical points (`El::clip_fade`).
-    public func clipFade(top: Float = 0, right: Float = 0, bottom: Float = 0, left: Float = 0) -> Self {
-        var copy = self
-        var spec = (copy.runtimeExtras[RenderExtrasKey.clipSpec] as? RenderClipSpec) ?? RenderClipSpec()
-        spec.clipRect = true
-        spec.fadeLTRB = SIMD4<Float>(max(0, left), max(0, top), max(0, right), max(0, bottom))
-        copy.runtimeExtras[RenderExtrasKey.clipSpec] = spec
-        copy.layout.clipOverflow = true
-        return copy
     }
 
     /// Directional feathered fade across `[from, to]` points (`El::clip_fade_linear`).
@@ -770,8 +743,13 @@ extension Runtime {
             let shapeTrim = el.runtimeExtras[RenderExtrasKey.shapeTrim] as? Vec2 ?? liveTrim
 
             // Determine whether this element opens a rounded/feathered/blurred/cutout GPU layer scope.
-            let hasRoundedClip = clipSpec?.radii != nil || (el.layout.clipOverflow && el.corners.maxMagnitude != 0)
-            let hasFeatherClip = clipSpec?.fadeLTRB != nil || clipSpec?.fadeLinear != nil
+            let clipRadiiPt: SIMD4<Float>? = clipSpec?.radii
+                ?? el.clipCorners.map { SIMD4<Float>($0.topLeft, $0.topRight, $0.bottomRight, $0.bottomLeft) }
+                ?? el.clipRadius.map { SIMD4<Float>(repeating: $0) }
+            let clipFadeLTRB: SIMD4<Float>? = clipSpec?.fadeLTRB
+                ?? el.clipFade.map { SIMD4<Float>(abs($0.x), abs($0.y), abs($0.z), abs($0.w)) }
+            let hasRoundedClip = clipRadiiPt != nil || (el.layout.clipOverflow && el.corners.maxMagnitude != 0)
+            let hasFeatherClip = clipFadeLTRB != nil || clipSpec?.fadeLinear != nil
             let hasCutout = clipSpec?.cutoutCircle != nil
             let cacheRequested = (el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false
             let cacheEligible = cacheRequested
@@ -787,10 +765,11 @@ extension Runtime {
             var scopeRoundedMask: (rect: SIMD4<Float>, radii: SIMD4<Float>)? = nil
             let nextChildClip: RenderClipState
 
-            if el.layout.clipOverflow || (clipSpec?.clipRect ?? false) {
+            let hasClipScope = el.layout.clipOverflow || (clipSpec?.clipRect ?? false) || clipRadiiPt != nil || clipFadeLTRB != nil
+            if hasClipScope {
                 let boundsClipPx = SIMD4<Float>(rectPx.x, rectPx.y, rectPx.x + rectPx.z, rectPx.y + rectPx.w)
                 var packedFade = SIMD4<UInt32>.zero
-                if let ltrb = clipSpec?.fadeLTRB {
+                if let ltrb = clipFadeLTRB {
                     packedFade = packFade(
                         width: SIMD4<Float>(ltrb.x * scale, ltrb.y * scale, ltrb.z * scale, ltrb.w * scale),
                         origin: boundsClipPx,
@@ -808,7 +787,7 @@ extension Runtime {
                             : packFade(width: SIMD4<Float>(0, 0, 0, softDist), origin: boundsClipPx, clip: boundsClipPx)
                     }
                 }
-                if let customClipR = clipSpec?.radii {
+                if let customClipR = clipRadiiPt {
                     let cr = customClipR * scale
                     let w = packClipRadii(clip: boundsClipPx, radii: cr)
                     packedFade = SIMD4<UInt32>(packedFade.x, packedFade.y, packedFade.z, w)
@@ -881,8 +860,8 @@ extension Runtime {
             let localOpacity = needsLayer ? 1.0 : effOpacity
 
             if needsLayer {
-                let layerClip = (el.layout.clipOverflow || (clipSpec?.clipRect ?? false)) ? scopeClipPx : parentClip.clipPx
-                let layerFade = (el.layout.clipOverflow || (clipSpec?.clipRect ?? false)) ? scopeFade : parentClip.fade
+                let layerClip = hasClipScope ? scopeClipPx : parentClip.clipPx
+                let layerFade = hasClipScope ? scopeFade : parentClip.fade
                 var scopeInst = RenderInstance.beginLayer(
                     bounds: rectPx,
                     clip: layerClip,
