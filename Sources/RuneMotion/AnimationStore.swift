@@ -156,7 +156,7 @@ public struct AnimationStore: Sendable {
     public init(pixelScale: Float, reducedMotion: Bool = false) {
         self._pixelScale = max(pixelScale, 0.5)
         self.reducedMotion = reducedMotion
-        self.auditMode = .allSprings
+        self.auditMode = .disabled
     }
 
     /// Pre-sizes pools for `tracks` tracks of `lanesPerTrack` lanes to avoid per-frame allocations.

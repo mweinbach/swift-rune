@@ -84,12 +84,18 @@ struct StoreParityTests {
         added.set(N, X, 0.0)
         var rng = TestRng(42)
         var t: Double = 0.0
-        for _ in 0..<6 {
+        for step in 0..<12 {
             let target = rng.range(-300.0, 300.0)
             merged.setTime(t)
             added.setTime(t)
+            let before = state(added)
             merged.animate(N, X, to: target, anim: Anim.spring(s).merge())
             added.animate(N, X, to: target, anim: Anim.spring(s).additive())
+            let afterRetarget = state(added)
+            if step >= 8 {
+                #expect(abs(afterRetarget.0 - before.0) < 1e-4)
+                #expect(abs(afterRetarget.1 - before.1) < 1e-4)
+            }
             for k in 0..<40 {
                 let tt = t + Double(k) * 0.002
                 merged.setTime(tt)
@@ -305,6 +311,53 @@ struct StoreParityTests {
 
     @Test("multi_lane_values_share_timing")
     func multiLaneValuesShareTiming() {
+        func refDecode(_ c: Float) -> Float {
+            c <= 0.04045 ? c / 12.92 : powf((c + 0.055) / 1.055, 2.4)
+        }
+        func refEncode(_ c: Float) -> Float {
+            let x = max(0, min(1, c))
+            return x <= 0.0031308 ? x * 12.92 : 1.055 * powf(x, 1.0 / 2.4) - 0.055
+        }
+        func refToOKLab(_ col: MotionColor) -> (Float, Float, Float) {
+            let r = refDecode(col.r)
+            let g = refDecode(col.g)
+            let b = refDecode(col.b)
+            let l = cbrtf(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+            let m = cbrtf(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+            let s = cbrtf(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+            return (
+                0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+                1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+                0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+            )
+        }
+        func refFromOKLab(_ L: Float, _ a: Float, _ b: Float) -> (Float, Float, Float) {
+            let l_ = L + 0.3963377774 * a + 0.2158037573 * b
+            let m_ = L - 0.1055613458 * a - 0.0638541728 * b
+            let s_ = L - 0.0894841775 * a - 1.2914855480 * b
+            let l = l_ * l_ * l_
+            let m = m_ * m_ * m_
+            let s = s_ * s_ * s_
+            return (
+                refEncode(+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+                refEncode(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+                refEncode(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+            )
+        }
+
+        // Verify sRGB->OKLab on mid-grey (#808080 -> L ~ 0.60, not linear 0.795) and 1e-6 alpha cutoff.
+        let grayLab = MotionColor.hex(0x808080).toOKLab()
+        #expect(abs(grayLab.L - 0.5999) < 2e-3)
+        let cut = MotionColor.fromLanes(MotionLanes(0.5e-6, 0, 0, 0.5e-6))
+        #expect(cut == MotionColor(r: 0, g: 0, b: 0, a: 0))
+        let aboveCut = MotionColor.fromLanes(MotionLanes(2e-6, 0, 0, 2e-6))
+        #expect(aboveCut.a > 0)
+
+        // Verify Sides toLanes/fromLanes follows LTRB [left, top, right, bottom].
+        let sides = Sides(top: 1, right: 2, bottom: 3, left: 4)
+        #expect(sides.toLanes() == MotionLanes(4, 1, 2, 3))
+        #expect(Sides.fromLanes(sides.toLanes()) == sides)
+
         var s = AnimationStore()
         let red = MotionColor(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
         let blue = MotionColor(r: 0.0, g: 0.0, b: 1.0, a: 1.0)
@@ -313,18 +366,17 @@ struct StoreParityTests {
         s.tickAt(0.15)
         let mid = s.get(N, Props.FILL)!
         let p = MotionTokens.SETTLE.sample(from: 0.0, velocity: 0.0, target: 1.0, at: 0.15).position
-        let a = red.toOKLab()
-        let b = blue.toOKLab()
-        let want = MotionColor.fromOKLab(
-            L: a.L + (b.L - a.L) * p,
-            a: a.a + (b.a - a.a) * p,
-            b: a.b + (b.b - a.b) * p,
-            alpha: 1.0
+        let a = refToOKLab(red)
+        let b = refToOKLab(blue)
+        let wantRGB = refFromOKLab(
+            a.0 + (b.0 - a.0) * p,
+            a.1 + (b.1 - a.1) * p,
+            a.2 + (b.2 - a.2) * p
         )
-        #expect(abs(mid.r - want.r) < 2e-3)
-        #expect(abs(mid.g - want.g) < 2e-3)
-        #expect(abs(mid.b - want.b) < 2e-3)
-        #expect(abs(mid.a - want.a) < 2e-3)
+        #expect(abs(mid.r - wantRGB.0) < 2e-3)
+        #expect(abs(mid.g - wantRGB.1) < 2e-3)
+        #expect(abs(mid.b - wantRGB.2) < 2e-3)
+        #expect(abs(mid.a - 1.0) < 2e-3)
         s.tickAt(5.0)
         let end = s.get(N, Props.FILL)!
         #expect(abs(end.b - 1.0) < 1e-3 && end.r < 1e-3)
@@ -955,5 +1007,54 @@ struct StoreParityTests {
         let triple = AnimatableTriple<Float, Vec2, Float>(1.0, Vec2(2.0, 3.0), 4.0)
         #expect(AnimatableTriple<Float, Vec2, Float>.laneCount == 4)
         #expect(AnimatableTriple<Float, Vec2, Float>.fromLanes(triple.toLanes()) == triple)
+    }
+
+    @Test("choreography_stagger_and_phase_animator_reduced_motion")
+    func choreographyStaggerAndPhaseAnimatorReducedMotion() {
+        // choreography_stagger_cascades_items (choreo.rs:53)
+        var store = AnimationStore()
+        let items = [NodeId(1), NodeId(2), NodeId(3), NodeId(4)]
+        for id in items { store.snap(id, Props.OPACITY, to: 0.0) }
+        var ch = Choreography()
+        let steps = ch.stagger(.now(), Stagger(step: 0.05), items: items) { ops, id in
+            ops.animate(id, Props.OPACITY, to: 1.0, anim: Anim.spring(MotionTokens.SNAP))
+        }
+        store.tickAt(0.0)
+        ch.tick(store: &store, at: 0.0)
+        for (i, stepId) in steps.enumerated() {
+            #expect(abs((ch.startTime(of: stepId) ?? -1.0) - Double(i) * 0.05) < 1e-6)
+        }
+        store.tickAt(0.06)
+        ch.tick(store: &store, at: 0.06)
+        #expect((store.get(items[0], Props.OPACITY) ?? 0) > 0.0)
+        #expect((store.get(items[1], Props.OPACITY) ?? 0) > 0.0)
+        #expect(store.get(items[2], Props.OPACITY) == 0.0)
+
+        // phase_animator_cycles_and_holds_under_reduced_motion (choreo.rs:74)
+        func pulse(_ store: inout AnimationStore, reduced: Bool) -> [Int] {
+            store.setReducedMotion(reduced)
+            let n = NodeId(1)
+            var ph = ChoreographyPhaseAnimator()
+                .phase { $0.animate(n, Props.SCALE, to: Vec2(1.0, 1.0), anim: Anim.spring(MotionTokens.SETTLE)) }
+                .phase { $0.animate(n, Props.SCALE, to: Vec2(1.04, 1.04), anim: Anim.spring(MotionTokens.SETTLE)) }
+                .advanceOn(.arrived)
+            var phases: [Int] = []
+            var t = 0.0
+            while t < 2.0 {
+                store.setTime(t)
+                ph.tick(store: &store, at: t)
+                store.tick()
+                phases.append(ph.currentIndex)
+                t += 1.0 / 120.0
+            }
+            return phases
+        }
+        var normalStore = AnimationStore()
+        let phases = pulse(&normalStore, reduced: false)
+        let switches = zip(phases, phases.dropFirst()).filter { $0.0 != $0.1 }.count
+        #expect((5...7).contains(switches))
+        var reducedStore = AnimationStore()
+        let held = pulse(&reducedStore, reduced: true)
+        #expect(held.allSatisfy { $0 == 0 })
     }
 }

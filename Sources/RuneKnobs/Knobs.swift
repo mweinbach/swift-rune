@@ -89,6 +89,8 @@ public struct Knobs: Sendable, Equatable {
     public var hotOpt: (String, Int)? = nil
     /// Knob currently being dragged.
     public var drag: String? = nil
+    /// Initial width captured when dragging the side-panel resize edge (`knobs-edge`).
+    public var resizeStartWidth: Float = 0
     /// Active preset name per group.
     public var active: [String: String] = [:]
     /// Undo/redo stacks.
@@ -281,6 +283,20 @@ public struct Knobs: Sendable, Equatable {
         }
     }
 
+    /// Moves the side-panel keyboard cursor to `node` and syncs the active group/cursor.
+    public mutating func setAt(_ node: KnobTreeNode?, groups: [KnobGroup]) {
+        treeAt = node
+        switch node {
+        case .group(let gi) where gi >= 0 && gi < groups.count:
+            group = groups[gi].name
+        case .knob(let gi, let ki) where gi >= 0 && gi < groups.count:
+            group = groups[gi].name
+            cursor = ki
+        default:
+            break
+        }
+    }
+
     public mutating func show() {
         if !open {
             let keep = group.flatMap { unfolded.contains($0) ? $0 : nil }
@@ -325,6 +341,16 @@ public struct Knobs: Sendable, Equatable {
     public mutating func hover(_ name: String, option: Int? = nil) {
         hot = name
         hotOpt = option.map { (name, $0) }
+    }
+
+    /// Mark a knob as active from pointer interaction (`rows.rs:56`).
+    public mutating func touch(group groupName: String, groupIndex: Int, knobIndex: Int) {
+        if group != groupName {
+            group = groupName
+        }
+        cursor = knobIndex
+        treeAt = .knob(groupIndex: groupIndex, knobIndex: knobIndex)
+        kbd = true
     }
 
     public mutating func pick(_ groupName: String) {
@@ -970,7 +996,7 @@ public enum RuneKnobs {
             default:
                 let taken = state[keyPath: keyPath].panelKey(groups: groups, event: event)
                 if taken {
-                    tx.settle()
+                    tx.instant()
                 }
                 return taken
             }

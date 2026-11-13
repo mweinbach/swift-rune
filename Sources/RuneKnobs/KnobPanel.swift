@@ -22,9 +22,48 @@ private enum PanelTypography {
     static let chip = TextStyle(size: 12.0, weight: 500.0).lh(16.0)
     static let chipOn = TextStyle(size: 12.0, weight: 600.0).lh(16.0)
     static let caption = TextStyle(size: 11.0, weight: 500.0).lh(14.0)
+    static let digit = TextStyle(size: 8.5, weight: 600.0).lh(10.0)
+    static let measurer = TextSystem()
+
+    static func textWidth(_ text: String, style: TextStyle) -> Float {
+        measurer.measure(text, style: style, maxWidth: nil, pixelScale: 1.0).x
+    }
+}
+
+/// Responsive layout mode for a choice knob at a card width (`rows.rs:247`).
+public enum ChoiceShape: Equatable, Sendable {
+    case inline
+    case grid(cols: Int)
+    case long(cols: Int)
 }
 
 public extension RuneKnobs {
+    /// Compute choice row layout shape for a knob and card width (`rows.rs:269`).
+    static func choiceShape(_ knob: Knob, cardWidth: Float, showSettledDot: Bool = false) -> ChoiceShape {
+        let pad: Float = 10
+        let optPad: Float = 7
+        let optGap: Float = 2
+        let well: Float = 2
+        let longThreshold = 10
+        let n = knob.labels.count
+        guard n > 0 else { return .inline }
+        let dotW: Float = showSettledDot ? 9 : 0
+        let inlineOptions = knob.labels.reduce(Float(0)) { acc, l in
+            acc + PanelTypography.textWidth(l, style: PanelTypography.chipOn) + 2 * optPad
+        }
+        let inlineNeed = inlineOptions + optGap * Float(max(0, n - 1)) + 2 * well + dotW
+        let labelNeed = PanelTypography.textWidth(knob.title, style: PanelTypography.label) + 2 * pad + 16
+        if inlineNeed + labelNeed <= cardWidth {
+            return .inline
+        }
+        let cellW = (knob.labels.map { PanelTypography.textWidth($0, style: PanelTypography.chipOn) }.max() ?? 24)
+            + 2 * optPad + dotW
+        let room = max(40, cardWidth - 2 * (pad - 6))
+        let fit = max(1, min(n, Int(floor((room - 2 * well + optGap) / (cellW + optGap)))))
+        let rows = (n + fit - 1) / fit
+        let cols = (n + max(1, rows) - 1) / max(1, rows)
+        return n > longThreshold ? .long(cols: cols) : .grid(cols: cols)
+    }
     /// Floating overlay knobs panel (`rune_knobs::layer`). Returns an empty element when `knobs.open == false`.
     static func layer<State>(
         knobs: Knobs,
@@ -39,8 +78,7 @@ public extension RuneKnobs {
         let current = knobs.current(in: groups)
         let card: El<State> = col()
             .key("knobs-floating-panel")
-            .w(340)
-            .maxW(380)
+            .w(300)
             .bg(style.bg)
             .border(1, style.border)
             .rounded(12)
@@ -49,11 +87,11 @@ public extension RuneKnobs {
             .shadows([Shadow(x: 0, y: 12, blur: 32, spread: 0, color: style.shadow)])
             .onKey { state, ev, tx in
                 if RuneKnobs.key(&state[keyPath: keyPath], event: ev) {
-                    tx.settle()
+                    tx.instant()
                     return true
                 }
                 if state[keyPath: keyPath].panelKey(groups: groups, event: ev) {
-                    tx.settle()
+                    tx.instant()
                     return true
                 }
                 return false
@@ -72,6 +110,7 @@ public extension RuneKnobs {
                     groupIndex: gi,
                     knobIndices: Array(0..<group.knobs.count),
                     markedIndex: knobs.kbd ? knobs.cursor : nil,
+                    cardWidth: 280,
                     style: style,
                     keyPath: keyPath
                 ))
@@ -97,10 +136,99 @@ public extension RuneKnobs {
             )
         }
 
-        return El<State>(direction: .row)
+        var root = El<State>(direction: .row)
             .key("knobs-layer")
-            .absolute(x: 16, y: 16)
-            .child(body)
+            .absolute(x: 0, y: 0)
+            .wFull()
+            .hFull()
+            .child(body.absolute(x: 16, y: 16))
+        root = appendOverlayChildren(
+            to: root,
+            knobs: knobs,
+            groups: groups,
+            style: style,
+            keyPath: keyPath,
+            containerKey: "knobs-layer"
+        )
+        return root
+    }
+
+    private static func regionAt(_ rects: [(String, [Float])], x: Float, y: Float) -> String? {
+        rects
+            .filter { _, r in x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3] }
+            .min { ($0.1[2] * $0.1[3]) < ($1.1[2] * $1.1[3]) }?
+            .0
+    }
+
+    private static func appendOverlayChildren<State>(
+        to container: El<State>,
+        knobs: Knobs,
+        groups: [KnobGroup],
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>,
+        containerKey: String
+    ) -> El<State> {
+        guard knobs.open else { return container }
+        var out = container
+        let origin = windowLayout(containerKey).map { ($0[0], $0[1]) } ?? (Float(0), Float(0))
+        let rects: [(String, [Float])] = groups.compactMap { g in
+            guard !g.region.isEmpty, let r = windowLayout(g.region) else { return nil }
+            return (g.name, r)
+        }
+        if knobs.picking {
+            out = out.child(
+                el()
+                    .key("knobs-pick")
+                    .absolute(x: 0, y: 0)
+                    .wFull()
+                    .hFull()
+                    .onPointerMove { state, press, tx in
+                        tx.instant()
+                        let hit = regionAt(rects, x: press.window.x, y: press.window.y)
+                        if state[keyPath: keyPath].hoverGroup != hit {
+                            state[keyPath: keyPath].hoverGroup = hit
+                        }
+                    }
+                    .onHover { state, inside, tx in
+                        if !inside {
+                            tx.instant()
+                            state[keyPath: keyPath].hoverGroup = nil
+                        }
+                    }
+                    .onClick { state, tx in
+                        tx.instant()
+                        if let hovered = state[keyPath: keyPath].hoverGroup {
+                            state[keyPath: keyPath].pick(hovered)
+                        }
+                    }
+            )
+        }
+        if let outlined = knobs.hoverGroup,
+           let (name, r) = rects.first(where: { $0.0 == outlined }) {
+            var outline: El<State> = el()
+                .key("knobs-outline")
+                .absolute(x: r[0] - origin.0, y: r[1] - origin.1)
+                .w(r[2])
+                .h(r[3])
+                .rounded(6)
+                .border(1, style.outline)
+                .inert(true)
+            if knobs.picking {
+                outline = outline.child(
+                    row()
+                        .key("knobs-tag")
+                        .absolute(x: 6, y: 6)
+                        .h(20)
+                        .px(7)
+                        .center()
+                        .rounded(5)
+                        .bg(style.bg)
+                        .child(text(name).font(PanelTypography.caption).color(style.fg))
+                )
+            }
+            out = out.child(outline)
+        }
+        return out
     }
 
     /// Right-hand side panel wrapping `page` (`rune_knobs::side`).
@@ -113,21 +241,86 @@ public extension RuneKnobs {
         keyPath: WritableKeyPath<State, Knobs>,
         filterEditKeyPath: WritableKeyPath<State, TextEdit>? = nil
     ) -> El<State> {
-        guard knobs.open else { return page }
-        let sidePanel = sidePanelContent(
-            knobs: knobs,
-            groups: groups,
-            style: style,
-            seen: seen,
-            keyPath: keyPath,
-            filterEditKeyPath: filterEditKeyPath
-        )
+        let w = knobs.sideW()
+        let slide = knobs.slide()
+        var pageBox: El<State> = col()
+            .key("knobs-page")
+            .grow(1)
+            .shrink(1)
+            .minW(0)
+            .hFull()
+            .minH(0)
+            .child(page)
+        if knobs.open {
+            var over: El<State> = el().key("knobs-over").absolute(x: 0, y: 0).wFull().hFull()
+            over = appendOverlayChildren(
+                to: over,
+                knobs: knobs,
+                groups: groups,
+                style: style,
+                keyPath: keyPath,
+                containerKey: "knobs-over"
+            )
+            pageBox = pageBox.child(over)
+        }
+
+        var sideBox: El<State> = el()
+            .key("knobs-side")
+            .w(knobs.open ? w : 0)
+            .hFull()
+            .clip(true)
+            .motion(slide)
+
+        if knobs.open {
+            let sidePanel = sidePanelContent(
+                knobs: knobs,
+                groups: groups,
+                style: style,
+                seen: seen,
+                keyPath: keyPath,
+                filterEditKeyPath: filterEditKeyPath
+            )
+            let edge: El<State> = el()
+                .key("knobs-edge")
+                .absolute(x: 0, y: 0)
+                .w(6)
+                .hFull()
+                .cursor(.resizeColumn)
+                .onDragStart { state, tx in
+                    tx.instant()
+                    state[keyPath: keyPath].resizeStartWidth = state[keyPath: keyPath].sideW()
+                }
+                .onDrag { state, drag, tx in
+                    tx.instant()
+                    let base = state[keyPath: keyPath].resizeStartWidth > 0
+                        ? state[keyPath: keyPath].resizeStartWidth
+                        : state[keyPath: keyPath].sideW()
+                    let resized = (base - drag.delta.x)
+                        .clamped(to: RuneKnobsDefaults.sideMin...RuneKnobsDefaults.sideMax)
+                        .rounded()
+                    state[keyPath: keyPath].width = resized
+                }
+                .onDragEnd { state, cancelled, tx in
+                    tx.instant()
+                    if cancelled {
+                        state[keyPath: keyPath].width = state[keyPath: keyPath].resizeStartWidth
+                    }
+                    state[keyPath: keyPath].resizeStartWidth = 0
+                }
+                .onDoubleClick { state, tx in
+                    tx.instant()
+                    state[keyPath: keyPath].width = 0
+                }
+            sideBox = sideBox.child(sidePanel).child(edge)
+        }
+
         return El<State>(direction: .row)
             .key("knobs-side-shell")
             .wFull()
             .hFull()
-            .child(el().grow(1).child(page))
-            .child(sidePanel)
+            .minH(0)
+            .child(pageBox)
+            .child(sideBox)
     }
 
     /// Inline panel suitable for embedding inside a playground column (`rune_knobs::inline`).
@@ -163,6 +356,7 @@ public extension RuneKnobs {
                     groupIndex: gi,
                     knobIndices: Array(0..<group.knobs.count),
                     markedIndex: knobs.kbd ? knobs.cursor : nil,
+                    cardWidth: 280,
                     style: style,
                     keyPath: keyPath
                 ))
@@ -206,96 +400,246 @@ public extension RuneKnobs {
         let plan = KnobTree.plan(knobs: knobs, groups: groups, seen: seen)
         let w = knobs.sideW()
 
+        let effectiveEditKP = filterEditKeyPath ?? keyPath.appending(path: \.edit)
+
         var panel: El<State> = col()
             .key("knobs-side-panel")
             .w(w)
             .shrink(0)
             .hFull()
+            .minH(0)
             .bg(style.bg)
             .border(1, style.border)
             .p(10)
             .gap(8)
+            .focusable(true)
             .onKey { state, ev, tx in
-                if RuneKnobs.key(&state[keyPath: keyPath], event: ev) {
-                    tx.settle()
+                let isToggleShortcut: Bool = {
+                    switch ev.key {
+                    case .command(let ch) where (ch == "k" || ch == "K") && ev.mods.shift:
+                        return true
+                    case .text(let s) where (s == "k" || s == "K") && ev.mods.primaryCommand && ev.mods.shift:
+                        return true
+                    default:
+                        return false
+                    }
+                }()
+                if isToggleShortcut {
+                    state[keyPath: keyPath].toggle()
+                    tx.instant()
                     return true
                 }
+                if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl {
+                    return false
+                }
+                if state[keyPath: keyPath].filtering {
+                    state[keyPath: keyPath].filtering = false
+                }
+                let wasFiltering = state[keyPath: keyPath].filtering
                 if KnobTree.handleKey(&state[keyPath: keyPath], groups: groups, seen: seen, event: ev) {
-                    tx.settle()
+                    if !wasFiltering && state[keyPath: keyPath].filtering {
+                        if let customKP = filterEditKeyPath {
+                            state[keyPath: customKP].setText(state[keyPath: keyPath].query)
+                            state[keyPath: customKP].selectAll()
+                        }
+                        tx.focus("knobs-filter-input")
+                        tx.instant()
+                    } else {
+                        tx.motion(state[keyPath: keyPath].foldSpring())
+                    }
                     return true
                 }
                 return false
             }
+            .onPointerMove { state, _, tx in
+                if state[keyPath: keyPath].kbd && state[keyPath: keyPath].drag == nil {
+                    state[keyPath: keyPath].kbd = false
+                    tx.instant()
+                }
+            }
 
-        // Filter bar
-        if let editKP = filterEditKeyPath {
-            panel = panel.child(
-                El<State>(direction: .row)
-                    .key("knobs-filter-row")
-                    .wFull()
-                    .h(28)
-                    .px(8)
-                    .rounded(6)
-                    .bg(style.inset)
-                    .border(1, knobs.filtering ? style.outline : style.border)
-                    .center()
-                    .child(
-                        textInput(key: "knobs-filter-input", editKP)
-                            .wFull()
-                            .font(PanelTypography.label)
-                            .color(style.fg)
-                            .onChange { state, newText, _ in
-                                state[keyPath: keyPath].query = newText
-                            }
-                    )
+        panel = panel.child(
+            sideFilterBar(
+                knobs: knobs,
+                groups: groups,
+                plan: plan,
+                style: style,
+                keyPath: keyPath,
+                effectiveEditKP: effectiveEditKP,
+                customEditKP: filterEditKeyPath
+            )
+        )
+
+        if !plan.tabs.isEmpty {
+            panel = panel.child(sideTabsBar(plan: plan, style: style, keyPath: keyPath))
+        }
+
+        var scrollCol: El<State> = col()
+            .key("knobs-scroll")
+            .wFull()
+            .grow(1)
+            .minH(0)
+            .gap(6)
+            .scroll()
+
+        let sectionEls = sideSections(
+            knobs: knobs,
+            groups: groups,
+            plan: plan,
+            cardWidth: max(120, w - 20),
+            style: style,
+            keyPath: keyPath
+        )
+        if sectionEls.isEmpty {
+            scrollCol = scrollCol.child(
+                text("Nothing matches")
+                    .key("knobs-none")
+                    .font(PanelTypography.chip)
+                    .color(style.fg3)
+                    .px(10)
             )
         } else {
-            panel = panel.child(
+            for secEl in sectionEls {
+                scrollCol = scrollCol.child(secEl)
+            }
+        }
+
+        return panel
+            .child(scrollCol)
+            .child(sideAboutFooter(knobs: knobs, groups: groups, style: style))
+    }
+
+    private static func sideFilterBar<State>(
+        knobs: Knobs,
+        groups: [KnobGroup],
+        plan: KnobTreePlan,
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>,
+        effectiveEditKP: WritableKeyPath<State, TextEdit>,
+        customEditKP: WritableKeyPath<State, TextEdit>?
+    ) -> El<State> {
+        let matchCount = plan.sections.reduce(0) { acc, s in
+            acc + s.subs.reduce(0) { $0 + $1.knobs.count }
+        }
+        let countLabel = matchCount == 1 ? "1 knob" : "\(matchCount) knobs"
+
+        if knobs.filtering {
+            var r: El<State> = El<State>(direction: .row)
+                .key("knobs-filter-row")
+                .wFull()
+                .h(28)
+                .px(8)
+                .gap(8)
+                .rounded(6)
+                .bg(style.inset)
+                .border(1, style.outline)
+                .center()
+                .child(
+                    el()
+                        .key("knobs-filter-field")
+                        .grow(1)
+                        .minW(0)
+                        .hFull()
+                        .center()
+                        .focusReturn("knobs-side-panel")
+                        .child(
+                            textInput(key: "knobs-filter-input", effectiveEditKP)
+                                .wFull()
+                                .font(PanelTypography.label)
+                                .color(style.fg)
+                                .onInputKey { state, ev, tx in
+                                    if KnobTree.filterKey(&state[keyPath: keyPath], groups: groups, plan: plan, event: ev) {
+                                        tx.instant()
+                                        return true
+                                    }
+                                    return false
+                                }
+                                .onChange { state, newText, tx in
+                                    tx.instant()
+                                    state[keyPath: keyPath].query = newText
+                                    if customEditKP != nil {
+                                        state[keyPath: keyPath].syncEdit()
+                                    }
+                                    state[keyPath: keyPath].kbd = true
+                                    KnobTree.refilter(&state[keyPath: keyPath], groups: groups, before: plan)
+                                }
+                        )
+                )
+            if !knobs.query.isEmpty {
+                r = r.child(text(countLabel).font(PanelTypography.value).color(style.fg3))
+            }
+            return r
+        }
+        var pill: El<State> = El<State>(direction: .row)
+            .key("knobs-filter-pill")
+            .wFull()
+            .h(26)
+            .px(8)
+            .gap(8)
+            .rounded(6)
+            .bg(style.inset)
+            .center()
+            .onClick { state, tx in
+                tx.instant()
+                state[keyPath: keyPath].kbd = true
+                state[keyPath: keyPath].startFilter()
+                if let customKP = customEditKP {
+                    state[keyPath: customKP].setText(state[keyPath: keyPath].query)
+                    state[keyPath: customKP].selectAll()
+                }
+                tx.focus("knobs-filter-input")
+            }
+            .child(text(knobs.query.isEmpty ? "Press / to filter" : knobs.query).font(PanelTypography.label).color(knobs.query.isEmpty ? style.fg3 : style.fg))
+            .child(spacer())
+        if !knobs.query.isEmpty {
+            pill = pill.child(text(countLabel).font(PanelTypography.value).color(style.fg3))
+        }
+        return pill
+    }
+
+    private static func sideTabsBar<State>(
+        plan: KnobTreePlan,
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>
+    ) -> El<State> {
+        var tabRow: El<State> = row().key("knobs-side-tabs").wFull().gap(4).p(2).rounded(8).bg(style.inset)
+        for (i, (tabName, isOnScreen)) in plan.tabs.enumerated() {
+            let selected = plan.tab == tabName
+            tabRow = tabRow.child(
                 El<State>(direction: .row)
-                    .key("knobs-filter-pill")
-                    .wFull()
-                    .h(26)
+                    .key("knobs-side-tab-\(i)")
+                    .role(.tab)
+                    .grow(1)
+                    .h(24)
                     .px(8)
+                    .gap(4)
                     .rounded(6)
-                    .bg(style.inset)
+                    .bg(selected ? style.raised : .transparent)
                     .center()
-                    .child(text(knobs.query.isEmpty ? "Filter knobs (/)" : knobs.query).font(PanelTypography.label).color(knobs.query.isEmpty ? style.fg3 : style.fg))
-                    .child(spacer())
+                    .onClick { state, tx in
+                        tx.settle()
+                        state[keyPath: keyPath].tab = tabName
+                    }
+                    .child(text(tabName).font(selected ? PanelTypography.chipOn : PanelTypography.chip).color(selected ? style.fg : style.fg2))
+                    .child(isOnScreen ? el().size(4, 4).rounded(2).bg(style.fg3) : el())
             )
         }
+        return tabRow
+    }
 
-        // Tabs bar for .tabs layout
-        if !plan.tabs.isEmpty {
-            var tabRow: El<State> = row().key("knobs-side-tabs").wFull().gap(4).p(2).rounded(8).bg(style.inset)
-            for (i, (tabName, isOnScreen)) in plan.tabs.enumerated() {
-                let selected = plan.tab == tabName
-                tabRow = tabRow.child(
-                    El<State>(direction: .row)
-                        .key("knobs-side-tab-\(i)")
-                        .role(.tab)
-                        .grow(1)
-                        .h(24)
-                        .px(8)
-                        .gap(4)
-                        .rounded(6)
-                        .bg(selected ? style.raised : .transparent)
-                        .center()
-                        .onClick { state, tx in
-                            tx.settle()
-                            state[keyPath: keyPath].tab = tabName
-                        }
-                        .child(text(tabName).font(selected ? PanelTypography.chipOn : PanelTypography.chip).color(selected ? style.fg : style.fg2))
-                        .child(isOnScreen ? el().size(4, 4).rounded(2).bg(style.fg3) : el())
-                )
-            }
-            panel = panel.child(tabRow)
-        }
-
-        // Sections
+    private static func sideSections<State>(
+        knobs: Knobs,
+        groups: [KnobGroup],
+        plan: KnobTreePlan,
+        cardWidth: Float,
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>
+    ) -> [El<State>] {
+        var out: [El<State>] = []
         for (si, sec) in plan.sections.enumerated() {
             switch sec.head {
             case .page(let pageName):
-                panel = panel.child(
+                out.append(
                     El<State>(direction: .row)
                         .key("knobs-sec-page-\(si)")
                         .role(.button)
@@ -304,58 +648,208 @@ public extension RuneKnobs {
                         .py(4)
                         .gap(6)
                         .onClick { state, tx in
-                            tx.settle()
-                            let wasFolded = !sec.open
-                            state[keyPath: keyPath].setFolded(pageName, !wasFolded)
+                            tx.motion(state[keyPath: keyPath].foldSpring())
+                            state[keyPath: keyPath].setFolded(pageName, sec.open)
+                            state[keyPath: keyPath].treeAt = .page(pageName)
+                            state[keyPath: keyPath].kbd = true
                         }
                         .child(text(sec.open ? "▾" : "▸").font(PanelTypography.caption).color(style.fg3))
                         .child(text(pageName).font(PanelTypography.title).color(style.fg))
                 )
             case .caption(let cap):
-                panel = panel.child(
-                    text(cap).font(PanelTypography.caption).color(style.fg3).px(4)
-                )
+                out.append(text(cap.uppercased()).font(PanelTypography.caption).color(style.fg3).px(4))
             case .bare:
                 break
             }
 
             guard sec.open else { continue }
             for sub in sec.subs {
-                let g = groups[sub.groupIndex]
-                let titleText = sub.full && !g.under.isEmpty ? "\(g.under) · \(g.name)" : g.name
-                panel = panel.child(
-                    El<State>(direction: .row)
-                        .key("knobs-sub-head-\(sub.groupIndex)")
-                        .role(.button)
-                        .wFull()
-                        .px(4)
-                        .py(3)
-                        .gap(6)
-                        .onClick { state, tx in
-                            tx.settle()
-                            state[keyPath: keyPath].setFolded(g.name, sub.open)
-                            state[keyPath: keyPath].pick(g.name)
-                        }
-                        .child(text(sub.open ? "▾" : "▸").font(PanelTypography.caption).color(style.fg3))
-                        .child(text(titleText).font(PanelTypography.chipOn).color(style.fg2))
-                )
-                if sub.open {
-                    panel = panel.child(
-                        knobCard(
-                            knobs: knobs,
-                            group: g,
-                            groupIndex: sub.groupIndex,
-                            knobIndices: sub.knobs,
-                            markedIndex: nil,
-                            style: style,
-                            keyPath: keyPath
-                        )
+                out.append(
+                    sideGroupSection(
+                        knobs: knobs,
+                        groups: groups,
+                        sub: sub,
+                        cardWidth: cardWidth,
+                        style: style,
+                        keyPath: keyPath
                     )
+                )
+            }
+        }
+        return out
+    }
+
+    private static func sideGroupSection<State>(
+        knobs: Knobs,
+        groups: [KnobGroup],
+        sub: KnobTreeSub,
+        cardWidth: Float,
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>
+    ) -> El<State> {
+        let g = groups[sub.groupIndex]
+        let gi = sub.groupIndex
+        let titleText = sub.full && !g.under.isEmpty ? "\(g.under) · \(g.name)" : g.name
+        let hovered = knobs.hoverGroup == g.name
+        let lit = hovered || knobs.group == g.name
+        let mark: Int? = if knobs.kbd, case .knob(let atG, let atI) = knobs.treeAt, atG == gi { atI } else { nil }
+
+        var header: El<State> = El<State>(direction: .row)
+            .key("knobs-sub-head-\(gi)")
+            .role(.button)
+            .wFull()
+            .h(28)
+            .px(4)
+            .gap(6)
+            .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside {
+                    state[keyPath: keyPath].hoverGroup = g.name
+                } else if state[keyPath: keyPath].hoverGroup == g.name {
+                    state[keyPath: keyPath].hoverGroup = nil
+                }
+            }
+            .onClick { state, tx in
+                tx.motion(state[keyPath: keyPath].foldSpring())
+                state[keyPath: keyPath].setFolded(g.name, sub.open)
+                state[keyPath: keyPath].treeAt = .group(gi)
+                state[keyPath: keyPath].kbd = true
+                if !sub.open {
+                    state[keyPath: keyPath].group = g.name
+                }
+            }
+            .onSecondaryClick { state, _, tx in
+                tx.instant()
+                state[keyPath: keyPath].reset(g)
+            }
+            .child(text(sub.open ? "▾" : "▸").font(PanelTypography.caption).color(style.fg3))
+            .child(text(titleText).font(PanelTypography.chipOn).color(lit ? style.fg : style.fg2))
+            .child(spacer())
+
+        if hovered {
+            header = header
+                .child(
+                    iconButton(
+                        key: "knobs-sec-\(gi)-random",
+                        svg: KnobIcons.random,
+                        active: true,
+                        style: style
+                    ) { state, tx in
+                        tx.instant()
+                        state[keyPath: keyPath].random(g)
+                    }
+                )
+                .child(
+                    iconButton(
+                        key: "knobs-sec-\(gi)-reset",
+                        svg: KnobIcons.reset,
+                        active: knobs.canReset(g),
+                        style: style
+                    ) { state, tx in
+                        tx.instant()
+                        state[keyPath: keyPath].reset(g)
+                    }
+                )
+        } else {
+            header = header.child(
+                text("\(sub.knobs.count)")
+                    .font(PanelTypography.value)
+                    .color(sub.open ? style.fg3 : style.fg2)
+            )
+        }
+
+        var body: El<State> = col()
+            .key("knobs-sec-\(gi)-body")
+            .wFull()
+            .clip(true)
+            .child(
+                knobCard(
+                    knobs: knobs,
+                    group: g,
+                    groupIndex: gi,
+                    knobIndices: sub.knobs,
+                    markedIndex: mark,
+                    cardWidth: cardWidth,
+                    style: style,
+                    keyPath: keyPath
+                )
+            )
+        if !sub.open {
+            body = body.h(0)
+        }
+
+        return col()
+            .key("knobs-sec-\(gi)")
+            .wFull()
+            .child(header)
+            .child(body)
+    }
+
+    private static func describedKnob(knobs: Knobs, groups: [KnobGroup]) -> Knob? {
+        if let hot = knobs.hot {
+            for g in groups {
+                if let match = g.knobs.first(where: { $0.name == hot }) {
+                    return match
                 }
             }
         }
+        if knobs.kbd, case .knob(let gi, let ki) = knobs.treeAt,
+           groups.indices.contains(gi), groups[gi].knobs.indices.contains(ki) {
+            return groups[gi].knobs[ki]
+        }
+        return nil
+    }
 
-        return panel
+    private static func sideAboutFooter<State>(
+        knobs: Knobs,
+        groups: [KnobGroup],
+        style: KnobStyle
+    ) -> El<State> {
+        var box: El<State> = col()
+            .key("knobs-about")
+            .wFull()
+            .h(64)
+            .px(4)
+            .pt(6)
+            .gap(2)
+
+        guard let d = describedKnob(knobs: knobs, groups: groups) else {
+            return box.child(
+                text("↑↓ move   ←→ fold, open or change   1–9 pick   / filter")
+                    .font(PanelTypography.caption)
+                    .color(style.fg3)
+            )
+        }
+
+        box = box.child(text(d.title).font(PanelTypography.title).color(style.fg2))
+        if !d.describe.isEmpty {
+            box = box.child(
+                text(d.describe)
+                    .key("knobs-about-line")
+                    .font(PanelTypography.caption)
+                    .color(style.fg3)
+            )
+        }
+        let optIdx: Int? = if let ho = knobs.hotOpt, ho.0 == d.name {
+            ho.1
+        } else if !d.labels.isEmpty {
+            Int(knobs.get(d).rounded())
+        } else {
+            nil
+        }
+        if let j = optIdx, d.labels.indices.contains(j) {
+            let hint = d.hint(at: j)
+            if !hint.isEmpty {
+                box = box.child(
+                    text("\(d.labels[j]): \(hint)")
+                        .key("knobs-about-option")
+                        .font(PanelTypography.caption)
+                        .color(style.fg2)
+                )
+            }
+        }
+        return box
     }
 
     // MARK: - Header, Group Tabs, Presets, Knob Rows
@@ -401,18 +895,20 @@ public extension RuneKnobs {
             active: canUndo,
             style: style
         ) { state, tx in
-            tx.settle()
+            guard state[keyPath: keyPath].canUndo else { return }
+            tx.instant()
             state[keyPath: keyPath].undo()
         })
 
         if let g = current {
             bar = bar
                 .child(iconButton(key: "knobs-btn-random", svg: KnobIcons.random, active: true, style: style) { state, tx in
-                    tx.settle()
+                    tx.instant()
                     state[keyPath: keyPath].random(g)
                 })
                 .child(iconButton(key: "knobs-btn-reset", svg: KnobIcons.reset, active: canReset, style: style) { state, tx in
-                    tx.settle()
+                    guard state[keyPath: keyPath].canReset(g) else { return }
+                    tx.instant()
                     state[keyPath: keyPath].reset(g)
                 })
                 .child(iconButton(key: "knobs-btn-copy", svg: KnobIcons.copy, active: true, style: style) { state, tx in
@@ -544,9 +1040,11 @@ public extension RuneKnobs {
         groupIndex: Int,
         knobIndices: [Int],
         markedIndex: Int?,
+        cardWidth: Float = 280,
         style: KnobStyle,
         keyPath: WritableKeyPath<State, Knobs>
     ) -> El<State> {
+        let measuredCardW = Rune.layoutWith("knobs-card") { $0[2].rounded() } ?? cardWidth
         var card: El<State> = col()
             .key("knobs-card")
             .wFull()
@@ -558,19 +1056,19 @@ public extension RuneKnobs {
             let d = group.knobs[idx]
             var r: El<State> = switch d.kind {
             case .bool:
-                boolRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                boolRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             case .select:
-                choiceRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                choiceRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, cardWidth: measuredCardW, style: style, keyPath: keyPath)
             case .color:
-                colorRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                colorRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             case .text:
-                textRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                textRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             case .vec2:
-                vec2Row(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                vec2Row(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             case .spring:
-                springRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                springRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             case .float, .int:
-                sliderRow(knobs: knobs, group: group, index: idx, knob: d, style: style, keyPath: keyPath)
+                sliderRow(knobs: knobs, group: group, groupIndex: groupIndex, index: idx, knob: d, style: style, keyPath: keyPath)
             }
 
             if markedIndex == idx {
@@ -589,6 +1087,7 @@ public extension RuneKnobs {
     private static func sliderRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -599,18 +1098,18 @@ public extension RuneKnobs {
         let frac = min(max((val - knob.min) / span, 0), 1)
         let isDragging = knobs.drag == knob.name
         let isHot = knobs.hot == knob.name
+        let changed = abs(val - knob.default) > 1e-4
         let trackFill = isDragging ? style.sliderActive : (isHot ? style.sliderHover : style.slider)
         let formatted = knob.kind == .int ? "\(Int(val.rounded()))" : trimFloat(val)
 
-        return El<State>(direction: .row)
+        return el()
             .key("knob-\(knob.name)")
+            .role(.slider)
             .wFull()
             .h(32)
-            .px(10)
-            .gap(8)
-            .center()
+            .bg(isHot || isDragging ? style.fillHover : .transparent)
             .onHover { state, inside, tx in
-                tx.settle()
+                tx.instant()
                 if inside {
                     state[keyPath: keyPath].hot = knob.name
                 } else if state[keyPath: keyPath].hot == knob.name {
@@ -618,97 +1117,316 @@ public extension RuneKnobs {
                 }
             }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .onDrag { state, drag, tx in
-                tx.settle()
+                tx.instant()
                 let w = max(1, drag.size.x)
                 let t = min(max(drag.local.x / w, 0), 1)
                 let nextVal = knob.min + t * (knob.max - knob.min)
                 if state[keyPath: keyPath].drag != knob.name {
                     state[keyPath: keyPath].checkpoint()
+                    state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                     state[keyPath: keyPath].drag = knob.name
                 }
                 state[keyPath: keyPath].set(knob, nextVal)
-                state[keyPath: keyPath].group = group.name
-                state[keyPath: keyPath].cursor = index
             }
             .onDragEnd { state, _, tx in
-                tx.settle()
+                tx.instant()
                 if state[keyPath: keyPath].drag == knob.name {
                     state[keyPath: keyPath].drag = nil
                 }
             }
-            .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
             .child(
-                el()
-                    .key("knob-track-\(knob.name)")
-                    .grow(1)
-                    .h(6)
-                    .rounded(3)
-                    .bg(style.inset)
-                    .clip(true)
+                El<State>(direction: .row)
+                    .key("fill")
+                    .absolute(x: 0, y: 0)
+                    .wFrac(frac)
+                    .h(32)
+                    .bg(trackFill)
+                    .child(spacer())
                     .child(
                         el()
-                            .key("knob-fill-\(knob.name)")
-                            .w(max(4, frac * 120))
-                            .hFull()
-                            .rounded(3)
-                            .bg(trackFill)
+                            .key("handle")
+                            .w(3)
+                            .minW(3)
+                            .h(20)
+                            .mt(6)
+                            .rounded(1.5)
+                            .bg(style.handle)
+                            .opacity(isDragging ? 0.95 : (isHot ? 0.65 : 0))
                     )
             )
-            .child(text(formatted).font(PanelTypography.value).color(style.fg))
+            .child(
+                El<State>(direction: .row)
+                    .key("text")
+                    .absolute(x: 0, y: 0)
+                    .wFull()
+                    .h(32)
+                    .px(10)
+                    .gap(8)
+                    .center()
+                    .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
+                    .child(spacer())
+                    .child(text(formatted).font(PanelTypography.value).color(isHot || isDragging || changed ? style.fg : style.fg2))
+            )
+    }
+
+    private static func choiceOptionCell<State>(
+        knobs: Knobs,
+        group: KnobGroup,
+        groupIndex: Int,
+        index: Int,
+        knob: Knob,
+        optIdx: Int,
+        optLabel: String,
+        cellWidth: Float?,
+        keyed: Bool,
+        settledIdx: Int?,
+        selectedIdx: Int,
+        style: KnobStyle,
+        keyPath: WritableKeyPath<State, Knobs>
+    ) -> El<State> {
+        let on = optIdx == selectedIdx
+        var opt: El<State> = El<State>(direction: .row)
+            .key("knob-\(knob.name)-opt-\(optIdx)")
+            .role(.button)
+            .h(22)
+            .px(7)
+            .gap(5)
+            .center()
+            .rounded(5)
+            .bg(on ? style.raised : .transparent)
+            .hover(style.fillHover)
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside {
+                    state[keyPath: keyPath].hot = knob.name
+                    state[keyPath: keyPath].hotOpt = (knob.name, optIdx)
+                } else if state[keyPath: keyPath].hotOpt?.0 == knob.name && state[keyPath: keyPath].hotOpt?.1 == optIdx {
+                    state[keyPath: keyPath].hotOpt = nil
+                }
+            }
+            .onClick { state, tx in
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
+                state[keyPath: keyPath].change(knob, Float(optIdx))
+            }
+            .child(text(optLabel).font(on ? PanelTypography.chipOn : PanelTypography.chip).color(on ? style.fg : style.fg2))
+        if settledIdx == optIdx {
+            opt = opt.child(el().key("current").size(4, 4).rounded(2).bg(style.fg3))
+        }
+        if keyed && optIdx < 9 {
+            opt = opt.child(
+                text("\(optIdx + 1)")
+                    .key("digit")
+                    .font(PanelTypography.digit)
+                    .color(style.fg3)
+                    .absolute(x: 1.5, y: 1.5)
+            )
+        }
+        if let cw = cellWidth {
+            opt = opt.w(cw)
+        }
+        return opt
     }
 
     private static func choiceRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
+        cardWidth: Float,
         style: KnobStyle,
         keyPath: WritableKeyPath<State, Knobs>
     ) -> El<State> {
         let selectedIdx = Int(knobs.get(knob).rounded())
-        var optionsRow: El<State> = row().gap(2).p(2).rounded(6).bg(style.inset)
-        for (optIdx, optLabel) in knob.labels.enumerated() {
-            let on = optIdx == selectedIdx
-            optionsRow = optionsRow.child(
-                El<State>(direction: .row)
-                    .key("knob-\(knob.name)-opt-\(optIdx)")
-                    .role(.button)
-                    .px(7)
-                    .py(3)
-                    .rounded(4)
-                    .bg(on ? style.raised : .transparent)
-                    .onClick { state, tx in
-                        tx.settle()
-                        state[keyPath: keyPath].change(knob, Float(optIdx))
-                        state[keyPath: keyPath].group = group.name
-                        state[keyPath: keyPath].cursor = index
+        let settledIdx = knobs.settled?[knob.name].map { Int(knob.clamp($0).rounded()) }
+        let shape = RuneKnobs.choiceShape(knob, cardWidth: cardWidth, showSettledDot: settledIdx != nil)
+        let keyed: Bool = if case .knob(let atG, let atI) = knobs.treeAt, atG == groupIndex, atI == index { true } else { false }
+
+        func buildGrid(cols: Int) -> El<State> {
+            let optGap: Float = 2
+            let well: Float = 2
+            let pad: Float = 10
+            let room = max(40, cardWidth - 2 * (pad - 6) - 2 * well)
+            let cw = max(20, (room - optGap * Float(max(0, cols - 1))) / Float(max(1, cols)))
+            var grid: El<State> = col().key("seg").wFull().p(well).gap(optGap).rounded(7).bg(style.inset)
+            var r = 0
+            while r * cols < knob.labels.count {
+                var line: El<State> = row().key("line-\(r)").gap(optGap)
+                for c in 0..<cols {
+                    let j = r * cols + c
+                    if j < knob.labels.count {
+                        line = line.child(
+                            choiceOptionCell(
+                                knobs: knobs, group: group, groupIndex: groupIndex, index: index,
+                                knob: knob, optIdx: j, optLabel: knob.labels[j], cellWidth: cw,
+                                keyed: keyed, settledIdx: settledIdx, selectedIdx: selectedIdx,
+                                style: style, keyPath: keyPath
+                            )
+                        )
                     }
-                    .child(text(optLabel).font(on ? PanelTypography.chipOn : PanelTypography.chip).color(on ? style.fg : style.fg2))
-            )
+                }
+                grid = grid.child(line)
+                r += 1
+            }
+            return grid
         }
-        return El<State>(direction: .row)
-            .key("knob-\(knob.name)")
-            .wFull()
-            .h(32)
-            .px(10)
-            .gap(8)
-            .center()
+
+        let inner: El<State> = switch shape {
+        case .inline:
+            {
+                var seg: El<State> = row().key("seg").h(26).p(2).gap(2).rounded(7).bg(style.inset)
+                for (optIdx, optLabel) in knob.labels.enumerated() {
+                    seg = seg.child(
+                        choiceOptionCell(
+                            knobs: knobs, group: group, groupIndex: groupIndex, index: index,
+                            knob: knob, optIdx: optIdx, optLabel: optLabel, cellWidth: nil,
+                            keyed: keyed, settledIdx: settledIdx, selectedIdx: selectedIdx,
+                            style: style, keyPath: keyPath
+                        )
+                    )
+                }
+                return El<State>(direction: .row)
+                    .key("knob-\(knob.name)")
+                    .wFull()
+                    .h(36)
+                    .pl(10)
+                    .pr(6)
+                    .gap(8)
+                    .center()
+                    .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
+                    .child(spacer())
+                    .child(seg)
+            }()
+        case .grid(let cols):
+            col()
+                .key("knob-\(knob.name)")
+                .wFull()
+                .px(4)
+                .pb(6)
+                .child(
+                    El<State>(direction: .row)
+                        .key("head")
+                        .wFull()
+                        .h(28)
+                        .px(6)
+                        .center()
+                        .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
+                        .child(spacer())
+                )
+                .child(buildGrid(cols: cols))
+        case .long(let cols):
+            {
+                let open = knobs.expanded == knob.name
+                let n = max(1, knob.labels.count)
+                let curLabel = knob.labels.indices.contains(selectedIdx) ? knob.labels[selectedIdx] : ""
+                let stepper: El<State> = row()
+                    .key("stepper")
+                    .h(26)
+                    .p(2)
+                    .gap(2)
+                    .center()
+                    .rounded(7)
+                    .bg(style.inset)
+                    .child(
+                        El<State>(direction: .row)
+                            .key("prev")
+                            .role(.button)
+                            .size(22, 22)
+                            .center()
+                            .rounded(5)
+                            .hover(style.fillHover)
+                            .onClick { state, tx in
+                                tx.instant()
+                                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
+                                let cur = Int(state[keyPath: keyPath].get(knob).rounded())
+                                let next = ((cur - 1) % n + n) % n
+                                state[keyPath: keyPath].change(knob, Float(next))
+                            }
+                            .child(text("‹").font(PanelTypography.chip).color(style.fg2))
+                    )
+                    .child(
+                        El<State>(direction: .row)
+                            .key("current")
+                            .role(.button)
+                            .h(22)
+                            .px(8)
+                            .gap(6)
+                            .center()
+                            .rounded(5)
+                            .bg(open ? style.raised : .transparent)
+                            .hover(style.fillHover)
+                            .onClick { state, tx in
+                                tx.instant()
+                                state[keyPath: keyPath].expanded = (state[keyPath: keyPath].expanded == knob.name) ? nil : knob.name
+                            }
+                            .child(text(curLabel).font(PanelTypography.chip).color(style.fg))
+                            .child(text("\(selectedIdx + 1)/\(n)").font(PanelTypography.value).color(style.fg3))
+                    )
+                    .child(
+                        El<State>(direction: .row)
+                            .key("next")
+                            .role(.button)
+                            .size(22, 22)
+                            .center()
+                            .rounded(5)
+                            .hover(style.fillHover)
+                            .onClick { state, tx in
+                                tx.instant()
+                                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
+                                let cur = Int(state[keyPath: keyPath].get(knob).rounded())
+                                let next = (cur + 1) % n
+                                state[keyPath: keyPath].change(knob, Float(next))
+                            }
+                            .child(text("›").font(PanelTypography.chip).color(style.fg2))
+                    )
+                let head: El<State> = El<State>(direction: .row)
+                    .key("head")
+                    .wFull()
+                    .h(36)
+                    .pl(6)
+                    .gap(8)
+                    .center()
+                    .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
+                    .child(spacer())
+                    .child(stepper)
+                var box: El<State> = col().key("knob-\(knob.name)").wFull().px(4).child(head)
+                if open {
+                    box = box.pb(6).child(buildGrid(cols: cols))
+                }
+                return box
+            }()
+        }
+
+        return inner
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside {
+                    state[keyPath: keyPath].hot = knob.name
+                } else if state[keyPath: keyPath].hot == knob.name {
+                    state[keyPath: keyPath].hot = nil
+                }
+            }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
-            .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
-            .child(spacer())
-            .child(optionsRow)
+            .onClick { state, tx in
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
+            }
     }
 
     private static func boolRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -723,15 +1441,20 @@ public extension RuneKnobs {
             .px(10)
             .gap(8)
             .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside { state[keyPath: keyPath].hot = knob.name }
+                else if state[keyPath: keyPath].hot == knob.name { state[keyPath: keyPath].hot = nil }
+            }
             .onClick { state, tx in
                 tx.settle()
                 state[keyPath: keyPath].checkpoint()
                 state[keyPath: keyPath].setBool(knob, !on)
-                state[keyPath: keyPath].group = group.name
-                state[keyPath: keyPath].cursor = index
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
             }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
@@ -756,6 +1479,7 @@ public extension RuneKnobs {
     private static func colorRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -769,8 +1493,14 @@ public extension RuneKnobs {
             .px(10)
             .gap(8)
             .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside { state[keyPath: keyPath].hot = knob.name }
+                else if state[keyPath: keyPath].hot == knob.name { state[keyPath: keyPath].hot = nil }
+            }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
@@ -782,6 +1512,7 @@ public extension RuneKnobs {
     private static func textRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -795,8 +1526,14 @@ public extension RuneKnobs {
             .px(10)
             .gap(8)
             .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside { state[keyPath: keyPath].hot = knob.name }
+                else if state[keyPath: keyPath].hot == knob.name { state[keyPath: keyPath].hot = nil }
+            }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
@@ -814,6 +1551,7 @@ public extension RuneKnobs {
     private static func vec2Row<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -827,8 +1565,14 @@ public extension RuneKnobs {
             .px(10)
             .gap(8)
             .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside { state[keyPath: keyPath].hot = knob.name }
+                else if state[keyPath: keyPath].hot == knob.name { state[keyPath: keyPath].hot = nil }
+            }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .child(text(knob.title).font(PanelTypography.label).color(style.fg2))
@@ -839,6 +1583,7 @@ public extension RuneKnobs {
     private static func springRow<State>(
         knobs: Knobs,
         group: KnobGroup,
+        groupIndex: Int,
         index: Int,
         knob: Knob,
         style: KnobStyle,
@@ -852,8 +1597,14 @@ public extension RuneKnobs {
             .px(10)
             .gap(8)
             .center()
+            .onHover { state, inside, tx in
+                tx.instant()
+                if inside { state[keyPath: keyPath].hot = knob.name }
+                else if state[keyPath: keyPath].hot == knob.name { state[keyPath: keyPath].hot = nil }
+            }
             .onSecondaryClick { state, _, tx in
-                tx.settle()
+                tx.instant()
+                state[keyPath: keyPath].touch(group: group.name, groupIndex: groupIndex, knobIndex: index)
                 state[keyPath: keyPath].resetKnob(knob)
             }
             .child(text(knob.title).font(PanelTypography.label).color(style.fg2))

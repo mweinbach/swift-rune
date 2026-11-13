@@ -236,7 +236,7 @@ public enum KnobTree {
         return out
     }
 
-    /// Handles keyboard navigation inside the side panel tree (`↑/↓`, `←/→`, `/`, `Esc`, `[`, `]`).
+    /// Handles keyboard navigation inside the side panel tree (`↑/↓`, `←/→`, `/`, `Esc`, `Enter`, `Backspace`, `[`, `]`, `1-9`).
     @discardableResult
     public static func handleKey(
         _ knobs: inout Knobs,
@@ -244,12 +244,9 @@ public enum KnobTree {
         seen: Set<Int> = [],
         event: KeyEvent
     ) -> Bool {
+        let currentPlan = plan(knobs: knobs, groups: groups, seen: seen)
         if knobs.filtering {
-            if event.key == .escape || event.key == .enter {
-                knobs.stopFilter()
-                return true
-            }
-            return false
+            return filterKey(&knobs, groups: groups, plan: currentPlan, event: event)
         }
         if event.mods.cmd || event.mods.alt || event.mods.ctrl {
             return false
@@ -257,52 +254,117 @@ public enum KnobTree {
 
         if event.key == .text("/") {
             knobs.startFilter()
+            knobs.kbd = true
             return true
         }
 
         if event.key == .escape {
             if !knobs.query.isEmpty {
                 knobs.setQuery("")
+                knobs.kbd = true
                 return true
             }
             knobs.close()
             return true
         }
 
-        let currentPlan = plan(knobs: knobs, groups: groups, seen: seen)
         let rowList = rows(in: currentPlan)
-        guard !rowList.isEmpty else { return false }
+        if event.key == .backspace && !knobs.query.isEmpty {
+            var q = knobs.query
+            q.removeLast()
+            knobs.setQuery(q)
+            refilter(&knobs, groups: groups, before: currentPlan)
+            knobs.kbd = true
+            return true
+        }
 
-        let currentIdx = knobs.treeAt.flatMap { rowList.firstIndex(of: $0) } ?? 0
+        if case .text(let t) = event.key, (t == "[" || t == "]"), !currentPlan.tabs.isEmpty {
+            let i = currentPlan.tab.flatMap { cur in currentPlan.tabs.firstIndex(where: { $0.0 == cur }) } ?? 0
+            let n = currentPlan.tabs.count
+            let delta = (t == "[") ? -1 : 1
+            let next = ((i + delta) % n + n) % n
+            knobs.tab = currentPlan.tabs[next].0
+            knobs.treeAt = nil
+            knobs.kbd = true
+            return true
+        }
+
+        let here = knobs.treeAt.flatMap { rowList.firstIndex(of: $0) }
 
         switch event.key {
         case .arrowUp, .arrowDown:
-            let delta = event.key == .arrowDown ? 1 : -1
-            let nextIdx = ((currentIdx + delta) % rowList.count + rowList.count) % rowList.count
-            knobs.treeAt = rowList[nextIdx]
+            guard !rowList.isEmpty else { return false }
+            let down = event.key == .arrowDown
+            let nextIdx: Int = switch here {
+            case .some(let i) where down: min(i + 1, rowList.count - 1)
+            case .some(let i): max(i - 1, 0)
+            case .none where down: 0
+            case .none: rowList.count - 1
+            }
+            knobs.setAt(rowList[nextIdx], groups: groups)
             knobs.kbd = true
             return true
 
         case .arrowLeft, .arrowRight:
             let right = event.key == .arrowRight
-            let node = rowList[currentIdx]
+            guard let here else {
+                guard !rowList.isEmpty else { return false }
+                knobs.setAt(rowList[0], groups: groups)
+                knobs.kbd = true
+                return true
+            }
+            let node = rowList[here]
             switch node {
             case .page(let p):
-                knobs.setFolded(p, !right)
+                let isOpen = currentPlan.sections.contains { $0.head == .page(p) && $0.open }
+                if (right && !isOpen) || (!right && isOpen) {
+                    knobs.setFolded(p, !right)
+                } else if right && isOpen, here + 1 < rowList.count {
+                    knobs.setAt(rowList[here + 1], groups: groups)
+                }
             case .group(let gi):
-                knobs.setFolded(groups[gi].name, !right)
+                let isOpen = currentPlan.sections.flatMap(\.subs).contains { $0.groupIndex == gi && $0.open }
+                if (right && !isOpen) || (!right && isOpen) {
+                    knobs.setFolded(groups[gi].name, !right)
+                } else if right && isOpen, here + 1 < rowList.count {
+                    knobs.setAt(rowList[here + 1], groups: groups)
+                } else if !right && !isOpen {
+                    let under = groups[gi].under
+                    if !under.isEmpty && rowList.contains(.page(under)) {
+                        knobs.setAt(.page(under), groups: groups)
+                    }
+                }
             case .knob(let gi, let ki):
                 let k = groups[gi].knobs[ki]
                 knobs.step(k, up: right, big: event.mods.shift)
+                knobs.group = groups[gi].name
+                knobs.cursor = ki
             }
             knobs.kbd = true
             return true
 
+        case .enter:
+            guard let here else { return false }
+            switch rowList[here] {
+            case .group(let gi):
+                let name = groups[gi].name
+                let folded = !currentPlan.sections.flatMap(\.subs).contains { $0.groupIndex == gi && $0.open }
+                knobs.setFolded(name, !folded)
+                knobs.kbd = true
+                return true
+            case .page(let p):
+                let folded = !currentPlan.sections.contains { $0.head == .page(p) && $0.open }
+                knobs.setFolded(p, !folded)
+                knobs.kbd = true
+                return true
+            case .knob:
+                return false
+            }
+
         case .text(let t) where t.count == 1 && ("1"..."9").contains(t):
             if let num = Int(t) {
                 let optIdx = num - 1
-                let node = rowList[currentIdx]
-                if case .knob(let gi, let ki) = node {
+                if let here, case .knob(let gi, let ki) = rowList[here] {
                     let k = groups[gi].knobs[ki]
                     if optIdx < k.labels.count {
                         knobs.checkpoint()
@@ -317,5 +379,76 @@ public enum KnobTree {
         default:
             return false
         }
+    }
+
+    /// Keys kept by the panel while the filter field is actively editing (`tree.rs::filter_key`).
+    @discardableResult
+    public static func filterKey(
+        _ knobs: inout Knobs,
+        groups: [KnobGroup],
+        plan currentPlan: KnobTreePlan,
+        event: KeyEvent
+    ) -> Bool {
+        if event.mods.cmd || event.mods.alt || event.mods.ctrl {
+            return false
+        }
+        let rowList = rows(in: currentPlan)
+        switch event.key {
+        case .escape:
+            knobs.stopFilter()
+            if rowList.isEmpty {
+                knobs.setQuery("")
+            }
+            knobs.kbd = true
+            return true
+        case .enter:
+            knobs.stopFilter()
+            knobs.kbd = true
+            return true
+        case .arrowUp, .arrowDown:
+            guard !rowList.isEmpty else { return false }
+            let down = event.key == .arrowDown
+            let here = knobs.treeAt.flatMap { rowList.firstIndex(of: $0) }
+            let nextIdx: Int = switch here {
+            case .some(let i) where down: min(i + 1, rowList.count - 1)
+            case .some(let i): max(i - 1, 0)
+            case .none where down: 0
+            case .none: rowList.count - 1
+            }
+            knobs.setAt(rowList[nextIdx], groups: groups)
+            knobs.kbd = true
+            return true
+        case .tab:
+            let heads = rowList.indices.filter {
+                if case .knob = rowList[$0] { return false }
+                return true
+            }
+            guard !heads.isEmpty else { return false }
+            let at = knobs.treeAt.flatMap { rowList.firstIndex(of: $0) } ?? 0
+            let next = event.mods.shift
+                ? (heads.last(where: { $0 < at }) ?? heads.last)
+                : (heads.first(where: { $0 > at }) ?? heads.first)
+            if let next {
+                knobs.setAt(rowList[next], groups: groups)
+            }
+            knobs.kbd = true
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Moves the keyboard cursor to the first matching knob after `query` changes (`tree.rs::refilter`).
+    public static func refilter(
+        _ knobs: inout Knobs,
+        groups: [KnobGroup],
+        before: KnobTreePlan
+    ) {
+        let now = plan(knobs: knobs, groups: groups, seen: before.seen)
+        let first = rows(in: now).first {
+            if case .knob = $0 { return true }
+            return false
+        }
+        knobs.setAt(first, groups: groups)
     }
 }

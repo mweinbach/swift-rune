@@ -132,15 +132,19 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
     }
 
     public func toOKLab() -> [Float] {
-        let mc = motionColor
-        let lab = mc.toOKLab()
+        let lab = MotionColor.linearToOKLab(r: r, g: g, b: b)
         return [lab.L, lab.a, lab.b, a]
     }
 
     public static func fromOKLab(_ lab: [Float]) -> Color {
         guard lab.count >= 4 else { return .transparent }
-        let mc = MotionColor.fromOKLab(L: lab[0], a: lab[1], b: lab[2], alpha: lab[3])
-        return Color(r: mc.r, g: mc.g, b: mc.b, a: mc.a)
+        let lin = MotionColor.oklabToLinear(L: lab[0], a: lab[1], b: lab[2])
+        return Color(
+            r: lin.r.clamped(to: 0...1),
+            g: lin.g.clamped(to: 0...1),
+            b: lin.b.clamped(to: 0...1),
+            a: lab[3].clamped(to: 0...1)
+        )
     }
 
     /// Relative WCAG luminance `Y` in linear light.
@@ -249,12 +253,22 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
 
     @inlinable
     public var motionColor: MotionColor {
-        MotionColor(r: r, g: g, b: b, a: a)
+        MotionColor(
+            r: RefShader.linearToSRGB(r),
+            g: RefShader.linearToSRGB(g),
+            b: RefShader.linearToSRGB(b),
+            a: a
+        )
     }
 
     @inlinable
     public init(_ mc: MotionColor) {
-        self.init(r: mc.r, g: mc.g, b: mc.b, a: mc.a)
+        self.init(
+            r: RefShader.srgbToLinear(mc.r),
+            g: RefShader.srgbToLinear(mc.g),
+            b: RefShader.srgbToLinear(mc.b),
+            a: mc.a
+        )
     }
 
     @inlinable
@@ -270,8 +284,26 @@ public struct Color: Animatable, Hashable, Codable, Sendable {
         return SIMD4<Float>(r, g, b, a.clamped(to: 0...1))
     }
 
-    public func toLanes() -> MotionLanes { motionColor.toLanes() }
-    public static func fromLanes(_ lanes: MotionLanes) -> Color { Color(MotionColor.fromLanes(lanes)) }
+    public func toLanes() -> MotionLanes {
+        let alpha = a.clamped(to: 0...1)
+        let lab = MotionColor.linearToOKLab(r: r, g: g, b: b)
+        return MotionLanes(lab.L * alpha, lab.a * alpha, lab.b * alpha, alpha)
+    }
+
+    public static func fromLanes(_ lanes: MotionLanes) -> Color {
+        let alpha = lanes.l3.clamped(to: 0...1)
+        if lanes.l3 <= 1e-6 {
+            return .transparent
+        }
+        let invA = 1.0 / lanes.l3
+        let lin = MotionColor.oklabToLinear(L: lanes.l0 * invA, a: lanes.l1 * invA, b: lanes.l2 * invA)
+        return Color(
+            r: lin.r.clamped(to: 0...1),
+            g: lin.g.clamped(to: 0...1),
+            b: lin.b.clamped(to: 0...1),
+            a: alpha
+        )
+    }
 }
 
 /// Top-level convenience matching `rune::oklch`, `rune::oklcha`, and `rune::color::hex`.
