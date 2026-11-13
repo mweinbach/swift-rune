@@ -316,14 +316,6 @@ public final class Runtime<State> {
     internal var activeDragOut: (path: String, key: String?, onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?)? = nil
     internal var pendingDragOutStart: DragOutStart? = nil
 
-    public private(set) var systemContrast: SystemContrast? = nil
-
-    public func setSystemContrast(_ contrast: SystemContrast?) {
-        guard contrast != systemContrast else { return }
-        systemContrast = contrast
-        needsCommit = true
-    }
-
     public var hasPendingInput: Bool {
         !pendingFileDialogAnswers.isEmpty || pendingDropMovePoint != nil || !popupQueue.isEmpty
     }
@@ -786,7 +778,6 @@ public final class Runtime<State> {
             hoveredKey: hoveredKey,
             pressedKey: pressedKey,
             waker: waker,
-            systemContrast: systemContrast,
             scrollLookup: { [weak self] key in
                 guard let self else { return .zero }
                 if let match = self.flatNodes.first(where: { selectsElementSelector(key, path: $0.path, key: $0.key) }) {

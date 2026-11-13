@@ -25,22 +25,22 @@ struct RunePlatformIncrement5Tests {
             state: State(),
             viewport: Vec2(120, 80),
             view: { _, cx in
-                let _ = cx.systemContrast
+                let _ = cx.systemContrast()
                 return el().w(100).h(40)
             }
         )
-        #expect(rt.systemContrast == nil)
+        #expect(rt.systemContrast() == nil)
 
         let aquatic = SystemContrast.preset(named: "aquatic")!
         rt.setSystemContrast(aquatic)
-        #expect(rt.systemContrast == aquatic)
+        #expect(rt.systemContrast() == aquatic)
 
         var seen: SystemContrast?
         let rtObserve = Runtime<State>(
             state: State(),
             viewport: Vec2(120, 80),
             view: { _, cx in
-                seen = cx.systemContrast
+                seen = cx.systemContrast()
                 return el().w(100).h(40)
             }
         )
