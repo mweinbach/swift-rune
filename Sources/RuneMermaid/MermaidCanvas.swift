@@ -428,7 +428,7 @@ struct MermaidScene: @unchecked Sendable {
             }
             body = body.child(t)
         }
-        let exit = Transition(insertion: .identity, removal: TransitionEffect(zeroOpacity: 0))
+        let exit = still(Transition(insertion: .identity, removal: TransitionEffect(zeroOpacity: 0)))
         for s in hovers {
             let r = s.rect
             var glow = (Rune.el() as El<State>)
@@ -448,6 +448,8 @@ struct MermaidScene: @unchecked Sendable {
                     makeLabel(l, color: lit)
                         .absolute(x: 0, y: 0)
                         .offset(l.at.x - 1.0, l.at.y)
+                        .key("t\(i)")
+                        .transition(.none)
                 )
             }
             if !glowChildren.isEmpty {

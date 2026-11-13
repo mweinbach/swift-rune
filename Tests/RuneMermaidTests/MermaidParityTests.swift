@@ -720,7 +720,7 @@ struct MermaidParityTests {
         for spot in hoverEls {
             #expect(spot.isHoverGroup)
             #expect(spot.isA11yHidden)
-            #expect(spot.transition?.removal.zeroOpacity == 0)
+            #expect(spot.transition == Transition.none)
             let glow = spot.children.first
             #expect(glow != nil)
             if let glow {
@@ -732,9 +732,19 @@ struct MermaidParityTests {
                 #expect(!glow.shapes.isEmpty)
             }
         }
-        // At least one hover glow includes the lit edge label "go" in litColor
+        // Streaming mode attaches removal opacity exit transition to hover spots
+        let elStreamOn: El<Int> = sOn.el(paint: dark, streaming: true)
+        let streamHoverEls = collectEls(elStreamOn).filter { $0.keyId?.starts(with: "hover:") == true }
+        #expect(!streamHoverEls.isEmpty)
+        for spot in streamHoverEls {
+            #expect(spot.transition?.insertion == .identity)
+            #expect(spot.transition?.removal.zeroOpacity == 0)
+        }
+        // At least one hover glow includes the lit edge label "go" in litColor with key "t<idx>" and Transition.none
         let glowLabels = hoverEls.flatMap { $0.children }.flatMap { $0.children }
-        #expect(glowLabels.contains { $0.plainText == "go" && $0.textColor == litColor })
+        #expect(glowLabels.contains {
+            $0.plainText == "go" && $0.textColor == litColor && $0.keyId?.hasPrefix("t") == true && $0.transition == Transition.none
+        })
 
         // Verify Runtime actually lights up hover group shapes when pointer moves onto a spot
         struct S {}
@@ -794,7 +804,7 @@ struct MermaidParityTests {
         #expect(!pieceNodes.isEmpty)
         for p in pieceNodes where !p.shapes.isEmpty {
             #expect(p.isA11yHidden)
-            #expect(p.role == .group)
+            #expect(p.role == .image)
         }
 
         let streamEdgeLabel = streamNodes.first { $0.plainText == "edge label" && $0.keyId == "e:A>B.t0" }
