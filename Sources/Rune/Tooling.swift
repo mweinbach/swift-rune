@@ -914,7 +914,7 @@ public enum HeadlessRunner {
         let metalRenderer: MetalRenderer? = args.forceCPU ? nil : (try? MetalRenderer())
         func renderScene(_ refScene: RefScene) throws -> Frame {
             if let gpu = metalRenderer {
-                return try gpu.renderOffscreen(refScene)
+                return try gpu.renderOffscreen(refScene, surfaces: runtime.surfaces)
             }
             return try RuneRef.render(refScene)
         }

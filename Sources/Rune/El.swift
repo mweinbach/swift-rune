@@ -422,6 +422,8 @@ struct ElColdData<State> {
     var selectionColor: Color? = nil
     var iconPayload: (SVGIcon, Float)? = nil
     var imagePayload: RGBA8Atlas? = nil
+    var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? = nil
+    var surfacePlace: SurfacePlace = .centered
     var gradient: Gradient? = nil
     var borderSides: Sides? = nil
     var dashedBorder: (dash: Float, gap: Float, phase: Float)? = nil
@@ -509,6 +511,8 @@ public struct El<State> {
     public var selectionColor: Color? { get { _cold?.data.selectionColor } set { ensureCold().data.selectionColor = newValue } }
     public var iconPayload: (SVGIcon, Float)? { get { _cold?.data.iconPayload } set { ensureCold().data.iconPayload = newValue } }
     public var imagePayload: RGBA8Atlas? { get { _cold?.data.imagePayload } set { ensureCold().data.imagePayload = newValue } }
+    public var surfacePayload: (surface: NativeSurface, fit: SurfaceFit)? { get { _cold?.data.surfacePayload } set { ensureCold().data.surfacePayload = newValue } }
+    public var surfacePlace: SurfacePlace { get { _cold?.data.surfacePlace ?? .centered } set { ensureCold().data.surfacePlace = newValue } }
     public var gradient: Gradient? { get { _cold?.data.gradient } set { ensureCold().data.gradient = newValue } }
     public var borderSides: Sides? { get { _cold?.data.borderSides } set { ensureCold().data.borderSides = newValue } }
     public var dashedBorder: (dash: Float, gap: Float, phase: Float)? { get { _cold?.data.dashedBorder } set { ensureCold().data.dashedBorder = newValue } }
@@ -2079,6 +2083,42 @@ public func canvas<State>(_ shape: Shape) -> El<State> {
     node.role = .image
     node.shapes = [shape]
     return node
+}
+
+public func nativeSurface<State>(_ surface: NativeSurface, _ fit: SurfaceFit = .fit) -> El<State> {
+    El<State>(direction: .row).nativeSurface(surface, fit)
+}
+
+public func video<State>(_ player: Player, _ fit: SurfaceFit = .fit) -> El<State> {
+    El<State>(direction: .row).video(player, fit)
+}
+
+extension El {
+    /// Paints the newest picture pushed into `surface` inside this element's box.
+    public func nativeSurface(_ surface: NativeSurface, _ fit: SurfaceFit = .fit) -> Self {
+        var copy = self
+        copy.surfacePayload = (surface, fit)
+        return copy
+    }
+
+    /// Plays `player` inside this element's box (`fit` letterboxes, `fill` crops).
+    public func video(_ player: Player, _ fit: SurfaceFit = .fit) -> Self {
+        nativeSurface(player.surface, fit)
+    }
+
+    /// Anchors a `nativeSurface` or `video` frame along `(horizontal, vertical)` inside its box.
+    public func surfaceAnchor(_ horizontal: Align, _ vertical: Align) -> Self {
+        var copy = self
+        copy.surfacePlace.anchor = (horizontal, vertical)
+        return copy
+    }
+
+    /// Draws a `nativeSurface` or `video` at 1 texel per device pixel without fit scaling.
+    public func surfaceUnscaled(_ unscaled: Bool = true) -> Self {
+        var copy = self
+        copy.surfacePlace.unscaled = unscaled
+        return copy
+    }
 }
 
 /// Interactive single-line or multiline text input bound via a Swift `WritableKeyPath<State, TextEdit>`.

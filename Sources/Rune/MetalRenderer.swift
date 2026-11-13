@@ -95,6 +95,9 @@ public final class MetalRenderer {
     private var glyphTexSize: SIMD2<Int> = .zero
     private var imageTexture: MTLTexture?
     private var imageTexSize: SIMD2<Int> = .zero
+    private var surfaceRenderer: SurfaceRenderer?
+
+    public var activeSurfaceRenderer: SurfaceRenderer? { surfaceRenderer }
 
     public enum RendererError: Error, CustomStringConvertible {
         case metalUnavailable
@@ -216,7 +219,7 @@ public final class MetalRenderer {
 
     /// Renders `scene` on the Metal GPU into an offscreen texture and reads back an RGBA8 `Frame`
     /// (for headless `--snap` PNG output and GPU-vs-`RuneRef` equivalence tests!).
-    public func renderOffscreen(_ scene: RefScene) throws -> Frame {
+    public func renderOffscreen(_ scene: RefScene, surfaces: [SurfaceDraw] = []) throws -> Frame {
         try scene.validate()
 
         let w = scene.width
@@ -235,7 +238,7 @@ public final class MetalRenderer {
             throw RendererError.metalUnavailable
         }
 
-        encodeMainPass(scene: scene, into: targetTex, commandBuffer: cmdBuf)
+        encodeMainPass(scene: scene, surfaces: surfaces, into: targetTex, commandBuffer: cmdBuf)
         cmdBuf.commit()
         cmdBuf.waitUntilCompleted()
 
@@ -280,11 +283,17 @@ public final class MetalRenderer {
     }
 
     /// Renders `scene` directly into a `CAMetalDrawable` for 60/120Hz native window presentation.
-    public func render(scene: RefScene, to drawable: CAMetalDrawable) {
+    public func render(scene: RefScene, surfaces: [SurfaceDraw] = [], to drawable: CAMetalDrawable) {
         guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
-        encodeMainPass(scene: scene, into: drawable.texture, commandBuffer: cmdBuf)
+        encodeMainPass(scene: scene, surfaces: surfaces, into: drawable.texture, commandBuffer: cmdBuf)
         cmdBuf.present(drawable)
         cmdBuf.commit()
+    }
+
+    /// Encodes `scene` into an arbitrary caller-owned `MTLTexture` using `commandBuffer` without committing.
+    public func encode(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) throws {
+        try scene.validate()
+        encodeMainPass(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer)
     }
 
     private func uploadAtlases(glyphs: R8Atlas, images: RGBA8Atlas, srgbImages: Bool) {
@@ -405,11 +414,11 @@ public final class MetalRenderer {
         return ping
     }
 
-    internal func renderScene(_ scene: RefScene, into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
-        encodeMainPass(scene: scene, into: target, commandBuffer: commandBuffer)
+    internal func renderScene(_ scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
+        encodeMainPass(scene: scene, surfaces: surfaces, into: target, commandBuffer: commandBuffer)
     }
 
-    private func encodeMainPass(scene: RefScene, into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    private func encodeMainPass(scene: RefScene, surfaces: [SurfaceDraw] = [], into target: MTLTexture, commandBuffer: MTLCommandBuffer) {
         uploadAtlases(glyphs: scene.glyphs, images: scene.images, srgbImages: !scene.srgbBlend)
 
         let w = scene.width
@@ -422,6 +431,21 @@ public final class MetalRenderer {
             Double(scene.clearColor.z) * ca,
             ca
         )
+
+        var activeSurfRenderer: SurfaceRenderer? = nil
+        if !surfaces.isEmpty {
+            if surfaceRenderer == nil {
+                surfaceRenderer = try? SurfaceRenderer(device: device, pixelFormat: target.pixelFormat)
+            }
+            if let sr = surfaceRenderer {
+                sr.srgbBlend = scene.srgbBlend
+                sr.prepare(draws: surfaces, viewport: (UInt32(max(1, w)), UInt32(max(1, h))))
+                if !sr.isEmpty {
+                    activeSurfRenderer = sr
+                }
+            }
+        }
+        var surfaceCursor = 0
 
         struct TargetLevel {
             var texture: MTLTexture
@@ -469,7 +493,27 @@ public final class MetalRenderer {
             TargetLevel(texture: target, clearColor: rootClear, cleared: false, pending: [], layerPrim: nil)
         ]
 
-        for prim in scene.primitives {
+        func flushSurfaces(upTo primIndex: UInt32) {
+            guard let sr = activeSurfRenderer else { return }
+            let total = sr.count
+            guard surfaceCursor < total, sr.beforeInstance(at: surfaceCursor) <= primIndex else { return }
+            flush(&stack[stack.count - 1])
+            let tex = stack[stack.count - 1].texture
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = tex
+            pass.colorAttachments[0].loadAction = .load
+            pass.colorAttachments[0].storeAction = .store
+            if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: pass) {
+                while surfaceCursor < total && sr.beforeInstance(at: surfaceCursor) <= primIndex {
+                    sr.draw(encoder: enc, index: surfaceCursor, pixelFormat: tex.pixelFormat)
+                    surfaceCursor += 1
+                }
+                enc.endEncoding()
+            }
+        }
+
+        for (primIndex, prim) in scene.primitives.enumerated() {
+            flushSurfaces(upTo: UInt32(primIndex))
             switch prim.kind {
             case .layerBegin:
                 flush(&stack[stack.count - 1])
@@ -573,7 +617,9 @@ public final class MetalRenderer {
             }
         }
 
+        flushSurfaces(upTo: UInt32.max)
         flush(&stack[0])
+        activeSurfRenderer?.trackSubmission(commandBuffer: commandBuffer)
     }
 
     // MARK: - Metal Shading Language (MSL) Uber-Shader matching `RefShader` 1:1

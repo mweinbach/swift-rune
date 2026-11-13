@@ -261,6 +261,9 @@ public final class Runtime<State> {
 
     public internal(set) var currentTime: Double = 0.0
     public private(set) var isAnimating: Bool = false
+    public private(set) var surfaces: [SurfaceDraw] = []
+    private var videoSignature: UInt64 = 0
+    private var lastVideoSnapshots: [String: VideoSnapshot] = [:]
     public private(set) var viewCommitCount: Int = 0
     public private(set) var keyWarnings: [String] = []
     public var windowTitle: String? = nil
@@ -423,6 +426,7 @@ public final class Runtime<State> {
         self.cxSettings = RuntimeShellSettings(viewport: viewport, pixelScale: pixelScale, reducedMotion: reducedMotion)
         if !MediaPlaybackGate.isEnabled {
             Recorder.headlessReset()
+            VideoHeadless.reset()
             HeadlessClock.set(0.0)
         }
     }
@@ -609,6 +613,7 @@ public final class Runtime<State> {
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
             Recorder.headlessFrame(clock: now)
+            VideoHeadless.frame(at: now)
         }
         scrollStore.pixelScale = pixelScale
         liveStore.pixelScale = pixelScale
@@ -1794,6 +1799,10 @@ public final class Runtime<State> {
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
+        var builtSurfaces: [SurfaceDraw] = []
+        var videosActive = false
+        var newVideoSig: UInt64 = 0
+        var newVideoSnaps: [String: VideoSnapshot] = [:]
 
         let flyingRootIds: Set<NodeId> = Set(frameOut.nodes.compactMap { p in
             guard let snap = nodeById[p.id],
@@ -2018,6 +2027,15 @@ public final class Runtime<State> {
                 return copy
             }
 
+            if let (surf, _) = el.surfacePayload {
+                if let vsnap = surf.videoSnapshot() {
+                    newVideoSnaps[snap.path] = vsnap
+                }
+                if !shouldEmit {
+                    newVideoSig = VideoSignature.foldUnpulled(newVideoSig, surface: surf)
+                }
+            }
+
             if shouldEmit {
                 let devRect = SIMD4<Float>(
                     rect.x * pxScale,
@@ -2108,8 +2126,61 @@ public final class Runtime<State> {
                     }
                 }
 
-                if hasFill || hasSolidBorder {
-                    let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                let effectiveBoxFill = ((isFocused && focusVisible ? el.focusHighlightColor : nil) ?? fillColor)
+                if let (surf, fit) = el.surfacePayload {
+                    if hasFill && el.gradient == nil {
+                        primitives.append(attachFade(.roundedRect(
+                            rect: devRect,
+                            radii: devRadii,
+                            fill: effectiveBoxFill.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderColor: .zero,
+                            borderWidth: 0,
+                            borderSides: nil,
+                            clip: devClip,
+                            turn: useLayer ? 0 : p.rotate
+                        )))
+                    }
+                    let wakeHandle = self.waker
+                    if let pulled = surf.pullVideo(clock: now, wake: { wakeHandle.wake() }) {
+                        if pulled.active {
+                            videosActive = true
+                        }
+                        newVideoSig = VideoSignature.fold(newVideoSig, generation: pulled.generation, surfaceKey: surf.key)
+                    }
+                    builtSurfaces.append(SurfaceDraw(
+                        surface: surf.placed(el.surfacePlace),
+                        fit: fit,
+                        beforeInstance: UInt32(primitives.count),
+                        rect: devRect,
+                        radii: devRadii,
+                        clip: devClip,
+                        fade: activeFadeEdges.first?.fade ?? .zero,
+                        fadeOrigin: activeFadeEdges.first?.origin ?? .zero,
+                        opacity: localAlpha
+                    ))
+                    if hasSolidBorder {
+                        let b4 = borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let sidePx = el.borderSides.map { s in
+                            SIMD4<Float>(
+                                snapBorderWidthPx(s.top, scale: pxScale),
+                                snapBorderWidthPx(s.right, scale: pxScale),
+                                snapBorderWidthPx(s.bottom, scale: pxScale),
+                                snapBorderWidthPx(s.left, scale: pxScale)
+                            )
+                        }
+                        let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
+                        primitives.append(attachFade(.roundedRect(
+                            rect: devRect,
+                            radii: devRadii,
+                            fill: .zero,
+                            borderColor: b4,
+                            borderWidth: bwPx,
+                            borderSides: sidePx,
+                            clip: devClip,
+                            turn: useLayer ? 0 : p.rotate
+                        )))
+                    }
+                } else if hasFill || hasSolidBorder {
                     let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                     let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
                     let sidePx = el.borderSides.map { s in
@@ -2669,6 +2740,13 @@ public final class Runtime<State> {
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives)
+        surfaces = builtSurfaces
+        videoSignature = newVideoSig
+        lastVideoSnapshots = newVideoSnaps
+        if videosActive {
+            isAnimating = true
+        }
+        _ = now
 
         return RefScene(
             width: devW,
@@ -3564,6 +3642,34 @@ public final class Runtime<State> {
             if e.hover > 0.001 { obj["hover"] = r2(e.hover) }
             if e.press > 0.001 { obj["press"] = r2(e.press) }
             if let caret = e.caret { obj["caret"] = caret.map(r2) }
+            if let v = lastVideoSnapshots[e.path] {
+                let (vState, vErr): (String, String?)
+                switch v.state {
+                case .loading: (vState, vErr) = ("loading", nil)
+                case .ready: (vState, vErr) = ("ready", nil)
+                case .playing: (vState, vErr) = ("playing", nil)
+                case .ended: (vState, vErr) = ("ended", nil)
+                case .failed(let msg): (vState, vErr) = ("failed", msg)
+                }
+                var vObj: [String: Any] = [
+                    "kind": v.kind.rawValue,
+                    "state": vState,
+                    "time": (v.time * 1000.0).rounded() / 1000.0,
+                    "rate": v.rate,
+                    "looping": v.looping,
+                    "muted": v.muted,
+                ]
+                if let dur = v.duration {
+                    vObj["duration"] = (dur * 1000.0).rounded() / 1000.0
+                }
+                if let sz = v.size {
+                    vObj["size"] = [sz.0, sz.1]
+                }
+                if let vErr {
+                    vObj["error"] = vErr
+                }
+                obj["video"] = vObj
+            }
             return obj
         }
 

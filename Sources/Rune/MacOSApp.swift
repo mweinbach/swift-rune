@@ -42,6 +42,7 @@ public enum MacOSApp {
     ) throws {
         ReadySignal.runStarts()
         RelaunchController.waitForPrevious()
+        MediaPlaybackGate.enable()
         HeadlessRunner.registerFonts(appBuilder.fontData)
 
         var initialState = appBuilder.makeState()
@@ -565,9 +566,9 @@ private final class RuneMetalHostView<State>: NSView {
                     targetTexture: drawable.texture,
                     pixelFormat: desiredFmt,
                     renderer: renderer,
-                    drawUI: { [renderer] in
+                    drawUI: { [renderer, surfaces = runtime.surfaces] in
                         drawCount += 1
-                        renderer.renderScene(refScene, into: drawable.texture, commandBuffer: cmdBuf)
+                        renderer.renderScene(refScene, surfaces: surfaces, into: drawable.texture, commandBuffer: cmdBuf)
                     }
                 )
                 comp.render(frame: compFrame)
@@ -578,7 +579,7 @@ private final class RuneMetalHostView<State>: NSView {
                 cmdBuf.commit()
             } else {
                 drawCount = 1
-                renderer.render(scene: refScene, to: drawable)
+                renderer.render(scene: refScene, surfaces: runtime.surfaces, to: drawable)
             }
             _ = surfaceMeter?.presented()
             if !didFireReady {
