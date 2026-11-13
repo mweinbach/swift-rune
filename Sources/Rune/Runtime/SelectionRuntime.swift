@@ -976,8 +976,7 @@ internal extension Runtime {
         let isA = ev.key == .command("a") || ev.key == .text("a") || ev.key == .text("A")
         if isC {
             guard let copied = copySelectionText() else { return false }
-            clipboard = ClipboardContent(copied)
-            richClipboard = RichClipboardPayload(content: clipboard)
+            recordCopy(ClipboardContent(copied))
             return true
         }
         if isA {

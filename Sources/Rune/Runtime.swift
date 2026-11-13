@@ -631,6 +631,8 @@ public final class Runtime<State> {
     public var nativeHelp: Bool = false
     public var clipboard = ClipboardContent("")
     public var richClipboard = RichClipboardPayload()
+    /// Pending clipboard copy text requested via `Tx.copyText(...)`, `Cmd+C`/`Cmd+X`, or selectable `Cmd+C`, consumed once by `takeCopyRequest()` (`Runtime::copy_request`).
+    public var copyRequest: String? = nil
     public let fileDropState = FileDropState()
     public var onFileDrop: ((inout State, FileDropPhase, inout Tx) -> Void)? = nil
     public var onAppFileDrop: ((inout State, [URL], inout Tx) -> Void)? = nil
@@ -8590,8 +8592,7 @@ public final class Runtime<State> {
                     }
                     // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
                 case .copy(let copied):
-                    clipboard = ClipboardContent(copied, html: preCopyHTML)
-                    richClipboard = RichClipboardPayload(content: clipboard)
+                    recordCopy(ClipboardContent(copied, html: preCopyHTML))
                     if edit.text != prevEdit.text {
                         deliverInputEdit(el: fNode.el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                     } else {
@@ -9189,14 +9190,10 @@ public final class Runtime<State> {
         why: UInt16 = CommitWhy.input
     ) {
         if let cb = tx.clipboardWrite {
-            clipboard = cb
-            richClipboard = RichClipboardPayload(content: cb)
-            writeCopyToBoundClipboard(text: cb.text, rich: nil)
+            recordCopy(cb)
         }
         if let rich = tx.runtimeActions["richClipboardWrite"] as? RichClipboardPayload {
-            richClipboard = rich
-            clipboard = rich.content
-            writeCopyToBoundClipboard(text: rich.content.text, rich: rich)
+            recordCopy(rich.content, rich: rich)
         }
         if let urls = tx.runtimeActions["openUrlRequests"] as? [OpenUrlRequest] {
             for req in urls {
@@ -9744,8 +9741,7 @@ public final class Runtime<State> {
             return false
         case .copy(let copied):
             editLens.set(&state, edit)
-            clipboard = ClipboardContent(copied, html: preCopyHTML)
-            richClipboard = RichClipboardPayload(content: clipboard)
+            recordCopy(ClipboardContent(copied, html: preCopyHTML))
             if let onChange = el.handlers.onTextChange {
                 var tx = makeTx(at: now)
                 onChange(&state, edit.text, &tx)
