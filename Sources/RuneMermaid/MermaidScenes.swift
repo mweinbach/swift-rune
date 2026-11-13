@@ -102,6 +102,7 @@ enum MermaidScenes {
             h.combine(false)
         }
         h.combine(growing)
+        h.combine(fontEpoch())
         return h.finalize()
     }
 

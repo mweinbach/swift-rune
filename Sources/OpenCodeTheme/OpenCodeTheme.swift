@@ -80,37 +80,45 @@ public enum OpenCodeIcons {
         paths: [
             "M14 14L10.3454 10.3454M6.88889 11.7778C9.58889 11.7778 11.7778 9.58889 11.7778 6.88889C11.7778 4.18889 9.58889 2 6.88889 2C4.18889 2 2 4.18889 2 6.88889C2 9.58889 4.18889 11.7778 6.88889 11.7778Z"
         ],
-        strokeWidth: 1.5
+        strokeWidth: 1.5,
+        body: #"<path d="M14 14L10.3454 10.3454M6.88889 11.7778C9.58889 11.7778 11.7778 9.58889 11.7778 6.88889C11.7778 4.18889 9.58889 2 6.88889 2C4.18889 2 2 4.18889 2 6.88889C2 9.58889 4.18889 11.7778 6.88889 11.7778Z" stroke="currentColor"/>"#
     )
 
     public static let close = SVGIcon(
         viewBox: 20,
         paths: ["M14.4446 5.55566L5.55566 14.4446M5.55566 5.55566L14.4446 14.4446"],
-        strokeWidth: 1.5
+        strokeWidth: 1.5,
+        body: #"<path d="M14.4446 5.55566L5.55566 14.4446M5.55566 5.55566L14.4446 14.4446" stroke="currentColor" stroke-linejoin="round"/>"#
     )
 
     public static let xmarkSmall = SVGIcon(
         viewBox: 16,
         paths: ["M4.25 11.75L11.75 4.25M11.75 11.75L4.25 4.25"],
-        strokeWidth: 1.5
+        strokeWidth: 1.5,
+        body: #"<path d="M4.25 11.75L11.75 4.25M11.75 11.75L4.25 4.25" stroke="currentColor"/>"#
     )
 
     public static let fillTriangleDown = SVGIcon(
         viewBox: 16,
-        paths: ["M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z"]
+        paths: ["M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z"],
+        strokeWidth: nil,
+        body: #"<path d="M5.37624 6.75194C5.18184 6.41861 5.42224 6 5.80814 6H10.1921C10.578 6 10.8184 6.41861 10.624 6.75194L8.43203 10.5096C8.23909 10.8404 7.76119 10.8404 7.56825 10.5096L5.37624 6.75194Z" fill="currentColor"/>"#
     )
 
     public static let circleX = SVGIcon(
         viewBox: 20,
         paths: [
             "M1.6665 10.0003C1.6665 5.39795 5.39746 1.66699 9.99984 1.66699C14.6022 1.66699 18.3332 5.39795 18.3332 10.0003C18.3332 14.6027 14.6022 18.3337 9.99984 18.3337C5.39746 18.3337 1.6665 14.6027 1.6665 10.0003ZM7.49984 6.91107L6.91058 7.50033L9.41058 10.0003L6.91058 12.5003L7.49984 13.0896L9.99984 10.5896L12.4998 13.0896L13.0891 12.5003L10.5891 10.0003L13.0891 7.50033L12.4998 6.91107L9.99984 9.41107L7.49984 6.91107Z"
-        ]
+        ],
+        strokeWidth: nil,
+        body: #"<path fill-rule="evenodd" clip-rule="evenodd" d="M1.6665 10.0003C1.6665 5.39795 5.39746 1.66699 9.99984 1.66699C14.6022 1.66699 18.3332 5.39795 18.3332 10.0003C18.3332 14.6027 14.6022 18.3337 9.99984 18.3337C5.39746 18.3337 1.6665 14.6027 1.6665 10.0003ZM7.49984 6.91107L6.91058 7.50033L9.41058 10.0003L6.91058 12.5003L7.49984 13.0896L9.99984 10.5896L12.4998 13.0896L13.0891 12.5003L10.5891 10.0003L13.0891 7.50033L12.4998 6.91107L9.99984 9.41107L7.49984 6.91107Z" fill="currentColor"/>"#
     )
 
     public static let copy = SVGIcon(
         viewBox: 20,
         paths: ["M6.2513 6.24935V2.91602H17.0846V13.7493H13.7513M13.7513 6.24935V17.0827H2.91797V6.24935H13.7513Z"],
-        strokeWidth: 1.5
+        strokeWidth: 1.5,
+        body: #"<path d="M6.2513 6.24935V2.91602H17.0846V13.7493H13.7513M13.7513 6.24935V17.0827H2.91797V6.24935H13.7513Z" stroke="currentColor" stroke-linecap="round"/>"#
     )
 }
 
@@ -164,9 +172,11 @@ public enum OpenCodeTheme {
     private static let linearLightKit = buildKit(dark: false, srgbBlend: false)
 
     /// Returns the resolved `JsonTheme` for `dark` or light appearance.
-    /// When `srgbBlend` is `false`, translucent tokens are adapted for linear-light blending over `v2-background-bg-base`.
-    public static func theme(dark: Bool, srgbBlend: Bool = true) -> JsonTheme {
-        if srgbBlend {
+    /// When `srgbBlend` is `false` (or `nil` while `Theme.blendsSrgb()` is `false`),
+    /// translucent tokens are adapted for linear-light blending over `v2-background-bg-base`.
+    public static func theme(dark: Bool, srgbBlend: Bool? = nil) -> JsonTheme {
+        let resolvedSrgb = srgbBlend ?? Theme.blendsSrgb()
+        if resolvedSrgb {
             return dark ? rawDarkTheme : rawLightTheme
         } else {
             return dark ? linearDarkTheme : linearLightTheme
@@ -178,17 +188,19 @@ public enum OpenCodeTheme {
         dark ? rawDarkTheme : rawLightTheme
     }
 
-    /// Returns a `RuneKit.Kit` configured with OpenCode's palette, elevation, typography, radius, and motion.
-    public static func kit(dark: Bool, srgbBlend: Bool = true) -> Kit {
-        if srgbBlend {
+    /// Returns a `RuneKit.Kit` configured with OpenCode's palette, elevation, typography, radius, and motion,
+    /// adapted for `srgbBlend ?? Theme.blendsSrgb()`.
+    public static func kit(dark: Bool, srgbBlend: Bool? = nil) -> Kit {
+        let resolvedSrgb = srgbBlend ?? Theme.blendsSrgb()
+        if resolvedSrgb {
             return dark ? srgbDarkKit : srgbLightKit
         } else {
             return dark ? linearDarkKit : linearLightKit
         }
     }
 
-    /// Looks up a single token color by name (without leading `--`).
-    public static func color(_ name: String, dark: Bool, srgbBlend: Bool = true) -> Color? {
+    /// Looks up a single token color by name (without leading `--`), adapted for `srgbBlend ?? Theme.blendsSrgb()`.
+    public static func color(_ name: String, dark: Bool, srgbBlend: Bool? = nil) -> Color? {
         theme(dark: dark, srgbBlend: srgbBlend)[name]
     }
 
@@ -255,13 +267,14 @@ public enum OpenCodeTheme {
         )
     }
 
-    /// Parses a named CSS shadow token from `theme.json`.
-    public static func shadows(_ name: String, dark: Bool, srgbBlend: Bool = true) -> [Shadow] {
+    /// Parses a named CSS shadow token from `theme.json`, adapted for `srgbBlend ?? Theme.blendsSrgb()`.
+    public static func shadows(_ name: String, dark: Bool, srgbBlend: Bool? = nil) -> [Shadow] {
+        let resolvedSrgb = srgbBlend ?? Theme.blendsSrgb()
         let map = dark ? OpenCodeThemeData.darkShadows : OpenCodeThemeData.lightShadows
         guard let raw = map[name] else { return [] }
         let bg = rawTheme(dark: dark)["v2-background-bg-base"] ?? (dark ? .black : .white)
         return parseBoxShadows(raw) { color in
-            Tok.forBlend(color, over: bg, srgbBlend: srgbBlend)
+            Tok.forBlend(color, over: bg, srgbBlend: resolvedSrgb)
         }
     }
 
