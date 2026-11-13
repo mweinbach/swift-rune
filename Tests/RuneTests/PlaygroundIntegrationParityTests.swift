@@ -577,7 +577,9 @@ struct PlaygroundSideKeysIntegrationTests {
             text("dial \(d.value)").key("dial")
         }
         let linkedView: (Dial, inout Cx<Dial>) -> El<Dial> = { _, _ in
-            el().key("docs").w(200).h(20).focusable().onClick { d, _ in d.opened = true }
+            rich("open the docs", []).key("stage-link").w(200)
+                .link(TextLink(0..<13, id: "docs"))
+                .onLink { d, _ in d.opened = true }
         }
         let dialKey: (inout Dial, KeyEvent, inout Tx) -> Bool = { d, ev, _ in
             switch ev.key {
@@ -666,10 +668,7 @@ struct PlaygroundSideKeysIntegrationTests {
         #expect(d2.value == 1 && d2.failed, "a key it leaves runs the trigger it's on")
     }
 
-    @Test(
-        "a stage link that keeps the slot's focus leaves it the keys and the mark",
-        .disabled("Requires @text El.link(TextLink) / Runtime link click preserving focus (crates/rune/src/el/text.rs:397)")
-    )
+    @Test("a stage link that keeps the slot's focus leaves it the keys and the mark")
     func stageLinkKeepsSlotFocus() throws {
         let rt = makeRuntime()
         var t = 0.0
@@ -696,10 +695,7 @@ struct PlaygroundSideKeysIntegrationTests {
         #expect(pgSays(rt, "linked-side") == "active 0", "and so did its mark")
     }
 
-    @Test(
-        "every input sequence routes as dev routes it",
-        .disabled("Requires @text El.link(TextLink) / Runtime link click preserving focus (crates/rune/src/el/text.rs:397)")
-    )
+    @Test("every input sequence routes as dev routes it")
     func everyInputSequenceRoutesAsDev() throws {
         let rt = makeRuntime()
         try rt.openPlayground(at: "Dials/Linked")
