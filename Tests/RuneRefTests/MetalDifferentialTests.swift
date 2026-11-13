@@ -501,6 +501,276 @@ struct MetalDifferentialTests {
         #expect(textRun.stdout.contains("\"outlier_pixels\" : 0"))
     }
 
+    @Test("differential.rs:74 cpu_gpu_proptest across 128 OracleGenerator.scene cases")
+    func cpuGpuProptestRenderFrameDiff() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var rng: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func nextByte() -> UInt8 {
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+            return UInt8((rng >> 24) & 0xFF)
+        }
+
+        for c in 0..<128 {
+            let count = 1 + (c % 8)
+            var records: [[UInt8]] = []
+            records.reserveCapacity(count)
+            for _ in 0..<count {
+                records.append((0..<32).map { _ in nextByte() })
+            }
+            let scene = OracleGenerator.scene(records: records)
+            try scene.validate()
+            var cpu = OracleFrame(width: scene.width, height: scene.height, provenance: true)
+            cpu.render(scene)
+            let rf = makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())
+            let gpuFrame = try gpu.renderOffscreen(rf)
+            let report = Oracle.compare(scene: scene, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+            #expect(report.outlierPixels == 0, "cpu_gpu_proptest case \(c): \(report)")
+        }
+    }
+
+    @Test("differential.rs:151 gpu_metamorphic translation, transparent, unclipped, and disjoint permutation")
+    func gpuMetamorphicRenderFrameDiff() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        func close(_ a: ArraySlice<UInt8>, _ b: ArraySlice<UInt8>) -> Bool {
+            a.count == b.count && zip(a, b).allSatisfy { abs(Int($0.0) - Int($0.1)) <= 2 }
+        }
+
+        for seed: UInt64 in 0..<32 {
+            let scene = OracleGenerator.seeded(seed: seed, count: 8)
+            let original = try gpu.renderOffscreen(makeRenderFrame(from: scene, glyphGeneration: await sharedGen.allocate())).rgba
+
+            var shifted = scene
+            shifted.width += 4
+            shifted.height += 6
+            OracleGenerator.translate(&shifted, x: 4.0, y: 6.0)
+            let actualShifted = try gpu.renderOffscreen(makeRenderFrame(from: shifted, glyphGeneration: await sharedGen.allocate())).rgba
+            for y in 0..<64 {
+                let rowA = original[(y * 256)..<((y + 1) * 256)]
+                let rowB = actualShifted[((y + 6) * 68 + 4) * 4 ..< ((y + 6) * 68 + 68) * 4]
+                #expect(close(rowA, rowB), "translated mismatch seed \(seed) row \(y)")
+            }
+
+            var transparent = scene
+            for var p in scene.primitives {
+                p.fill = [0, 0, 0, 0]
+                p.border = [0, 0, 0, 0]
+                if p.params[1] == 4.0 {
+                    p.uv = [0, 0, 0, 0]
+                }
+                transparent.primitives.append(p)
+            }
+            let transparentRgba = try gpu.renderOffscreen(makeRenderFrame(from: transparent, glyphGeneration: await sharedGen.allocate())).rgba
+            #expect(original == transparentRgba, "transparent injection mismatch seed \(seed)")
+
+            var full = scene
+            for i in full.primitives.indices {
+                full.primitives[i].clip = oracleNoClip
+                full.primitives[i].fade = [0, 0, 0, 0]
+            }
+            let unclipped = try gpu.renderOffscreen(makeRenderFrame(from: full, glyphGeneration: await sharedGen.allocate())).rgba
+            for i in full.primitives.indices {
+                full.primitives[i].clip = [0, 0, 64, 64]
+            }
+            let viewportClipped = try gpu.renderOffscreen(makeRenderFrame(from: full, glyphGeneration: await sharedGen.allocate())).rgba
+            #expect(close(unclipped[...], viewportClipped[...]), "viewport clip mismatch seed \(seed)")
+
+            var disjoint = scene
+            for i in disjoint.primitives.indices {
+                disjoint.primitives[i].clip = [0, 0, 31, 64]
+                disjoint.primitives[i].fade = [0, 0, 0, 0]
+            }
+            let n = disjoint.primitives.count
+            for var p in scene.primitives {
+                p.rect[0] += 32.0
+                p.clip = [32, 0, 64, 64]
+                p.fade = [0, 0, 0, 0]
+                disjoint.primitives.append(p)
+            }
+            let first = try gpu.renderOffscreen(makeRenderFrame(from: disjoint, glyphGeneration: await sharedGen.allocate())).rgba
+            disjoint.primitives = Array(disjoint.primitives.dropFirst(n) + disjoint.primitives.prefix(n))
+            let rotated = try gpu.renderOffscreen(makeRenderFrame(from: disjoint, glyphGeneration: await sharedGen.allocate())).rgba
+            #expect(first == rotated, "disjoint permutation mismatch seed \(seed)")
+        }
+    }
+
+    @Test("differential.rs:281 multi-stop radial gradient bands match OracleFrame")
+    func cpuGpuMultiStopRadialRenderFrameDiff() async throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        var multi = OracleGenerator.scene(records: [])
+        let base = OraclePrimitive(
+            node: 1,
+            source: "radial/multi-0",
+            rect: [8, 8, 48, 48],
+            radii: [12, 12, 12, 12],
+            fill: [0.8, 0.2, 0.1, 0.9],
+            border: [0.2, 0.7, 0.4, 0.9],
+            params: [0.0, 11.0, 0.0, 2.5],
+            uv: [24, 24, 24, 20],
+            clip: oracleNoClip,
+            fade: [0, 0, 0, 0]
+        )
+        var outer = base
+        outer.node = 2
+        outer.source = "radial/multi-1"
+        outer.fill = base.border
+        outer.border = [0.05, 0.1, 0.3, 0.4]
+        outer.params = [2.5, 11.0, 0.0, 1.0]
+        multi.primitives = [base, outer]
+        try multi.validate()
+
+        var cpu = OracleFrame(width: multi.width, height: multi.height, provenance: true)
+        cpu.render(multi)
+        let rf = makeRenderFrame(from: multi, glyphGeneration: await sharedGen.allocate())
+        let gpuFrame = try gpu.renderOffscreen(rf)
+        let report = Oracle.compare(scene: multi, cpu: cpu, gpu: gpuFrame.rgba, tolerance: 2)
+        #expect(report.outlierPixels == 0, "multi-stop radial: \(report)")
+    }
+
+    private static func makeOracleScene(from rf: RenderFrame, prefix: String) -> OracleScene {
+        let primitives: [OraclePrimitive] = rf.instances.enumerated().map { idx, inst in
+            let kind = inst.params.y
+            let clip = [inst.clip.x, inst.clip.y, inst.clip.z, inst.clip.w]
+            let isLayer = kind == 8.0
+            let radii: [Float] = isLayer ? [0, 0, 0, 0] : [inst.radii.x, inst.radii.y, inst.radii.z, inst.radii.w]
+            let border: [Float] = isLayer
+                ? OraclePrimitive.unpackClipRadii(inst.fade.w)
+                : [inst.border.x, inst.border.y, inst.border.z, inst.border.w]
+            let uv: [Float] = isLayer ? [0, 0, 0, 0] : [inst.uv.x, inst.uv.y, inst.uv.z, inst.uv.w]
+            let fadeInfo: ([Float], [Float]?) = {
+                if isLayer { return ([0, 0, 0, 0], nil) }
+                let (w, off) = OraclePrimitive.unpackFade([inst.fade.x, inst.fade.y, inst.fade.z, inst.fade.w])
+                if w == [0, 0, 0, 0] { return (w, nil) }
+                let origin: [Float] = [
+                    clip[0] - off[0] * abs(w[0]),
+                    clip[1] - off[1] * abs(w[1]),
+                    clip[2] + off[2] * abs(w[2]),
+                    clip[3] + off[3] * abs(w[3]),
+                ]
+                return (w, origin)
+            }()
+            let turn: [Float]? = (isLayer && (inst.border.y != 0 || inst.border.z != 0 || inst.border.w != 0))
+                ? [inst.border.y, inst.border.z, inst.border.w]
+                : nil
+            return OraclePrimitive(
+                node: UInt32(idx + 1),
+                source: "\(prefix)/\(idx)",
+                rect: [inst.rect.x, inst.rect.y, inst.rect.z, inst.rect.w],
+                radii: radii,
+                fill: [inst.fill.x, inst.fill.y, inst.fill.z, inst.fill.w],
+                border: border,
+                params: [inst.params.x, inst.params.y, inst.params.z, inst.params.w],
+                uv: uv,
+                clip: clip,
+                fade: fadeInfo.0,
+                fadeOrigin: fadeInfo.1,
+                turn: turn
+            )
+        }
+        return OracleScene(
+            width: UInt32(rf.width),
+            height: UInt32(rf.height),
+            clear: [rf.clearColor.x, rf.clearColor.y, rf.clearColor.z, rf.clearColor.w],
+            primitives: primitives,
+            atlas: OracleAtlas(width: UInt32(rf.glyphs.width), height: UInt32(rf.glyphs.height), data: rf.glyphs.texels)
+        )
+    }
+
+    @Test("differential.rs:316 cpu_gpu_cached_subtrees and scrolled multi-line text culling parity")
+    func cpuGpuCachedSubtreesAndScrolledText() throws {
+        let gpu: MetalRenderer
+        do { gpu = try MetalRenderer() } catch { return }
+
+        func makeRuntime(cached: Bool) -> Runtime<Bool> {
+            let rt = Runtime(state: cached, viewport: Vec2(64, 64), pixelScale: 1.0, systemDark: true) { isCached, _ in
+                var card: El<Bool> = col()
+                    .w(48)
+                    .h(44)
+                    .p(4)
+                    .gap(3)
+                    .bg(.srgb(0.18, 0.24, 0.36, 1.0))
+                    .rounded(8)
+                    .border(1, .srgb(0.45, 0.62, 0.88, 1.0))
+                    .child(text("Rune").color(.srgb(1, 1, 1, 1)))
+                    .child(col().w(36).h(12).bg(.srgb(0.85, 0.32, 0.28, 0.85)).rounded(4))
+                if isCached {
+                    card = card.cache(true)
+                }
+                return col()
+                    .w(64)
+                    .h(64)
+                    .p(8)
+                    .bg(.srgb(0.06, 0.08, 0.12, 1.0))
+                    .child(card)
+            }
+            rt.srgbBlend = false
+            return rt
+        }
+
+        let uncachedRt = makeRuntime(cached: false)
+        let cachedRt = makeRuntime(cached: true)
+        let uncachedRF = uncachedRt.renderFrame(at: 0)
+        let cachedRF = cachedRt.renderFrame(at: 0)
+
+        #expect(cachedRF.instances.contains { $0.params.y == 8.0 && $0.params.w == 1.0 })
+
+        let uncachedOracle = Self.makeOracleScene(from: uncachedRF, prefix: "uncached")
+        let cachedOracle = Self.makeOracleScene(from: cachedRF, prefix: "cache")
+        try uncachedOracle.validate()
+        try cachedOracle.validate()
+
+        var cpuUncached = OracleFrame(width: uncachedOracle.width, height: uncachedOracle.height, provenance: true)
+        cpuUncached.render(uncachedOracle)
+        var cpuCached = OracleFrame(width: cachedOracle.width, height: cachedOracle.height, provenance: true)
+        cpuCached.render(cachedOracle)
+
+        let gpuUncached = try gpu.renderOffscreen(uncachedRF)
+        let gpuCached = try gpu.renderOffscreen(cachedRF)
+
+        let diffUncached = Oracle.compare(scene: uncachedOracle, cpu: cpuUncached, gpu: gpuUncached.rgba, tolerance: 2)
+        #expect(diffUncached.outlierPixels == 0, "uncached CPU vs GPU: \(diffUncached)")
+        let diffCached = Oracle.compare(scene: cachedOracle, cpu: cpuCached, gpu: gpuCached.rgba, tolerance: 2)
+        #expect(diffCached.outlierPixels == 0, "cached CPU vs GPU: \(diffCached)")
+        let diffCachedVsUncached = Oracle.compare(scene: cachedOracle, cpu: cpuUncached, gpu: gpuCached.rgba, tolerance: 2)
+        #expect(diffCachedVsUncached.outlierPixels == 0, "cached GPU vs uncached CPU: \(diffCachedVsUncached)")
+        #expect(gpuUncached.rgba.count == gpuCached.rgba.count)
+        for (a, b) in zip(gpuUncached.rgba, gpuCached.rgba) {
+            #expect(abs(Int(a) - Int(b)) <= 1, "cached vs uncached GPU mismatch: \(a) vs \(b)")
+        }
+
+        let lines = (0..<40).map { String(format: "Line %02d rune", $0) }.joined(separator: "\n")
+        let scrollRt = Runtime(state: (), viewport: Vec2(64, 64), pixelScale: 1.0, systemDark: true) { _, _ in
+            col()
+                .w(64)
+                .h(64)
+                .p(6)
+                .bg(.srgb(0.06, 0.08, 0.12, 1.0))
+                .child(
+                    col()
+                        .wFull()
+                        .h(52)
+                        .scrollY()
+                        .child(text(lines).font(TextStyle(size: 11, weight: 400, lineHeight: 14)).color(.srgb(1, 1, 1, 1)))
+                )
+        }
+        scrollRt.srgbBlend = false
+        _ = scrollRt.renderFrame(at: 0)
+        scrollRt.wheel(WheelEvent(dx: 0, dy: -145), at: Vec2(32, 32), now: 0)
+        let scrolledRF = scrollRt.renderFrame(at: 1.0 / 60.0)
+        let scrolledOracle = Self.makeOracleScene(from: scrolledRF, prefix: "scroll")
+        try scrolledOracle.validate()
+        var cpuScrolled = OracleFrame(width: scrolledOracle.width, height: scrolledOracle.height, provenance: true)
+        cpuScrolled.render(scrolledOracle)
+        let gpuScrolled = try gpu.renderOffscreen(scrolledRF)
+        let diffScrolled = Oracle.compare(scene: scrolledOracle, cpu: cpuScrolled, gpu: gpuScrolled.rgba, tolerance: 2)
+        #expect(diffScrolled.outlierPixels == 0, "scrolled multi-line text CPU vs GPU: \(diffScrolled)")
+    }
+
     private static func locateRuneRefBinary() -> URL? {
         var candidates: [URL] = []
         for bundle in Bundle.allBundles where bundle.bundleURL.pathExtension == "xctest" {

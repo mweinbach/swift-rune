@@ -244,8 +244,7 @@ public final class PerfFileRecorder: @unchecked Sendable {
     }
 
     deinit {
-        health.setStop()
-        queue.close()
+        shutdown()
     }
 
     /// Starts the bounded background writer for `config`.
