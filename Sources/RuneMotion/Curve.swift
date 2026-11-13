@@ -90,19 +90,19 @@ public enum Curve: Sendable, Hashable {
         }
     }
 
-    /// How retargeting blends by default: springs and decays merge, tweens and Hermite splines add.
+    /// How retargeting blends by default: springs, decays, and keyframes merge; tweens add.
     @inlinable
     public var defaultBlend: Blend {
         switch self {
-        case .spring, .decay, .instant: return .merge
-        case .tween, .hermite: return .additive
+        case .spring, .decay, .instant, .hermite: return .merge
+        case .tween: return .additive
         }
     }
 }
 
 /// Retargeting strategy when a track receives a new target while already in flight.
 public enum Blend: Sendable, Hashable {
-    /// Merge for physics curves (`.spring`, `.decay`, `.instant`), additive for timed curves (`.tween`, `.hermite`).
+    /// Merge for springs, decays, and Hermite keyframes; additive for tweens.
     case auto
     /// Collapse current position and velocity into a single analytic response toward the new target.
     case merge
@@ -113,7 +113,7 @@ public enum Blend: Sendable, Hashable {
 }
 
 /// Starting velocity rule for an animation segment.
-public enum VelocityRule: Sendable, Equatable {
+public enum VelocityRule: Sendable, Hashable {
     /// Keep the track's instantaneous velocity (default interruptible motion).
     case inherit
     /// Start from zero velocity.
@@ -123,7 +123,7 @@ public enum VelocityRule: Sendable, Equatable {
 }
 
 /// Typed velocity wrapper matching an `Animatable`'s lanes (units per second).
-public struct Velocity<T: Animatable>: Sendable, Equatable {
+public struct Velocity<T: Animatable>: Sendable, Hashable {
     public var lanes: MotionLanes
 
     public static var zero: Velocity<T> { Velocity(lanes: .zero) }
@@ -138,7 +138,7 @@ public struct Velocity<T: Animatable>: Sendable, Equatable {
 }
 
 /// Full animation specification combining curve, retargeting blend, optional delay, velocity seed, and completion token.
-public struct Anim<T: Animatable>: Sendable, Equatable {
+public struct Anim<T: Animatable>: Sendable, Hashable {
     public var curve: Curve
     public var blend: Blend
     public var delay: Float

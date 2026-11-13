@@ -337,7 +337,7 @@ public final class MotionTrace: @unchecked Sendable {
                 }
 
                 let r = p.rect
-                let flags = flagsByNode[p.id] ?? (p.isMoving ? TraceFlags.animated : 0)
+                let flags = flagsByNode[p.id] ?? (p.flags != 0 ? p.flags : (p.isMoving ? TraceFlags.animated : 0))
                 var s: [Float] = [
                     r.x, r.y, r.width, r.height, p.opacity, p.corners.topLeft, Float(flags),
                     .nan, 0, 0, 0

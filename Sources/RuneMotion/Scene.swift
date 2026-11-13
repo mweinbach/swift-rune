@@ -1,41 +1,138 @@
 import Foundation
 
-/// Coordinate frame in which layout motion (`animateLayout`) travels.
+/// Width-leads ratio for the X axis spring (native morph: `width_vd = 0.78 * vd`).
+public let WIDTH_LEAD: Float = 0.78
+
+/// Lifecycle phase of a scene node.
+public enum ScenePhase: Sendable, Hashable {
+    case entering
+    case present
+    /// Removed by the app; still drawn until its exit settles. `generation` guards against stale exits.
+    case exiting(generation: UInt32)
+}
+
+/// Whether an insert is part of the first build (no animation) or a later change.
+public enum Mount: Sendable, Hashable {
+    case initial
+    case animated
+}
+
+/// Coordinate space layout motion is tracked in.
 public enum Travel: Sendable, Hashable, Codable {
-    /// Moves only when the node's position relative to its parent changes; rides parent motion 1:1.
+    /// Edges animate in parent space; an unchanged child rides its parent 1:1.
     case parent
-    /// Animates across screen space when moved between parents (shared-element / active-tab pill).
+    /// The node travels one straight screen-space path from where it was seen to where it lands.
     case screen
 }
 
-/// Per-node layout animation configuration, including directional leading/trailing edge springs
-/// and width-leads-height choreography.
+/// How a frame change animates: per-axis curves, directional edge lead, and travel space.
 public struct LayoutAnim: Sendable, Hashable {
-    public var spring: Spring
-    public var leadingSpring: Spring?
-    public var widthScale: Float?
+    public var x: Anim<Float>
+    public var y: Anim<Float>
+    public var leadCurve: Anim<Float>?
+    public var trailCurve: Anim<Float>?
     public var travel: Travel
 
+    public static let instant = LayoutAnim(x: .instant, y: .instant)
+
+    public var lead: (Anim<Float>, Anim<Float>)? {
+        get {
+            if let l = leadCurve, let t = trailCurve { return (l, t) }
+            return nil
+        }
+        set {
+            leadCurve = newValue?.0
+            trailCurve = newValue?.1
+        }
+    }
+
+    public init(
+        x: Anim<Float>,
+        y: Anim<Float>? = nil,
+        lead: (Anim<Float>, Anim<Float>)? = nil,
+        travel: Travel = .parent
+    ) {
+        self.x = x
+        self.y = y ?? x
+        self.leadCurve = lead?.0
+        self.trailCurve = lead?.1
+        self.travel = travel
+    }
+
+    public init(_ spring: Spring) {
+        let a = Anim<Float>(curve: .spring(spring))
+        self.x = a
+        self.y = a
+        self.leadCurve = nil
+        self.trailCurve = nil
+        self.travel = .parent
+    }
+
+    public init(_ pair: SpringPair) {
+        let a = Anim<Float>(curve: .spring(pair.enter))
+        self.x = a
+        self.y = a
+        self.leadCurve = nil
+        self.trailCurve = nil
+        self.travel = .parent
+    }
+
+    /// Legacy compatibility initializer used by `Runtime` and existing tests.
     public init(
         spring: Spring = MotionTokens.SETTLE,
         leadingSpring: Spring? = nil,
         widthScale: Float? = nil,
         travel: Travel = .parent
     ) {
-        self.spring = spring
-        self.leadingSpring = leadingSpring
-        self.widthScale = widthScale
+        let sx = widthScale.map { spring.withDuration(spring.duration * $0) } ?? spring
+        self.x = Anim(curve: .spring(sx))
+        self.y = Anim(curve: .spring(spring))
+        self.leadCurve = leadingSpring.map { Anim(curve: .spring($0)) }
+        self.trailCurve = leadingSpring.map { _ in Anim(curve: .spring(spring)) }
         self.travel = travel
     }
 
-    /// Width settles at `0.78 * duration` ahead of height (classic macOS/iOS card expansion feel).
-    public static func widthLeads(_ spring: Spring = MotionTokens.SETTLE) -> LayoutAnim {
-        LayoutAnim(spring: spring, widthScale: 0.78)
+    public static func axes(_ x: Anim<Float>, _ y: Anim<Float>) -> LayoutAnim {
+        LayoutAnim(x: x, y: y)
     }
 
-    /// Advancing edges move on `lead`, trailing edges follow on `trail`.
+    public static func axes(_ x: Spring, _ y: Spring) -> LayoutAnim {
+        LayoutAnim(x: Anim(curve: .spring(x)), y: Anim(curve: .spring(y)))
+    }
+
+    /// Width settles at `0.78 * duration` ahead of height.
+    public func widthLeads() -> LayoutAnim {
+        var copy = self
+        if case let .spring(s) = copy.x.curve {
+            copy.x.curve = .spring(s.withDuration(s.duration * WIDTH_LEAD))
+        }
+        return copy
+    }
+
+    /// Static legacy factory matching `widthLeads()`.
+    public static func widthLeads(_ spring: Spring = MotionTokens.SETTLE) -> LayoutAnim {
+        LayoutAnim(spring: spring, widthScale: WIDTH_LEAD)
+    }
+
+    public func lead(_ lead: Anim<Float>, _ trail: Anim<Float>) -> LayoutAnim {
+        var copy = self
+        copy.leadCurve = lead
+        copy.trailCurve = trail
+        return copy
+    }
+
+    public func lead(_ lead: Spring, _ trail: Spring) -> LayoutAnim {
+        self.lead(Anim(curve: .spring(lead)), Anim(curve: .spring(trail)))
+    }
+
     public static func lead(lead: Spring = MotionTokens.LEAD, trail: Spring = MotionTokens.SETTLE) -> LayoutAnim {
         LayoutAnim(spring: trail, leadingSpring: lead)
+    }
+
+    public func screen() -> LayoutAnim {
+        var copy = self
+        copy.travel = .screen
+        return copy
     }
 
     public func withTravel(_ travel: Travel) -> LayoutAnim {
@@ -45,7 +142,7 @@ public struct LayoutAnim: Sendable, Hashable {
     }
 }
 
-/// Declarative motion specification committed per element on each layout pass.
+/// Declarative motion specification for a scene node.
 public struct NodeSpec: Sendable, Equatable {
     public var id: NodeId
     public var parent: NodeId?
@@ -61,6 +158,30 @@ public struct NodeSpec: Sendable, Equatable {
     public var layoutAnim: LayoutAnim?
     public var styleSpring: Spring?
     public var transition: Transition?
+
+    /// Layout frame in parent space when used with `Scene.insert` (alias for `rect`).
+    public var frame: MotionRect {
+        get { rect }
+        set { rect = newValue }
+    }
+
+    /// Retained-mode upstream constructor (`NodeSpec::new(frame)`).
+    public init(_ frame: MotionRect) {
+        self.id = NodeId(0)
+        self.parent = nil
+        self.rect = frame
+        self.opacity = 1.0
+        self.scale = Vec2(1, 1)
+        self.rotate = 0
+        self.offset = .zero
+        self.corners = .all(0)
+        self.blur = 0
+        self.fill = nil
+        self.border = nil
+        self.layoutAnim = nil
+        self.styleSpring = nil
+        self.transition = .opacity
+    }
 
     public init(
         id: NodeId,
@@ -93,28 +214,125 @@ public struct NodeSpec: Sendable, Equatable {
         self.styleSpring = styleSpring
         self.transition = transition
     }
+
+    public func parent(_ parent: NodeId) -> NodeSpec {
+        var c = self; c.parent = parent; return c
+    }
+    public func opacity(_ opacity: Float) -> NodeSpec {
+        var c = self; c.opacity = opacity; return c
+    }
+    public func radius(_ radius: Corners) -> NodeSpec {
+        var c = self; c.corners = radius; return c
+    }
+    public func radius(_ uniform: Float) -> NodeSpec {
+        var c = self; c.corners = .all(uniform); return c
+    }
+    public func fill(_ color: MotionColor) -> NodeSpec {
+        var c = self; c.fill = color; return c
+    }
+    public func transition(_ transition: Transition) -> NodeSpec {
+        var c = self; c.transition = transition; return c
+    }
 }
 
-/// Sampled presentation state for a single mounted or exiting node on the current frame.
+/// Soft SDF clip in the node's own coordinates.
+public struct Mask: Sendable, Hashable {
+    public var inset: Sides
+    public var feather: Sides
+
+    public static let zero = Mask(inset: .zeroValue, feather: .zeroValue)
+
+    public init(inset: Sides = .zeroValue, feather: Sides = .zeroValue) {
+        self.inset = inset
+        self.feather = feather
+    }
+
+    public var isNone: Bool {
+        inset == .zeroValue && feather == .zeroValue
+    }
+
+    /// Upstream `[left, top, right, bottom]` edge arrays for tests & shaders.
+    public var insetEdges: [Float] { [inset.left, inset.top, inset.right, inset.bottom] }
+    public var featherEdges: [Float] { [feather.left, feather.top, feather.right, feather.bottom] }
+}
+
+/// Everything the renderer needs to draw one node on a frame.
 public struct Presented: Sendable, Equatable {
     public var id: NodeId
     public var parent: NodeId?
-    /// Presented rectangle snapped to 1/64 device pixel (includes transition & offset translation).
     public var rect: MotionRect
-    /// Unsnapped layout target rectangle.
     public var targetRect: MotionRect
-    /// Optional directional reveal clip rectangle.
     public var revealClip: MotionRect?
     public var opacity: Float
-    public var scale: Vec2
-    public var rotate: Float
-    public var corners: Corners
+    public var transform: Transform2D
+    public var anchor: Vec2
     public var blur: Float
+    public var corners: Corners
     public var fill: MotionColor?
     public var border: MotionColor?
+    public var mask: Mask
+    public var phase: ScenePhase
+    public var inFlow: Bool
+    public var flags: UInt32
+    public var draw: Float
     public var presence: Float
-    public var isExiting: Bool
     public var isMoving: Bool
+
+    public var node: NodeId { id }
+    public var radius: Corners { corners }
+    public var fillColor: MotionColor { fill ?? .zeroValue }
+    public var scale: Vec2 { transform.sx == transform.sy ? Vec2(transform.sx, transform.sy) : Vec2(transform.sx, transform.sy) }
+    public var rotate: Float { transform.rot }
+    public var isExiting: Bool {
+        if case .exiting = phase { return true }
+        return false
+    }
+
+    public func affine() -> [Float] {
+        transform.toAffine(anchor: anchor)
+    }
+
+    public init(
+        id: NodeId,
+        parent: NodeId?,
+        rect: MotionRect,
+        targetRect: MotionRect,
+        revealClip: MotionRect?,
+        opacity: Float,
+        transform: Transform2D,
+        anchor: Vec2,
+        blur: Float,
+        corners: Corners,
+        fill: MotionColor?,
+        border: MotionColor?,
+        mask: Mask,
+        phase: ScenePhase,
+        inFlow: Bool,
+        flags: UInt32,
+        draw: Float,
+        presence: Float,
+        isMoving: Bool
+    ) {
+        self.id = id
+        self.parent = parent
+        self.rect = rect
+        self.targetRect = targetRect
+        self.revealClip = revealClip
+        self.opacity = opacity
+        self.transform = transform
+        self.anchor = anchor
+        self.blur = blur
+        self.corners = corners
+        self.fill = fill
+        self.border = border
+        self.mask = mask
+        self.phase = phase
+        self.inFlow = inFlow
+        self.flags = flags
+        self.draw = draw
+        self.presence = presence
+        self.isMoving = isMoving
+    }
 
     public init(
         id: NodeId,
@@ -133,380 +351,1276 @@ public struct Presented: Sendable, Equatable {
         isExiting: Bool,
         isMoving: Bool
     ) {
-        self.id = id
-        self.parent = parent
-        self.rect = rect
-        self.targetRect = targetRect
-        self.revealClip = revealClip
-        self.opacity = opacity
-        self.scale = scale
-        self.rotate = rotate
-        self.corners = corners
-        self.blur = blur
-        self.fill = fill
-        self.border = border
-        self.presence = presence
-        self.isExiting = isExiting
-        self.isMoving = isMoving
+        self.init(
+            id: id,
+            parent: parent,
+            rect: rect,
+            targetRect: targetRect,
+            revealClip: revealClip,
+            opacity: opacity,
+            transform: Transform2D(tx: 0, ty: 0, sx: scale.x, sy: scale.y, rot: rotate),
+            anchor: Vec2(0.5, 0.5),
+            blur: blur,
+            corners: corners,
+            fill: fill,
+            border: border,
+            mask: .zero,
+            phase: isExiting ? .exiting(generation: 1) : .present,
+            inFlow: !isExiting,
+            flags: isMoving ? TraceFlags.animated : 0,
+            draw: 1.0,
+            presence: presence,
+            isMoving: isMoving
+        )
     }
 }
 
-/// Output of `Scene.frame(at:)`: presented nodes (in tree + exiting order) and animation status.
+/// Output of one scene frame.
 public struct FrameOutput: Sendable {
+    /// Nodes whose presented values changed this frame, parents before children.
+    public var changed: [Presented]
+    /// Nodes whose exit settled this frame.
+    public var exited: [NodeId]
+    /// Events emitted by the store during this frame's tick.
+    public var events: [MotionEvent]
+    /// Whether any track (not frozen) is still running.
+    public var animating: Bool
+
+    /// Full snapshot for declarative callers using `commit(...)` + `frame(at:)`.
     public var nodes: [Presented]
     public var byId: [NodeId: Presented]
-    public var isAnimating: Bool
+    public var isAnimating: Bool { animating }
 
-    public init(nodes: [Presented], byId: [NodeId: Presented], isAnimating: Bool) {
+    public init(
+        changed: [Presented],
+        exited: [NodeId],
+        events: [MotionEvent],
+        animating: Bool,
+        nodes: [Presented] = [],
+        byId: [NodeId: Presented] = [:]
+    ) {
+        self.changed = changed
+        self.exited = exited
+        self.events = events
+        self.animating = animating
         self.nodes = nodes
         self.byId = byId
-        self.isAnimating = isAnimating
     }
 }
 
-/// Declarative motion coordinator sitting between Flexbox layout and the GPU/CPU renderer.
-///
-/// Handles:
-/// - Independent 4-edge (`[left, top, right, bottom]`) layout morphing (`animateLayout`).
-/// - Parent-shift cancellation (`Travel.parent`) vs cross-parent shared-element flight (`Travel.screen`).
-/// - Directional leading/trailing edge springs and width-leads-height choreography.
-/// - Enter & exit presence transitions (`Transition`), keeping unmounted nodes alive until
-///   their exit transition settles and smoothly reviving nodes that remount mid-exit!
+internal struct ScreenPath: Sendable {
+    var start: MotionRect
+    var endLocal: MotionRect
+    var origin: Vec2
+}
+
+internal struct SceneDual: Sendable {
+    var x: Float = 0
+    var v: Float = 0
+
+    static func c(_ x: Float) -> SceneDual { SceneDual(x: x, v: 0) }
+    func add(_ o: SceneDual) -> SceneDual { SceneDual(x: x + o.x, v: v + o.v) }
+    func sub(_ o: SceneDual) -> SceneDual { SceneDual(x: x - o.x, v: v - o.v) }
+    func mul(_ o: SceneDual) -> SceneDual { SceneDual(x: x * o.x, v: v * o.x + x * o.v) }
+}
+
+internal struct SceneRest: Sendable {
+    var rect: MotionRect = .zero
+    var origin: Vec2 = .zero
+    var moving: Bool = false
+}
+
+/// The render thread's animated retained-mode scene tree, with a declarative `commit` adapter.
 public struct Scene: Sendable {
-    private struct Entry: Sendable {
-        var spec: NodeSpec
-        var isExiting: Bool
-        /// Last committed parent target origin `(left, top)` for `Travel.parent` shift cancellation.
-        var lastParentOrigin: Vec2
-        /// Order index from the most recent commit so exiting nodes paint near their former siblings.
-        var orderIndex: Int
+    internal static let noneIdx: UInt32 = UInt32.max
+    internal static let maxTrackSlots: Int = 21
+
+    internal struct Node: Sendable {
+        var id: NodeId
+        var parent: UInt32
+        var firstChild: UInt32
+        var lastChild: UInt32
+        var nextSibling: UInt32
+        var prevSibling: UInt32
+        var alive: Bool
+        var frame: MotionRect
+        var opacity: Float
+        var baseScale2D: Vec2
+        var baseRotate: Float
+        var baseOffset: Vec2
+        var baseBlur: Float
+        var radius: Corners
+        var fill: MotionColor
+        var border: MotionColor
+        var hasFill: Bool
+        var hasBorder: Bool
+        var transition: Transition
+        var compatHadTransition: Bool
+        var presence: PresenceState
+        var generation: UInt32
+        var anchor: Vec2
+        var reveal: Reveal?
+        var path: ScreenPath?
+        var rideTrailing: Bool
+        var tracks: [TrackId?]
+        var dirty: Bool
+        var world: MotionRect
+        var origin: Vec2
+        var last: Presented?
+
+        mutating func phaseStep(_ event: PhaseEvent) -> [PhaseAct] {
+            stepPhase(state: &presence, generation: &generation, event: event)
+        }
     }
 
-    private static let EDGE_LEFT = Prop<Float>(id: PropId(101), propClass: .spatial, name: "rect.left")
-    private static let EDGE_TOP = Prop<Float>(id: PropId(102), propClass: .spatial, name: "rect.top")
-    private static let EDGE_RIGHT = Prop<Float>(id: PropId(103), propClass: .spatial, name: "rect.right")
-    private static let EDGE_BOTTOM = Prop<Float>(id: PropId(104), propClass: .spatial, name: "rect.bottom")
-
     public var store: AnimationStore
-    private var entries: [NodeId: Entry] = [:]
+    internal var nodes: [Node] = []
+    internal var rests: [SceneRest] = []
+    private var free: [UInt32] = []
+    internal var index: [UInt64: UInt32] = [:]
+    private var rootHead: UInt32 = Scene.noneIdx
+    private var rootTail: UInt32 = Scene.noneIdx
+    internal var order: [UInt32] = []
+    internal var orderDirty: Bool = false
+    internal var out: [Presented] = []
+    internal var late: [Presented] = []
+    internal var exitedCarry = Carry<NodeId>()
+    internal var toRemove: [UInt32] = []
+    internal var travelling: [UInt32] = []
+    internal var trace: MotionTrace? = nil
+    internal var intents: [(NodeId, UInt32, Float)] = []
+    internal var keep: Bool = false
     private var hasCommittedOnce: Bool = false
 
     public init(pixelScale: Float = 2.0, reducedMotion: Bool = false) {
-        self.store = AnimationStore(pixelScale: pixelScale, reducedMotion: reducedMotion)
+        var s = AnimationStore()
+        s.setPixelScale(pixelScale)
+        s.setReducedMotion(reducedMotion)
+        self.store = s
     }
 
     public var pixelScale: Float {
         get { store.pixelScale }
-        set { store.pixelScale = newValue }
+        set { setPixelScale(newValue) }
     }
 
     public var reducedMotion: Bool {
         get { store.reducedMotion }
-        set { store.reducedMotion = newValue }
+        set { setReducedMotion(newValue) }
     }
 
-    public var isAnimating: Bool {
-        store.isAnimating
+    public var isAnimating: Bool { store.running }
+    public var now: Double { store.now }
+    public var count: Int { index.count }
+    public var isEmpty: Bool { index.isEmpty }
+
+    public mutating func keepFlights(_ on: Bool) {
+        keep = on
     }
 
-    /// Commits a freshly laid-out list of `NodeSpec`s at timestamp `now`.
-    /// When `initialCut` is true (e.g. initial mount or explicit `settle()`), everything lands without enter springs.
-    public mutating func commit(_ specs: [NodeSpec], at now: Double, initialCut: Bool = false) {
-        store.sample(at: now)
-        let cut = initialCut || !hasCommittedOnce
-        hasCommittedOnce = true
+    internal func inFlightTo<T: Animatable>(_ id: NodeId, _ prop: Prop<T>, _ value: T) -> Bool {
+        guard keep, store.isAnimating(id, prop), let to = store.target(id, prop) else {
+            return false
+        }
+        let a = to.toLanes()
+        let b = value.toLanes()
+        for k in 0..<T.laneCount {
+            if abs(a[k] - b[k]) > 1e-3 { return false }
+        }
+        return true
+    }
 
-        // Map of new parent target origins `(left, top)` for `Travel.parent`.
-        var newOrigins: [NodeId: Vec2] = [:]
-        newOrigins.reserveCapacity(specs.count)
-        for s in specs {
-            newOrigins[s.id] = Vec2(s.rect.left, s.rect.top)
+    public mutating func setTime(_ t: Double) {
+        store.setTime(t)
+    }
+
+    public mutating func setTimeScale(_ id: NodeId, _ scale: Float) {
+        store.setNodeTimeScale(id, scale)
+    }
+
+    public mutating func setPixelScale(_ s: Float) {
+        let prev = store.pixelScale
+        store.setPixelScale(s)
+        if store.pixelScale != prev {
+            for i in nodes.indices where nodes[i].alive {
+                nodes[i].dirty = true
+            }
+        }
+    }
+
+    public mutating func setReducedMotion(_ on: Bool) {
+        store.setReducedMotion(on)
+        for i in nodes.indices where nodes[i].alive {
+            nodes[i].dirty = true
+        }
+    }
+
+    public mutating func setTrace(_ trace: MotionTrace?) {
+        self.trace = trace
+        for i in nodes.indices where nodes[i].alive {
+            nodes[i].dirty = true
+        }
+    }
+
+    public var isTracing: Bool { trace != nil }
+
+    public mutating func traceName(_ id: NodeId, _ name: String?) {
+        if trace?.name(id, name) == true, let i = slot(id) {
+            nodes[i].dirty = true
+        }
+    }
+
+    public mutating func traceNamespace(_ id: NodeId, _ ns: (String, String)?) {
+        if trace?.namespace(id, ns) == true, let i = slot(id) {
+            nodes[i].dirty = true
+        }
+    }
+
+    public mutating func takeTrace() -> MotionTrace? {
+        defer { trace = nil }
+        return trace
+    }
+
+    public func contains(_ id: NodeId) -> Bool {
+        index[id.rawValue] != nil
+    }
+
+    public func phase(_ id: NodeId) -> ScenePhase? {
+        guard let i = slot(id) else { return nil }
+        return nodes[i].presence.public(nodes[i].generation)
+    }
+
+    public func presented(_ id: NodeId) -> Presented? {
+        guard let i = slot(id) else { return nil }
+        return nodes[i].last
+    }
+
+    public func rest(_ id: NodeId) -> MotionRect? {
+        guard let i = slot(id) else { return nil }
+        let r = rests[i]
+        return r.moving ? snapRect(r.rect, pixelScale: store.pixelScale) : nil
+    }
+
+    public func world(_ id: NodeId) -> MotionRect? {
+        guard let i = slot(id) else { return nil }
+        return snapRect(nodes[i].world, pixelScale: store.pixelScale)
+    }
+
+    internal func slot(_ id: NodeId) -> Int? {
+        index[id.rawValue].map(Int.init)
+    }
+
+    internal func sample(_ t: TrackId) -> ([Float], [Float])? {
+        var x = [Float](repeating: 0, count: MotionLanes.maxLanes)
+        var v = [Float](repeating: 0, count: MotionLanes.maxLanes)
+        guard store.sampleExact(t, x: &x, v: &v) else { return nil }
+        return (x, v)
+    }
+
+    // MARK: - Layout
+
+    public mutating func setFrame(_ id: NodeId, _ frame: MotionRect, _ anim: LayoutAnim) {
+        setFrameDrawn(id, frame, anim, drawnOffset: .zero, drawnVelocity: .zero)
+    }
+
+    public mutating func setFrame(_ id: NodeId, _ frame: MotionRect, _ spring: Spring) {
+        setFrame(id, frame, LayoutAnim(spring))
+    }
+
+    internal mutating func setFrameDrawn(
+        _ id: NodeId,
+        _ frame: MotionRect,
+        _ anim: LayoutAnim,
+        drawnOffset: Vec2,
+        drawnVelocity: Vec2
+    ) {
+        guard let i = slot(id) else { return }
+        let old = nodes[i].frame
+        if old == frame && nodes[i].path == nil && nodes[i].tracks[Int(Props.FRAME.id.rawValue)] == nil {
+            return
+        }
+        if frame.width != old.width {
+            rebaseTrailing(i, dw: frame.width - old.width)
+        }
+        let hadPath = nodes[i].path != nil
+        if anim == .instant && !hadPath && inFlightTo(id, Props.FRAME, frame) {
+            return
+        }
+        if anim == .instant && (hadPath || store.isAnimating(id, Props.FRAME)) {
+            endPath(i)
+            nodes[i].frame = frame
+            trackSet(i, Props.FRAME, frame)
+            nodes[i].dirty = true
+            return
+        }
+        if old == frame && !hadPath {
+            return
+        }
+        let secs = anim.x.curve.logicalDuration
+        intent(id, TraceIntent.position | TraceIntent.size, secs)
+
+        if anim.travel == .screen && !store.reducedMotion {
+            let curPos: (Float, Float, Float, Float)
+            let curVel: (Float, Float, Float, Float)
+            if let path = nodes[i].path {
+                let e = pathDual(i, path: path, origin: path.origin)
+                curPos = (e.0.x, e.1.x, e.2.x, e.3.x)
+                curVel = (e.0.v, e.1.v, e.2.v, e.3.v)
+            } else {
+                (curPos, curVel) = exactWorld(i)
+            }
+            let start = MotionRect.fromEdges(
+                curPos.0 + drawnOffset.x,
+                curPos.1 + drawnOffset.y,
+                curPos.2 + drawnOffset.x,
+                curPos.3 + drawnOffset.y
+            )
+            let vel = (
+                curVel.0 + drawnVelocity.x,
+                curVel.1 + drawnVelocity.y,
+                curVel.2 + drawnVelocity.x,
+                curVel.3 + drawnVelocity.y
+            )
+            nodes[i].frame = frame
+            startPath(i, start: start, velocity: vel, anim: anim)
+            return
         }
 
-        var seen = Set<NodeId>(minimumCapacity: specs.count)
-
-        for (index, spec) in specs.enumerated() {
-            seen.insert(spec.id)
-            let parentOrigin = spec.parent.flatMap { newOrigins[$0] } ?? .zero
-
-            if var existing = entries[spec.id] {
-                let wasExiting = existing.isExiting
-                let oldParentOrigin = existing.lastParentOrigin
-                let parentDelta = Vec2(parentOrigin.x - oldParentOrigin.x, parentOrigin.y - oldParentOrigin.y)
-
-                // If `Travel.parent` (or no layout anim) and parent stayed the same, shift edges by parentDelta first
-                // so the node rides its moving parent 1:1 without exciting its own spring!
-                let travel = spec.layoutAnim?.travel ?? .parent
-                if travel == .parent, existing.spec.parent == spec.parent, (parentDelta.x != 0 || parentDelta.y != 0) {
-                    store.shift(spec.id, Self.EDGE_LEFT, by: MotionLanes(parentDelta.x))
-                    store.shift(spec.id, Self.EDGE_RIGHT, by: MotionLanes(parentDelta.x))
-                    store.shift(spec.id, Self.EDGE_TOP, by: MotionLanes(parentDelta.y))
-                    store.shift(spec.id, Self.EDGE_BOTTOM, by: MotionLanes(parentDelta.y))
-                }
-
-                // Update 4 edges
-                if cut || spec.layoutAnim == nil {
-                    store.snap(spec.id, Self.EDGE_LEFT, to: spec.rect.left)
-                    store.snap(spec.id, Self.EDGE_TOP, to: spec.rect.top)
-                    store.snap(spec.id, Self.EDGE_RIGHT, to: spec.rect.right)
-                    store.snap(spec.id, Self.EDGE_BOTTOM, to: spec.rect.bottom)
-                } else if let la = spec.layoutAnim {
-                    animateEdges(id: spec.id, target: spec.rect, layout: la, at: now)
-                }
-
-                // Update visual style tracks
-                let styleCurve: Curve = (!cut && spec.styleSpring != nil) ? .spring(spec.styleSpring!) : .instant
-                applyStyle(spec: spec, curve: styleCurve, at: now)
-
-                // Revive if it was mid-exit!
-                if wasExiting {
-                    let enterSpring = spec.transition?.insertion.spring ?? spec.styleSpring ?? MotionTokens.SETTLE
-                    let curve: Curve = cut ? .instant : .spring(enterSpring)
-                    store.set(spec.id, Props.PRESENCE, to: 1.0, anim: Anim(curve: curve), at: now)
-                }
-
-                existing.spec = spec
-                existing.isExiting = false
-                existing.lastParentOrigin = parentOrigin
-                existing.orderIndex = index
-                entries[spec.id] = existing
-            } else {
-                // Brand new node
-                store.snap(spec.id, Self.EDGE_LEFT, to: spec.rect.left)
-                store.snap(spec.id, Self.EDGE_TOP, to: spec.rect.top)
-                store.snap(spec.id, Self.EDGE_RIGHT, to: spec.rect.right)
-                store.snap(spec.id, Self.EDGE_BOTTOM, to: spec.rect.bottom)
-                applyStyle(spec: spec, curve: .instant, at: now, initialSnap: true)
-
-                if !cut, let trans = spec.transition {
-                    store.snap(spec.id, Props.PRESENCE, to: 0.0)
-                    let sp = trans.insertion.spring ?? spec.styleSpring ?? MotionTokens.SETTLE
-                    store.set(spec.id, Props.PRESENCE, to: 1.0, anim: Anim(curve: .spring(sp)), at: now)
-                } else {
-                    store.snap(spec.id, Props.PRESENCE, to: 1.0)
-                }
-
-                entries[spec.id] = Entry(
-                    spec: spec,
-                    isExiting: false,
-                    lastParentOrigin: parentOrigin,
-                    orderIndex: index
+        if hadPath {
+            let (w, wv) = exactWorld(i)
+            let (po, pv) = parentOriginExact(i)
+            let trail = trailDual(i)
+            let px = po.x + trail.x
+            let py = po.y
+            let pvx = pv.x + trail.v
+            let pvy = pv.y
+            let local = MotionRect.fromEdges(w.0 - px, w.1 - py, w.2 - px, w.3 - py)
+            let lv = MotionLanes(w.0 - px == w.0 - px ? wv.0 - pvx : 0, wv.1 - pvy, wv.2 - pvx, wv.3 - pvy)
+            endPath(i)
+            trackSet(i, Props.FRAME, local)
+            if let tid = nodes[i].tracks[Int(Props.FRAME.id.rawValue)] {
+                let smooth = Anim<MotionRect>(curve: .spring(MotionTokens.SMOOTH))
+                store.animateRaw(
+                    tid.indexInt,
+                    targets: local.toLanes(),
+                    count: 4,
+                    curve: smooth.curve,
+                    blend: smooth.blend,
+                    delay: smooth.delay,
+                    velocityRule: .inherit,
+                    token: 0,
+                    laneVelocities: lv
                 )
             }
+        } else if nodes[i].tracks[Int(Props.FRAME.id.rawValue)] == nil {
+            trackSet(i, Props.FRAME, old)
         }
 
-        // Handle unmounted nodes: start exit transition or remove immediately.
-        var toRemove: [NodeId] = []
-        for (id, var entry) in entries where !seen.contains(id) {
-            if cut {
-                toRemove.append(id)
-                continue
+        nodes[i].frame = frame
+        guard let tid = nodes[i].tracks[Int(Props.FRAME.id.rawValue)] else { return }
+        let ti = tid.indexInt
+        let cur = store.laneTargets4(ti)
+        let e = frame.edges
+        let eArr = [e.0, e.1, e.2, e.3]
+        var curArr = [cur.0, cur.1, cur.2, cur.3]
+
+        if let (lead, trail) = anim.lead {
+            for axis in 0..<2 {
+                let a = axis
+                let b = axis + 2
+                let (sa, sb) = (eArr[a] + eArr[b] > curArr[a] + curArr[b]) ? (trail, lead) : (lead, trail)
+                var tgA = MotionLanes(curArr[0], curArr[1], curArr[2], curArr[3])
+                tgA[a] = eArr[a]
+                _ = store.animateRaw(
+                    ti, targets: tgA, count: 4, curve: sa.curve, blend: sa.blend,
+                    delay: sa.delay, velocityRule: sa.velocityRule, token: sa.token, laneVelocities: nil
+                )
+                curArr[a] = eArr[a]
+
+                var tgB = MotionLanes(curArr[0], curArr[1], curArr[2], curArr[3])
+                tgB[b] = eArr[b]
+                _ = store.animateRaw(
+                    ti, targets: tgB, count: 4, curve: sb.curve, blend: sb.blend,
+                    delay: sb.delay, velocityRule: sb.velocityRule, token: sb.token, laneVelocities: nil
+                )
+                curArr[b] = eArr[b]
             }
-            if !entry.isExiting {
-                if let trans = entry.spec.transition {
-                    entry.isExiting = true
-                    let exitSpring = trans.removal.spring
-                        ?? entry.spec.styleSpring?.scaledDuration(0.8)
-                        ?? MotionTokens.SETTLE_PAIR.exit
-                    store.set(id, Props.PRESENCE, to: 0.0, anim: Anim(curve: .spring(exitSpring)), at: now)
-                    entries[id] = entry
-                } else {
-                    toRemove.append(id)
-                }
-            } else {
-                let p = store.get(id, Props.PRESENCE) ?? 0.0
-                if !store.isMoving(id, Props.PRESENCE) && p <= 1e-3 {
-                    toRemove.append(id)
-                }
-            }
+            _ = cur
+        } else {
+            // X edges on the X curve, Y edges on the Y curve; unchanged lanes are skipped.
+            let tgX = MotionLanes(e.0, cur.1, e.2, cur.3)
+            _ = store.animateRaw(
+                ti, targets: tgX, count: 4, curve: anim.x.curve, blend: anim.x.blend,
+                delay: anim.x.delay, velocityRule: anim.x.velocityRule, token: anim.x.token, laneVelocities: nil
+            )
+            let tgY = MotionLanes(e.0, e.1, e.2, e.3)
+            _ = store.animateRaw(
+                ti, targets: tgY, count: 4, curve: anim.y.curve, blend: anim.y.blend,
+                delay: anim.y.delay, velocityRule: anim.y.velocityRule, token: anim.y.token, laneVelocities: nil
+            )
         }
-        for id in toRemove {
-            entries.removeValue(forKey: id)
-            store.removeNode(id)
+        nodes[i].dirty = true
+    }
+
+    internal func parentTargetOrigin(_ i: Int) -> Vec2 {
+        var o = Vec2.zero
+        var p = nodes[i].parent
+        while p != Self.noneIdx {
+            let pf = nodes[Int(p)].frame
+            o.x += pf.left
+            o.y += pf.top
+            p = nodes[Int(p)].parent
+        }
+        return o
+    }
+
+    internal func exactWorld(_ i: Int) -> ((Float, Float, Float, Float), (Float, Float, Float, Float)) {
+        let e = worldDual(i)
+        return ((e.0.x, e.1.x, e.2.x, e.3.x), (e.0.v, e.1.v, e.2.v, e.3.v))
+    }
+
+    public func samplingError() -> (samples: Int, maxDevicePxError: Float) {
+        var count = 0
+        var error: Float = 0
+        for slot in order {
+            let i = Int(slot)
+            guard nodes[i].alive, let p = nodes[i].last else { continue }
+            let w = worldDual(i)
+            let o = originDual(i)
+            let ideal = (o.0.x, o.1.x, o.0.x + w.2.x - w.0.x, o.1.x + w.3.x - w.1.x)
+            let shown = p.rect.edges
+            error = max(error, abs(shown.0 - ideal.0) * store.pixelScale)
+            error = max(error, abs(shown.1 - ideal.1) * store.pixelScale)
+            error = max(error, abs(shown.2 - ideal.2) * store.pixelScale)
+            error = max(error, abs(shown.3 - ideal.3) * store.pixelScale)
+            count += 4
+        }
+        return (count, error)
+    }
+
+    internal func parentOriginExact(_ i: Int) -> (Vec2, Vec2) {
+        let p = nodes[i].parent
+        if p == Self.noneIdx { return (.zero, .zero) }
+        let o = originDual(Int(p))
+        return (Vec2(o.0.x, o.1.x), Vec2(o.0.v, o.1.v))
+    }
+
+    internal func lanesDual(_ i: Int, _ p: PropId, into out: inout [SceneDual]) {
+        let pid = Int(p.rawValue)
+        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid], let (x, v) = sample(tid) else {
+            return
+        }
+        for k in 0..<out.count {
+            out[k] = SceneDual(x: x[k], v: v[k])
         }
     }
 
-    /// Evaluates the scene at timestamp `now` and returns presented geometry/visuals for all
-    /// mounted and still-exiting nodes.
-    public mutating func frame(at now: Double) -> FrameOutput {
-        store.sample(at: now)
-
-        // Prune any exiting nodes whose presence track finished settling at 0 on this sample.
-        var finishedExits: [NodeId] = []
-        for (id, entry) in entries where entry.isExiting {
-            let p = store.get(id, Props.PRESENCE) ?? 0.0
-            if !store.isMoving(id, Props.PRESENCE) && p <= 1e-3 {
-                finishedExits.append(id)
-            }
+    internal func worldDual(_ i: Int) -> (SceneDual, SceneDual, SceneDual, SceneDual) {
+        if let path = nodes[i].path {
+            return pathDual(i, path: path, origin: parentTargetOrigin(i))
         }
-        for id in finishedExits {
-            entries.removeValue(forKey: id)
-            store.removeNode(id)
+        return laidDual(i)
+    }
+
+    internal func pathDual(_ i: Int, path: ScreenPath, origin: Vec2) -> (SceneDual, SceneDual, SceneDual, SceneDual) {
+        var p = [SceneDual.c(1.0), SceneDual.c(1.0)]
+        lanesDual(i, Props.TRAVEL.id, into: &p)
+        return startPathDual(start: path.start, end: path.endLocal.translated(origin), progress: (p[0], p[1]))
+    }
+
+    internal func originDual(_ i: Int) -> (SceneDual, SceneDual) {
+        let w = worldDual(i)
+        var off = [SceneDual.c(0), SceneDual.c(0)]
+        lanesDual(i, Props.OFFSET.id, into: &off)
+        var p = [SceneDual.c(1.0)]
+        lanesDual(i, Props.PRESENCE.id, into: &p)
+        let (at0, at1) = nodes[i].presence.pair
+        let oneMinusP = SceneDual.c(1.0).sub(p[0])
+        @inline(__always) func fx(_ k: Int) -> SceneDual {
+            SceneDual.c(fxAt(at0, k)).mul(oneMinusP).add(SceneDual.c(fxAt(at1, k)).mul(p[0]))
         }
-
-        let sortedEntries = entries.values.sorted { a, b in
-            if a.orderIndex != b.orderIndex { return a.orderIndex < b.orderIndex }
-            return a.spec.id.rawValue < b.spec.id.rawValue
+        let sizeX = w.2.sub(w.0)
+        let sizeY = w.3.sub(w.1)
+        let reduced = store.reducedMotion
+        let baseX = w.0.add(off[0])
+        let baseY = w.1.add(off[1])
+        if reduced {
+            return (baseX, baseY)
         }
+        return (
+            baseX.add(fx(2)).add(fx(4).mul(sizeX)),
+            baseY.add(fx(3)).add(fx(5).mul(sizeY))
+        )
+    }
 
-        // First compute presented parent deltas so exiting children ride moving parents naturally.
-        var nodes: [Presented] = []
-        nodes.reserveCapacity(sortedEntries.count)
-        var byId: [NodeId: Presented] = [:]
-        byId.reserveCapacity(sortedEntries.count)
+    // MARK: - Stepping & Presenting a Frame
 
-        for entry in sortedEntries {
-            let id = entry.spec.id
-            let left = store.get(id, Self.EDGE_LEFT) ?? entry.spec.rect.left
-            let top = store.get(id, Self.EDGE_TOP) ?? entry.spec.rect.top
-            let right = store.get(id, Self.EDGE_RIGHT) ?? entry.spec.rect.right
-            let bottom = store.get(id, Self.EDGE_BOTTOM) ?? entry.spec.rect.bottom
-            var rawRect = MotionRect(left: left, top: top, right: max(left, right), bottom: max(top, bottom))
+    public mutating func frameAt(_ t: Double) -> FrameOutput {
+        setTime(t)
+        return frame()
+    }
 
-            let baseOpacity = store.get(id, Props.OPACITY) ?? entry.spec.opacity
-            let baseScale = store.get(id, Props.SCALE) ?? entry.spec.scale
-            let baseRotate = store.get(id, Props.ROTATE) ?? entry.spec.rotate
-            let baseOffset = store.get(id, Props.OFFSET) ?? entry.spec.offset
-            let corners = store.get(id, Props.CORNERS) ?? entry.spec.corners
-            let baseBlur = (store.get(id, Props.BLUR) ?? Blur(entry.spec.blur)).radius
-            let fill = entry.spec.fill != nil ? (store.get(id, Props.FILL) ?? entry.spec.fill) : nil
-            let border = entry.spec.border != nil ? (store.get(id, Props.BORDER) ?? entry.spec.border) : nil
-            let presence = store.get(id, Props.PRESENCE) ?? 1.0
+    public mutating func frame() -> FrameOutput {
+        frameImpl(includeSnapshot: false)
+    }
 
-            var transOpacity: Float = 1.0
-            var transScale = Vec2(1, 1)
-            var transOffset = Vec2.zero
-            var transBlur: Float = 0.0
-            var revealClip: MotionRect? = nil
+    /// Presents what was set or animated since `frame()` without advancing time.
+    public mutating func present() {
+        if orderDirty {
+            rebuildOrder()
+        }
+        let from = out.count
+        presentDirty()
+        if trace != nil && out.count > from {
+            late.append(contentsOf: out[from...])
+        }
+    }
 
-            if let trans = entry.spec.transition {
-                let activeEffect = entry.isExiting ? trans.removal : trans.insertion
-                if entry.isExiting || presence < 0.9999 || store.isMoving(id, Props.PRESENCE) {
-                    let size = Vec2(rawRect.width, rawRect.height)
-                    let eval = activeEffect.evaluate(presence: presence, size: size)
-                    transOpacity = eval.opacity
-                    transScale = eval.scale
-                    transOffset = eval.offset
-                    transBlur = eval.blur
-                    if let rev = activeEffect.reveal {
-                        revealClip = snapRect(rev.clipRect(for: rawRect, presence: presence), pixelScale: store.pixelScale)
+    private mutating func frameImpl(includeSnapshot: Bool) -> FrameOutput {
+        store.tick()
+        exitedCarry.begin()
+        toRemove.removeAll(keepingCapacity: true)
+
+        for ev in store.events {
+            if case let .settled(_, node, p) = ev, p == Props.PRESENCE.id {
+                guard let i = slot(node) else { continue }
+                let acts = nodes[i].phaseStep(.settle)
+                for act in acts {
+                    if case .retire = act {
+                        toRemove.append(UInt32(i))
                     }
                 }
             }
-
-            let totalOffset = Vec2(baseOffset.x + transOffset.x, baseOffset.y + transOffset.y)
-            rawRect = rawRect.offsetBy(totalOffset)
-            let snapped = snapRect(rawRect, pixelScale: store.pixelScale)
-
-            let moving =
-                store.isMoving(id, Self.EDGE_LEFT) ||
-                store.isMoving(id, Self.EDGE_TOP) ||
-                store.isMoving(id, Self.EDGE_RIGHT) ||
-                store.isMoving(id, Self.EDGE_BOTTOM) ||
-                store.isMoving(id, Props.OPACITY) ||
-                store.isMoving(id, Props.SCALE) ||
-                store.isMoving(id, Props.OFFSET) ||
-                store.isMoving(id, Props.ROTATE) ||
-                store.isMoving(id, Props.BLUR) ||
-                store.isMoving(id, Props.PRESENCE) ||
-                store.isMoving(id, Props.FILL) ||
-                store.isMoving(id, Props.BORDER) ||
-                store.isMoving(id, Props.CORNERS)
-
-            let presented = Presented(
-                id: id,
-                parent: entry.spec.parent,
-                rect: snapped,
-                targetRect: entry.spec.rect,
-                revealClip: revealClip,
-                opacity: (baseOpacity * transOpacity).clamped(to: 0...1),
-                scale: Vec2(baseScale.x * transScale.x, baseScale.y * transScale.y),
-                rotate: baseRotate,
-                corners: corners,
-                blur: baseBlur + transBlur,
-                fill: fill,
-                border: border,
-                presence: presence,
-                isExiting: entry.isExiting,
-                isMoving: moving
-            )
-            nodes.append(presented)
-            byId[id] = presented
         }
 
-        return FrameOutput(nodes: nodes, byId: byId, isAnimating: store.isAnimating)
+        var retire = toRemove
+        toRemove.removeAll(keepingCapacity: true)
+        for (tid, node, p) in store.touchedTracks() where p == Props.PRESENCE.id {
+            guard let ui = index[node.rawValue] else { continue }
+            let i = Int(ui)
+            if !nodes[i].presence.isExiting || retire.contains(ui) { continue }
+            guard let vals = store.valuesOf(tid), let pv = vals.first else { continue }
+            let acts = nodes[i].phaseStep(.faded(p: pv))
+            for act in acts {
+                if case .retire = act {
+                    retire.append(ui)
+                }
+            }
+        }
+        toRemove = retire
+
+        for (tid, node, p) in store.touchedTracks() {
+            guard let i = slot(node) else { continue }
+            nodes[i].dirty = true
+            let pid = Int(p.rawValue)
+            if pid < nodes[i].tracks.count {
+                nodes[i].tracks[pid] = tid
+            }
+        }
+
+        // Screen travel checks in start order (travelling), not tree order.
+        var k = 0
+        while k < travelling.count {
+            let i = Int(travelling[k])
+            let travelTid = nodes[i].tracks[Int(Props.TRAVEL.id.rawValue)]
+            let arrived = travelTid.map { !store.isActive($0) } ?? true
+            if arrived && !ancestorMoving(i) {
+                let endLocal = nodes[i].path?.endLocal ?? nodes[i].frame
+                endPath(i)
+                trackSet(i, Props.FRAME, endLocal)
+                continue
+            }
+            let po = parentTargetOrigin(i)
+            nodes[i].path?.origin = po
+            k += 1
+        }
+
+        if orderDirty {
+            rebuildOrder()
+        }
+
+        out.removeAll(keepingCapacity: true)
+        if !late.isEmpty {
+            out.append(contentsOf: late)
+            late.removeAll(keepingCapacity: true)
+        }
+        presentDirty()
+
+        for ui in toRemove {
+            let i = Int(ui)
+            if nodes[i].alive {
+                removeNow(i)
+            }
+        }
+        exitedCarry.end()
+
+        let animating = store.running
+        if let trace {
+            var flagsMap: [NodeId: UInt32] = [:]
+            flagsMap.reserveCapacity(out.count)
+            for p in out {
+                flagsMap[p.id] = p.flags
+            }
+            trace.frame(
+                at: store.now,
+                presented: out,
+                gone: exitedCarry.items,
+                events: store.events,
+                intents: intents,
+                flagsByNode: flagsMap
+            )
+            intents.removeAll(keepingCapacity: true)
+        }
+
+        var snapshotNodes: [Presented] = []
+        var snapshotById: [NodeId: Presented] = [:]
+        if includeSnapshot {
+            snapshotNodes.reserveCapacity(order.count)
+            snapshotById.reserveCapacity(order.count)
+            for ui in order {
+                let i = Int(ui)
+                guard nodes[i].alive, let last = nodes[i].last else { continue }
+                snapshotNodes.append(last)
+                snapshotById[last.id] = last
+            }
+        }
+
+        return FrameOutput(
+            changed: out,
+            exited: exitedCarry.items,
+            events: store.events,
+            animating: animating,
+            nodes: snapshotNodes,
+            byId: snapshotById
+        )
+    }
+
+    private mutating func presentDirty() {
+        let scale = store.pixelScale
+        let reduced = store.reducedMotion
+        for slotIdx in order {
+            let i = Int(slotIdx)
+            let parent = nodes[i].parent
+            let parentDirty = parent != Self.noneIdx && nodes[Int(parent)].dirty
+            let own = nodes[i].dirty
+            if parentDirty {
+                nodes[i].dirty = true
+            }
+            if nodes[i].dirty {
+                let p = computePresented(i, scale: scale, reduced: reduced, ownDirty: own, parentDirty: parentDirty)
+                nodes[i].last = p
+                out.append(p)
+            }
+        }
+        for slotIdx in order {
+            nodes[Int(slotIdx)].dirty = false
+        }
+    }
+
+    private func ancestorMoving(_ i: Int) -> Bool {
+        let watched: [Int] = [
+            Int(Props.FRAME.id.rawValue),
+            Int(Props.TRAVEL.id.rawValue),
+            Int(Props.OFFSET.id.rawValue),
+            Int(Props.PRESENCE.id.rawValue),
+            Int(Props.UNIFORM_SCALE.id.rawValue),
+            Int(Props.OPACITY.id.rawValue),
+            Int(Props.BLUR_SCALAR.id.rawValue),
+        ]
+        var p = nodes[i].parent
+        while p != Self.noneIdx {
+            let pn = nodes[Int(p)]
+            for pid in watched {
+                if let tid = pn.tracks[pid], store.isActive(tid) {
+                    return true
+                }
+            }
+            p = pn.parent
+        }
+        return false
+    }
+
+    internal func values(_ i: Int, _ p: PropId) -> ArraySlice<Float>? {
+        let pid = Int(p.rawValue)
+        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        return store.valuesOf(tid)
+    }
+
+    private func targets4(_ i: Int, _ p: PropId) -> (Float, Float, Float, Float)? {
+        let pid = Int(p.rawValue)
+        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        var buf = [Float](repeating: 0, count: 4)
+        guard store.targetsOf(tid, into: &buf) else { return nil }
+        return (buf[0], buf[1], buf[2], buf[3])
+    }
+
+    private func target1(_ i: Int, _ p: PropId) -> Float? {
+        let pid = Int(p.rawValue)
+        guard pid < nodes[i].tracks.count, let tid = nodes[i].tracks[pid] else { return nil }
+        var buf = [Float](repeating: 0, count: 1)
+        guard store.targetsOf(tid, into: &buf) else { return nil }
+        return buf[0]
+    }
+
+    private func restOf(_ i: Int, reduced: Bool) -> MotionRect {
+        let n = nodes[i]
+        let parent = n.parent
+        let world: MotionRect
+        if let path = n.path {
+            var tp = [Float](repeating: 1.0, count: 2)
+            if let tid = n.tracks[Int(Props.TRAVEL.id.rawValue)] {
+                _ = store.targetsOf(tid, into: &tp)
+            }
+            let s = path.start.edges
+            let e = path.endLocal.translated(parentTargetOrigin(i)).edges
+            world = MotionRect.fromEdges(
+                s.0 + (e.0 - s.0) * tp[0],
+                s.1 + (e.1 - s.1) * tp[1],
+                s.2 + (e.2 - s.2) * tp[0],
+                s.3 + (e.3 - s.3) * tp[1]
+            )
+        } else {
+            let origin = (parent == Self.noneIdx) ? Vec2.zero : rests[Int(parent)].origin
+            let local: MotionRect
+            if let t4 = targets4(i, Props.FRAME.id) {
+                local = MotionRect.fromEdges(t4.0, t4.1, t4.2, t4.3)
+            } else {
+                local = n.frame
+            }
+            world = local.translated(origin)
+        }
+        let p = target1(i, Props.PRESENCE.id) ?? 1.0
+        let (at0, at1) = n.presence.pair
+        var s = lerpFx(at0, at1, p)
+        if reduced {
+            s = (s.0, 1.0, 0, 0, 0, 0, 0, 0, 1.0)
+        }
+        let own: Vec2
+        if let tid = n.tracks[Int(Props.OFFSET.id.rawValue)] {
+            var buf = [Float](repeating: 0, count: 2)
+            own = store.targetsOf(tid, into: &buf) ? Vec2(buf[0], buf[1]) : n.baseOffset
+        } else {
+            own = n.baseOffset
+        }
+        return world.translated(Vec2(own.x + s.2 + s.4 * world.width, own.y + s.3 + s.5 * world.height))
+    }
+
+    private mutating func computePresented(
+        _ i: Int,
+        scale: Float,
+        reduced: Bool,
+        ownDirty: Bool,
+        parentDirty: Bool
+    ) -> Presented {
+        let parent = nodes[i].parent
+        let parentOrigin = (parent == Self.noneIdx) ? Vec2.zero : nodes[Int(parent)].origin
+        let n = nodes[i]
+
+        let world: MotionRect
+        if let path = n.path {
+            let tp: (Float, Float)
+            if let vals = values(i, Props.TRAVEL.id), vals.count >= 2 {
+                let b = vals.startIndex
+                tp = (vals[b], vals[b + 1])
+            } else {
+                tp = (1.0, 1.0)
+            }
+            let s = path.start.edges
+            let e = path.endLocal.translated(parentTargetOrigin(i)).edges
+            world = MotionRect.fromEdges(
+                s.0 + (e.0 - s.0) * tp.0,
+                s.1 + (e.1 - s.1) * tp.1,
+                s.2 + (e.2 - s.2) * tp.0,
+                s.3 + (e.3 - s.3) * tp.1
+            )
+        } else {
+            let local: MotionRect
+            if let vals = values(i, Props.FRAME.id), vals.count >= 4 {
+                let b = vals.startIndex
+                local = MotionRect.fromEdges(vals[b], vals[b + 1], vals[b + 2], vals[b + 3])
+            } else {
+                local = n.frame
+            }
+            var w = local.translated(parentOrigin)
+            if n.rideTrailing && parent != Self.noneIdx {
+                let pn = nodes[Int(parent)]
+                w = w.translated(Vec2(pn.world.width - pn.frame.width, 0))
+            }
+            world = w
+        }
+
+        let p = values(i, Props.PRESENCE.id)?.first ?? 1.0
+        let (at0, at1) = n.presence.pair
+        var s = lerpFx(at0, at1, p)
+        if reduced {
+            s = (s.0, 1.0, 0, 0, 0, 0, 0, 0, 1.0)
+        }
+
+        let ownOpacity = values(i, Props.OPACITY.id)?.first ?? n.opacity
+        let ownUniformScale = values(i, Props.UNIFORM_SCALE.id)?.first ?? 1.0
+        let ownScale2D: Vec2
+        if let sv = values(i, Props.SCALE.id), sv.count >= 2 {
+            let b = sv.startIndex
+            ownScale2D = Vec2(sv[b], sv[b + 1])
+        } else {
+            ownScale2D = n.baseScale2D
+        }
+        let ownOffset: Vec2
+        if let ov = values(i, Props.OFFSET.id), ov.count >= 2 {
+            let b = ov.startIndex
+            ownOffset = Vec2(ov[b], ov[b + 1])
+        } else {
+            ownOffset = n.baseOffset
+        }
+        let rotation = values(i, Props.ROTATE.id)?.first ?? n.baseRotate
+        let ownBlur = values(i, Props.BLUR_SCALAR.id)?.first ?? values(i, Props.BLUR.id)?.first ?? n.baseBlur
+        let radius: Corners
+        if let rv = values(i, Props.CORNERS.id), rv.count >= 4 {
+            let b = rv.startIndex
+            radius = Corners(rv[b], rv[b + 1], rv[b + 2], rv[b + 3])
+        } else {
+            radius = n.radius
+        }
+        let fill: MotionColor?
+        if n.hasFill {
+            if let fv = values(i, Props.FILL.id), fv.count >= 4 {
+                let b = fv.startIndex
+                fill = MotionColor.fromLanes(MotionLanes(fv[b], fv[b + 1], fv[b + 2], fv[b + 3]))
+            } else {
+                fill = n.fill
+            }
+        } else if let tid = n.tracks[Int(Props.FILL.id.rawValue)], let fv = store.valuesOf(tid), fv.count >= 4 {
+            let b = fv.startIndex
+            fill = MotionColor.fromLanes(MotionLanes(fv[b], fv[b + 1], fv[b + 2], fv[b + 3]))
+        } else {
+            fill = nil
+        }
+        let border: MotionColor?
+        if n.hasBorder {
+            if let bv = values(i, Props.BORDER.id), bv.count >= 4 {
+                let b = bv.startIndex
+                border = MotionColor.fromLanes(MotionLanes(bv[b], bv[b + 1], bv[b + 2], bv[b + 3]))
+            } else {
+                border = n.border
+            }
+        } else {
+            border = nil
+        }
+
+        let ownMask: Sides
+        if let mv = values(i, Props.MASK.id), mv.count >= 4 {
+            let b = mv.startIndex
+            ownMask = Sides(top: mv[b], right: mv[b + 1], bottom: mv[b + 2], left: mv[b + 3])
+        } else {
+            ownMask = .zeroValue
+        }
+
+        let offset = Vec2(
+            ownOffset.x + s.2 + s.4 * world.width,
+            ownOffset.y + s.3 + s.5 * world.height
+        )
+        let shown = world.translated(offset)
+        let sx = max(0, ownUniformScale * ownScale2D.x * s.1)
+        let sy = max(0, ownUniformScale * ownScale2D.y * s.1)
+        var blur = max(0, ownBlur + s.6)
+        if blur < 1.0 / 64.0 {
+            blur = 0.0
+        }
+
+        var mask = Mask(inset: ownMask, feather: .zeroValue)
+        var revealClip: MotionRect? = nil
+        if let rv = n.reveal {
+            let hidden = s.7.clamped(to: 0...1)
+            if hidden > 0 {
+                switch rv.edge {
+                case .leading:
+                    let d = hidden * shown.width
+                    mask.inset.right += d
+                    mask.feather.right = rv.feather * min(1.0, d / max(rv.feather, 1e-3))
+                case .top:
+                    let d = hidden * shown.height
+                    mask.inset.bottom += d
+                    mask.feather.bottom = rv.feather * min(1.0, d / max(rv.feather, 1e-3))
+                case .trailing:
+                    let d = hidden * shown.width
+                    mask.inset.left += d
+                    mask.feather.left = rv.feather * min(1.0, d / max(rv.feather, 1e-3))
+                case .bottom:
+                    let d = hidden * shown.height
+                    mask.inset.top += d
+                    mask.feather.top = rv.feather * min(1.0, d / max(rv.feather, 1e-3))
+                }
+                revealClip = snapRect(rv.clipRect(for: shown, presence: 1.0 - hidden), pixelScale: scale)
+            }
+        }
+
+        let anchor = Vec2(shown.left + n.anchor.x * shown.width, shown.top + n.anchor.y * shown.height)
+
+        var fl: UInt32 = 0
+        var ownBits: UInt32 = 0
+        for k in 0..<n.tracks.count {
+            if let tid = n.tracks[k], store.isActive(tid) {
+                ownBits |= TraceIntent.forProp(PropId(UInt16(k)))
+            }
+        }
+        if n.path != nil {
+            ownBits |= TraceIntent.position | TraceIntent.size
+        }
+        if ownBits != 0 || (ownDirty && !parentDirty) {
+            fl |= TraceFlags.animated
+        }
+        if parentDirty {
+            fl |= TraceFlags.ancestorAnimated
+            let pb = nodes[Int(parent)].last.map { ($0.flags >> 8) & 0xff | ($0.flags >> 16) & 0xff } ?? 0
+            fl |= pb << 16
+        }
+        fl |= ownBits << 8
+        if !mask.isNone { fl |= TraceFlags.clipped }
+        if blur > 0 { fl |= TraceFlags.filtered }
+
+        let inFlow = !n.presence.isExiting || !n.transition.popLayout
+        let snapped = snapRect(shown, pixelScale: scale)
+        let outPresented = Presented(
+            id: n.id,
+            parent: (parent != Self.noneIdx) ? nodes[Int(parent)].id : nil,
+            rect: snapped,
+            targetRect: n.frame.translated(parentTargetOrigin(i)),
+            revealClip: revealClip,
+            opacity: (ownOpacity * s.0).clamped(to: 0...1),
+            transform: Transform2D(tx: 0, ty: 0, sx: sx, sy: sy, rot: rotation),
+            anchor: anchor,
+            blur: blur,
+            corners: radius,
+            fill: fill,
+            border: border,
+            mask: mask,
+            phase: n.presence.public(n.generation),
+            inFlow: inFlow,
+            flags: fl,
+            draw: s.8.clamped(to: 0...1),
+            presence: p,
+            isMoving: ownBits != 0
+        )
+
+        let parentStill = parent == Self.noneIdx || rests[Int(parent)].origin == nodes[Int(parent)].origin
+        let ownStill = [Props.TRAVEL.id, Props.FRAME.id, Props.PRESENCE.id, Props.OFFSET.id].allSatisfy { pid in
+            guard let tid = nodes[i].tracks[Int(pid.rawValue)] else { return true }
+            return store.isSettled(tid)
+        }
+        let restRect = (!nodes[i].rideTrailing && parentStill && ownStill) ? shown : restOf(i, reduced: reduced)
+        nodes[i].world = world
+        nodes[i].origin = Vec2(shown.left, shown.top)
+        rests[i] = SceneRest(rect: restRect, origin: Vec2(restRect.left, restRect.top), moving: restRect != shown)
+        return outPresented
+    }
+
+    // MARK: - Slot & Intrusive Tree Management
+
+    internal mutating func allocNodeSlot(id: NodeId, parent: UInt32, spec: NodeSpec) -> Int {
+        let idx: Int
+        if let freeSlot = free.popLast() {
+            idx = Int(freeSlot)
+        } else {
+            idx = nodes.count
+            nodes.append(Node(
+                id: id, parent: parent,
+                firstChild: Self.noneIdx, lastChild: Self.noneIdx,
+                nextSibling: Self.noneIdx, prevSibling: Self.noneIdx,
+                alive: true, frame: spec.rect, opacity: spec.opacity,
+                baseScale2D: spec.scale, baseRotate: spec.rotate, baseOffset: spec.offset,
+                baseBlur: spec.blur, radius: spec.corners,
+                fill: spec.fill ?? .zeroValue, border: spec.border ?? .zeroValue,
+                hasFill: spec.fill != nil, hasBorder: spec.border != nil,
+                transition: spec.transition ?? .none,
+                compatHadTransition: spec.transition != nil,
+                presence: .present(at0: fxIdentity, at1: fxIdentity),
+                generation: 0, anchor: Vec2(0.5, 0.5), reveal: nil, path: nil,
+                rideTrailing: false,
+                tracks: Array(repeating: nil, count: Self.maxTrackSlots),
+                dirty: true, world: .zero, origin: .zero, last: nil
+            ))
+            rests.append(SceneRest())
+            index[id.rawValue] = UInt32(idx)
+            orderDirty = true
+            return idx
+        }
+        nodes[idx] = Node(
+            id: id, parent: parent,
+            firstChild: Self.noneIdx, lastChild: Self.noneIdx,
+            nextSibling: Self.noneIdx, prevSibling: Self.noneIdx,
+            alive: true, frame: spec.rect, opacity: spec.opacity,
+            baseScale2D: spec.scale, baseRotate: spec.rotate, baseOffset: spec.offset,
+            baseBlur: spec.blur, radius: spec.corners,
+            fill: spec.fill ?? .zeroValue, border: spec.border ?? .zeroValue,
+            hasFill: spec.fill != nil, hasBorder: spec.border != nil,
+            transition: spec.transition ?? .none,
+            compatHadTransition: spec.transition != nil,
+            presence: .present(at0: fxIdentity, at1: fxIdentity),
+            generation: 0, anchor: Vec2(0.5, 0.5), reveal: nil, path: nil,
+            rideTrailing: false,
+            tracks: Array(repeating: nil, count: Self.maxTrackSlots),
+            dirty: true, world: .zero, origin: .zero, last: nil
+        )
+        rests[idx] = SceneRest()
+        index[id.rawValue] = UInt32(idx)
+        orderDirty = true
+        return idx
+    }
+
+    internal mutating func linkNodeSlot(_ i: Int, parent: UInt32) {
+        let ui = UInt32(i)
+        nodes[i].parent = parent
+        if parent == Self.noneIdx {
+            let tail = rootTail
+            nodes[i].prevSibling = tail
+            nodes[i].nextSibling = Self.noneIdx
+            if tail == Self.noneIdx {
+                rootHead = ui
+            } else {
+                nodes[Int(tail)].nextSibling = ui
+            }
+            rootTail = ui
+        } else {
+            let pi = Int(parent)
+            let tail = nodes[pi].lastChild
+            nodes[i].prevSibling = tail
+            nodes[i].nextSibling = Self.noneIdx
+            if tail == Self.noneIdx {
+                nodes[pi].firstChild = ui
+            } else {
+                nodes[Int(tail)].nextSibling = ui
+            }
+            nodes[pi].lastChild = ui
+        }
+        orderDirty = true
+    }
+
+    internal mutating func unlinkNodeSlot(_ i: Int) {
+        let parent = nodes[i].parent
+        let next = nodes[i].nextSibling
+        let prev = nodes[i].prevSibling
+        if prev == Self.noneIdx {
+            if parent == Self.noneIdx { rootHead = next } else { nodes[Int(parent)].firstChild = next }
+        } else {
+            nodes[Int(prev)].nextSibling = next
+        }
+        if next == Self.noneIdx {
+            if parent == Self.noneIdx { rootTail = prev } else { nodes[Int(parent)].lastChild = prev }
+        } else {
+            nodes[Int(next)].prevSibling = prev
+        }
+        nodes[i].nextSibling = Self.noneIdx
+        nodes[i].prevSibling = Self.noneIdx
+        orderDirty = true
+    }
+
+    internal mutating func reparentSlot(_ i: Int, to newParentId: NodeId?) {
+        let newParentIdx = newParentId.flatMap { slot($0) }.map(UInt32.init) ?? Self.noneIdx
+        if nodes[i].parent == newParentIdx { return }
+        unlinkNodeSlot(i)
+        linkNodeSlot(i, parent: newParentIdx)
+        nodes[i].dirty = true
+    }
+
+    internal mutating func removeNow(_ i: Int) {
+        var c = nodes[i].firstChild
+        while c != Self.noneIdx {
+            let next = nodes[Int(c)].nextSibling
+            removeNow(Int(c))
+            c = next
+        }
+        let id = nodes[i].id
+        unlinkNodeSlot(i)
+        travelling.removeAll { Int($0) == i }
+        store.removeNode(id)
+        index.removeValue(forKey: id.rawValue)
+        nodes[i].alive = false
+        nodes[i].dirty = false
+        nodes[i].firstChild = Self.noneIdx
+        nodes[i].lastChild = Self.noneIdx
+        nodes[i].last = nil
+        free.append(UInt32(i))
+        exitedCarry.push(id)
+        orderDirty = true
+    }
+
+    internal mutating func rebuildOrder() {
+        order.removeAll(keepingCapacity: true)
+        var r = rootHead
+        while r != Self.noneIdx {
+            order.append(r)
+            r = nodes[Int(r)].nextSibling
+        }
+        var k = 0
+        while k < order.count {
+            var c = nodes[Int(order[k])].firstChild
+            while c != Self.noneIdx {
+                order.append(c)
+                c = nodes[Int(c)].nextSibling
+            }
+            k += 1
+        }
+        orderDirty = false
+    }
+
+    // MARK: - Declarative Compatibility Layer (`Runtime` & `RuneMotionTests`)
+
+    /// Commits a freshly laid-out list of world-space `NodeSpec`s at `now`.
+    public mutating func commit(_ specs: [NodeSpec], at now: Double, initialCut: Bool = false) {
+        setTime(now)
+        let cut = initialCut || !hasCommittedOnce
+        hasCommittedOnce = true
+
+        var worldOrigins: [NodeId: Vec2] = [:]
+        worldOrigins.reserveCapacity(specs.count)
+        for s in specs {
+            worldOrigins[s.id] = s.rect.origin
+        }
+
+        var seen = Set<NodeId>(minimumCapacity: specs.count)
+        for spec in specs {
+            seen.insert(spec.id)
+            let parentOrigin = spec.parent.flatMap { worldOrigins[$0] } ?? .zero
+            let localFrame = MotionRect.fromEdges(
+                spec.rect.left - parentOrigin.x,
+                spec.rect.top - parentOrigin.y,
+                spec.rect.right - parentOrigin.x,
+                spec.rect.bottom - parentOrigin.y
+            )
+            var localSpec = spec
+            localSpec.rect = localFrame
+
+            if let existingIdx = slot(spec.id) {
+                let wasScreenChange = spec.layoutAnim?.travel == .screen
+                    && (nodes[existingIdx].parent != (spec.parent.flatMap { slot($0) }.map(UInt32.init) ?? Self.noneIdx))
+                let preWorld = wasScreenChange ? exactWorld(existingIdx) : nil
+
+                if let trans = spec.transition {
+                    nodes[existingIdx].compatHadTransition = true
+                    localSpec.transition = trans
+                } else {
+                    nodes[existingIdx].compatHadTransition = false
+                    localSpec.transition = Transition.none
+                }
+
+                insert(spec.id, localSpec, cut ? .initial : .animated)
+
+                if let (curPos, curVel) = preWorld, let la = spec.layoutAnim, !store.reducedMotion && !cut {
+                    nodes[existingIdx].frame = localFrame
+                    startPath(
+                        existingIdx,
+                        start: MotionRect.fromEdges(curPos.0, curPos.1, curPos.2, curPos.3),
+                        velocity: curVel,
+                        anim: la
+                    )
+                } else if cut || spec.layoutAnim == nil {
+                    landFrame(spec.id, localFrame)
+                } else if let la = spec.layoutAnim {
+                    setFrame(spec.id, localFrame, la)
+                }
+
+                // Update visual properties smoothly or immediately
+                nodes[existingIdx].hasFill = (spec.fill != nil)
+                nodes[existingIdx].hasBorder = (spec.border != nil)
+                if !cut, let sp = spec.styleSpring {
+                    let a = Anim<Float>(curve: .spring(sp))
+                    animate(spec.id, Props.OPACITY, to: spec.opacity, anim: a)
+                    animate(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: .spring(sp)))
+                    animate(spec.id, Props.ROTATE, to: spec.rotate, anim: a)
+                    animate(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: .spring(sp)))
+                    animate(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: .spring(sp)))
+                    animate(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: .spring(sp)))
+                    if let fill = spec.fill {
+                        animate(spec.id, Props.FILL, to: fill, anim: Anim(curve: .spring(sp)))
+                    }
+                    if let border = spec.border {
+                        animate(spec.id, Props.BORDER, to: border, anim: Anim(curve: .spring(sp)))
+                    }
+                } else {
+                    set(spec.id, Props.OPACITY, spec.opacity)
+                    set(spec.id, Props.SCALE, spec.scale)
+                    set(spec.id, Props.ROTATE, spec.rotate)
+                    set(spec.id, Props.OFFSET, spec.offset)
+                    set(spec.id, Props.CORNERS, spec.corners)
+                    set(spec.id, Props.BLUR, Blur(spec.blur))
+                    if let fill = spec.fill {
+                        set(spec.id, Props.FILL, fill)
+                    }
+                    if let border = spec.border {
+                        set(spec.id, Props.BORDER, border)
+                    }
+                }
+                nodes[existingIdx].dirty = true
+            } else {
+                let mount: Mount = (cut || spec.transition == nil) ? .initial : .animated
+                insert(spec.id, localSpec, mount)
+                if let i = slot(spec.id) {
+                    nodes[i].compatHadTransition = (spec.transition != nil)
+                    if spec.scale != Vec2(1, 1) { nodes[i].baseScale2D = spec.scale }
+                    if spec.rotate != 0 { nodes[i].baseRotate = spec.rotate }
+                    if spec.offset != .zero { nodes[i].baseOffset = spec.offset }
+                    if spec.blur != 0 { nodes[i].baseBlur = spec.blur }
+                    if let border = spec.border { nodes[i].border = border; nodes[i].hasBorder = true }
+                }
+            }
+        }
+
+        // Remove omitted nodes
+        let currentNodes = Array(index.keys)
+        for rawId in currentNodes {
+            let nid = NodeId(rawId)
+            if seen.contains(nid) { continue }
+            guard let i = slot(nid), nodes[i].alive else { continue }
+            if cut || !nodes[i].compatHadTransition {
+                unmount(nid)
+            } else if !nodes[i].presence.isExiting {
+                remove(nid)
+            }
+        }
+    }
+
+    /// Evaluates the scene at `now` and populates `nodes`/`byId` snapshots alongside incremental output.
+    public mutating func frame(at now: Double) -> FrameOutput {
+        setTime(now)
+        return frameImpl(includeSnapshot: true)
     }
 
     /// Cuts all active tracks immediately to their targets and drops exiting nodes.
     public mutating func settle(at now: Double) {
-        let liveSpecs = entries.values
-            .filter { !$0.isExiting }
-            .sorted { $0.orderIndex < $1.orderIndex }
-            .map(\.spec)
-        entries.removeAll()
+        if orderDirty { rebuildOrder() }
+        var liveSpecs: [NodeSpec] = []
+        for ui in order {
+            let i = Int(ui)
+            let n = nodes[i]
+            guard n.alive, !n.presence.isExiting else { continue }
+            let parentId = (n.parent == Self.noneIdx) ? nil : nodes[Int(n.parent)].id
+            let worldRect = n.frame.translated(parentTargetOrigin(i))
+            liveSpecs.append(NodeSpec(
+                id: n.id,
+                parent: parentId,
+                rect: worldRect,
+                opacity: n.opacity,
+                scale: n.baseScale2D,
+                rotate: n.baseRotate,
+                offset: n.baseOffset,
+                corners: n.radius,
+                blur: n.baseBlur,
+                fill: n.hasFill ? n.fill : nil,
+                border: n.hasBorder ? n.border : nil,
+                transition: n.compatHadTransition ? n.transition : nil
+            ))
+        }
+        nodes.removeAll(keepingCapacity: true)
+        rests.removeAll(keepingCapacity: true)
+        free.removeAll(keepingCapacity: true)
+        index.removeAll(keepingCapacity: true)
+        rootHead = Self.noneIdx
+        rootTail = Self.noneIdx
+        order.removeAll(keepingCapacity: true)
+        orderDirty = false
+        travelling.removeAll(keepingCapacity: true)
         store.clear()
         hasCommittedOnce = false
         commit(liveSpecs, at: now, initialCut: true)
-    }
-
-    private mutating func animateEdges(id: NodeId, target: MotionRect, layout: LayoutAnim, at now: Double) {
-        let curL = store.target(id, Self.EDGE_LEFT) ?? target.left
-        let curT = store.target(id, Self.EDGE_TOP) ?? target.top
-        let curR = store.target(id, Self.EDGE_RIGHT) ?? target.right
-        let curB = store.target(id, Self.EDGE_BOTTOM) ?? target.bottom
-
-        let baseHorizontal = layout.widthScale.map { layout.spring.scaledDuration($0) } ?? layout.spring
-        let baseVertical = layout.spring
-
-        let spL: Spring
-        let spR: Spring
-        if let lead = layout.leadingSpring {
-            spL = (target.left < curL) ? lead : baseHorizontal
-            spR = (target.right > curR) ? lead : baseHorizontal
-        } else {
-            spL = baseHorizontal
-            spR = baseHorizontal
-        }
-
-        let spT: Spring
-        let spB: Spring
-        if let lead = layout.leadingSpring {
-            spT = (target.top < curT) ? lead : baseVertical
-            spB = (target.bottom > curB) ? lead : baseVertical
-        } else {
-            spT = baseVertical
-            spB = baseVertical
-        }
-
-        store.set(id, Self.EDGE_LEFT, to: target.left, anim: .spring(spL), at: now)
-        store.set(id, Self.EDGE_TOP, to: target.top, anim: .spring(spT), at: now)
-        store.set(id, Self.EDGE_RIGHT, to: target.right, anim: .spring(spR), at: now)
-        store.set(id, Self.EDGE_BOTTOM, to: target.bottom, anim: .spring(spB), at: now)
-    }
-
-    private mutating func applyStyle(spec: NodeSpec, curve: Curve, at now: Double, initialSnap: Bool = false) {
-        if initialSnap || curve == .instant {
-            store.snap(spec.id, Props.OPACITY, to: spec.opacity)
-            store.snap(spec.id, Props.SCALE, to: spec.scale)
-            store.snap(spec.id, Props.ROTATE, to: spec.rotate)
-            store.snap(spec.id, Props.OFFSET, to: spec.offset)
-            store.snap(spec.id, Props.CORNERS, to: spec.corners)
-            store.snap(spec.id, Props.BLUR, to: Blur(spec.blur))
-            if let fill = spec.fill { store.snap(spec.id, Props.FILL, to: fill) }
-            if let border = spec.border { store.snap(spec.id, Props.BORDER, to: border) }
-        } else {
-            store.set(spec.id, Props.OPACITY, to: spec.opacity, anim: Anim(curve: curve), at: now)
-            store.set(spec.id, Props.SCALE, to: spec.scale, anim: Anim(curve: curve), at: now)
-            store.set(spec.id, Props.ROTATE, to: spec.rotate, anim: Anim(curve: curve), at: now)
-            store.set(spec.id, Props.OFFSET, to: spec.offset, anim: Anim(curve: curve), at: now)
-            store.set(spec.id, Props.CORNERS, to: spec.corners, anim: Anim(curve: curve), at: now)
-            store.set(spec.id, Props.BLUR, to: Blur(spec.blur), anim: Anim(curve: curve), at: now)
-            if let fill = spec.fill {
-                store.set(spec.id, Props.FILL, to: fill, anim: Anim(curve: curve), at: now)
-            }
-            if let border = spec.border {
-                store.set(spec.id, Props.BORDER, to: border, anim: Anim(curve: curve), at: now)
-            }
-        }
     }
 }

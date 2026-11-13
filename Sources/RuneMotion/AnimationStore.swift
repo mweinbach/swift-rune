@@ -973,6 +973,29 @@ public struct AnimationStore: Sendable {
         if anyNonZero { resample(ti) }
     }
 
+    /// Translates `track`'s targets & sampled values by `delta` while preserving motion/velocity.
+    internal mutating func translateTrack(_ track: TrackId, delta: MotionLanes, count: Int) {
+        guard contains(track) else { return }
+        let ti = track.indexInt
+        let l0 = Int(tLane0[ti])
+        let n = min(count, Int(tN[ti]))
+        var anyNonZero = false
+        for i in 0..<n {
+            let d = delta[i]
+            if d == 0 { continue }
+            anyNonZero = true
+            let l = l0 + i
+            lTarget[l] += d
+            lValue[l] += d
+            var p = lPending[l]
+            while p != Self.none {
+                pending[Int(p)].target += d
+                p = pending[Int(p)].next
+            }
+        }
+        if anyNonZero { resample(ti) }
+    }
+
     // MARK: - Legacy Raw Compatibility Shims (for Scene/Choreography migration)
 
     public mutating func ensureRaw(

@@ -142,6 +142,22 @@ public struct TransitionEffect: Sendable, Hashable {
         )
     }
 
+    /// Enforces Rune Kit's tasteful motion guardrails on one direction (`insertion` or `removal`):
+    /// scale clamped to `[0.9, 1.1]` (or `[0.5, 1.1]` with `smallScale`), blur <= 4.0 (0 when travelling),
+    /// opacity clamped to `0...1`, draw clamped to `0...1`, and `removal` always fades to `0.0`.
+    public func kitRules(removal: Bool, small: Bool = false) -> TransitionEffect {
+        var out = self
+        let minScale: Float = (small || out.smallScale) ? Transition.smallScaleFloor : 0.9
+        out.zeroScale = Vec2(
+            out.zeroScale.x.clamped(to: minScale...1.1),
+            out.zeroScale.y.clamped(to: minScale...1.1)
+        )
+        out.zeroBlur = out.travels ? 0.0 : out.zeroBlur.clamped(to: 0.0...4.0)
+        out.zeroOpacity = removal ? 0.0 : out.zeroOpacity.map { $0.clamped(to: 0.0...1.0) }
+        out.draw = out.draw.clamped(to: 0.0...1.0)
+        return out
+    }
+
     /// Evaluates `(opacityMultiplier, scale, offset, blur, clip)` at `presence` (typically `[0, 1]`,
     /// though bouncy springs may slightly overshoot `1.0`).
     public func evaluate(presence: Float, size: Vec2) -> (opacity: Float, scale: Vec2, offset: Vec2, blur: Float) {
@@ -163,24 +179,47 @@ public struct TransitionEffect: Sendable, Hashable {
 
 /// Enter / exit presence transition specification (`insertion` and `removal` effects).
 public struct Transition: Sendable, Hashable {
+    /// Smallest scale permitted with `.allowSmallScale()`.
+    public static let smallScaleFloor: Float = 0.5
+
     public var insertion: TransitionEffect
     public var removal: TransitionEffect
     public var popLayout: Bool
+    public var springs: SpringPair
 
-    public init(insertion: TransitionEffect, removal: TransitionEffect, popLayout: Bool = true) {
+    public init(
+        insertion: TransitionEffect,
+        removal: TransitionEffect,
+        popLayout: Bool = true,
+        springs: SpringPair = MotionTokens.SETTLE_PAIR
+    ) {
         self.insertion = insertion
         self.removal = removal
         self.popLayout = popLayout
+        self.springs = springs
     }
 
-    public init(symmetric effect: TransitionEffect, popLayout: Bool = true) {
+    public init(
+        symmetric effect: TransitionEffect,
+        popLayout: Bool = true,
+        springs: SpringPair = MotionTokens.SETTLE_PAIR
+    ) {
         self.insertion = effect
         self.removal = effect
         self.popLayout = popLayout
+        self.springs = springs
     }
 
     public static let identity = Transition(symmetric: .identity)
-    public static let none = Transition(symmetric: .identity).spring(.none)
+    public static let none = Transition(symmetric: .identity, springs: .none)
+
+    public var isNone: Bool {
+        springs == .none && insertion.spring == nil && removal.spring == nil &&
+            insertion.showsNothing && removal.showsNothing
+    }
+
+    public var enterSpring: Spring { insertion.spring ?? springs.enter }
+    public var exitSpring: Spring { removal.spring ?? springs.exit }
 
     /// Pure opacity fade (`0 <-> 1`).
     public static let opacity = Transition(symmetric: TransitionEffect(zeroOpacity: 0))
@@ -219,7 +258,7 @@ public struct Transition: Sendable, Hashable {
     }
 
     /// Blur + subtle scale + fade replacement (`blurReplace`).
-    public static func blurReplace(radius: Float = 6.0, scale: Float = 0.96) -> Transition {
+    public static func blurReplace(radius: Float = 1.5, scale: Float = 0.96) -> Transition {
         Transition(symmetric: TransitionEffect(zeroOpacity: 0, zeroScale: Vec2(scale, scale), zeroBlur: radius))
     }
 
@@ -231,19 +270,26 @@ public struct Transition: Sendable, Hashable {
     /// Self-drawing stroke/fill reveal.
     public static let draw = Transition(symmetric: TransitionEffect(draw: 0.0))
 
-    /// Unrolls from `edge` using a layout clip rectangle.
+    /// Unrolls from `edge` using a layout clip rectangle (24 pt feather).
     public static func reveal(edge: MotionEdge) -> Transition {
-        Transition(symmetric: TransitionEffect(zeroOpacity: 0, reveal: Reveal(edge: edge)))
+        Transition(symmetric: TransitionEffect(reveal: Reveal(edge: edge, feather: 24.0)))
     }
 
     public static func asymmetric(insertion: Transition, removal: Transition) -> Transition {
-        Transition(insertion: insertion.insertion, removal: removal.removal)
+        Transition(
+            insertion: insertion.insertion,
+            removal: removal.removal,
+            popLayout: insertion.popLayout,
+            springs: insertion.springs
+        )
     }
 
     public func combined(with other: Transition) -> Transition {
         Transition(
             insertion: insertion.combined(with: other.insertion),
-            removal: removal.combined(with: other.removal)
+            removal: removal.combined(with: other.removal),
+            popLayout: popLayout,
+            springs: springs
         )
     }
 
@@ -256,8 +302,9 @@ public struct Transition: Sendable, Hashable {
 
     public func springs(_ pair: SpringPair) -> Transition {
         var copy = self
-        copy.insertion.spring = pair.enter
-        copy.removal.spring = pair.exit
+        copy.springs = pair
+        copy.insertion.spring = nil
+        copy.removal.spring = nil
         return copy
     }
 
@@ -278,25 +325,11 @@ public struct Transition: Sendable, Hashable {
     /// clamps scale to `[0.9, 1.1]` (or `[0.5, 1.1]` when `small` is true for tiny glyphs/checks),
     /// caps blur at `4.0` (and `0` when travelling), and ensures removal fades opacity to `0`.
     public func kitRules(small: Bool = false) -> Transition {
-        let maxScale: Float = 1.1
-        func clampEffect(_ e: TransitionEffect, forceFade: Bool) -> TransitionEffect {
-            var out = e
-            let minScale: Float = (small || e.smallScale) ? 0.5 : 0.9
-            out.zeroScale = Vec2(
-                e.zeroScale.x.clamped(to: minScale...maxScale),
-                e.zeroScale.y.clamped(to: minScale...maxScale)
-            )
-            out.zeroBlur = e.travels ? 0.0 : e.zeroBlur.clamped(to: 0.0...4.0)
-            out.draw = e.draw.clamped(to: 0.0...1.0)
-            if forceFade && out.zeroOpacity == nil {
-                out.zeroOpacity = 0
-            }
-            return out
-        }
-        return Transition(
-            insertion: clampEffect(insertion, forceFade: false),
-            removal: clampEffect(removal, forceFade: true),
-            popLayout: popLayout
+        Transition(
+            insertion: insertion.kitRules(removal: false, small: small),
+            removal: removal.kitRules(removal: true, small: small),
+            popLayout: popLayout,
+            springs: springs
         )
     }
 }

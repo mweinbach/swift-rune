@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Maximum lane count in `RuneMotion` is 16 (`maxLanes`); common UI types use 1..5 lanes
 /// stored inline with zero heap allocation.
-public struct MotionLanes: Sendable, Equatable {
+public struct MotionLanes: Sendable, Hashable {
     public static let maxLanes = 16
 
     public var l0: Float
@@ -225,6 +225,19 @@ public struct MotionRect: Animatable, Hashable {
 
     @inlinable
     public var xywh: [Float] { [left, top, max(0, right - left), max(0, bottom - top)] }
+
+    @inlinable
+    public var edges: (Float, Float, Float, Float) { (left, top, right, bottom) }
+
+    @inlinable
+    public static func fromEdges(_ left: Float, _ top: Float, _ right: Float, _ bottom: Float) -> MotionRect {
+        MotionRect(left: left, top: top, right: right, bottom: bottom)
+    }
+
+    @inlinable
+    public func translated(_ d: Vec2) -> MotionRect {
+        MotionRect(left: left + d.x, top: top + d.y, right: right + d.x, bottom: bottom + d.y)
+    }
 
     @inlinable
     public func offsetBy(_ d: Vec2) -> MotionRect {
