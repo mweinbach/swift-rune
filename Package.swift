@@ -99,6 +99,11 @@ let package = Package(
         .executable(name: "rune-zoom-sweep", targets: ["RuneZoomSweep"]),
         .executable(name: "rune-text-gpu", targets: ["RuneTextGpu"]),
         .executable(name: "rune-tree-swap", targets: ["RuneTreeSwap"]),
+        .executable(name: "rune-long-note", targets: ["RuneLongNote"]),
+        .executable(name: "rune-scroll-commits", targets: ["RuneScrollCommits"]),
+        .executable(name: "rune-kit-layout-text-cost", targets: ["RuneKitLayoutTextCost"]),
+        .executable(name: "rune-kit-markdown-resize", targets: ["RuneKitMarkdownResize"]),
+        .executable(name: "rune-kit-scroll-bench", targets: ["RuneKitScrollBench"]),
     ],
     targets: [
         .target(
@@ -562,6 +567,31 @@ let package = Package(
             dependencies: ["Rune"],
             path: "Sources/Examples/RuneTreeSwap"
         ),
+        .executableTarget(
+            name: "RuneLongNote",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneLongNote"
+        ),
+        .executableTarget(
+            name: "RuneScrollCommits",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneScrollCommits"
+        ),
+        .executableTarget(
+            name: "RuneKitLayoutTextCost",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitLayoutTextCost"
+        ),
+        .executableTarget(
+            name: "RuneKitMarkdownResize",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitMarkdownResize"
+        ),
+        .executableTarget(
+            name: "RuneKitScrollBench",
+            dependencies: ["Rune", "RuneKit"],
+            path: "Sources/Examples/RuneKitScrollBench"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -722,6 +752,11 @@ let package = Package(
                 "RuneZoomSweep",
                 "RuneTextGpu",
                 "RuneTreeSwap",
+                "RuneLongNote",
+                "RuneScrollCommits",
+                "RuneKitLayoutTextCost",
+                "RuneKitMarkdownResize",
+                "RuneKitScrollBench",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

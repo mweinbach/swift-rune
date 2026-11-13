@@ -4,11 +4,17 @@ import Testing
 @testable import RuneCachePanZoom
 @testable import RuneGpuSprings
 @testable import RuneInteractionCost
+@testable import RuneKit
+@testable import RuneKitLayoutTextCost
+@testable import RuneKitMarkdownResize
+@testable import RuneKitScrollBench
+@testable import RuneLongNote
 @testable import RuneLuauBench
 @testable import RuneMotion
 @testable import RuneMotionBench
 @testable import RunePopupMenu
 @testable import RuneRewindCost
+@testable import RuneScrollCommits
 @testable import RuneTaffyAdapterBench
 @testable import RuneTextGpu
 @testable import RuneTreeSwap
@@ -207,5 +213,69 @@ struct ContentExamplesParityTests {
             #expect(r.rowsBuilt > 0)
             #expect(r.rowsSettled > 0)
         }
+    }
+
+    @Test("rune-long-note runs editing, IME commit, undo/paste, scroll, and caret tracking")
+    func longNoteSmoke() throws {
+        let report = try RuneLongNoteApp.runReport(sizes: [4], samples: 3, blocks: false)
+        #expect(report.noteBytes >= 4096)
+        #expect(report.noteLines > 20)
+        #expect(report.undoDepth == 30)
+        #expect(report.scrollFrames > 1)
+        #expect(report.caretHiddenCount == 0)
+        #expect(report.output.contains("case=type_mid"))
+        #expect(report.output.contains("case=paste_2k"))
+        #expect(report.output.contains("case=undo"))
+        #expect(report.output.contains("case=scroll"))
+        #expect(report.output.contains("case=down"))
+    }
+
+    @Test("rune-scroll-commits measures pure scroll commits with layout reads and video")
+    func scrollCommitsSmoke() {
+        let report = RuneScrollCommitsApp.runReport(samples: 1, frames: 20)
+        #expect(report.results.count == 2)
+        #expect(report.output.contains("scenario=layout metric=commits"))
+        #expect(report.output.contains("scenario=video metric=commits"))
+        for r in report.results {
+            #expect(r.frames == 20)
+            #expect(r.cpuMeanMs >= 0 && r.cpuMeanMs.isFinite)
+        }
+    }
+
+    @Test("rune-kit-layout-text-cost measures Markdown + Kit cold open, resize, and scroll")
+    func kitLayoutTextCostSmoke() {
+        let report = RuneKitLayoutTextCostApp.runReport(bytes: 6000, resizeSteps: 4, scrollFrames: 5)
+        #expect(report.cases.count == 3)
+        #expect(report.cases.allSatisfy { $0.instances > 0 && $0.glyphs > 0 && $0.wallMs >= 0 })
+        #expect(report.output.contains("CASE name=open_cold"))
+        #expect(report.output.contains("CASE name=resize_sweep"))
+        #expect(report.output.contains("CASE name=scroll_sweep"))
+    }
+
+    @Test("rune-kit-markdown-resize measures open, live resize, scroll, highlights, and font switch")
+    func kitMarkdownResizeSmoke() {
+        let report = RuneKitMarkdownResizeApp.runReport(sizes: [4], step: 60, useMemo: false, highlightCount: 20, testFonts: true)
+        #expect(report.metrics.count == 5)
+        #expect(report.metrics.allSatisfy { $0.glyphs > 0 && $0.instances > 0 })
+        #expect(report.output.contains("case=open"))
+        #expect(report.output.contains("case=resize"))
+        #expect(report.output.contains("case=scroll"))
+        #expect(report.output.contains("case=marks"))
+        #expect(report.output.contains("case=fonts"))
+    }
+
+    @Test("rune-kit-scroll-bench exercises list, markdown, sticky, growth, prose, and card workloads")
+    func kitScrollBenchSmoke() {
+        let report = RuneKitScrollBenchApp.runAll(rows: 40, frames: 6)
+        #expect(report.results.count == 6)
+        for r in report.results {
+            #expect(r.frames == 6)
+            #expect(r.instances > 0)
+            #expect(r.medianCpuMs >= 0 && r.medianCpuMs.isFinite)
+        }
+        #expect(report.output.contains("WORKLOAD name=list"))
+        #expect(report.output.contains("WORKLOAD name=sticky"))
+        #expect(report.output.contains("WORKLOAD name=growth"))
+        #expect(report.output.contains("WORKLOAD name=card"))
     }
 }
