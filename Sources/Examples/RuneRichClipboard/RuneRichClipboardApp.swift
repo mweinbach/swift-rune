@@ -1,13 +1,17 @@
 import Foundation
 import Rune
 
-struct RichClipboardState {
-    var field = TextEdit()
-    var last: (String, ClipboardContent)? = nil
-    var clipboard = Clipboard.shared
+public struct RichClipboardState: Sendable {
+    public var field = TextEdit()
+    public var last: (String, ClipboardContent)? = nil
+    public var clipboard: Clipboard
+
+    public init(clipboard: Clipboard = Clipboard.shared) {
+        self.clipboard = clipboard
+    }
 }
 
-func sampleRichPayload() -> RichClipboardPayload {
+public func sampleRichPayload() -> RichClipboardPayload {
     RichClipboardPayload(
         text: "Rune copies bold and italic text.",
         html: "Rune copies <b>bold</b> and <i>italic</i> text.",
@@ -15,7 +19,7 @@ func sampleRichPayload() -> RichClipboardPayload {
     )
 }
 
-func recordSeen(_ s: inout RichClipboardState, how: String, content: ClipboardContent) {
+public func recordSeen(_ s: inout RichClipboardState, how: String, content: ClipboardContent) {
     let htmlLen = content.html.map { "\($0.utf8.count)" } ?? "nil"
     let rtfLen = content.rtf.map { "\($0.utf8.count)" } ?? "nil"
     print("\(how): text \(content.text.utf8.count) bytes, html \(htmlLen) bytes, rtf \(rtfLen) bytes")
@@ -25,7 +29,7 @@ func recordSeen(_ s: inout RichClipboardState, how: String, content: ClipboardCo
     s.last = (how, content)
 }
 
-func richSummary(_ last: (String, ClipboardContent)?) -> (String, String) {
+public func richSummary(_ last: (String, ClipboardContent)?) -> (String, String) {
     guard let (how, content) = last else {
         return ("Paste formatted text into the field", "")
     }
@@ -55,7 +59,7 @@ func richButton(
         .onClick(action)
 }
 
-func richClipboardView(_ s: RichClipboardState, _ cx: inout Cx<RichClipboardState>) -> El<RichClipboardState> {
+public func richClipboardView(_ s: RichClipboardState, _ cx: inout Cx<RichClipboardState>) -> El<RichClipboardState> {
     let t = Tok.theme(dark: true)
     let (head, preview) = richSummary(s.last)
 
