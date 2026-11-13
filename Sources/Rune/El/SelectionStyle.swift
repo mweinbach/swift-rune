@@ -179,4 +179,19 @@ internal extension El {
         }
         return box.handler(selection)
     }
+
+    static func liftSelectionChangeBox<Parent>(
+        to _: Parent.Type = Parent.self,
+        from extra: Any?,
+        isValid: @escaping () -> Bool,
+        get: @escaping () -> State?,
+        set: @escaping (State) -> Void
+    ) -> Any? {
+        guard let box = extra as? SelectionChangeBox<State> else { return nil }
+        return SelectionChangeBox<Parent> { _, change, tx in
+            guard isValid(), var child = get() else { return }
+            box.handler(&child, change, &tx)
+            set(child)
+        }
+    }
 }

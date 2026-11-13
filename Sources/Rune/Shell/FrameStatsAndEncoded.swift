@@ -508,7 +508,7 @@ public final class FrameClock {
     public func presented(done: Double) -> Double {
         switch phase {
         case .stepped(let last, _, _):
-            let late = max(0.0, done - last)
+            let late = min(Self.maxGap, max(0.0, done - last))
             phase = .presented(last: last)
             return late
         case .idle(let last), .presented(let last):

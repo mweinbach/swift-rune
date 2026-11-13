@@ -26,6 +26,7 @@ public struct AppSpec<State> {
     public var makeState: () -> State
     /// Named scene presets invokable via `--scene <name>` for instant visual QA snapshots.
     public var scenes: [String: (inout State, inout Tx) -> Void]
+    public var sceneOrder: [String] = []
     public var fonts: [Data]
     public var families: [String]
     public var setup: ((Waker) -> Void)?
@@ -59,6 +60,7 @@ public struct AppSpec<State> {
         self.srgbBlend = srgbBlend
         self.makeState = state
         self.scenes = scenes
+        self.sceneOrder = scenes.keys.sorted()
         self.fonts = fonts
         self.families = families
         self.setup = setup
@@ -72,12 +74,18 @@ public struct AppSpec<State> {
     public func scene(_ name: String, _ apply: @escaping (inout State) -> Void) -> Self {
         var copy = self
         copy.scenes[name] = { s, _ in apply(&s) }
+        if !copy.sceneOrder.contains(name) {
+            copy.sceneOrder.append(name)
+        }
         return copy
     }
 
     public func scene(_ name: String, _ apply: @escaping (inout State, inout Tx) -> Void) -> Self {
         var copy = self
         copy.scenes[name] = apply
+        if !copy.sceneOrder.contains(name) {
+            copy.sceneOrder.append(name)
+        }
         return copy
     }
 
@@ -855,7 +863,8 @@ public enum HeadlessRunner {
                 runtime.fitHeight = app.isFitContentHeight
                 runtime.windowResting = true
                 if let pg = app.playgroundHost {
-                    pg.bindScenes(app.intoSpec().scenes, view: app.view)
+                    let spec = app.intoSpec()
+                    pg.bindScenes(spec.scenes, sceneOrder: spec.sceneOrder, view: app.view)
                     runtime.playgroundHost = pg
                 }
             }
@@ -1124,31 +1133,24 @@ public enum HeadlessRunner {
         }()
 
         if args.hasPlayground {
-            guard let pg = playgroundHost ?? runtime.playgroundHost else {
+            let pg = playgroundHost ?? runtime.playgroundHost
+            if pg == nil && spec.scenes.isEmpty {
                 throw ToolingError.playgroundNotConfigured
             }
-            try pg.openAt(story: args.playgroundName, variant: args.playgroundVariant)
-            if let story = pg.currentStory {
-                if let makeState = story.makeState {
-                    runtime.state = makeState()
-                } else if story.isScene, let applyScene = spec.scenes[story.path] {
-                    var pgTx = Tx()
-                    applyScene(&runtime.state, &pgTx)
-                    runtime.applyTx(pgTx, at: 0.0, markDirtyIfNotLiveOnly: false)
-                }
-                if let fresh = pg.freshTransform {
-                    runtime.state = fresh(runtime.state)
-                }
-                if let variant = pg.currentVariant {
-                    variant.apply(&runtime.state)
-                }
-                runtime.view = { state, cx in
-                    let stageSize = story.stageConfig.size ?? vp
-                    let inner = story.view(state, pg.controls, &cx)
-                    return el().key("playground-stage").w(stageSize.x).h(stageSize.y).child(inner)
-                }
-                runtime.markNeedsCommit()
+            if let pg, pg.stories.isEmpty && pg.liveSpec.orderedPages.isEmpty && spec.scenes.isEmpty {
+                throw ToolingError.playgroundNotConfigured
             }
+            _ = try PlaygroundAttach.attach(
+                runtime: runtime,
+                host: pg,
+                scenes: spec.scenes,
+                sceneOrder: spec.sceneOrder,
+                makeState: spec.makeState,
+                open: args.playgroundName,
+                openRequested: true,
+                variant: args.playgroundVariant,
+                windowed: false
+            )
         }
 
         let dumpDir = args.outDir ?? args.framesDir
@@ -1422,9 +1424,17 @@ public enum HeadlessRunner {
         var finalFrame = applyChromeOverlay(try renderAndReport(lastCaptured, at: runtime.currentTime))
         if !args.cropRects.isEmpty {
             finalFrame = tileCrops(finalFrame, cropRectsPt: args.cropRects, scale: args.pixelScale)
-        } else if let cropKey = args.cropKey, let elInfo = runtime.element(byKey: cropKey) {
-            finalFrame = cropFrame(finalFrame, rectPt: elInfo.rect, scale: args.pixelScale)
-        } else if args.hasPlayground && !args.wholeWindow, let stageEl = runtime.elements().first(where: { $0.key == "playground-stage" }) {
+        } else if let cropKey = args.cropKey {
+            if args.hasPlayground && !args.wholeWindow {
+                let all = runtime.elements()
+                if let idx = Runtime<State>.stageElementIndex(in: all, key: cropKey) {
+                    finalFrame = cropFrame(finalFrame, rectPt: all[idx].rect, scale: args.pixelScale)
+                }
+            } else if let elInfo = runtime.element(byKey: cropKey) {
+                finalFrame = cropFrame(finalFrame, rectPt: elInfo.rect, scale: args.pixelScale)
+            }
+        } else if args.hasPlayground && !args.wholeWindow,
+                  let stageEl = runtime.elements().first(where: { Runtime<State>.isPlaygroundStageKey($0.key) }) {
             finalFrame = cropFrame(finalFrame, rectPt: stageEl.rect, scale: args.pixelScale)
         }
         let chromeOverlaps: [String] = chromeLights.map {

@@ -126,7 +126,7 @@ public protocol Compositor<State>: AnyObject {
 public extension Compositor {
     var features: CompositorFeatures { [] }
     var isAnimating: Bool { false }
-    var drawsOwnContent: Bool { false }
+    var drawsOwnContent: Bool { true }
     func summary() -> String? { nil }
 }
 

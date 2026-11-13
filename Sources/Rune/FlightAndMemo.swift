@@ -10,11 +10,23 @@ public enum FlightSelector {
         guard let key else { return false }
         if selector == key { return true }
         let suffix = "/" + key
-        guard selector.hasSuffix(suffix), path.hasSuffix(suffix) else { return false }
+        let atSuffix = "/@" + key
+        guard selector.hasSuffix(suffix) else { return false }
+        let above: Substring
+        if path.hasSuffix(atSuffix) {
+            above = path.dropLast(atSuffix.count)
+        } else if path.hasSuffix(suffix) {
+            above = path.dropLast(suffix.count)
+        } else {
+            return false
+        }
         let scope = selector.dropLast(suffix.count)
-        let above = path.dropLast(suffix.count)
         let scopeParts = scope.split(separator: "/").reversed()
-        let pathKeyed = above.split(separator: "/").filter { !$0.hasPrefix("#") }.reversed()
+        let pathKeyed = above.split(separator: "/").compactMap { seg -> Substring? in
+            if seg.hasPrefix("@") { return seg.dropFirst() }
+            if seg.hasPrefix("#") || seg.allSatisfy(\.isNumber) { return nil }
+            return seg
+        }.reversed()
         var pathIter = pathKeyed.makeIterator()
         for seg in scopeParts {
             guard pathIter.next() == seg else { return false }
@@ -278,7 +290,7 @@ public final class MemoCache: @unchecked Sendable {
         deps: Deps,
         build: () -> El<State>
     ) -> (element: El<State>, hit: Bool) {
-        getOrBuildMemo(rawId: id, deps: deps, ignoreDuplicateGuard: true, build: build)
+        getOrBuildMemo(rawId: id, deps: deps, ignoreDuplicateGuard: false, build: build)
     }
 
     func getOrBuildMemo<State, Deps: Equatable>(
@@ -363,6 +375,14 @@ public final class MemoCache: @unchecked Sendable {
         let scopedId = "region:\(scope?.scopedId(for: rawId) ?? rawId)"
         let env = scope?.envHash ?? MemoScope.activeEnvHash
         let curGeometry = scope?.geometry ?? [:]
+
+        // Same-pass duplicate region IDs bypass caching (`memo.rs:638,663-664`).
+        if let scope, !scope.isVerificationDryRun {
+            if !scope.seenScopedIds.insert(scopedId).inserted {
+                let built = build()
+                return (built, false)
+            }
+        }
 
         lock.lock()
         if var existing = entries[scopedId],

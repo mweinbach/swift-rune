@@ -149,13 +149,7 @@ public struct PlaygroundStory<State> {
     }
 
     public static func slug(for path: String) -> String {
-        path.lowercased()
-            .map { $0.isLetter || $0.isNumber ? $0 : "-" }
-            .reduce(into: "") { acc, ch in
-                if ch == "-" && acc.last == "-" { return }
-                acc.append(ch)
-            }
-            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        PlaygroundSlug.slug(for: path)
     }
 }
 
@@ -227,6 +221,12 @@ public final class PlaygroundHost<State> {
     private var pendingVariants: [(story: String, variant: PlaygroundVariant<State>)] = []
     private var pendingSides: [(story: String, view: (State, inout Cx<State>) -> El<State>)] = []
     private var pendingStages: [(story: String, config: PlaygroundStageConfig)] = []
+    internal var liveSpec = PlaygroundHostLiveSpec<State>()
+
+    internal var pendingTriggersSnapshot: [(story: String, trigger: PlaygroundTrigger<State>)] { pendingTriggers }
+    internal var pendingVariantsSnapshot: [(story: String, variant: PlaygroundVariant<State>)] { pendingVariants }
+    internal var pendingSidesSnapshot: [(story: String, view: (State, inout Cx<State>) -> El<State>)] { pendingSides }
+    internal var pendingStagesSnapshot: [(story: String, config: PlaygroundStageConfig)] { pendingStages }
 
     public init() {}
 
@@ -235,6 +235,20 @@ public final class PlaygroundHost<State> {
         var resolved = story
         applyPendingAttachments(to: &resolved)
         stories.append(resolved)
+        if !resolved.isScene && !liveSpec.orderedPages.contains(where: { $0.path == resolved.path }) {
+            let layout: PlaygroundStageLayout? = (resolved.stageConfig.size != nil || !resolved.stageConfig.centered)
+                ? (resolved.stageConfig.centered ? .center : .fill)
+                : nil
+            liveSpec.orderedPages.append(
+                PlaygroundPageItem(
+                    path: resolved.path,
+                    kind: .legacy(resolved),
+                    stageLayout: layout,
+                    stageFrame: resolved.stageConfig.size,
+                    isOverlay: false
+                )
+            )
+        }
         if selectedStoryPath == nil {
             selectedStoryPath = resolved.path
         }
@@ -246,7 +260,16 @@ public final class PlaygroundHost<State> {
         _ path: String,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) -> Self {
-        story(PlaygroundStory(path: path) { state, _, cx in
+        liveSpec.orderedPages.append(
+            PlaygroundPageItem(
+                path: path,
+                kind: .live(view),
+                stageLayout: nil,
+                stageFrame: nil,
+                isOverlay: false
+            )
+        )
+        return story(PlaygroundStory(path: path) { state, _, cx in
             view(state, &cx)
         })
     }
@@ -396,10 +419,19 @@ public final class PlaygroundHost<State> {
     /// Binds `AppSpec.scenes` into the story list ahead of pages, honoring `scenesFilter` (`playground.rs`).
     public func bindScenes(
         _ scenes: [String: (inout State, inout Tx) -> Void],
+        sceneOrder: [String] = [],
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
         var addedScenes: [PlaygroundStory<State>] = []
-        for name in scenes.keys.sorted() {
+        var orderedNames: [String] = []
+        orderedNames.reserveCapacity(scenes.count)
+        for name in sceneOrder where scenes[name] != nil && !orderedNames.contains(name) {
+            orderedNames.append(name)
+        }
+        for name in scenes.keys.sorted() where !orderedNames.contains(name) {
+            orderedNames.append(name)
+        }
+        for name in orderedNames {
             if let filter = scenesFilter, !filter(name) { continue }
             if stories.contains(where: { $0.path == name }) { continue }
             let applyScene = scenes[name]!

@@ -101,15 +101,9 @@ public enum MemoRead: Sendable, Equatable {
         case .windowLayoutWith(let key, _, let matchesRect):
             return matchesRect(geometry[key]?.windowRect)
         case .layoutSize(let key, let prev):
-            let cur = geometry[key]?.rect.size
-            switch (prev, cur) {
-            case (.none, .none): return true
-            case (.some(let a), .some(let b)):
-                return abs(a.x - b.x) <= 0.01 && abs(a.y - b.y) <= 0.01
-            default: return false
-            }
+            return prev == geometry[key]?.rect.size
         case .caret(let key, let prev):
-            return Self.rectsMatch(prev, geometry[key]?.caretRect, tolerance: 0.01)
+            return prev == geometry[key]?.caretRect
         case .tracked(let cellId, let recordedVer):
             return MemoTrackedBridge.version(for: cellId) == recordedVer
         }
@@ -126,6 +120,19 @@ public enum MemoRead: Sendable, Equatable {
                 && abs(ra.bottom - rb.bottom) <= tolerance
         default:
             return false
+        }
+    }
+
+    internal func sameTarget(as other: MemoRead) -> Bool {
+        switch (self, other) {
+        case let (.layout(k1, _), .layout(k2, _)): return k1 == k2
+        case let (.layoutWith(k1, _, _), .layoutWith(k2, _, _)): return k1 == k2
+        case let (.windowLayout(k1, _), .windowLayout(k2, _)): return k1 == k2
+        case let (.windowLayoutWith(k1, _, _), .windowLayoutWith(k2, _, _)): return k1 == k2
+        case let (.layoutSize(k1, _), .layoutSize(k2, _)): return k1 == k2
+        case let (.caret(k1, _), .caret(k2, _)): return k1 == k2
+        case let (.tracked(c1, _), .tracked(c2, _)): return c1 == c2
+        default: return false
         }
     }
 }
@@ -314,15 +321,43 @@ public enum MemoScope {
 
     static func readLayoutWith<T: Equatable & Sendable>(
         _ key: String,
-        _ transform: @escaping @Sendable ([Float]) -> T
+        _ transform: @escaping @Sendable ([Float]) -> T,
+        into reads: inout [MemoRead]
     ) -> T? {
         let rect = current?.geometry[key]?.rect
         let initial = rect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
         let tag = MemoReadTag.next()
-        current?.record(.layoutWith(key: key, tag: tag) { nextRect in
+        let entry: MemoRead = .layoutWith(key: key, tag: tag) { nextRect in
             let next = nextRect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
             return next == initial
-        })
+        }
+        current?.record(entry)
+        reads.append(entry)
+        return initial
+    }
+
+    static func readLayoutWith<T: Equatable & Sendable>(
+        _ key: String,
+        _ transform: @escaping @Sendable ([Float]) -> T
+    ) -> T? {
+        var ignored: [MemoRead] = []
+        return readLayoutWith(key, transform, into: &ignored)
+    }
+
+    static func readWindowLayoutWith<T: Equatable & Sendable>(
+        _ key: String,
+        _ transform: @escaping @Sendable ([Float]) -> T,
+        into reads: inout [MemoRead]
+    ) -> T? {
+        let rect = current?.geometry[key]?.windowRect
+        let initial = rect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
+        let tag = MemoReadTag.next()
+        let entry: MemoRead = .windowLayoutWith(key: key, tag: tag) { nextRect in
+            let next = nextRect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
+            return next == initial
+        }
+        current?.record(entry)
+        reads.append(entry)
         return initial
     }
 
@@ -330,14 +365,8 @@ public enum MemoScope {
         _ key: String,
         _ transform: @escaping @Sendable ([Float]) -> T
     ) -> T? {
-        let rect = current?.geometry[key]?.windowRect
-        let initial = rect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
-        let tag = MemoReadTag.next()
-        current?.record(.windowLayoutWith(key: key, tag: tag) { nextRect in
-            let next = nextRect.map { transform([$0.left, $0.top, $0.width, $0.height]) }
-            return next == initial
-        })
-        return initial
+        var ignored: [MemoRead] = []
+        return readWindowLayoutWith(key, transform, into: &ignored)
     }
 
     static func readLayoutSize(_ key: String) -> [Float]? {
@@ -411,7 +440,7 @@ extension Cx {
         _ key: String,
         _ transform: @escaping @Sendable ([Float]) -> T
     ) -> T? {
-        MemoScope.readLayoutWith(key, transform)
+        MemoScope.readLayoutWith(key, transform, into: &envState.reads.layoutReads)
     }
 
     /// Last committed `[width, height]` of `.key(key)`, invalidating memos only on size changes.
@@ -433,7 +462,7 @@ extension Cx {
         _ key: String,
         _ transform: @escaping @Sendable ([Float]) -> T
     ) -> T? {
-        MemoScope.readWindowLayoutWith(key, transform)
+        MemoScope.readWindowLayoutWith(key, transform, into: &envState.reads.layoutReads)
     }
 
     /// Last rendered `[x, y, width, height]` caret rect of text field `.key(key)`.

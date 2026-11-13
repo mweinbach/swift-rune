@@ -98,6 +98,21 @@ public enum MacOSApp {
         runtime.fitHeight = appBuilder.isFitContentHeight
         runtime.setSystemContrast(SystemPreferences.current().contrast)
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
+        if let pg = appBuilder.playgroundHost {
+            runtime.playgroundHost = pg
+        }
+        _ = try PlaygroundAttach.attach(
+            runtime: runtime,
+            host: appBuilder.playgroundHost,
+            scenes: appBuilder.scenes,
+            sceneOrder: appBuilder.sceneOrder,
+            makeState: appBuilder.makeState,
+            appId: appBuilder.title,
+            open: parsed.playgroundName,
+            openRequested: parsed.hasPlayground,
+            variant: parsed.playgroundVariant,
+            windowed: true
+        )
 
         let renderer = try MetalRenderer()
         let reports = (appBuilder.onFrameEncodedHook != nil || appBuilder.onFrameDrawnHook != nil)

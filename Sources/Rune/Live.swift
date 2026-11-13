@@ -35,8 +35,11 @@ extension Vec2: LiveValue {
 
 extension Color: LiveValue {
     public func encodeLiveLanes() -> MotionLanes? {
-        guard !r.isNaN && !g.isNaN && !b.isNaN && !a.isNaN else { return nil }
-        return MotionLanes(r, g, b, a)
+        guard let lr = r.encodeLiveLanes(),
+              let lg = g.encodeLiveLanes(),
+              let lb = b.encodeLiveLanes(),
+              let la = a.encodeLiveLanes() else { return nil }
+        return MotionLanes(lr.l0, lg.l0, lb.l0, la.l0)
     }
 
     public static func decodeLiveLanes(_ lanes: MotionLanes) -> Color {
@@ -46,12 +49,108 @@ extension Color: LiveValue {
 
 extension MotionRect: LiveValue {
     public func encodeLiveLanes() -> MotionLanes? {
-        guard !left.isNaN && !top.isNaN && !right.isNaN && !bottom.isNaN else { return nil }
-        return toLanes()
+        guard let ll = left.encodeLiveLanes(),
+              let lt = top.encodeLiveLanes(),
+              let lr = right.encodeLiveLanes(),
+              let lb = bottom.encodeLiveLanes() else { return nil }
+        return MotionLanes(ll.l0, lt.l0, lr.l0, lb.l0)
     }
 
     public static func decodeLiveLanes(_ lanes: MotionLanes) -> MotionRect {
         fromLanes(lanes)
+    }
+}
+
+/// Coalescing visibility-aware wake handle for `Live` subscriptions (`rune::live::Wake`).
+public final class LiveWake: @unchecked Sendable {
+    private static let pendingFlag: UInt8 = 1
+    private static let hiddenFlag: UInt8 = 2
+    private let lock = NSLock()
+    private var flags: UInt8 = 0
+    private let callback: @Sendable () -> Void
+
+    public init(_ callback: @escaping @Sendable () -> Void) {
+        self.callback = callback
+    }
+
+    public func visible(_ visible: Bool) {
+        lock.lock()
+        let old = flags
+        if visible {
+            flags &= ~Self.hiddenFlag
+        } else {
+            flags |= Self.hiddenFlag
+        }
+        let shouldWake = visible && old == (Self.hiddenFlag | Self.pendingFlag)
+        lock.unlock()
+        if shouldWake {
+            callback()
+        }
+    }
+
+    public func notify() {
+        lock.lock()
+        let old = flags
+        flags |= Self.pendingFlag
+        let isHidden = (flags & Self.hiddenFlag) != 0
+        lock.unlock()
+        if old == 0 && !isHidden {
+            callback()
+        }
+    }
+
+    @discardableResult
+    public func takeVisible() -> Bool {
+        lock.lock()
+        let had = flags != 0
+        flags = 0
+        lock.unlock()
+        return had
+    }
+
+    public var isVisiblePending: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return flags == Self.pendingFlag
+    }
+}
+
+/// Subscription handle linking a `Live` source to a `LiveWake` (`rune::live::Subscription`).
+public final class LiveSubscription: @unchecked Sendable {
+    public let sourceId: UInt64
+    private let lock = NSLock()
+    private var activeFlag: Bool = true
+    weak var wake: LiveWake?
+
+    init(sourceId: UInt64, wake: LiveWake) {
+        self.sourceId = sourceId
+        self.wake = wake
+    }
+
+    public var isActive: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return activeFlag
+        }
+        set {
+            lock.lock()
+            activeFlag = newValue
+            lock.unlock()
+        }
+    }
+}
+
+private enum LiveSourceIdCounter {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var nextId: UInt64 = 1
+
+    static func next() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = nextId
+        nextId &+= 1
+        return out
     }
 }
 
@@ -62,11 +161,13 @@ enum LiveOperation: Sendable, Equatable {
 }
 
 final class LiveSource: @unchecked Sendable {
+    let id: UInt64 = LiveSourceIdCounter.next()
     private let lock = NSLock()
     private(set) var sequence: UInt64 = 0
     private(set) var lanes: MotionLanes
     private(set) var lastOp: LiveOperation
     private var wakers: [WeakWaker] = []
+    private var subscriptions: [LiveSubscription] = []
     let linearSpec: LinearTweenSpec?
 
     struct WeakWaker {
@@ -80,7 +181,7 @@ final class LiveSource: @unchecked Sendable {
 
     init(initial: MotionLanes, linearSpec: LinearTweenSpec? = nil) {
         self.lanes = initial
-        self.lastOp = .snap(initial)
+        self.lastOp = .set(initial)
         self.linearSpec = linearSpec
     }
 
@@ -92,6 +193,7 @@ final class LiveSource: @unchecked Sendable {
 
     func publish(_ newLanes: MotionLanes, snap: Bool) -> Bool {
         var toWake: [Waker] = []
+        var wakesToNotify: [LiveWake] = []
         lock.lock()
         let sameKind: Bool
         switch (lastOp, snap) {
@@ -109,21 +211,34 @@ final class LiveSource: @unchecked Sendable {
         lastOp = snap ? .snap(newLanes) : .set(newLanes)
         wakers.removeAll { $0.ref == nil }
         toWake = wakers.compactMap(\.ref)
+        subscriptions.removeAll { $0.wake == nil }
+        wakesToNotify = subscriptions.compactMap { sub in
+            guard sub.isActive, let w = sub.wake else { return nil }
+            return w
+        }
         lock.unlock()
         for w in toWake { w.wake() }
+        for w in wakesToNotify { w.notify() }
         return true
     }
 
     func publishPulse(active: MotionLanes, rest: MotionLanes, holdSeconds: Double) -> Bool {
         var toWake: [Waker] = []
+        var wakesToNotify: [LiveWake] = []
         lock.lock()
         lanes = rest
         sequence &+= 1
         lastOp = .pulse(active: active, rest: rest, holdSeconds: holdSeconds)
         wakers.removeAll { $0.ref == nil }
         toWake = wakers.compactMap(\.ref)
+        subscriptions.removeAll { $0.wake == nil }
+        wakesToNotify = subscriptions.compactMap { sub in
+            guard sub.isActive, let w = sub.wake else { return nil }
+            return w
+        }
         lock.unlock()
         for w in toWake { w.wake() }
+        for w in wakesToNotify { w.notify() }
         return true
     }
 
@@ -134,6 +249,19 @@ final class LiveSource: @unchecked Sendable {
             wakers.append(WeakWaker(ref: waker))
         }
         lock.unlock()
+    }
+
+    func subscribe(_ wake: LiveWake) -> LiveSubscription {
+        lock.lock()
+        subscriptions.removeAll { $0.wake == nil }
+        if let existing = subscriptions.first(where: { $0.wake === wake }) {
+            lock.unlock()
+            return existing
+        }
+        let sub = LiveSubscription(sourceId: id, wake: wake)
+        subscriptions.append(sub)
+        lock.unlock()
+        return sub
     }
 }
 
@@ -186,6 +314,10 @@ public struct Live<T: LiveValue>: Sendable {
     public var binding: Binding<T> {
         Binding(live: self, spring: nil, restSpring: nil)
     }
+
+    public func subscribe(_ wake: LiveWake) -> LiveSubscription {
+        source.subscribe(wake)
+    }
 }
 
 /// Property binding carrying a `Live<T>` source and optional smoothing spring(s).
@@ -228,10 +360,12 @@ public struct Tween<T: LiveValue>: Sendable {
 
 /// Latest-wins text handle for fixed-layout labels (`rune::LiveText`).
 public final class LiveText: @unchecked Sendable {
+    private let id: UInt64 = LiveSourceIdCounter.next()
     private let lock = NSLock()
     private var value: String
     private(set) var sequence: UInt64 = 0
     private var wakers: [LiveSource.WeakWaker] = []
+    private var subscriptions: [LiveSubscription] = []
 
     public init(_ initial: String) {
         self.value = initial
@@ -246,6 +380,7 @@ public final class LiveText: @unchecked Sendable {
     @discardableResult
     public func set(_ newText: String) -> Bool {
         var toWake: [Waker] = []
+        var wakesToNotify: [LiveWake] = []
         lock.lock()
         if value == newText {
             lock.unlock()
@@ -255,8 +390,14 @@ public final class LiveText: @unchecked Sendable {
         sequence &+= 1
         wakers.removeAll { $0.ref == nil }
         toWake = wakers.compactMap(\.ref)
+        subscriptions.removeAll { $0.wake == nil }
+        wakesToNotify = subscriptions.compactMap { sub in
+            guard sub.isActive, let w = sub.wake else { return nil }
+            return w
+        }
         lock.unlock()
         for w in toWake { w.wake() }
+        for w in wakesToNotify { w.notify() }
         return true
     }
 
@@ -267,5 +408,18 @@ public final class LiveText: @unchecked Sendable {
             wakers.append(LiveSource.WeakWaker(ref: waker))
         }
         lock.unlock()
+    }
+
+    public func subscribe(_ wake: LiveWake) -> LiveSubscription {
+        lock.lock()
+        subscriptions.removeAll { $0.wake == nil }
+        if let existing = subscriptions.first(where: { $0.wake === wake }) {
+            lock.unlock()
+            return existing
+        }
+        let sub = LiveSubscription(sourceId: id, wake: wake)
+        subscriptions.append(sub)
+        lock.unlock()
+        return sub
     }
 }

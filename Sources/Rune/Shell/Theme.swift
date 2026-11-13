@@ -147,13 +147,10 @@ enum JsonThemeParser {
         let modeDict: [String: Any]
         if root["dark"] != nil || root["light"] != nil {
             let modeKey = dark ? "dark" : "light"
-            if let d = root[modeKey] as? [String: Any] {
-                modeDict = d
-            } else if let fallback = root[dark ? "light" : "dark"] as? [String: Any] {
-                modeDict = fallback
-            } else {
+            guard let d = root[modeKey] as? [String: Any] else {
                 throw ThemeError.missingMode(modeKey)
             }
+            modeDict = d
         } else if let t = root["theme"] as? [String: Any] {
             modeDict = t
         } else {

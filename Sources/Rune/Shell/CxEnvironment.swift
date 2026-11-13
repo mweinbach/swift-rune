@@ -251,7 +251,13 @@ extension Cx {
         if other.envState.reads.caretRead {
             self.envState.reads.caretRead = true
         }
-        self.envState.reads.layoutReads.append(contentsOf: other.envState.reads.layoutReads)
+        for read in other.envState.reads.layoutReads {
+            if let idx = self.envState.reads.layoutReads.firstIndex(where: { $0.sameTarget(as: read) }) {
+                self.envState.reads.layoutReads[idx] = read
+            } else {
+                self.envState.reads.layoutReads.append(read)
+            }
+        }
     }
 
     mutating func clearChrome() {
