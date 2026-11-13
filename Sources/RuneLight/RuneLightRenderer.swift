@@ -78,6 +78,8 @@ public final class LightRenderer: @unchecked Sendable {
         )
     }
 
+    private let counterSampleBuffer: MTLCounterSampleBuffer?
+    private var timedGI: Bool = false
     private weak var lastCommandBuffer: MTLCommandBuffer?
 
     public init(
@@ -222,6 +224,18 @@ public final class LightRenderer: @unchecked Sendable {
         self.fieldTex = targets.field
         self.visTex = targets.vis
         self.airTex = targets.air
+
+        if device.supportsCounterSampling(.atStageBoundary),
+           let tsSet = device.counterSets?.first(where: { $0.name == MTLCommonCounterSet.timestamp.rawValue }) {
+            let csDesc = MTLCounterSampleBufferDescriptor()
+            csDesc.label = "light timings"
+            csDesc.counterSet = tsSet
+            csDesc.storageMode = .shared
+            csDesc.sampleCount = 22
+            self.counterSampleBuffer = try? device.makeCounterSampleBuffer(descriptor: csDesc)
+        } else {
+            self.counterSampleBuffer = nil
+        }
     }
 
     private static func makePrimBuffer(device: MTLDevice, capacity: Int) -> MTLBuffer? {
@@ -384,6 +398,19 @@ public final class LightRenderer: @unchecked Sendable {
 
         var passes: UInt32 = 0
 
+        func attachComputeTimestamps(_ desc: MTLComputePassDescriptor, start: Int, end: Int) {
+            guard let counterSampleBuffer else { return }
+            desc.sampleBufferAttachments[0]?.sampleBuffer = counterSampleBuffer
+            desc.sampleBufferAttachments[0]?.startOfEncoderSampleIndex = start
+            desc.sampleBufferAttachments[0]?.endOfEncoderSampleIndex = end
+        }
+        func attachRenderTimestamps(_ desc: MTLRenderPassDescriptor, start: Int, end: Int) {
+            guard let counterSampleBuffer else { return }
+            desc.sampleBufferAttachments[0]?.sampleBuffer = counterSampleBuffer
+            desc.sampleBufferAttachments[0]?.startOfVertexSampleIndex = start
+            desc.sampleBufferAttachments[0]?.endOfFragmentSampleIndex = end
+        }
+
         // 1. Surface GBuffer pass
         let gPassDesc = MTLRenderPassDescriptor()
         gPassDesc.colorAttachments[0].texture = gb0Tex
@@ -394,6 +421,7 @@ public final class LightRenderer: @unchecked Sendable {
         gPassDesc.colorAttachments[1].loadAction = .clear
         gPassDesc.colorAttachments[1].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         gPassDesc.colorAttachments[1].storeAction = .store
+        attachRenderTimestamps(gPassDesc, start: 0, end: 1)
         if let gEnc = commandBuffer.makeRenderCommandEncoder(descriptor: gPassDesc) {
             gEnc.label = "light surface"
             if !scene.prims.isEmpty {
@@ -408,7 +436,9 @@ public final class LightRenderer: @unchecked Sendable {
         }
 
         // 2 & 3. Distance field (16x16 workgroup tile culling) + soft shadows (8x8)
-        if let fEnc = commandBuffer.makeComputeCommandEncoder() {
+        let fPassDesc = MTLComputePassDescriptor()
+        attachComputeTimestamps(fPassDesc, start: 2, end: 3)
+        if let fEnc = commandBuffer.makeComputeCommandEncoder(descriptor: fPassDesc) {
             fEnc.label = "light field"
             fEnc.setComputePipelineState(fieldPipeline)
             fEnc.setBuffer(frameBuffer, offset: 0, index: 0)
@@ -424,7 +454,9 @@ public final class LightRenderer: @unchecked Sendable {
             fEnc.endEncoding()
             passes += 1
         }
-        if let sEnc = commandBuffer.makeComputeCommandEncoder() {
+        let sPassDesc = MTLComputePassDescriptor()
+        attachComputeTimestamps(sPassDesc, start: 4, end: 5)
+        if let sEnc = commandBuffer.makeComputeCommandEncoder(descriptor: sPassDesc) {
             sEnc.label = "light shadows"
             sEnc.setComputePipelineState(shadowPipeline)
             sEnc.setBuffer(frameBuffer, offset: 0, index: 0)
@@ -446,11 +478,13 @@ public final class LightRenderer: @unchecked Sendable {
         }
 
         // 4. Radiance cascades GI (scene media -> cascades top down -> fluence)
+        timedGI = false
         if giEnabled,
            let emitTex = giEmitTex,
            let occTex = giOccTex,
            let fluTex = giFluenceTex,
            giMergedTexs.count == Int(lightCascades) {
+            timedGI = (counterSampleBuffer != nil)
             let tg = MTLSize(width: 8, height: 8, depth: 1)
             let giGroups = MTLSize(
                 width: max((Int(giSize.0) + 7) / 8, 1),
@@ -463,7 +497,9 @@ public final class LightRenderer: @unchecked Sendable {
                 depth: 1
             )
 
-            if let scEnc = commandBuffer.makeComputeCommandEncoder() {
+            let scPassDesc = MTLComputePassDescriptor()
+            attachComputeTimestamps(scPassDesc, start: 6, end: 7)
+            if let scEnc = commandBuffer.makeComputeCommandEncoder(descriptor: scPassDesc) {
                 scEnc.label = "gi scene"
                 scEnc.setComputePipelineState(giScenePipeline)
                 scEnc.setBuffer(frameBuffer, offset: 0, index: 0)
@@ -482,7 +518,9 @@ public final class LightRenderer: @unchecked Sendable {
             for k in 0..<Int(lightCascades) {
                 let n = Int(lightCascades) - 1 - k
                 let upperTex = (n + 1 < Int(lightCascades)) ? giMergedTexs[n + 1] : blackTex
-                if let cEnc = commandBuffer.makeComputeCommandEncoder() {
+                let cCasPassDesc = MTLComputePassDescriptor()
+                attachComputeTimestamps(cCasPassDesc, start: 8 + 2 * n, end: 9 + 2 * n)
+                if let cEnc = commandBuffer.makeComputeCommandEncoder(descriptor: cCasPassDesc) {
                     cEnc.label = "gi cascade \(n)"
                     cEnc.setComputePipelineState(giCascadePipeline)
                     cEnc.setBuffer(frameBuffer, offset: 0, index: 0)
@@ -500,7 +538,9 @@ public final class LightRenderer: @unchecked Sendable {
                 }
             }
 
-            if let flEnc = commandBuffer.makeComputeCommandEncoder() {
+            let flPassDesc = MTLComputePassDescriptor()
+            attachComputeTimestamps(flPassDesc, start: 18, end: 19)
+            if let flEnc = commandBuffer.makeComputeCommandEncoder(descriptor: flPassDesc) {
                 flEnc.label = "gi fluence"
                 flEnc.setComputePipelineState(giFluencePipeline)
                 flEnc.setBuffer(frameBuffer, offset: 0, index: 0)
@@ -541,6 +581,7 @@ public final class LightRenderer: @unchecked Sendable {
         cPassDesc.colorAttachments[0].loadAction = .clear
         cPassDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         cPassDesc.colorAttachments[0].storeAction = .store
+        attachRenderTimestamps(cPassDesc, start: 20, end: 21)
         if let cEnc = commandBuffer.makeRenderCommandEncoder(descriptor: cPassDesc) {
             cEnc.label = "light composite"
             cEnc.setRenderPipelineState(compositePipeline)
@@ -595,12 +636,43 @@ public final class LightRenderer: @unchecked Sendable {
         guard cb.status == .completed else {
             return nil
         }
-        // Per-pass Metal counter sampling is not attached here; report only the measured
-        // command buffer GPU duration in `total`/`raster` and leave unmeasured passes at 0.
         let elapsedMs = max((cb.gpuEndTime - cb.gpuStartTime) * 1000.0, 0.0)
         var t = LightTimings()
         t.total = elapsedMs
-        t.raster = elapsedMs
+        if let counterSampleBuffer,
+           let data = try? counterSampleBuffer.resolveCounterRange(0..<22),
+           data.count >= 22 * MemoryLayout<MTLCounterResultTimestamp>.stride {
+            let totalSpan = data.withUnsafeBytes { raw -> Double in
+                let stamps = raw.bindMemory(to: MTLCounterResultTimestamp.self)
+                let start = stamps[0].timestamp
+                let end = stamps[21].timestamp
+                guard start != UInt64.max, end != UInt64.max, end > start else { return 0.0 }
+                return Double(end - start)
+            }
+            func sampleMs(_ a: Int, _ b: Int) -> Double {
+                guard totalSpan > 0.0 else { return 0.0 }
+                return data.withUnsafeBytes { raw in
+                    let stamps = raw.bindMemory(to: MTLCounterResultTimestamp.self)
+                    let ta = stamps[a].timestamp
+                    let tb = stamps[b].timestamp
+                    guard ta != UInt64.max, tb != UInt64.max, tb >= ta else { return 0.0 }
+                    return Double(tb - ta) / totalSpan * elapsedMs
+                }
+            }
+            t.field = sampleMs(2, 3)
+            t.shadows = sampleMs(4, 5)
+            if timedGI {
+                t.giScene = sampleMs(6, 7)
+                for n in 0..<Int(lightCascades) {
+                    t.cascades[n] = sampleMs(8 + 2 * n, 9 + 2 * n)
+                }
+                t.fluence = sampleMs(18, 19)
+                t.gi = t.giScene + t.cascades.reduce(0.0, +) + t.fluence
+            }
+            t.raster = max(0.0, t.total - t.field - t.shadows - t.gi)
+        } else {
+            t.raster = elapsedMs
+        }
         return t
     }
 }
