@@ -270,7 +270,13 @@ internal final class RenderFrameEngine {
                         encoder: enc,
                         index: surfaceCursor,
                         pixelFormat: top.format,
-                        blend: .sourceOver
+                        blend: .sourceOver,
+                        targetViewport: SIMD4<Float>(
+                            Float(top.texture.width),
+                            Float(top.texture.height),
+                            top.origin.x,
+                            top.origin.y
+                        )
                     )
                     enc.endEncoding()
                 }
@@ -472,7 +478,7 @@ internal final class RenderFrameEngine {
                 if x1 <= x0 || y1 <= y0 { continue }
 
                 let mark = i < frame.marks.count ? frame.marks[i] : effectMark(inst)
-                let wantsBackdrop = inst.params.x >= 0.5 && backdropHook != nil
+                let wantsBackdrop = inst.params.x >= 0.5 && (hook != nil || backdropHook != nil)
 
                 var backdropSnap: MTLTexture?
                 if wantsBackdrop {

@@ -2168,7 +2168,7 @@ public final class Runtime<State> {
                         beforeInstance: UInt32(primitives.count),
                         rect: devRect,
                         radii: devRadii,
-                        clip: devClip,
+                        clip: SIMD4<Float>(devClip.x, devClip.y, devClip.x + devClip.z, devClip.y + devClip.w),
                         fade: activeFadeEdges.first?.fade ?? .zero,
                         fadeOrigin: activeFadeEdges.first?.origin ?? .zero,
                         opacity: localAlpha

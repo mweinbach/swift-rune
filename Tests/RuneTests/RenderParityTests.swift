@@ -825,6 +825,151 @@ struct RenderGPUAndShaderParityTests {
         #expect(mid.g > 100 && mid.g < 220)
     }
 
+    @Test("Single-phase EffectHook receives site.backdrop and isolates viewport/scissor (backdrop_tests.rs:51-76)")
+    func singlePhaseEffectHookReceivesBackdropAndIsolatesState() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let rt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(32, 32),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(32, 32)
+                    .child(el().size(32, 32).bg(Color(r: 1, g: 0, b: 0, a: 1)))
+                    .child(
+                        col()
+                            .size(16, 16)
+                            .absolute(x: 0, y: 0)
+                            .clip()
+                            .child(el().size(16, 16).effect(1).effectBackdrop(true))
+                    )
+                    .child(el().size(16, 32).absolute(x: 16, y: 0).bg(Color(r: 0, g: 1, b: 0, a: 1)))
+            }
+        )
+        var frame = rt.renderFrame(at: 0)
+        frame.srgbBlend = false
+
+        var sawHookBackdrop = false
+        let img = try renderer.renderOffscreen(frame, hook: { encoder, site in
+            sawHookBackdrop = (site.backdrop != nil)
+            encoder.setViewport(MTLViewport(originX: 0, originY: 0, width: 1, height: 1, znear: 0, zfar: 1))
+            encoder.setScissorRect(MTLScissorRect(x: 0, y: 0, width: 1, height: 1))
+        })
+        #expect(sawHookBackdrop == true)
+        let leftPx = sampleRGBA(img, x: 8, y: 24)
+        let rightPx = sampleRGBA(img, x: 24, y: 24)
+        #expect(leftPx.r > 245 && leftPx.g < 10 && leftPx.b < 10)
+        #expect(rightPx.g > 245 && rightPx.r < 10 && rightPx.b < 10)
+
+        // Also verify drawRangeWith(..., hook:) delivers site.backdrop != nil
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb,
+            width: 32,
+            height: 32,
+            mipmapped: false
+        )
+        desc.usage = [.renderTarget, .shaderRead]
+        let target = try #require(renderer.device.makeTexture(descriptor: desc))
+        let cb = try #require(renderer.commandQueue.makeCommandBuffer())
+        var sawDrawRangeBackdrop = false
+        renderer.drawRangeWith(frame: frame, into: target, commandBuffer: cb, hook: { _, site in
+            sawDrawRangeBackdrop = (site.backdrop != nil)
+        })
+        cb.commit()
+        cb.waitUntilCompleted()
+        #expect(sawDrawRangeBackdrop == true)
+    }
+
+    @Test("Dashed border ring_arc matches WGSL perimeter (-bw) and sharp/rounded corner projection")
+    func dashedBorderSharpAndRoundedParity() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+
+        // 1. Sharp corners: 68x48 rect with bw=8 => centerline 60x40 => perimeter 200 = 10 periods of (10 dash + 10 gap).
+        let rtSharp0 = Runtime<S>(
+            state: S(),
+            viewport: Vec2(68, 48),
+            pixelScale: 1.0,
+            view: { _, _ in
+                el()
+                    .size(68, 48)
+                    .dashedBorder(8, .white, dash: 10, gap: 10, phase: 0)
+            }
+        )
+        var fSharp0 = rtSharp0.renderFrame(at: 0)
+        fSharp0.clearColor = .zero
+        let sharp0 = try renderer.renderOffscreen(fSharp0)
+        // Top edge: dash 0 covers s in [0, 10] (x=4..13), gap 0 covers s in [10, 20] (x=14..23), dash 1 at x=24
+        #expect(sampleRGBA(sharp0, x: 4, y: 2).a > 200)
+        #expect(sampleRGBA(sharp0, x: 14, y: 2).a < 15)
+        #expect(sampleRGBA(sharp0, x: 24, y: 2).a > 200)
+        // Sharp inner corner projection: top-left inner top (s=2.5, dash 0) is ON while just below corner on left edge (s=197.5, gap 9) is OFF
+        #expect(sampleRGBA(sharp0, x: 6, y: 2).a > 200)
+        #expect(sampleRGBA(sharp0, x: 2, y: 6).a < 15)
+        // Right edge after -bw corner length (s_right = 60): y=4 -> s=60.5 (ON), y=14 -> s=70.5 (OFF), y=24 -> s=80.5 (ON)
+        #expect(sampleRGBA(sharp0, x: 66, y: 4).a > 200)
+        #expect(sampleRGBA(sharp0, x: 66, y: 14).a < 15)
+        #expect(sampleRGBA(sharp0, x: 66, y: 24).a > 200)
+
+        // Shifting phase by half a period (10 px) cleanly inverts dashes and gaps, including sharp inner corner & right edge
+        let rtSharp10 = Runtime<S>(
+            state: S(),
+            viewport: Vec2(68, 48),
+            pixelScale: 1.0,
+            view: { _, _ in
+                el()
+                    .size(68, 48)
+                    .dashedBorder(8, .white, dash: 10, gap: 10, phase: 10)
+            }
+        )
+        var fSharp10 = rtSharp10.renderFrame(at: 0)
+        fSharp10.clearColor = .zero
+        let sharp10 = try renderer.renderOffscreen(fSharp10)
+        #expect(sampleRGBA(sharp10, x: 4, y: 2).a < 15)
+        #expect(sampleRGBA(sharp10, x: 6, y: 2).a < 15)
+        #expect(sampleRGBA(sharp10, x: 2, y: 6).a > 200)
+        #expect(sampleRGBA(sharp10, x: 14, y: 2).a > 200)
+        #expect(sampleRGBA(sharp10, x: 66, y: 4).a < 15)
+        #expect(sampleRGBA(sharp10, x: 66, y: 14).a > 200)
+
+        // 2. Rounded capsule (border_dash.rs parity): 136x30 pill, bw=2, dash=16, gap=8
+        let rtRounded = Runtime<S>(
+            state: S(),
+            viewport: Vec2(160, 60),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(160, 60)
+                    .child(
+                        el()
+                            .size(136, 30)
+                            .absolute(x: 12, y: 15)
+                            .pill()
+                            .dashedBorder(2, .white, dash: 16, gap: 8, phase: 0)
+                    )
+            }
+        )
+        var fRounded = rtRounded.renderFrame(at: 0)
+        fRounded.clearColor = .zero
+        let rounded = try renderer.renderOffscreen(fRounded)
+        // Top straight edge starts at x = 12 + 15 = 27: dash 0 covers s in [0, 15.38] (x=29 -> s=2.5), gap 0 covers [15.38, 23.07] (x=46 -> s=19.5)
+        #expect(sampleRGBA(rounded, x: 29, y: 15).a > 180)
+        #expect(sampleRGBA(rounded, x: 46, y: 15).a < 15)
+        // Right rounded cap arc (center 133, 30, ring centerline radius 14): both ON and OFF samples exist along arc
+        var arcLit = 0
+        var arcDark = 0
+        for deg in stride(from: 10, through: 170, by: 10) {
+            let rad = Float(deg) * (.pi / 180.0)
+            let px = Int((133.0 + 14.0 * sin(rad)).rounded())
+            let py = Int((30.0 - 14.0 * cos(rad)).rounded())
+            let a = sampleRGBA(rounded, x: px, y: py).a
+            if a > 120 { arcLit += 1 }
+            if a < 15 { arcDark += 1 }
+        }
+        #expect(arcLit > 0 && arcDark > 0)
+    }
+
     @Test("El.cache matches uncached output, skips re-rasterization on ancestor Live offset, invalidates on state/animation, and updates imageRevision")
     func layerCacheAndImageRevisionParity() throws {
         let renderer = try MetalRenderer()

@@ -799,7 +799,7 @@ public struct SurfaceDraw: @unchecked Sendable {
     public var rect: SIMD4<Float>
     /// Corner radii `(tl, tr, br, bl)` in device pixels.
     public var radii: SIMD4<Float>
-    /// Scissor / clip rect `[x, y, w, h]` in device pixels.
+    /// Scissor / clip rect `[l, t, r, b]` in device pixels.
     public var clip: SIMD4<Float>
     /// Feather / linear fade parameters matching `Primitive.fade`.
     public var fade: SIMD4<Float>

@@ -87,7 +87,7 @@ public final class SurfaceRenderer: @unchecked Sendable {
         self.library = try ShaderLibraryCache.load(
             named: "video",
             source: Self.mslSource,
-            requiredFunction: "vs",
+            requiredFunction: "video_vs",
             on: device
         )
 
@@ -263,11 +263,14 @@ public final class SurfaceRenderer: @unchecked Sendable {
     }
 
     /// Encodes surface draw `index` into an already-open Metal render command encoder.
+    /// When `targetViewport` is supplied (`(targetW, targetH, originX, originY)`), draws are
+    /// reprojected into an isolated layer target without shifting frame-space UVs or clips.
     public func draw(
         encoder: MTLRenderCommandEncoder,
         index: Int,
         pixelFormat: MTLPixelFormat? = nil,
-        blend: SurfaceBlend = .sourceOver
+        blend: SurfaceBlend = .sourceOver,
+        targetViewport: SIMD4<Float>? = nil
     ) {
         guard index >= 0 && index < draws.count else { return }
         let p = draws[index]
@@ -275,8 +278,15 @@ public final class SurfaceRenderer: @unchecked Sendable {
         let fmt = pixelFormat ?? primaryFormat
         guard let pipe = try? pipeline(for: fmt, blend: blend) else { return }
         encoder.setRenderPipelineState(pipe)
-        encoder.setVertexBuffer(p.uniformBuffer, offset: 0, index: 0)
-        encoder.setFragmentBuffer(p.uniformBuffer, offset: 0, index: 0)
+        if let tv = targetViewport {
+            var u = p.uniforms
+            u.viewport = tv
+            encoder.setVertexBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+            encoder.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
+        } else {
+            encoder.setVertexBuffer(p.uniformBuffer, offset: 0, index: 0)
+            encoder.setFragmentBuffer(p.uniformBuffer, offset: 0, index: 0)
+        }
         encoder.setFragmentTexture(p.imported.textures[0], index: 0)
         encoder.setFragmentTexture(p.imported.textures[1], index: 1)
         encoder.setFragmentSamplerState(samplerLinear, index: 0)
@@ -475,9 +485,10 @@ public final class SurfaceRenderer: @unchecked Sendable {
     ) {
         float2 corner = float2(float(vid & 1u), float((vid >> 1u) & 1u));
         float2 px = u.node.xy + corner * u.node.zw;
+        float2 local = px - u.viewport.zw;
         float2 ndc = float2(
-            (px.x / max(1.0, u.viewport.x)) * 2.0 - 1.0,
-            1.0 - (px.y / max(1.0, u.viewport.y)) * 2.0
+            (local.x / max(1.0, u.viewport.x)) * 2.0 - 1.0,
+            1.0 - (local.y / max(1.0, u.viewport.y)) * 2.0
         );
         VideoOut out;
         out.pos = float4(ndc, 0.0, 1.0);
@@ -598,23 +609,14 @@ public final class SurfaceRenderer: @unchecked Sendable {
         sampler sampLinear [[sampler(0)]],
         sampler sampNearest [[sampler(1)]]
     ) {
-        float2 frag = in.pos.xy;
-        float cov = 1.0;
-        if (any(u.clipFade != uint4(0u))) {
-            cov = clip_alpha(frag, u.clip, u.clipFade);
-            if (cov <= 0.0) return float4(0.0);
-        } else {
-            if (u.clip.z <= 0.0 || u.clip.w <= 0.0) return float4(0.0);
-            float clipX = saturate(min(frag.x - u.clip.x + 0.5, (u.clip.x + u.clip.z) - frag.x + 0.5));
-            float clipY = saturate(min(frag.y - u.clip.y + 0.5, (u.clip.y + u.clip.w) - frag.y + 0.5));
-            cov = clipX * clipY;
-            if (cov <= 0.0) return float4(0.0);
+        float2 frag = in.pos.xy + u.viewport.zw;
+        float cov = clip_alpha(frag, u.clip, u.clipFade);
+        if (cov <= 0.0) return float4(0.0);
 
-            if (u.fade.z != 0.0) {
-                float d = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
-                cov *= u.fade.w + (1.0 - u.fade.w) * saturate(d);
-                if (cov <= 0.0) return float4(0.0);
-            }
+        if (u.fade.z != 0.0) {
+            float d = dot(frag - u.fadeOrigin.xy, u.fade.xy) * u.fade.z;
+            cov *= u.fade.w + (1.0 - u.fade.w) * saturate(d);
+            if (cov <= 0.0) return float4(0.0);
         }
 
         float2 nodeCenter = u.node.xy + u.node.zw * 0.5;

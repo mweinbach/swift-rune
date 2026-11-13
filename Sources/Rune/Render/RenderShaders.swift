@@ -439,52 +439,42 @@ fn clip_alpha(p: vec2<f32>, c: vec4<f32>, packed: vec4<u32>) -> f32 {
         return select(c, srgb_encode(c), g.flags.x > 0.5);
     }
 
-    static inline float2 ring_arc(float2 q, float2 size, float4 radii, float bw) {
-        float m = min(size.x, size.y) * 0.5;
+    static inline float2 ring_arc(float2 p, float2 size, float4 radii, float bw) {
         float h = bw * 0.5;
-        float tl = max(min(abs(radii.x), m) - h, 0.0);
-        float tr = max(min(abs(radii.y), m) - h, 0.0);
-        float br = max(min(abs(radii.z), m) - h, 0.0);
-        float bl = max(min(abs(radii.w), m) - h, 0.0);
-        float pi_2 = 1.5707963;
-        float w_t = max(size.x - min(abs(radii.x), m) - min(abs(radii.y), m), 0.0);
-        float w_r = max(size.y - min(abs(radii.y), m) - min(abs(radii.z), m), 0.0);
-        float w_b = max(size.x - min(abs(radii.z), m) - min(abs(radii.w), m), 0.0);
-        float w_l = max(size.y - min(abs(radii.w), m) - min(abs(radii.x), m), 0.0);
-        float4 arc = float4(tl, tr, br, bl) * pi_2;
-        float s_tr = w_t;
-        float s_r = s_tr + arc.y;
-        float s_br = s_r + w_r;
-        float s_b = s_br + arc.z;
-        float s_bl = s_b + w_b;
-        float s_l = s_bl + arc.w;
-        float s_tl = s_l + w_l;
-        float2 top_l = float2(h + tl, h + tl);
-        float2 top_r = float2(size.x - h - tr, h + tr);
-        float2 bot_r = float2(size.x - h - br, size.y - h - br);
-        float2 bot_l = float2(h + bl, size.y - h - bl);
-        float2 c = q - size * 0.5;
-        float s = 0.0;
-        if (c.y <= 0.0 && q.x >= top_l.x && q.x <= top_r.x) {
-            s = q.x - top_l.x;
-        } else if (c.x >= 0.0 && q.y >= top_r.y && q.y <= bot_r.y) {
-            s = s_r + q.y - top_r.y;
-        } else if (c.y > 0.0 && q.x >= bot_l.x && q.x <= bot_r.x) {
-            s = s_b + bot_r.x - q.x;
-        } else if (c.x < 0.0 && q.y >= top_l.y && q.y <= bot_l.y) {
-            s = s_l + bot_l.y - q.y;
-        } else if (c.x >= 0.0 && c.y <= 0.0) {
-            float2 d = q - top_r;
-            s = s_tr + tr * atan2(d.x, -d.y);
-        } else if (c.x >= 0.0 && c.y > 0.0) {
-            float2 d = q - bot_r;
-            s = s_br + br * atan2(d.y, d.x);
-        } else if (c.x < 0.0 && c.y > 0.0) {
-            float2 d = q - bot_l;
-            s = s_bl + bl * atan2(-d.x, d.y);
+        float2 halfSize = size * 0.5;
+        float4 rc = max(min(abs(radii), float4(min(halfSize.x, halfSize.y))) - float4(h), float4(0.0));
+        float4 e = rc + float4(h);
+        float4 arc = rc * 1.5707964;
+        float s_tr = max(size.x - bw - rc.x - rc.y, 0.0);
+        float s_right = s_tr + arc.y;
+        float s_br = s_right + max(size.y - bw - rc.y - rc.z, 0.0);
+        float s_bottom = s_br + arc.z;
+        float s_bl = s_bottom + max(size.x - bw - rc.z - rc.w, 0.0);
+        float s_left = s_bl + arc.w;
+        float s_tl = s_left + max(size.y - bw - rc.w - rc.x, 0.0);
+        float top = p.x - e.x;
+        float right = s_right + p.y - e.y;
+        float bottom = s_bottom + size.x - e.z - p.x;
+        float left = s_left + size.y - e.w - p.y;
+        float s;
+        if (p.x > halfSize.x) {
+            if (p.y > halfSize.y) {
+                float2 v = p - (size - float2(e.z));
+                if (v.x > 0.0 && v.y > 0.0) { s = s_br + atan2(v.y, v.x) * rc.z; }
+                else { s = select(bottom, right, size.x - p.x < size.y - p.y); }
+            } else {
+                float2 v = p - float2(size.x - e.y, e.y);
+                if (v.x > 0.0 && v.y < 0.0) { s = s_tr + atan2(v.x, -v.y) * rc.y; }
+                else { s = select(top, right, size.x - p.x < p.y); }
+            }
+        } else if (p.y > halfSize.y) {
+            float2 v = p - float2(e.w, size.y - e.w);
+            if (v.x < 0.0 && v.y > 0.0) { s = s_bl + atan2(-v.x, v.y) * rc.w; }
+            else { s = select(bottom, left, p.x < size.y - p.y); }
         } else {
-            float2 d = q - top_l;
-            s = s_tl + tl * atan2(-d.y, -d.x);
+            float2 v = p - float2(e.x);
+            if (v.x < 0.0 && v.y < 0.0) { s = s_tl + atan2(-v.y, -v.x) * rc.x; }
+            else { s = select(top, left, p.x < p.y); }
         }
         return float2(s, s_tl + arc.x);
     }

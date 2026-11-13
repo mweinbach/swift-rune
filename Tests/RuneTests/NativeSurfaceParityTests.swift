@@ -553,5 +553,93 @@ struct NativeSurfaceParityTests {
             }
         }
     }
+
+    @Test("Native video surface inside isolated layer at offset origin and under hard rectangular clip")
+    func isolatedLayerAndRectangularClipOnVideoSurface() throws {
+        let renderer = try MetalRenderer()
+
+        // 1. Video inside an isolated layer at non-zero origin (20, 15) must render in layer target bounds
+        let layerSurf = NativeSurface()
+        var greenData = Data(count: 40 * 30 * 4)
+        greenData.withUnsafeMutableBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: ptr.count, by: 4) {
+                ptr[i + 0] = 0
+                ptr[i + 1] = 255
+                ptr[i + 2] = 0
+                ptr[i + 3] = 255
+            }
+        }
+        try layerSurf.pushBytes(try ByteFrame(width: 40, height: 30, format: .bgra, color: .srgb, planes: [greenData]), frameId: 1)
+
+        struct S {}
+        let rtLayer = Runtime<S>(
+            state: S(),
+            viewport: Vec2(100, 80),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(100, 80)
+                    .child(
+                        col()
+                            .size(40, 30)
+                            .absolute(x: 20, y: 15)
+                            .clipRounded(4)
+                            .child(nativeSurface(layerSurf, .fill).size(40, 30))
+                    )
+            }
+        )
+        var fLayer = rtLayer.renderFrame(at: 0)
+        fLayer.clearColor = .zero
+        let layerImg = try renderer.renderOffscreen(fLayer)
+        let insideA = rgbaAt(layerImg.rgba, width: 100, x: 30, y: 25)
+        let insideB = rgbaAt(layerImg.rgba, width: 100, x: 50, y: 35)
+        let outsideTL = rgbaAt(layerImg.rgba, width: 100, x: 10, y: 10)
+        let outsideBR = rgbaAt(layerImg.rgba, width: 100, x: 70, y: 50)
+        #expect(insideA[1] > 220 && insideA[0] < 20 && insideA[3] == 255)
+        #expect(insideB[1] > 220 && insideB[0] < 20 && insideB[3] == 255)
+        #expect(outsideTL[3] == 0)
+        #expect(outsideBR[3] == 0)
+
+        // 2. Hard rectangular .clip() (clipFade == 0) at non-zero origin treats u.clip as (l, t, r, b)
+        let clipSurf = NativeSurface()
+        var redData = Data(count: 40 * 20 * 4)
+        redData.withUnsafeMutableBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self)
+            for i in stride(from: 0, to: ptr.count, by: 4) {
+                ptr[i + 0] = 0
+                ptr[i + 1] = 0
+                ptr[i + 2] = 255
+                ptr[i + 3] = 255
+            }
+        }
+        try clipSurf.pushBytes(try ByteFrame(width: 40, height: 20, format: .bgra, color: .srgb, planes: [redData]), frameId: 1)
+
+        let rtClip = Runtime<S>(
+            state: S(),
+            viewport: Vec2(80, 60),
+            pixelScale: 1.0,
+            view: { _, _ in
+                col()
+                    .size(80, 60)
+                    .child(
+                        col()
+                            .size(20, 15)
+                            .absolute(x: 10, y: 10)
+                            .clip()
+                            .child(nativeSurface(clipSurf, .fill).size(40, 20))
+                    )
+            }
+        )
+        var fClip = rtClip.renderFrame(at: 0)
+        fClip.clearColor = .zero
+        let clipImg = try renderer.renderOffscreen(fClip)
+        let clippedIn = rgbaAt(clipImg.rgba, width: 80, x: 20, y: 18)
+        let clippedRight = rgbaAt(clipImg.rgba, width: 80, x: 35, y: 18)
+        let clippedBottom = rgbaAt(clipImg.rgba, width: 80, x: 20, y: 28)
+        #expect(clippedIn[0] > 220 && clippedIn[1] < 20 && clippedIn[3] == 255)
+        #expect(clippedRight[3] == 0)
+        #expect(clippedBottom[3] == 0)
+    }
     #endif
 }
