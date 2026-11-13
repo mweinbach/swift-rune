@@ -3,8 +3,14 @@ import Rune
 
 /// Port of `examples/shapes`: vector shapes including a filled waveform envelope,
 /// polylines, level meters, Bézier paths, concave star polygon, and hairline/thick strokes.
-struct ShapesState {
-    var t: Float = 0.0
+public struct ShapesState: Sendable {
+    public var t: Float = 0.0
+    public var fixedSceneT: Bool = false
+
+    public init(t: Float = 0.0, fixedSceneT: Bool = false) {
+        self.t = t
+        self.fixedSceneT = fixedSceneT
+    }
 }
 
 private let ink = Color(r: 0.92, g: 0.93, b: 0.95, a: 1.0)
@@ -120,32 +126,14 @@ private func curvesEl() -> El<ShapesState> {
         .size(490, 96)
 }
 
-func shapesView(_ s: ShapesState, _ cx: inout Cx<ShapesState>) -> El<ShapesState> {
+public func shapesView(_ s: ShapesState, _ cx: inout Cx<ShapesState>) -> El<ShapesState> {
     col()
         .key("root")
         .sizeFull()
         .p(24)
         .gap(16)
         .bg(bg)
-        .child(
-            row()
-                .wFull()
-                .itemsCenter()
-                .justifyBetween()
-                .child(text("Waveform: filled envelope, polyline, hairline").color(ink))
-                .child(
-                    row()
-                        .key("step-btn")
-                        .px(10)
-                        .py(4)
-                        .rounded(6)
-                        .bg(cardBg)
-                        .border(1, Color(r: 0.22, g: 0.24, b: 0.30, a: 1))
-                        .pressScale(0.95)
-                        .onClick { state in state.t += 0.35 }
-                        .child(text(String(format: "Step t=%.2f", s.t)).size(12).color(ink))
-                )
-        )
+        .child(text("Waveform: filled envelope, polyline, hairline").color(ink))
         .child(
             waveformEl(s.t, w: 260, h: 96)
                 .key("wave")
@@ -166,24 +154,39 @@ func shapesView(_ s: ShapesState, _ cx: inout Cx<ShapesState>) -> El<ShapesState
                     col()
                         .gap(8)
                         .child(text("Paths, a concave fill, line widths").color(ink))
-                        .child(curvesEl().key("curves"))
+                        .child(memo("curves", 0) { curvesEl().key("curves") })
                 )
         )
 }
 
-let spec = AppSpec<ShapesState>(
-    title: "Shapes",
-    size: Vec2(820, 360),
-    state: ShapesState(),
-    onKey: { state, event, _ in
-        if event.key == .space {
-            state.t += 0.35
-            return true
+@main
+public enum RuneShapesApp {
+    public static func makeSpec() -> AppSpec<ShapesState> {
+        AppSpec<ShapesState>(
+            title: "Shapes",
+            size: Vec2(820, 360),
+            state: ShapesState(),
+            poll: { state, t, _ in
+                guard !state.fixedSceneT else { return false }
+                state.t = Float(t)
+                return true
+            },
+            onKey: { state, event, _ in
+                if event.key == .space {
+                    state.t += 0.35
+                    return true
+                }
+                return false
+            },
+            view: shapesView
+        )
+        .scene("t15") {
+            $0.fixedSceneT = true
+            $0.t = 1.5
         }
-        return false
-    },
-    view: shapesView
-)
-.scene("t15") { $0.t = 1.5 }
+    }
 
-try RuneApp.run(spec)
+    public static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}

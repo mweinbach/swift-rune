@@ -4,17 +4,17 @@ import RuneLuau
 
 /// Port of `examples/luau-panel`: a Rune app hosting a Luau script (`scripts/panel`) with
 /// a header, `task.wait` pulse, `@rune/signal`, and a 1,000-row `ui.virtualList`.
-struct LuauPanelState {
-    var script: Script
-    var surfaceName: String = "render"
+public struct LuauPanelState {
+    public var script: Script
+    public var surfaceName: String = "render"
 
-    static func embeddedSources() -> Sources {
+    public static func embeddedSources() -> Sources {
         Sources()
             .with("init.luau", initLuauSource)
             .with("rows.luau", rowsLuauSource)
     }
 
-    static func initial() -> LuauPanelState {
+    public static func initial() -> LuauPanelState {
         let options = ScriptOptions().onLog { level, line in
             fputs("luau-panel \(level.rawValue): \(line)\n", stderr)
         }
@@ -233,7 +233,8 @@ return {
 """#
 }
 
-func luauPanelView(_ s: LuauPanelState, _ cx: inout Cx<LuauPanelState>) -> El<LuauPanelState> {
+public func luauPanelView(_ s: LuauPanelState, _ cx: inout Cx<LuauPanelState>) -> El<LuauPanelState> {
+    s.script.setWaker(cx.waker)
     let panel = s.surfaceName == "render"
         ? s.script.view(cx)
         : s.script.surface(cx, name: s.surfaceName)
@@ -242,14 +243,24 @@ func luauPanelView(_ s: LuauPanelState, _ cx: inout Cx<LuauPanelState>) -> El<Lu
         .child(panel)
 }
 
-let spec = AppSpec<LuauPanelState>(
-    title: "Luau panel",
-    size: Vec2(720, 640),
-    dark: true,
-    state: LuauPanelState.initial(),
-    view: luauPanelView
-)
-.scene("panel") { $0.surfaceName = "render" }
-.scene("panel20") { $0.surfaceName = "panel20" }
+@main
+public enum RuneLuauPanelApp {
+    public static func makeSpec() -> AppSpec<LuauPanelState> {
+        AppSpec<LuauPanelState>(
+            title: "Luau panel",
+            size: Vec2(720, 640),
+            dark: true,
+            state: LuauPanelState.initial(),
+            poll: { state, now, tx in
+                state.script.poll(now: now, tx: &tx)
+            },
+            view: luauPanelView
+        )
+        .scene("panel") { $0.surfaceName = "render" }
+        .scene("panel20") { $0.surfaceName = "panel20" }
+    }
 
-try RuneApp.run(spec)
+    public static func main() throws {
+        try RuneApp.run(makeSpec())
+    }
+}

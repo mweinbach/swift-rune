@@ -632,6 +632,12 @@ let package = Package(
                 "RuneKeepStuck",
                 "RuneGrowthReorder",
                 "RuneWindowResize",
+                "RuneShapes",
+                "RuneLuauPanel",
+                "RuneLuau",
+                "RuneLiveValues",
+                "RunePlayground",
+                "RuneGlassCard",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"
