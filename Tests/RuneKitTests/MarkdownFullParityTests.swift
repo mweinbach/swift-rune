@@ -765,6 +765,102 @@ struct MarkdownFullParityTests {
         _ = mermaidRT.frame(at: 0.04)
         #expect(mermaidRT.elements().compactMap(\.key).contains("source"))
     }
+
+    @Test("Markdown selectable, selectionGroup, selectionCopy, and sourceCopy parity")
+    func markdownSelectableAndSourceCopyWiring() {
+        func countSelectableTexts<S>(_ node: El<S>) -> Int {
+            var count = node.isSelectable ? 1 : 0
+            for child in node.children {
+                count += countSelectableTexts(child)
+            }
+            return count
+        }
+
+        let kit = Kit.neutral(dark: true)
+        let src = "# Title\n\nHello **world** and [link](https://x.dev/a).\n\n- alpha\n- [x] beta\n\n```rust\nfn main() {}\n```\n\nLast *line*.\n"
+        let nonSelectable: El<Int> = Markdown(src).selectable(false).copySource(true).build(kit)
+        #expect(!nonSelectable.isSelectionGroup)
+        #expect(!nonSelectable.hasSelectionCopyHandler)
+        #expect(countSelectableTexts(nonSelectable) == 0)
+
+        let selectableOnly: El<Int> = Markdown(src).selectable(true).copySource(false).build(kit)
+        #expect(selectableOnly.isSelectionGroup)
+        #expect(!selectableOnly.hasSelectionCopyHandler)
+        #expect(countSelectableTexts(selectableOnly) >= 6)
+
+        let tableDiffSrc = "| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```diff\n@@ -1 +1 @@\n-old\n+new\n```\n"
+        let tableDiffEl: El<Int> = Markdown(tableDiffSrc).selectable(true).build(kit)
+        #expect(countSelectableTexts(tableDiffEl) >= 7)
+
+        let copySourceRoot: El<Int> = Markdown(src).selectable(true).copySource(true).build(kit)
+        #expect(copySourceRoot.isSelectionGroup)
+        #expect(copySourceRoot.hasSelectionCopyHandler)
+
+        let allWhole = TextSelection(
+            texts: [
+                SelectedText(path: "b0/t", range: 0..<5, len: 5, whole: true, text: "Title", content: "Title"),
+                SelectedText(path: "b1/t", range: 0..<21, len: 21, whole: true, text: "Hello world and link.", content: "Hello world and link."),
+                SelectedText(path: "b2/i0/b0", range: 0..<5, len: 5, whole: true, text: "alpha", content: "alpha"),
+                SelectedText(path: "b2/i1/b0", range: 0..<4, len: 4, whole: true, text: "beta", content: "beta"),
+                SelectedText(path: "b3/code", range: 0..<12, len: 12, whole: true, text: "fn main() {}", content: "fn main() {}"),
+                SelectedText(path: "b4/t", range: 0..<10, len: 10, whole: true, text: "Last line.", content: "Last line."),
+            ],
+            text: "drawn"
+        )
+        #expect(copySourceRoot.invokeSelectionCopy(allWhole) == src)
+
+        let onlyB1 = TextSelection(
+            texts: [
+                SelectedText(path: "b0/t", range: 0..<0, len: 5, whole: false, text: "", content: "Title"),
+                SelectedText(path: "b1/t", range: 0..<21, len: 21, whole: true, text: "Hello world and link.", content: "Hello world and link."),
+                SelectedText(path: "b2/i0/b0", range: 0..<0, len: 5, whole: false, text: "", content: "alpha"),
+            ],
+            text: "Hello world and link."
+        )
+        #expect(copySourceRoot.invokeSelectionCopy(onlyB1) == "Hello **world** and [link](https://x.dev/a).")
+
+        let onlyB2 = TextSelection(
+            texts: [
+                SelectedText(path: "@note/@b1/@t", range: 0..<0, len: 21, whole: false, text: "", content: "Hello world and link."),
+                SelectedText(path: "@note/@b2/@i0/@b0", range: 0..<5, len: 5, whole: true, text: "alpha", content: "alpha"),
+                SelectedText(path: "@note/@b2/@i1/@b0", range: 0..<4, len: 4, whole: true, text: "beta", content: "beta"),
+                SelectedText(path: "@note/@b3/@code", range: 0..<0, len: 12, whole: false, text: "", content: "fn main() {}"),
+            ],
+            text: "- alpha\n- [x] beta"
+        )
+        #expect(copySourceRoot.invokeSelectionCopy(onlyB2) == "- alpha\n- [x] beta")
+
+        let partialB1 = TextSelection(
+            texts: [
+                SelectedText(path: "b0/t", range: 0..<0, len: 5, whole: false, text: "", content: "Title"),
+                SelectedText(path: "b1/t", range: 6..<11, len: 21, whole: false, text: "world", content: "Hello world and link."),
+                SelectedText(path: "b2/i0/b0", range: 0..<0, len: 5, whole: false, text: "", content: "alpha"),
+            ],
+            text: "world"
+        )
+        #expect(copySourceRoot.invokeSelectionCopy(partialB1) == nil)
+
+        let ruled = "---\n\nHello **world**\n\n---\n"
+        let ruledRoot: El<Int> = Markdown(ruled).selectable(true).copySource(true).build(kit)
+        let ruledSel = TextSelection(
+            texts: [SelectedText(path: "b1/t", range: 0..<11, len: 11, whole: true, text: "Hello world", content: "Hello world")],
+            text: "Hello world"
+        )
+        #expect(ruledRoot.invokeSelectionCopy(ruledSel) == ruled)
+
+        let crlf = "```rust\r\nfn main() {}\r\n```\r\n\r\n```diff\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n```\r\n"
+        let crlfRoot: El<Int> = Markdown(crlf).selectable(true).copySource(true).build(kit)
+        let crlfSel = TextSelection(
+            texts: [
+                SelectedText(path: "b0/code", range: 0..<12, len: 12, whole: true, text: "fn main() {}", content: "fn main() {}"),
+                SelectedText(path: "b1/l0", range: 0..<11, len: 11, whole: true, text: "@@ -1 +1 @@", content: "@@ -1 +1 @@"),
+                SelectedText(path: "b1/l1", range: 0..<4, len: 4, whole: true, text: "-old", content: "-old"),
+                SelectedText(path: "b1/l2", range: 0..<4, len: 4, whole: true, text: "+new", content: "+new"),
+            ],
+            text: "fn main() {}\n\n@@ -1 +1 @@\n-old\n+new"
+        )
+        #expect(crlfRoot.invokeSelectionCopy(crlfSel) == crlf)
+    }
 }
 
 private final class LockedCollector: @unchecked Sendable {

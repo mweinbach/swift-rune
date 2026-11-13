@@ -4158,6 +4158,73 @@ public struct Markdown: Sendable {
         "h\(index)"
     }
 
+    /// Resolves the raw Markdown source copied for `selection` when `Markdown.copySource(true)`
+    /// is active (`crates/rune-kit/src/markdown/render.rs:source_copy`).
+    public static func sourceCopy(
+        source: String,
+        blockStarts: [Int],
+        blockKeys: [String],
+        selection: TextSelection
+    ) -> String? {
+        func blockIndex(for path: String) -> Int? {
+            var best: (index: Int, start: String.Index, length: Int)? = nil
+            func consider(_ i: Int, key k: String, at start: String.Index) {
+                let isBetter: Bool
+                if let cur = best {
+                    isBetter = start < cur.start || (start == cur.start && k.count > cur.length)
+                } else {
+                    isBetter = true
+                }
+                if isBetter {
+                    best = (i, start, k.count)
+                }
+            }
+            for (i, k) in blockKeys.enumerated() where !k.isEmpty {
+                for candidate in [k, "@\(k)"] {
+                    if path == candidate || path.hasPrefix("\(candidate)/") {
+                        consider(i, key: k, at: path.startIndex)
+                    } else if let r = path.range(of: "/\(candidate)/") {
+                        consider(i, key: k, at: path.index(after: r.lowerBound))
+                    } else if path.hasSuffix("/\(candidate)") {
+                        let start = path.index(path.endIndex, offsetBy: -candidate.count)
+                        consider(i, key: k, at: start)
+                    }
+                }
+            }
+            return best?.index
+        }
+
+        var touched: (first: Int, last: Int)? = nil
+        for t in selection.texts where !t.range.isEmpty {
+            guard let b = blockIndex(for: t.path) else { continue }
+            if let cur = touched {
+                touched = (min(cur.first, b), max(cur.last, b))
+            } else {
+                touched = (b, b)
+            }
+        }
+        guard let (first, last) = touched else { return nil }
+        if first == last {
+            let blockTexts = selection.texts.filter { blockIndex(for: $0.path) == first }
+            if !blockTexts.allSatisfy({ $0.whole || $0.len == 0 }) {
+                return nil
+            }
+        }
+        if (first == 0 && last + 1 >= blockStarts.count)
+            || selection.texts.allSatisfy({ $0.whole || $0.len == 0 }) {
+            return source
+        }
+        guard first < blockStarts.count else { return nil }
+        let startByte = blockStarts[first]
+        let endByte = (last + 1 < blockStarts.count) ? blockStarts[last + 1] : source.utf8.count
+        guard let slice = utf8Slice(source, range: startByte..<endByte) else { return nil }
+        var scalars = slice.unicodeScalars
+        while let lastScalar = scalars.last, lastScalar.properties.isWhitespace {
+            scalars.removeLast()
+        }
+        return String(scalars)
+    }
+
     public func build<State>(_ kit: Kit) -> El<State> {
         MarkdownView<State>(config: self).build(kit)
     }
@@ -4276,7 +4343,23 @@ private final class MarkdownRenderer<State> {
     }
 
     func renderRoot(keys: [String]) -> El<State> {
-        blocksIn(doc.blocks, maps: doc.maps, keys: keys, topLevel: true, inItem: false)
+        let root = blocksIn(doc.blocks, maps: doc.maps, keys: keys, topLevel: true, inItem: false)
+            .selectionGroup(view.config.isSelectable)
+        guard view.config.isSelectable && view.config.copySourceMode else {
+            return root
+        }
+        let names = renderedKeys(count: doc.blocks.count, keys: keys)
+        let src = view.config.source
+        let starts = doc.blockStarts
+        return root.selectionCopy { selection in
+            Markdown.sourceCopy(source: src, blockStarts: starts, blockKeys: names, selection: selection)
+        }
+    }
+
+    private func applySelect(_ node: El<State>) -> El<State> {
+        view.config.isSelectable
+            ? node.selectable(true).selectionStyle(SelectionStyle(highlight: s.selection))
+            : node
     }
 
     private func renderedKeys(count: Int, keys: [String]) -> [String] {
@@ -4627,7 +4710,7 @@ private final class MarkdownRenderer<State> {
                 }
             }
         }
-        return elNode
+        return applySelect(elNode)
     }
 
     private func renderCode(_ code: String, source: MarkdownCodeSource?, map: MarkdownSpanMap?) -> El<State> {
@@ -4687,7 +4770,7 @@ private final class MarkdownRenderer<State> {
             )
         }
 
-        let body: El<State> = rich(spans).font(s.codeBlock).color(ink).wFull()
+        let body = applySelect(rich(spans).font(s.codeBlock).color(ink).wFull())
         let frame: El<State> = col()
             .wFull()
             .rounded(6)
@@ -4737,7 +4820,7 @@ private final class MarkdownRenderer<State> {
             if !lineHLs.isEmpty {
                 spans = applyUTF8Highlights(spans: spans, ranges: lineHLs, activeIndex: nil, bg: s.highlightBg, activeBg: s.highlightCurrentBg, fg: s.highlightFg, activeFg: s.highlightCurrentFg)
             }
-            var r: El<State> = row().key("l\(n)").wFull().px(s.codeBlockPad[0]).child(rich(spans).font(s.codeBlock).color(color).wFull())
+            var r: El<State> = row().key("l\(n)").wFull().px(s.codeBlockPad[0]).child(applySelect(rich(spans).font(s.codeBlock).color(color).wFull()))
             if let tint { r = r.bg(tint) }
             c = c.child(r)
         }
@@ -4953,7 +5036,7 @@ private final class MarkdownRenderer<State> {
             if !hl.isEmpty {
                 spans = applyUTF8Highlights(spans: spans, ranges: hl, activeIndex: nil, bg: s.highlightBg, activeBg: s.highlightCurrentBg, fg: s.highlightFg, activeFg: s.highlightCurrentFg)
             }
-            let content: El<State> = rich(spans).font(font).color(color).textAlign(align.textAlign).wFull()
+            let content = applySelect(rich(spans).font(font).color(color).textAlign(align.textAlign).wFull())
             var cell: El<State> = col().key("c\(j)")
             if let fixed = widths, j < fixed.count {
                 cell = cell.w(fixed[j])
