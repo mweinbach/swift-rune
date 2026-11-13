@@ -101,8 +101,13 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
         )
     }
 
-    /// Converts this `OraclePrimitive` into a Swift `RuneRef.Primitive` for `MetalRenderer` interop.
+    /// Converts this `OraclePrimitive` into a Swift `RuneRef.Primitive` for `RefScene` interop.
     public func toInstance() -> Primitive {
+        toInstance(atlasWidth: 1.0, atlasHeight: 1.0)
+    }
+
+    /// Converts this `OraclePrimitive` into a Swift `RuneRef.Primitive`, normalizing glyph UVs by `atlasWidth` / `atlasHeight`.
+    public func toInstance(atlasWidth: Float, atlasHeight: Float) -> Primitive {
         func unpremul(_ c: [Float]) -> SIMD4<Float> {
             guard c.count == 4 else { return .zero }
             let a = min(max(c[3], 0), 1)
@@ -110,6 +115,13 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
             return SIMD4<Float>(min(1, c[0] / a), min(1, c[1] / a), min(1, c[2] / a), a)
         }
         let kind = params.count > 1 ? params[1] : 0
+        let rectVec = SIMD4<Float>(rect[0], rect[1], rect[2], rect[3])
+        var radiiOut = SIMD4<Float>(radii[0], radii[1], radii[2], radii[3])
+        var fillOut = unpremul(fill)
+        var borderOut = unpremul(border)
+        var paramsOut = SIMD4<Float>(params[0], kind, params[2], params[3])
+        var uvOut = SIMD4<Float>(uv[0], uv[1], uv[2], uv[3])
+        var turnOut: Float = turn?.first ?? 0
         let clipRect: SIMD4<Float> = if clip == oracleNoClip {
             RefGenerator.noClip
         } else if clip.count == 4 {
@@ -117,19 +129,62 @@ public struct OraclePrimitive: Codable, Sendable, Equatable {
         } else {
             RefGenerator.noClip
         }
-        let isLinearGrad = kind == 4.0
-        let borderOut = isLinearGrad ? unpremul(uv) : unpremul(border)
+
+        switch Int(kind.rounded()) {
+        case 1:
+            // OraclePrimitive dropShadow: rect = shadow bbox, params[2] = sigma, uv = cutout hole
+            borderOut = rectVec
+            paramsOut = SIMD4<Float>(params[2] * 2.0, 1.0, 0.0, 0.0)
+            uvOut = .zero
+        case 2:
+            // OraclePrimitive glyph: uv = [u0, v0, uw, vh] in texels, params[0] = turn, params[3] = gamma
+            let uw = uv[2] > 0 ? uv[2] : rect[2]
+            let vh = uv[3] > 0 ? uv[3] : rect[3]
+            let aw = max(atlasWidth, 1.0)
+            let ah = max(atlasHeight, 1.0)
+            uvOut = SIMD4<Float>(uv[0] / aw, uv[1] / ah, (uv[0] + uw) / aw, (uv[1] + vh) / ah)
+            paramsOut = SIMD4<Float>(0.0, 2.0, 0.0, params[3])
+            turnOut = params[0]
+        case 3:
+            // OraclePrimitive insetShadow: params[0] = spread, params[2] = sigma
+            paramsOut = SIMD4<Float>(params[2] * 2.0, 3.0, params[0], 0.0)
+        case 4:
+            // OraclePrimitive linearGradient: uv = end stop color, params[2] = soft
+            borderOut = unpremul(uv)
+            paramsOut = SIMD4<Float>(params[0], 4.0, .pi * 0.5, 0.0)
+            uvOut = .zero
+        case 8:
+            // OraclePrimitive layerBegin: fill[3] = opacity, border = clip radii, params[0] = additive, params[2] = blur
+            fillOut = .zero
+            radiiOut = SIMD4<Float>(border[0], border[1], border[2], border[3])
+            borderOut = .zero
+            paramsOut = SIMD4<Float>(fill.count == 4 ? fill[3] : 1.0, 8.0, params[0], params[2])
+        case 10:
+            // OraclePrimitive dashedRing: uv = [dash, gap, phase, 0]
+            paramsOut = SIMD4<Float>(params[0], 10.0, uv[0], uv[1])
+            uvOut = SIMD4<Float>(uv[2], 0.0, 0.0, 0.0)
+        case 11:
+            // OraclePrimitive radial: uv.xy is rect-relative center
+            uvOut = SIMD4<Float>(rect[0] + uv[0], rect[1] + uv[1], uv[2], uv[3])
+        case 12:
+            // OraclePrimitive kind 12 = effect slot no-op (RefScene maps 12 to backdropBlur, 13 to effectSlot)
+            paramsOut.y = Float(PrimitiveKind.effectSlot.rawValue)
+        default:
+            break
+        }
+
+        // OraclePrimitive.fade encodes 4-edge LTRB ramp widths; RefScene.fade is directional [dx, dy, invSpan, minAlpha].
         return Primitive(
-            rect: SIMD4<Float>(rect[0], rect[1], rect[2], rect[3]),
-            radii: SIMD4<Float>(radii[0], radii[1], radii[2], radii[3]),
-            fill: unpremul(fill),
+            rect: rectVec,
+            radii: radiiOut,
+            fill: fillOut,
             border: borderOut,
-            params: SIMD4<Float>(params[0], params[1], params[2], params[3]),
-            uv: SIMD4<Float>(uv[0], uv[1], uv[2], uv[3]),
+            params: paramsOut,
+            uv: uvOut,
             clip: clipRect,
-            fade: SIMD4<Float>(fade[0], fade[1], fade[2], fade[3]),
-            fadeOrigin: fadeOrigin.map { SIMD2<Float>($0[0], $0[1]) } ?? .zero,
-            turn: turn?.first ?? 0
+            fade: .zero,
+            fadeOrigin: .zero,
+            turn: turnOut
         )
     }
 
@@ -398,13 +453,15 @@ public struct OracleScene: Codable, Sendable, Equatable {
         } else {
             .zero
         }
+        let aw = Float(max(1, atlas.width))
+        let ah = Float(max(1, atlas.height))
         return RefScene(
             width: Int(width),
             height: Int(height),
             srgbBlend: false,
             clearColor: clearStraight,
             glyphs: R8Atlas(width: Int(atlas.width), height: Int(atlas.height), texels: atlas.data),
-            primitives: primitives.map { $0.toInstance() }
+            primitives: primitives.map { $0.toInstance(atlasWidth: aw, atlasHeight: ah) }
         )
     }
 }

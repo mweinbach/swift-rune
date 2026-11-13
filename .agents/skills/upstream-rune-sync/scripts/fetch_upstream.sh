@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-SYNC_FILE="$REPO_ROOT/.upstream-sync.json"
+SYNC_FILE="${SYNC_FILE:-$REPO_ROOT/.upstream-sync.json}"
 
 UPSTREAM_DIR="${UPSTREAM_DIR:-/tmp/anomalyco-rune}"
 UPSTREAM_EXPLICIT=0

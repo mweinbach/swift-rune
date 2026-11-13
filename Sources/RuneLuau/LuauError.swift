@@ -26,7 +26,7 @@ public struct ScriptError: Error, Sendable, Equatable, CustomStringConvertible {
 
     /// The first line of the message: `init.luau:12: attempt to index nil`.
     public var summary: String {
-        if let idx = message.firstIndex(of: "\n") {
+        if let idx = message.unicodeScalars.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
             return String(message[..<idx])
         }
         return message

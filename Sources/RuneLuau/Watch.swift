@@ -25,7 +25,7 @@ internal final class LuauFolderWatcher: @unchecked Sendable {
     private var saving: Bool = false
     private var readyResult: Result<(Sources, CompiledSources, Duration), ScriptError>?
     private var lastCompiled: (Sources, CompiledSources)?
-    private var baselineSources: Sources?
+    private var lastSeenSources: Sources?
 
     func start(
         directory: URL,
@@ -41,7 +41,7 @@ internal final class LuauFolderWatcher: @unchecked Sendable {
         }
         lock.lock()
         isStopped = false
-        baselineSources = try? Sources.fromDir(directory).entry(entryPath)
+        lastSeenSources = try? Sources.fromDir(directory).entry(entryPath)
         lock.unlock()
 
         #if canImport(Darwin)
@@ -96,7 +96,7 @@ internal final class LuauFolderWatcher: @unchecked Sendable {
         if let children = try? FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: []
         ) {
             for child in children {
                 let isDir = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
@@ -140,9 +140,10 @@ internal final class LuauFolderWatcher: @unchecked Sendable {
         }
 
         lock.lock()
-        let unchanged = (lastCompiled?.0 ?? baselineSources) == nextSources
+        let unchanged = (lastSeenSources == nextSources)
         let prevCompiled = lastCompiled?.1
         if !unchanged {
+            lastSeenSources = nextSources
             saving = true
         }
         lock.unlock()
@@ -161,7 +162,6 @@ internal final class LuauFolderWatcher: @unchecked Sendable {
             let elapsed = start.duration(to: .now)
             lock.lock()
             lastCompiled = (nextSources, compiled)
-            baselineSources = nextSources
             lock.unlock()
             compiledResult = .success((nextSources, compiled, elapsed))
         } catch let err as ScriptError {

@@ -123,8 +123,55 @@ internal final class LuauParser {
                 return try parseTypeAlias(exported: true)
             }
             return try parseExprStatement()
+        case .at:
+            try skipAttributes()
+            if current.kind == .kwFunction {
+                return try parseFunctionDecl()
+            } else if current.kind == .kwLocal && peek(1).kind == .kwFunction {
+                return try parseLocal()
+            }
+            throw syntaxError("expected function declaration after attribute", line: current.line)
         default:
             return try parseExprStatement()
+        }
+    }
+
+    private func skipAttributes() throws {
+        while match(.at) {
+            if current.kind == .lbracket {
+                advance()
+                var depth = 1
+                while depth > 0 && current.kind != .eof {
+                    if current.kind == .lbracket { depth += 1 }
+                    else if current.kind == .rbracket { depth -= 1 }
+                    advance()
+                }
+            } else if case .identifier = current.kind {
+                advance()
+                if current.kind == .lparen {
+                    advance()
+                    var depth = 1
+                    while depth > 0 && current.kind != .eof {
+                        if current.kind == .lparen { depth += 1 }
+                        else if current.kind == .rparen { depth -= 1 }
+                        advance()
+                    }
+                } else if current.kind == .lbrace {
+                    advance()
+                    var depth = 1
+                    while depth > 0 && current.kind != .eof {
+                        if current.kind == .lbrace { depth += 1 }
+                        else if current.kind == .rbrace { depth -= 1 }
+                        advance()
+                    }
+                } else if case .string = current.kind {
+                    advance()
+                } else if case .byteString = current.kind {
+                    advance()
+                }
+            } else {
+                throw syntaxError("expected attribute name after '@'", line: current.line)
+            }
         }
     }
 
@@ -506,6 +553,10 @@ internal final class LuauParser {
             let line = current.line
             advance()
             return [.string(s, line: line)]
+        case .byteString(let bytes):
+            let line = current.line
+            advance()
+            return [.byteString(bytes, line: line)]
         default:
             throw syntaxError("expected function arguments", line: current.line)
         }
@@ -524,6 +575,8 @@ internal final class LuauParser {
             advance(); return .number(n, line: tok.line)
         case .string(let s):
             advance(); return .string(s, line: tok.line)
+        case .byteString(let bytes):
+            advance(); return .byteString(bytes, line: tok.line)
         case .dotDotDot:
             advance(); return .vararg(line: tok.line)
         case .identifier(let name):
@@ -535,6 +588,15 @@ internal final class LuauParser {
             return .group(inner, line: tok.line)
         case .lbrace:
             return try parseTableConstructor()
+        case .at:
+            try skipAttributes()
+            guard current.kind == .kwFunction else {
+                throw syntaxError("expected 'function' after attribute", line: current.line)
+            }
+            let fnLine = current.line
+            advance()
+            let (params, isVar, body) = try parseFuncBody()
+            return .function(params: params, isVariadic: isVar, body: body, line: fnLine)
         case .kwFunction:
             advance()
             let (params, isVar, body) = try parseFuncBody()
@@ -635,13 +697,22 @@ internal final class LuauParser {
             advance()
         }
         switch current.kind {
-        case .kwNil, .kwTrue, .kwFalse, .string:
+        case .kwNil, .kwTrue, .kwFalse, .string, .byteString:
             advance()
         case .dotDotDot:
             advance()
             try skipSimpleType()
-        case .identifier:
+        case .identifier(let name):
             advance()
+            if name == "typeof" && current.kind == .lparen {
+                advance()
+                var depth = 1
+                while depth > 0 && current.kind != .eof {
+                    if current.kind == .lparen { depth += 1 }
+                    else if current.kind == .rparen { depth -= 1 }
+                    advance()
+                }
+            }
             if current.kind == .dot {
                 while match(.dot) {
                     _ = advance()
@@ -762,6 +833,8 @@ internal final class LuauParser {
         case .pipe: return "|"
         case .amp: return "&"
         case .question: return "?"
+        case .at: return "@"
+        case .byteString: return "string"
         }
     }
 }

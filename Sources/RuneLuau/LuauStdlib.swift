@@ -40,6 +40,7 @@ internal enum LuauStdlib {
         installCoroutine(into: g)
         installDebug(into: g)
         installVector(into: g)
+        installBuffer(into: g, vm: vm)
     }
 
     // MARK: - Globals
@@ -220,6 +221,7 @@ internal enum LuauStdlib {
             switch v {
             case .table(let t): return .values([.number(Double(t.rawLength))])
             case .string(let s): return .values([.number(Double(s.utf8.count))])
+            case .byteString(let b): return .values([.number(Double(b.count))])
             default: throw LuauRuntimeError(value: .string("bad argument #1 to 'rawlen' (table or string expected)"))
             }
         }))
@@ -272,9 +274,10 @@ internal enum LuauStdlib {
         }))
 
         g.rawSet("loadstring", value: .nativeFunction(LuauNativeFunction(name: "loadstring") { vm, _, args in
-            guard case .string(let src) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'loadstring' (string expected)"))
             }
+            let src = String(decoding: bytes, as: UTF8.self)
             let chunkName = (args.count > 1 ? args[1].asString : nil) ?? "loadstring"
             do {
                 let cl = try vm.load(source: src, name: chunkName)
@@ -283,6 +286,24 @@ internal enum LuauStdlib {
                 return .values([.nil, .string(err.message)])
             } catch {
                 return .values([.nil, .string(error.localizedDescription)])
+            }
+        }))
+
+        g.rawSet("gcinfo", value: .nativeFunction(LuauNativeFunction(name: "gcinfo") { vm, _, _ in
+            return .values([.number(Double(vm.estimatedMemoryBytes()) / 1024.0)])
+        }))
+
+        g.rawSet("collectgarbage", value: .nativeFunction(LuauNativeFunction(name: "collectgarbage") { vm, _, args in
+            let opt = (args.first?.isNil == false ? args.first?.asString : nil) ?? "collect"
+            switch opt {
+            case "count":
+                return .values([.number(Double(vm.estimatedMemoryBytes()) / 1024.0)])
+            case "isrunning":
+                return .values([.bool(true)])
+            case "collect", "stop", "restart", "step", "setpause", "setstepmul":
+                return .values([.number(0)])
+            default:
+                throw LuauRuntimeError(value: .string("invalid option '\(opt)' to 'collectgarbage'"))
             }
         }))
     }
@@ -467,50 +488,56 @@ internal enum LuauStdlib {
         let s = LuauTable()
 
         s.rawSet("len", value: .nativeFunction(LuauNativeFunction(name: "string.len") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'len' (string expected)"))
             }
-            return .values([.number(Double(str.utf8.count))])
+            return .values([.number(Double(bytes.count))])
         }))
 
         s.rawSet("lower", value: .nativeFunction(LuauNativeFunction(name: "string.lower") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'lower' (string expected)"))
             }
-            return .values([.string(str.lowercased())])
+            let out = bytes.map { ($0 >= 65 && $0 <= 90) ? ($0 + 32) : $0 }
+            return .values([LuauValue.fromBytes(out)])
         }))
 
         s.rawSet("upper", value: .nativeFunction(LuauNativeFunction(name: "string.upper") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'upper' (string expected)"))
             }
-            return .values([.string(str.uppercased())])
+            let out = bytes.map { ($0 >= 97 && $0 <= 122) ? ($0 - 32) : $0 }
+            return .values([LuauValue.fromBytes(out)])
         }))
 
         s.rawSet("reverse", value: .nativeFunction(LuauNativeFunction(name: "string.reverse") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'reverse' (string expected)"))
             }
-            return .values([.string(String(str.reversed()))])
+            return .values([LuauValue.fromBytes(Array(bytes.reversed()))])
         }))
 
         s.rawSet("rep", value: .nativeFunction(LuauNativeFunction(name: "string.rep") { vm, _, args in
-            guard case .string(let str) = args.first, let n = args.dropFirst().first?.asInt else {
+            guard let bytes = args.first?.stringBytes, let n = args.dropFirst().first?.asInt else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'rep'"))
             }
-            let sep = (args.count > 2 ? args[2].asString : nil) ?? ""
+            let sepBytes = (args.count > 2 ? args[2].stringBytes : nil) ?? []
             if n <= 0 { return .values([.string("")]) }
-            let estimated = n.multipliedReportingOverflow(by: max(1, str.utf8.count + sep.utf8.count))
+            let estimated = n.multipliedReportingOverflow(by: max(1, bytes.count + sepBytes.count))
             try vm.noteAllocation(estimated.overflow ? Int.max : estimated.partialValue)
-            let out = Array(repeating: str, count: n).joined(separator: sep)
-            return .values([.string(out)])
+            var out: [UInt8] = []
+            out.reserveCapacity(bytes.count * n + sepBytes.count * max(0, n - 1))
+            for idx in 0..<n {
+                if idx > 0 && !sepBytes.isEmpty { out.append(contentsOf: sepBytes) }
+                out.append(contentsOf: bytes)
+            }
+            return .values([LuauValue.fromBytes(out)])
         }))
 
         s.rawSet("sub", value: .nativeFunction(LuauNativeFunction(name: "string.sub") { _, _, args in
-            guard case .string(let str) = args.first, let iArg = args.dropFirst().first?.asInt else {
+            guard let bytes = args.first?.stringBytes, let iArg = args.dropFirst().first?.asInt else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'sub'"))
             }
-            let bytes = Array(str.utf8)
             let len = bytes.count
             let jArg = args.count > 2 ? (args[2].asInt ?? len) : len
             let start = max(1, iArg < 0 ? len + iArg + 1 : iArg)
@@ -518,15 +545,13 @@ internal enum LuauStdlib {
             if start > end || start > len || end < 1 {
                 return .values([.string("")])
             }
-            let sub = String(decoding: bytes[(start - 1)..<end], as: UTF8.self)
-            return .values([.string(sub)])
+            return .values([LuauValue.fromBytes(Array(bytes[(start - 1)..<end]))])
         }))
 
         s.rawSet("byte", value: .nativeFunction(LuauNativeFunction(name: "string.byte") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'byte'"))
             }
-            let bytes = Array(str.utf8)
             let len = bytes.count
             let iArg = args.count > 1 ? (args[1].asInt ?? 1) : 1
             let jArg = args.count > 2 ? (args[2].asInt ?? iArg) : iArg
@@ -538,157 +563,206 @@ internal enum LuauStdlib {
 
         s.rawSet("char", value: .nativeFunction(LuauNativeFunction(name: "string.char") { _, _, args in
             var bytes: [UInt8] = []
+            bytes.reserveCapacity(args.count)
             for a in args {
                 guard let n = a.asInt, n >= 0 && n <= 255 else {
                     throw LuauRuntimeError(value: .string("bad argument to 'char' (value out of range)"))
                 }
                 bytes.append(UInt8(n))
             }
-            return .values([.string(String(decoding: bytes, as: UTF8.self))])
+            return .values([LuauValue.fromBytes(bytes)])
         }))
 
         s.rawSet("split", value: .nativeFunction(LuauNativeFunction(name: "string.split") { _, _, args in
-            guard case .string(let str) = args.first else {
+            guard let sBytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'split' (string expected)"))
             }
-            let sep = (args.count > 1 ? args[1].asString : nil) ?? ","
+            let sepBytes = (args.count > 1 ? args[1].stringBytes : nil) ?? Array(",".utf8)
             let result = LuauTable()
-            if sep.isEmpty {
-                for (i, ch) in str.enumerated() {
-                    result.rawSet(i + 1, value: .string(String(ch)))
+            if sepBytes.isEmpty {
+                for (i, b) in sBytes.enumerated() {
+                    result.rawSet(i + 1, value: LuauValue.fromBytes([b]))
                 }
             } else {
-                let parts = str.components(separatedBy: sep)
-                for (i, p) in parts.enumerated() {
-                    result.rawSet(i + 1, value: .string(p))
+                var idx = 1
+                var cursor = 0
+                while cursor <= sBytes.count - sepBytes.count {
+                    if sBytes[cursor..<(cursor + sepBytes.count)].elementsEqual(sepBytes) {
+                        result.rawSet(idx, value: LuauValue.fromBytes(Array(sBytes[cursor..<cursor])))
+                        idx += 1
+                        cursor += sepBytes.count
+                        continue
+                    }
+                    var nextMatch: Int?
+                    var scan = cursor + 1
+                    while scan <= sBytes.count - sepBytes.count {
+                        if sBytes[scan..<(scan + sepBytes.count)].elementsEqual(sepBytes) {
+                            nextMatch = scan
+                            break
+                        }
+                        scan += 1
+                    }
+                    if let m = nextMatch {
+                        result.rawSet(idx, value: LuauValue.fromBytes(Array(sBytes[cursor..<m])))
+                        idx += 1
+                        cursor = m + sepBytes.count
+                    } else {
+                        break
+                    }
                 }
+                result.rawSet(idx, value: LuauValue.fromBytes(Array(sBytes[cursor...])))
             }
             return .values([.table(result)])
         }))
 
         s.rawSet("find", value: .nativeFunction(LuauNativeFunction(name: "string.find") { _, _, args in
-            guard case .string(let subj) = args.first,
-                  let pat = args.dropFirst().first?.asString else {
+            guard let sBytes = args.first?.stringBytes,
+                  let pBytes = args.dropFirst().first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'string.find'"))
             }
-            let len = subj.utf8.count
+            let len = sBytes.count
             let initArg = args.count > 2 ? (args[2].asInt ?? 1) : 1
             let start = max(0, (initArg < 0 ? len + initArg + 1 : initArg) - 1)
             let plain = args.count > 3 ? args[3].isTruthy : false
-            guard let m = LuauPatternEngine.find(in: subj, pattern: pat, initPos: start, plain: plain) else {
+            guard let m = LuauPatternEngine.find(inBytes: sBytes, patternBytes: pBytes, initPos: start, plain: plain) else {
                 return .values([.nil])
             }
             var out: [LuauValue] = [.number(Double(m.start + 1)), .number(Double(m.end))]
-            for cap in m.captures {
-                out.append(.string(cap))
+            for (idx, span) in m.captureSpans.enumerated() {
+                switch span {
+                case .position(let pos): out.append(.number(Double(pos + 1)))
+                case .span: out.append(LuauValue.fromBytes(m.captureBytes[idx]))
+                }
             }
             return .values(out)
         }))
 
         s.rawSet("match", value: .nativeFunction(LuauNativeFunction(name: "string.match") { _, _, args in
-            guard case .string(let subj) = args.first,
-                  let pat = args.dropFirst().first?.asString else {
+            guard let sBytes = args.first?.stringBytes,
+                  let pBytes = args.dropFirst().first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'string.match'"))
             }
-            let len = subj.utf8.count
+            let len = sBytes.count
             let initArg = args.count > 2 ? (args[2].asInt ?? 1) : 1
             let start = max(0, (initArg < 0 ? len + initArg + 1 : initArg) - 1)
-            guard let m = LuauPatternEngine.find(in: subj, pattern: pat, initPos: start, plain: false) else {
+            guard let m = LuauPatternEngine.find(inBytes: sBytes, patternBytes: pBytes, initPos: start, plain: false) else {
                 return .values([.nil])
             }
-            if m.captures.isEmpty {
-                let bytes = Array(subj.utf8)
-                return .values([.string(String(decoding: bytes[m.start..<m.end], as: UTF8.self))])
+            if m.captureSpans.isEmpty {
+                return .values([LuauValue.fromBytes(Array(sBytes[m.start..<m.end]))])
             }
-            return .values(m.captures.map { .string($0) })
+            return .values(m.captureSpans.enumerated().map { idx, span in
+                switch span {
+                case .position(let pos): return .number(Double(pos + 1))
+                case .span: return LuauValue.fromBytes(m.captureBytes[idx])
+                }
+            })
         }))
 
         s.rawSet("gmatch", value: .nativeFunction(LuauNativeFunction(name: "string.gmatch") { _, _, args in
-            guard case .string(let subj) = args.first,
-                  let pat = args.dropFirst().first?.asString else {
+            guard let sBytes = args.first?.stringBytes,
+                  let pBytes = args.dropFirst().first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'string.gmatch'"))
             }
             final class Cursor: @unchecked Sendable { var pos = 0 }
             let cursor = Cursor()
-            let bytes = Array(subj.utf8)
             let iter = LuauNativeFunction(name: "gmatch_iter") { _, _, _ in
-                guard cursor.pos <= bytes.count,
-                      let m = LuauPatternEngine.find(in: subj, pattern: pat, initPos: cursor.pos, plain: false) else {
+                guard cursor.pos <= sBytes.count,
+                      let m = LuauPatternEngine.find(inBytes: sBytes, patternBytes: pBytes, initPos: cursor.pos, plain: false) else {
                     return .values([.nil])
                 }
                 cursor.pos = m.end == cursor.pos ? cursor.pos + 1 : m.end
-                if m.captures.isEmpty {
-                    return .values([.string(String(decoding: bytes[m.start..<m.end], as: UTF8.self))])
+                if m.captureSpans.isEmpty {
+                    return .values([LuauValue.fromBytes(Array(sBytes[m.start..<m.end]))])
                 }
-                return .values(m.captures.map { .string($0) })
+                return .values(m.captureSpans.enumerated().map { idx, span in
+                    switch span {
+                    case .position(let pos): return .number(Double(pos + 1))
+                    case .span: return LuauValue.fromBytes(m.captureBytes[idx])
+                    }
+                })
             }
             return .values([.nativeFunction(iter)])
         }))
 
         s.rawSet("gsub", value: .nativeFunction(LuauNativeFunction(name: "string.gsub") { vm, _, args in
             guard args.count >= 3,
-                  case .string(let subj) = args[0],
-                  case .string(let pat) = args[1] else {
+                  let bytes = args[0].stringBytes,
+                  let pBytes = args[1].stringBytes else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'string.gsub'"))
             }
             let repl = args[2]
             let maxN = args.count > 3 ? (args[3].asInt ?? Int.max) : Int.max
-            let bytes = Array(subj.utf8)
             var outBytes: [UInt8] = []
             var pos = 0
             var count = 0
+            let anchored = pBytes.first == UInt8(ascii: "^")
 
             while count < maxN && pos <= bytes.count {
-                guard let m = LuauPatternEngine.find(in: subj, pattern: pat, initPos: pos, plain: false) else {
+                guard let m = LuauPatternEngine.find(inBytes: bytes, patternBytes: pBytes, initPos: pos, plain: false) else {
                     break
                 }
                 if m.start > pos {
                     outBytes.append(contentsOf: bytes[pos..<m.start])
                 }
-                let fullMatch = String(decoding: bytes[m.start..<m.end], as: UTF8.self)
-                let repStr: String?
+                let fullMatchBytes = Array(bytes[m.start..<m.end])
+                let repBytes: [UInt8]?
                 switch repl {
-                case .string(let template):
-                    var built = ""
-                    var ti = template.startIndex
-                    while ti < template.endIndex {
-                        if template[ti] == "%" {
-                            let next = template.index(after: ti)
-                            if next < template.endIndex {
-                                let ch = template[next]
-                                if ch == "%" {
-                                    built.append("%")
-                                } else if ch == "0" {
-                                    built.append(fullMatch)
-                                } else if let d = ch.wholeNumberValue, d >= 1 && d <= 9 {
-                                    if d - 1 < m.captures.count {
-                                        built.append(m.captures[d - 1])
-                                    }
-                                } else {
-                                    built.append(ch)
+                case .string, .byteString:
+                    let tBytes = repl.stringBytes ?? []
+                    var built: [UInt8] = []
+                    var ti = 0
+                    while ti < tBytes.count {
+                        if tBytes[ti] == UInt8(ascii: "%") && ti + 1 < tBytes.count {
+                            let ch = tBytes[ti + 1]
+                            if ch == UInt8(ascii: "%") {
+                                built.append(UInt8(ascii: "%"))
+                            } else if ch == UInt8(ascii: "0") {
+                                built.append(contentsOf: fullMatchBytes)
+                            } else if ch >= UInt8(ascii: "1") && ch <= UInt8(ascii: "9") {
+                                let d = Int(ch - UInt8(ascii: "0"))
+                                if d - 1 < m.captureBytes.count {
+                                    built.append(contentsOf: m.captureBytes[d - 1])
                                 }
-                                ti = template.index(after: next)
-                                continue
+                            } else {
+                                built.append(ch)
+                            }
+                            ti += 2
+                            continue
+                        }
+                        built.append(tBytes[ti])
+                        ti += 1
+                    }
+                    repBytes = built
+                case .number(let n):
+                    repBytes = Array(LuauValue.formatNumber(n).utf8)
+                case .table(let t):
+                    let keyVal: LuauValue = if m.captureSpans.isEmpty {
+                        LuauValue.fromBytes(fullMatchBytes)
+                    } else if case .position(let p) = m.captureSpans[0] {
+                        .number(Double(p + 1))
+                    } else {
+                        LuauValue.fromBytes(m.captureBytes[0])
+                    }
+                    let val = t.rawGet(keyVal)
+                    repBytes = val.isTruthy ? (val.stringBytes ?? Array(val.displayString.utf8)) : nil
+                case .closure, .nativeFunction:
+                    let callArgs: [LuauValue] = if m.captureSpans.isEmpty {
+                        [LuauValue.fromBytes(fullMatchBytes)]
+                    } else {
+                        m.captureSpans.enumerated().map { idx, span in
+                            switch span {
+                            case .position(let pos): return .number(Double(pos + 1))
+                            case .span: return LuauValue.fromBytes(m.captureBytes[idx])
                             }
                         }
-                        built.append(template[ti])
-                        ti = template.index(after: ti)
                     }
-                    repStr = built
-                case .number(let n):
-                    repStr = LuauValue.formatNumber(n)
-                case .table(let t):
-                    let key = m.captures.first ?? fullMatch
-                    let val = t.rawGet(.string(key))
-                    repStr = val.isTruthy ? val.displayString : nil
-                case .closure, .nativeFunction:
-                    let callArgs: [LuauValue] = m.captures.isEmpty ? [.string(fullMatch)] : m.captures.map { .string($0) }
                     let res = try vm.call(value: repl, args: callArgs).first ?? .nil
-                    repStr = res.isTruthy ? res.displayString : nil
+                    repBytes = res.isTruthy ? (res.stringBytes ?? Array(res.displayString.utf8)) : nil
                 default:
                     throw LuauRuntimeError(value: .string("bad argument #3 to 'gsub'"))
                 }
-                outBytes.append(contentsOf: (repStr ?? fullMatch).utf8)
+                outBytes.append(contentsOf: repBytes ?? fullMatchBytes)
                 count += 1
                 if m.end == pos {
                     if pos < bytes.count {
@@ -698,20 +772,50 @@ internal enum LuauStdlib {
                 } else {
                     pos = m.end
                 }
-                if pat.hasPrefix("^") { break }
+                if anchored { break }
             }
             if pos < bytes.count {
                 outBytes.append(contentsOf: bytes[pos...])
             }
-            return .values([.string(String(decoding: outBytes, as: UTF8.self)), .number(Double(count))])
+            return .values([LuauValue.fromBytes(outBytes), .number(Double(count))])
         }))
 
         s.rawSet("format", value: .nativeFunction(LuauNativeFunction(name: "string.format") { vm, _, args in
-            guard case .string(let fmt) = args.first else {
+            guard let fmtBytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'format' (string expected)"))
             }
-            let out = try formatString(fmt, args: Array(args.dropFirst()), vm: vm)
-            return .values([.string(out)])
+            let out = try formatStringBytes(fmtBytes, args: Array(args.dropFirst()), vm: vm)
+            return .values([LuauValue.fromBytes(out)])
+        }))
+
+        s.rawSet("pack", value: .nativeFunction(LuauNativeFunction(name: "string.pack") { _, _, args in
+            guard let fmt = args.first?.asString else {
+                throw LuauRuntimeError(value: .string("bad argument #1 to 'pack' (string expected)"))
+            }
+            let packed = try packBinary(fmt: fmt, args: Array(args.dropFirst()))
+            return .values([LuauValue.fromBytes(packed)])
+        }))
+
+        s.rawSet("unpack", value: .nativeFunction(LuauNativeFunction(name: "string.unpack") { _, _, args in
+            guard let fmt = args.first?.asString,
+                  let bytes = args.dropFirst().first?.stringBytes else {
+                throw LuauRuntimeError(value: .string("bad arguments to 'string.unpack'"))
+            }
+            let posArg = args.count > 2 ? (args[2].asInt ?? 1) : 1
+            let startIdx = (posArg < 0 ? bytes.count + posArg + 1 : posArg) - 1
+            guard startIdx >= 0 && startIdx <= bytes.count else {
+                throw LuauRuntimeError(value: .string("bad argument #3 to 'unpack' (initial position out of string)"))
+            }
+            let (values, nextIdx) = try unpackBinary(fmt: fmt, bytes: bytes, initPos: startIdx)
+            return .values(values + [.number(Double(nextIdx + 1))])
+        }))
+
+        s.rawSet("packsize", value: .nativeFunction(LuauNativeFunction(name: "string.packsize") { _, _, args in
+            guard let fmt = args.first?.asString else {
+                throw LuauRuntimeError(value: .string("bad argument #1 to 'packsize' (string expected)"))
+            }
+            let size = try packSizeBinary(fmt: fmt)
+            return .values([.number(Double(size))])
         }))
 
         g.rawSet("string", value: .table(s))
@@ -720,42 +824,41 @@ internal enum LuauStdlib {
         vm.setAppData(StringMetatableBox(smt))
     }
 
-    private static func formatString(_ fmt: String, args: [LuauValue], vm: LuauVM) throws -> String {
-        var out = ""
+    private static func formatStringBytes(_ fmtBytes: [UInt8], args: [LuauValue], vm: LuauVM) throws -> [UInt8] {
+        var out: [UInt8] = []
         var argIdx = 0
-        let chars = Array(fmt)
         var i = 0
-        while i < chars.count {
-            if chars[i] != "%" {
-                out.append(chars[i])
+        while i < fmtBytes.count {
+            if fmtBytes[i] != UInt8(ascii: "%") {
+                out.append(fmtBytes[i])
                 i += 1
                 continue
             }
             i += 1
-            if i < chars.count && chars[i] == "%" {
-                out.append("%")
+            if i < fmtBytes.count && fmtBytes[i] == UInt8(ascii: "%") {
+                out.append(UInt8(ascii: "%"))
                 i += 1
                 continue
             }
             var spec = "%"
-            while i < chars.count && "-+ #0".contains(chars[i]) {
-                spec.append(chars[i])
+            while i < fmtBytes.count && [UInt8(ascii: "-"), UInt8(ascii: "+"), UInt8(ascii: " "), UInt8(ascii: "#"), UInt8(ascii: "0")].contains(fmtBytes[i]) {
+                spec.append(Character(UnicodeScalar(fmtBytes[i])))
                 i += 1
             }
-            while i < chars.count && chars[i].isNumber {
-                spec.append(chars[i])
+            while i < fmtBytes.count && fmtBytes[i] >= UInt8(ascii: "0") && fmtBytes[i] <= UInt8(ascii: "9") {
+                spec.append(Character(UnicodeScalar(fmtBytes[i])))
                 i += 1
             }
-            if i < chars.count && chars[i] == "." {
+            if i < fmtBytes.count && fmtBytes[i] == UInt8(ascii: ".") {
                 spec.append(".")
                 i += 1
-                while i < chars.count && chars[i].isNumber {
-                    spec.append(chars[i])
+                while i < fmtBytes.count && fmtBytes[i] >= UInt8(ascii: "0") && fmtBytes[i] <= UInt8(ascii: "9") {
+                    spec.append(Character(UnicodeScalar(fmtBytes[i])))
                     i += 1
                 }
             }
-            guard i < chars.count else { break }
-            let conv = chars[i]
+            guard i < fmtBytes.count else { break }
+            let conv = Character(UnicodeScalar(fmtBytes[i]))
             i += 1
             guard argIdx < args.count else {
                 throw LuauRuntimeError(value: .string("bad argument #\(argIdx + 2) to 'format' (no value)"))
@@ -766,34 +869,385 @@ internal enum LuauStdlib {
             switch conv {
             case "d", "i":
                 guard let n = val.coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
-                out += String(format: spec + "lld", Int64(n))
+                out.append(contentsOf: String(format: spec + "lld", Int64(n)).utf8)
             case "u", "x", "X", "o":
                 guard let n = val.coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
-                out += String(format: spec + "ll" + String(conv), UInt64(bitPattern: Int64(n)))
+                out.append(contentsOf: String(format: spec + "ll" + String(conv), UInt64(bitPattern: Int64(n))).utf8)
             case "f", "e", "E", "g", "G":
                 guard let n = val.coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
-                out += String(format: spec + String(conv), n)
+                out.append(contentsOf: String(format: spec + String(conv), n).utf8)
             case "c":
                 guard let n = val.coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
-                if let scalar = UnicodeScalar(UInt32(n) & 0xFF) {
-                    out.unicodeScalars.append(scalar)
-                }
+                out.append(UInt8(truncatingIfNeeded: Int64(n)))
             case "s":
-                let str = try vm.valueToString(val)
-                out += str
+                if vm.getMetamethod(of: val, name: "__tostring") == nil, let rawBytes = val.stringBytes {
+                    if spec == "%" {
+                        out.append(contentsOf: rawBytes)
+                    } else {
+                        let s = String(decoding: rawBytes, as: UTF8.self)
+                        out.append(contentsOf: (s as NSString).utf8String.map { String(format: spec + "s", $0) }?.utf8 ?? s.utf8)
+                    }
+                } else {
+                    let str = try vm.valueToString(val)
+                    out.append(contentsOf: str.utf8)
+                }
             case "q":
-                let str = val.displayString
-                let escaped = str
-                    .replacingOccurrences(of: "\\", with: "\\\\")
-                    .replacingOccurrences(of: "\"", with: "\\\"")
-                    .replacingOccurrences(of: "\n", with: "\\n")
-                    .replacingOccurrences(of: "\r", with: "\\r")
-                out += "\"\(escaped)\""
+                let rawBytes = val.stringBytes ?? Array(val.displayString.utf8)
+                out.append(UInt8(ascii: "\""))
+                for b in rawBytes {
+                    switch b {
+                    case UInt8(ascii: "\\"): out.append(contentsOf: "\\\\".utf8)
+                    case UInt8(ascii: "\""): out.append(contentsOf: "\\\"".utf8)
+                    case UInt8(ascii: "\n"): out.append(contentsOf: "\\n".utf8)
+                    case UInt8(ascii: "\r"): out.append(contentsOf: "\\r".utf8)
+                    case 0..<32, 127: out.append(contentsOf: "\\\(b)".utf8)
+                    default: out.append(b)
+                    }
+                }
+                out.append(UInt8(ascii: "\""))
             default:
-                out.append(conv)
+                out.append(contentsOf: String(conv).utf8)
             }
         }
         return out
+    }
+
+    private enum PackEndian { case little, big, native }
+
+    private enum PackOp {
+        case padding(Int)
+        case fixedString(Int)
+        case cString
+        case lengthString(Int)
+        case signedInt(Int)
+        case unsignedInt(Int)
+        case float32
+        case float64
+        case alignOnly(Int)
+    }
+
+    private static func parsePackFormat(_ fmt: String) throws -> [(PackOp, PackEndian, Int)] {
+        let chars = Array(fmt)
+        var i = 0
+        var endian: PackEndian = .little
+        var maxAlign = 1
+        var ops: [(PackOp, PackEndian, Int)] = []
+
+        func readNum(defaultVal: Int? = nil) throws -> Int {
+            var n = 0
+            var any = false
+            while i < chars.count && chars[i].isNumber {
+                any = true
+                n = n * 10 + Int(String(chars[i]))!
+                i += 1
+            }
+            if !any {
+                if let d = defaultVal { return d }
+                throw LuauRuntimeError(value: .string("invalid format option in pack format"))
+            }
+            return n
+        }
+
+        func parseSingleOp() throws -> (PackOp, Int) {
+            guard i < chars.count else {
+                throw LuauRuntimeError(value: .string("invalid format option 'X'"))
+            }
+            let ch = chars[i]
+            i += 1
+            switch ch {
+            case "b": return (.signedInt(1), 1)
+            case "B": return (.unsignedInt(1), 1)
+            case "h": return (.signedInt(2), 2)
+            case "H": return (.unsignedInt(2), 2)
+            case "l", "j": return (.signedInt(8), 8)
+            case "L", "J", "T": return (.unsignedInt(8), 8)
+            case "i":
+                let sz = try readNum(defaultVal: 4)
+                guard sz >= 1 && sz <= 16 else { throw LuauRuntimeError(value: .string("integral size (\(sz)) out of limits [1,16]")) }
+                return (.signedInt(sz), sz)
+            case "I":
+                let sz = try readNum(defaultVal: 4)
+                guard sz >= 1 && sz <= 16 else { throw LuauRuntimeError(value: .string("integral size (\(sz)) out of limits [1,16]")) }
+                return (.unsignedInt(sz), sz)
+            case "f": return (.float32, 4)
+            case "d", "n": return (.float64, 8)
+            case "c":
+                let sz = try readNum()
+                return (.fixedString(sz), 1)
+            case "z": return (.cString, 1)
+            case "s":
+                let sz = try readNum(defaultVal: 8)
+                guard sz >= 1 && sz <= 16 else { throw LuauRuntimeError(value: .string("integral size (\(sz)) out of limits [1,16]")) }
+                return (.lengthString(sz), sz)
+            case "x": return (.padding(1), 1)
+            default:
+                throw LuauRuntimeError(value: .string("invalid format option '\(ch)'"))
+            }
+        }
+
+        while i < chars.count {
+            let ch = chars[i]
+            switch ch {
+            case " ": i += 1
+            case "<": endian = .little; i += 1
+            case ">": endian = .big; i += 1
+            case "=": endian = .native; i += 1
+            case "!":
+                i += 1
+                let a = try readNum(defaultVal: 8)
+                guard a >= 1 && a <= 16 && (a & (a - 1)) == 0 else {
+                    throw LuauRuntimeError(value: .string("alignment must be a power of 2 in [1, 16]"))
+                }
+                maxAlign = a
+            case "X":
+                i += 1
+                let (_, naturalAlign) = try parseSingleOp()
+                let align = min(naturalAlign, maxAlign)
+                ops.append((.alignOnly(align), endian, align))
+            default:
+                let (op, naturalAlign) = try parseSingleOp()
+                let align = min(naturalAlign, maxAlign)
+                ops.append((op, endian, align))
+            }
+        }
+        return ops
+    }
+
+    private static func isLittleEndian(_ e: PackEndian) -> Bool {
+        switch e {
+        case .little: return true
+        case .big: return false
+        case .native: return Int(littleEndian: 1) == 1
+        }
+    }
+
+    private static func packIntBytes(_ value: Int64, size: Int, signed: Bool, little: Bool) throws -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: size)
+        if signed {
+            if size < 8 {
+                let bits = size * 8
+                let minVal = -(Int64(1) << (bits - 1))
+                let maxVal = (Int64(1) << (bits - 1)) - 1
+                if value < minVal || value > maxVal {
+                    throw LuauRuntimeError(value: .string("integer overflow in 'string.pack'"))
+                }
+            }
+            var u = UInt64(bitPattern: value)
+            let fill: UInt8 = value < 0 ? 0xFF : 0x00
+            for idx in 0..<size {
+                let byte = idx < 8 ? UInt8(u & 0xFF) : fill
+                if idx < 8 { u >>= 8 }
+                bytes[little ? idx : (size - 1 - idx)] = byte
+            }
+        } else {
+            if value < 0 {
+                throw LuauRuntimeError(value: .string("unsigned overflow in 'string.pack'"))
+            }
+            var u = UInt64(value)
+            if size < 8 {
+                let maxVal = (UInt64(1) << (size * 8)) - 1
+                if u > maxVal {
+                    throw LuauRuntimeError(value: .string("integer overflow in 'string.pack'"))
+                }
+            }
+            for idx in 0..<size {
+                let byte = idx < 8 ? UInt8(u & 0xFF) : 0
+                if idx < 8 { u >>= 8 }
+                bytes[little ? idx : (size - 1 - idx)] = byte
+            }
+        }
+        return bytes
+    }
+
+    private static func unpackIntBytes(_ slice: ArraySlice<UInt8>, signed: Bool, little: Bool) -> Double {
+        let size = slice.count
+        var u: UInt64 = 0
+        for i in 0..<min(size, 8) {
+            let b = little ? slice[slice.startIndex + i] : slice[slice.endIndex - 1 - i]
+            u |= UInt64(b) << (i * 8)
+        }
+        if signed {
+            let msb = little ? slice[slice.endIndex - 1] : slice[slice.startIndex]
+            if (msb & 0x80) != 0 {
+                if size < 8 {
+                    u |= ~((UInt64(1) << (size * 8)) - 1)
+                }
+                return Double(Int64(bitPattern: u))
+            }
+            return Double(Int64(bitPattern: u))
+        }
+        return Double(u)
+    }
+
+    private static func packBinary(fmt: String, args: [LuauValue]) throws -> [UInt8] {
+        let ops = try parsePackFormat(fmt)
+        var out: [UInt8] = []
+        var argIdx = 0
+
+        func alignOut(_ align: Int) {
+            guard align > 1 else { return }
+            let rem = out.count % align
+            if rem != 0 {
+                out.append(contentsOf: repeatElement(0, count: align - rem))
+            }
+        }
+
+        for (op, endian, align) in ops {
+            alignOut(align)
+            let little = isLittleEndian(endian)
+            switch op {
+            case .padding(let n):
+                out.append(contentsOf: repeatElement(0, count: n))
+            case .alignOnly:
+                break
+            case .signedInt(let size):
+                guard argIdx < args.count, let n = args[argIdx].coercedNumber else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (number expected)"))
+                }
+                argIdx += 1
+                out.append(contentsOf: try packIntBytes(Int64(n), size: size, signed: true, little: little))
+            case .unsignedInt(let size):
+                guard argIdx < args.count, let n = args[argIdx].coercedNumber else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (number expected)"))
+                }
+                argIdx += 1
+                if n < 0 {
+                    throw LuauRuntimeError(value: .string("unsigned overflow in 'string.pack'"))
+                }
+                out.append(contentsOf: try packIntBytes(Int64(UInt64(n)), size: size, signed: false, little: little))
+            case .float32:
+                guard argIdx < args.count, let n = args[argIdx].coercedNumber else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (number expected)"))
+                }
+                argIdx += 1
+                var bits = Float(n).bitPattern
+                bits = little ? bits.littleEndian : bits.bigEndian
+                withUnsafeBytes(of: &bits) { out.append(contentsOf: $0) }
+            case .float64:
+                guard argIdx < args.count, let n = args[argIdx].coercedNumber else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (number expected)"))
+                }
+                argIdx += 1
+                var bits = n.bitPattern
+                bits = little ? bits.littleEndian : bits.bigEndian
+                withUnsafeBytes(of: &bits) { out.append(contentsOf: $0) }
+            case .fixedString(let n):
+                guard argIdx < args.count, let bytes = args[argIdx].stringBytes else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (string expected)"))
+                }
+                argIdx += 1
+                guard bytes.count <= n else {
+                    throw LuauRuntimeError(value: .string("string longer than given size"))
+                }
+                out.append(contentsOf: bytes)
+                if bytes.count < n {
+                    out.append(contentsOf: repeatElement(0, count: n - bytes.count))
+                }
+            case .cString:
+                guard argIdx < args.count, let bytes = args[argIdx].stringBytes else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (string expected)"))
+                }
+                argIdx += 1
+                if bytes.contains(0) {
+                    throw LuauRuntimeError(value: .string("string contains zeros"))
+                }
+                out.append(contentsOf: bytes)
+                out.append(0)
+            case .lengthString(let size):
+                guard argIdx < args.count, let bytes = args[argIdx].stringBytes else {
+                    throw LuauRuntimeError(value: .string("bad argument to 'pack' (string expected)"))
+                }
+                argIdx += 1
+                out.append(contentsOf: try packIntBytes(Int64(bytes.count), size: size, signed: false, little: little))
+                out.append(contentsOf: bytes)
+            }
+        }
+        return out
+    }
+
+    private static func unpackBinary(fmt: String, bytes: [UInt8], initPos: Int) throws -> ([LuauValue], Int) {
+        let ops = try parsePackFormat(fmt)
+        var pos = initPos
+        var results: [LuauValue] = []
+
+        func alignPos(_ align: Int) {
+            guard align > 1 else { return }
+            let rem = pos % align
+            if rem != 0 {
+                pos += align - rem
+            }
+        }
+
+        for (op, endian, align) in ops {
+            alignPos(align)
+            let little = isLittleEndian(endian)
+            switch op {
+            case .padding(let n):
+                guard pos + n <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                pos += n
+            case .alignOnly:
+                break
+            case .signedInt(let size):
+                guard pos + size <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                results.append(.number(unpackIntBytes(bytes[pos..<(pos + size)], signed: true, little: little)))
+                pos += size
+            case .unsignedInt(let size):
+                guard pos + size <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                results.append(.number(unpackIntBytes(bytes[pos..<(pos + size)], signed: false, little: little)))
+                pos += size
+            case .float32:
+                guard pos + 4 <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                let raw = bytes[pos..<(pos + 4)].withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+                let bits = little ? UInt32(littleEndian: raw) : UInt32(bigEndian: raw)
+                results.append(.number(Double(Float(bitPattern: bits))))
+                pos += 4
+            case .float64:
+                guard pos + 8 <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                let raw = bytes[pos..<(pos + 8)].withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }
+                let bits = little ? UInt64(littleEndian: raw) : UInt64(bigEndian: raw)
+                results.append(.number(Double(bitPattern: bits)))
+                pos += 8
+            case .fixedString(let n):
+                guard pos + n <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                results.append(LuauValue.fromBytes(Array(bytes[pos..<(pos + n)])))
+                pos += n
+            case .cString:
+                guard let nulIdx = bytes[pos...].firstIndex(of: 0) else {
+                    throw LuauRuntimeError(value: .string("unfinished string for format 'z'"))
+                }
+                results.append(LuauValue.fromBytes(Array(bytes[pos..<nulIdx])))
+                pos = nulIdx + 1
+            case .lengthString(let size):
+                guard pos + size <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                let len = Int(unpackIntBytes(bytes[pos..<(pos + size)], signed: false, little: little))
+                pos += size
+                guard len >= 0 && pos + len <= bytes.count else { throw LuauRuntimeError(value: .string("data string too short")) }
+                results.append(LuauValue.fromBytes(Array(bytes[pos..<(pos + len)])))
+                pos += len
+            }
+        }
+        return (results, pos)
+    }
+
+    private static func packSizeBinary(fmt: String) throws -> Int {
+        let ops = try parsePackFormat(fmt)
+        var size = 0
+        for (op, _, align) in ops {
+            if align > 1 {
+                let rem = size % align
+                if rem != 0 { size += align - rem }
+            }
+            switch op {
+            case .padding(let n), .fixedString(let n): size += n
+            case .alignOnly: break
+            case .signedInt(let n), .unsignedInt(let n): size += n
+            case .float32: size += 4
+            case .float64: size += 8
+            case .cString, .lengthString:
+                throw LuauRuntimeError(value: .string("variable-length format"))
+            }
+        }
+        return size
     }
 
     // MARK: - table
@@ -899,20 +1353,23 @@ internal enum LuauStdlib {
             guard case .table(let tbl) = args.first else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'concat' (table expected)"))
             }
-            let sep = (args.count > 1 ? args[1].asString : nil) ?? ""
+            let sepBytes = (args.count > 1 ? args[1].stringBytes : nil) ?? []
             let i = args.count > 2 ? (args[2].asInt ?? 1) : 1
             let j = args.count > 3 ? (args[3].asInt ?? tbl.rawLength) : tbl.rawLength
             if i > j { return .values([.string("")]) }
-            var parts: [String] = []
+            var out: [UInt8] = []
             for idx in i...j {
+                if idx > i && !sepBytes.isEmpty { out.append(contentsOf: sepBytes) }
                 let v = tbl.rawGet(idx)
-                switch v {
-                case .string(let s): parts.append(s)
-                case .number(let n): parts.append(LuauValue.formatNumber(n))
-                default: throw LuauRuntimeError(value: .string("invalid value (\(v.typeName)) at index \(idx) in table for 'concat'"))
+                if let vb = v.stringBytes {
+                    out.append(contentsOf: vb)
+                } else if case .number(let n) = v {
+                    out.append(contentsOf: LuauValue.formatNumber(n).utf8)
+                } else {
+                    throw LuauRuntimeError(value: .string("invalid value (\(v.typeName)) at index \(idx) in table for 'concat'"))
                 }
             }
-            return .values([.string(parts.joined(separator: sep))])
+            return .values([LuauValue.fromBytes(out)])
         }))
 
         t.rawSet("sort", value: .nativeFunction(LuauNativeFunction(name: "table.sort") { vm, _, args in
@@ -937,10 +1394,11 @@ internal enum LuauStdlib {
                         return false
                     }
                 } else {
-                    switch (a, b) {
-                    case (.number(let na), .number(let nb)): return na < nb
-                    case (.string(let sa), .string(let sb)): return sa < sb
-                    default:
+                    if case .number(let na) = a, case .number(let nb) = b {
+                        return na < nb
+                    } else if let ba = a.stringBytes, let bb = b.stringBytes {
+                        return ba.lexicographicallyPrecedes(bb)
+                    } else {
                         sortError = LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
                         return false
                     }
@@ -1100,16 +1558,31 @@ internal enum LuauStdlib {
             return .values([.string(out)])
         }))
         u.rawSet("len", value: .nativeFunction(LuauNativeFunction(name: "utf8.len") { _, _, args in
-            guard case .string(let s) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'utf8.len'"))
             }
-            return .values([.number(Double(s.unicodeScalars.count))])
+            let len = bytes.count
+            let iArg = args.count > 1 ? (args[1].asInt ?? 1) : 1
+            let jArg = args.count > 2 ? (args[2].asInt ?? -1) : -1
+            let start = max(1, iArg < 0 ? len + iArg + 1 : iArg)
+            let end = min(len, jArg < 0 ? len + jArg + 1 : jArg)
+            if start > end { return .values([.number(0)]) }
+            var idx = start - 1
+            var count = 0
+            while idx < end {
+                if let (_, nextIdx) = decodeUTF8Scalar(bytes, at: idx, limit: end) {
+                    count += 1
+                    idx = nextIdx
+                } else {
+                    return .values([.nil, .number(Double(idx + 1))])
+                }
+            }
+            return .values([.number(Double(count))])
         }))
         u.rawSet("offset", value: .nativeFunction(LuauNativeFunction(name: "utf8.offset") { _, _, args in
-            guard case .string(let s) = args.first, let n = args.count > 1 ? args[1].asInt : nil else {
+            guard let bytes = args.first?.stringBytes, let n = args.count > 1 ? args[1].asInt : nil else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'utf8.offset'"))
             }
-            let bytes = Array(s.utf8)
             var pos = args.count > 2 ? (args[2].asInt ?? (n >= 0 ? 1 : bytes.count + 1)) : (n >= 0 ? 1 : bytes.count + 1)
             if pos < 0 { pos = bytes.count + 1 + pos }
             var idx = pos - 1
@@ -1145,31 +1618,74 @@ internal enum LuauStdlib {
             }
         }))
         u.rawSet("codepoint", value: .nativeFunction(LuauNativeFunction(name: "utf8.codepoint") { _, _, args in
-            guard case .string(let s) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'utf8.codepoint'"))
             }
-            let scalars = Array(s.unicodeScalars)
-            if scalars.isEmpty { return .values([]) }
-            return .values([.number(Double(scalars[0].value))])
+            let len = bytes.count
+            let iArg = args.count > 1 ? (args[1].asInt ?? 1) : 1
+            let jArg = args.count > 2 ? (args[2].asInt ?? iArg) : iArg
+            let start = max(1, iArg < 0 ? len + iArg + 1 : iArg)
+            let end = min(len, jArg < 0 ? len + jArg + 1 : jArg)
+            if start > end { return .values([]) }
+            var idx = start - 1
+            var out: [LuauValue] = []
+            while idx < end {
+                guard let (cp, nextIdx) = decodeUTF8Scalar(bytes, at: idx, limit: bytes.count) else {
+                    throw LuauRuntimeError(value: .string("invalid UTF-8 code"))
+                }
+                out.append(.number(Double(cp)))
+                idx = nextIdx
+            }
+            return .values(out)
         }))
         u.rawSet("codes", value: .nativeFunction(LuauNativeFunction(name: "utf8.codes") { _, _, args in
-            guard case .string(let s) = args.first else {
+            guard let bytes = args.first?.stringBytes else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'utf8.codes'"))
             }
-            let scalars = Array(s.unicodeScalars)
-            final class Cursor: @unchecked Sendable { var idx = 0; var bytePos = 1 }
+            final class Cursor: @unchecked Sendable { var idx = 0 }
             let cur = Cursor()
             let iter = LuauNativeFunction(name: "utf8_codes_iter") { _, _, _ in
-                if cur.idx >= scalars.count { return .values([.nil]) }
-                let sc = scalars[cur.idx]
-                let pos = cur.bytePos
-                cur.idx += 1
-                cur.bytePos += sc.utf8.count
-                return .values([.number(Double(pos)), .number(Double(sc.value))])
+                if cur.idx >= bytes.count { return .values([.nil]) }
+                let pos = cur.idx + 1
+                guard let (cp, nextIdx) = decodeUTF8Scalar(bytes, at: cur.idx, limit: bytes.count) else {
+                    throw LuauRuntimeError(value: .string("invalid UTF-8 code"))
+                }
+                cur.idx = nextIdx
+                return .values([.number(Double(pos)), .number(Double(cp))])
             }
             return .values([.nativeFunction(iter)])
         }))
         g.rawSet("utf8", value: .table(u))
+    }
+
+    private static func decodeUTF8Scalar(_ bytes: [UInt8], at idx: Int, limit: Int) -> (UInt32, Int)? {
+        guard idx < limit else { return nil }
+        let b0 = bytes[idx]
+        if b0 < 0x80 {
+            return (UInt32(b0), idx + 1)
+        } else if (b0 & 0xE0) == 0xC0 {
+            guard idx + 1 < limit else { return nil }
+            let b1 = bytes[idx + 1]
+            guard (b1 & 0xC0) == 0x80 else { return nil }
+            let cp = (UInt32(b0 & 0x1F) << 6) | UInt32(b1 & 0x3F)
+            guard cp >= 0x80 else { return nil }
+            return (cp, idx + 2)
+        } else if (b0 & 0xF0) == 0xE0 {
+            guard idx + 2 < limit else { return nil }
+            let b1 = bytes[idx + 1], b2 = bytes[idx + 2]
+            guard (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 else { return nil }
+            let cp = (UInt32(b0 & 0x0F) << 12) | (UInt32(b1 & 0x3F) << 6) | UInt32(b2 & 0x3F)
+            guard cp >= 0x800 && !(cp >= 0xD800 && cp <= 0xDFFF) else { return nil }
+            return (cp, idx + 3)
+        } else if (b0 & 0xF8) == 0xF0 {
+            guard idx + 3 < limit else { return nil }
+            let b1 = bytes[idx + 1], b2 = bytes[idx + 2], b3 = bytes[idx + 3]
+            guard (b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80 else { return nil }
+            let cp = (UInt32(b0 & 0x07) << 18) | (UInt32(b1 & 0x3F) << 12) | (UInt32(b2 & 0x3F) << 6) | UInt32(b3 & 0x3F)
+            guard cp >= 0x10000 && cp <= 0x10FFFF else { return nil }
+            return (cp, idx + 4)
+        }
+        return nil
     }
 
     // MARK: - os
@@ -1182,8 +1698,97 @@ internal enum LuauStdlib {
             let secs = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18
             return .values([.number(secs)])
         }))
-        o.rawSet("time", value: .nativeFunction(LuauNativeFunction(name: "os.time") { _, _, _ in
+        o.rawSet("time", value: .nativeFunction(LuauNativeFunction(name: "os.time") { _, _, args in
+            if case .table(let tbl) = args.first {
+                guard let year = tbl.rawGet("year").asInt,
+                      let month = tbl.rawGet("month").asInt,
+                      let day = tbl.rawGet("day").asInt else {
+                    throw LuauRuntimeError(value: .string("field missing in date table"))
+                }
+                var t = tm()
+                t.tm_year = Int32(year - 1900)
+                t.tm_mon = Int32(month - 1)
+                t.tm_mday = Int32(day)
+                t.tm_hour = Int32(tbl.rawGet("hour").asInt ?? 12)
+                t.tm_min = Int32(tbl.rawGet("min").asInt ?? 0)
+                t.tm_sec = Int32(tbl.rawGet("sec").asInt ?? 0)
+                let dstVal = tbl.rawGet("isdst")
+                if dstVal.isNil {
+                    t.tm_isdst = -1
+                } else {
+                    t.tm_isdst = dstVal.isTruthy ? 1 : 0
+                }
+                let res = mktime(&t)
+                if res == -1 { return .values([.nil]) }
+                return .values([.number(Double(res))])
+            }
             return .values([.number(floor(Date().timeIntervalSince1970))])
+        }))
+        o.rawSet("date", value: .nativeFunction(LuauNativeFunction(name: "os.date") { _, _, args in
+            let fmt = (args.first?.isNil == false ? args.first?.asString : nil) ?? "%c"
+            var rawTime: time_t
+            if args.count > 1 && !args[1].isNil {
+                guard let num = args[1].coercedNumber else {
+                    throw LuauRuntimeError(value: .string("bad argument #2 to 'date' (number expected)"))
+                }
+                rawTime = time_t(Int64(num))
+            } else {
+                rawTime = time_t(Int64(floor(Date().timeIntervalSince1970)))
+            }
+            let utc = fmt.hasPrefix("!")
+            let spec = utc ? String(fmt.dropFirst()) : fmt
+            var t = tm()
+            if utc {
+                gmtime_r(&rawTime, &t)
+            } else {
+                localtime_r(&rawTime, &t)
+            }
+            if spec == "*t" {
+                let tbl = LuauTable()
+                tbl.rawSet("year", value: .number(Double(Int(t.tm_year) + 1900)))
+                tbl.rawSet("month", value: .number(Double(Int(t.tm_mon) + 1)))
+                tbl.rawSet("day", value: .number(Double(Int(t.tm_mday))))
+                tbl.rawSet("hour", value: .number(Double(Int(t.tm_hour))))
+                tbl.rawSet("min", value: .number(Double(Int(t.tm_min))))
+                tbl.rawSet("sec", value: .number(Double(Int(t.tm_sec))))
+                tbl.rawSet("wday", value: .number(Double(Int(t.tm_wday) + 1)))
+                tbl.rawSet("yday", value: .number(Double(Int(t.tm_yday) + 1)))
+                tbl.rawSet("isdst", value: .bool(t.tm_isdst > 0))
+                return .values([.table(tbl)])
+            }
+            let validOpts = Set("aAbBcCdDeFgGhHIjmMnprRStTuUVwWxXyYzZ%")
+            var si = spec.startIndex
+            while si < spec.endIndex {
+                if spec[si] == "%" {
+                    let next = spec.index(after: si)
+                    guard next < spec.endIndex, validOpts.contains(spec[next]) else {
+                        let bad = next < spec.endIndex ? String(spec[next]) : ""
+                        throw LuauRuntimeError(value: .string("invalid conversion specifier '%\(bad)'"))
+                    }
+                    si = spec.index(after: next)
+                } else {
+                    si = spec.index(after: si)
+                }
+            }
+            if spec.isEmpty { return .values([.string("")]) }
+            var buf = [CChar](repeating: 0, count: 512)
+            let written = spec.withCString { cFmt in
+                strftime(&buf, buf.count, cFmt, &t)
+            }
+            if written == 0 {
+                // Distinguish empty output from buffer too small by trying larger buffer
+                var bigBuf = [CChar](repeating: 0, count: 4096)
+                let bigWritten = spec.withCString { cFmt in
+                    strftime(&bigBuf, bigBuf.count, cFmt, &t)
+                }
+                if bigWritten == 0 {
+                    return .values([.string("")])
+                }
+                let bytes = bigBuf[0..<bigWritten].map { UInt8(bitPattern: $0) }
+                return .values([LuauValue.fromBytes(bytes)])
+            }
+            let bytes = buf[0..<written].map { UInt8(bitPattern: $0) }
+            return .values([LuauValue.fromBytes(bytes)])
         }))
         o.rawSet("difftime", value: .nativeFunction(LuauNativeFunction(name: "os.difftime") { _, _, args in
             let t2 = args.count > 0 ? (args[0].coercedNumber ?? 0) : 0
@@ -1287,10 +1892,102 @@ internal enum LuauStdlib {
             }
             return .values([.string(lines.joined(separator: "\n"))])
         }))
+        final class SelfRef: @unchecked Sendable { var fn: LuauNativeFunction? }
+        let infoRef = SelfRef()
+        let infoFn = LuauNativeFunction(name: "debug.info") { _, currentThread, args in
+            var targetThread = currentThread
+            var idx = 0
+            if case .thread(let th) = args.first {
+                targetThread = th
+                idx = 1
+            }
+            guard idx + 1 < args.count else {
+                throw LuauRuntimeError(value: .string("bad arguments to 'debug.info'"))
+            }
+            let target = args[idx]
+            guard let what = args[idx + 1].asString else {
+                throw LuauRuntimeError(value: .string("bad argument to 'debug.info' (string expected)"))
+            }
+
+            let source: String
+            let line: Int
+            let name: String
+            let nparams: Int
+            let isvararg: Bool
+            let funcVal: LuauValue
+
+            if let level = target.asInt {
+                if level < 0 {
+                    throw LuauRuntimeError(value: .string("bad argument to 'debug.info' (level can't be negative)"))
+                }
+                if level == 0 {
+                    source = "[C]"
+                    line = -1
+                    name = "info"
+                    nparams = 0
+                    isvararg = true
+                    funcVal = infoRef.fn.map { .nativeFunction($0) } ?? .nil
+                } else {
+                    let frameIdx = targetThread.frames.count - level
+                    if frameIdx < 0 || frameIdx >= targetThread.frames.count {
+                        return .values([])
+                    }
+                    let frame = targetThread.frames[frameIdx]
+                    let pc = max(0, frame.pc - 1)
+                    line = pc < frame.closure.proto.code.count ? frame.closure.proto.code[pc].line : 0
+                    source = frame.closure.proto.sourceName
+                    name = frame.closure.proto.name
+                    nparams = frame.closure.proto.paramsCount
+                    isvararg = frame.closure.proto.isVariadic
+                    funcVal = .closure(frame.closure)
+                }
+            } else if case .closure(let cl) = target {
+                source = cl.proto.sourceName
+                line = cl.proto.code.first?.line ?? 0
+                name = cl.proto.name
+                nparams = cl.proto.paramsCount
+                isvararg = cl.proto.isVariadic
+                funcVal = .closure(cl)
+            } else if case .nativeFunction(let nf) = target {
+                source = "[C]"
+                line = -1
+                name = nf.name
+                nparams = 0
+                isvararg = true
+                funcVal = .nativeFunction(nf)
+            } else {
+                throw LuauRuntimeError(value: .string("bad argument to 'debug.info' (function or level expected)"))
+            }
+
+            var out: [LuauValue] = []
+            for ch in what {
+                switch ch {
+                case "s": out.append(.string(source))
+                case "l": out.append(.number(Double(line)))
+                case "n": out.append(.string(name))
+                case "a":
+                    out.append(.number(Double(nparams)))
+                    out.append(.bool(isvararg))
+                case "f": out.append(funcVal)
+                default:
+                    throw LuauRuntimeError(value: .string("invalid option '\(ch)' to 'debug.info'"))
+                }
+            }
+            return .values(out)
+        }
+        infoRef.fn = infoFn
+        d.rawSet("info", value: .nativeFunction(infoFn))
         g.rawSet("debug", value: .table(d))
     }
 
     // MARK: - vector
+
+    private static func reqVec(_ args: [LuauValue], _ idx: Int, _ fn: String) throws -> SIMD3<Double> {
+        guard idx < args.count, case .vector(let vec) = args[idx] else {
+            throw LuauRuntimeError(value: .string("bad argument #\(idx + 1) to 'vector.\(fn)' (vector expected)"))
+        }
+        return vec
+    }
 
     private static func installVector(into g: LuauTable) {
         let v = LuauTable()
@@ -1300,8 +1997,380 @@ internal enum LuauStdlib {
             let z = args.count > 2 ? (args[2].coercedNumber ?? 0) : 0
             return .values([.vector(SIMD3<Double>(x, y, z))])
         }))
+        v.rawSet("magnitude", value: .nativeFunction(LuauNativeFunction(name: "vector.magnitude") { _, _, args in
+            let a = try reqVec(args, 0, "magnitude")
+            return .values([.number((a.x * a.x + a.y * a.y + a.z * a.z).squareRoot())])
+        }))
+        v.rawSet("normalize", value: .nativeFunction(LuauNativeFunction(name: "vector.normalize") { _, _, args in
+            let a = try reqVec(args, 0, "normalize")
+            let mag = (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot()
+            return .values([.vector(a / mag)])
+        }))
+        v.rawSet("cross", value: .nativeFunction(LuauNativeFunction(name: "vector.cross") { _, _, args in
+            let a = try reqVec(args, 0, "cross")
+            let b = try reqVec(args, 1, "cross")
+            return .values([.vector(SIMD3<Double>(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x))])
+        }))
+        v.rawSet("dot", value: .nativeFunction(LuauNativeFunction(name: "vector.dot") { _, _, args in
+            let a = try reqVec(args, 0, "dot")
+            let b = try reqVec(args, 1, "dot")
+            return .values([.number(a.x * b.x + a.y * b.y + a.z * b.z)])
+        }))
+        v.rawSet("angle", value: .nativeFunction(LuauNativeFunction(name: "vector.angle") { _, _, args in
+            let a = try reqVec(args, 0, "angle")
+            let b = try reqVec(args, 1, "angle")
+            let c = SIMD3<Double>(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+            let cMag = (c.x * c.x + c.y * c.y + c.z * c.z).squareRoot()
+            let dot = a.x * b.x + a.y * b.y + a.z * b.z
+            var ang = atan2(cMag, dot)
+            if args.count > 2 && !args[2].isNil {
+                let axis = try reqVec(args, 2, "angle")
+                if c.x * axis.x + c.y * axis.y + c.z * axis.z < 0 {
+                    ang = -ang
+                }
+            }
+            return .values([.number(ang)])
+        }))
+        v.rawSet("floor", value: .nativeFunction(LuauNativeFunction(name: "vector.floor") { _, _, args in
+            let a = try reqVec(args, 0, "floor")
+            return .values([.vector(SIMD3<Double>(Foundation.floor(a.x), Foundation.floor(a.y), Foundation.floor(a.z)))])
+        }))
+        v.rawSet("ceil", value: .nativeFunction(LuauNativeFunction(name: "vector.ceil") { _, _, args in
+            let a = try reqVec(args, 0, "ceil")
+            return .values([.vector(SIMD3<Double>(Foundation.ceil(a.x), Foundation.ceil(a.y), Foundation.ceil(a.z)))])
+        }))
+        v.rawSet("abs", value: .nativeFunction(LuauNativeFunction(name: "vector.abs") { _, _, args in
+            let a = try reqVec(args, 0, "abs")
+            return .values([.vector(SIMD3<Double>(Swift.abs(a.x), Swift.abs(a.y), Swift.abs(a.z)))])
+        }))
+        v.rawSet("sign", value: .nativeFunction(LuauNativeFunction(name: "vector.sign") { _, _, args in
+            let a = try reqVec(args, 0, "sign")
+            func sgn(_ x: Double) -> Double { x > 0 ? 1 : (x < 0 ? -1 : 0) }
+            return .values([.vector(SIMD3<Double>(sgn(a.x), sgn(a.y), sgn(a.z)))])
+        }))
+        v.rawSet("clamp", value: .nativeFunction(LuauNativeFunction(name: "vector.clamp") { _, _, args in
+            let a = try reqVec(args, 0, "clamp")
+            let lo = try reqVec(args, 1, "clamp")
+            let hi = try reqVec(args, 2, "clamp")
+            guard lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z else {
+                throw LuauRuntimeError(value: .string("bad argument #3 to 'vector.clamp' (max must be >= min)"))
+            }
+            return .values([.vector(SIMD3<Double>(
+                Swift.min(Swift.max(a.x, lo.x), hi.x),
+                Swift.min(Swift.max(a.y, lo.y), hi.y),
+                Swift.min(Swift.max(a.z, lo.z), hi.z)
+            ))])
+        }))
+        v.rawSet("min", value: .nativeFunction(LuauNativeFunction(name: "vector.min") { _, _, args in
+            var best = try reqVec(args, 0, "min")
+            for i in 1..<args.count {
+                let next = try reqVec(args, i, "min")
+                best = SIMD3<Double>(Swift.min(best.x, next.x), Swift.min(best.y, next.y), Swift.min(best.z, next.z))
+            }
+            return .values([.vector(best)])
+        }))
+        v.rawSet("max", value: .nativeFunction(LuauNativeFunction(name: "vector.max") { _, _, args in
+            var best = try reqVec(args, 0, "max")
+            for i in 1..<args.count {
+                let next = try reqVec(args, i, "max")
+                best = SIMD3<Double>(Swift.max(best.x, next.x), Swift.max(best.y, next.y), Swift.max(best.z, next.z))
+            }
+            return .values([.vector(best)])
+        }))
+        v.rawSet("lerp", value: .nativeFunction(LuauNativeFunction(name: "vector.lerp") { _, _, args in
+            let a = try reqVec(args, 0, "lerp")
+            let b = try reqVec(args, 1, "lerp")
+            guard let t = args.count > 2 ? args[2].coercedNumber : nil else {
+                throw LuauRuntimeError(value: .string("bad argument #3 to 'vector.lerp' (number expected)"))
+            }
+            return .values([.vector(a + (b - a) * t)])
+        }))
         v.rawSet("zero", value: .vector(.zero))
         v.rawSet("one", value: .vector(SIMD3<Double>(1, 1, 1)))
         g.rawSet("vector", value: .table(v))
+    }
+
+    // MARK: - buffer
+
+    private static func reqBuffer(_ args: [LuauValue], _ idx: Int, _ fn: String) throws -> LuauBufferBox {
+        guard idx < args.count,
+              case .userdata(let u) = args[idx],
+              let box = u.payload as? LuauBufferBox else {
+            throw LuauRuntimeError(value: .string("bad argument #\(idx + 1) to 'buffer.\(fn)' (buffer expected)"))
+        }
+        return box
+    }
+
+    private static func reqOffset(_ args: [LuauValue], _ idx: Int, _ fn: String) throws -> Int {
+        guard idx < args.count, let off = args[idx].asInt else {
+            throw LuauRuntimeError(value: .string("bad argument #\(idx + 1) to 'buffer.\(fn)' (number expected)"))
+        }
+        return off
+    }
+
+    private static func checkRange(_ buf: LuauBufferBox, _ offset: Int, _ size: Int) throws {
+        guard offset >= 0, size >= 0, offset + size <= buf.bytes.count else {
+            throw LuauRuntimeError(value: .string("buffer access out of bounds"))
+        }
+    }
+
+    private static func readLE<T: FixedWidthInteger>(_ buf: LuauBufferBox, offset: Int, as type: T.Type) throws -> T {
+        let size = MemoryLayout<T>.size
+        try checkRange(buf, offset, size)
+        var val: T = 0
+        for i in 0..<size {
+            val |= T(buf.bytes[offset + i]) << (i * 8)
+        }
+        return val
+    }
+
+    private static func writeLE<T: FixedWidthInteger>(_ buf: LuauBufferBox, offset: Int, value: T) throws {
+        let size = MemoryLayout<T>.size
+        try checkRange(buf, offset, size)
+        for i in 0..<size {
+            buf.bytes[offset + i] = UInt8(truncatingIfNeeded: value >> (i * 8))
+        }
+    }
+
+    private static func installBuffer(into g: LuauTable, vm: LuauVM) {
+        let b = LuauTable()
+
+        b.rawSet("create", value: .nativeFunction(LuauNativeFunction(name: "buffer.create") { vm, _, args in
+            guard let size = args.first?.asInt, size >= 0 else {
+                throw LuauRuntimeError(value: .string("bad argument #1 to 'buffer.create' (size out of range)"))
+            }
+            try vm.noteAllocation(size + 64)
+            return .values([.userdata(LuauUserdata(payload: LuauBufferBox([UInt8](repeating: 0, count: size))))])
+        }))
+
+        b.rawSet("fromstring", value: .nativeFunction(LuauNativeFunction(name: "buffer.fromstring") { vm, _, args in
+            guard let bytes = args.first?.stringBytes else {
+                throw LuauRuntimeError(value: .string("bad argument #1 to 'buffer.fromstring' (string expected)"))
+            }
+            try vm.noteAllocation(bytes.count + 64)
+            return .values([.userdata(LuauUserdata(payload: LuauBufferBox(bytes)))])
+        }))
+
+        b.rawSet("tostring", value: .nativeFunction(LuauNativeFunction(name: "buffer.tostring") { _, _, args in
+            let buf = try reqBuffer(args, 0, "tostring")
+            return .values([LuauValue.fromBytes(buf.bytes)])
+        }))
+
+        b.rawSet("len", value: .nativeFunction(LuauNativeFunction(name: "buffer.len") { _, _, args in
+            let buf = try reqBuffer(args, 0, "len")
+            return .values([.number(Double(buf.bytes.count))])
+        }))
+
+        b.rawSet("readi8", value: .nativeFunction(LuauNativeFunction(name: "buffer.readi8") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readi8")
+            let off = try reqOffset(args, 1, "readi8")
+            try checkRange(buf, off, 1)
+            return .values([.number(Double(Int8(bitPattern: buf.bytes[off])))])
+        }))
+        b.rawSet("readu8", value: .nativeFunction(LuauNativeFunction(name: "buffer.readu8") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readu8")
+            let off = try reqOffset(args, 1, "readu8")
+            try checkRange(buf, off, 1)
+            return .values([.number(Double(buf.bytes[off]))])
+        }))
+        b.rawSet("readi16", value: .nativeFunction(LuauNativeFunction(name: "buffer.readi16") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readi16")
+            let off = try reqOffset(args, 1, "readi16")
+            let raw = try readLE(buf, offset: off, as: UInt16.self)
+            return .values([.number(Double(Int16(bitPattern: raw)))])
+        }))
+        b.rawSet("readu16", value: .nativeFunction(LuauNativeFunction(name: "buffer.readu16") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readu16")
+            let off = try reqOffset(args, 1, "readu16")
+            let raw = try readLE(buf, offset: off, as: UInt16.self)
+            return .values([.number(Double(raw))])
+        }))
+        b.rawSet("readi32", value: .nativeFunction(LuauNativeFunction(name: "buffer.readi32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readi32")
+            let off = try reqOffset(args, 1, "readi32")
+            let raw = try readLE(buf, offset: off, as: UInt32.self)
+            return .values([.number(Double(Int32(bitPattern: raw)))])
+        }))
+        b.rawSet("readu32", value: .nativeFunction(LuauNativeFunction(name: "buffer.readu32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readu32")
+            let off = try reqOffset(args, 1, "readu32")
+            let raw = try readLE(buf, offset: off, as: UInt32.self)
+            return .values([.number(Double(raw))])
+        }))
+        b.rawSet("readf32", value: .nativeFunction(LuauNativeFunction(name: "buffer.readf32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readf32")
+            let off = try reqOffset(args, 1, "readf32")
+            let raw = try readLE(buf, offset: off, as: UInt32.self)
+            return .values([.number(Double(Float(bitPattern: raw)))])
+        }))
+        b.rawSet("readf64", value: .nativeFunction(LuauNativeFunction(name: "buffer.readf64") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readf64")
+            let off = try reqOffset(args, 1, "readf64")
+            let raw = try readLE(buf, offset: off, as: UInt64.self)
+            return .values([.number(Double(bitPattern: raw))])
+        }))
+
+        b.rawSet("writei8", value: .nativeFunction(LuauNativeFunction(name: "buffer.writei8") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writei8")
+            let off = try reqOffset(args, 1, "writei8")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try checkRange(buf, off, 1)
+            buf.bytes[off] = UInt8(truncatingIfNeeded: Int64(val))
+            return .values([])
+        }))
+        b.rawSet("writeu8", value: .nativeFunction(LuauNativeFunction(name: "buffer.writeu8") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writeu8")
+            let off = try reqOffset(args, 1, "writeu8")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try checkRange(buf, off, 1)
+            buf.bytes[off] = UInt8(truncatingIfNeeded: Int64(val))
+            return .values([])
+        }))
+        b.rawSet("writei16", value: .nativeFunction(LuauNativeFunction(name: "buffer.writei16") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writei16")
+            let off = try reqOffset(args, 1, "writei16")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: UInt16(truncatingIfNeeded: Int64(val)))
+            return .values([])
+        }))
+        b.rawSet("writeu16", value: .nativeFunction(LuauNativeFunction(name: "buffer.writeu16") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writeu16")
+            let off = try reqOffset(args, 1, "writeu16")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: UInt16(truncatingIfNeeded: Int64(val)))
+            return .values([])
+        }))
+        b.rawSet("writei32", value: .nativeFunction(LuauNativeFunction(name: "buffer.writei32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writei32")
+            let off = try reqOffset(args, 1, "writei32")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: UInt32(truncatingIfNeeded: Int64(val)))
+            return .values([])
+        }))
+        b.rawSet("writeu32", value: .nativeFunction(LuauNativeFunction(name: "buffer.writeu32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writeu32")
+            let off = try reqOffset(args, 1, "writeu32")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: UInt32(truncatingIfNeeded: UInt64(max(0, Int64(val)))))
+            return .values([])
+        }))
+        b.rawSet("writef32", value: .nativeFunction(LuauNativeFunction(name: "buffer.writef32") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writef32")
+            let off = try reqOffset(args, 1, "writef32")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: Float(val).bitPattern)
+            return .values([])
+        }))
+        b.rawSet("writef64", value: .nativeFunction(LuauNativeFunction(name: "buffer.writef64") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writef64")
+            let off = try reqOffset(args, 1, "writef64")
+            guard args.count > 2, let val = args[2].coercedNumber else { throw LuauRuntimeError(value: .string("number expected")) }
+            try writeLE(buf, offset: off, value: val.bitPattern)
+            return .values([])
+        }))
+
+        b.rawSet("readstring", value: .nativeFunction(LuauNativeFunction(name: "buffer.readstring") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readstring")
+            let off = try reqOffset(args, 1, "readstring")
+            let count = try reqOffset(args, 2, "readstring")
+            try checkRange(buf, off, count)
+            return .values([LuauValue.fromBytes(Array(buf.bytes[off..<(off + count)]))])
+        }))
+
+        b.rawSet("writestring", value: .nativeFunction(LuauNativeFunction(name: "buffer.writestring") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writestring")
+            let off = try reqOffset(args, 1, "writestring")
+            guard args.count > 2, let strBytes = args[2].stringBytes else {
+                throw LuauRuntimeError(value: .string("bad argument #3 to 'buffer.writestring' (string expected)"))
+            }
+            let count = args.count > 3 ? (args[3].asInt ?? strBytes.count) : strBytes.count
+            guard count >= 0 && count <= strBytes.count else {
+                throw LuauRuntimeError(value: .string("bad argument #4 to 'buffer.writestring' (count out of bounds)"))
+            }
+            try checkRange(buf, off, count)
+            for i in 0..<count {
+                buf.bytes[off + i] = strBytes[i]
+            }
+            return .values([])
+        }))
+
+        b.rawSet("copy", value: .nativeFunction(LuauNativeFunction(name: "buffer.copy") { _, _, args in
+            let target = try reqBuffer(args, 0, "copy")
+            let targetOff = try reqOffset(args, 1, "copy")
+            let source = try reqBuffer(args, 2, "copy")
+            let sourceOff = args.count > 3 ? (args[3].asInt ?? 0) : 0
+            guard sourceOff >= 0 && sourceOff <= source.bytes.count else {
+                throw LuauRuntimeError(value: .string("buffer access out of bounds"))
+            }
+            let count = args.count > 4 ? (args[4].asInt ?? (source.bytes.count - sourceOff)) : (source.bytes.count - sourceOff)
+            try checkRange(source, sourceOff, count)
+            try checkRange(target, targetOff, count)
+            let snapshot = Array(source.bytes[sourceOff..<(sourceOff + count)])
+            for i in 0..<count {
+                target.bytes[targetOff + i] = snapshot[i]
+            }
+            return .values([])
+        }))
+
+        b.rawSet("fill", value: .nativeFunction(LuauNativeFunction(name: "buffer.fill") { _, _, args in
+            let buf = try reqBuffer(args, 0, "fill")
+            let off = try reqOffset(args, 1, "fill")
+            guard args.count > 2, let valNum = args[2].coercedNumber else {
+                throw LuauRuntimeError(value: .string("number expected"))
+            }
+            guard off >= 0 && off <= buf.bytes.count else {
+                throw LuauRuntimeError(value: .string("buffer access out of bounds"))
+            }
+            let count = args.count > 3 ? (args[3].asInt ?? (buf.bytes.count - off)) : (buf.bytes.count - off)
+            try checkRange(buf, off, count)
+            let byteVal = UInt8(truncatingIfNeeded: Int64(valNum))
+            for i in 0..<count {
+                buf.bytes[off + i] = byteVal
+            }
+            return .values([])
+        }))
+
+        b.rawSet("readbits", value: .nativeFunction(LuauNativeFunction(name: "buffer.readbits") { _, _, args in
+            let buf = try reqBuffer(args, 0, "readbits")
+            let bitOff = try reqOffset(args, 1, "readbits")
+            let bitCount = try reqOffset(args, 2, "readbits")
+            guard bitOff >= 0, bitCount >= 0, bitCount <= 32, bitOff + bitCount <= buf.bytes.count * 8 else {
+                throw LuauRuntimeError(value: .string("buffer access out of bounds"))
+            }
+            var result: UInt32 = 0
+            for i in 0..<bitCount {
+                let bitIdx = bitOff + i
+                let byteVal = buf.bytes[bitIdx / 8]
+                let bit = UInt32((byteVal >> (bitIdx % 8)) & 1)
+                result |= (bit << i)
+            }
+            return .values([.number(Double(result))])
+        }))
+
+        b.rawSet("writebits", value: .nativeFunction(LuauNativeFunction(name: "buffer.writebits") { _, _, args in
+            let buf = try reqBuffer(args, 0, "writebits")
+            let bitOff = try reqOffset(args, 1, "writebits")
+            let bitCount = try reqOffset(args, 2, "writebits")
+            guard args.count > 3, let valNum = args[3].coercedNumber else {
+                throw LuauRuntimeError(value: .string("number expected"))
+            }
+            guard bitOff >= 0, bitCount >= 0, bitCount <= 32, bitOff + bitCount <= buf.bytes.count * 8 else {
+                throw LuauRuntimeError(value: .string("buffer access out of bounds"))
+            }
+            let val = UInt32(truncatingIfNeeded: Int64(valNum))
+            for i in 0..<bitCount {
+                let bitIdx = bitOff + i
+                let bytePos = bitIdx / 8
+                let bitInByte = UInt8(bitIdx % 8)
+                if ((val >> i) & 1) != 0 {
+                    buf.bytes[bytePos] |= (1 << bitInByte)
+                } else {
+                    buf.bytes[bytePos] &= ~(1 << bitInByte)
+                }
+            }
+            return .values([])
+        }))
+
+        g.rawSet("buffer", value: .table(b))
     }
 }

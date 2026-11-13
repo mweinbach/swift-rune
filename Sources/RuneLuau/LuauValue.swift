@@ -6,6 +6,7 @@ public enum LuauValue: @unchecked Sendable {
     case bool(Bool)
     case number(Double)
     case string(String)
+    case byteString([UInt8])
     case table(LuauTable)
     case closure(LuauClosure)
     case nativeFunction(LuauNativeFunction)
@@ -31,11 +32,13 @@ public enum LuauValue: @unchecked Sendable {
         case .nil: return "nil"
         case .bool: return "boolean"
         case .number: return "number"
-        case .string: return "string"
+        case .string, .byteString: return "string"
         case .table: return "table"
         case .closure, .nativeFunction: return "function"
         case .thread: return "thread"
-        case .userdata: return "userdata"
+        case .userdata(let u):
+            if u.payload is LuauBufferBox { return "buffer" }
+            return "userdata"
         case .vector: return "vector"
         }
     }
@@ -49,6 +52,7 @@ public enum LuauValue: @unchecked Sendable {
             }
             return "table"
         case .userdata(let u):
+            if u.payload is LuauBufferBox { return "buffer" }
             if let mt = u.metatable, case .string(let s) = mt.rawGet(.string("__type")) {
                 return s
             }
@@ -69,8 +73,28 @@ public enum LuauValue: @unchecked Sendable {
     }
 
     public var asString: String? {
-        if case .string(let s) = self { return s }
-        return nil
+        switch self {
+        case .string(let s): return s
+        case .byteString(let b): return String(decoding: b, as: UTF8.self)
+        default: return nil
+        }
+    }
+
+    /// Raw bytes of a Luau string (UTF-8 for `.string`, raw bytes for `.byteString`).
+    public var stringBytes: [UInt8]? {
+        switch self {
+        case .string(let s): return Array(s.utf8)
+        case .byteString(let b): return b
+        default: return nil
+        }
+    }
+
+    /// Canonicalizes arbitrary raw bytes into `.string` if valid UTF-8, or `.byteString` otherwise.
+    public static func fromBytes(_ bytes: [UInt8]) -> LuauValue {
+        if let str = String(bytes: bytes, encoding: .utf8) {
+            return .string(str)
+        }
+        return .byteString(bytes)
     }
 
     public var asBool: Bool? {
@@ -103,6 +127,7 @@ public enum LuauValue: @unchecked Sendable {
         case .bool(let b): return b ? "true" : "false"
         case .number(let n): return LuauValue.formatNumber(n)
         case .string(let s): return s
+        case .byteString(let b): return String(decoding: b, as: UTF8.self)
         case .table(let t): return "table: \(ObjectIdentifier(t).hashValue)"
         case .closure(let c): return "function: \(ObjectIdentifier(c).hashValue)"
         case .nativeFunction(let f): return "function: \(f.name)"
@@ -132,6 +157,9 @@ extension LuauValue: Equatable {
         case (.bool(let a), .bool(let b)): return a == b
         case (.number(let a), .number(let b)): return a == b
         case (.string(let a), .string(let b)): return a == b
+        case (.byteString(let a), .byteString(let b)): return a == b
+        case (.string(let a), .byteString(let b)): return Array(a.utf8) == b
+        case (.byteString(let a), .string(let b)): return a == Array(b.utf8)
         case (.table(let a), .table(let b)): return a === b
         case (.closure(let a), .closure(let b)): return a === b
         case (.nativeFunction(let a), .nativeFunction(let b)): return a === b
@@ -148,6 +176,7 @@ public enum LuauHashKey: Hashable, @unchecked Sendable {
     case bool(Bool)
     case number(UInt64) // bitPattern of normalized Double (-0.0 -> +0.0)
     case string(String)
+    case byteString([UInt8])
     case table(ObjectIdentifier)
     case closure(ObjectIdentifier)
     case nativeFunction(ObjectIdentifier)
@@ -164,6 +193,12 @@ public enum LuauHashKey: Hashable, @unchecked Sendable {
             let norm = d == 0.0 ? 0.0 : d
             self = .number(norm.bitPattern)
         case .string(let s): self = .string(s)
+        case .byteString(let b):
+            if let s = String(bytes: b, encoding: .utf8) {
+                self = .string(s)
+            } else {
+                self = .byteString(b)
+            }
         case .table(let t): self = .table(ObjectIdentifier(t))
         case .closure(let c): self = .closure(ObjectIdentifier(c))
         case .nativeFunction(let f): self = .nativeFunction(ObjectIdentifier(f))
@@ -178,6 +213,7 @@ public enum LuauHashKey: Hashable, @unchecked Sendable {
         case .bool(let b): return .bool(b)
         case .number(let bits): return .number(Double(bitPattern: bits))
         case .string(let s): return .string(s)
+        case .byteString(let b): return .byteString(b)
         case .vector(let v): return .vector(v)
         default: return .nil
         }
@@ -441,6 +477,14 @@ public final class LuauNativeFunction: @unchecked Sendable {
     public init(name: String, callback: @escaping LuauNativeCallback) {
         self.name = name
         self.callback = callback
+    }
+}
+
+/// Mutable byte buffer backing Luau `buffer` values.
+internal final class LuauBufferBox: @unchecked Sendable {
+    var bytes: [UInt8]
+    init(_ bytes: [UInt8]) {
+        self.bytes = bytes
     }
 }
 

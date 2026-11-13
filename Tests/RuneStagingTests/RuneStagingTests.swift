@@ -183,6 +183,25 @@ struct RuneStagingTests {
         #expect(Array(dst.readBytes()[4..<7]) == [9, 10, 11])
         #expect(instanceCalls.count == 1)
         #expect(instanceStaging.stats.direct == 1)
+
+        // Conflict isolation: a third setDirect registration for another buffer type is ignored
+        // and does not hijack plain Staging(backend:) instances.
+        final class IsolatedBuffer: StagingBufferHandle, @unchecked Sendable {
+            let length = 32
+        }
+        let thirdCalls = CallCounter()
+        Staging.setDirect { buf, _, _ in
+            guard buf is IsolatedBuffer else { return false }
+            thirdCalls.increment()
+            return true
+        }
+        let plainStaging = Staging(backend: backend)
+        let isolatedBuf = IsolatedBuffer()
+        plainStaging.writeBuffer(isolatedBuf, offset: 0, data: [1, 2, 3, 4])
+        #expect(thirdCalls.count == 0)
+        #expect(plainStaging.stats.direct == 0)
+        #expect(plainStaging.stats.chunks == 1)
+        plainStaging.submit()
     }
 
     @Test("Queue passthrough backend skips staging chunks")
@@ -235,6 +254,106 @@ struct RuneStagingTests {
         enc.commandBuffer.waitUntilCompleted()
         let bytes = rawDst.contents().assumingMemoryBound(to: UInt8.self)
         #expect([bytes[0], bytes[1], bytes[2], bytes[3]] == [11, 22, 33, 44])
+
+        // Real MTLTexture writeTextureRows upload + byte readback verification (non-256B row width).
+        let texDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: 10,
+            height: 4,
+            mipmapped: false
+        )
+        texDesc.storageMode = device.hasUnifiedMemory ? .shared : .managed
+        texDesc.usage = [.shaderRead]
+        guard let rawTex = device.makeTexture(descriptor: texDesc) else { return }
+        let texHandle = MetalStagingTextureHandle(rawTex, bytesPerPixel: 4)
+        let rowBytes = 10 * 4
+        var uploadRows = [UInt8](repeating: 0, count: rowBytes * 2)
+        for i in 0..<uploadRows.count {
+            uploadRows[i] = UInt8((i * 7 + 3) & 0xFF)
+        }
+
+        let texStaging = Staging(device: device, queue: queue)
+        texStaging.writeTextureRows(texHandle, y: 1, rows: uploadRows)
+        #expect(texStaging.stats.bytes == UInt64(Staging.rowAlign * 2))
+        let texCB = queue.makeCommandBuffer()!
+        let texEnc = MetalStagingCommandEncoder(commandBuffer: texCB)
+        texStaging.flush(into: texEnc)
+        if !device.hasUnifiedMemory, let syncBlit = texCB.makeBlitCommandEncoder() {
+            syncBlit.synchronize(resource: rawTex)
+            syncBlit.endEncoding()
+        }
+        texCB.commit()
+        texCB.waitUntilCompleted()
+        #expect(texCB.status == .completed)
+        #expect(texStaging.lost == 0)
+        #expect(!texStaging.busy)
+
+        var readback = [UInt8](repeating: 0xCC, count: rowBytes * 4)
+        readback.withUnsafeMutableBytes { ptr in
+            rawTex.getBytes(
+                ptr.baseAddress!,
+                bytesPerRow: rowBytes,
+                from: MTLRegionMake2D(0, 0, 10, 4),
+                mipmapLevel: 0
+            )
+        }
+        #expect(Array(readback[0..<rowBytes]) == [UInt8](repeating: 0, count: rowBytes))
+        #expect(Array(readback[rowBytes..<(rowBytes * 3)]) == uploadRows)
+        #expect(Array(readback[(rowBytes * 3)..<(rowBytes * 4)]) == [UInt8](repeating: 0, count: rowBytes))
     }
     #endif
+
+    @Test("withMappedBytes failNextMap drops unmappable write and increments lost on failed remap")
+    func withMappedBytesFailNextMapPath() {
+        final class CapturingBackend: StagingBackend, @unchecked Sendable {
+            let inner = InMemoryStagingBackend()
+            private let lock = NSLock()
+            var chunks: [InMemoryStagingChunk] = []
+            var failOnCreate = false
+
+            func createStagingChunk(size: Int) -> any StagingChunkBuffer {
+                let c = inner.createStagingChunk(size: size) as! InMemoryStagingChunk
+                lock.lock()
+                if failOnCreate { c.failNextMap = true }
+                chunks.append(c)
+                lock.unlock()
+                return c
+            }
+            func createCommandEncoder() -> any StagingCommandEncoder { inner.createCommandEncoder() }
+            func submit(_ encoder: any StagingCommandEncoder) { inner.submit(encoder) }
+            func writeQueueBuffer(_ buffer: any StagingBufferHandle, offset: Int, data: UnsafeRawBufferPointer) {
+                inner.writeQueueBuffer(buffer, offset: offset, data: data)
+            }
+            func writeQueueTextureRows(_ texture: any StagingTextureHandle, y: Int, bytesPerRow: Int, rows: Int, data: UnsafeRawBufferPointer) {
+                inner.writeQueueTextureRows(texture, y: y, bytesPerRow: bytesPerRow, rows: rows, data: data)
+            }
+        }
+
+        // Case 1: initial withMappedBytes returns false -> stageLocked returns early without marking writes/busy.
+        let failCreateBackend = CapturingBackend()
+        failCreateBackend.failOnCreate = true
+        let staging1 = Staging(backend: failCreateBackend)
+        let dst1 = InMemoryStagingBuffer(size: 32)
+        staging1.writeBuffer(dst1, offset: 0, data: [1, 2, 3, 4])
+        #expect(staging1.stats.chunks == 1)
+        #expect(staging1.stats.writes == 0)
+        #expect(staging1.stats.bytes == 0)
+        #expect(!staging1.busy)
+        #expect(Array(dst1.readBytes()[0..<4]) == [0, 0, 0, 0])
+
+        // Case 2: remap fails after submit -> lost increments and chunk is not recycled to free pool.
+        let backend2 = CapturingBackend()
+        let staging2 = Staging(backend: backend2)
+        let dst2 = InMemoryStagingBuffer(size: 32)
+        staging2.writeBuffer(dst2, offset: 0, data: [5, 6, 7, 8])
+        #expect(staging2.stats.chunks == 1)
+        #expect(staging2.stats.writes == 1)
+        backend2.chunks[0].failNextMap = true
+        staging2.submit()
+        #expect(Array(dst2.readBytes()[0..<4]) == [5, 6, 7, 8])
+        #expect(staging2.lost == 1)
+
+        staging2.writeBuffer(dst2, offset: 8, data: [9, 10, 11, 12])
+        #expect(staging2.stats.chunks == 2)
+    }
 }

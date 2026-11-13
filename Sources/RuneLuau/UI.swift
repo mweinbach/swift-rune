@@ -42,17 +42,63 @@ public enum Prop: @unchecked Sendable {
 
 /// A script function a host node can run on press/hover.
 /// Modifier key state delivered to `NodeArgs.onPress` / `NodeArgs.onPressWith` callbacks.
-public struct Press: Sendable, Equatable {
+public struct Press: @unchecked Sendable, Equatable {
     public var key: String?
     public var shift: Bool
     public var alt: Bool
     public var mod: Bool
+    private let handler: Handler?
 
     public init(key: String? = nil, shift: Bool = false, alt: Bool = false, mod: Bool = false) {
         self.key = key
         self.shift = shift
         self.alt = alt
         self.mod = mod
+        self.handler = nil
+    }
+
+    internal init(handler: Handler, key: String?) {
+        self.key = key
+        self.shift = false
+        self.alt = false
+        self.mod = false
+        self.handler = handler
+    }
+
+    public static func == (lhs: Press, rhs: Press) -> Bool {
+        lhs.key == rhs.key && lhs.shift == rhs.shift && lhs.alt == rhs.alt && lhs.mod == rhs.mod
+    }
+
+    /// Attaches click and pointer-up handlers delivering `kind = "press"`, modifiers, and extra `fields`.
+    public func attach<State>(_ el: El<State>, fields: [(String, LuauData)] = []) -> El<State> {
+        guard let handler else { return el }
+        let vmID = handler.vmID
+        let fn = handler.fn
+        let scriptRef = handler.script
+        let fallbackKey = self.key
+        return el
+            .onPointerUp { _, press, _ in
+                scriptRef?.stashPressMods(press.mods)
+            }
+            .onClick { st, tx in
+                guard let script = scriptRef else { return }
+                let mods = script.consumePressMods()
+                let m = script.pressEventMods(mods)
+                let ev = LuauTable()
+                ev.rawSet("kind", value: .string("press"))
+                if let fallbackKey { ev.rawSet("key", value: .string(fallbackKey)) }
+                ev.rawSet("shift", value: .bool(m.shift))
+                ev.rawSet("alt", value: .bool(m.alt))
+                ev.rawSet("mod", value: .bool(m.mod))
+                for (fk, fv) in fields {
+                    ev.rawSet(fk, value: fv.toLuau())
+                }
+                script.aroundWrite(state: &st, tx: &tx) { innerTx in
+                    script.enter(tx: &innerTx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
+                    }
+                }
+            }
     }
 }
 
@@ -157,9 +203,21 @@ public final class NodeArgs: @unchecked Sendable {
         return nil
     }
 
+    private func rawKey() -> String? {
+        guard let pair = props.last(where: { $0.0 == "key" }) else { return nil }
+        if case .string(let s) = pair.1 { return s }
+        return nil
+    }
+
     /// Builds an `El` click callback invoking a Luau `Handler` with press event details.
     public func onPress<State>(_ type: State.Type = State.self, handler: Handler) -> (@Sendable (inout State, inout Tx) -> Void) {
-        onPressWith(type, handler: handler, key: string("key"))
+        onPressWith(type, handler: handler, key: rawKey())
+    }
+
+    /// Attaches a named press handler prop to `el` if present, without marking `"key"` as read.
+    public func onPress<State>(_ el: El<State>, _ name: String) -> El<State> {
+        guard let h = handler(name) else { return el }
+        return Press(handler: h, key: rawKey()).attach(el)
     }
 
     /// Builds an `El` click callback invoking a Luau `Handler` with an explicit key and modifier state.
@@ -167,7 +225,8 @@ public final class NodeArgs: @unchecked Sendable {
         _ type: State.Type = State.self,
         handler: Handler,
         key: String? = nil,
-        press: Press? = nil
+        press: Press? = nil,
+        fields: [(String, LuauData)] = []
     ) -> (@Sendable (inout State, inout Tx) -> Void) {
         let vmID = handler.vmID
         let fn = handler.fn
@@ -183,12 +242,21 @@ public final class NodeArgs: @unchecked Sendable {
             ev.rawSet("shift", value: .bool(p.shift))
             ev.rawSet("alt", value: .bool(p.alt))
             ev.rawSet("mod", value: .bool(p.mod))
+            for (fk, fv) in fields {
+                ev.rawSet(fk, value: fv.toLuau())
+            }
             script.aroundWrite(state: &state, tx: &tx) { tx in
                 script.enter(tx: &tx) {
                     try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
                 }
             }
         }
+    }
+
+    /// Captures a named press handler prop for later attachment via `Press.attach(_:fields:)`, without marking `"key"` as read.
+    public func pressLater(_ name: String) -> Press? {
+        let k = rawKey()
+        return handler(name).map { Press(handler: $0, key: k) }
     }
 
     /// Invokes a Luau `Handler` asynchronously without an active `Tx`.
@@ -213,7 +281,7 @@ public final class NodeArgs: @unchecked Sendable {
         let vmID = handler.vmID
         let fn = handler.fn
         let script = handler.script
-        let capturedKey = string("key")
+        let capturedKey = rawKey()
         return { state, entered, tx in
             guard let script else { return }
             let ev = LuauTable()
@@ -226,6 +294,12 @@ public final class NodeArgs: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Attaches a named hover handler prop to `el` if present, without marking `"key"` as read.
+    public func onHover<State>(_ el: El<State>, _ name: String) -> El<State> {
+        guard let h = handler(name) else { return el }
+        return el.onHover(onHover(State.self, handler: h))
     }
 
     internal func wasRead(_ name: String) -> Bool {
@@ -405,8 +479,26 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
             throw LuauRuntimeError(value: .string("ui.each needs items, key, version, build"))
         }
         let keyBy = args[1]
+        switch keyBy {
+        case .string, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.each: key must be a string or function, got \(keyBy.typeName)"))
+        }
         let versionBy = args[2]
+        switch versionBy {
+        case .string, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.each: version must be a string or function, got \(versionBy.typeName)"))
+        }
         let buildFn = args[3]
+        switch buildFn {
+        case .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.each: build must be a function, got \(buildFn.typeName)"))
+        }
         let len = items.rawLength
         let out = LuauTable(arrayCapacity: len)
 
@@ -422,10 +514,17 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
             } else {
                 keyVal = try vm.call(value: keyBy, args: [item, .number(Double(i))]).first ?? .nil
             }
-            guard !keyVal.isNil else {
+            let itemKey: String
+            switch keyVal {
+            case .string(let s):
+                itemKey = s
+            case .number(let n):
+                itemKey = LuauValue.number(n).displayString
+            case .nil:
                 throw LuauRuntimeError(value: .string("ui.each: key for item \(i) is nil"))
+            default:
+                throw LuauRuntimeError(value: .string("ui.each: key for item \(i) must be a string or number, got \(keyVal.typeName)"))
             }
-            let itemKey = keyVal.displayString
 
             let verVal: LuauValue
             if case .string(let field) = versionBy {
@@ -466,13 +565,39 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
             throw LuauRuntimeError(value: .string("ui.virtualList count must be a number"))
         }
         let count = max(0, rawCount)
-        let estimate = Float(max(1.0, props.rawGet("estimatedRowHeight").coercedNumber ?? 32.0))
+        let estimateVal = props.rawGet("estimatedRowHeight")
+        let estimate: Float
+        switch estimateVal {
+        case .nil:
+            estimate = 32.0
+        case .number(let n):
+            estimate = Float(max(1.0, n))
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList estimatedRowHeight must be a number, got \(estimateVal.typeName)"))
+        }
         let renderRow = props.rawGet("renderRow")
-        guard !renderRow.isNil else {
+        switch renderRow {
+        case .nil:
             throw LuauRuntimeError(value: .string("ui.virtualList needs renderRow"))
+        case .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList renderRow must be a function, got \(renderRow.typeName)"))
         }
         let rowKeyFn = props.rawGet("rowKey")
+        switch rowKeyFn {
+        case .nil, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList rowKey must be a function, got \(rowKeyFn.typeName)"))
+        }
         let rowErrorFn = props.rawGet("rowError")
+        switch rowErrorFn {
+        case .nil, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList rowError must be a function, got \(rowErrorFn.typeName)"))
+        }
         let onVisibleRowsFn = props.rawGet("onVisibleRows")
         switch onVisibleRowsFn {
         case .nil, .closure, .nativeFunction:
@@ -483,7 +608,16 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         if !props.rawGet("onPress").isNil {
             env.warnOnce("ui.virtualList takes no onPress")
         }
-        let gap = Float(props.rawGet("gap").coercedNumber ?? 0.0)
+        let gapVal = props.rawGet("gap")
+        let gap: Float
+        switch gapVal {
+        case .nil:
+            gap = 0.0
+        case .number(let n):
+            gap = Float(n)
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList gap must be a number, got \(gapVal.typeName)"))
+        }
         let keyStr = props.rawGet("key").isNil ? "list" : props.rawGet("key").displayString
         let containerKey = "\(env.prefix)\(keyStr)"
         env.trackedScrollKeys.append(containerKey)
@@ -491,8 +625,26 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         let listVersionVal = props.rawGet("version")
         let keysVersion = listVersionVal.isNil ? env.version : LuauUIBridge.versionHash(listVersionVal)
         let listVersion = LuauUIBridge.mixHash(keysVersion, env.salt)
-        let rowVersionsTbl = props.rawGet("rowVersions").asTable
-        let ownScroll = props.rawGet("scrollY").asBool ?? true
+        let rowVersionsVal = props.rawGet("rowVersions")
+        let rowVersionsTbl: LuauTable?
+        switch rowVersionsVal {
+        case .nil:
+            rowVersionsTbl = nil
+        case .table(let t):
+            rowVersionsTbl = t
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList rowVersions must be a table, got \(rowVersionsVal.typeName)"))
+        }
+        let scrollYVal = props.rawGet("scrollY")
+        let ownScroll: Bool
+        switch scrollYVal {
+        case .nil:
+            ownScroll = true
+        case .bool(let b):
+            ownScroll = b
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList scrollY must be a boolean, got \(scrollYVal.typeName)"))
+        }
 
         let liveScrollY = env.scrollLookup?(containerKey).y ?? 0
         let explicitH = props.rawGet("h").coercedNumber.map { Float($0) }
@@ -593,39 +745,51 @@ internal final class UIRenderSession<State>: AnyUIRenderSession {
         renderRow: LuauValue,
         rowErrorFn: LuauValue
     ) throws -> El<State> {
-        let resolvedRowKey: String
-        if let cached = env.script?.cachedRowKey(for: containerKey, version: keysVersion, index: idx) {
-            resolvedRowKey = cached
-        } else if !rowKeyFn.isNil {
-            let k = try vm.call(value: rowKeyFn, args: [.number(Double(idx + 1))]).first ?? .nil
-            let s = k.isNil ? String(idx + 1) : k.displayString
-            env.script?.storeRowKey(s, for: containerKey, version: keysVersion, index: idx)
-            resolvedRowKey = s
-        } else {
-            resolvedRowKey = String(idx + 1)
-        }
+        let buildRow: () throws -> El<State> = {
+            let resolvedRowKey: String
+            if let cached = self.env.script?.cachedRowKey(for: containerKey, version: keysVersion, index: idx) {
+                resolvedRowKey = cached
+            } else if !rowKeyFn.isNil {
+                let k = try vm.call(value: rowKeyFn, args: [.number(Double(idx + 1))]).first ?? .nil
+                let s = k.isNil ? String(idx + 1) : k.displayString
+                self.env.script?.storeRowKey(s, for: containerKey, version: keysVersion, index: idx)
+                resolvedRowKey = s
+            } else {
+                resolvedRowKey = String(idx + 1)
+            }
 
-        let rowVer = rowVersionsTbl.map {
-            LuauUIBridge.mixHash(LuauUIBridge.versionHash($0.rawGet(idx + 1)), listVersion)
-        } ?? listVersion
-        let rowID = "\(containerKey)/\(resolvedRowKey)"
-        return Rune.memo(rowID, deps: rowVer) { () -> El<State> in
-            env.script?.incrementRowsMetric()
-            do {
-                let res = try vm.call(value: renderRow, args: [.number(Double(idx + 1))]).first ?? .nil
-                let rowEl = try LuauUIBridge.unwrapEl(res, State.self)
-                return rowEl.keyId == nil ? rowEl.key(rowID) : rowEl
-            } catch {
-                let msg = error.localizedDescription
-                env.script?.logError(msg)
-                if !rowErrorFn.isNil,
-                   let fallback = try? vm.call(value: rowErrorFn, args: [.number(Double(idx + 1)), .string(msg)]).first,
-                   let el = try? LuauUIBridge.unwrapEl(fallback, State.self) {
-                    return el.keyId == nil ? el.key(rowID) : el
+            let rowVer = rowVersionsTbl.map {
+                LuauUIBridge.mixHash(LuauUIBridge.versionHash($0.rawGet(idx + 1)), listVersion)
+            } ?? listVersion
+            let rowID = "\(containerKey)/\(resolvedRowKey)"
+            return Rune.memo(rowID, deps: rowVer) { () -> El<State> in
+                self.env.script?.incrementRowsMetric()
+                defer { self.env.script?.noteSchedule() }
+                do {
+                    let res = try vm.call(value: renderRow, args: [.number(Double(idx + 1))]).first ?? .nil
+                    let rowEl = try LuauUIBridge.unwrapEl(res, State.self)
+                    return rowEl.keyId == nil ? rowEl.key(rowID) : rowEl
+                } catch {
+                    let msg: String = switch error {
+                    case let rt as LuauRuntimeError: rt.toScriptError().message
+                    case let se as ScriptError: se.message
+                    default: error.localizedDescription
+                    }
+                    self.env.script?.logError(msg)
+                    if !rowErrorFn.isNil,
+                       let fallback = try? vm.call(value: rowErrorFn, args: [.number(Double(idx + 1)), .string(msg)]).first,
+                       !fallback.isNil,
+                       let el = try? LuauUIBridge.unwrapEl(fallback, State.self) {
+                        return el.keyId == nil ? el.key(rowID) : el
+                    }
+                    return (LuauCard.rowError(message: msg) as El<State>).key(rowID)
                 }
-                return (LuauCard.rowError(message: msg) as El<State>).key(rowID)
             }
         }
+        if let script = env.script {
+            return try script.aroundReadOptional(state: (), buildRow) ?? (Rune.el() as El<State>)
+        }
+        return try buildRow()
     }
 
     func buildHostNode(_ node: HostNode, args: [LuauValue]) throws -> LuauValue {
@@ -1058,6 +1222,7 @@ internal enum LuauUIBridge {
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
         var isSelectable = false
+        var hasDir = false
     }
 
     private static func propNum(_ v: LuauValue, _ name: String) throws -> Float {
@@ -1250,7 +1415,7 @@ internal enum LuauUIBridge {
         case "shadow":
             let s = try propStr(v, k)
             if let list = env.shadows?(s, env.dark) {
-                el = el.shadows(list)
+                el = el.shadows(list.reversed())
             } else {
                 env.warnOnce("unknown shadow \(s)")
             }
@@ -1314,16 +1479,18 @@ internal enum LuauUIBridge {
             env.warnOnce("fadeOut has no effect on Swift El yet")
         case "dir":
             switch try propStr(v, k) {
-            case "auto", "ltr", "rtl": break
+            case "auto": state.textStyle.direction = nil
+            case "ltr": state.textStyle.direction = .ltr
+            case "rtl": state.textStyle.direction = .rtl
             case let other: throw LuauRuntimeError(value: .string("dir must be auto, ltr or rtl, got \(other)"))
             }
-            env.warnOnce("dir has no effect on Swift El yet")
+            state.hasDir = true
         case "hoverTransition":
             switch try propStr(v, k) {
-            case "default", "instant": break
+            case "default": break
+            case "instant": el = el.animate(Tok.Motion.INSTANT)
             case let other: throw LuauRuntimeError(value: .string("hoverTransition must be default or instant, got \(other)"))
             }
-            env.warnOnce("hoverTransition has no effect on Swift El yet")
         case "hoverGroup":
             if try propFlag(v, k) { el = el.hoverGroup() }
         case "hoverGroupColor":
@@ -1380,8 +1547,13 @@ internal enum LuauUIBridge {
             if state.isSelectable {
                 el = el.selectable(true)
             }
-        } else if let c = state.textColor {
-            el = el.color(c)
+        } else {
+            if state.hasDir {
+                env.warnOnce("dir only applies to text on Swift El; container RTL layout has no effect yet")
+            }
+            if let c = state.textColor {
+                el = el.color(c)
+            }
         }
         if let k = state.keyStr {
             el = el.key(k)

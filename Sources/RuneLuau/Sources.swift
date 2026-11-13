@@ -63,14 +63,17 @@ public struct Sources: Sendable, Equatable {
         var out = Sources()
         out.folder = dir.lastPathComponent
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey]) else {
+        let resolvedDir = dir.resolvingSymlinksInPath().standardizedFileURL
+        guard let enumerator = fm.enumerator(at: resolvedDir, includingPropertiesForKeys: [.isRegularFileKey]) else {
             return out
         }
-        let rootPath = dir.standardizedFileURL.path
+        let rootPath = resolvedDir.path
         for case let fileURL as URL in enumerator {
             let name = fileURL.lastPathComponent
             if name.hasSuffix(".luau") || configFiles.contains(name) {
-                let fullPath = fileURL.standardizedFileURL.path
+                let isRegular = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile ?? false
+                guard isRegular else { continue }
+                let fullPath = fileURL.resolvingSymlinksInPath().standardizedFileURL.path
                 if fullPath.hasPrefix(rootPath) {
                     var rel = String(fullPath.dropFirst(rootPath.count))
                     if rel.hasPrefix("/") { rel.removeFirst() }
@@ -79,11 +82,56 @@ public struct Sources: Sendable, Equatable {
                 }
             }
         }
-        let parentLuaurc = dir.deletingLastPathComponent().appendingPathComponent(".luaurc")
+        let parentLuaurc = resolvedDir.deletingLastPathComponent().appendingPathComponent(".luaurc")
         if let parentText = try? String(contentsOf: parentLuaurc, encoding: .utf8) {
             out.parentConfig = parentText
         }
         return out
+    }
+
+    public static func compileBytecode(_ source: String, name: String = Sources.entry) throws -> Data {
+        let normName = normalize(name)
+        do {
+            let lexer = LuauLexer(source: source, name: normName)
+            let tokens = try lexer.tokenize()
+            let parser = LuauParser(tokens: tokens, sourceName: normName)
+            let stmts = try parser.parseChunk()
+            let compiler = LuauCompiler(sourceName: normName)
+            let proto = try compiler.compile(stmts: stmts)
+            return proto.encode()
+        } catch let err as ScriptError {
+            let msg = err.message.hasPrefix("\(normName):") ? err.message : "\(normName): \(err.message)"
+            throw ScriptError(kind: err.kind, message: msg)
+        } catch {
+            let msg = "\(error)"
+            let prefixed = msg.hasPrefix("\(normName):") ? msg : "\(normName): \(msg)"
+            throw ScriptError(kind: .syntax, message: prefixed)
+        }
+    }
+
+    /// Registers precompiled bytecode once per process (write-once `OnceLock` semantics).
+    public static func precompiled(_ entries: [(String, Data)]) {
+        var map: [String: Data] = [:]
+        for (rawPath, data) in entries {
+            let key = normalizePrecompiledKey(rawPath)
+            map[key] = data
+        }
+        PrecompiledStore.shared.setOnce(map)
+    }
+
+    /// Registers precompiled bytecode once per process (write-once `OnceLock` semantics).
+    public static func precompiled(_ entries: [String: Data]) {
+        precompiled(entries.map { ($0.key, $0.value) })
+    }
+
+    internal static func _resetPrecompiledForTests() {
+        PrecompiledStore.shared.resetForTests()
+    }
+
+    private static func normalizePrecompiledKey(_ path: String) -> String {
+        var s = path
+        if s.hasPrefix("@") { s.removeFirst() }
+        return normalize(s)
     }
 
     public func compile() throws -> CompiledSources {
@@ -110,6 +158,11 @@ public struct Sources: Sendable, Equatable {
             }
             if let prev = previous?.modules[path], prev.source == source {
                 modules[path] = prev
+                continue
+            }
+            if let precompiledData = PrecompiledStore.shared.lookup(path),
+               let proto = LuauProto.decode(precompiledData) {
+                modules[path] = CompiledModule(proto: proto, source: source)
                 continue
             }
             do {
@@ -196,5 +249,31 @@ public final class CompiledSources: @unchecked Sendable {
             if let text = configs[p] { return text }
         }
         return nil
+    }
+}
+
+private final class PrecompiledStore: @unchecked Sendable {
+    static let shared = PrecompiledStore()
+    private let lock = NSLock()
+    private var entries: [String: Data]?
+
+    func setOnce(_ map: [String: Data]) {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries == nil {
+            entries = map
+        }
+    }
+
+    func lookup(_ path: String) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries?[path]
+    }
+
+    func resetForTests() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries = nil
     }
 }

@@ -360,6 +360,62 @@ enum RuneRefCLI {
         }
     }
 
+    static func makeRenderFrame(from scene: OracleScene) -> RenderFrame {
+        var instances: [RenderInstance] = []
+        instances.reserveCapacity(scene.primitives.count)
+        for p in scene.primitives {
+            let kind = p.params.count > 1 ? p.params[1] : 0
+            let rect = SIMD4<Float>(p.rect[0], p.rect[1], p.rect[2], p.rect[3])
+            let radii = SIMD4<Float>(p.radii[0], p.radii[1], p.radii[2], p.radii[3])
+            let fill = SIMD4<Float>(p.fill[0], p.fill[1], p.fill[2], p.fill[3])
+            let params = SIMD4<Float>(p.params[0], p.params[1], p.params[2], p.params[3])
+            let uv = SIMD4<Float>(p.uv[0], p.uv[1], p.uv[2], p.uv[3])
+            let clip = SIMD4<Float>(p.clip[0], p.clip[1], p.clip[2], p.clip[3])
+            let fadeWidth = SIMD4<Float>(p.fade[0], p.fade[1], p.fade[2], p.fade[3])
+            let fadeOrigin: SIMD4<Float> = if let o = p.fadeOrigin, o.count >= 4 {
+                SIMD4<Float>(o[0], o[1], o[2], o[3])
+            } else {
+                clip
+            }
+            var packedFade = packFade(width: fadeWidth, origin: fadeOrigin, clip: clip)
+            let border: SIMD4<Float>
+            if kind == 8.0 {
+                let clipRadii = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
+                packedFade.w = packClipRadii(clip: clip, radii: clipRadii)
+                if let t = p.turn, t.count >= 3 {
+                    border = SIMD4<Float>(0, t[0], t[1], t[2])
+                } else {
+                    border = .zero
+                }
+            } else {
+                border = SIMD4<Float>(p.border[0], p.border[1], p.border[2], p.border[3])
+            }
+            instances.append(RenderInstance(
+                rect: rect,
+                radii: radii,
+                fill: fill,
+                border: border,
+                params: params,
+                uv: uv,
+                clip: clip,
+                fade: packedFade
+            ))
+        }
+        let clear = scene.clear.count == 4
+            ? SIMD4<Float>(scene.clear[0], scene.clear[1], scene.clear[2], scene.clear[3])
+            : SIMD4<Float>(0, 0, 0, 1)
+        let atlas = R8Atlas(width: Int(scene.atlas.width), height: Int(scene.atlas.height), texels: scene.atlas.data)
+        return RenderFrame(
+            width: Int(scene.width),
+            height: Int(scene.height),
+            srgbBlend: false,
+            clearColor: clear,
+            glyphs: atlas,
+            glyphGeneration: 1,
+            instances: instances
+        )
+    }
+
     static func runGenerate(_ opts: Options) throws {
         if isOracleSceneName(opts.scene) {
             let oracleScene = try buildOracleScene(name: opts.scene, seed: opts.seed, count: opts.count)
@@ -369,7 +425,7 @@ enum RuneRefCLI {
 
             if opts.useGPU {
                 let renderer = try MetalRenderer()
-                let gpuFrame = try renderer.renderOffscreen(oracleScene.toRefScene())
+                let gpuFrame = try renderer.renderOffscreen(makeRenderFrame(from: oracleScene))
                 print("blake3=\(Blake3.hashHex(gpuFrame.rgba))")
                 if let outPath = opts.outPath {
                     try gpuFrame.writePNG(to: URL(fileURLWithPath: outPath))
@@ -401,7 +457,7 @@ enum RuneRefCLI {
             }
             if opts.diffFlag {
                 let renderer = try MetalRenderer()
-                let gpuFrame = try renderer.renderOffscreen(oracleScene.toRefScene())
+                let gpuFrame = try renderer.renderOffscreen(makeRenderFrame(from: oracleScene))
                 let report = Oracle.compare(
                     scene: oracleScene,
                     cpu: frame,

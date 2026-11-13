@@ -170,6 +170,7 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
         vm.globals.rawSet("task", value: .table(taskTable))
         let signalModule = LuauTable()
         signalModule.rawSet("new", value: preludeTable.rawGet("scriptSignal"))
+        signalModule.isFrozen = true
         vm.registeredModules["@rune/signal"] = .table(signalModule)
 
         return preludeTable
