@@ -423,56 +423,67 @@ public struct LinkPaint: Sendable, Hashable {
     public func bg(_ c: Color) -> Self { var p = self; p.background = c; return p }
     public func ring(_ c: Color, width: Float = 1.0) -> Self { var p = self; p.ring = TextRing(color: c, width: width); return p }
     public func underline(_ on: Bool = true) -> Self { var p = self; p.underline = on; return p }
+
+    /// Whether no hover, pressed, or focused visual overrides are configured.
+    public var isEmpty: Bool {
+        color == nil && background == nil && ring == nil && underline == nil
+    }
 }
 
 /// Interactive byte-range link inside rich text (`rune::Link`).
 public struct TextLink: Sendable, Hashable {
     public var byteRange: Range<Int>
     public var id: String
+    public var role: ElementRole
     public var label: String?
     public var hover: LinkPaint
     public var pressed: LinkPaint?
     public var focused: LinkPaint?
+    public var help: String?
 
     public init(
         _ byteRange: Range<Int>,
         id: String,
+        role: ElementRole = .link,
         label: String? = nil,
         hover: LinkPaint = LinkPaint(),
         pressed: LinkPaint? = nil,
-        focused: LinkPaint? = nil
+        focused: LinkPaint? = nil,
+        help: String? = nil
     ) {
         self.byteRange = max(0, byteRange.lowerBound)..<max(max(0, byteRange.lowerBound), byteRange.upperBound)
         self.id = id
+        self.role = role
         self.label = label
         self.hover = hover
         self.pressed = pressed
         self.focused = focused
+        self.help = help.flatMap { $0.isEmpty ? nil : $0 }
     }
 
+    public func role(_ role: ElementRole) -> Self { var l = self; l.role = role; return l }
+    public func label(_ label: String) -> Self { var l = self; l.label = label; return l }
     public func hover(_ paint: LinkPaint) -> Self { var l = self; l.hover = paint; return l }
     public func pressed(_ paint: LinkPaint) -> Self { var l = self; l.pressed = paint; return l }
     public func focused(_ paint: LinkPaint) -> Self { var l = self; l.focused = paint; return l }
+    public func help(_ text: String) -> Self {
+        var l = self
+        l.help = text.isEmpty ? nil : text
+        return l
+    }
 
-    /// Computes effective interactive `LinkPaint` priority (`pressed > hover`, merged with `focused`).
+    /// Computes effective interactive `LinkPaint` priority (`pressed > hover > focused ?? hover`, `links.rs:187-197`).
     public func effectivePaint(hovered: Bool, pressed: Bool, focused: Bool) -> LinkPaint {
-        var out = LinkPaint()
-        if focused, let f = self.focused {
-            out = f
+        if pressed {
+            return self.pressed ?? self.hover
         }
         if hovered {
-            if let c = hover.color { out.color = c }
-            if let bg = hover.background { out.background = bg }
-            if let r = hover.ring { out.ring = r }
-            if let u = hover.underline { out.underline = u }
+            return self.hover
         }
-        if pressed, let p = self.pressed {
-            if let c = p.color { out.color = c }
-            if let bg = p.background { out.background = bg }
-            if let r = p.ring { out.ring = r }
-            if let u = p.underline { out.underline = u }
+        if focused {
+            return self.focused ?? self.hover
         }
-        return out
+        return LinkPaint()
     }
 }
 

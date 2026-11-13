@@ -175,9 +175,35 @@ public enum SelectionMath {
         return floorCharBoundary(in: content, offset: i - 1)
     }
 
+    /// Shrinks `(start, end)` away from any `uncopied` spans touching its ends, returning `range`
+    /// unchanged when trimming leaves nothing (`crates/rune/src/runtime/selection/selectable.rs:193-199`).
+    public static func trimUncopied(_ uncopied: [Range<Int>], range: (Int, Int)) -> (Int, Int) {
+        let r0 = range
+        var a = range.0
+        var b = range.1
+        while let u = uncopied.first(where: { $0.lowerBound <= a && a < $0.upperBound && a < b }) {
+            a = min(u.upperBound, b)
+        }
+        while let u = uncopied.first(where: { $0.lowerBound < b && b <= $0.upperBound && a < b }) {
+            b = max(u.lowerBound, a)
+        }
+        return a < b ? (a, b) : r0
+    }
+
     /// Returns `(start, end)` UTF-8 byte offsets of the `unit` surrounding UTF-8 offset `at`
     /// (`crates/rune/src/runtime/selection/selectable.rs:67-109`).
     public static func unitRange(in content: String, at utf8Offset: Int, unit: SelectionUnit) -> (Int, Int) {
+        unitRange(in: content, at: utf8Offset, unit: unit, uncopied: [])
+    }
+
+    /// Returns `(start, end)` UTF-8 byte offsets of the `unit` surrounding UTF-8 offset `at`,
+    /// trimming `uncopied` edges when `unit == .word` (`selectable.rs:254-259`).
+    public static func unitRange(
+        in content: String,
+        at utf8Offset: Int,
+        unit: SelectionUnit,
+        uncopied: [Range<Int>]
+    ) -> (Int, Int) {
         let utf8 = content.utf8
         let len = utf8.count
         var i = floorCharBoundary(in: content, offset: utf8Offset)
@@ -231,7 +257,7 @@ public enum SelectionMath {
                 let kind = classify(scalar)
                 if foundTarget {
                     if kind != spanKind {
-                        return (spanStart, byteCursor)
+                        return trimUncopied(uncopied, range: (spanStart, byteCursor))
                     }
                 } else {
                     let startsNewSpan: Bool
@@ -246,14 +272,15 @@ public enum SelectionMath {
                     spanKind = kind
                     if i < nextCursor {
                         if kind == .punctuation || kind == .newline {
-                            return (byteCursor, nextCursor)
+                            return trimUncopied(uncopied, range: (byteCursor, nextCursor))
                         }
                         foundTarget = true
                     }
                 }
                 byteCursor = nextCursor
             }
-            return foundTarget ? (spanStart, len) : (len, len)
+            let raw = foundTarget ? (spanStart, len) : (len, len)
+            return trimUncopied(uncopied, range: raw)
         }
     }
 
