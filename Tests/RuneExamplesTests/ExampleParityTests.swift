@@ -102,6 +102,37 @@ struct ExampleParityTests {
         #expect(one[2] > 600.0 && one[3] > 350.0, "fills the stage: \(one)")
     }
 
+    // Upstream: examples/knobs/src/main.rs:95 in_the_playground_arrows_pick_and_step_the_side_columns_knobs
+    @Test("knobs: in the playground, arrows pick and step the side column's knobs")
+    func knobsPlaygroundArrowsPickAndStepSideColumnKnobs() throws {
+        let rt = RuneKnobsDemoApp.makeApp()
+            .headlessRuntime(size: Vec2(820, 520), env: Env(systemDark: true, scale: 1.0))
+        try rt.openPlayground(at: "card-knobs")
+
+        func press(_ key: Key, shift: Bool = false) {
+            _ = rt.keyDown(KeyEvent(key: key, mods: Mods(shift: shift)), at: 0.0)
+            rt.frame(at: 1.0 / 60.0)
+        }
+        func knob(_ d: Knob) throws -> Float {
+            let pg = try #require(rt.playgroundState(as: KnobsDemoState.self))
+            return pg.knobs.get(d)
+        }
+
+        press(.arrowRight)
+        press(.arrowRight)
+        #expect(abs(try knob(radiusKnob) - 14.32) < 1e-4, "→ steps the first knob, the radius")
+        press(.arrowDown)
+        press(.arrowRight, shift: true)
+        #expect(try knob(padKnob) == 34.0, "↓ picks the padding, and ⇧→ steps it ten")
+        press(.arrowLeft)
+        #expect(try knob(padKnob) == 33.0, "← steps back rather than leaving")
+        #expect(rt.elements().contains(where: { ($0.key?.hasPrefix("playground-slot-") == true) && $0.focused }), "the keyboard is on the knobs")
+        press(.escape)
+        press(.arrowDown)
+        #expect(try knob(padKnob) == 33.0, "after Esc, ↓ moves in the list again")
+        #expect(rt.state.knobs.get(radiusKnob) == radiusKnob.default, "the real state is untouched")
+    }
+
     // Upstream: examples/knobs/src/main.rs:115 cmd_shift_k_opens_the_panel_and_a_knob_changes_the_card
     @Test("knobs: Cmd+Shift+K opens the panel and a knob changes the card")
     func knobsCmdShiftKOpensPanelAndKnobChangesCard() {

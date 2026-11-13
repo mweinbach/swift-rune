@@ -892,6 +892,7 @@ let package = Package(
                 "RuneCoretextCompare",
                 "RuneOccludedTimer",
                 "RuneLayerFilterOverlay",
+                "RuneSiteScenes",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

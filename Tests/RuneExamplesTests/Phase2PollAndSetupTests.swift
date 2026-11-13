@@ -6,6 +6,7 @@ import Testing
 @testable import RuneLuauPanel
 @testable import RunePlayground
 @testable import RuneShapes
+@testable import RuneSiteScenes
 
 @Suite("Phase 2 AppSpec/App poll, setup, playground & multi-window rewires", .serialized)
 struct Phase2PollAndSetupTests {
@@ -136,5 +137,31 @@ struct Phase2PollAndSetupTests {
         let patternElems = try #require(patternJson["elements"] as? [[String: Any]])
         #expect(patternElems.contains(where: { ($0["key"] as? String) == "pattern" }))
         #expect(patternElems.contains(where: { ($0["text"] as? String) == "RUNE 120 Hz" }))
+    }
+
+    @Test("site-scenes: renders 2x metal, glass, and light PNG stills with --out/--only/--t")
+    func siteScenesRendersMetalGlassLightStills() throws {
+        #expect(RuneSiteScenesApp.availableScenes == ["metal", "glass", "light"])
+        #if canImport(Metal)
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rune-site-scenes-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let written = try RuneSiteScenesApp.runCLI(arguments: ["--out", dir.path, "--t", "1.2"])
+        #expect(written.map(\.lastPathComponent) == ["metal.png", "glass.png", "light.png"])
+        for url in written {
+            let data = try Data(contentsOf: url)
+            #expect(data.count > 10_000, "\(url.lastPathComponent) should be a non-empty 1920x1080 PNG")
+        }
+
+        let snapPath = dir.appendingPathComponent("only-glass.png")
+        let snapped = try RuneSiteScenesApp.runCLI(arguments: ["--snap", snapPath.path, "--scene", "glass", "--t", "0.5"])
+        #expect(snapped == [snapPath])
+        #expect((try Data(contentsOf: snapPath)).count > 10_000)
+
+        #expect(throws: RuneSiteScenesApp.CLIError.self) {
+            _ = try RuneSiteScenesApp.runCLI(arguments: ["--out", dir.path, "--only", "bogus"])
+        }
+        #endif
     }
 }
