@@ -69,6 +69,18 @@ extension AnimationStore {
         return first.isFinite ? first : nil
     }
 
+    /// True if `prop` on `node` is actively moving or due (excludes `.waiting` delayed-start holds and `.frozen`).
+    public func isUnheldAnimating(_ node: NodeId, _ prop: PropId) -> Bool {
+        guard let tid = trackId(node, prop) else { return false }
+        let ti = tid.indexInt
+        return tSlot[ti] != Self.none && !mode(ti).holds
+    }
+
+    /// Typed convenience for `isUnheldAnimating(_:_:)`.
+    public func isUnheldAnimating<T>(_ node: NodeId, _ prop: Prop<T>) -> Bool {
+        isUnheldAnimating(node, prop.id)
+    }
+
     /// Live tracks sampled (or `set`) in the last `tick()`, with generational track IDs.
     public func touchedTracks() -> [(TrackId, NodeId, PropId)] {
         var out: [(TrackId, NodeId, PropId)] = []

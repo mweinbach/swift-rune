@@ -1577,7 +1577,7 @@ public final class Runtime<State> {
         if isInitiallyScrolling {
             layoutFeedback.step(.reopened)
         }
-        var didCommitThisFrame = releasedAny
+        var didCommitThisFrame = false
         if needsCommit {
             let other = hasExternalDirtyCommit || ranExternalLayoutAction
             let feedback = ranLayoutFeedback
@@ -5277,10 +5277,10 @@ public final class Runtime<State> {
                 && rExact[1] <= min(visClip.bottom * pxScale, Float(devH)) + filterMargin
             ))
             let unscaled = abs(scaleVec.x - 1.0) <= 1e-5 && abs(scaleVec.y - 1.0) <= 1e-5 && anchor == anchorTo
-            let ownScaleSpringMoving = scene.store.isAnimating(p.id, Props.SCALE)
-                || scene.store.isAnimating(p.id, Props.UNIFORM_SCALE)
-                || scene.store.isAnimating(p.id, Props.PRESENCE)
-                || scene.store.isAnimating(p.id, Props.PRESS_SCALE)
+            let ownScaleSpringMoving = scene.store.isUnheldAnimating(p.id, Props.SCALE)
+                || scene.store.isUnheldAnimating(p.id, Props.UNIFORM_SCALE)
+                || scene.store.isUnheldAnimating(p.id, Props.PRESENCE)
+                || scene.store.isUnheldAnimating(p.id, Props.PRESS_SCALE)
             let ownLiveScaleMoving = el.liveBindings.contains(where: { b in
                 b.target == .scale
                     && (liveStore.isMoving(NodeId.hash("live:\(snap.path):\(b.target)"), Props.SCALE) || isLinearTweenActive(b.source, at: now))
