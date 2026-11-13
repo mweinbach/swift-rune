@@ -131,6 +131,7 @@ struct ScrollBarRuntimeParityTests {
             }
             rt.setSystemScrollBars(.always)
             rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
             var now = 0.0
             _ = rt.frame(at: now)
             frames(rt, 2, now: &now)
@@ -162,6 +163,7 @@ struct ScrollBarRuntimeParityTests {
             }
             rt.setSystemScrollBars(.always)
             rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
             var now = 0.0
             _ = rt.frame(at: now)
             frames(rt, 2, now: &now)
@@ -210,6 +212,7 @@ struct ScrollBarRuntimeParityTests {
             }
             rt.setSystemScrollBars(.always)
             rt.setSystemScrollerJumps(jumps)
+            rt.checkLiveOnly(false)
             var now = 0.0
             _ = rt.frame(at: now)
             frames(rt, 2, now: &now)
@@ -316,6 +319,7 @@ struct ScrollBarRuntimeParityTests {
             return makeView(rows)
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)
@@ -353,6 +357,7 @@ struct ScrollBarRuntimeParityTests {
             )
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)
@@ -399,6 +404,7 @@ struct ScrollBarRuntimeParityTests {
             )
         }
         rt.setSystemScrollBars(.always)
+        rt.checkLiveOnly(false)
         var now = 0.0
         _ = rt.frame(at: now)
         frames(rt, 2, now: &now)

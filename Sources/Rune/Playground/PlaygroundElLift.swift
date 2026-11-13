@@ -288,6 +288,14 @@ extension El {
             hasHandler = true
             lifted.onScrollOffset = onScrollOffset
         }
+        if let onScroll = h.onScroll {
+            hasHandler = true
+            lifted.onScroll = { _, pos, tx in
+                guard isValid(), var child = get() else { return }
+                onScroll(&child, pos, &tx)
+                set(child)
+            }
+        }
         if let onVisibleRows = h.onVisibleRows {
             hasHandler = true
             lifted.onVisibleRows = { _, range in

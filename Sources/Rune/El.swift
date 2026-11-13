@@ -606,6 +606,9 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case menuItemCheckbox = "menu-item-check-box"
     case passwordInput = "password-input"
     case mark = "mark"
+    case code = "code"
+    case blockquote = "blockquote"
+    case table = "table"
 }
 
 /// Live property binding entry attached to an `El`.
@@ -666,6 +669,7 @@ public struct ElementHandlers<State> {
     public var onAtBottom: ((inout State, Bool) -> Void)?
     public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)?
     public var onScrollOffset: ((ScrollPos) -> Void)?
+    public var onScroll: ((inout State, ScrollPos, inout Tx) -> Void)?
     public var onVisibleRows: ((inout State, Range<Int>) -> Bool)?
     public var onDrawnLayout: ((inout State, [Float], inout Tx) -> Void)?
     public var onVisible: ((inout State, Bool, inout Tx) -> Void)?
@@ -1325,6 +1329,12 @@ public struct El<State> {
         } else {
             copy.handlers.onScrollOffset = handler
         }
+        return copy
+    }
+
+    public func onScroll(_ handler: @escaping (inout State, ScrollPos, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onScroll = handler
         return copy
     }
 

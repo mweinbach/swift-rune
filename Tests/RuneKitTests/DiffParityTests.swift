@@ -1410,7 +1410,7 @@ struct DiffParityTests {
             }
         }
 
-        // 5. #182: 3-file a11y labels (`heading`, `added/removed/unchanged line`) + `]`, `j`, `[` navigation
+        // 5. #182: 3-file a11y labels (`heading`, `added/removed/unchanged line`) + `]`, `j`, `[` navigation + `onVisibleFile`
         let (navOld, navNew) = makeNumbered(200, every: 50)
         let navFiles = (0..<3).map { i in FileDiff.fromTexts(path: "f\(i).rs", old: navOld, new: navNew, context: 3) }
         let navRT = Runtime<AppState>(
@@ -1419,6 +1419,7 @@ struct DiffParityTests {
             onKey: { st, ev, tx in st.diff.key(ev, keyPrefix: "dv", tx: &tx) },
             view: { s, cx in
                 DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .onVisibleFile { st, fileIdx in st.actions.append(fileIdx) }
                     .build(state: s, cx: cx)
             }
         )
@@ -1441,15 +1442,286 @@ struct DiffParityTests {
         _ = navRT.keyDown(KeyEvent(key: .text("[")), at: nt); nt += 0.01
         for _ in 0..<60 { nt += 1.0 / 60.0; _ = navRT.frame(at: nt) }
         #expect(navRT.state.diff.visibleFile == 0)
+        #expect(navRT.state.actions.last == 0)
 
-        // 6. #184-#185: hovering across lines & scrolling emits zero PerfWarn warnings (note: Rust liveOnly structural view-equality probe isn't in Swift Runtime)
-        PerfWarn.resetForTesting()
-        for rowIdx in 0..<8 {
-            if let codeEl = gRT.element(byKey: "dv-code-\(rowIdx)"), codeEl.rect.count == 4 {
-                gRT.pointerMove(to: Vec2(codeEl.rect[0] + 20, codeEl.rect[1] + 10), at: gt + Double(rowIdx) * 0.01)
-                _ = gRT.frame(at: gt + 0.005 + Double(rowIdx) * 0.01)
+        // 6. #184-#185: liveOnly hover & events skip view builds cleanly and `checkLiveOnly` reports real view mutations
+        for mode in [DiffMode.unified, .split] {
+            let (lOld, lNew) = makeNumbered(40, every: 3)
+            var ld = DiffState(diff: FileDiff.fromTexts(path: "a.rs", old: lOld, new: lNew, context: 40))
+            ld.setMode(mode)
+            let lRT = Runtime<AppState>(
+                state: AppState(diff: ld),
+                viewport: Vec2(900, 1200),
+                view: { s, cx in
+                    DiffView<AppState>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 }).build(state: s, cx: cx)
+                }
+            )
+            var lt = 0.0
+            _ = lRT.frame(at: lt)
+            let codeCells = lRT.elements().filter { ($0.path).hasSuffix("/code") || ($0.key ?? "").contains("-code-") || ($0.key ?? "").contains("-ccode-") }
+                .filter { $0.rect.count == 4 }
+            #expect(codeCells.count > 20)
+            let checksBefore = lRT.liveOnlyEvents
+            for (idx, cell) in codeCells.enumerated() {
+                if idx % 2 == 0 {
+                    lt += 0.3
+                    _ = lRT.frame(at: lt)
+                }
+                lRT.pointerMove(to: Vec2(cell.rect[0] + cell.rect[2] * 0.5, cell.rect[1] + cell.rect[3] * 0.5), at: lt)
+                lt += 1.0 / 60.0
+                _ = lRT.frame(at: lt)
             }
+            #expect(lRT.liveOnlyEvents > checksBefore)
+            #expect(lRT.liveOnlyWarnings.isEmpty)
         }
-        #expect(PerfWarn.takeTestLog(resetSites: true).isEmpty)
+    }
+
+    @Test("FileDiff.fold, DiffLineRange.line, DiffState.singleColumn, setHighlighter, and scrollToLine parity")
+    func diffModelAndStateCloseoutAPIs() {
+        let fullOld = (1...30).map { "func f\($0)() { let x = \($0) }" }.joined(separator: "\n") + "\n"
+        var newLines = (1...30).map { "func f\($0)() { let x = \($0) }" }
+        newLines[3] = "func f4() { let x = 400 }"
+        newLines[25] = "func f26() { let x = 2600 }"
+        let fullNew = newLines.joined(separator: "\n") + "\n"
+
+        // FileDiff.fold splits a single huge-context hunk around changes while keeping source expandable
+        let singleHunk = FileDiff.fromTexts(path: "a.swift", old: fullOld, new: fullNew, context: 1000)
+        #expect(singleHunk.hunks.count == 1)
+        let folded = singleHunk.fold(context: 2)
+        #expect(folded.hunks.count == 2)
+        #expect(folded.expandable)
+        #expect(folded.hunks[0].lines.contains(where: { $0.kind == .addition }))
+        #expect(folded.hunks[1].lines.contains(where: { $0.kind == .addition }))
+
+        // DiffLineRange.line & DiffState.singleColumn
+        let ref = DiffLineRef(side: .new, line: 4)
+        let lineRange = DiffLineRange.line(ref)
+        #expect(lineRange.start == ref && lineRange.end == ref)
+
+        let addedFile = FileDiff.fromTexts(path: "added.swift", old: "", new: "let a = 1\nlet b = 2\n", context: 3)
+        let deletedFile = FileDiff.fromTexts(path: "deleted.swift", old: "let x = 1\n", new: "", context: 3)
+        var st = DiffState(files: [addedFile, deletedFile, singleHunk], mode: .split)
+        #expect(st.singleColumn(file: 0) == .new)
+        #expect(st.singleColumn(file: 1) == .old)
+        #expect(st.singleColumn(file: 2) == nil)
+        st.setMode(.unified)
+        #expect(st.singleColumn(file: 0) == nil)
+
+        // DiffState.setHighlighter
+        final class CounterBox: @unchecked Sendable { var calls = 0 }
+        let box = CounterBox()
+        let customHL = SyntaxHighlighter(id: "diff-custom") { _, _ in
+            box.calls += 1
+            return []
+        }
+        st.setHighlighter(customHL)
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime<DiffState>(state: st, viewport: Vec2(700, 400)) { s, cx in
+            DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
+        }
+        _ = rt.frame(at: 0.0)
+        #expect(box.calls > 0)
+
+        // DiffState.scrollToLine expands collapsed gap and scrolls to target file line
+        var collapsedFileState = DiffState(diff: folded)
+        var tx = Tx()
+        collapsedFileState.scrollToLine(0, at: DiffLineRef(side: .new, line: 15), keyPrefix: "dv", tx: &tx)
+        #expect(!collapsedFileState.collapsed(file: 0))
+        #expect(!tx.scrollOffsetRequests.isEmpty)
+        #expect(tx.scrollOffsetRequests.last?.key == "dv-body")
+    }
+
+    @Test("tests/diff.rs #183: focused_annotation_input_keeps_navigation_and_escape_keys")
+    @MainActor
+    func focusedAnnotationInputKeepsNavigationAndEscapeKeys() {
+        struct ComposeApp: Sendable {
+            var diff: DiffState
+            var comment: TextEdit = TextEdit()
+        }
+        let kit = Kit.neutral(dark: true)
+        let long = String(repeating: "x", count: 400)
+        var oldLines = (1...60).map { "let value_\($0) = compute(\($0));" }
+        var newLines = (1...60).map { i in
+            (i % 10 == 0) ? "let value_\(i) = compute(\(i)) + 1;" : "let value_\(i) = compute(\(i));"
+        }
+        oldLines[8] = long
+        newLines[8] = long
+        let old = oldLines.joined(separator: "\n")
+        let new = newLines.joined(separator: "\n")
+        let files = (0..<2).map { i in FileDiff.fromTexts(path: "f\(i).rs", old: old, new: new, context: 3) }
+        var diff = DiffState(files: files)
+        diff.annotations = [DiffAnnotation(id: "c1", file: 0, side: .new, line: 10, body: "")]
+        let sel = DiffLineRange.line(DiffLineRef(side: .new, line: 10))
+        diff.select(sel)
+
+        let rt = Runtime<ComposeApp>(
+            state: ComposeApp(diff: diff),
+            viewport: Vec2(600, 600),
+            onKey: { s, ev, tx in s.diff.key(ev, keyPrefix: "dv", tx: &tx) },
+            view: { s, cx in
+                let dv = DiffView<ComposeApp>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 })
+                    .annotation { _, a in
+                        let colNode: El<ComposeApp> = col()
+                        return colNode
+                            .wFull()
+                            .child(
+                                textInput(key: "input-\(a.id)", \ComposeApp.comment)
+                                    .font(TextStyle(size: 13, weight: 400))
+                                    .size(300, 28)
+                            )
+                            .child(
+                                el()
+                                    .key("pop-\(a.id)")
+                                    .size(80, 20)
+                                    .anchored("input-\(a.id)", side: .bottom, align: .start, gap: 4)
+                            )
+                    }
+                    .build(state: s, cx: cx)
+                return col().wFull().hFull().child(dv)
+            }
+        )
+        var t = 0.0
+        _ = rt.frame(at: t)
+        for _ in 0..<30 { t += 1.0 / 60.0; _ = rt.frame(at: t) }
+        rt.wheel(WheelEvent(dx: -250, dy: -40), at: Vec2(300, 200), now: t)
+        for _ in 0..<60 { t += 1.0 / 60.0; _ = rt.frame(at: t) }
+
+        let code10 = rt.elements().first { ($0.key ?? "").contains("-code-") && $0.rect[1] > 100 && $0.rect[0] < -50 }
+        let codeX = code10?.rect[0] ?? 0
+        #expect(codeX < -50, "Expected code scrolled sideways, got \(codeX)")
+
+        guard let inp = rt.element(byKey: "input-c1"), let pop = rt.element(byKey: "pop-c1") else {
+            Issue.record("Missing annotation input-c1 or pop-c1")
+            return
+        }
+        #expect(abs(inp.rect[0]) < 2.0, "Input stays pinned near left edge: \(String(describing: inp.rect))")
+        #expect(abs(pop.rect[0] - max(8.0, inp.rect[0])) < 1.0)
+        #expect(abs(pop.rect[1] - (inp.rect[1] + inp.rect[3] + 4.0)) < 1.0)
+
+        // Click the comment box to focus and type `][jk`
+        let clickPt = Vec2(inp.rect[0] + 10, inp.rect[1] + 10)
+        rt.pointerDown(at: clickPt, at: t); t += 0.01
+        rt.pointerUp(at: clickPt, at: t); t += 0.01
+        _ = rt.frame(at: t)
+        #expect(rt.focusedKey == "input-c1")
+
+        for ch in ["]", "[", "j", "k"] {
+            _ = rt.keyDown(KeyEvent(key: .text(ch)), at: t); t += 0.01
+            _ = rt.frame(at: t)
+        }
+        #expect(rt.state.comment.text == "][jk")
+        if let inpAfter = rt.element(byKey: "input-c1"), let caret = inpAfter.caret {
+            #expect(caret[0] >= inpAfter.rect[0] && caret[0] < inpAfter.rect[0] + inpAfter.rect[2])
+        } else {
+            Issue.record("Focused input should report caret")
+        }
+        #expect(rt.state.diff.visibleFile == 0)
+        #expect(rt.state.diff.selectedRange == sel)
+
+        // First Escape blurs input without clearing diff selection; second Escape clears diff selection
+        _ = rt.keyDown(KeyEvent(key: .escape), at: t); t += 0.01
+        _ = rt.frame(at: t)
+        #expect(rt.focusedKey == nil)
+        #expect(rt.state.diff.selectedRange == sel)
+
+        _ = rt.keyDown(KeyEvent(key: .escape), at: t); t += 0.01
+        _ = rt.frame(at: t)
+        #expect(rt.state.diff.selectedRange == nil)
+    }
+
+    @Test("tests/diff.rs #185 & #186: checkLiveOnly catches state mutation during liveOnly, 50k diff stays responsive")
+    @MainActor
+    func liveOnlyCheckAnd50kDiffBenchmark() {
+        struct LiveApp: Sendable {
+            var diff: DiffState
+            var mutateMode: Bool = false
+        }
+        let kit = Kit.neutral(dark: false)
+        let old = (1...200).map { "let line_\($0) = \($0);" }.joined(separator: "\n")
+        let new = (1...200).map { ($0 % 5 == 0) ? "let line_\($0) = \($0 + 1);" : "let line_\($0) = \($0);" }.joined(separator: "\n")
+        var state = DiffState(diff: FileDiff.fromTexts(path: "a.rs", old: old, new: new, context: 200))
+        state.setMode(.unified)
+
+        let rt = Runtime<LiveApp>(
+            state: LiveApp(diff: state),
+            viewport: Vec2(900, 600),
+            onKey: { s, _, tx in
+                if s.mutateMode {
+                    s.diff.setMode(s.diff.mode == .split ? .unified : .split)
+                }
+                tx.liveOnly()
+                return true
+            },
+            view: { s, cx in
+                DiffView<LiveApp>(key: "dv", kit: kit, get: { $0.diff }, set: { $0.diff = $1 }).build(state: s, cx: cx)
+            }
+        )
+        var t = 0.0
+        _ = rt.frame(at: t)
+        rt.checkLiveOnly(false)
+        let initialSkips = rt.liveOnlyEvents
+        rt.wheel(WheelEvent(dx: 0, dy: -600), at: Vec2(400, 300), now: t)
+        for _ in 0..<4 { t += 1.0 / 60.0; _ = rt.frame(at: t) }
+        _ = rt.keyDown(KeyEvent(key: .f(5)), at: t); t += 0.01
+        _ = rt.frame(at: t)
+        #expect(rt.liveOnlyEvents > initialSkips)
+        #expect(rt.liveOnlyWarnings.isEmpty)
+
+        // Probe catches silent mode mutation under tx.liveOnly() after >= 0.25s
+        rt.checkLiveOnly(true)
+        rt.state.mutateMode = true
+        t += 0.30
+        _ = rt.keyDown(KeyEvent(key: .f(5)), at: t); t += 0.01
+        _ = rt.frame(at: t)
+        #expect(rt.liveOnlyWarnings.count == 1)
+
+        // #186: 50k-line scattered diff (every 7th changed) constructs & renders windowed slice quickly
+        let old50 = (1...50_000).map { "let v_\($0) = compute(\($0));" }.joined(separator: "\n")
+        let new50 = (1...50_000).map { ($0 % 7 == 0) ? "let v_\($0) = compute(\($0)) + 1;" : "let v_\($0) = compute(\($0));" }.joined(separator: "\n")
+        let bigFile = FileDiff.fromTexts(path: "big.rs", old: old50, new: new50, context: 3)
+        let bigRT = Runtime<DiffState>(state: DiffState(diff: bigFile), viewport: Vec2(1200, 900)) { s, cx in
+            DiffView<DiffState>(key: "dv50k", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
+        }
+        _ = bigRT.frame(at: 0.0)
+        #expect(bigRT.state.rows(file: 0).count > 10_000)
+        #expect(bigRT.elements().filter { ($0.key ?? "").hasPrefix("dv50k-row-") }.count < 160)
+    }
+
+    @Test("tests/diff.rs #184: hovering lines at rest builds nothing new under checkLiveOnly")
+    @MainActor
+    func hoveringLinesAtRestBuildsNothingNew() {
+        let kit = Kit.neutral(dark: false)
+        let old = (1...40).map { "line \($0)" }.joined(separator: "\n")
+        let new = (1...40).map { ($0 % 3 == 0) ? "line \($0) edited" : "line \($0)" }.joined(separator: "\n")
+        for mode in [DiffMode.unified, DiffMode.split] {
+            var diff = DiffState(diff: FileDiff.fromTexts(path: "a.rs", old: old, new: new, context: 40))
+            diff.setMode(mode)
+            let rt = Runtime<DiffState>(state: diff, viewport: Vec2(900, 1200)) { s, cx in
+                DiffView<DiffState>(key: "dv", kit: kit, get: { $0 }, set: { $0 = $1 }).build(state: s, cx: cx)
+            }
+            var t = 0.0
+            _ = rt.frame(at: t)
+            let cells = rt.elements().filter {
+                let k = $0.key ?? ""
+                return !$0.exiting && (
+                    k.hasPrefix("dv-code-") || k.hasPrefix("dv-scode-") || k.hasPrefix("dv-ccode-") || k.hasPrefix("dv-dcode-") || k.hasPrefix("dv-acode-")
+                )
+            }
+            #expect(cells.count > 30)
+            let checks = rt.liveOnlyEvents
+            for (i, cell) in cells.enumerated() {
+                if i % 2 == 0 {
+                    t += 0.3
+                    _ = rt.frame(at: t)
+                }
+                let cx = cell.rect[0] + cell.rect[2] * 0.5
+                let cy = cell.rect[1] + cell.rect[3] * 0.5
+                rt.pointerMove(to: Vec2(cx, cy), at: t)
+                t += 1.0 / 60.0
+                _ = rt.frame(at: t)
+            }
+            #expect(rt.liveOnlyEvents > checks)
+            #expect(rt.liveOnlyWarnings.isEmpty, "Unexpected liveOnly warnings for \(mode): \(rt.liveOnlyWarnings)")
+        }
     }
 }
