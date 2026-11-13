@@ -611,4 +611,65 @@ struct RuneMotionTests {
         let bouncy = MotionTraceCapture.sampleSpring(Spring(duration: 0.3, bounce: 0.4), from: 0, to: 100)
         #expect(bouncy.maxOvershoot(from: 0, to: 100) > 1.0)
     }
+
+    @Test("Scene.commit honors authored layoutAnim over REFLOW and preserves same-parent sibling reorder")
+    func sceneCommitLayoutAnimAndSiblingReorder() {
+        var scene = Scene(pixelScale: 2.0)
+        let fastId = NodeId.hash("fast-mover")
+        let reflowId = NodeId.hash("reflow-mover")
+        let slowId = NodeId.hash("slow-mover")
+
+        // Initial cut
+        scene.commit([
+            NodeSpec(id: fastId, rect: .fromXYWH(0, 0, 80, 30)),
+            NodeSpec(id: reflowId, rect: .fromXYWH(0, 40, 80, 30)),
+            NodeSpec(id: slowId, rect: .fromXYWH(0, 80, 80, 30)),
+        ], at: 0.0)
+        _ = scene.frame(at: 0.0)
+
+        // Move with faster-than-REFLOW (0.12s), REFLOW (0.40s), and slower-than-REFLOW (0.90s) springs
+        scene.commit([
+            NodeSpec(id: fastId, rect: .fromXYWH(200, 0, 80, 30), layoutAnim: LayoutAnim(spring: Spring(duration: 0.12, bounce: 0.0))),
+            NodeSpec(id: reflowId, rect: .fromXYWH(200, 40, 80, 30), layoutAnim: LayoutAnim(spring: MotionTokens.REFLOW)),
+            NodeSpec(id: slowId, rect: .fromXYWH(200, 80, 80, 30), layoutAnim: LayoutAnim(spring: Spring(duration: 0.90, bounce: 0.0))),
+        ], at: 0.1)
+
+        // At t = 0.50 (0.40s elapsed), fastId (0.12s) must already be settled while REFLOW (0.40s) is still moving.
+        let fFast = scene.frame(at: 0.50)
+        #expect(abs((fFast.byId[fastId]?.rect.left ?? 0) - 200.0) < 0.05)
+        #expect(fFast.byId[fastId]?.isMoving == false, "fast 0.12s layoutAnim must be settled by 0.40s elapsed")
+        #expect(fFast.byId[reflowId]?.isMoving == true, "0.40s REFLOW control must still be moving at 0.40s elapsed")
+
+        // At t = 1.25 (1.15s elapsed), REFLOW (0.40s) has settled while slowId (0.90s) is still in flight.
+        let fSlow = scene.frame(at: 1.25)
+        #expect(fSlow.byId[reflowId]?.isMoving == false, "0.40s REFLOW control should have settled by 1.15s elapsed")
+        #expect((fSlow.byId[slowId]?.rect.left ?? 200.0) < 199.5, "slow 0.90s layoutAnim must still be in flight past REFLOW")
+        #expect(fSlow.byId[slowId]?.isMoving == true)
+
+        // Same-parent sibling reorder (`[a, b] -> [b, a]`) and root reorder updates FrameOutput.nodes order
+        var orderScene = Scene(pixelScale: 2.0)
+        let parentId = NodeId.hash("parent")
+        let childA = NodeId.hash("a")
+        let childB = NodeId.hash("b")
+        let otherRoot = NodeId.hash("other")
+
+        orderScene.commit([
+            NodeSpec(id: parentId, rect: .fromXYWH(0, 0, 200, 200)),
+            NodeSpec(id: childA, parent: parentId, rect: .fromXYWH(0, 0, 100, 40)),
+            NodeSpec(id: childB, parent: parentId, rect: .fromXYWH(20, 20, 100, 40)),
+            NodeSpec(id: otherRoot, rect: .fromXYWH(0, 0, 50, 50)),
+        ], at: 0.0)
+        let f0 = orderScene.frame(at: 0.0)
+        #expect(f0.nodes.map(\.id) == [parentId, otherRoot, childA, childB])
+
+        // Swap children `[a, b] -> [b, a]` and roots `[parent, otherRoot] -> [otherRoot, parent]`
+        orderScene.commit([
+            NodeSpec(id: otherRoot, rect: .fromXYWH(0, 0, 50, 50)),
+            NodeSpec(id: parentId, rect: .fromXYWH(0, 0, 200, 200)),
+            NodeSpec(id: childB, parent: parentId, rect: .fromXYWH(20, 20, 100, 40)),
+            NodeSpec(id: childA, parent: parentId, rect: .fromXYWH(0, 0, 100, 40)),
+        ], at: 0.1)
+        let f1 = orderScene.frame(at: 0.1)
+        #expect(f1.nodes.map(\.id) == [otherRoot, parentId, childB, childA])
+    }
 }
