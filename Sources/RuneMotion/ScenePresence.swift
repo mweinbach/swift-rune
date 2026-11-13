@@ -45,7 +45,10 @@ extension Scene {
         let ins = transition.insertion.kitRules(removal: false)
         let plain = delay <= 0.0 && transition.insertion == Transition.opacity.insertion
         let ridesParent = hasEnteringAncestorBelowHalf(parentIdx, plain: plain)
-        let shouldAnimate = (mount == .animated) && !ridesParent && !ins.showsNothing
+        // Under reducedMotion, non-opacity-fading effects (like Transition.draw) snap to identity,
+        // so mounting them runs no visible change and should settle immediately.
+        let reducedIdentity = store.reducedMotion && (ins.zeroOpacity ?? 1.0) >= 0.9999
+        let shouldAnimate = (mount == .animated) && !ridesParent && !ins.showsNothing && !reducedIdentity
 
         let clampedDelay = delay.isFinite ? max(0.0, delay) : 0.0
         let acts = nodes[i].phaseStep(.mount(transition: transition, animate: shouldAnimate, delay: clampedDelay))

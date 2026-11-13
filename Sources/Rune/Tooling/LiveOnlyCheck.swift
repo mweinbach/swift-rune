@@ -1,4 +1,5 @@
 import Foundation
+import RuneMotion
 
 /// Snapshot of a single committed node used by `Runtime.checkLiveOnly(_:)`
 /// (`crates/rune/src/runtime/motion/live_check.rs`).
@@ -11,6 +12,8 @@ internal struct LiveOnlyNodePrint {
     var opacity: Float
     var corners: Corners
     var text: String?
+    var isLiveText: Bool = false
+    var isRedacted: Bool = false
     var textColor: Color?
 }
 
@@ -80,12 +83,27 @@ private extension LiveOnlyNodePrint {
 
     static func formatColor(_ c: Color?) -> String {
         guard let c else { return "(live)" }
-        let byte = { (x: Float) -> Int in Int((max(0.0, min(1.0, x)) * 255.0).rounded()) }
-        return String(format: "#%02x%02x%02x%02x", byte(c.r), byte(c.g), byte(c.b), byte(c.a))
+        let byte = { (x: Float) -> Int in
+            let enc = MotionColor.srgbEncode(max(0.0, min(1.0, x)))
+            return Int((max(0.0, min(1.0, enc)) * 255.0).rounded())
+        }
+        let alphaByte = Int((max(0.0, min(1.0, c.a)) * 255.0).rounded())
+        return String(format: "#%02x%02x%02x%02x", byte(c.r), byte(c.g), byte(c.b), alphaByte)
     }
 
     static func formatPoints(_ xs: [Float]) -> String {
         "[" + xs.map { String(format: "%.1f", $0) }.joined(separator: ", ") + "]"
+    }
+
+    static func snippet(_ s: String?, isLive: Bool, isRedacted: Bool) -> String {
+        guard let s else { return "no text" }
+        if isRedacted { return "[redacted]" }
+        if isLive { return "(live)" }
+        let maxChars = 40
+        if s.count > maxChars {
+            return String(reflecting: String(s.prefix(maxChars)) + "…")
+        }
+        return String(reflecting: s)
     }
 
     func difference(against now: LiveOnlyNodePrint) -> LiveOnlyDifference? {
@@ -112,8 +130,8 @@ private extension LiveOnlyNodePrint {
                 path: path,
                 what: "border",
                 values: (
-                    "\(Self.formatColor(borderColor)) \(String(format: "%.1f", borderWidth))",
-                    "\(Self.formatColor(now.borderColor)) \(String(format: "%.1f", now.borderWidth))"
+                    "\(Self.formatColor(borderColor)) \(String(format: "%.1f", borderWidth))pt",
+                    "\(Self.formatColor(now.borderColor)) \(String(format: "%.1f", now.borderWidth))pt"
                 )
             )
         }
@@ -121,7 +139,7 @@ private extension LiveOnlyNodePrint {
             return LiveOnlyDifference(
                 path: path,
                 what: "opacity",
-                values: (String(format: "%.2f", opacity), String(format: "%.2f", now.opacity))
+                values: (String(format: "%.3f", opacity), String(format: "%.3f", now.opacity))
             )
         }
         let aRad = [corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft]
@@ -133,11 +151,24 @@ private extension LiveOnlyNodePrint {
                 values: (Self.formatPoints(aRad), Self.formatPoints(bRad))
             )
         }
-        if text != now.text || !Self.bitsEqual(Self.colorBits(textColor), Self.colorBits(now.textColor)) {
+        let contentDiffers = (text == nil) != (now.text == nil)
+            || (!isLiveText && !now.isLiveText && text != now.text)
+            || (isLiveText != now.isLiveText)
+        if contentDiffers {
             return LiveOnlyDifference(
                 path: path,
                 what: "text",
-                values: (text ?? "<none>", now.text ?? "<none>")
+                values: (
+                    Self.snippet(text, isLive: isLiveText, isRedacted: isRedacted),
+                    Self.snippet(now.text, isLive: now.isLiveText, isRedacted: now.isRedacted)
+                )
+            )
+        }
+        if !Self.bitsEqual(Self.colorBits(textColor), Self.colorBits(now.textColor)) {
+            return LiveOnlyDifference(
+                path: path,
+                what: "text color",
+                values: (Self.formatColor(textColor), Self.formatColor(now.textColor))
             )
         }
         return nil
@@ -161,8 +192,10 @@ extension Runtime {
             if case .exiting = scene.phase(node.nodeId) { return nil }
             let el = node.el
             let hasLiveFill = el.liveBindings.contains { $0.target == .fill }
+            let isLiveText = el.liveText != nil
+            let isRedacted = el.isSecure && !el.isRevealed
             let textVal: String?
-            if el.liveText != nil {
+            if isLiveText {
                 textVal = "(live)"
             } else if let spans = el.richSpans, !spans.isEmpty {
                 textVal = spans.map(\.text).joined()
@@ -178,7 +211,9 @@ extension Runtime {
                 opacity: el.opacity,
                 corners: el.corners,
                 text: textVal,
-                textColor: el.liveText != nil ? nil : el.textColor
+                isLiveText: isLiveText,
+                isRedacted: isRedacted,
+                textColor: isLiveText ? nil : el.textColor
             )
         }
         return LiveOnlyViewPrint(nodes: entries)
@@ -192,11 +227,11 @@ extension Runtime {
     /// a check commit (`0.25s` after the last commit) and `false` when the view build is skipped.
     internal func recordLiveOnlySkip(handler: String, at now: Double) -> Bool {
         #if DEBUG
-        if liveOnlyCheckEnabled && !needsCommit && !hasPendingActions && (now - lastLiveCommitClock >= liveOnlyCheckInterval) {
-            if pendingLiveOnlyCheck == nil {
+        if liveOnlyCheckEnabled && (now - lastLiveCommitClock >= liveOnlyCheckInterval) {
+            if pendingLiveOnlyCheck == nil && !needsCommit && !hasPendingActions && !suppressLiveOnlyCheckUntilCommit {
                 pendingLiveOnlyCheck = (handler, captureLiveOnlyViewPrint())
             }
-            liveChecks += 1
+            liveChecks &+= 1
             return true
         }
         #endif

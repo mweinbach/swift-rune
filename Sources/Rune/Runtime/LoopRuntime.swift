@@ -84,11 +84,27 @@ struct LoopRuntime {
         return res
     }
 
-    func hasActiveLoops(nodeTime: (NodeId) -> Double, wall: Double, reducedMotion: Bool) -> Bool {
+    func phaseValue(id: NodeId, at now: Double, reducedMotion: Bool) -> Float? {
+        guard let spec = entries[id], let track = tracks[id] else { return nil }
+        if reducedMotion {
+            if case .sequence = spec.kind {
+                return Float(track.phase(at: now))
+            }
+            return 0.0
+        }
+        return Float(track.phase(at: now))
+    }
+
+    func hasActiveLoops(
+        nodeTime: (NodeId) -> Double,
+        wall: Double,
+        reducedMotion: Bool,
+        excluding sleepingIds: Set<NodeId> = []
+    ) -> Bool {
         if reducedMotion {
             return false
         }
-        for (id, track) in tracks {
+        for (id, track) in tracks where !sleepingIds.contains(id) {
             if case .opacityCycle = entries[id]?.kind {
                 return true
             }
@@ -110,9 +126,12 @@ struct LoopRuntime {
         }
     }
 
-    func nextFrameInterval(reducedMotion: Bool) -> Double? {
+    func nextFrameInterval(
+        reducedMotion: Bool,
+        excluding sleepingIds: Set<NodeId> = []
+    ) -> Double? {
         var best: Double? = nil
-        for (id, track) in tracks {
+        for (id, track) in tracks where !sleepingIds.contains(id) {
             if reducedMotion { continue }
             if let interval = track.frameInterval() {
                 best = best.map { min($0, interval) } ?? interval

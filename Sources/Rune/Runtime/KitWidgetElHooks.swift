@@ -200,14 +200,8 @@ extension Runtime {
         func nodeHasHoverVisual(_ path: String?) -> Bool {
             guard let path, let idx = nodeByPath[path] else { return false }
             let el = flatNodes[idx].el
-            return el.hoverBg != nil
-                || el.hoverMotionSpec != nil
+            return el.hoverMotionSpec != nil
                 || el.hoverWithinSpec != nil
-                || el.isHoverGroup
-                || el.isHoverAlone
-                || el.hoverGroupShare != nil
-                || el.groupOpacity != nil
-                || el.groupColor != nil
                 || el.a11yHelp != nil
                 || el.attachedCursor != nil
         }

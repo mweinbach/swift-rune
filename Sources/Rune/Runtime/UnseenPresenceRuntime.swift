@@ -368,6 +368,7 @@ extension Runtime {
     internal func applyUnseenPresenceAfterCommit(
         specs: [NodeSpec],
         cut: Bool,
+        matchedStartIds: Set<NodeId> = [],
         to scene: inout Scene
     ) -> Bool {
         guard specs.count == flatNodes.count else { return false }
@@ -442,7 +443,8 @@ extension Runtime {
 
             let clip = intersectRects(node.clipRect, spec.rect.offsetBy(mySticky))
             let winClip = intersectRects(clip, winRect)
-            let inViewNow = node.el.isolatedLayer || (winClip.width > 0.001 && winClip.height > 0.001)
+            let visibleOpacity = spec.opacity >= 1.0 / 512.0 || !node.el.liveBindings.filter({ $0.target == .opacity }).isEmpty || loopRuntime.tracks[id] != nil
+            let inViewNow = node.el.isolatedLayer || (visibleOpacity && winClip.width > 0.001 && winClip.height > 0.001)
 
             if !inViewNow {
                 // 2. `enters_unseen`: newly mounted nodes clipped out of view land immediately at rest.
@@ -454,17 +456,32 @@ extension Runtime {
                     scene.enterNow(id)
                 }
 
-                // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame so offscreen
-                // reflow does not animate invisibly.
-                if unseenPresence.unseenIds.contains(id), spec.layoutAnim != nil {
-                    let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
-                    let localFrame = MotionRect(
-                        left: spec.rect.left - parentOrigin.x,
-                        top: spec.rect.top - parentOrigin.y,
-                        right: spec.rect.right - parentOrigin.x,
-                        bottom: spec.rect.bottom - parentOrigin.y
-                    )
-                    scene.landFrame(id, localFrame)
+                // 3. `unseen_before_and_after`: nodes staying unseen land layout & style props immediately
+                // so offscreen reflow and color/blur/transform changes do not animate invisibly
+                // (`apply.rs:432,515-615`, `unseen_entrances.rs`).
+                if unseenPresence.unseenIds.contains(id), !matchedStartIds.contains(id) {
+                    if let fill = spec.fill {
+                        scene.set(id, Props.FILL, fill)
+                    }
+                    if let border = spec.border {
+                        scene.set(id, Props.BORDER, border)
+                    }
+                    scene.set(id, Props.BLUR, Blur(spec.blur))
+                    scene.set(id, Props.OPACITY, spec.opacity)
+                    scene.set(id, Props.SCALE, spec.scale)
+                    scene.set(id, Props.ROTATE, spec.rotate)
+                    scene.set(id, Props.OFFSET, spec.offset)
+                    scene.set(id, Props.CORNERS, spec.corners)
+                    if spec.layoutAnim != nil {
+                        let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
+                        let localFrame = MotionRect(
+                            left: spec.rect.left - parentOrigin.x,
+                            top: spec.rect.top - parentOrigin.y,
+                            right: spec.rect.right - parentOrigin.x,
+                            bottom: spec.rect.bottom - parentOrigin.y
+                        )
+                        scene.landFrame(id, localFrame)
+                    }
                 }
             } else if !reducedMotion,
                       spec.transition != nil,

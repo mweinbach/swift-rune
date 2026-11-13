@@ -465,7 +465,8 @@ public func foldEndLayer(
     } else {
         unmasked = true
     }
-    let transferClip = scope.fade.w == 0 && unmasked
+    let singleSupported = (primitives == 1 && instances[start + 1].params.y != KIND_EFFECT && instances[start + 1].params.y != KIND_BACKDROP_BLUR) || videos == 1
+    let transferClip = unmasked && (scope.fade.w == 0 || singleSupported)
     let fadedEffect = primitives == 1 && instances[start + 1].params.y == KIND_EFFECT && scope.fill.w != 1.0
     if !fadedEffect
         && primitives + videos <= 1
@@ -473,7 +474,7 @@ public func foldEndLayer(
         && scope.params.x == 0
         && scope.params.z == 0
         && scope.params.w == 0
-        && (transferClip || (scope.clip == NO_CLIP && scope.fade == .zero))
+        && (primitives + videos == 0 || transferClip || (scope.clip == NO_CLIP && scope.fade == .zero))
     {
         let opacity = scope.fill.w
         if primitives == 1 {

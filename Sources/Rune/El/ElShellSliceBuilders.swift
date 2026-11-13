@@ -11,7 +11,6 @@ private enum ShellElExtrasKey {
     static let spanRadius = "shell.spanRadius"
     static let strikes = "shell.strikes"
     static let wrapAnywhere = "shell.wrapAnywhere"
-    static let revealWordFade = "shell.revealWordFade"
     static let outline = "shell.elOutline"
     static let paintAlpha = "shell.paintAlpha"
     static let layerOpacity = "shell.layerOpacity"
@@ -92,9 +91,8 @@ extension El {
     /// Enables streaming word-by-word reveal over `wordFade` seconds per word (`El::reveal`).
     public func reveal(wordFade: Float) -> Self {
         guard isTextElement else { return self }
-        let clamped = wordFade.isFinite ? max(0, wordFade) : 0
         var copy = self
-        copy.runtimeExtras[ShellElExtrasKey.revealWordFade] = clamped
+        copy.revealDuration = wordFade.isFinite ? max(0, wordFade) : 0
         return copy
     }
 
@@ -189,7 +187,7 @@ extension El {
     }
 
     internal var elRevealWordFade: Float? {
-        runtimeExtras[ShellElExtrasKey.revealWordFade] as? Float
+        revealDuration >= 0 ? revealDuration : nil
     }
 
     internal var elOutline: Outline? {

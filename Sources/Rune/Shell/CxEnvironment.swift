@@ -128,12 +128,14 @@ public struct ZoomState: Sendable, Equatable {
 
 final class CxReadsLog: @unchecked Sendable {
     var caretRead: Bool = false
+    var focusRead: Bool = false
     var layoutReads: [MemoRead] = []
 
     init() {}
 
     init(copying other: CxReadsLog) {
         self.caretRead = other.caretRead
+        self.focusRead = other.focusRead
         self.layoutReads = other.layoutReads
     }
 }
@@ -175,6 +177,7 @@ struct RuntimeShellSettings {
     var scrollBarsState: SystemScrollBars = .default
     var fullKeyboardAccess: Bool = true
     var caretReadByView: Bool = false
+    var focusReadByView: Bool = false
     var lastCommittedCaret: (keyPath: String, rect: [Float])? = nil
 
     init(viewport: Vec2 = .zero, pixelScale: Float = 2.0, reducedMotion: Bool = false) {
@@ -258,6 +261,9 @@ extension Cx {
         self.envState.defaults = other.envState.defaults
         if other.envState.reads.caretRead {
             self.envState.reads.caretRead = true
+        }
+        if other.envState.reads.focusRead {
+            self.envState.reads.focusRead = true
         }
         for read in other.envState.reads.layoutReads {
             if let idx = self.envState.reads.layoutReads.firstIndex(where: { $0.sameTarget(as: read) }) {

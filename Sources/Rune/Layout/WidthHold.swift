@@ -35,15 +35,22 @@ public enum WidthHold: Equatable, Sendable {
     }
 }
 
-/// Per-`growth(...)` stack state for width-change rewrap deferral (`RowStack` in `types.rs`).
+/// Per-`growth(...)` stack state for width-change rewrap deferral and content slides (`RowStack` in `types.rs`).
 internal struct RuntimeGrowthStackState: Sendable {
     var width: Float
     var widthHold: WidthHold
     var pendingHeights: [String: Float] = [:]
+    var slides: ContentSlides = ContentSlides()
 
-    init(width: Float, widthHold: WidthHold = .off, pendingHeights: [String: Float] = [:]) {
+    init(
+        width: Float,
+        widthHold: WidthHold = .off,
+        pendingHeights: [String: Float] = [:],
+        slides: ContentSlides = ContentSlides()
+    ) {
         self.width = width
         self.widthHold = widthHold
         self.pendingHeights = pendingHeights
+        self.slides = slides
     }
 }

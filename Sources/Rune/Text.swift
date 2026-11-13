@@ -75,6 +75,9 @@ public struct TextStyle: Sendable, Hashable, Codable {
     public var features: String
     public var opticalSize: OpticalSize
     public var direction: TextFlow?
+    public var truncateFade: Bool
+    public var truncateFadeEm: Float
+    public var graphemeElide: Bool
 
     public static let body = TextStyle(size: 13.0, weight: 400.0)
 
@@ -95,7 +98,10 @@ public struct TextStyle: Sendable, Hashable, Codable {
         variations: String = "",
         features: String = "",
         opticalSize: OpticalSize = .auto,
-        direction: TextFlow? = nil
+        direction: TextFlow? = nil,
+        truncateFade: Bool = false,
+        truncateFadeEm: Float = TRUNCATE_FADE_EM,
+        graphemeElide: Bool = false
     ) {
         self.size = max(1.0, size)
         self.weight = weight.clamped(to: 100...900)
@@ -114,10 +120,14 @@ public struct TextStyle: Sendable, Hashable, Codable {
         self.features = features
         self.opticalSize = opticalSize
         self.direction = direction
+        self.truncateFade = truncateFade
+        self.truncateFadeEm = max(0.0, truncateFadeEm)
+        self.graphemeElide = graphemeElide
     }
 
     private enum CodingKeys: String, CodingKey {
         case size, weight, lineHeight, letterSpacing, italic, family, align, wrap, wrapAnywhere, elide, maxLines, exactLines, fontSmoothing, variations, features, opticalSize, direction
+        case truncateFade, truncateFadeEm, graphemeElide
     }
 
     public init(from decoder: Decoder) throws {
@@ -139,7 +149,10 @@ public struct TextStyle: Sendable, Hashable, Codable {
             variations: try c.decodeIfPresent(String.self, forKey: .variations) ?? "",
             features: try c.decodeIfPresent(String.self, forKey: .features) ?? "",
             opticalSize: try c.decodeIfPresent(OpticalSize.self, forKey: .opticalSize) ?? .auto,
-            direction: try c.decodeIfPresent(TextFlow.self, forKey: .direction)
+            direction: try c.decodeIfPresent(TextFlow.self, forKey: .direction),
+            truncateFade: try c.decodeIfPresent(Bool.self, forKey: .truncateFade) ?? false,
+            truncateFadeEm: try c.decodeIfPresent(Float.self, forKey: .truncateFadeEm) ?? TRUNCATE_FADE_EM,
+            graphemeElide: try c.decodeIfPresent(Bool.self, forKey: .graphemeElide) ?? false
         )
     }
 
@@ -337,19 +350,23 @@ public struct PositionedGlyph: Sendable, Equatable {
     public var colorGlyphIndex: UInt32?
     /// Alpha atlas page index (`GlyphAtlas.pageData(_:)`, `atlas.rs:168`).
     public var atlasPage: UInt16
+    /// UTF-8 byte offset of this glyph in the authored text string (`reveal_phase.rs`).
+    public var byteOffset: Int
 
     public init(
         rect: SIMD4<Float>,
         uv: SIMD4<Float>,
         color: Color? = nil,
         colorGlyphIndex: UInt32? = nil,
-        atlasPage: UInt16 = 0
+        atlasPage: UInt16 = 0,
+        byteOffset: Int = 0
     ) {
         self.rect = rect
         self.uv = uv
         self.color = color
         self.colorGlyphIndex = colorGlyphIndex
         self.atlasPage = atlasPage
+        self.byteOffset = byteOffset
     }
 }
 
@@ -484,7 +501,7 @@ public struct ShapedText: @unchecked Sendable {
     #if canImport(CoreText) && canImport(CoreGraphics)
     internal var lineStrings: [(utf8Start: Int, text: String, originY: Float, originX: Float, ctLine: CTLine?)] = []
     #endif
-    fileprivate var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
+    internal var portableLines: [(utf8Start: Int, text: String, originY: Float, originX: Float, charOffsets: [Float])] = []
     internal var markerMap: MarkerMap = MarkerMap()
     internal var forcedDirection: TextFlow? = nil
     internal var primaryIsRTL: Bool = false
@@ -492,6 +509,7 @@ public struct ShapedText: @unchecked Sendable {
     internal var lastLineAdvancePx: Float = 0
     internal var hangingAdvancePx: Float = 0
     public var elided: TextElision? = nil
+    public var elision: TextElision? = nil
     internal var drawnText: String = ""
     internal var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
 
@@ -2416,6 +2434,15 @@ public final class TextSystem: @unchecked Sendable {
         return true
     }
 
+    /// Forgets cached shaped glyph runs / elisions (`TextSystem::forget_raster_state`) so the next
+    /// build places every glyph as a text seen for the first time (`RUNE_RASTER_CHECK`).
+    public func forgetRasterState() {
+        lock.lock()
+        shapeCache.removeAll(keepingCapacity: true)
+        elisionCache.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
     /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
     public var currentFontEpoch: UInt64 {
         syncGlobalFamiliesIfNeeded()
@@ -2733,6 +2760,12 @@ public final class TextSystem: @unchecked Sendable {
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
+        if style.truncateFade {
+            let full = measure(text, style: {
+                var s = style; s.wrap = .noWrap; s.truncateFade = false; return s
+            }(), maxWidth: nil, pixelScale: pixelScale, pills: pills)
+            return Vec2(maxWidth.map { min(full.x, $0) } ?? full.x, full.y)
+        }
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
             effectiveStyle.fontSmoothing = smoothing
@@ -2783,7 +2816,53 @@ public final class TextSystem: @unchecked Sendable {
             effectiveStyle.fontSmoothing = smoothing
         }
         return measureFramePhase(.text) {
-            shapeImpl(
+            if effectiveStyle.truncateFade {
+                var fadeStyle = effectiveStyle
+                fadeStyle.wrap = .noWrap
+                fadeStyle.truncateFade = false
+                return shapeImpl(
+                    text: text,
+                    spans: spans,
+                    pills: pills,
+                    style: fadeStyle,
+                    maxWidth: nil,
+                    pixelScale: pixelScale,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx
+                )
+            }
+            if effectiveStyle.wrap == .ellipsis,
+               effectiveStyle.elide != .end || effectiveStyle.graphemeElide,
+               let maxW = maxWidth,
+               maxW > 0 {
+                let (drawn, drawnSpans, elision, wasCut) = TextTruncation.elide(
+                    text: text,
+                    spans: spans,
+                    pills: pills,
+                    style: effectiveStyle,
+                    maxWidth: maxW,
+                    pixelScale: pixelScale,
+                    textSystem: self
+                )
+                var elidedStyle = effectiveStyle
+                elidedStyle.wrap = .noWrap
+                elidedStyle.elide = .end
+                elidedStyle.graphemeElide = false
+                var shaped = shapeImpl(
+                    text: drawn,
+                    spans: drawnSpans,
+                    pills: pills,
+                    style: elidedStyle,
+                    maxWidth: nil,
+                    pixelScale: pixelScale,
+                    emitGlyphs: emitGlyphs,
+                    glidePx: glidePx
+                )
+                shaped.elision = wasCut ? elision : nil
+                shaped.wasTruncated = wasCut
+                return shaped
+            }
+            return shapeImpl(
                 text: text,
                 spans: spans,
                 pills: pills,
@@ -3935,6 +4014,28 @@ public final class TextSystem: @unchecked Sendable {
             }
 
             guard emitGlyphs else { continue }
+            let lineUTF16ToUTF8: [Int]? = {
+                let u16c = item.authSubstr.utf16.count
+                if u16c == item.authSubstr.utf8.count { return nil }
+                var map: [Int] = []
+                map.reserveCapacity(u16c + 1)
+                var b = 0
+                for sc in item.authSubstr.unicodeScalars {
+                    for _ in 0..<sc.utf16.count { map.append(b) }
+                    b += sc.utf8.count
+                }
+                map.append(b)
+                return map
+            }()
+            func glyphByteOffset(forShapedU16 sIdx: Int) -> Int {
+                let aIdx = markerMap.authU16(forShapedU16: sIdx)
+                let relU16 = max(0, aIdx - item.authU16Start)
+                if let map = lineUTF16ToUTF8 {
+                    let clamped = min(relU16, max(0, map.count - 1))
+                    return item.authUTF8Start + (map.isEmpty ? 0 : map[clamped])
+                }
+                return item.authUTF8Start + min(relU16, item.authSubstr.utf8.count)
+            }
             for run in runs {
                 let attrs = CTRunGetAttributes(run) as NSDictionary
                 if attrs[kCTRunDelegateAttributeName] != nil || attrs[pillMarkerKey] != nil {
@@ -3951,10 +4052,13 @@ public final class TextSystem: @unchecked Sendable {
 
                 var glyphs = Array<CGGlyph>(repeating: 0, count: glyphCount)
                 var positions = Array<CGPoint>(repeating: .zero, count: glyphCount)
+                var stringIndices = Array<CFIndex>(repeating: 0, count: glyphCount)
                 CTRunGetGlyphs(run, CFRangeMake(0, glyphCount), &glyphs)
                 CTRunGetPositions(run, CFRangeMake(0, glyphCount), &positions)
+                CTRunGetStringIndices(run, CFRangeMake(0, glyphCount), &stringIndices)
 
                 for i in 0..<glyphCount {
+                    let gByteOffset = glyphByteOffset(forShapedU16: stringIndices[i])
                     let gxPx = alignOffsetPx + Float(positions[i].x)
                     let gyPx = baselineYPx - Float(positions[i].y)
                     let floorX = floorf(gxPx)
@@ -3975,7 +4079,8 @@ public final class TextSystem: @unchecked Sendable {
                             ),
                             uv: .zero,
                             color: runColor,
-                            colorGlyphIndex: colorEntry.index
+                            colorGlyphIndex: colorEntry.index,
+                            byteOffset: gByteOffset
                         ))
                         continue
                     }
@@ -4028,7 +4133,8 @@ public final class TextSystem: @unchecked Sendable {
                         ),
                         uv: entry.uv,
                         color: runColor,
-                        atlasPage: entry.page
+                        atlasPage: entry.page,
+                        byteOffset: gByteOffset
                     ))
                 }
             }
@@ -4417,6 +4523,12 @@ public final class TextSystem: @unchecked Sendable {
     ) -> Vec2 {
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
+        }
+        if style.truncateFade {
+            let full = measure(text, style: {
+                var s = style; s.wrap = .noWrap; s.truncateFade = false; return s
+            }(), maxWidth: nil, pixelScale: pixelScale, pills: pills)
+            return Vec2(maxWidth.map { min(full.x, $0) } ?? full.x, full.y)
         }
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
@@ -4814,7 +4926,8 @@ public final class TextSystem: @unchecked Sendable {
                             rect: SIMD4<Float>(gx, gy, gw, gh),
                             uv: entry.uv,
                             color: spanColor,
-                            atlasPage: entry.page
+                            atlasPage: entry.page,
+                            byteOffset: chStart
                         ))
                     }
                 }

@@ -424,7 +424,10 @@ internal final class RenderFrameEngine {
             scope.cleared = true
 
             guard let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) else { return }
-            let pipe = pipelineFor(format: scope.format, additive: false, springs: springsActive)
+            let useAdditive = scope.additive && (breakers.checkingGpu(.plusLighter) {
+                try ensurePlusLighterPipelines()
+            } ?? false)
+            let pipe = pipelineFor(format: scope.format, additive: useAdditive, springs: springsActive)
             enc.setRenderPipelineState(pipe)
 
             var g = globals
@@ -464,11 +467,14 @@ internal final class RenderFrameEngine {
                 rpd.colorAttachments[0].storeAction = .store
                 stack[stack.count - 1].cleared = true
                 if let sr = surfaceRenderer, let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
+                    let useAdditiveSurface = top.additive && (breakers.checkingGpu(.plusLighter) {
+                        try ensurePlusLighterPipelines()
+                    } ?? false)
                     sr.draw(
                         encoder: enc,
                         index: surfaceCursor,
                         pixelFormat: top.format,
-                        blend: .sourceOver,
+                        blend: useAdditiveSurface ? .plusLighter : .sourceOver,
                         targetViewport: SIMD4<Float>(
                             Float(top.texture.width),
                             Float(top.texture.height),
@@ -486,7 +492,7 @@ internal final class RenderFrameEngine {
             source: MTLTexture,
             origin: SIMD2<Float>,
             scopeInst: RenderInstance,
-            additive: Bool,
+            clampAdditive: Bool,
             radiiOverride: SIMD4<Float>? = nil,
             clearIndex: Int
         ) {
@@ -494,6 +500,9 @@ internal final class RenderFrameEngine {
                 encodeBatch(start: clearIndex, end: clearIndex, scope: &stack[stack.count - 1])
             }
             let parent = stack[stack.count - 1]
+            let blendAdditive = parent.additive && (breakers.checkingGpu(.plusLighter) {
+                try ensurePlusLighterPipelines()
+            } ?? false)
             var compositeInst = RenderInstance(
                 rect: SIMD4<Float>(
                     origin.x,
@@ -504,7 +513,7 @@ internal final class RenderFrameEngine {
                 radii: radiiOverride ?? scopeInst.radii,
                 fill: SIMD4<Float>(1, 1, 1, scopeInst.fill.w),
                 border: scopeInst.border,
-                params: SIMD4<Float>(additive ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
+                params: SIMD4<Float>(clampAdditive ? 1.0 : 0.0, Float(KIND_LAYER), 0, 0),
                 uv: .zero,
                 clip: scopeInst.clip,
                 fade: scopeInst.fade
@@ -514,7 +523,7 @@ internal final class RenderFrameEngine {
             rpd.colorAttachments[0].loadAction = .load
             rpd.colorAttachments[0].storeAction = .store
             if let enc = commandBuffer.makeRenderCommandEncoder(descriptor: rpd) {
-                let compPipe = pipelineFor(format: parent.format, additive: additive, springs: false)
+                let compPipe = pipelineFor(format: parent.format, additive: blendAdditive, springs: false)
                 enc.setRenderPipelineState(compPipe)
                 var g = globals
                 g.projection = SIMD4<Float>(parent.origin.x, parent.origin.y, Float(parent.texture.width), Float(parent.texture.height))
@@ -550,14 +559,32 @@ internal final class RenderFrameEngine {
 
                 let sigma = min(max(inst.params.z, 0.0), LayerBlurConstants.maxSigma)
                 let pad: Float = sigma > 0 ? ceilf(min(sigma * 3.0, 96.0)) : 0
-                let ox = floorf(inst.rect.x - pad)
-                let oy = floorf(inst.rect.y - pad)
-                let lw = max(1, Int(ceilf(inst.rect.x + inst.rect.z + pad) - ox))
-                let lh = max(1, Int(ceilf(inst.rect.y + inst.rect.w + pad) - oy))
+                var ox = floorf(inst.rect.x - pad)
+                var oy = floorf(inst.rect.y - pad)
+                var lw = max(1, Int(ceilf(inst.rect.x + inst.rect.z + pad) - ox))
+                var lh = max(1, Int(ceilf(inst.rect.y + inst.rect.w + pad) - oy))
                 let additive = inst.params.x >= 0.5
-                let isCached = inst.params.w >= 0.5
-                let cacheNid: UInt64? = isCached ? unpackFloat4ToU64(inst.radii) : nil
-                let cacheSig: UInt64? = isCached ? unpackFloat4ToU64(inst.uv) : nil
+                var isCached = inst.params.w >= 0.5
+                var cacheNid: UInt64? = isCached ? unpackFloat4ToU64(inst.radii) : nil
+                var cacheSig: UInt64? = isCached ? unpackFloat4ToU64(inst.uv) : nil
+
+                if isCached && (lw > LayerPoolLimits.maxDimension || lh > LayerPoolLimits.maxDimension || (lw * lh * 8) > layersPool.cacheBudgetBytes) {
+                    if let nid = cacheNid {
+                        frame.residentTracker?.evict(nodeId: nid)
+                    }
+                    let parent = stack[stack.count - 1]
+                    let x0 = max(ox, parent.origin.x)
+                    let y0 = max(oy, parent.origin.y)
+                    let x1 = min(ox + Float(lw), parent.origin.x + Float(parent.texture.width))
+                    let y1 = min(oy + Float(lh), parent.origin.y + Float(parent.texture.height))
+                    ox = floorf(x0)
+                    oy = floorf(y0)
+                    lw = max(1, min(LayerPoolLimits.maxDimension, Int(ceilf(max(x1, x0 + 1.0)) - ox)))
+                    lh = max(1, min(LayerPoolLimits.maxDimension, Int(ceilf(max(y1, y0 + 1.0)) - oy)))
+                    isCached = false
+                    cacheNid = nil
+                    cacheSig = nil
+                }
 
                 if let nid = cacheNid,
                    let sig = cacheSig,
@@ -575,14 +602,14 @@ internal final class RenderFrameEngine {
                         }
                         matchEnd += 1
                     }
-                    let useAdditive = additive && (breakers.checkingGpu(.plusLighter) {
+                    let useClamp = additive && (breakers.checkingGpu(.plusLighter) {
                         try ensurePlusLighterPipelines()
                     } ?? false)
                     compositeLayer(
                         source: cachedTex,
                         origin: SIMD2<Float>(ox, oy),
                         scopeInst: inst,
-                        additive: useAdditive,
+                        clampAdditive: useClamp,
                         radiiOverride: .zero,
                         clearIndex: i
                     )
@@ -594,9 +621,17 @@ internal final class RenderFrameEngine {
                     continue
                 }
 
+                let transientBucket = LayerPlannerConstants.bucketOf(
+                    SIMD4<Float>(0, 0, Float(lw), Float(lh))
+                ).bucket
                 let acquired: MTLTexture? = isCached
                     ? layersPool.acquireRetainedTarget(device: device, width: lw, height: lh, format: .rgba16Float)
-                    : layersPool.acquireTarget(device: device, width: lw, height: lh, format: .rgba16Float)
+                    : layersPool.acquireTarget(
+                        device: device,
+                        width: max(lw, Int(transientBucket.x)),
+                        height: max(lh, Int(transientBucket.y)),
+                        format: .rgba16Float
+                    )
 
                 if let layerTex = acquired {
                     stack.append(
@@ -661,15 +696,15 @@ internal final class RenderFrameEngine {
                     frame.residentTracker?.markResident(nodeId: nid, signature: sig)
                 }
 
-                let useAdditive = finished.additive && (breakers.checkingGpu(.plusLighter) {
+                let useClamp = finished.additive && (breakers.checkingGpu(.plusLighter) {
                     try ensurePlusLighterPipelines()
                 } ?? false)
                 compositeLayer(
                     source: compositedSource,
                     origin: finished.origin,
                     scopeInst: scopeInst,
-                    additive: useAdditive,
-                    radiiOverride: finished.cacheNodeId != nil ? .zero : scopeInst.radii,
+                    clampAdditive: useClamp,
+                    radiiOverride: (finished.cacheNodeId != nil || scopeInst.params.w >= 0.5) ? .zero : scopeInst.radii,
                     clearIndex: i
                 )
                 if finished.cacheNodeId == nil, compositedSource !== finished.texture {

@@ -96,8 +96,7 @@ extension Scene {
 
     /// True when the property has no track yet and `value` already equals its base value.
     internal func atBase<T: Animatable>(_ i: Int, _ prop: Prop<T>, _ value: T) -> Bool {
-        guard !hasTrack(i, prop), let base: T = baseValue(i, prop) else { return false }
-        let a = base.toLanes()
+        guard !hasTrack(i, prop), let a = baseLanes(i, prop.id) else { return false }
         let b = value.toLanes()
         for k in 0..<T.laneCount {
             if a[k] != b[k] { return false }
@@ -105,35 +104,44 @@ extension Scene {
         return true
     }
 
-    internal func baseValue<T: Animatable>(_ i: Int, _ prop: Prop<T>) -> T? {
+    internal func baseLanes(_ i: Int, _ propId: PropId) -> MotionLanes? {
         let n = nodes[i]
-        var lanes = MotionLanes.zero
-        switch prop.id {
+        switch propId {
         case Props.OPACITY.id:
-            lanes[0] = n.opacity
+            return MotionLanes(n.opacity, 0, 0, 0)
         case Props.UNIFORM_SCALE.id, Props.PRESENCE.id:
-            lanes[0] = 1.0
+            return MotionLanes(1.0, 0, 0, 0)
         case Props.SCALE.id:
-            lanes[0] = n.baseScale2D.x
-            lanes[1] = n.baseScale2D.y
+            return MotionLanes(n.baseScale2D.x, n.baseScale2D.y, 0, 0)
         case Props.FRAME.id:
-            if let r = n.frame as? T { return r }
-            lanes = n.frame.toLanes()
+            return n.frame.toLanes()
         case Props.CORNERS.id:
-            if let c = n.radius as? T { return c }
-            lanes = n.radius.toLanes()
+            return n.radius.toLanes()
         case Props.FILL.id:
-            if let c = n.fill as? T { return c }
-            lanes = n.fill.toLanes()
+            return n.fill.toLanes()
         case Props.BORDER.id:
-            if let c = n.border as? T { return c }
-            lanes = n.border.toLanes()
-        case Props.OFFSET.id, Props.ROTATE.id, Props.BLUR_SCALAR.id, Props.BLUR.id, Props.MASK.id:
-            break
+            return n.border.toLanes()
+        case Props.OFFSET.id:
+            return MotionLanes(n.baseOffset.x, n.baseOffset.y, 0, 0)
+        case Props.ROTATE.id:
+            return MotionLanes(n.baseRotate, 0, 0, 0)
+        case Props.BLUR_SCALAR.id, Props.BLUR.id:
+            return MotionLanes(n.baseBlur, 0, 0, 0)
+        case Props.MASK.id:
+            return MotionLanes.zero
         default:
             return nil
         }
-        return T.fromLanes(lanes)
+    }
+
+    internal func baseValue<T: Animatable>(_ i: Int, _ prop: Prop<T>) -> T? {
+        if prop.id == Props.FILL.id, let v = nodes[i].fill as? T {
+            return v
+        }
+        if prop.id == Props.BORDER.id, let v = nodes[i].border as? T {
+            return v
+        }
+        return baseLanes(i, prop.id).map(T.fromLanes)
     }
 
     internal func currentValue<T: Animatable>(_ i: Int, _ prop: Prop<T>) -> T? {

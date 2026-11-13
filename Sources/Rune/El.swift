@@ -270,6 +270,11 @@ public struct Tx {
         commitKind = commitKind.instant()
     }
 
+    /// Marks this commit as background/unprompted so late-mounting revealing text lands whole (`Tx::unprompted`).
+    public mutating func setUnprompted(_ on: Bool = true) {
+        unprompted = on
+    }
+
     /// Animates this change even where the runtime would otherwise snap, preserving any `settle()` land flag.
     public mutating func animated() {
         commitKind = commitKind.animated()
@@ -528,6 +533,7 @@ public struct Tx {
             runtimeActions[k] = v
         }
         commitKind = commitKind.merge(one.commitKind)
+        unprompted = unprompted || one.unprompted
         followEdgeRequested = followEdgeRequested || one.followEdgeRequested
         askedMotion = askedMotion || one.askedMotion
         if let m = one.motionSource { motionSource = m }
@@ -708,7 +714,8 @@ public struct Cx<State> {
     }
 
     public func isFocused(_ key: String) -> Bool {
-        focusedKey == key
+        envState.reads.focusRead = true
+        return focusedKey == key
     }
 
     public func isHovered(_ key: String) -> Bool {
@@ -886,6 +893,7 @@ final class ElColdData<State> {
     var pixelSnapEnabled: Bool = true
     var clipRadius: Float? = nil
     var clipCorners: Corners? = nil
+    var continuousCornersFlag: Bool = false
     var clipFade: SIMD4<Float>? = nil
     var scrollEdgeFadeWidth: Float = 0
     var scrollFadeStyle: ScrollFadeStyle = .smooth
@@ -896,6 +904,8 @@ final class ElColdData<State> {
     var isStreaming: Bool = false
     var isArrivesWhole: Bool = false
     var foldGlideSpec: FoldGlide? = nil
+    var revealDuration: Float = -1.0
+    var holdLandingWidthFlag: Bool = false
     var virtualEstimate: Float? = nil
     var virtualRowsSource: VirtualRowSource<State>? = nil
     var virtualRowsVersion: UInt64? = nil
@@ -1034,6 +1044,7 @@ final class ElColdData<State> {
         c.pixelSnapEnabled = pixelSnapEnabled
         c.clipRadius = clipRadius
         c.clipCorners = clipCorners
+        c.continuousCornersFlag = continuousCornersFlag
         c.clipFade = clipFade
         c.scrollEdgeFadeWidth = scrollEdgeFadeWidth
         c.scrollFadeStyle = scrollFadeStyle
@@ -1044,6 +1055,8 @@ final class ElColdData<State> {
         c.isStreaming = isStreaming
         c.isArrivesWhole = isArrivesWhole
         c.foldGlideSpec = foldGlideSpec
+        c.revealDuration = revealDuration
+        c.holdLandingWidthFlag = holdLandingWidthFlag
         c.virtualEstimate = virtualEstimate
         c.virtualRowsSource = virtualRowsSource
         c.virtualRowsVersion = virtualRowsVersion
@@ -1258,6 +1271,7 @@ public struct El<State> {
     public var pixelSnapEnabled: Bool { get { _cold?.data.pixelSnapEnabled ?? true } set { ensureCold().data.pixelSnapEnabled = newValue } }
     public var clipRadius: Float? { get { _cold?.data.clipRadius } set { ensureCold().data.clipRadius = newValue } }
     public var clipCorners: Corners? { get { _cold?.data.clipCorners } set { ensureCold().data.clipCorners = newValue } }
+    public var isContinuousCorners: Bool { get { _cold?.data.continuousCornersFlag ?? false } set { ensureCold().data.continuousCornersFlag = newValue } }
     public var clipFade: SIMD4<Float>? { get { _cold?.data.clipFade } set { ensureCold().data.clipFade = newValue } }
     public var scrollEdgeFadeWidth: Float { get { _cold?.data.scrollEdgeFadeWidth ?? 0 } set { ensureCold().data.scrollEdgeFadeWidth = newValue } }
     public var scrollFadeStyle: ScrollFadeStyle { get { _cold?.data.scrollFadeStyle ?? .smooth } set { ensureCold().data.scrollFadeStyle = newValue } }
@@ -1277,6 +1291,8 @@ public struct El<State> {
     public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
     public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
+    public var revealDuration: Float { get { _cold?.data.revealDuration ?? -1.0 } set { ensureCold().data.revealDuration = newValue } }
+    public var holdLandingWidthFlag: Bool { get { _cold?.data.holdLandingWidthFlag ?? false } set { ensureCold().data.holdLandingWidthFlag = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
     internal var virtualizeSite: String? {
         get { _cold?.data.runtimeExtras["virtualizeSite"] as? String }
@@ -1737,6 +1753,10 @@ public struct El<State> {
     public func clip(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.layout.clipOverflow = enabled
+        if copy._cold != nil {
+            copy.clipCorners = nil
+            copy.clipRadius = nil
+        }
         return copy
     }
 
@@ -1899,6 +1919,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Use Apple's continuous corner curve for fill, border, image, clip_rounded, and clip_corners.
+    public func continuousCorners(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isContinuousCorners = enabled
+        return copy
+    }
+
     public func corners(_ tl: Float, _ tr: Float, _ br: Float, _ bl: Float) -> Self {
         var copy = self
         copy.corners = Corners(tl, tr, br, bl)
@@ -2010,13 +2037,13 @@ public struct El<State> {
     }
 
     public func clipCorners(_ radii: Corners) -> Self {
-        var copy = self
         let clamped = Corners(
             max(0, radii.topLeft),
             max(0, radii.topRight),
             max(0, radii.bottomRight),
             max(0, radii.bottomLeft)
         )
+        var copy = self
         copy.applyParityClip { target in
             target.clipCorners = clamped
             target.clipRadius = clamped.maxMagnitude
@@ -2386,7 +2413,7 @@ public struct El<State> {
         return copy
     }
 
-    private func bindLive<T: LiveValue>(_ target: BoundLiveProperty.Target, _ b: Binding<T>) -> Self {
+    internal func bindLive<T: LiveValue>(_ target: BoundLiveProperty.Target, _ b: Binding<T>) -> Self {
         var copy = self
         let entry = BoundLiveProperty(target: target, source: b.live.source, spring: b.spring, restSpring: b.restSpring)
         copy.liveBindings.removeAll { $0.target == target }

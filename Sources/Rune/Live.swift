@@ -119,6 +119,13 @@ public final class LiveWake: @unchecked Sendable {
         defer { lock.unlock() }
         return flags == Self.pendingFlag
     }
+
+    /// Test helper inspecting `(visible, pending)` without mutating flags.
+    internal func probe() -> (visible: Bool, pending: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return ((flags & Self.hiddenFlag) == 0, (flags & Self.pendingFlag) != 0)
+    }
 }
 
 /// Subscription handle linking a `Live` source to a `LiveWake` (`rune::live::Subscription`).

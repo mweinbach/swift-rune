@@ -439,3 +439,7 @@ public struct ImageAtlas: Sendable {
         return (pages.count - 1, x, y)
     }
 }
+
+private struct WeakPixelsWaker {
+    weak var waker: Waker?
+}

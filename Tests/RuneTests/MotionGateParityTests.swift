@@ -182,12 +182,12 @@ struct MotionGateParityTests {
         )
         let runSnap = MotionGateRun(rtSnap)
         runSnap.stepN(6)
-        // Update without recording input -> sudden unrequested color snap
+        // Update without recording input -> sudden unrequested border-width snap
         runSnap.update { s, _ in s.lit = true }
         let snapFindings = runSnap.playAndCheck(0.3)
         #expect(snapFindings.contains { $0.kind == "snap" && $0.element.contains("card") })
 
-        // Same color cut marked tx.instant() produces no snap
+        // Same paint cut marked tx.instant() produces no snap
         let rtClean = Runtime<S>(
             state: S(),
             viewport: Vec2(120, 80),

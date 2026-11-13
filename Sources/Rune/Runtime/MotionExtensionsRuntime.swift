@@ -63,6 +63,7 @@ internal extension Runtime {
 
     /// Catches running periodic loop tracks up to wall-clock time when animation frames stall or sleep (`loop_clock.rs`).
     func syncMotionLoopClock(to appNow: Double, animNow: Double) {
+        guard isWindowVisibleForLoops else { return }
         elSliceRenderState.loopCatchUp.catchLoopsUp(
             hostNow: appNow,
             animNow: animNow,
@@ -84,24 +85,70 @@ internal extension Runtime {
         )
     }
 
+    /// Drops exit transitions on removed subtrees that draw nothing (`springs.rs:409`).
+    func skipNonPaintingExits(
+        prevNodes: [FlatNode],
+        newById: [NodeId: FlatNode],
+        matchedStarts: [NodeId: MatchedFlightStart],
+        to scene: inout Scene
+    ) {
+        guard !prevNodes.isEmpty else { return }
+        var effectiveAlpha = [Float](repeating: 1.0, count: prevNodes.count)
+        for i in prevNodes.indices {
+            let parentAlpha: Float = prevNodes[i].parentIndex.flatMap { $0 < i ? effectiveAlpha[$0] : nil } ?? 1.0
+            let nodeAlpha = scene.get(prevNodes[i].nodeId, Props.OPACITY) ?? prevNodes[i].el.opacity
+            effectiveAlpha[i] = parentAlpha * max(0.0, nodeAlpha)
+        }
+        let matchedRemoved = Set(matchedStarts.values.compactMap(\.fromId))
+        for (i, node) in prevNodes.enumerated() where effectiveAlpha[i] <= 0.001 {
+            guard newById[node.nodeId] == nil, !matchedRemoved.contains(node.nodeId) else { continue }
+            scene.setTransition(node.nodeId, .none)
+        }
+    }
+
+    /// Marks loops on hidden, offscreen-clipped, unpresented, or exiting nodes as sleeping so
+    /// neither `isAnimating` nor `nextWakeDeadline` keeps ticking on them (`loop_sleep.rs`).
+    func updateSleepingLoopIds(from motionElements: [MotionElement]) {
+        var visibleLiveIds = Set<NodeId>()
+        for me in motionElements {
+            guard me.is(MotionElement.LOOP) || loopRuntime.tracks[me.id] != nil else { continue }
+            let visibleOk = me.visible.count >= 4 && me.visible[2] > 0.01 && me.visible[3] > 0.01
+            let alphaOk = me.opacity > (0.5 / 255.0)
+            let notExiting = !me.is(MotionElement.EXITING)
+            if visibleOk && alphaOk && notExiting {
+                visibleLiveIds.insert(me.id)
+            }
+        }
+        var sleeping = Set<NodeId>()
+        for id in loopRuntime.tracks.keys where !visibleLiveIds.contains(id) {
+            sleeping.insert(id)
+        }
+        FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds = sleeping
+    }
+
     /// True when any non-sleeping loop needs frame advances (`isAnimating`).
     func hasActiveMotionLoops(at appNow: Double) -> Bool {
-        loopRuntime.hasActiveLoops(
+        guard isWindowVisibleForLoops else { return false }
+        let sleeping = FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds
+        return loopRuntime.hasActiveLoops(
             nodeTime: { scene.store.nodeTime($0) },
             wall: appNow,
-            reducedMotion: reducedMotion
+            reducedMotion: reducedMotion,
+            excluding: sleeping
         )
     }
 
     /// Earliest wall-clock deadline needed by any active `Cycle` frame interval OR delayed `LoopTrack`.
     func nextLoopWakeDeadline(after now: Double) -> Double? {
+        guard isWindowVisibleForLoops else { return nil }
+        let sleeping = FxSliceMotionSideTable.shared.slot(for: self).sleepingLoopIds
         var best: Double? = nil
-        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion) {
+        if let loopInterval = loopRuntime.nextFrameInterval(reducedMotion: reducedMotion, excluding: sleeping) {
             best = now + loopInterval
         }
         let viewScale = Double(max(0.0, cxSettings.viewTimeScale.isFinite ? cxSettings.viewTimeScale : 1.0))
         if !reducedMotion, viewScale > 0.0 {
-            for (id, track) in loopRuntime.tracks {
+            for (id, track) in loopRuntime.tracks where !sleeping.contains(id) {
                 let nt = scene.store.nodeTime(id)
                 let ns = Double(max(0.0, scene.store.nodeTimeScale(id)))
                 let effectiveScale = viewScale * ns

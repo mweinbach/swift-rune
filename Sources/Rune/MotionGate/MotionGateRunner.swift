@@ -6,7 +6,7 @@ import simd
 
 // MARK: - El Motion-Gate Modifiers & Runtime Telemetry Bridge
 
-private enum MotionGateExtraKey {
+internal enum MotionGateExtraKey {
     static let instantChanges = "motionGate.instantChanges"
     static let motionIntent = "motionGate.motionIntent"
     static let ownMotionNone = "motionGate.ownMotionNone"
