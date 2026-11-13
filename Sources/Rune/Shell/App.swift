@@ -1187,6 +1187,7 @@ public struct App<State> {
             allowUnmodified: allowUnmodifiedShortcutsEnabled,
             sharedHandle: sharedHandle
         )
+        runtime.setModifierKeys(sendsModifierKeys)
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         sharedHandle.shared.setWaker(waker)
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {

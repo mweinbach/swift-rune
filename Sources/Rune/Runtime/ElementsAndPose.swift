@@ -516,11 +516,8 @@ extension Runtime {
 
     /// Records a diagnostic event marker when `recordEvents || traceChannels != nil` (`runtime/event_log.rs`).
     internal func logEvent(_ event: @autoclosure () -> String) {
-        guard recordEvents || traceChannels != nil else { return }
-        if events.count >= 512 {
-            events.removeFirst(256)
-        }
-        events.append(event())
+        guard recordEvents || traceChannels != nil || inputMachines.traceChannelsActive else { return }
+        RuntimeEventLog.push(&events, event())
     }
 }
 

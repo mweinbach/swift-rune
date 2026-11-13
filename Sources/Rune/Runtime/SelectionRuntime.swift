@@ -3,18 +3,26 @@ import RuneMotion
 
 internal enum SelectionEdgeScrollState {
     case idle
-    case running(scrollPath: String, last: Double, fromOffset: Double?, due: Double)
-    case laying(scrollPath: String, last: Double, fromOffset: Double?, more: Bool)
+    case running(attempt: EdgeScrollAttempt, scrollPath: String, last: Double, fromOffset: Double?, due: Double)
+    case laying(next: EdgeScrollAttempt?, scrollPath: String, last: Double, fromOffset: Double?)
 
     var isRunning: Bool {
         if case .idle = self { return false }
         return true
     }
 
+    var attempt: EdgeScrollAttempt? {
+        switch self {
+        case .idle: return nil
+        case .running(let attempt, _, _, _, _): return attempt
+        case .laying(let next, _, _, _): return next
+        }
+    }
+
     var scrollPath: String? {
         switch self {
         case .idle: return nil
-        case .running(let p, _, _, _), .laying(let p, _, _, _): return p
+        case .running(_, let p, _, _, _), .laying(_, let p, _, _): return p
         }
     }
 
@@ -39,7 +47,10 @@ internal struct RuntimeSelectionState {
     var lastClickTime: Double = -10.0
     var lastClickPos: Vec2 = Vec2(-10000, -10000)
     var clickCount: Int = 0
+    var edgeScrollSeq = EdgeScrollSeq()
     var edgeScroll: SelectionEdgeScrollState = .idle
+    var lastCommittedMarkedTexts: [SelectionMark] = []
+    var pendingFollowCaret: Bool = false
 
     mutating func clearClicks() {
         lastClickPath = nil
@@ -198,6 +209,62 @@ public extension Runtime {
             }
         }
         return sel.text.isEmpty ? nil : sel.text
+    }
+
+    /// Semantic `text/html` representation of the active `El.selectable` selection
+    /// (`Runtime::copy_html` / `copy_html.rs`). Returns `nil` when empty or spanning unmounted rows.
+    func copySelectionHTML() -> String? {
+        let snaps = selectableSnapshots()
+        guard let sel = selectionState.coordinator.currentSelection(in: snaps),
+              !sel.texts.isEmpty else {
+            return nil
+        }
+        var selectedRanges: [CopyHTMLBuilder.SelectedRange] = []
+        selectedRanges.reserveCapacity(sel.texts.count)
+        for item in sel.texts {
+            guard let nodeIdx = nodeByPath[item.path],
+                  nodeIdx < flatNodes.count else {
+                return nil
+            }
+            if !item.range.isEmpty {
+                selectedRanges.append(CopyHTMLBuilder.SelectedRange(nodeIndex: nodeIdx, range: item.range))
+            }
+        }
+        guard !selectedRanges.isEmpty else { return nil }
+
+        let htmlNodes: [CopyHTMLBuilder.NodeSnapshot] = flatNodes.enumerated().map { idx, node in
+            var spans: [CopyHTMLBuilder.SpanRun] = []
+            if let richSpans = node.el.richSpans, !richSpans.isEmpty {
+                var byteCursor = 0
+                for sp in richSpans {
+                    let nextCursor = byteCursor + sp.text.utf8.count
+                    spans.append(CopyHTMLBuilder.SpanRun(
+                        byteRange: byteCursor..<nextCursor,
+                        weight: sp.weight,
+                        italic: sp.italic,
+                        monospace: sp.monospace,
+                        strikethrough: sp.strikethrough
+                    ))
+                    byteCursor = nextCursor
+                }
+            }
+            let links = node.el.textLinks.map { CopyHTMLBuilder.LinkRun(byteRange: $0.byteRange, id: $0.id) }
+            return CopyHTMLBuilder.NodeSnapshot(
+                parentIndex: node.parentIndex,
+                roleRaw: node.el.role.rawValue,
+                a11yLevel: node.el.a11yLevel,
+                a11yHidden: node.el.isA11yHidden,
+                rect: laidOutRect(forIndex: idx, in: flatNodes),
+                text: selectableNodeText(node),
+                baseWeight: node.el.textStyle.weight,
+                baseItalic: node.el.textStyle.italic,
+                baseMonospace: node.el.textStyle.family == .monospace,
+                spans: spans,
+                links: links,
+                uncopied: node.el.uncopiedRanges
+            )
+        }
+        return CopyHTMLBuilder.build(nodes: htmlNodes, ranges: selectedRanges)
     }
 }
 
@@ -705,7 +772,9 @@ internal extension Runtime {
             if selectionState.coordinator.phase.selection != nil {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
-                dirtyCommit(at: now, external: false)
+                if cxSettings.selectionRectsReadByView {
+                    dirtyCommit(at: now, external: false)
+                }
                 dispatchSelectionChanges(at: now)
             }
             return
@@ -723,7 +792,9 @@ internal extension Runtime {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now, external: false)
+                if cxSettings.selectionRectsReadByView {
+                    dirtyCommit(at: now, external: false)
+                }
                 dispatchSelectionChanges(at: now)
             }
             return
@@ -761,17 +832,26 @@ internal extension Runtime {
                     selectionState.dragStartPos = pos
                 }
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now, external: false)
+                if cxSettings.selectionRectsReadByView {
+                    dirtyCommit(at: now, external: false)
+                }
                 dispatchSelectionChanges(at: now)
                 return
-            } else if let sGroup, let anchorGroup, sGroup == anchorGroup {
+            } else if let sGroup, let anchorGroup, sGroup == anchorGroup, let anchorSnapIdx {
+                let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path }) ?? anchorSnapIdx
+                let betweenHash = SelectionMath.computeBetweenHash(
+                    in: snaps,
+                    anchorIdx: anchorSnapIdx,
+                    farIdx: sSnapIdx
+                )
                 let updated = ActiveSelection(
                     path: existing.path,
                     content: existing.content,
                     anchor: existing.anchor,
                     focus: offset,
                     origin: existing.origin,
-                    far: SelectionFar(path: sNode.path, content: content)
+                    far: SelectionFar(path: sNode.path, content: content),
+                    betweenHash: betweenHash
                 )
                 if interactiveTakesDrag {
                     selectionState.coordinator.phase.place(updated)
@@ -782,7 +862,9 @@ internal extension Runtime {
                     selectionState.dragStartPos = pos
                 }
                 selectionState.suppressedClickOnRelease = false
-                dirtyCommit(at: now, external: false)
+                if cxSettings.selectionRectsReadByView {
+                    dirtyCommit(at: now, external: false)
+                }
                 dispatchSelectionChanges(at: now)
                 return
             }
@@ -807,7 +889,9 @@ internal extension Runtime {
             selectionState.dragStartPos = pos
         }
         selectionState.suppressedClickOnRelease = false
-        dirtyCommit(at: now, external: false)
+        if cxSettings.selectionRectsReadByView {
+            dirtyCommit(at: now, external: false)
+        }
         dispatchSelectionChanges(at: now)
     }
 
@@ -844,6 +928,7 @@ internal extension Runtime {
         #endif
 
         let copied = copySelectionText()
+        let copiedHTML = copySelectionHTML()
         let menu = PopupMenu().item(
             "copy",
             "Copy",
@@ -855,7 +940,8 @@ internal extension Runtime {
             anchor: .point(pos.x, pos.y),
             onPick: { _, picked, tx in
                 if picked == "copy", let copied {
-                    tx.copyText(copied)
+                    let cb = ClipboardContent(copied, html: copiedHTML)
+                    tx.runtimeActions["richClipboardWrite"] = RichClipboardPayload(content: cb)
                 }
             }
         ))
@@ -901,7 +987,9 @@ internal extension Runtime {
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
             selectionState.coordinator.phase.clear()
-            dirtyCommit(at: now, external: false)
+            if cxSettings.selectionRectsReadByView {
+                dirtyCommit(at: now, external: false)
+            }
             return false
         }
         updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
@@ -930,6 +1018,7 @@ internal extension Runtime {
             sel.anchor = ext.anchor
             sel.focus = ext.focus
             sel.far = nil
+            sel.betweenHash = 0
         } else {
             if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
                 sel.anchor = sel.originStart
@@ -939,13 +1028,35 @@ internal extension Runtime {
                 sel.focus = targetUnit.0
             }
             sel.far = SelectionFar(path: flatNodes[targetIdx].path, content: targetContent)
+            if let anchorIdx = anchorMountedIdx {
+                sel.betweenHash = SelectionMath.computeBetweenHash(
+                    in: snaps,
+                    anchorIdx: anchorIdx,
+                    farIdx: targetIdx
+                )
+            } else {
+                selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
+                let allSnaps = selectableSnapshotsWithVirtuals()
+                if let aIdx = allSnaps.firstIndex(where: { $0.path == sel.path }),
+                   let fIdx = allSnaps.firstIndex(where: { $0.path == flatNodes[targetIdx].path }) {
+                    sel.betweenHash = SelectionMath.computeBetweenHash(
+                        in: allSnaps,
+                        anchorIdx: aIdx,
+                        farIdx: fIdx
+                    )
+                } else {
+                    sel.betweenHash = 0
+                }
+            }
         }
         selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
         if hypot(pos.x - selectionState.dragStartPos.x, pos.y - selectionState.dragStartPos.y) > 4.0,
            selectedText() != nil {
             selectionState.suppressedClickOnRelease = true
         }
-        dirtyCommit(at: now, external: false)
+        if cxSettings.selectionRectsReadByView {
+            dirtyCommit(at: now, external: false)
+        }
         dispatchSelectionChanges(at: now)
         return true
     }
@@ -960,7 +1071,9 @@ internal extension Runtime {
         let suppressClick = selectionState.suppressedClickOnRelease && selectedText() != nil
         selectionState.suppressedClickOnRelease = false
         selectionState.coordinator.phase.endDrag()
-        dirtyCommit(at: now, external: false)
+        if cxSettings.selectionRectsReadByView {
+            dirtyCommit(at: now, external: false)
+        }
         dispatchSelectionChanges(at: now)
         return suppressClick
     }
@@ -976,7 +1089,7 @@ internal extension Runtime {
         let isA = ev.key == .command("a") || ev.key == .text("a") || ev.key == .text("A")
         if isC {
             guard let copied = copySelectionText() else { return false }
-            recordCopy(ClipboardContent(copied))
+            recordCopy(ClipboardContent(copied, html: copySelectionHTML()))
             return true
         }
         if isA {
@@ -1025,12 +1138,15 @@ internal extension Runtime {
 
     func finalizeSelectionAfterCommit(at now: Double) {
         let snaps = selectableSnapshotsWithVirtuals()
+        let keepPending = needsCommit || !scrollGlidingPaths.isEmpty || !scrollRequestsState.isEmpty
         if let pendingAll = selectionState.pendingSelectAllKey {
-            selectionState.pendingSelectAllKey = nil
-            _ = selectionState.coordinator.selectAllText(key: pendingAll, in: snaps)
+            if selectionState.coordinator.selectAllText(key: pendingAll, in: snaps) != nil || !keepPending {
+                selectionState.pendingSelectAllKey = nil
+            }
         } else if let pendingReq = selectionState.pendingSelectTextRequest {
-            selectionState.pendingSelectTextRequest = nil
-            _ = selectionState.coordinator.selectText(key: pendingReq.key, range: pendingReq.range, in: snaps)
+            if selectionState.coordinator.selectText(key: pendingReq.key, range: pendingReq.range, in: snaps) != nil || !keepPending {
+                selectionState.pendingSelectTextRequest = nil
+            }
         }
         reconcileSelectionPhaseAgainstTree()
         dispatchSelectionChanges(at: now)
@@ -1063,9 +1179,65 @@ internal extension Runtime {
         into primitives: inout [Primitive]
     ) -> SelectablePaintInk? {
         guard !isExiting,
-              el.isSelectable,
               !el.isSecure,
-              el.handlers.editLens == nil,
+              el.handlers.editLens == nil else {
+            return nil
+        }
+
+        let style = resolvedSelectionStyle(for: snap)
+        let picked = style?.pick(active: windowFocused)
+        let fallbackHl = windowFocused
+            ? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+            : (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28)).scaleAlpha(0.55)
+        let rot = useLayer ? 0 : effRotate
+
+        // Custom marked ranges declared via `Cx.markTexts` paint square per-line boxes (`text_marks.rs`).
+        if !selectionState.lastCommittedMarkedTexts.isEmpty,
+           let content = selectableNodeText(snap),
+           !content.isEmpty {
+            let markColor = (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+                .scaleAlpha(localAlpha)
+                .simd4(srgb: srgbBlend)
+            let utf8 = Array(content.utf8)
+            for mark in selectionState.lastCommittedMarkedTexts where mark.path == snap.path && !mark.range.isEmpty {
+                let lo = mark.range.lowerBound
+                let hi = mark.range.upperBound
+                guard lo >= 0, hi <= utf8.count, lo < hi,
+                      SelectionMath.floorCharBoundary(in: content, offset: lo) == lo,
+                      SelectionMath.floorCharBoundary(in: content, offset: hi) == hi else { continue }
+                let sub = String(decoding: utf8[lo..<hi], as: UTF8.self)
+                guard sub == mark.text else { continue }
+                var lineStart = lo
+                for line in sub.split(separator: "\n", omittingEmptySubsequences: false) {
+                    let trimmedLen = line.hasSuffix("\r") ? line.utf8.count - 1 : line.utf8.count
+                    let lineEnd = lineStart + trimmedLen
+                    if lineStart < lineEnd {
+                        let markRects = textSystem.selectionRects(
+                            in: shaped,
+                            utf8Range: lineStart..<lineEnd,
+                            pixelScale: pxScale
+                        )
+                        for r in markRects {
+                            primitives.append(.roundedRect(
+                                rect: SIMD4<Float>(
+                                    (textOriginX + r.x * scaleVec.x) * pxScale,
+                                    (textOriginY + r.y * scaleVec.y) * pxScale,
+                                    r.z * scaleVec.x * pxScale,
+                                    r.w * scaleVec.y * pxScale
+                                ),
+                                radii: .zero,
+                                fill: markColor,
+                                clip: devClip,
+                                turn: rot
+                            ))
+                        }
+                    }
+                    lineStart += line.utf8.count + 1
+                }
+            }
+        }
+
+        guard el.isSelectable,
               let range = activeSelectionRanges[snap.path],
               !range.isEmpty else {
             return nil
@@ -1073,31 +1245,94 @@ internal extension Runtime {
         let drawnRange = shaped.elided?.selectionRange(range) ?? range
         let lineRects = textSystem.selectionRects(in: shaped, utf8Range: drawnRange, pixelScale: pxScale)
         guard !lineRects.isEmpty else { return nil }
-        let style = resolvedSelectionStyle(for: snap)
-        let picked = style?.pick(active: windowFocused)
-        let fallbackHl = windowFocused
-            ? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
-            : (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28)).scaleAlpha(0.55)
         let hlColor = (picked?.highlight ?? fallbackHl).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-        let rot = useLayer ? 0 : effRotate
+        let radiusPx = 2.0 * pxScale * scaleVec.x
+        let reachPx = 40.0 * pxScale * scaleVec.x
         for r in lineRects {
-            primitives.append(.roundedRect(
+            SelectionRunExtender.appendHighlight(
+                into: &primitives,
                 rect: SIMD4<Float>(
                     (textOriginX + r.x * scaleVec.x) * pxScale,
                     (textOriginY + r.y * scaleVec.y) * pxScale,
                     r.z * scaleVec.x * pxScale,
                     r.w * scaleVec.y * pxScale
                 ),
-                radii: SIMD4<Float>(repeating: 2.0 * pxScale),
                 fill: hlColor,
+                radius: radiusPx,
                 clip: devClip,
-                turn: rot
-            ))
+                fade: .zero,
+                turn: rot,
+                reach: reachPx
+            )
         }
         if let ink = picked?.ink {
             return SelectablePaintInk(ink: ink, rects: lineRects)
         }
         return nil
+    }
+
+    func laidOutRect(forIndex idx: Int, in nodes: [FlatNode]) -> MotionRect {
+        guard idx >= 0 && idx < nodes.count else { return .zero }
+        var totalScroll = Vec2.zero
+        var cur = nodes[idx].parentIndex
+        var portalBroken = nodes[idx].el.anchor != nil
+        while let pIdx = cur, pIdx < nodes.count {
+            if !portalBroken, !nodes[pIdx].el.layout.scrollAxes.isEmpty {
+                let off = scrollOffsets[nodes[pIdx].path] ?? .zero
+                totalScroll.x += off.x
+                totalScroll.y += off.y
+            }
+            if nodes[pIdx].el.anchor != nil {
+                portalBroken = true
+            }
+            cur = nodes[pIdx].parentIndex
+        }
+        return nodes[idx].unscrolledRect.offsetBy(Vec2(-totalScroll.x, -totalScroll.y))
+    }
+
+    /// Selection highlight boxes `[x, y, w, h]` in post-scroll window points across mounted texts
+    /// (`Runtime::selection_boxes` / `rects.rs:42-81`).
+    func computeSelectionBoxes(in candidateNodes: [FlatNode]? = nil) -> [[Float]] {
+        let ranges = computeActiveSelectionRangesByPath()
+        guard !ranges.isEmpty else { return [] }
+        let nodes = candidateNodes ?? flatNodes
+        let snaps = selectableSnapshots()
+        guard let sel = selectionState.coordinator.currentSelection(in: snaps) else { return [] }
+
+        var boxes: [[Float]] = []
+        for item in sel.texts where !item.range.isEmpty {
+            let matchIdx = nodes.firstIndex { $0.path == item.path }
+                ?? nodes.firstIndex { SelectionMath.sameKeyedPath($0.path, item.path) }
+            guard let j = matchIdx, j < nodes.count else { continue }
+            let node = nodes[j]
+            let el = node.el
+            guard !node.effectiveInert, !el.isSecure, el.handlers.editLens == nil else { continue }
+            let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+            guard !text.isEmpty else { continue }
+            let len = text.utf8.count
+            let lo = max(0, min(len, item.range.lowerBound))
+            let hi = max(lo, min(len, item.range.upperBound))
+            guard lo < hi else { continue }
+
+            let rect = laidOutRect(forIndex: j, in: nodes)
+            let pad = el.layout.padding
+            let innerW = max(0, rect.width - pad.left - pad.right)
+            let shaped = textSystem.shape(
+                text: text,
+                spans: el.richSpans,
+                pills: el.pillChips,
+                style: el.textStyle,
+                maxWidth: innerW + 0.5,
+                pixelScale: pixelScale,
+                emitGlyphs: false
+            )
+            let originX = rect.left + pad.left
+            let originY = rect.top + pad.top
+            for r in textSystem.selectionRects(in: shaped, utf8Range: lo..<hi, pixelScale: pixelScale) {
+                boxes.append([originX + r.x, originY + r.y, r.z, r.w])
+            }
+        }
+        return boxes
     }
 
     private func resolvedNodeIndex(forPath path: String) -> Int? {
@@ -1150,6 +1385,20 @@ internal extension Runtime {
             if let farNow = farTextNow,
                let farPath = farResolvedPath,
                SelectionMath.kept(then: far.content, now: farNow, upto: min(sel.focus, farNow.utf8.count)) {
+                let allSnaps = selectableSnapshotsWithVirtuals()
+                if let aIdx = allSnaps.firstIndex(where: { $0.path == anchorResolvedPath }),
+                   let fIdx = allSnaps.firstIndex(where: { $0.path == farPath }) {
+                    let nowBetween = SelectionMath.computeBetweenHash(
+                        in: allSnaps,
+                        anchorIdx: aIdx,
+                        farIdx: fIdx
+                    )
+                    guard nowBetween == sel.betweenHash else {
+                        selectionState.coordinator.phase.clear()
+                        selectionState.isDraggingSelection = false
+                        return
+                    }
+                }
                 far.path = farPath
                 updated.far = far
             } else {
@@ -1197,8 +1446,22 @@ internal extension Runtime {
             var tx = makeTx(at: now)
             if flatNodes[idx].el.invokeSelectionChange(state: &state, change: change, tx: &tx) {
                 applyTx(tx, at: now)
+                dirtyCommit(at: now)
             }
         }
+    }
+
+    private func safeParentNode(of node: FlatNode) -> FlatNode? {
+        if let p = node.parentIndex, flatNodes.indices.contains(p),
+           node.path.hasPrefix(flatNodes[p].path + "/") {
+            return flatNodes[p]
+        }
+        if let slash = node.path.lastIndex(of: "/"),
+           let pIdx = nodeByPath[String(node.path[..<slash])],
+           flatNodes.indices.contains(pIdx) {
+            return flatNodes[pIdx]
+        }
+        return nil
     }
 
     private func resolvedSelectionStyle(for node: FlatNode) -> SelectionStyle? {
@@ -1207,7 +1470,7 @@ internal extension Runtime {
             if let style = n.el.resolvedSelectionStyle {
                 return style
             }
-            cur = n.parentIndex.map { flatNodes[$0] }
+            cur = safeParentNode(of: n)
         }
         return nil
     }
@@ -1279,10 +1542,10 @@ internal extension Runtime {
 
     func nextSelectableEdgeScrollWakeDeadline(after now: Double) -> Double? {
         switch selectionState.edgeScroll {
-        case .running(_, _, _, let due):
+        case .running(_, _, _, _, let due):
             return max(now, due)
-        case .laying(_, _, _, let more):
-            return more ? now : nil
+        case .laying(let next, _, _, _):
+            return next != nil ? now : nil
         case .idle:
             return nil
         }
@@ -1335,15 +1598,17 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             return
         }
-        if case .running(let existingPath, _, _, _) = selectionState.edgeScroll, existingPath == edge.scrollPath {
+        if case .running(_, let existingPath, _, _, _) = selectionState.edgeScroll, existingPath == edge.scrollPath {
             return
         }
-        selectionState.edgeScroll = .running(scrollPath: edge.scrollPath, last: now, fromOffset: nil, due: now)
+        let attempt = selectionState.edgeScrollSeq.next()
+        selectionState.edgeScroll = .running(attempt: attempt, scrollPath: edge.scrollPath, last: now, fromOffset: nil, due: now)
     }
 
     @discardableResult
     func stepSelectableEdgeScroll(at now: Double) -> Bool {
-        guard case .running(let scrollPath, let last, let fromOffset, let due) = selectionState.edgeScroll,
+        guard case .running(let armedAttempt, let scrollPath, let last, let fromOffset, let due) = selectionState.edgeScroll,
+              selectionState.edgeScroll.attempt == armedAttempt,
               now >= due,
               case .dragging(let sel, _) = selectionState.coordinator.phase,
               let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
@@ -1364,6 +1629,7 @@ internal extension Runtime {
         let dt = min(max(0.0, now - last), 0.05)
         guard dt > 1e-9 else {
             selectionState.edgeScroll = .running(
+                attempt: armedAttempt,
                 scrollPath: scrollPath,
                 last: last,
                 fromOffset: fromOffset,
@@ -1392,22 +1658,24 @@ internal extension Runtime {
             wasPinnedToBottom.remove(scrollPath)
         }
         scrollStore.snap(NodeId.hash("scroll:" + scrollPath), Props.SCROLL, to: updated)
+        let nextAttempt = reachedEnd ? nil : selectionState.edgeScrollSeq.next()
         selectionState.edgeScroll = .laying(
+            next: nextAttempt,
             scrollPath: scrollPath,
             last: now,
-            fromOffset: by != 0 ? edge.offset : nil,
-            more: !reachedEnd
+            fromOffset: by != 0 ? edge.offset : nil
         )
         dirtyCommit(at: now, external: false)
         return true
     }
 
     func laidSelectableEdgeScroll(at now: Double) {
-        guard case .laying(let scrollPath, let last, let fromOffset, let more) = selectionState.edgeScroll else {
+        guard case .laying(let nextAttempt, let scrollPath, let last, let fromOffset) = selectionState.edgeScroll else {
             return
         }
-        if more {
+        if let attempt = nextAttempt {
             selectionState.edgeScroll = .running(
+                attempt: attempt,
                 scrollPath: scrollPath,
                 last: last,
                 fromOffset: fromOffset,
@@ -1417,5 +1685,96 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
         }
         _ = handleSelectablePointerMove(to: pointerPosition, mods: .none, at: now)
+    }
+
+    /// Scrolls the focused `TextEdit` field's nearest ancestor scroll viewport on each axis just far
+    /// enough to reveal the caret line, respecting the viewport's `El.scrollMargin` (`caret.rs:58-90`).
+    func followCaretIfNeeded() {
+        guard let fp = focusedPath,
+              let i = nodeByPath[fp],
+              i < flatNodes.count,
+              let editLens = flatNodes[i].el.handlers.editLens else {
+            return
+        }
+        let node = flatNodes[i]
+        let edit = editLens.get(state)
+        let rect = laidOutRect(forIndex: i, in: flatNodes)
+        let pad = node.el.layout.padding
+        let innerW = max(0, rect.width - pad.left - pad.right)
+        var style = node.el.textStyle
+        if edit.multiline { style.wrap = .wrap }
+        if let fDir = edit.forcedDir { style.direction = fDir }
+        let shaped = textSystem.shape(
+            text: edit.displayString,
+            style: style,
+            maxWidth: edit.multiline ? innerW : nil,
+            pixelScale: pixelScale,
+            emitGlyphs: false
+        )
+        let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: false)
+        let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pixelScale)
+        let lineH = cRect.w > 0 ? cRect.w : (style.lineHeight ?? style.size * 1.25)
+        let singleX: Float = edit.multiline
+            ? 0
+            : computeSingleLineScroll(
+                path: node.path,
+                edit: edit,
+                shaped: shaped,
+                isFocused: true,
+                showingPlaceholder: false,
+                innerWidthPt: innerW,
+                pixelScale: pixelScale
+            )
+        let caretWin: [Float] = [
+            rect.left + pad.left - singleX + cRect.x,
+            rect.top + pad.top + cRect.y,
+            max(1.5, cRect.z),
+            lineH
+        ]
+
+        for horizontal in [false, true] {
+            var cur = node.parentIndex
+            var portalBroken = node.el.anchor != nil
+            var viewportIdx: Int? = nil
+            while let pIdx = cur, pIdx < flatNodes.count {
+                if portalBroken { break }
+                let candidate = flatNodes[pIdx]
+                if candidate.el.layout.scrollAxes.contains(horizontal ? .horizontal : .vertical) {
+                    viewportIdx = pIdx
+                    break
+                }
+                if candidate.el.anchor != nil {
+                    portalBroken = true
+                }
+                cur = candidate.parentIndex
+            }
+            guard let v = viewportIdx else { continue }
+            let vNode = flatNodes[v]
+            let vRect = laidOutRect(forIndex: v, in: flatNodes)
+            let start = Double(horizontal ? vRect.left : vRect.top)
+            let view = Double(horizontal ? vRect.width : vRect.height)
+            let at = Double(horizontal ? caretWin[0] : caretWin[1]) - start
+            let len = Double(horizontal ? caretWin[2] : caretWin[3])
+            let margin = Double(vNode.el.scrollMarginPts)
+            let delta = ScrollEdgeMath.reveal(offset: 0.0, top: at, height: len, viewport: view, margin: margin)
+            if abs(delta) <= 1e-6 { continue }
+
+            let vPath = vNode.path
+            let maxExt = scrollMaxExtents[vPath] ?? .zero
+            let old = scrollOffsets[vPath] ?? .zero
+            let next: Vec2
+            if horizontal {
+                let x = Float((Double(old.x) + delta).clamped(to: 0.0...Double(maxExt.x)))
+                next = Vec2(x, old.y)
+            } else {
+                let y = Float((Double(old.y) + delta).clamped(to: 0.0...Double(maxExt.y)))
+                next = Vec2(old.x, y)
+                if y < maxExt.y - 0.5 {
+                    wasPinnedToBottom.remove(vPath)
+                }
+            }
+            scrollOffsets[vPath] = next
+            scrollStore.snap(NodeId.hash("scroll:" + vPath), Props.SCROLL, to: next)
+        }
     }
 }

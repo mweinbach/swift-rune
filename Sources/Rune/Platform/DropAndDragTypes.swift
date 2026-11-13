@@ -406,6 +406,7 @@ internal final class ErasedPopupRequest: @unchecked Sendable {
     let anchor: PopupAnchor
     let onPick: (inout Any, String?, inout Tx) -> Void
     let isFieldMenu: Bool
+    var fieldMenuId: UInt64?
     private let lock = NSLock()
     private var taken = false
 
@@ -413,12 +414,14 @@ internal final class ErasedPopupRequest: @unchecked Sendable {
         menu: PopupMenu,
         anchor: PopupAnchor,
         onPick: @escaping (inout Any, String?, inout Tx) -> Void,
-        isFieldMenu: Bool = false
+        isFieldMenu: Bool = false,
+        fieldMenuId: UInt64? = nil
     ) {
         self.menu = menu
         self.anchor = anchor
         self.onPick = onPick
         self.isFieldMenu = isFieldMenu
+        self.fieldMenuId = fieldMenuId
     }
 
     /// Claims this request once across cloned `Tx` values (`popup_menu/tests.rs::clones_of_a_tx_share_one_request`).

@@ -128,12 +128,14 @@ public struct ZoomState: Sendable, Equatable {
 
 final class CxReadsLog: @unchecked Sendable {
     var caretRead: Bool = false
+    var selectionRectsRead: Bool = false
     var layoutReads: [MemoRead] = []
 
     init() {}
 
     init(copying other: CxReadsLog) {
         self.caretRead = other.caretRead
+        self.selectionRectsRead = other.selectionRectsRead
         self.layoutReads = other.layoutReads
     }
 }
@@ -152,6 +154,8 @@ struct CxEnvironmentState {
     var timeScale: Float = 1.0
     var zoom: Float = 1.0
     var caret: (keyPath: String, rect: [Float])? = nil
+    var selectionRects: [[Float]] = []
+    var markedTexts: [SelectionMark] = []
     var reads = CxReadsLog()
 }
 
@@ -176,6 +180,8 @@ struct RuntimeShellSettings {
     var fullKeyboardAccess: Bool = true
     var caretReadByView: Bool = false
     var lastCommittedCaret: (keyPath: String, rect: [Float])? = nil
+    var selectionRectsReadByView: Bool = false
+    var lastCommittedSelectionRects: [[Float]] = []
 
     init(viewport: Vec2 = .zero, pixelScale: Float = 2.0, reducedMotion: Bool = false) {
         self.zoomState = ZoomState(k: 1.0, window: viewport, windowScale: max(pixelScale, 0.5))
@@ -242,6 +248,7 @@ extension Cx {
             layoutCollector: layoutCollector
         )
         out.envState = envState
+        out.envState.markedTexts = []
         out.envState.reads = CxReadsLog(copying: envState.reads)
         return out
     }
@@ -258,6 +265,12 @@ extension Cx {
         self.envState.defaults = other.envState.defaults
         if other.envState.reads.caretRead {
             self.envState.reads.caretRead = true
+        }
+        if other.envState.reads.selectionRectsRead {
+            self.envState.reads.selectionRectsRead = true
+        }
+        if !other.envState.markedTexts.isEmpty {
+            self.envState.markedTexts.append(contentsOf: other.envState.markedTexts)
         }
         for read in other.envState.reads.layoutReads {
             if let idx = self.envState.reads.layoutReads.firstIndex(where: { $0.sameTarget(as: read) }) {

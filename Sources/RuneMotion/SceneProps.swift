@@ -128,7 +128,14 @@ extension Scene {
         case Props.BORDER.id:
             if let c = n.border as? T { return c }
             lanes = n.border.toLanes()
-        case Props.OFFSET.id, Props.ROTATE.id, Props.BLUR_SCALAR.id, Props.BLUR.id, Props.MASK.id:
+        case Props.OFFSET.id:
+            lanes[0] = n.baseOffset.x
+            lanes[1] = n.baseOffset.y
+        case Props.ROTATE.id:
+            lanes[0] = n.baseRotate
+        case Props.BLUR_SCALAR.id, Props.BLUR.id:
+            lanes[0] = n.baseBlur
+        case Props.MASK.id:
             break
         default:
             return nil

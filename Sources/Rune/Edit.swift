@@ -746,6 +746,34 @@ public struct TextEdit: Sendable, Equatable {
         caretAffinity = .downstream
     }
 
+    /// Selects the hard `\n`-delimited paragraph containing `offset`, including its trailing newline
+    /// when not the final line (`input_click_tests.rs:164`).
+    public mutating func selectHardLine(atUTF8Offset offset: Int) {
+        breakHistoryGroup()
+        let r = hardLineParagraphRange(atUTF8Offset: offset)
+        anchor = r.0
+        cursor = r.1
+        snapToPills()
+        typingStyle = .inherited
+        caretColumn = .free
+        caretAffinity = .downstream
+    }
+
+    internal func wordUnitRange(atUTF8Offset offset: Int) -> (Int, Int) {
+        let snapped = snapToGraphemeBoundary(offset)
+        let left = prevWordBoundary(from: snapped == text.utf8.count ? snapped : nextGraphemeBoundary(from: snapped))
+        let right = nextWordBoundary(from: left)
+        return (left, right)
+    }
+
+    internal func hardLineParagraphRange(atUTF8Offset offset: Int) -> (Int, Int) {
+        let lineIdx = lineIndexOfUTF8(offset)
+        let lineRange = lineRangeUTF8(of: lineIdx)
+        let textCount = text.utf8.count
+        let end = (lineRange.upperBound < textCount) ? lineRange.upperBound + 1 : lineRange.upperBound
+        return (lineRange.lowerBound, end)
+    }
+
     /// Inserts `inserted` at the current caret or replaces any active selection.
     public mutating func insert(_ inserted: String) {
         insert(inserted, kind: .other)

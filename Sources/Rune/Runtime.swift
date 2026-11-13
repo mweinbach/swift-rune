@@ -110,6 +110,7 @@ public struct ElementInfo: Sendable, Equatable {
     public var inGrowingRow: Bool = false
     public var scrolling: Bool = false
     public var liveIntent: UInt32 = 0
+    public var shapeKey: UInt64? = nil
 
     public static func stub(_ key: String) -> ElementInfo {
         ElementInfo(
@@ -416,6 +417,7 @@ public final class Runtime<State> {
         var mods: Mods
         var isTextSelectionDrag: Bool
         var movedBeyondSlop: Bool = false
+        var textSelectionOrigin: (Int, Int)? = nil
         var stateSnapshotBeforeDrag: State
     }
 
@@ -663,6 +665,8 @@ public final class Runtime<State> {
         }
     }
     public var helpDelay: Double = 0.5
+    public internal(set) var imeArea: [Float]? = nil
+    internal var inputMachines = RuntimeInputMachines()
     public var nativeHelp: Bool = false
     public var clipboard = ClipboardContent("")
     public var richClipboard = RichClipboardPayload()
@@ -726,7 +730,10 @@ public final class Runtime<State> {
     internal var activeDragOut: (path: String, key: String?, onEnd: ((inout State, DragOutcome, inout Tx) -> Void)?)? = nil
     internal var pendingDragOutStart: DragOutStart? = nil
     /// Whether standalone physical modifier transitions (`ModifierKey`) are tracked and dispatched (`keys.rs`).
-    public var modifierKeysEnabled: Bool = false
+    public var modifierKeysEnabled: Bool {
+        get { inputMachines.modifierKeys.enabled }
+        set { setModifierKeys(newValue) }
+    }
     internal var heldModifierKeys: [ModifierKey] = []
     public var traceChannels: [String: (kind: TraceChannels.Kind, value: Float)]? = nil {
         didSet {
@@ -752,6 +759,7 @@ public final class Runtime<State> {
     public internal(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
     public internal(set) var hoveredPath: String? = nil
     public internal(set) var hoveredKey: String? = nil
+    internal var hoveredCallbackPaths: [String] = []
     public internal(set) var pressedPath: String? = nil
     public internal(set) var pressedKey: String? = nil
     private var pressedPointerInside: Bool = false
@@ -764,11 +772,11 @@ public final class Runtime<State> {
     internal var hoveredLink: TextLinkTarget? = nil
     internal var pressedLink: TextLinkTarget? = nil
     private var webFocusTabStartPath: String? = nil
-    private var dirChord: DirChord = .idle
+    internal var dirChord: DirChord = .idle
     private var lastPinnedGlyphMask: UInt32 = 0
     public private(set) var lastKeyDiagnostics: [DuplicateKeyWarning] = []
 
-    private var lastClickTime: Double = -10.0
+    internal var lastClickTime: Double = -10.0
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
     internal var clickCount: Int = 0
     internal var activeDrag: DragSession? = nil
@@ -900,6 +908,8 @@ public final class Runtime<State> {
     internal var lastViewReadScroll: Bool = false
     private struct FocusReturnEntry {
         var ownerPath: String
+        var scopePath: String
+        var isModal: Bool
         var returnPath: String?
         var returnKey: String?
         var prevFocusVisible: Bool
@@ -1011,7 +1021,7 @@ public final class Runtime<State> {
     private var layoutCommitGen: UInt64 = 0
     private var layoutFeedback = LayoutFeedback.initial
     internal var hasExternalDirtyCommit: Bool = true
-    private var scrollMovedSinceLastFrame: Bool = false
+    internal var scrollMovedSinceLastFrame: Bool = false
     private var layoutFired: [NodeId: [Float]] = [:]
     private var screenFired: [NodeId: [Float]] = [:]
     private var drawnFired: [NodeId: (drawn: [Float], laid: [Float])] = [:]
@@ -1425,6 +1435,7 @@ public final class Runtime<State> {
             interactionFrameBegins()
         }
 
+        flushPendingKeysLost(at: now)
         let splitStep: (catchUpAnimNow: Double, dt: Double)?
         if let split {
             let scale = Double(cxSettings.viewTimeScale)
@@ -1442,13 +1453,22 @@ public final class Runtime<State> {
             splitStep = nil
         }
 
-        let (frameOut, animNow) = stepToFrameOutputScaled(
+        var (frameOut, animNow) = stepToFrameOutputScaled(
             at: now,
             splitStep: splitStep,
             skipFramePoll: timerAlreadyPolled
         )
-        let sceneOut = measureFramePhase(.paint) {
+        var sceneOut = measureFramePhase(.paint) {
             buildRefScene(frameOut: frameOut, now: animNow)
+        }
+        if cxSettings.caretReadByView,
+           let nextCaret = currentFocusedCaret(),
+           cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
+            needsCommit = true
+            (frameOut, animNow) = stepToFrameOutputScaled(at: now)
+            sceneOut = measureFramePhase(.paint) {
+                buildRefScene(frameOut: frameOut, now: animNow)
+            }
         }
         finishPostFrameHooks(at: now)
         if rewindRecorder != nil {
@@ -1498,6 +1518,10 @@ public final class Runtime<State> {
            cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
             needsCommit = true
             resizeReadMovedFlag = true
+        }
+        if cxSettings.selectionRectsReadByView,
+           SelectionRectsMath.boxesMoved(cxSettings.lastCommittedSelectionRects, computeSelectionBoxes()) {
+            needsCommit = true
         }
     }
 
@@ -1998,7 +2022,19 @@ public final class Runtime<State> {
                 )
             }
         }
+        out[MemoScope.selectionRectsKey] = MemoElementGeometry(
+            rect: .zero,
+            selectionBoxes: computeSelectionBoxes(in: source)
+        )
         return out
+    }
+
+    internal func flushPendingCommitIfNeeded(at now: Double) {
+        if needsCommit {
+            commitTree(at: now, cut: forceInitialSettle)
+            needsCommit = false
+            forceInitialSettle = false
+        }
     }
 
     internal func commitTree(at now: Double, cut: Bool, resizeSnap: Bool = false) {
@@ -2085,7 +2121,7 @@ public final class Runtime<State> {
         }
     }
 
-    private var scrollRequiresCommit: Bool {
+    internal var scrollRequiresCommit: Bool {
         !activeVirtualPaths.isEmpty || lastViewReadScroll || hasScrollCallbacks()
     }
 
@@ -2268,6 +2304,7 @@ public final class Runtime<State> {
         cx.envState.systemReducedMotion = cxSettings.hostReducedMotion
         cx.envState.zoom = 1.0
         cx.envState.caret = focusedCaret
+        cx.envState.selectionRects = computeSelectionBoxes(in: memoNodes)
         let envHash = MemoScope.environmentHash(
             systemDark: systemDark,
             pixelScale: pixelScale,
@@ -2298,6 +2335,8 @@ public final class Runtime<State> {
         cxSettings.captionColor = cx.envState.captionColor
         cxSettings.titlebarOverride = cx.envState.titlebar
         cxSettings.caretReadByView = cx.envState.reads.caretRead
+        cxSettings.selectionRectsReadByView = cx.envState.reads.selectionRectsRead
+        selectionState.lastCommittedMarkedTexts = cx.envState.markedTexts
         let effReducedMotion = cx.envState.reducedMotionOverride ?? cxSettings.hostReducedMotion
         cxSettings.setTimeScale(cx.envState.timeScale, at: now)
         if cx.envState.zoom != cxSettings.zoomState.k {
@@ -3322,12 +3361,16 @@ public final class Runtime<State> {
         }
         var retryCaret = focusedCaret
         let initialCaretMoved = cxSettings.caretReadByView && caretMoved(from: retryCaret, in: pass.nodes)
-        if (!pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: false)) || initialCaretMoved {
+        let prevSelectionBoxes = cxSettings.selectionRectsReadByView ? computeSelectionBoxes(in: flatNodes) : []
+        if (!pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: false))
+            || initialCaretMoved
+            || (cxSettings.selectionRectsReadByView && SelectionRectsMath.boxesMoved(prevSelectionBoxes, computeSelectionBoxes(in: pass.nodes))) {
             for extra in 0..<LayoutReadConstants.passes {
                 if cxSettings.caretReadByView, let nextC = focusedCaretInfo(in: pass.nodes) {
                     retryCaret = nextC
                     cxSettings.lastCommittedCaret = nextC
                 }
+                let iterPrevBoxes = cxSettings.selectionRectsReadByView ? computeSelectionBoxes(in: pass.nodes) : []
                 if let nextPass = measurePass(
                     at: now,
                     cut: cut,
@@ -3345,7 +3388,8 @@ public final class Runtime<State> {
                 let isLast = (extra + 1 == LayoutReadConstants.passes)
                 let readsStillMoved = !pass.reads.isEmpty && evaluateLayoutMoved(reads: pass.reads, nodes: pass.nodes, force: isLast)
                 let caretStillMoved = cxSettings.caretReadByView && caretMoved(from: retryCaret, in: pass.nodes)
-                if !readsStillMoved && !caretStillMoved {
+                let selStillMoving = cxSettings.selectionRectsReadByView && SelectionRectsMath.boxesMoved(iterPrevBoxes, computeSelectionBoxes(in: pass.nodes))
+                if !readsStillMoved && !caretStillMoved && !selStillMoving {
                     break
                 }
             }
@@ -3752,6 +3796,10 @@ public final class Runtime<State> {
             followEdge: commitFollowEdge,
             snaps: commitKind.snaps
         )
+        if selectionState.pendingFollowCaret {
+            selectionState.pendingFollowCaret = false
+            followCaretIfNeeded()
+        }
         var changedScrollDeltas: [String: Vec2] = [:]
         for (sPath, newOff) in scrollOffsets {
             let oldOff = preScrollOffsets[sPath] ?? .zero
@@ -3959,8 +4007,12 @@ public final class Runtime<State> {
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
         }
+        if !needsCommit && scrollGlidingPaths.isEmpty && scrollRequestsState.isEmpty {
+            pendingTxFocusKey = nil
+        }
         syncRideTrailingFlags(pass.nodes, on: &scene)
         finalizeSelectionAfterCommit(at: now)
+        cxSettings.lastCommittedSelectionRects = computeSelectionBoxes()
         if fitHeight {
             let natH = max(1.0, ceil(pass.rootHeight * cxSettings.zoomState.k * pixelScale) / pixelScale)
             if fitWindowState.ask(height: natH, current: viewport.y) {
@@ -4117,7 +4169,7 @@ public final class Runtime<State> {
             pressableRoles.contains(el.role)
     }
 
-    private func updateScrollPositions(at now: Double) {
+    internal func updateScrollPositions(at now: Double) {
         guard !flatNodes.isEmpty else { return }
         let fullWindowClip = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
         var childClips = [MotionRect](repeating: fullWindowClip, count: flatNodes.count)
@@ -4490,6 +4542,23 @@ public final class Runtime<State> {
         }
     }
 
+    private func isOffscreenVirtualFocusedPath(_ fp: String) -> Bool {
+        for vPath in activeVirtualPaths {
+            guard fp.hasPrefix(vPath + "/"),
+                  let vState = virtualLists[vPath] else { continue }
+            let rest = String(fp.dropFirst(vPath.count + 1))
+            let firstSeg = rest.split(separator: "/", maxSplits: 1).first.map(String.init) ?? rest
+            let rowKey = firstSeg.hasPrefix("@") ? String(firstSeg.dropFirst()) : firstSeg
+            if vState.lastKeys.contains(rowKey) {
+                if let mPath = activeModalPath {
+                    return vPath == mPath || vPath.hasPrefix(mPath + "/")
+                }
+                return true
+            }
+        }
+        return false
+    }
+
     private func reconcileFocusAfterCommit(
         prevFocusedPath: String?,
         prevFocusedKey: String?,
@@ -4527,15 +4596,44 @@ public final class Runtime<State> {
             }
         }
         focusReturnStack = keptReturns
+        var openedModalThisCommit = false
         for node in flatNodes where (node.el.isModal || node.el.focusReturnKey != nil) {
             if !focusReturnStack.contains(where: { $0.ownerPath == node.path }) {
+                if node.el.isModal { openedModalThisCommit = true }
+                let zeroSentinel = !node.el.isModal && node.el.focusReturnKey != nil && node.targetRect.width == 0 && node.targetRect.height == 0
+                let scope = zeroSentinel ? (node.parentIndex.map { flatNodes[$0].path } ?? node.path) : node.path
                 focusReturnStack.append(FocusReturnEntry(
                     ownerPath: node.path,
+                    scopePath: scope,
+                    isModal: node.el.isModal,
                     returnPath: node.el.focusReturnKey == nil ? prevFocusedPath : nil,
                     returnKey: node.el.focusReturnKey ?? prevFocusedKey,
                     prevFocusVisible: prevFocusVisible
                 ))
             }
+        }
+        if txBlur {
+            inputMachines.focusMachine.blurredFocusPath = nil
+        }
+        var openedModalHasMenuOrListbox = false
+        if openedModalThisCommit, let mPath = activeModalPath, let mIdx = nodeByPath[mPath] {
+            let mPrefix = flatNodes[mIdx].path + "/"
+            let hasMenuOrListbox = flatNodes.contains { n in
+                (n.path == flatNodes[mIdx].path || n.path.hasPrefix(mPrefix)) &&
+                n.el.focusGroup &&
+                (n.el.role == .menu || n.el.role == .listbox)
+            }
+            openedModalHasMenuOrListbox = hasMenuOrListbox
+            if hasMenuOrListbox && inputMachines.focusMachine.lastPressedWasPointer {
+                inputMachines.focusMachine.openedModalKind = .pointerMenu
+                inputMachines.focusMachine.highlightHidden = true
+            } else {
+                inputMachines.focusMachine.openedModalKind = .dialog
+                inputMachines.focusMachine.highlightHidden = false
+            }
+            inputMachines.focusMachine.highlightedPath = nil
+        } else if activeModalPath == nil && poppedReturns.isEmpty {
+            inputMachines.focusMachine.resetForModalClose()
         }
 
         var nextIdx: Int? = nil
@@ -4547,6 +4645,10 @@ public final class Runtime<State> {
             if let vis = txFocusVisible {
                 focusVisible = vis
             }
+        } else if let fk = txFocusKey,
+                  (!pendingScrollReveals.isEmpty || !scrollRequestsState.isEmpty || virtualLists.values.contains(where: { $0.lastKeys.contains(fk) })) {
+            // Virtual row may mount on the second commit pass right after post-layout scrollIntoView runs.
+            pendingTxFocusKey = fk
         } else if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
             nextIdx = rIdx
             focusVisible = false
@@ -4564,20 +4666,54 @@ public final class Runtime<State> {
             nextIdx = idx
         }
 
+        // Follow app selection changes (`focus_follows`) when focused inside a `focusGroup` (`focus.rs:1400`).
+        var nextSelectedByGroup: [String: String] = [:]
+        for gNode in flatNodes where gNode.el.focusGroup && gNode.el.isFocusFollowsSelection {
+            let members = groupMemberIndices(groupIndex: gNode.index)
+            if let selIdx = members.first(where: { flatNodes[$0].el.isFocusSelected }) {
+                let selPath = flatNodes[selIdx].path
+                nextSelectedByGroup[gNode.path] = selPath
+                if let cur = nextIdx,
+                   findFocusGroupAncestor(of: cur) == gNode.index,
+                   let prevSel = inputMachines.focusMachine.lastFocusSelectedByGroup[gNode.path],
+                   prevSel != selPath,
+                   flatNodes[cur].path != selPath {
+                    nextIdx = selIdx
+                }
+            }
+        }
+        inputMachines.focusMachine.lastFocusSelectedByGroup = nextSelectedByGroup
+
         if !txBlur && nextIdx == nil {
             for ret in poppedReturns.reversed() {
+                if !ret.isModal {
+                    let prior = prevFocusedPath ?? inputMachines.focusMachine.blurredFocusPath
+                    let inScope = prior.map { p in
+                        p == ret.scopePath || ret.scopePath.isEmpty || p.hasPrefix(ret.scopePath + "/")
+                    } ?? false
+                    if !inScope { continue }
+                }
                 if let rk = ret.returnKey,
                    let idx = flatNodes.firstIndex(where: { $0.key == rk && canFocusIndex($0.index) }) {
                     nextIdx = idx
+                    if inputMachines.focusMachine.openedModalKind == .pointerMenu {
+                        focusVisible = false
+                    }
                     break
                 }
                 if let rp = ret.returnPath,
                    let idx = nodeByPath[rp],
                    canFocusIndex(idx) {
                     nextIdx = idx
+                    if inputMachines.focusMachine.openedModalKind == .pointerMenu {
+                        focusVisible = false
+                    }
                     break
                 }
             }
+        }
+        if activeModalPath == nil && !poppedReturns.isEmpty {
+            inputMachines.focusMachine.resetForModalClose()
         }
 
         if txFocusKey == nil && nextIdx == nil {
@@ -4610,7 +4746,7 @@ public final class Runtime<State> {
             }
         }
 
-        if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty || cxSettings.viewDefaults.webFocus) {
+        if !txBlur && nextIdx == nil && activeModalPath != nil && (prevFocusedPath != nil || !poppedReturns.isEmpty || cxSettings.viewDefaults.webFocus || (openedModalThisCommit && !openedModalHasMenuOrListbox)) {
             nextIdx = tabOrderIndices().first
         }
 
@@ -4620,11 +4756,36 @@ public final class Runtime<State> {
                 focusVisible = pendingVis
             }
         }
-        focusedPath = nextIdx.map { flatNodes[$0].path }
-        focusedKey = nextIdx.flatMap { flatNodes[$0].key }
-        if prevFocusedPath != focusedPath {
+        let keptOffscreenVirtual: Bool
+        let nextPath: String?
+        if let idx = nextIdx {
+            nextPath = flatNodes[idx].path
+            keptOffscreenVirtual = false
+        } else if !txBlur, let fp = prevFocusedPath, isOffscreenVirtualFocusedPath(fp) {
+            nextPath = fp
+            keptOffscreenVirtual = true
+        } else {
+            nextPath = nil
+            keptOffscreenVirtual = false
+        }
+        if prevFocusedPath != nextPath {
+            finishPreeditIfNeeded(forPath: prevFocusedPath, at: currentTime)
             imeReset = true
             hoveredHighlightActive = false
+        }
+        focusedPath = nextPath
+        focusedKey = keptOffscreenVirtual ? prevFocusedKey : nextIdx.flatMap { flatNodes[$0].key }
+        if nextPath != nil || !pressing() {
+            inputMachines.focusMachine.blurredFocusPath = nil
+        }
+        if let chk = inputMachines.focusMachine.pendingPhysicalFocusCheck {
+            if focusedPath != chk.beforeFocus {
+                inputMachines.focusMachine.suppressedRepeatPhysicalKeys.insert(chk.code)
+                if let k = chk.key {
+                    inputMachines.focusMachine.suppressedRepeatKey = k
+                }
+            }
+            inputMachines.focusMachine.pendingPhysicalFocusCheck = nil
         }
         syncFocusedLinkIndex()
     }
@@ -4969,6 +5130,7 @@ public final class Runtime<State> {
         let devH = max(1, Int((viewport.y * pxScale).rounded()))
         let defaultViewFg = cxSettings.viewDefaults.foreground
         let defaultRingOutline = cxSettings.viewDefaults.focusRing
+            ?? Outline(width: 2.0, offset: 3.0, color: cxSettings.systemAccent.focus(dark: systemDark))
         let forceFocusRings = cxSettings.viewDefaults.forceFocusRings
         stuckShiftsByPath.removeAll(keepingCapacity: true)
         unseenPresence.beginPaint()
@@ -5873,7 +6035,9 @@ public final class Runtime<State> {
                     }
                 }
 
-                let effectiveBoxFill = activeFocusFill ?? fillColor
+                let highlightedMenu = isHighlightedMenuNode(snap, isFocused: isFocused)
+                let effectiveFocusFill = activeFocusFill ?? (highlightedMenu ? el.focusHighlightColor : nil)
+                let effectiveBoxFill = effectiveFocusFill ?? fillColor
                 if let (surf, fit) = el.surfacePayload, surfaceVisible {
                     if hasFill && el.gradient == nil {
                         primitives.append(attachFade(.roundedRect(
@@ -5950,7 +6114,7 @@ public final class Runtime<State> {
                         clip: devClip,
                         turn: useLayer ? 0 : effRotate
                     )))
-                } else if let hl = activeFocusFill {
+                } else if let hl = effectiveFocusFill {
                     primitives.append(attachFade(.roundedRect(
                         rect: devRect,
                         radii: devRadii,
@@ -6389,15 +6553,6 @@ public final class Runtime<State> {
                         glidePx: glidePx
                     )
                     var singleLineShiftX: Float = 0
-                    if resolvedInput.isSingleLine && isFocused && !showingPlaceholder && shaped.size.x > innerW {
-                        let cRect = textSystem.caretRect(in: shaped, utf8Offset: edit.cursor, pixelScale: pxScale)
-                        if cRect.x > max(0, innerW - 2.0) {
-                            singleLineShiftX = cRect.x - max(0, innerW - 2.0)
-                        }
-                    }
-                    let inputRestOriginX = restOriginX - singleLineShiftX * scaleVec.x
-                    let inputOriginX = textOriginX - singleLineShiftX * scaleVec.x
-
                     let inputClip = intersectRects(visClip, rect)
                     let devInputClip = SIMD4<Float>(
                         inputClip.x * pxScale,
@@ -6405,6 +6560,17 @@ public final class Runtime<State> {
                         inputClip.width * pxScale,
                         inputClip.height * pxScale
                     )
+                    let inputScrollX = computeSingleLineScroll(
+                        path: snap.path,
+                        edit: edit,
+                        shaped: shaped,
+                        isFocused: isFocused,
+                        showingPlaceholder: showingPlaceholder,
+                        innerWidthPt: innerW / max(1e-4, scaleVec.x),
+                        pixelScale: pxScale
+                    )
+                    let inputTextOriginX = textOriginX - inputScrollX * scaleVec.x
+                    let inputRestOriginX = restOriginX - inputScrollX * scaleVec.x
 
                     if !resolvedInput.blocks.isEmpty {
                         RichTextFieldRender.emitBlockDecorations(
@@ -6453,23 +6619,7 @@ public final class Runtime<State> {
                             utf8Range: displayRange,
                             pixelScale: pxScale
                         )
-                        if lineRects.isEmpty {
-                            let cStart = textSystem.caretRect(in: shaped, utf8Offset: displayRange.lowerBound, pixelScale: pxScale)
-                            let cEnd = textSystem.caretRect(in: shaped, utf8Offset: displayRange.upperBound, pixelScale: pxScale)
-                            let sx = min(cStart.x, cEnd.x)
-                            let sw = max(2.0, abs(cEnd.x - cStart.x))
-                            primitives.append(.roundedRect(
-                                rect: SIMD4<Float>(
-                                    (inputRestOriginX + sx) * pxScale,
-                                    (restOriginY + cStart.y) * pxScale,
-                                    sw * pxScale,
-                                    cStart.w * pxScale
-                                ),
-                                radii: SIMD4<Float>(repeating: 2.0 * pxScale),
-                                fill: selCol,
-                                clip: devInputClip
-                            ))
-                        } else {
+                        if !lineRects.isEmpty {
                             for r in lineRects {
                                 primitives.append(.roundedRect(
                                     rect: SIMD4<Float>(
@@ -6477,6 +6627,47 @@ public final class Runtime<State> {
                                         (restOriginY + r.y) * pxScale,
                                         max(2.0, r.z) * pxScale,
                                         r.w * pxScale
+                                    ),
+                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                    fill: selCol,
+                                    clip: devInputClip
+                                ))
+                            }
+                        } else {
+                            let cStart = textSystem.caretRect(in: shaped, utf8Offset: displayRange.lowerBound, pixelScale: pxScale)
+                            let cEnd = textSystem.caretRect(in: shaped, utf8Offset: displayRange.upperBound, pixelScale: pxScale)
+                            if abs(cStart.y - cEnd.y) < 1.0 {
+                                let sx = min(cStart.x, cEnd.x)
+                                let sw = max(2.0, abs(cEnd.x - cStart.x))
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(
+                                        (inputRestOriginX + sx) * pxScale,
+                                        (restOriginY + cStart.y) * pxScale,
+                                        sw * pxScale,
+                                        cStart.w * pxScale
+                                    ),
+                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                    fill: selCol,
+                                    clip: devInputClip
+                                ))
+                            } else {
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(
+                                        (inputRestOriginX + cStart.x) * pxScale,
+                                        (restOriginY + cStart.y) * pxScale,
+                                        max(4, innerW - cStart.x) * pxScale,
+                                        cStart.w * pxScale
+                                    ),
+                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                    fill: selCol,
+                                    clip: devInputClip
+                                ))
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(
+                                        inputRestOriginX * pxScale,
+                                        (restOriginY + cEnd.y) * pxScale,
+                                        max(4, cEnd.x) * pxScale,
+                                        cEnd.w * pxScale
                                     ),
                                     radii: SIMD4<Float>(repeating: 2.0 * pxScale),
                                     fill: selCol,
@@ -6525,14 +6716,14 @@ public final class Runtime<State> {
 
                     // Caret bar when focused & window focused
                     if isFocused {
-                        let byteOff = showingPlaceholder ? 0 : edit.cursor
+                        let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: showingPlaceholder)
                         let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
                         let caretXPt: Float
                         if isGliding {
-                            let cxPx = (inputOriginX + cRect.x) * pxScale
+                            let cxPx = (inputTextOriginX + cRect.x) * pxScale
                             caretXPt = ((cxPx - glidePx.x).rounded(.toNearestOrAwayFromZero) + glidePx.x) / pxScale
                         } else {
-                            caretXPt = inputOriginX + cRect.x
+                            caretXPt = inputTextOriginX + cRect.x
                         }
                         let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
                         caretOut = worldCaret
@@ -6893,12 +7084,15 @@ public final class Runtime<State> {
                 let r = lens.get(state).selectedUTF8Range
                 nodeEditRange = [r.lowerBound, r.upperBound]
             }
-            if isFocused && !nodeIsSecure && el.handlers.editLens != nil {
-                if let caretOut {
-                    imeArea = caretOut
-                } else {
-                    imeArea = rect.xywh
-                }
+            if let c = caretOut, isFocused, !nodeIsSecure, !snap.effectiveInert, !p.isExiting,
+               visibleRect.width > 0, visibleRect.height > 0 {
+                imeArea = c
+            } else if isFocused && !nodeIsSecure && el.handlers.editLens != nil,
+                      !snap.effectiveInert, !p.isExiting,
+                      visibleRect.width > 0, visibleRect.height > 0 {
+                imeArea = rect.xywh
+            } else if el.isImeCursor, imeArea == nil, !snap.effectiveInert, !p.isExiting {
+                imeArea = rect.xywh
             }
             let nodeLoopPhase: Double? = {
                 guard let track = loopRuntime.tracks[p.id] else { return nil }
@@ -7010,7 +7204,17 @@ public final class Runtime<State> {
                 revealing: nodeRevealing,
                 inGrowingRow: isOwnGrowthMoving,
                 scrolling: false,
-                liveIntent: ownLiveBits
+                liveIntent: ownLiveBits,
+                shapeKey: (!nodeIsSecure && (paintedLabelValue != nil || el.richSpans != nil))
+                    ? TextShapeKey.compute(
+                        text: paintedLabelValue ?? "",
+                        spans: el.richSpans,
+                        pills: el.pillChips,
+                        style: el.textStyle,
+                        pixelScale: pxScale,
+                        wrapAnywhere: (el.runtimeExtras["htmlWrapAnywhere"] as? Bool) ?? false
+                    )
+                    : nil
             ))
             if shouldEmit && !p.isExiting && !snap.effectiveInert {
                 if el.isImeCursor && !hasFocusedTextInput && nextImeCursorArea == nil {
@@ -7742,15 +7946,14 @@ public final class Runtime<State> {
         syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
         pressedLink = nil
         hoveredLink = nil
-        if let old = hoveredPath {
+        if hoveredPath != nil {
             hoveredPath = nil
             hoveredKey = nil
-            if let idx = nodeByPath[old], !flatNodes[idx].el.hasKitHoverDelays,
-               let cb = flatNodes[idx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, false, &tx)
-                applyTx(tx, at: now)
-            }
+        }
+        if !hoveredCallbackPaths.isEmpty {
+            isDispatchingHover = true
+            dispatchHoverCallbacks(to: nil, at: now)
+            isDispatchingHover = false
         }
         dirtyCommit(at: now)
     }
@@ -7783,6 +7986,61 @@ public final class Runtime<State> {
         return flatNodes[idx].el.handlers.onDragOutEnd
     }
 
+    @discardableResult
+    internal func dispatchHoverCallbacks(to newPath: String?, at now: Double) -> (ranAny: Bool, allLiveOnly: Bool) {
+        var desired: [String] = []
+        if let path = newPath, var cur = nodeByPath[path] {
+            var chain: [String] = []
+            while flatNodes.indices.contains(cur) {
+                let node = flatNodes[cur]
+                if node.effectiveInert { break }
+                if !node.el.hasKitHoverDelays && node.el.handlers.onHover != nil {
+                    chain.append(node.path)
+                }
+                if node.el.isHoverAlone { break }
+                guard let p = node.parentIndex else { break }
+                cur = p
+            }
+            desired = chain.reversed()
+        }
+        let oldSet = Set(hoveredCallbackPaths)
+        let newSet = Set(desired)
+        let exited = hoveredCallbackPaths.reversed().filter { !newSet.contains($0) }
+        let entered = desired.filter { !oldSet.contains($0) }
+        hoveredCallbackPaths = desired
+        var ranAny = false
+        var allLiveOnly = true
+        for path in exited {
+            if let idx = nodeByPath[path],
+               !flatNodes[idx].el.hasKitHoverDelays,
+               let cb = flatNodes[idx].el.handlers.onHover {
+                var tx = makeTx(at: now)
+                cb(&state, false, &tx)
+                if !tx.liveOnlyRequested {
+                    perfWatch.meter.handler(name: "on_hover", path: path)
+                }
+                ranAny = true
+                allLiveOnly = allLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
+            }
+        }
+        for path in entered {
+            if let idx = nodeByPath[path],
+               !flatNodes[idx].el.hasKitHoverDelays,
+               let cb = flatNodes[idx].el.handlers.onHover {
+                var tx = makeTx(at: now)
+                cb(&state, true, &tx)
+                if !tx.liveOnlyRequested {
+                    perfWatch.meter.handler(name: "on_hover", path: path)
+                }
+                ranAny = true
+                allLiveOnly = allLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
+            }
+        }
+        return (ranAny, allLiveOnly)
+    }
+
     public func pointerExit(at now: Double) {
         hoverHoldState = .free
         pointerPosition = Vec2(-10000, -10000)
@@ -7793,22 +8051,24 @@ public final class Runtime<State> {
         if helpState.tipState != .idle {
             dirtyCommit(at: now)
         }
+        var exitedHover = false
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
-            var ranAnyHover = false
-            var hoverAllLiveOnly = true
-            if let oldIdx = nodeByPath[old], !flatNodes[oldIdx].el.hasKitHoverDelays,
-               let cb = flatNodes[oldIdx].el.handlers.onHover {
-                var tx = makeTx(at: now)
-                cb(&state, false, &tx)
-                ranAnyHover = true
-                hoverAllLiveOnly = tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            if hoverVisualNeedsCommit(oldPath: old, newPath: nil) {
+                exitedHover = true
             }
-            if (ranAnyHover && !hoverAllLiveOnly) || hoverVisualNeedsCommit(oldPath: old, newPath: nil) {
-                dirtyCommit(at: now)
+        }
+        if !hoveredCallbackPaths.isEmpty {
+            isDispatchingHover = true
+            let (ranAnyHover, hoverAllLiveOnly) = dispatchHoverCallbacks(to: nil, at: now)
+            isDispatchingHover = false
+            if ranAnyHover && !hoverAllLiveOnly {
+                exitedHover = true
             }
+        }
+        if exitedHover {
+            dirtyCommit(at: now)
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -7821,6 +8081,16 @@ public final class Runtime<State> {
             hoverPaused = false
             releaseHoverHold()
             resetKitHoverHoldOnPointerMove()
+            if var pair = inputMachines.currentDoubleClickPair {
+                if !PressRun.withinSlop(pair.downPoint, pos) {
+                    pair.moved = true
+                }
+                inputMachines.currentDoubleClickPair = pair
+            }
+            if let rPath = pressedPath, let idx = nodeByPath[rPath] {
+                let rect = presentedRectByPath[rPath] ?? flatNodes[idx].targetRect
+                inputMachines.pressedStillInside = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
+            }
         }
         pointerPosition = pos
         if moved, let pPath = pressedPath, let pIdx = nodeByPath[pPath] {
@@ -7872,8 +8142,21 @@ public final class Runtime<State> {
                 let node = flatNodes[idx]
                 if drag.isTextSelectionDrag, let editLens = node.el.handlers.editLens {
                     var edit = editLens.get(state)
+                    let isSecure = edit.isSecure || node.el.isSecure
                     let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
-                    edit.setCursor(utf8Offset: offset, extendSelection: true)
+                    if !isSecure, drag.clicks == 2, let origin = drag.textSelectionOrigin {
+                        let unit = edit.wordUnitRange(atUTF8Offset: offset)
+                        let ext = SelectionMath.extendSelection(origin: origin, at: unit)
+                        edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
+                        edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
+                    } else if !isSecure, drag.clicks >= 3, edit.multiline, let origin = drag.textSelectionOrigin {
+                        let unit = edit.hardLineParagraphRange(atUTF8Offset: offset)
+                        let ext = SelectionMath.extendSelection(origin: origin, at: unit)
+                        edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
+                        edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
+                    } else {
+                        edit.setCursor(utf8Offset: offset, extendSelection: true)
+                    }
                     editLens.set(&state, edit)
                     pendingCommitKind = pendingCommitKind.instant()
                     dirtyCommit(at: now)
@@ -7887,7 +8170,9 @@ public final class Runtime<State> {
                         startLocal: drag.startLocal,
                         size: drag.elementSize,
                         clicks: drag.clicks,
-                        mods: mods
+                        mods: mods,
+                        phase: .move,
+                        isCancelled: false
                     )
                     var tx = makeTx(at: now, button: drag.button)
                     onDrag(&state, d, &tx)
@@ -7954,45 +8239,21 @@ public final class Runtime<State> {
         }()
         let linkChanged = (newHoveredLink != hoveredLink)
 
-        if hoverHoldState != .held {
+        if hoverHoldState != .held && pressedPath == nil {
             if linkChanged {
                 hoveredLink = newHoveredLink
             }
             let newPath = hit?.node.path
             let newKey = hit?.node.key
             var changed = false
+            let oldPath = hoveredPath
             if newPath != hoveredPath {
-                let oldPath = hoveredPath
                 hoveredPath = newPath
                 hoveredKey = newKey
+                updateMenuHoverHighlight(hoveredPath: newPath)
                 if isPointerEvent {
                     isDispatchingHover = true
-                    var ranAnyHover = false
-                    var hoverAllLiveOnly = true
-                    if let old = oldPath, let oldIdx = nodeByPath[old],
-                       !flatNodes[oldIdx].el.hasKitHoverDelays,
-                       let cb = flatNodes[oldIdx].el.handlers.onHover {
-                        var tx = makeTx(at: now)
-                        cb(&state, false, &tx)
-                        if !tx.liveOnlyRequested {
-                            perfWatch.meter.handler(name: "on_hover", path: old)
-                        }
-                        ranAnyHover = true
-                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                    }
-                    if let np = newPath, let newIdx = nodeByPath[np],
-                       !flatNodes[newIdx].el.hasKitHoverDelays,
-                       let cb = flatNodes[newIdx].el.handlers.onHover {
-                        var tx = makeTx(at: now)
-                        cb(&state, true, &tx)
-                        if !tx.liveOnlyRequested {
-                            perfWatch.meter.handler(name: "on_hover", path: np)
-                        }
-                        ranAnyHover = true
-                        hoverAllLiveOnly = hoverAllLiveOnly && tx.liveOnlyRequested
-                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
-                    }
+                    let (ranAnyHover, hoverAllLiveOnly) = dispatchHoverCallbacks(to: newPath, at: now)
                     isDispatchingHover = false
                     let hoverNeedsCommit = (ranAnyHover && !hoverAllLiveOnly)
                         || (!ranAnyHover && moveDispatched && !moveAllLiveOnly)
@@ -8003,6 +8264,7 @@ public final class Runtime<State> {
                         changed = true
                     }
                 } else if linkChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
+                    suppressRevealFromHoverCommit = true
                     dirtyCommit(at: now)
                     changed = true
                 }
@@ -8055,19 +8317,11 @@ public final class Runtime<State> {
         pointerPosition = pos
         focusVisible = false
         hoveredHighlightActive = false
+        inputMachines.focusMachine.lastPressedWasPointer = true
         pressHelp(at: pos, now: now)
 
-        if button == .primary {
-            let dt = now - lastClickTime
-            let dist = hypotf(pos.x - lastClickPos.x, pos.y - lastClickPos.y)
-            if dt <= 0.35 && dist <= 6.0 {
-                clickCount += 1
-            } else {
-                clickCount = 1
-            }
-            lastClickTime = now
-            lastClickPos = pos
-        } else {
+        if button != .primary {
+            inputMachines.pressClicks.clear()
             clickCount = 1
             lastClickTime = -.infinity
         }
@@ -8153,6 +8407,9 @@ public final class Runtime<State> {
 
         guard let (node, rect, rawLocal) = interactiveHit else {
             recordTitlebarPressOnMiss(at: pos, button: button, now: now)
+            inputMachines.pressClicks.clear()
+            inputMachines.firstDoubleClick = nil
+            inputMachines.currentDoubleClickPair = nil
             if cxSettings.viewDefaults.webFocus, let bgHit = hitTest(at: pos, predicate: { _ in true }) {
                 webFocusTabStartPath = bgHit.node.path
             }
@@ -8160,8 +8417,11 @@ public final class Runtime<State> {
             if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                inputMachines.focusMachine.blurredFocusPath = prevFp
+                finishPreeditIfNeeded(forPath: prevFp, at: now)
                 focusedPath = nil
                 focusedKey = nil
+                inputMachines.focusMachine.highlightedPath = nil
                 imeReset = true
                 dirtyCommit(at: now)
             }
@@ -8179,51 +8439,93 @@ public final class Runtime<State> {
         let preservesFocus = preservesFocusOnPressInChain(node) || node.el.preservesFocusOnPress
         let inEditSubtree = isInsideEditLensSubtree(node)
         let onLink = hasActiveTextLinks(node.el)
+        if button == .primary {
+            let pendingPair = inputMachines.firstDoubleClick
+            inputMachines.firstDoubleClick = nil
+            let clicks = inputMachines.pressClicks.press(path: node.path, at: now, point: pos, interval: doubleClickInterval)
+            clickCount = Int(clicks)
+            lastClickTime = now
+            lastClickPos = pos
+            let isSecond = node.el.handlers.onDoubleClick != nil && pendingPair.map {
+                $0.path == node.path && PressRun.follows(then: $0.at, was: $0.point, now: now, point: pos, interval: doubleClickInterval)
+            } == true
+            inputMachines.currentDoubleClickPair = (downAt: now, downPoint: pos, isSecond: isSecond, moved: false, left: false)
+            inputMachines.pressedWindowPoint = pos
+            inputMachines.pressedStillInside = true
+        } else {
+            inputMachines.pressedWindowPoint = pos
+            inputMachines.pressedStillInside = true
+        }
         handleSelectablePointerDown(at: pos, button: button, mods: mods, hitInteractiveNode: node, at: now)
         pressedPath = node.path
         pressedKey = node.key
         pressedPointerInside = true
         syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
+        inputMachines.pressedButton = button
         if cxSettings.viewDefaults.webFocus && !preservesSel && !preservesFocus {
             webFocusTabStartPath = node.path
         }
+        let isTextBox = node.el.handlers.editLens != nil
         var downFocusChanged = false
         if node.el.pressFocusesBelow {
             if let belowNode = scrollRegionBelow(node: node, at: pos) {
                 if focusedPath != belowNode.path {
                     let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
                     handleKitFocusTransition(prevNode: prevNode, newPath: belowNode.path, at: now)
+                    finishPreeditIfNeeded(forPath: focusedPath, at: now)
                     imeReset = true
                     downFocusChanged = true
                 }
+                inputMachines.focusMachine.blurredFocusPath = nil
                 focusedPath = belowNode.path
                 focusedKey = belowNode.key
+                inputMachines.focusMachine.highlightedPath = nil
             } else if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                inputMachines.focusMachine.blurredFocusPath = prevFp
+                finishPreeditIfNeeded(forPath: prevFp, at: now)
                 focusedPath = nil
                 focusedKey = nil
+                inputMachines.focusMachine.highlightedPath = nil
                 imeReset = true
                 downFocusChanged = true
             }
         } else {
-            let isTextBox = node.el.handlers.editLens != nil
-            let shouldFocusNode = isTextBox || (!preservesFocus && nodeTakesFocus(node.el))
-            if !preservesSel && !onLink && shouldFocusNode {
-                if focusedPath != node.path {
+            let focusableTarget: FlatNode? = {
+                if isTextBox || (!preservesFocus && nodeTakesFocus(node.el)) { return node }
+                guard !preservesSel && !preservesFocus && !onLink && !inEditSubtree else { return nil }
+                var pIdx = node.parentIndex
+                while let i = pIdx, i < flatNodes.count {
+                    let cand = flatNodes[i]
+                    if cand.effectiveInert { return nil }
+                    if nodeTakesFocus(cand.el) { return cand }
+                    if cand.el.isModal { return nil }
+                    pIdx = cand.parentIndex
+                }
+                return nil
+            }()
+            if !preservesSel && !onLink, let target = focusableTarget {
+                if focusedPath != target.path {
                     let prevNode = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0] }
-                    handleKitFocusTransition(prevNode: prevNode, newPath: node.path, at: now)
+                    handleKitFocusTransition(prevNode: prevNode, newPath: target.path, at: now)
+                    finishPreeditIfNeeded(forPath: focusedPath, at: now)
                     imeReset = true
                     downFocusChanged = true
                 }
-                focusedPath = node.path
-                focusedKey = node.key
+                inputMachines.focusMachine.blurredFocusPath = nil
+                focusedPath = target.path
+                focusedKey = target.key
+                inputMachines.focusMachine.highlightedPath = nil
             } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
                 if let prevFp = focusedPath {
                     let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                     handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                    inputMachines.focusMachine.blurredFocusPath = prevFp
+                    finishPreeditIfNeeded(forPath: prevFp, at: now)
                     focusedPath = nil
                     focusedKey = nil
+                    inputMachines.focusMachine.highlightedPath = nil
                     imeReset = true
                     downFocusChanged = true
                 }
@@ -8247,7 +8549,7 @@ public final class Runtime<State> {
         var downAllLiveOnly = true
 
         if let onDown = node.el.handlers.onPointerDown {
-            var tx = makeTx(at: now, button: button)
+            var tx = makeTx(at: now, button: button, mods: mods == .none ? nil : mods)
             onDown(&state, press, &tx)
             downRanHandler = true
             downAllLiveOnly = downAllLiveOnly && tx.liveOnlyRequested
@@ -8258,13 +8560,33 @@ public final class Runtime<State> {
         if let editLens = node.el.handlers.editLens {
             let snapshot = state
             var edit = editLens.get(state)
+            let isSecure = edit.isSecure || node.el.isSecure
             let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+            let textSelOrigin: (Int, Int)?
             if clickCount >= 3 {
-                edit.selectAll()
+                if isSecure {
+                    edit.selectAll()
+                    textSelOrigin = nil
+                } else if edit.multiline {
+                    let origin = edit.hardLineParagraphRange(atUTF8Offset: offset)
+                    edit.selectHardLine(atUTF8Offset: offset)
+                    textSelOrigin = origin
+                } else {
+                    edit.selectAll()
+                    textSelOrigin = nil
+                }
             } else if clickCount == 2 {
-                edit.selectWord(atUTF8Offset: offset)
+                if isSecure {
+                    edit.selectAll()
+                    textSelOrigin = nil
+                } else {
+                    let origin = edit.wordUnitRange(atUTF8Offset: offset)
+                    edit.selectWord(atUTF8Offset: offset)
+                    textSelOrigin = origin
+                }
             } else {
                 edit.setCursor(utf8Offset: offset, extendSelection: mods.shift)
+                textSelOrigin = nil
             }
             editLens.set(&state, edit)
             activeDrag = DragSession(
@@ -8280,13 +8602,14 @@ public final class Runtime<State> {
                 button: button,
                 mods: mods,
                 isTextSelectionDrag: true,
+                textSelectionOrigin: textSelOrigin,
                 stateSnapshotBeforeDrag: snapshot
             )
             dirtyCommit(at: now)
             return
         }
 
-        let hasDragOut = node.el.handlers.dragOut != nil || node.el.attachedDragOutItem != nil
+        let hasDragOut = inputMachines.osDragSupported && (node.el.handlers.dragOut != nil || node.el.attachedDragOutItem != nil)
         if button == .primary && hasDragOut {
             let threshold = node.el.handlers.dragThreshold ?? DragItem.defaultThreshold
             armedDragOut = (path: node.path, key: node.key, startWindow: pos, bounds: rect, threshold: threshold)
@@ -8322,7 +8645,9 @@ public final class Runtime<State> {
                     startLocal: local,
                     size: elemSize,
                     clicks: clickCount,
-                    mods: mods
+                    mods: mods,
+                    phase: .down,
+                    isCancelled: false
                 ),
                 &tx
             )
@@ -8359,13 +8684,27 @@ public final class Runtime<State> {
             applyHoverWithin(within.inside, held: false, at: now)
         }
         syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
+        var pairInfo = inputMachines.currentDoubleClickPair
+        inputMachines.currentDoubleClickPair = nil
+        if pointerMovedAtUp, var p = pairInfo {
+            if !PressRun.withinSlop(p.downPoint, pos) {
+                p.moved = true
+            }
+            pairInfo = p
+        }
         let suppressedClickFromSelDrag = handleSelectablePointerUp(at: pos, button: button, at: now)
         let hadPressVisual = releasedPath.flatMap { nodeByPath[$0] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false
         var upRanHandler = false
         var upAllLiveOnly = true
+        if cxSettings.selectionRectsReadByView {
+            dirtyCommit(at: now)
+        }
 
+        defer { leaveAfterRelease(at: now) }
         var draggedPastThreshold = suppressedClickFromSelDrag
+        var hadActiveDrag = false
         if let drag = activeDrag {
+            hadActiveDrag = !drag.isTextSelectionDrag
             activeDrag = nil
             draggedPastThreshold = suppressedClickFromSelDrag || (!drag.isTextSelectionDrag &&
                 (drag.movedBeyondSlop || hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0))
@@ -8373,12 +8712,58 @@ public final class Runtime<State> {
                 clickCount = 0
                 lastClickTime = -.infinity
             }
-            if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = makeTx(at: now, button: drag.button)
-                onEnd(&state, false, &tx)
-                upRanHandler = true
-                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            if !drag.isTextSelectionDrag, let idx = nodeByPath[drag.path] {
+                let node = flatNodes[idx]
+                let sx = abs(drag.startScale.x) > 1e-6 ? drag.startScale.x : 1.0
+                let sy = abs(drag.startScale.y) > 1e-6 ? drag.startScale.y : 1.0
+                let local = Vec2((pos.x - drag.startElementOrigin.x) / sx, (pos.y - drag.startElementOrigin.y) / sy)
+                let delta = Vec2(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y)
+                if let onDrag = node.el.handlers.onDrag {
+                    if pointerMovedAtUp {
+                        let moveDrag = Drag(
+                            window: pos,
+                            local: local,
+                            delta: delta,
+                            startLocal: drag.startLocal,
+                            size: drag.elementSize,
+                            clicks: drag.clicks,
+                            mods: mods,
+                            phase: .move,
+                            isCancelled: false
+                        )
+                        var tx = makeTx(at: now, button: drag.button)
+                        onDrag(&state, moveDrag, &tx)
+                        if !tx.askedMotion { tx.instant() }
+                        upRanHandler = true
+                        upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                    }
+                    if node.el.handlers.onDragEnd == nil {
+                        let upDrag = Drag(
+                            window: pos,
+                            local: local,
+                            delta: delta,
+                            startLocal: drag.startLocal,
+                            size: drag.elementSize,
+                            clicks: drag.clicks,
+                            mods: mods,
+                            phase: .up,
+                            isCancelled: false
+                        )
+                        var tx = makeTx(at: now, button: drag.button)
+                        onDrag(&state, upDrag, &tx)
+                        upRanHandler = true
+                        upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                    }
+                }
+                if let onEnd = node.el.handlers.onDragEnd {
+                    var tx = makeTx(at: now, button: drag.button)
+                    onEnd(&state, false, &tx)
+                    upRanHandler = true
+                    upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                }
             }
         }
 
@@ -8395,6 +8780,26 @@ public final class Runtime<State> {
         }
         let node = flatNodes[idx]
         let rect = presentedRectByPath[rPath] ?? node.targetRect
+        let insideNow: Bool
+        if node.el.pressScaleFactor != nil {
+            insideNow = pressRestingContains(path: rPath, at: pos)
+        } else {
+            insideNow = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
+        }
+        let inside = pointerMovedAtUp ? insideNow : (wasPressedInside && inputMachines.pressedStillInside)
+        let movedOutsideSlop = (pairInfo?.moved ?? false) || (inputMachines.pressedWindowPoint.map { !PressRun.withinSlop($0, pos) } ?? false)
+        if movedOutsideSlop || (draggedPastThreshold && hadActiveDrag) {
+            inputMachines.pressClicks.clear()
+        }
+        if button == .primary,
+           let p = pairInfo,
+           !p.isSecond,
+           inside,
+           !movedOutsideSlop,
+           (now - p.downAt) <= doubleClickInterval,
+           node.el.handlers.onDoubleClick != nil {
+            inputMachines.firstDoubleClick = FirstDoubleClick(path: rPath, at: p.downAt, point: p.downPoint)
+        }
         let unturnedLocal = hitGeometryByPath[rPath]?.turn?.unturn(pos) ?? pos
         let press = PointerPress(
             window: pos,
@@ -8405,8 +8810,9 @@ public final class Runtime<State> {
             clicks: button == .primary ? clickCount : 1
         )
 
+        let effMods: Mods? = (mods == .none) ? nil : mods
         if let onUp = node.el.handlers.onPointerUp {
-            var tx = makeTx(at: now, button: button)
+            var tx = makeTx(at: now, button: button, mods: effMods)
             onUp(&state, press, &tx)
             upRanHandler = true
             upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
@@ -8414,48 +8820,44 @@ public final class Runtime<State> {
         }
 
         // Fire click / double-click only if pointer released inside the pressed element (or didn't move when element moved out from under it) and not dragged!
-        let insideNow: Bool
-        if node.el.pressScaleFactor != nil {
-            insideNow = pressRestingContains(path: rPath, at: pos)
-        } else {
-            insideNow = hitGeometryByPath[rPath]?.contains(pos) ?? halfOpenContains(rect, pos)
-        }
-        let inside = pointerMovedAtUp ? insideNow : wasPressedInside
         let allowsButton = button == .primary || (button != .secondary && (node.el.handlers.pointerButtons?.contains(button) ?? false))
         if inside && allowsButton && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
-            if button == .primary && clickCount == 2, let onDbl = node.el.handlers.onDoubleClick {
-                logEvent("double press \(node.path)")
-                var tx = makeTx(at: now, button: button)
+            if node.el.handlers.onClick != nil || node.el.handlers.onClickPress != nil {
+                logInputEvent("press \(rPath)")
+            }
+            if let onClick = node.el.handlers.onClick {
+                var tx = makeTx(at: now, button: button, mods: effMods)
+                onClick(&state, &tx)
+                upRanHandler = true
+                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            }
+            if let onClickP = node.el.handlers.onClickPress {
+                var tx = makeTx(at: now, button: button, mods: effMods)
+                onClickP(&state, press, &tx)
+                upRanHandler = true
+                upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            }
+            let clickInTime = pairInfo.map { (now - $0.downAt) <= doubleClickInterval } ?? true
+            if button == .primary && (pairInfo?.isSecond == true) && !movedOutsideSlop && clickInTime,
+               let onDbl = node.el.handlers.onDoubleClick {
+                logInputEvent("double press \(rPath)")
+                var tx = makeTx(at: now, button: button, mods: effMods)
                 onDbl(&state, &tx)
                 upRanHandler = true
                 upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
                 applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-            } else {
-                if let onClick = node.el.handlers.onClick {
-                    logEvent("press \(node.path)")
-                    var tx = makeTx(at: now, button: button)
-                    onClick(&state, &tx)
-                    upRanHandler = true
-                    upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+            } else if let onBg = node.el.handlers.onBackgroundPress {
+                if node.el.handlers.onClick == nil && node.el.handlers.onClickPress == nil {
+                    logInputEvent("press \(rPath)")
                 }
-                if let onClickP = node.el.handlers.onClickPress {
-                    if node.el.handlers.onClick == nil { logEvent("press \(node.path)") }
-                    var tx = makeTx(at: now, button: button)
-                    onClickP(&state, press, &tx)
-                    upRanHandler = true
-                    upAllLiveOnly = upAllLiveOnly && tx.liveOnlyRequested
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-                }
-                if let onBg = node.el.handlers.onBackgroundPress {
-                    if node.el.handlers.onClick == nil && node.el.handlers.onClickPress == nil { logEvent("press \(node.path)") }
-                    var tx = makeTx(at: now, button: button)
-                    onBg(&state, press, &tx)
-                    applyTx(tx, at: now)
-                }
+                var tx = makeTx(at: now, button: button, mods: effMods)
+                onBg(&state, press, &tx)
+                applyTx(tx, at: now)
             }
             if InteractionGate.isOn {
-                let action = (button == .primary && clickCount == 2 && node.el.handlers.onDoubleClick != nil)
+                let action = (button == .primary && (pairInfo?.isSecond == true) && !movedOutsideSlop && clickInTime && node.el.handlers.onDoubleClick != nil)
                     ? "on_double_press"
                     : "on_press"
                 if let note = interactionNote(action: action, rank: 3, path: notePath) {
@@ -8471,107 +8873,9 @@ public final class Runtime<State> {
         }
     }
 
-    /// Recovers a lost primary pointer release (`platform/macos/pointer.rs::pointer_release_lost`).
-    /// Cancels an active primary drag at `pos` (preserving click run if within drag slop),
-    /// or falls back to `pointerUp`.
-    public func pointerReleaseLost(at pos: Vec2, at now: Double = 0.0) {
-        if let drag = activeDrag, drag.button == .primary {
-            let moved = drag.movedBeyondSlop || hypotf(pos.x - drag.startWindow.x, pos.y - drag.startWindow.y) > 4.0
-            activeDrag = nil
-            endKitPressRepeat()
-            armedDragOut = nil
-            pressedPath = nil
-            pressedKey = nil
-            pointerPosition = pos
-            if moved {
-                clickCount = 0
-                lastClickTime = -.infinity
-            }
-            if !drag.isTextSelectionDrag,
-               let idx = nodeByPath[drag.path],
-               let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = makeTx(at: now, button: .primary)
-                onEnd(&state, true, &tx)
-                applyTx(tx, at: now)
-            }
-            dirtyCommit(at: now)
-            return
-        }
-        pointerUp(at: pos, button: .primary, mods: .none, at: now)
-    }
-
-    /// Routes wheel / trackpad scroll deltas to custom `onWheel` handlers or the nearest scrollable ancestor.
+    /// Routes wheel / trackpad scroll deltas through `WheelLock` to `onWheel` or scrollable ancestors (`gesture.rs`, `scroll/x.rs`).
     public func wheel(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
-        releaseHoverHold()
-        dismissHelp(at: now)
-        let targetPos = pos ?? pointerPosition
-        if let pos { pointerPosition = pos }
-
-        // Check custom `onWheel` handler first
-        if let (customNode, _) = hitTest(at: targetPos, predicate: { $0.el.handlers.onWheel != nil }) {
-            var tx = makeTx(at: now)
-            let taken = customNode.el.handlers.onWheel?(&state, event, &tx) == true
-            Tx.took(taken, &tx)
-            if taken {
-                applyTx(tx, at: now)
-                return
-            }
-        }
-
-        // Find innermost scrollable container under `targetPos`, chaining up ancestors if at boundary
-        // Upstream `scroll_at_axis` ignores non-interactive visual overlay siblings (`drawn_rect.rs`).
-        guard let (hitNode, _) = hitTest(at: targetPos, ignoreBlockers: true, predicate: { !$0.el.layout.scrollAxes.isEmpty }) else {
-            return
-        }
-        var walkIdx: Int? = hitNode.index
-        while let i = walkIdx {
-            let scrollNode = flatNodes[i]
-            if !scrollNode.effectiveInert && !scrollNode.el.layout.scrollAxes.isEmpty {
-                let path = scrollNode.path
-                let maxExt = scrollMaxExtents[path] ?? .zero
-                let prev = scrollOffsets[path] ?? .zero
-                var cur = prev
-                if scrollNode.el.layout.scrollAxes.contains(.horizontal) {
-                    let signDx = (scrollNode.flow == .rtl) ? -event.dx : event.dx
-                    cur.x = (cur.x - signDx).clamped(to: 0...maxExt.x)
-                }
-                if scrollNode.el.layout.scrollAxes.contains(.vertical) {
-                    cur.y = (cur.y - event.dy).clamped(to: 0...maxExt.y)
-                    if maxExt.y - cur.y <= 2.0 {
-                        wasPinnedToBottom.insert(path)
-                    } else {
-                        wasPinnedToBottom.remove(path)
-                    }
-                }
-                if cur != prev {
-                    if event.dy != 0 {
-                        logEvent(String(format: "wheel %.1f", event.dy))
-                    }
-                    if event.dx != 0 {
-                        logEvent(String(format: "wheel-x %.1f", event.dx))
-                    }
-                    let nid = NodeId.hash("scroll:" + path)
-                    scrollOffsets[path] = cur
-                    frameMovedScrollPaths.insert(path)
-                    scrollStore.snap(nid, Props.SCROLL, to: cur)
-                    scrollGlidingPaths.remove(path)
-                    markScrollMovedByHand(path: path)
-                    scrollRequestsState.stepCancel()
-                    scrollMovedSinceLastFrame = true
-                    cancelPressedOnScrollIfNeeded(scrollNodeIndex: i, at: now)
-                    if scrollRequiresCommit {
-                        directScrolledPaths.insert(path)
-                        pendingCommitKind = pendingCommitKind.instant()
-                        dirtyCommit(at: now, external: false)
-                    } else {
-                        directScrolledPaths.remove(path)
-                        updateScrollPositions(at: now)
-                    }
-                    return
-                }
-            }
-            walkIdx = flatNodes[i].parentIndex
-        }
+        dispatchLockedWheel(event, at: pos, now: now)
     }
 
     /// Starts an inertial scroll `Decay` fling (`vx`, `vy` in points/sec) on the scroll container under `pos`.
@@ -8630,6 +8934,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
+        frameHadInputSinceLastFrame = true
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -8643,12 +8948,12 @@ public final class Runtime<State> {
             currentKeyBase = baseChar
             currentKeyRepeat = isRepeat
         }
+        return physicalWithFallback(event, fallbackKey: fallbackKey, at: now)
+    }
+
+    internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
         currentTime = now
-        if needsCommit {
-            commitTree(at: now, cut: forceInitialSettle)
-            needsCommit = false
-            forceInitialSettle = false
-        }
+        flushPendingCommitIfNeeded(at: now)
         if case .focusLost = event {
             dirChord = .idle
         }
@@ -8659,6 +8964,9 @@ public final class Runtime<State> {
         defer {
             activeByKeys = prevByKeys
         }
+        if case .key(let code, _, true, _) = event, code == .escape, cancelActiveDrag(at: nil, time: now) {
+            return true
+        }
 
         // Dispatch along focused -> ancestor chain (stopping at inert / modal boundary)
         if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
@@ -8666,7 +8974,15 @@ public final class Runtime<State> {
             while let curIdx = walkIdx {
                 if flatNodes[curIdx].effectiveInert { break }
                 if let onPhys = flatNodes[curIdx].el.handlers.onPhysicalInput {
-                    var tx = makeTx(at: now)
+                    let physCode: PhysicalKeyCode? = {
+                        if case .key(let c, _, _, _) = event { return c }
+                        return nil
+                    }()
+                    let physRepeat: Bool = {
+                        if case .key(_, _, _, let r) = event { return r }
+                        return false
+                    }()
+                    var tx = makeTx(at: now, physicalKey: physCode, isRepeat: physRepeat)
                     let taken = onPhys(&state, event, &tx)
                     _ = Tx.took(taken, &tx)
                     if taken {
@@ -8691,57 +9007,15 @@ public final class Runtime<State> {
                 }
             }
         }
-
-        if case .key(let physCode, let mods, let pressed, let isRepeat) = event, !isRepeat {
-            if let modKey = Self.modifierKey(for: physCode) {
-                let (nextChord, flow) = stepDirChord(
-                    dirChord,
-                    modifier: modKey,
-                    pressed: pressed,
-                    ctrl: mods.ctrl,
-                    shift: mods.shift
-                )
-                dirChord = nextChord
-                if let flow,
-                   let fPath = focusedPath,
-                   let fEl = focusedInputElement(at: fPath),
-                   let editLens = fEl.handlers.editLens {
-                    var edit = editLens.get(state)
-                    edit.forceDir(flow)
-                    editLens.set(&state, edit)
-                    dirtyCommit(at: now)
-                    return true
-                }
-                if modifierKeysEnabled {
-                    if pressed {
-                        if !heldModifierKeys.contains(modKey) {
-                            heldModifierKeys.append(modKey)
-                        }
-                    } else if let idx = heldModifierKeys.firstIndex(of: modKey) {
-                        heldModifierKeys.remove(at: idx)
-                    }
-                    let kev = KeyEvent(key: .modifier(modKey, pressed: pressed), mods: mods)
-                    return keyDown(kev, isRepeat: false, at: now)
-                }
-            } else if pressed {
-                dirChord = .idle
-            }
-        }
-
-        if let fallbackKey {
-            if case .key(_, _, let pressed, let isRepeat) = event {
-                if !pressed {
-                    return keyUp(fallbackKey, at: now)
-                }
-                return keyDown(fallbackKey, isRepeat: isRepeat, at: now)
-            }
-            return keyDown(fallbackKey, at: now)
-        }
         return false
     }
 
     /// Synthesizes key-up modifier events for all currently held modifier keys (`overlay::hide` / blur).
     public func releaseHeldModifiers(at now: Double = 0.0) {
+        let modEvents = inputMachines.modifierKeys.apply(.focusLost, consumed: false)
+        for ev in modEvents {
+            _ = routeModifierKey(ev, at: now)
+        }
         guard !heldModifierKeys.isEmpty else { return }
         let held = heldModifierKeys
         heldModifierKeys.removeAll(keepingCapacity: true)
@@ -8754,6 +9028,8 @@ public final class Runtime<State> {
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
         frameHadInputSinceLastFrame = true
+        currentTime = now
+        flushPendingCommitIfNeeded(at: now)
         let prevKitByKeys = kitHooks.isDispatchingByKeys
         let prevByKeys = activeByKeys
         let prevRepeat = currentKeyRepeat
@@ -8769,34 +9045,53 @@ public final class Runtime<State> {
             kitHooks.isKeyRepeat = prevKitKeyRepeat
         }
         suppressRevealFromHoverCommit = false
-        dismissHelp(at: now)
         let isFocusedSecure = focusedPath.flatMap { nodeByPath[$0] }.map { flatNodes[$0].el.isSecure && !flatNodes[$0].el.isRevealed } ?? false
         if isFocusedSecure {
             logEvent("key [redacted]")
         } else {
             logEvent("key \(ev.key)")
         }
-        // 1. Escape cancels an in-progress drag and restores pre-drag state!
-        if ev.key == .escape, let drag = activeDrag {
-            state = drag.stateSnapshotBeforeDrag
-            activeDrag = nil
-            endKitPressRepeat()
-            pressedPath = nil
-            pressedKey = nil
-            if let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
-                var tx = makeTx(at: now)
-                onEnd(&state, true, &tx)
-                applyTx(tx, at: now)
+        inputMachines.focusMachine.lastPressedWasPointer = false
+        if isRepeat {
+            if inputMachines.focusMachine.suppressedRepeatKey == ev.key {
+                return true
             }
-            dirtyCommit(at: now)
+        } else {
+            inputMachines.focusMachine.suppressedRepeatKey = nil
+        }
+        let physKey = inputMachines.activePhysicalKey
+        dismissHelp(at: now)
+        // 1. Escape cancels an in-progress drag (`DragPhase.up`, `isCancelled = true`)
+        if ev.key == .escape, cancelActiveDrag(at: nil, time: now) {
             return true
         }
         if !isRepeat {
             pressedKeyFocusPath = focusedPath
         }
+        let composingNow = isAnyImeComposing
+        inputMachines.keyReleases.down(composing: composingNow, repeat: isRepeat) { focusedPath }
+        if (ev.key == .enter || ev.key == .escape) && composingNow {
+            inputMachines.keyReleases.imeTookKey()
+            return true
+        }
 
         if playgroundNav(ev, isRepeat: isRepeat, at: now) {
             return true
+        }
+
+        let appFirst = (focusedPath == nil)
+        if appFirst && ev.key == .enter && ev.mods == .none, tryDefaultButtonReturn(at: now, isRepeat: isRepeat) {
+            return true
+        }
+        if appFirst && activeModalPath == nil && playgroundLive == nil,
+           let globalOnKey {
+            var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
+            let taken = globalOnKey(&state, ev, &tx)
+            let consumed = Tx.took(taken, &tx)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed)
+            if consumed {
+                return true
+            }
         }
 
         // 2. Focused element & ancestor chain
@@ -8816,8 +9111,10 @@ public final class Runtime<State> {
                 while let curIdx = walkIdx {
                     if flatNodes[curIdx].effectiveInert { break }
                     if let onKey = flatNodes[curIdx].el.handlers.onKey {
-                        var tx = makeTx(at: now)
+                        var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
                         if onKey(&state, ev, &tx) {
+                            inputMachines.pressClicks.clear()
+                            selectionState.clearClicks()
                             applyTx(tx, at: now, liveOnlyLabel: "onKey")
                             return true
                         }
@@ -8829,14 +9126,21 @@ public final class Runtime<State> {
 
             // Focused TextInput editing (`on_input_key` runs before `TextEdit.handleKey`)
             if let editLens = fNode.el.handlers.editLens {
+                inputMachines.pressClicks.clear()
+                selectionState.clearClicks()
                 if let onInputKey = fNode.el.handlers.onInputKey {
-                    var tx = makeTx(at: now)
+                    var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
                     let handled = onInputKey(&state, ev, &tx)
                     if Tx.took(handled, &tx) {
                         applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
                         return true
                     }
                     applyTx(tx, at: now, markDirtyIfNotLiveOnly: false)
+                }
+                if ev.mods == .none, (ev.key == .arrowDown || ev.key == .arrowUp || ev.key == .enter),
+                   findSearchFollowsGroup(forFocusedIndex: fIdx) != nil,
+                   handleMenuOrGroupNavigation(ev, focusedIndex: fIdx, isRepeat: isRepeat, at: now) {
+                    return true
                 }
                 if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
                     let pasteContent = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
@@ -8885,6 +9189,7 @@ public final class Runtime<State> {
                 case .ignored:
                     if edit.didRequestBlur && activeModalPath == nil {
                         if !isRepeat {
+                            inputMachines.focusMachine.suppressedRepeatKey = ev.key
                             focusedPath = nil
                             focusedKey = nil
                             syncedEditFocusedPaths.removeAll()
@@ -8896,13 +9201,17 @@ public final class Runtime<State> {
                 case .navigation:
                     editLens.set(&state, edit)
                     pendingCaretFollow = true
+                    selectionState.pendingFollowCaret = true
                     dirtyCommit(at: now)
                     return true
                 case .modified:
+                    selectionState.pendingFollowCaret = true
                     deliverInputEdit(el: fNode.el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                     return true
                 case .submit:
+                    if isRepeat { return true }
                     editLens.set(&state, edit)
+                    selectionState.pendingFollowCaret = true
                     if let onSubmit = fNode.el.handlers.onTextSubmit {
                         var tx = makeTx(at: now)
                         tx.animated()
@@ -8913,20 +9222,30 @@ public final class Runtime<State> {
                     }
                     // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
                 case .copy(let copied):
+                    selectionState.pendingFollowCaret = true
                     recordCopy(ClipboardContent(copied, html: preCopyHTML))
                     if edit.text != prevEdit.text {
                         deliverInputEdit(el: fNode.el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                     } else {
                         editLens.set(&state, edit)
-                        if let onChange = fNode.el.handlers.onTextChange {
+                        if fNode.el.handlers.onTextChange != nil || fNode.el.handlers.onInputChange != nil {
                             var tx = makeTx(at: now)
-                            onChange(&state, edit.text, &tx)
+                            _ = fNode.el.handlers.onInputChange?(&state, edit.text, &tx)
+                            fNode.el.handlers.onTextChange?(&state, edit.text, &tx)
                             applyTx(tx, at: now)
                         }
                         dirtyCommit(at: now)
                     }
                     return true
                 }
+            }
+
+            if handleFocusedStepKey(ev, node: fNode, at: now) {
+                return true
+            }
+
+            if handleMenuOrGroupNavigation(ev, focusedIndex: fIdx, isRepeat: isRepeat, at: now) {
+                return true
             }
 
             // Space/Enter/ContextMenu activates focused text links first, then buttons/rows (`takesReturn`).
@@ -8977,14 +9296,12 @@ public final class Runtime<State> {
                (isSpaceKey || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
                 if isRepeat { return true }
                 if let onClick = fNode.el.handlers.onClick {
-                    focusVisible = true
                     var tx = makeTx(at: now)
                     onClick(&state, &tx)
                     applyTx(tx, at: now)
                     return true
                 }
                 if let onClickPress = fNode.el.handlers.onClickPress {
-                    focusVisible = true
                     let r = presentedRectByPath[fNode.path] ?? fNode.targetRect
                     let press = PointerPress(
                         window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
@@ -9000,7 +9317,6 @@ public final class Runtime<State> {
                     return true
                 }
             }
-
             if handleFocusedStepKey(ev, node: fNode, at: now) {
                 return true
             }
@@ -9009,6 +9325,8 @@ public final class Runtime<State> {
             if handleFocusGroupKey(ev, focusedIndex: fIdx, at: now) {
                 return true
             }
+        } else if handleUnfocusedMenuNavigation(ev, isRepeat: isRepeat, at: now) {
+            return true
         }
 
         // 2b. Unhandled Escape inside an active modal blurs focus and dismisses the innermost modal
@@ -9017,6 +9335,7 @@ public final class Runtime<State> {
             if isRepeat {
                 return true
             }
+            inputMachines.focusMachine.suppressedRepeatKey = ev.key
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
@@ -9051,29 +9370,13 @@ public final class Runtime<State> {
         }
 
         // 3b. Default button activation on unmodified Return when no control consumed it
-        if ev.key == .enter && ev.mods == .none && !isRepeat,
-           let defNode = defaultButtonNode() {
-            if let onClick = defNode.el.handlers.onClick {
-                var tx = makeTx(at: now)
-                onClick(&state, &tx)
-                applyTx(tx, at: now)
-                return true
-            }
-            if let onClickPress = defNode.el.handlers.onClickPress {
-                let r = presentedRectByPath[defNode.path] ?? defNode.targetRect
-                let press = PointerPress(
-                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
-                    local: Vec2(r.width * 0.5, r.height * 0.5),
-                    elementSize: Vec2(r.width, r.height),
-                    button: .primary,
-                    mods: .none,
-                    clicks: 1
-                )
-                var tx = makeTx(at: now)
-                onClickPress(&state, press, &tx)
-                applyTx(tx, at: now)
-                return true
-            }
+        if !appFirst && ev.key == .enter && ev.mods == .none,
+           tryDefaultButtonReturn(at: now, isRepeat: isRepeat) {
+            return true
+        }
+
+        if contextMenuKey(ev, at: now) {
+            return true
         }
 
         if dispatchContextMenuKey(
@@ -9090,12 +9393,12 @@ public final class Runtime<State> {
             if !live.typing(appState: state), let handled = playgroundAppKey(ev, at: now), handled {
                 return true
             }
-        } else if playgroundLive == nil, let globalOnKey {
-            var tx = makeTx(at: now)
+        } else if !appFirst && playgroundLive == nil, let globalOnKey {
+            var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
             let taken = globalOnKey(&state, ev, &tx)
-            Tx.took(taken, &tx)
-            if taken {
-                applyTx(tx, at: now, liveOnlyLabel: "onKey")
+            let consumed = Tx.took(taken, &tx)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed)
+            if consumed {
                 return true
             }
         }
@@ -9199,6 +9502,7 @@ public final class Runtime<State> {
         if node.el.layout.stickBottom {
             if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
         }
+        logInputEvent("page \(ev.key)")
         dirtyCommit(at: now)
         return true
     }
@@ -9648,6 +9952,7 @@ public final class Runtime<State> {
             pendingTxFocusKey = nil
             kitHooks.pendingTxFocusVisible = nil
             pendingTxFocusVisible = nil
+            inputMachines.focusMachine.blurredFocusPath = nil
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
@@ -9663,6 +9968,7 @@ public final class Runtime<State> {
             kitHooks.pendingTxFocusVisible = tx.requestedFocusVisible
             pendingTxFocusVisible = tx.focusAskedByReturn ? tx.requestedFocusVisible : nil
             focusVisible = tx.requestedFocusVisible
+            inputMachines.focusMachine.blurredFocusPath = nil
             focusedKey = fk
             if let match = matchedNode {
                 focusedPath = match.path
@@ -10148,11 +10454,25 @@ public final class Runtime<State> {
         kitHooks.windowFocused = focused
         var handledFocus = false
         var cancelOrHoverDirty = false
+        func resetInputMachinesOnBlur() {
+            if cancelActiveDrag(at: nil, time: t) { cancelOrHoverDirty = true }
+            inputMachines.secondaryCapture = .up
+            inputMachines.pressClicks.clear()
+            selectionState.clearClicks()
+            inputMachines.firstDoubleClick = nil
+            inputMachines.keyReleases.lost()
+            inputMachines.wheelLock.lost()
+            inputMachines.currentMods = .none
+            inputMachines.pendingKeysLost = false
+            inputMachines.pendingKeysLostTime = nil
+            _ = physicalWithFallback(.focusLost, fallbackKey: nil, at: t)
+        }
         if let hook = onFocus {
             handledFocus = true
             if playgroundDispatchFocus(focused, hook: hook, at: t) {
                 if !focused {
-                    _ = cancelPointerForFocusLoss(at: t)
+                    resetInputMachinesOnBlur()
+                    if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
                     finishComposition(at: t)
                     endHoverDelays(at: t)
                     _ = endKitHoverDelays(at: t)
@@ -10165,6 +10485,7 @@ public final class Runtime<State> {
             update(at: t) { s, tx in hook(&s, focused, &tx) }
         }
         if !focused {
+            resetInputMachinesOnBlur()
             if cancelPointerForFocusLoss(at: t) { cancelOrHoverDirty = true }
             finishComposition(at: t)
             let hadDelayedHover = !hoverDelays.isEmpty
@@ -10225,17 +10546,23 @@ public final class Runtime<State> {
 
     /// Returns the focused input caret rect in window coordinates, if available.
     public func focusedCaretRect() -> MotionRect? {
-        guard let c = (currentFocusedCaret() ?? cxSettings.lastCommittedCaret)?.rect,
-              c.count >= 4 else {
-            return nil
+        if let c = (currentFocusedCaret() ?? cxSettings.lastCommittedCaret)?.rect,
+           c.count >= 4 {
+            return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
         }
-        return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+        if let a = imeArea, a.count >= 4 {
+            return MotionRect.fromXYWH(a[0], a[1], a[2], a[3])
+        }
+        return nil
     }
 
     /// Commits any open preedit composition on focus loss or window deactivation (`Runtime::finish_composition`).
     public func finishComposition(at now: Double? = nil) {
         let t = now ?? currentTime
         imeReset = true
+        if finishAppImeComposition(at: t) {
+            return
+        }
         guard let fp = focusedPath,
               let el = focusedInputElement(at: fp),
               let editLens = el.handlers.editLens else {
@@ -10253,9 +10580,64 @@ public final class Runtime<State> {
     /// Applies an AppKit/OS `ImeEvent` to the focused `TextEdit` and forwards to `onIme` (`Runtime::ime`).
     @discardableResult
     public func dispatchImeEvent(_ event: ImeEvent, at now: Double? = nil) -> Bool {
+        dispatchImeEvent(event, recordReleaseGuard: true, at: now)
+    }
+
+    @discardableResult
+    internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
         frameHadInputSinceLastFrame = true
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime
+        let shellIme: Ime?
+        switch event {
+        case .preedit(let str, let cursorUTF8, let clauses):
+            shellIme = .preedit(ImePreedit(text: str, cursorUTF8: cursorUTF8, clauses: clauses))
+        case .commit(let str):
+            shellIme = .commit(str)
+        case .select:
+            shellIme = nil
+        case .enabled:
+            shellIme = .enabled
+        case .disabled:
+            shellIme = .disabled
+        }
+        let appHandlesOnly = inputMachines.appIme.isComposing || (shellIme == .enabled || shellIme == .disabled) || !hasFocusedTextInput
+        let activeIme: Bool = {
+            if isAnyImeComposing { return true }
+            switch event {
+            case .preedit(let s, _, _), .commit(let s): return !s.isEmpty
+            case .select, .enabled, .disabled: return false
+            }
+        }()
+        if appHandlesOnly, let shellIme {
+            let ran = dispatchAppIme(shellIme, at: t)
+            if recordReleaseGuard && ran && activeIme { inputMachines.keyReleases.imeTookKey() }
+            return ran
+        }
+        let handledByEdit = applyImeToFocusedField(event, at: t)
+        let handledByHook: Bool
+        if let shellIme, let hook = onIme {
+            var tx = makeTx(at: t)
+            handledByHook = Tx.took(hook(&state, shellIme, &tx), &tx)
+            applyTx(tx, at: t, markDirtyIfNotLiveOnly: handledByHook)
+        } else {
+            handledByHook = false
+        }
+        let ran = handledByEdit || handledByHook
+        if recordReleaseGuard && ran && activeIme { inputMachines.keyReleases.imeTookKey() }
+        if case .select = event {
+            return ran
+        }
+        if InteractionGate.isOn,
+           let note = interactionNote(action: "key_edit", rank: 3, path: focusedPath) {
+            let endedNs = DispatchTime.now().uptimeNanoseconds
+            let handlerMs = Double(endedNs >= imeStartNs ? endedNs - imeStartNs : 0) / 1_000_000.0
+            perfWatch.interaction.noted(note: note, arrivedNs: imeStartNs, startedNs: imeStartNs, handlerMs: handlerMs)
+        }
+        return ran
+    }
+
+    internal func applyImeToFocusedField(_ event: ImeEvent, at t: Double) -> Bool {
         var handledByEdit = false
         if let fp = focusedPath,
            nodeByPath[fp].map({ !flatNodes[$0].effectiveInert }) ?? true,
@@ -10274,39 +10656,21 @@ public final class Runtime<State> {
             case .navigation:
                 editLens.set(&state, edit)
                 pendingCaretFollow = true
+                selectionState.pendingFollowCaret = true
                 dirtyCommit(at: t)
                 handledByEdit = true
             case .modified:
+                selectionState.pendingFollowCaret = true
                 deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t)
                 handledByEdit = true
             case .submit, .copy:
                 editLens.set(&state, edit)
+                selectionState.pendingFollowCaret = true
                 dirtyCommit(at: t)
                 handledByEdit = true
             }
         }
-
-        let shellIme: Ime
-        switch event {
-        case .preedit(let str, let cursorUTF8, let clauses):
-            shellIme = .preedit(ImePreedit(text: str, cursorUTF8: cursorUTF8, clauses: clauses))
-        case .commit(let str):
-            shellIme = .commit(str)
-        case .select:
-            return handledByEdit
-        case .enabled:
-            shellIme = .enabled
-        case .disabled:
-            shellIme = .disabled
-        }
-        let handledByHook = dispatchIme(shellIme, at: t)
-        if InteractionGate.isOn,
-           let note = interactionNote(action: "key_edit", rank: 3, path: focusedPath) {
-            let endedNs = DispatchTime.now().uptimeNanoseconds
-            let handlerMs = Double(endedNs >= imeStartNs ? endedNs - imeStartNs : 0) / 1_000_000.0
-            perfWatch.interaction.noted(note: note, arrivedNs: imeStartNs, startedNs: imeStartNs, handlerMs: handlerMs)
-        }
-        return handledByEdit || handledByHook
+        return handledByEdit
     }
 
     /// Resolves the pointer cursor shape under the current pointer / press target (`Runtime::cursor`).
@@ -10318,9 +10682,10 @@ public final class Runtime<State> {
             return .default
         }
 
-        let targetPath = pressedPath ?? hoveredPath
         var curIdx: Int?
-        if let tp = targetPath, let idx = nodeByPath[tp], !flatNodes[idx].effectiveInert {
+        if let tp = pressedPath, let idx = nodeByPath[tp], !flatNodes[idx].effectiveInert {
+            curIdx = idx
+        } else if let hp = hoveredPath, let idx = hoverLive(hp) {
             curIdx = idx
         } else if let hit = hitTest(at: pointerPosition, predicate: { _ in true }) {
             curIdx = nodeByPath[hit.node.path]
@@ -10333,10 +10698,10 @@ public final class Runtime<State> {
 
         let leafEl = flatNodes[idx].el
         if leafEl.attachedCursor == nil {
-            if leafEl.handlers.editLens != nil || leafEl.role == .textInput {
+            if leafEl.handlers.editLens != nil || leafEl.role == ElementRole.textInput || leafEl.isSelectable {
                 return .text
             }
-            if leafEl.role == .link || leafEl.a11yHref != nil {
+            if leafEl.role == ElementRole.link || leafEl.a11yHref != nil {
                 return .pointer
             }
         }
@@ -10357,6 +10722,7 @@ public final class Runtime<State> {
     }
 
     public func dispatchModifiers(_ mods: Mods, at now: Double? = nil) {
+        inputMachines.currentMods = mods
         guard let hook = onModifiers else { return }
         updateIf(at: now) { s, tx in
             hook(&s, mods, &tx)
@@ -10609,8 +10975,12 @@ public final class Runtime<State> {
         } else {
             nextIdx = backward ? candidateIndices.last! : candidateIndices.first!
         }
+        if focusedPath != flatNodes[nextIdx].path {
+            finishPreeditIfNeeded(forPath: focusedPath, at: currentTime)
+        }
         focusedPath = flatNodes[nextIdx].path
         focusedKey = flatNodes[nextIdx].key
+        inputMachines.focusMachine.highlightedPath = nil
         if hasActiveTextLinks(flatNodes[nextIdx].el) {
             let links = flatNodes[nextIdx].el.textLinks
             let k = backward ? max(0, links.count - 1) : 0
@@ -10636,7 +11006,38 @@ public final class Runtime<State> {
         }.first
     }
 
-    private func findFocusGroupAncestor(of idx: Int) -> Int? {
+    private func playgroundIsTyping() -> Bool {
+        playgroundLive?.typing(appState: state) == true
+    }
+
+    private func tryDefaultButtonReturn(at now: Double, isRepeat: Bool) -> Bool {
+        guard let defNode = defaultButtonNode() else { return false }
+        if isRepeat { return true }
+        if let onClick = defNode.el.handlers.onClick {
+            var tx = makeTx(at: now)
+            onClick(&state, &tx)
+            applyTx(tx, at: now)
+            return true
+        }
+        if let onClickPress = defNode.el.handlers.onClickPress {
+            let r = presentedRectByPath[defNode.path] ?? defNode.targetRect
+            let press = PointerPress(
+                window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
+                local: Vec2(r.width * 0.5, r.height * 0.5),
+                elementSize: Vec2(r.width, r.height),
+                button: .primary,
+                mods: .none,
+                clicks: 1
+            )
+            var tx = makeTx(at: now)
+            onClickPress(&state, press, &tx)
+            applyTx(tx, at: now)
+            return true
+        }
+        return false
+    }
+
+    internal func findFocusGroupAncestor(of idx: Int) -> Int? {
         var cur: Int? = idx
         while let i = cur {
             if flatNodes[i].el.focusGroup {
@@ -10811,7 +11212,8 @@ public final class Runtime<State> {
             pixelScale: pixelScale,
             emitGlyphs: false
         )
-        let localX = (windowPos.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x)
+        let hScroll = resolvedEdit.multiline ? 0 : (inputMachines.inputScroll[node.path] ?? 0)
+        let localX = (windowPos.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(0.01, sc.x) + hScroll
         let localY = (windowPos.y - (rect.y + node.el.layout.padding.top * sc.y)) / max(0.01, sc.y)
         let hit = textSystem.hitTestUTF8Offset(in: shaped, localX: localX, localY: localY, pixelScale: pixelScale)
         if resolvedEdit.isSecure {
@@ -10875,7 +11277,7 @@ public final class Runtime<State> {
         return false
     }
 
-    private func dismissHelp(at now: Double) {
+    internal func dismissHelp(at now: Double) {
         if helpState.tipState.target != nil {
             stepHelpState(event: .dismiss, at: now)
         }

@@ -95,8 +95,19 @@ extension Runtime {
     /// or deepest-first within the active scope when unfocused/at-rest (`Runtime::route_key_up`).
     @discardableResult
     public func keyUp(_ ev: KeyEvent, at now: Double = 0) -> Bool {
-        let pressedFocus = pressedKeyFocusPath
-        pressedKeyFocusPath = nil
+        keyUp(ev, fromPhysicalRelease: false, at: now)
+    }
+
+    @discardableResult
+    internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0) -> Bool {
+        if !fromPhysicalRelease && inputMachines.keyReleases.eat(composing: isAnyImeComposing) {
+            return false
+        }
+        let routedPressFocus = inputMachines.keyReleases.route()
+        let pressedFocus = routedPressFocus ?? pressedKeyFocusPath
+        if inputMachines.keyReleases.held == nil {
+            pressedKeyFocusPath = nil
+        }
 
         let activeModalIdx = activeModalPath.flatMap { nodeByPath[$0] }
         let allowedNode: (Int) -> Bool = { i in
@@ -136,9 +147,10 @@ extension Runtime {
             chain.sort { (sharedRank[$0] ?? 0) < (sharedRank[$1] ?? 0) }
         }
 
+        let physKey = inputMachines.activePhysicalKey
         for idx in chain {
             guard idx < flatNodes.count, let onUp = flatNodes[idx].el.handlers.onKeyUp else { continue }
-            var tx = makeTx(at: now)
+            var tx = makeTx(at: now, physicalKey: physKey)
             let taken = onUp(&state, ev, &tx)
             _ = Tx.took(taken, &tx)
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: taken)
@@ -496,6 +508,8 @@ extension Runtime {
                launchedFlightIds.contains(nid) ||
                growthRows["growth:\(n.path)"]?.track.moving == true ||
                growthRows["fold:\(n.path)"]?.track.moving == true ||
+               ((n.el.growthSpec != nil || n.el.foldGlideSpec != nil) &&
+                growthRows.contains(where: { ($0.key.hasPrefix("growth:\(n.path)/") || $0.key.hasPrefix("fold:\(n.path)/")) && $0.value.track.moving })) ||
                scrollGlidingPaths.contains(n.path) {
                 return true
             }
@@ -628,14 +642,9 @@ extension Runtime {
             if let cur = hoveredPath, hoverLive(cur) == nil {
                 hoveredPath = nil
                 hoveredKey = nil
-                if let oldIdx = nodeByPath[cur], !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
-                    isDispatchingHover = true
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, false, &tx)
-                    applyTx(tx, at: currentTime)
-                    isDispatchingHover = false
-                }
+                isDispatchingHover = true
+                dispatchHoverCallbacks(to: nil, at: currentTime)
+                isDispatchingHover = false
             }
         } else if ptrInWindow {
             let newHoveredLink: TextLinkTarget? = {
@@ -650,24 +659,10 @@ extension Runtime {
                 hoveredLink = newHoveredLink
             }
             if candidatePath != hoveredPath {
-                let oldPath = hoveredPath
                 hoveredPath = candidatePath
                 hoveredKey = candidateHit?.node.key
                 isDispatchingHover = true
-                if let old = oldPath, let oldIdx = nodeByPath[old],
-                   !flatNodes[oldIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[oldIdx].el.handlers.onHover {
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, false, &tx)
-                    applyTx(tx, at: currentTime)
-                }
-                if let np = candidatePath, let newIdx = nodeByPath[np],
-                   !flatNodes[newIdx].el.hasKitHoverDelays,
-                   let cb = flatNodes[newIdx].el.handlers.onHover {
-                    var tx = makeTx(at: currentTime)
-                    cb(&state, true, &tx)
-                    applyTx(tx, at: currentTime)
-                }
+                dispatchHoverCallbacks(to: candidatePath, at: currentTime)
                 isDispatchingHover = false
             }
         }

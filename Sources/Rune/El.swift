@@ -72,6 +72,13 @@ public struct PointerEvent: Sendable, Equatable {
     }
 }
 
+/// Phase of a pointer drag gesture (`crates/rune/src/el/mod.rs` `Phase`).
+public enum DragPhase: String, Sendable, Equatable, Hashable {
+    case down
+    case move
+    case up
+}
+
 /// Drag event payload delivered to `onDrag` (`rune::Drag`).
 public struct Drag: Sendable, Equatable {
     /// Current pointer position in window points.
@@ -87,6 +94,8 @@ public struct Drag: Sendable, Equatable {
     /// Click count on press (`1` = normal drag, `2` = double-click-and-drag word selection).
     public var clicks: Int
     public var mods: Mods
+    /// Phase of this drag callback (`.down`, `.move`, `.up`).
+    public var phase: DragPhase
     /// Whether the gesture ended cancelled (Escape / focus loss / taken away, `Drag::cancelled`).
     public var isCancelled: Bool
     /// Pointer in desktop pixels when hosted in a native window (`Drag::screen_point`).
@@ -100,6 +109,7 @@ public struct Drag: Sendable, Equatable {
         size: Vec2,
         clicks: Int = 1,
         mods: Mods = .none,
+        phase: DragPhase = .move,
         isCancelled: Bool = false,
         screen: (Int32, Int32)? = nil
     ) {
@@ -110,6 +120,7 @@ public struct Drag: Sendable, Equatable {
         self.size = size
         self.clicks = clicks
         self.mods = mods
+        self.phase = phase
         self.isCancelled = isCancelled
         self.screen = screen
     }
@@ -122,6 +133,7 @@ public struct Drag: Sendable, Equatable {
             && lhs.size == rhs.size
             && lhs.clicks == rhs.clicks
             && lhs.mods == rhs.mods
+            && lhs.phase == rhs.phase
             && lhs.isCancelled == rhs.isCancelled
             && lhs.screen?.0 == rhs.screen?.0
             && lhs.screen?.1 == rhs.screen?.1
@@ -150,19 +162,28 @@ public struct WheelEvent: Sendable, Equatable {
     public var precise: Bool
     public var phase: GesturePhase
     public var mods: Mods
+    public var momentum: Bool
+    public var x: Float
+    public var y: Float
 
     public init(
         dx: Float = 0,
         dy: Float = 0,
         precise: Bool = true,
         phase: GesturePhase = .changed,
-        mods: Mods = .none
+        mods: Mods = .none,
+        momentum: Bool = false,
+        x: Float = 0,
+        y: Float = 0
     ) {
         self.dx = dx
         self.dy = dy
         self.precise = precise
         self.phase = phase
         self.mods = mods
+        self.momentum = momentum
+        self.x = x
+        self.y = y
     }
 }
 
@@ -211,7 +232,20 @@ public struct Tx {
     public internal(set) var colorMotionSpring: Spring? = nil
     public internal(set) var clock: Double = 0.0
     public internal(set) var button: PointerButton = .primary
+    public internal(set) var mods: Mods = .none
+    public internal(set) var physicalKeyCode: PhysicalKeyCode? = nil
+    public internal(set) var isKeyRepeat: Bool = false
+    public internal(set) var focusedElementKey: String? = nil
     public internal(set) var pasteRequested: Bool = false
+
+    /// Physical key that produced this key event, if any (`Tx::physical_key`).
+    public func physicalKey() -> PhysicalKeyCode? { physicalKeyCode ?? physicalKeyValue }
+
+    /// True while a held key auto-repeats (`Tx::key_repeat`).
+    public func keyRepeat() -> Bool { isKeyRepeat || keyRepeatValue }
+
+    /// The currently focused element's key (or `"#<index>"` if unkeyed), if any (`Tx::focused`).
+    public func focused() -> String? { focusedElementKey }
 
     public internal(set) var settleRequested: Bool {
         get { commitKind.snaps }
@@ -331,14 +365,8 @@ public struct Tx {
     internal var traceEvents: [String] = []
     internal var traceChannels: [(name: String, kind: TraceChannels.Kind, value: Float)] = []
 
-    /// Physical key position for the current key/key-up handler (`Tx::physical_key`).
-    public func physicalKey() -> PhysicalKeyCode? { physicalKeyValue }
-
     /// Unmodified base character for the current key/key-up handler (`Tx::key_base`).
     public func keyBase() -> Character? { keyBaseValue }
-
-    /// Whether the current key event is an auto-repeat (`Tx::key_repeat`).
-    public func keyRepeat() -> Bool { keyRepeatValue }
 
     /// Whether this runtime has an attached motion or tooling trace (`Tx::tracing`).
     public var tracing: Bool { tracingEnabled }
@@ -2994,9 +3022,6 @@ public struct El<State> {
         links.append(link)
         copy.textLinks = links
         copy.focusable = true
-        if copy.attachedCursor == nil {
-            copy.runtimeExtras["cursor"] = Cursor.pointer
-        }
         return copy
     }
 
