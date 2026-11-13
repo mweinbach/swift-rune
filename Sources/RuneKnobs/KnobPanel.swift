@@ -465,6 +465,16 @@ public extension RuneKnobs {
             }
 
         panel = panel.child(
+            headerBar(
+                knobs: knobs,
+                groups: groups,
+                current: knobs.current(in: groups),
+                style: style,
+                keyPath: keyPath
+            )
+        )
+
+        panel = panel.child(
             sideFilterBar(
                 knobs: knobs,
                 groups: groups,
