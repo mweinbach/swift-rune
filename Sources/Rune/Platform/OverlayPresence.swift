@@ -716,7 +716,7 @@ public struct OverlayHold: Equatable, Sendable {
         }
     }
 
-    private var clicks: [OverlayHoldClick] {
+    public var clicks: [OverlayHoldClick] {
         switch state {
         case let .free(ups):
             return ups.map { OverlayHoldClick.up($0) }
@@ -926,8 +926,26 @@ public final class OverlayPointerState {
         hold.isCaptured
     }
 
+    public var isWanted: Bool {
+        resolvedInput != .none || followPointer || isCaptured
+    }
+
     public var deadline: Double? {
         hold.deadline
+    }
+
+    public func deadline(poll: Double?, occluded: Bool) -> Double? {
+        let activePoll = occluded ? nil : poll
+        switch (activePoll, hold.deadline) {
+        case let (a?, b?):
+            return min(a, b)
+        case let (a?, nil):
+            return a
+        case let (nil, b?):
+            return b
+        case (nil, nil):
+            return nil
+        }
     }
 
     public func over(_ point: Vec2) -> Bool {
@@ -950,7 +968,8 @@ public final class OverlayPointerState {
         isCaptured || over(point)
     }
 
-    private func apply(_ event: OverlayHoldEvent) -> Vec2? {
+    @discardableResult
+    public func apply(_ event: OverlayHoldEvent) -> Vec2? {
         var delivered: Vec2? = nil
         for effect in hold.step(event) {
             switch effect {
@@ -963,6 +982,16 @@ public final class OverlayPointerState {
             }
         }
         return delivered
+    }
+
+    public func observeRelease(buttons: UInt, now: Double, at point: Vec2) {
+        _ = apply(.sampled(buttonDown: (buttons & 1) != 0, now: now, at: point))
+    }
+
+    public func takeRecoveredRelease() -> Vec2? {
+        let lost = recoveredRelease
+        recoveredRelease = nil
+        return lost
     }
 
     public func recordClick(down: Bool, at point: Vec2) {

@@ -465,6 +465,7 @@ public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
     case unsupportedVideoContainer(ext: String)
     case ffmpegUnavailable
     case ffmpegFailed(status: Int32)
+    case encoderError(message: String)
 
     public var errorDescription: String? {
         switch self {
@@ -487,12 +488,34 @@ public enum ToolingError: Error, LocalizedError, Equatable, Sendable {
             return "--video needs ffmpeg on PATH (macOS: brew install ffmpeg; Debian/Ubuntu: apt install ffmpeg)"
         case .ffmpegFailed(let status):
             return "ffmpeg failed writing video (exit status \(status))"
+        case .encoderError(let message):
+            return message
         }
     }
 }
 
 /// Headless virtual-clock runner for `--snap`, `--tree`, `--script`, `--frames`, `--out`, and `--strip`.
 public enum HeadlessRunner {
+    /// Unpremultiplies premultiplied sRGB pixel bytes in linear space (`tooling/headless.rs::straight_alpha`).
+    public static func straightAlpha(_ pixels: inout [UInt8]) {
+        let count = pixels.count - (pixels.count % 4)
+        for i in stride(from: 0, to: count, by: 4) {
+            let a = Float(pixels[i + 3]) / 255.0
+            if a == 0.0 {
+                pixels[i] = 0
+                pixels[i + 1] = 0
+                pixels[i + 2] = 0
+            } else if a < 1.0 {
+                for c in 0..<3 {
+                    let encoded = Float(pixels[i + c]) / 255.0
+                    let linear = DragImage.srgbDecode(encoded) / a
+                    let reencoded = DragImage.srgbEncode(min(1.0, max(0.0, linear)))
+                    pixels[i + c] = UInt8((reencoded * 255.0).rounded())
+                }
+            }
+        }
+    }
+
     public struct Output: Sendable {
         public var finalFrame: Frame
         public var treeJSON: Data
@@ -1735,18 +1758,17 @@ private final class ToolingTraceWriter {
     }
 }
 
-private final class ToolingVideoEncoder {
+internal final class ToolingVideoEncoder {
     private let width: Int
     private let height: Int
+    private let outputPath: String
     #if os(macOS) || os(Linux)
     private let process: Process
     private let stdinPipe: Pipe
     private var finished = false
     #endif
 
-    init(outputPath: String, width: Int, height: Int, fps: Double) throws {
-        self.width = width
-        self.height = height
+    static func ffmpegArgs(outputPath: String, width: Int, height: Int, fps: Double) throws -> [String] {
         let url = URL(fileURLWithPath: outputPath)
         let ext = url.pathExtension.lowercased()
         let codecArgs: [String]
@@ -1762,22 +1784,37 @@ private final class ToolingVideoEncoder {
         default:
             throw ToolingError.unsupportedVideoContainer(ext: ext)
         }
+        let safeOutput = (!outputPath.hasPrefix("/") && outputPath.hasPrefix("-")) ? "./\(outputPath)" : outputPath
+        let fpsString = fps.rounded() == fps ? String(Int(fps)) : String(fps)
+        return [
+            "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-f", "rawvideo", "-pix_fmt", "rgba",
+            "-s", "\(width)x\(height)", "-r", fpsString, "-i", "-",
+        ] + codecArgs + [safeOutput]
+    }
 
-        #if os(macOS) || os(Linux)
+    static func unpad(_ data: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> [UInt8] {
+        let rowBytes = width * 4
+        var out: [UInt8] = []
+        out.reserveCapacity(rowBytes * height)
+        for row in 0..<height {
+            let start = row * bytesPerRow
+            out.append(contentsOf: data[start..<(start + rowBytes)])
+        }
+        return out
+    }
+
+    #if os(macOS) || os(Linux)
+    convenience init(outputPath: String, width: Int, height: Int, fps: Double) throws {
+        let args = try Self.ffmpegArgs(outputPath: outputPath, width: width, height: height, fps: fps)
         guard let ffmpegPath = Self.findFFmpegOnPath() else {
             throw ToolingError.ffmpegUnavailable
         }
+        let url = URL(fileURLWithPath: outputPath)
         let parent = url.deletingLastPathComponent()
         if !parent.path.isEmpty {
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         }
-        let safeOutput = (!outputPath.hasPrefix("/") && outputPath.hasPrefix("-")) ? "./\(outputPath)" : outputPath
-        let args = [
-            "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-            "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", "\(width)x\(height)", "-r", "\(fps)", "-i", "-",
-        ] + codecArgs + [safeOutput]
-
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: ffmpegPath)
         proc.arguments = args
@@ -1786,30 +1823,62 @@ private final class ToolingVideoEncoder {
         proc.standardOutput = FileHandle.nullDevice
         proc.standardError = FileHandle.nullDevice
         try proc.run()
-        self.process = proc
-        self.stdinPipe = pipe
-        #else
-        let _ = codecArgs
+        self.init(process: proc, stdinPipe: pipe, outputPath: outputPath, width: width, height: height)
+    }
+    #else
+    init(outputPath: String, width: Int, height: Int, fps: Double) throws {
+        self.width = width
+        self.height = height
+        self.outputPath = outputPath
+        let _ = try Self.ffmpegArgs(outputPath: outputPath, width: width, height: height, fps: fps)
         throw ToolingError.ffmpegUnavailable
+    }
+    #endif
+
+    #if os(macOS) || os(Linux)
+    init(process: Process, stdinPipe: Pipe, outputPath: String, width: Int, height: Int) {
+        self.width = width
+        self.height = height
+        self.outputPath = outputPath
+        self.process = process
+        self.stdinPipe = stdinPipe
+        #if canImport(Darwin)
+        _ = Darwin.fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         #endif
     }
+    #endif
 
     func writeFrame(_ frame: Frame) throws {
         #if os(macOS) || os(Linux)
         guard frame.width == width, frame.height == height else { return }
-        try stdinPipe.fileHandleForWriting.write(contentsOf: frame.rgba)
+        if !process.isRunning {
+            process.waitUntilExit()
+            throw ToolingError.encoderError(message: "video encoder stopped reading (status \(process.terminationStatus))")
+        }
+        do {
+            try stdinPipe.fileHandleForWriting.write(contentsOf: frame.rgba)
+        } catch {
+            try? stdinPipe.fileHandleForWriting.close()
+            finished = true
+            process.waitUntilExit()
+            throw ToolingError.encoderError(message: "video encoder stopped reading (status \(process.terminationStatus)): \(error.localizedDescription)")
+        }
         #endif
     }
 
-    func finish() throws {
+    @discardableResult
+    func finish() throws -> String? {
         #if os(macOS) || os(Linux)
-        guard !finished else { return }
+        guard !finished else { return nil }
         finished = true
         try? stdinPipe.fileHandleForWriting.close()
         process.waitUntilExit()
         if process.terminationStatus != 0 {
-            throw ToolingError.ffmpegFailed(status: process.terminationStatus)
+            throw ToolingError.encoderError(message: "failed writing video (status \(process.terminationStatus))")
         }
+        return outputPath
+        #else
+        return nil
         #endif
     }
 

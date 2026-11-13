@@ -478,7 +478,7 @@ struct RunePlatformIncrement4Tests {
         #expect(MacOSDragOutLogic.stackOffset(index: 10) == Vec2(12, 12))
 
         // DropTempNaming helpers
-        #expect(DropTempNaming.freeName(stem: "Photo", ext: "png", existing: ["Photo.png", "Photo-2.png"]) == "Photo-3.png")
+        #expect(DropTempNaming.freeName(stem: "Photo", ext: "png", existing: ["Photo.png", "Photo 2.png"]) == "Photo 3.png")
         #expect(DropTempNaming.hoverStandInURL(prefix: "Image", extension: "jpg").lastPathComponent == "Image.jpg")
         let tiffExt = DropTempNaming.imageExtension(forUTI: "public.tiff")
         #expect(tiffExt?.ext == "png" && tiffExt?.needsPNGConversion == true)

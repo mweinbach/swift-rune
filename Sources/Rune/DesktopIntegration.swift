@@ -1655,6 +1655,15 @@ public enum TrayItem: Sendable, Equatable {
     public static func action(id: String, label: String) -> TrayItem {
         .action(id: id, label: label, enabled: true)
     }
+
+    public func enabled(_ value: Bool) -> TrayItem {
+        switch self {
+        case .separator:
+            return .separator
+        case let .action(id, label, _):
+            return .action(id: id, label: label, enabled: value)
+        }
+    }
 }
 
 public enum TrayEvent: Sendable, Equatable {

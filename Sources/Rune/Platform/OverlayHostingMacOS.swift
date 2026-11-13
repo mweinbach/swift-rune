@@ -178,6 +178,7 @@ public final class RuneOverlayMetalView<State>: NSView {
             return
         }
         self.layer = metalLayer
+        MacOSMetalLayerSurface.pinContentsTopLeft(metalLayer)
         _ = srgbBlend
     }
 
@@ -728,7 +729,7 @@ public final class RuneOverlayMacOSHost<State> {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 
-    private static func containsAppKitPoint(_ rect: NSRect, point: NSPoint) -> Bool {
+    static func containsAppKitPoint(_ rect: NSRect, point: NSPoint) -> Bool {
         point.x >= rect.origin.x &&
             point.x < rect.origin.x + rect.size.width &&
             point.y > rect.origin.y &&
