@@ -407,25 +407,30 @@ public struct ShortcutRecorder<State> {
                 s[keyPath: stateKeyPath] = recCopy
             }
         )
+        // Keep focusLost wired even when disabled so focus loss cancels an active capture
+        // while ignoring all other physical inputs (matching crates/rune-kit/src/shortcut_recorder.rs:235-236).
+        elTree = elTree.onPhysicalInput { s, ev, tx in
+            if disabled {
+                if case .focusLost = ev {} else { return false }
+            }
+            guard let mapped = Self.mapPhysicalInput(ev) else { return false }
+            var recCopy = s[keyPath: stateKeyPath]
+            let wasRecording = recCopy.isRecording
+            let handled = recCopy.handleWithValidator(
+                mapped,
+                allowUnmodified: allowUnmodified
+            ) { chord in
+                onChange?(&s, chord)
+            }
+            s[keyPath: stateKeyPath] = recCopy
+            if wasRecording && !recCopy.isRecording {
+                tx.blur()
+            }
+            return handled
+        }
         if !disabled {
             elTree = elTree
                 .focusable(true)
-                .onPhysicalInput { s, ev, tx in
-                    guard let mapped = Self.mapPhysicalInput(ev) else { return false }
-                    var recCopy = s[keyPath: stateKeyPath]
-                    let wasRecording = recCopy.isRecording
-                    let handled = recCopy.handleWithValidator(
-                        mapped,
-                        allowUnmodified: allowUnmodified
-                    ) { chord in
-                        onChange?(&s, chord)
-                    }
-                    s[keyPath: stateKeyPath] = recCopy
-                    if wasRecording && !recCopy.isRecording {
-                        tx.blur()
-                    }
-                    return handled
-                }
                 .onKey { s, ev, tx in
                     guard let event = Self.mapKeyEvent(ev) else { return false }
                     var recCopy = s[keyPath: stateKeyPath]

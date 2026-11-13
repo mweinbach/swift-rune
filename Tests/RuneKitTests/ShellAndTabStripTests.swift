@@ -666,7 +666,10 @@ struct ShellAndTabStripTests {
             }
             rt.frame(at: 0.0)
             rt.frame(at: 1.0 / 60.0)
-            let tab0 = try #require(rt.element(byKey: "strip-tab-tab0"))
+            guard let tab0 = rt.element(byKey: "strip-tab-tab0") else {
+                Issue.record("Missing strip-tab-tab0")
+                return rt
+            }
             let r = tab0.rect
             let x = r[0] + r[2] * 0.5
             let y = r[1] + r[3] * 0.5
@@ -783,5 +786,69 @@ struct ShellAndTabStripTests {
         #expect(rt.state.sidebar.width == 240.0)
         #expect(rt.state.sidebar.isOpen && !rt.state.sidebar.isResizing)
         #expect(!rt.state.sidebar.isPeeking)
+    }
+
+    @Test("Hiding sidebar keeps focus in toolbar search or main pane field (tests/shell.rs:352,369)")
+    func hidingSidebarKeepsFocusInToolbarSearchAndMainField() throws {
+        struct S {
+            var sidebar = PaneState(width: 220).range(140, 360)
+            var search = TextEdit()
+            var mainEdit = TextEdit()
+        }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(800, 400), systemDark: false) { s, _ in
+            SplitView<S>(key: "sv") { _ in
+                Page<S>()
+                    .header(
+                        Toolbar<S>(key: "tb")
+                            .trailing(Rune.textInput(key: "toolbar-search", \.search).size(160, 28))
+                            .build(kit)
+                    )
+                    .child(Rune.textInput(key: "main-field", \.mainEdit).size(200, 28))
+                    .build(kit)
+            }
+            .sidebar(\.sidebar, current: s.sidebar) { _ in
+                Sidebar<S>(key: "sb").section(SidebarSection<S>(title: "Nav").build(kit)).build(kit)
+            }
+            .paneMotion(.instant)
+            .build(s, kit: kit)
+        }
+
+        rt.frame(at: 0.0)
+        let searchRect = try #require(rt.element(byKey: "toolbar-search")).rect
+        rt.pointerDown(at: Vec2(searchRect[0] + 12, searchRect[1] + searchRect[3] * 0.5), at: 0.02)
+        rt.pointerUp(at: Vec2(searchRect[0] + 12, searchRect[1] + searchRect[3] * 0.5), at: 0.03)
+        rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "toolbar-search")
+
+        rt.update { st, _ in st.sidebar.toggle() }
+        rt.frame(at: 0.06)
+        #expect(!rt.state.sidebar.isOpen)
+        #expect(rt.focusedKey == "toolbar-search")
+        _ = rt.keyDown(KeyEvent(key: .text("search")), at: 0.07)
+        rt.frame(at: 0.08)
+        #expect(rt.state.search.text == "search")
+
+        // Re-open sidebar, focus main-field, collapse sidebar, verify main-field keeps focus & spaces
+        rt.update { st, _ in st.sidebar.toggle() }
+        rt.frame(at: 0.11)
+        #expect(rt.state.sidebar.isOpen)
+
+        let mainRect = try #require(rt.element(byKey: "main-field")).rect
+        rt.pointerDown(at: Vec2(mainRect[0] + 12, mainRect[1] + mainRect[3] * 0.5), at: 0.12)
+        rt.pointerUp(at: Vec2(mainRect[0] + 12, mainRect[1] + mainRect[3] * 0.5), at: 0.13)
+        rt.frame(at: 0.14)
+        #expect(rt.focusedKey == "main-field")
+
+        rt.update { st, _ in st.sidebar.toggle() }
+        rt.frame(at: 0.16)
+        #expect(!rt.state.sidebar.isOpen)
+        #expect(rt.focusedKey == "main-field")
+        _ = rt.keyDown(KeyEvent(key: .text("a")), at: 0.17)
+        _ = rt.keyDown(KeyEvent(key: .space), at: 0.18)
+        _ = rt.keyDown(KeyEvent(key: .text("b")), at: 0.19)
+        rt.frame(at: 0.20)
+        #expect(rt.state.mainEdit.text == "a b")
+        #expect(!rt.state.sidebar.isOpen)
     }
 }
