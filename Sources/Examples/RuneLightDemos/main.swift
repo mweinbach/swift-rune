@@ -117,6 +117,7 @@ private func renderDemo(ctx: DemoCtx, demo: any LightDemo, out: URL, frames: Int
     let stripAt = (0..<5).map { ($0 * n) / 5 + n / 10 }
     var strip: [[UInt8]] = []
 
+#if os(macOS)
     let mp4 = out.appendingPathComponent("\(name).mp4")
     let ff = Process()
     ff.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -131,6 +132,7 @@ private func renderDemo(ctx: DemoCtx, demo: any LightDemo, out: URL, frames: Int
     let pipe = Pipe()
     ff.standardInput = pipe
     let canEncodeMP4 = (try? ff.run()) != nil
+#endif
 
     for fIdx in 0..<n {
         let t = Float(fIdx) / Float(demoFPS)
@@ -144,15 +146,19 @@ private func renderDemo(ctx: DemoCtx, demo: any LightDemo, out: URL, frames: Int
             if stripAt.contains(fIdx) {
                 strip.append(downscale(px, w: demoW, h: demoH, factor: 4))
             }
+#if os(macOS)
             if canEncodeMP4 {
                 try? pipe.fileHandleForWriting.write(contentsOf: Data(px))
             }
+#endif
         }
     }
+#if os(macOS)
     if canEncodeMP4 {
         try? pipe.fileHandleForWriting.close()
         ff.waitUntilExit()
     }
+#endif
     if !strip.isEmpty {
         let sw = demoW / 4
         let sh = demoH / 4

@@ -38,6 +38,7 @@ private func downscaleRGBA(_ src: [UInt8], width: Int, height: Int, factor: Int)
     return out
 }
 
+#if os(macOS)
 private func spawnFFmpeg(args: [String], output: URL) throws -> (Process, FileHandle) {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -50,8 +51,10 @@ private func spawnFFmpeg(args: [String], output: URL) throws -> (Process, FileHa
     try process.run()
     return (process, pipe.fileHandleForWriting)
 }
+#endif
 
 func runReelRender(reel: Reel, ctx: ReelCtx, outDir: URL, from: Float, to: Float) throws {
+#if os(macOS)
     let tag = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv", "-movflags", "+faststart"]
     let h264Args = ["-pix_fmt", "yuv420p", "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "12", "-tune", "film", "-pix_fmt", "yuv420p"] + tag
     let hevcArgs = ["-pix_fmt", "yuv420p10le", "-i", "-", "-c:v", "libx265", "-preset", "medium", "-crf", "10", "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1", "-x265-params", "log-level=error:aq-mode=3"] + tag
@@ -131,6 +134,10 @@ func runReelRender(reel: Reel, ctx: ReelCtx, outDir: URL, from: Float, to: Float
     }
     let totalSec = Double(DispatchTime.now().uptimeNanoseconds - t0) / 1e9
     FileHandle.standardError.write(Data(String(format: "rendered %d frames in %.1fs\n", max(n1 - n0, 0), totalSec).utf8))
+#else
+    _ = (reel, ctx, outDir, from, to)
+    throw NSError(domain: "RuneLightReel", code: 2, userInfo: [NSLocalizedDescriptionKey: "ffmpeg video render is only supported on macOS"])
+#endif
 }
 
 private func median(_ values: [Double]) -> Double {
