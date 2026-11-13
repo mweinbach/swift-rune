@@ -810,4 +810,357 @@ struct PixelSnapParityTests {
         let stillPrims = still.frame(at: 0.0).primitives
         #expect(primitivesMatchWithColorTol(landed, stillPrims), "landed card draws identically to a still one")
     }
+
+    // MARK: - One-Snap Concentric Placement & Large Heading Glide (one_snap.rs)
+
+    private static let oneSnapRingIcon = SVGIcon(
+        viewBox: 16.0,
+        body: #"<circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5" fill="none"/>"#
+    )
+    private static let oneSnapDiscIcon = SVGIcon(
+        viewBox: 16.0,
+        body: #"<circle cx="8" cy="8" r="4" fill="currentColor"/>"#
+    )
+
+    private static func circlePoints(cx: Float, cy: Float, r: Float) -> [Vec2] {
+        (0..<64).map { k in
+            let a = Float.pi * 2.0 * Float(k) / 64.0
+            return Vec2(cx + r * cos(a), cy + r * sin(a))
+        }
+    }
+
+    private static func discShape(r: Float, color: Color) -> Shape {
+        Shape.new().fill(circlePoints(cx: 8.0, cy: 8.0, r: r), color: color)
+    }
+
+    /// Coverage-weighted `[cx, cy]` (device px) and total pixel area of `channel` in straight RGBA frame.
+    private static func channelMoments(_ frame: Frame, channel: Int) -> (SIMD2<Float>, Float) {
+        var sum = 0.0
+        var sx = 0.0
+        var sy = 0.0
+        let w = frame.width
+        let h = frame.height
+        for y in 0..<h {
+            for x in 0..<w {
+                let idx = (y * w + x) * 4
+                let a = Double(frame.rgba[idx + 3]) / 255.0
+                let v: Double = channel == 3 ? a : (Double(frame.rgba[idx + channel]) / 255.0) * a
+                if v > 0.0 {
+                    sum += v
+                    sx += v * (Double(x) + 0.5)
+                    sy += v * (Double(y) + 0.5)
+                }
+            }
+        }
+        #expect(sum > 0.0, "channel \(channel) must have non-zero coverage")
+        return (SIMD2<Float>(Float(sx / sum), Float(sy / sum)), Float(sum))
+    }
+
+    private static func isWholePixel(_ v: Float) -> Bool {
+        abs(v - v.rounded()) < 1e-4
+    }
+
+    @Test("one_snap: concentric_icon_and_shape_share_centre_and_size_at_scaled_rest")
+    func concentricIconAndShapeShareCentreAndSizeAtScaledRest() throws {
+        struct ScaledCase {
+            var at: SIMD2<Float>
+            var zoom: Float
+            var anchored: Bool
+            var onlyIconDisc: Bool
+        }
+        func buildView(_ s: ScaledCase, _: inout Cx<ScaledCase>) -> El<ScaledCase> {
+            let red = Color(r: 1, g: 0, b: 0, a: 1)
+            let green = Color(r: 0, g: 1, b: 0, a: 1)
+            let blue = Color(r: 0, g: 0, b: 1, a: 1)
+            let badge: El<ScaledCase> = if s.onlyIconDisc {
+                el().key("badge").size(16.0, 16.0)
+                    .child(icon(Self.oneSnapDiscIcon, size: 16.0).color(red).absolute(x: 0.0, y: 0.0))
+            } else {
+                el().key("badge").size(16.0, 16.0).bg(blue)
+                    .child(icon(Self.oneSnapRingIcon, size: 16.0).color(red).absolute(x: 0.0, y: 0.0))
+                    .child(canvas(Self.discShape(r: 4.0, color: green)).size(16.0, 16.0).absolute(x: 0.0, y: 0.0))
+            }
+            if s.anchored {
+                let page: El<ScaledCase> = col().key("page").size(120.0, 120.0)
+                    .scale(s.zoom, s.zoom).origin(0.0, 0.0)
+                    .child(el().key("anchor").absolute(x: 12.0 + s.at.x, y: 10.0 + s.at.y).size(24.0, 8.0))
+                let pop: El<ScaledCase> = col().key("pop").p(6.0)
+                    .bg(Color(r: 0, g: 0, b: 0.25, a: 1))
+                    .child(badge)
+                    .anchored("anchor", side: .bottom, align: .start, gap: 4.0)
+                return col().size(160.0, 160.0).child(page).child(pop)
+            } else {
+                return col().size(160.0, 160.0).child(
+                    col().key("scaled").size(100.0, 100.0)
+                        .scale(s.zoom, s.zoom).origin(0.0, 0.0)
+                        .child(badge.absolute(x: 14.0 + s.at.x, y: 14.0 + s.at.y))
+                )
+            }
+        }
+
+        let renderer = try MetalRenderer()
+        let rectKind = Float(PrimitiveKind.roundedRect.rawValue)
+        for anchored in [false, true] {
+            var minIconArea = Float.greatestFiniteMagnitude
+            var maxIconArea: Float = 0.0
+            for iy in 0..<5 {
+                for ix in 0..<5 {
+                    let at = SIMD2<Float>(Float(ix) * 0.21, Float(iy) * 0.21)
+                    let rt = Runtime<ScaledCase>(
+                        state: ScaledCase(at: at, zoom: 1.6, anchored: anchored, onlyIconDisc: false),
+                        viewport: Vec2(160.0, 160.0),
+                        pixelScale: 2.0,
+                        systemDark: true,
+                        view: buildView
+                    )
+                    rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+                    _ = rt.frame(at: 0.0)
+                    let scene = rt.frame(at: 1.0 / 120.0)
+
+                    let fills = scene.primitives.filter { $0.params.y == rectKind && $0.fill.w > 0 }
+                    #expect(!fills.isEmpty)
+                    for prim in fills {
+                        let r = prim.rect
+                        #expect(
+                            Self.isWholePixel(r.x) && Self.isWholePixel(r.y)
+                                && Self.isWholePixel(r.z) && Self.isWholePixel(r.w),
+                            "anchored=\(anchored) at=\(at): held 1.6x fill must snap to whole device px, got \(r)"
+                        )
+                    }
+
+                    let frame = try renderer.renderOffscreen(scene)
+                    let (cIcon, _) = Self.channelMoments(frame, channel: 0)
+                    let (cShape, shapeDiscArea) = Self.channelMoments(frame, channel: 1)
+                    let errX = abs(cIcon.x - cShape.x)
+                    let errY = abs(cIcon.y - cShape.y)
+                    #expect(
+                        errX <= 0.125 && errY <= 0.125,
+                        "anchored=\(anchored) at=\(at): icon centre \(cIcon) vs shape centre \(cShape)"
+                    )
+
+                    if iy == 2 {
+                        let rtDisc = Runtime<ScaledCase>(
+                            state: ScaledCase(at: at, zoom: 1.6, anchored: anchored, onlyIconDisc: true),
+                            viewport: Vec2(160.0, 160.0),
+                            pixelScale: 2.0,
+                            systemDark: true,
+                            view: buildView
+                        )
+                        rtDisc.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+                        _ = rtDisc.frame(at: 0.0)
+                        let discScene = rtDisc.frame(at: 1.0 / 120.0)
+                        let discFrame = try renderer.renderOffscreen(discScene)
+                        let (_, iconDiscArea) = Self.channelMoments(discFrame, channel: 0)
+                        minIconArea = min(minIconArea, iconDiscArea)
+                        maxIconArea = max(maxIconArea, iconDiscArea)
+                        let rel = abs(iconDiscArea - shapeDiscArea) / shapeDiscArea
+                        #expect(
+                            rel < 0.015,
+                            "anchored=\(anchored) at=\(at): icon disc area \(iconDiscArea) vs shape \(shapeDiscArea) (rel=\(rel))"
+                        )
+                    }
+                }
+            }
+            let spread = (maxIconArea - minIconArea) / minIconArea
+            #expect(
+                spread < 0.005,
+                "anchored=\(anchored): icon disc area jumped across pixel phases: \(minIconArea)..\(maxIconArea)"
+            )
+        }
+    }
+
+    @Test("one_snap: concentric_icon_shape_and_fill_glide_together_during_motion")
+    func concentricIconShapeAndFillGlideTogetherDuringMotion() throws {
+        struct MovingCase {
+            var at: SIMD2<Float>
+            var zoom: Float
+        }
+        func buildView(_ s: MovingCase, _: inout Cx<MovingCase>) -> El<MovingCase> {
+            let red = Color(r: 1, g: 0, b: 0, a: 1)
+            let green = Color(r: 0, g: 1, b: 0, a: 1)
+            let blue = Color(r: 0, g: 0, b: 1, a: 1)
+            let sp = Spring(duration: 0.45, bounce: 0.0)
+            let badge: El<MovingCase> = el().key("badge").size(16.0, 16.0).bg(blue)
+                .offset(s.at.x, s.at.y).animate(sp)
+                .child(icon(Self.oneSnapRingIcon, size: 16.0).color(red).absolute(x: 0.0, y: 0.0))
+                .child(canvas(Self.discShape(r: 4.0, color: green)).size(16.0, 16.0).absolute(x: 0.0, y: 0.0))
+            return col().size(120.0, 120.0).child(
+                col().key("scaled").size(100.0, 100.0).scale(s.zoom, s.zoom).origin(0.0, 0.0)
+                    .child(badge.absolute(x: 10.0, y: 10.0))
+            )
+        }
+
+        let renderer = try MetalRenderer()
+        for zoom: Float in [1.0, 1.6] {
+            let rt = Runtime<MovingCase>(
+                state: MovingCase(at: .zero, zoom: zoom),
+                viewport: Vec2(120.0, 120.0),
+                pixelScale: 2.0,
+                systemDark: true,
+                view: buildView
+            )
+            rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+            var t = 0.0
+            _ = rt.frame(at: t)
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            rt.update(at: t) { st, _ in st.at = SIMD2<Float>(17.35, 13.65) }
+
+            for f in 0..<90 {
+                t += 1.0 / 120.0
+                let scene = rt.frame(at: t)
+                let frame = try renderer.renderOffscreen(scene)
+                let (cIcon, _) = Self.channelMoments(frame, channel: 0)
+                let (cShape, _) = Self.channelMoments(frame, channel: 1)
+                let (cFill, _) = Self.channelMoments(frame, channel: 3)
+                let dIS = max(abs(cIcon.x - cShape.x), abs(cIcon.y - cShape.y))
+                let dIF = max(abs(cIcon.x - cFill.x), abs(cIcon.y - cFill.y))
+                #expect(
+                    dIS <= 0.125 && dIF <= 0.125,
+                    "zoom=\(zoom) frame=\(f): d_is=\(dIS), d_if=\(dIF)"
+                )
+            }
+        }
+    }
+
+    @Test("one_snap: swapping_canvas_shape_to_icon_keeps_centre_and_area_steady")
+    func swappingCanvasShapeToIconKeepsCentreAndAreaSteady() throws {
+        struct SwapCase {
+            var swapped: Bool
+            var discR: Float
+        }
+        func buildView(_ s: SwapCase, _: inout Cx<SwapCase>) -> El<SwapCase> {
+            let red = Color(r: 1, g: 0, b: 0, a: 1)
+            let blue = Color(r: 0, g: 0, b: 1, a: 1)
+            let page: El<SwapCase> = col().key("page").size(120.0, 120.0)
+                .scale(1.6, 1.6).origin(0.0, 0.0)
+                .child(el().key("anchor").absolute(x: 12.2, y: 10.35).size(24.0, 8.0))
+            let indicator: El<SwapCase> = if s.swapped {
+                el().key("badge").size(16.0, 16.0)
+                    .child(icon(Self.oneSnapRingIcon, size: 16.0).color(blue).absolute(x: 0.0, y: 0.0))
+                    .child(icon(Self.oneSnapDiscIcon, size: 16.0).color(red).absolute(x: 0.0, y: 0.0))
+            } else {
+                el().key("badge").size(16.0, 16.0)
+                    .child(icon(Self.oneSnapRingIcon, size: 16.0).color(blue).absolute(x: 0.0, y: 0.0))
+                    .child(canvas(Self.discShape(r: s.discR, color: red)).size(16.0, 16.0).absolute(x: 0.0, y: 0.0))
+            }
+            let pop: El<SwapCase> = col().key("pop").p(6.15)
+                .child(indicator)
+                .anchored("anchor", side: .bottom, align: .start, gap: 4.1)
+            return col().size(160.0, 160.0).child(page).child(pop)
+        }
+
+        let renderer = try MetalRenderer()
+        let rt = Runtime<SwapCase>(
+            state: SwapCase(swapped: false, discR: 2.8),
+            viewport: Vec2(160.0, 160.0),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: buildView
+        )
+        rt.clearColor = Color(r: 0, g: 0, b: 0, a: 0)
+        var t = 0.0
+        _ = rt.frame(at: t)
+
+        var centres: [SIMD2<Float>] = []
+        var areas: [Float] = []
+        for f in 0..<60 {
+            let u = min(1.0, max(0.0, Float(f) / 30.0))
+            let r: Float = 2.8 + (4.0 - 2.8) * (1.0 - pow(1.0 - u, 3.0))
+            let swapped = f >= 36
+            rt.update(at: t) { st, _ in
+                st.discR = r
+                st.swapped = swapped
+            }
+            t += 1.0 / 120.0
+            let scene = rt.frame(at: t)
+            let frame = try renderer.renderOffscreen(scene)
+            let (c, area) = Self.channelMoments(frame, channel: 0)
+            centres.append(c)
+            areas.append(area)
+        }
+
+        let before = centres[35]
+        let after = centres[36]
+        let jumpX = abs(after.x - before.x)
+        let jumpY = abs(after.y - before.y)
+        let areaRel = abs(areas[36] - areas[35]) / areas[35]
+        #expect(jumpX <= 0.125 && jumpY <= 0.125, "shape->icon swap jumped: \(before) -> \(after)")
+        #expect(areaRel < 0.01, "shape->icon swap area changed by \(areaRel * 100)%")
+        let c0 = centres[0]
+        for (f, c) in centres.enumerated() {
+            let dx = abs(c.x - c0.x)
+            let dy = abs(c.y - c0.y)
+            #expect(dx <= 0.125 && dy <= 0.125, "frame \(f): centre drifted from \(c0) to \(c)")
+        }
+    }
+
+    @Test("one_snap: large_heading_glides_horizontally_within_a_phase")
+    func largeHeadingGlidesHorizontallyWithinAPhase() {
+        struct HeadingCard {
+            var x: Float = 0.0
+        }
+        let rt = Runtime<HeadingCard>(
+            state: HeadingCard(),
+            viewport: Vec2(280.0, 100.0),
+            pixelScale: 2.0,
+            systemDark: true
+        ) { s, _ in
+            let sp = Spring(duration: 0.35, bounce: 0.0)
+            let card: El<HeadingCard> = col()
+                .absolute(x: 20.0, y: 20.0)
+                .p(10.0)
+                .bg(Color.white.mix(with: .black, t: 0.8))
+                .offset(s.x, 0.0)
+                .animate(sp)
+                .child(text("Centered").font(TextStyle(size: 24.0, weight: 600.0)).color(.white))
+            return el().size(280.0, 100.0).child(card)
+        }
+
+        func headingInkX(_ scene: RefScene) -> Float {
+            let atlas = rt.textSystem.glyphAtlas.atlas
+            var sum = 0.0
+            var sx = 0.0
+            let glyphKind = Float(PrimitiveKind.glyph.rawValue)
+            for p in scene.primitives where p.params.y == glyphKind {
+                let u = Int((p.uv.x * Float(atlas.width)).rounded())
+                let v = Int((p.uv.y * Float(atlas.height)).rounded())
+                let w = Int(p.rect.z.rounded())
+                let h = Int(p.rect.w.rounded())
+                for y in 0..<h {
+                    for x in 0..<w {
+                        let row = v + y
+                        let col = u + x
+                        guard row >= 0, row < atlas.height, col >= 0, col < atlas.width else { continue }
+                        let c = Double(atlas.texels[row * atlas.width + col])
+                        sum += c
+                        sx += c * (Double(p.rect.x) + Double(x) + 0.5)
+                    }
+                }
+            }
+            #expect(sum > 0.0)
+            return Float(sx / sum)
+        }
+
+        var t = 0.0
+        let firstScene = rt.frame(at: t)
+        let glyphs = firstScene.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }.count
+        let masks0 = rt.textSystem.glyphAtlas.cachedEntryCount
+        var lo = Float.greatestFiniteMagnitude
+        var hi = -Float.greatestFiniteMagnitude
+        for k in 1...180 {
+            t = Double(k) / 60.0
+            let d = 2.5 * (0.5 - 0.5 * cos(Float.pi * 2.0 * Float(t) / 3.0))
+            rt.update(at: t) { st, _ in st.x = d }
+            let scene = rt.frame(at: t)
+            let cardX = glideCardAt(scene).x
+            let off = headingInkX(scene) - cardX
+            lo = min(lo, off)
+            hi = max(hi, off)
+        }
+        let spread = hi - lo
+        let added = rt.textSystem.glyphAtlas.cachedEntryCount - masks0
+        #expect(spread <= 0.30, "48 ppem heading x-glide spread \(spread) px > 0.30 px")
+        #expect(added <= glyphs * Int(GlyphAtlas.glidePhases), "\(added) masks for \(glyphs) glyphs")
+    }
 }

@@ -1216,4 +1216,222 @@ struct LayoutReadParityTests {
     func manyReadsFollowScrollsAndCommits() {
         runScopedHighlightReadFollowsScrollsAndCommits(extraReads: 12)
     }
+
+    @Test("regression #695: scrollAnchor preserved after fast wheel and fling without commit")
+    func scrollAnchorPreservedAfterFastWheelAndFlingWithoutCommit() {
+        struct AnchorState {
+            var extraTop: Float = 0
+        }
+        let rt = Runtime<AnchorState>(
+            state: AnchorState(),
+            viewport: Vec2(200, 100),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { s, _ in
+            col().key("scroll").size(200, 100).scrollY().scrollAnchor(true)
+                .child(el().key("head").size(200, 40 + s.extraTop))
+                .child(el().key("row-a").size(200, 60))
+                .child(el().key("row-b").size(200, 200))
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        let commitsBefore = rt.viewCommitCount
+
+        // Wheel + fling past `head` (40pt) on a plain scroll container take the !scrollRequiresCommit fast path.
+        t += 1.0 / 120.0
+        rt.wheel(WheelEvent(dx: 0, dy: -55), at: Vec2(100, 50), now: t)
+        _ = rt.frame(at: t)
+        t += 1.0 / 120.0
+        rt.fling(vx: 0, vy: -180, at: Vec2(100, 50), now: t)
+        var coastFrames = 0
+        while rt.scrollStore.isAnimating && coastFrames < 720 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            coastFrames += 1
+        }
+        #expect(!rt.scrollStore.isAnimating, "fling should finish coasting")
+        #expect(rt.viewCommitCount == commitsBefore, "plain scroll fast path does not commit")
+        let rowABefore = findInfo(rt, key: "row-a")!.rect[1]
+        let offsetBefore = rt.scrollOffset(forKey: "scroll").y
+        #expect(offsetBefore > 45.0)
+
+        // Prepending content above row-a on the next commit must engage scrollAnchor compensation.
+        t += 1.0 / 120.0
+        rt.update(at: t) { s, tx in
+            tx.instant()
+            s.extraTop = 60
+        }
+        _ = rt.frame(at: t)
+        let rowAAfter = findInfo(rt, key: "row-a")!.rect[1]
+        let offsetAfter = rt.scrollOffset(forKey: "scroll").y
+        #expect(abs(rowAAfter - rowABefore) < 0.5)
+        #expect(abs((offsetAfter - offsetBefore) - 60.0) < 0.5)
+    }
+
+    @Test("virtual_row_reads_where_it_draws_with_rows_culled_above")
+    func virtualRowReadsWhereItDrawsWithRowsCulledAbove() {
+        let markColor = Color(r: 1.0, g: 0.0, b: 0.0, a: 1.0)
+        final class ReadBox: @unchecked Sendable {
+            var r22: [Float]? = nil
+        }
+        let reads = ReadBox()
+        let rt: Runtime<Int> = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(240, 120),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { _, cx in
+            reads.r22 = cx.windowLayout("row-22")
+            let list: El<Int> = col().key("vlist").size(240, 120).scrollY()
+                .virtualRows(40, 30, key: { (_: Int, i: Int) in "row-\(i)" }) { (_: Int, i: Int) in
+                    var row: El<Int> = el().key("row-\(i)").size(240, 30)
+                    if i == 22 { row = row.bg(markColor) }
+                    return row
+                }
+            return col().size(240, 120).child(list)
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        t += 1.0 / 120.0
+        rt.update(at: t) { _, tx in
+            tx.scrollToInstant("vlist", x: 0, y: 600)
+        }
+        _ = rt.frame(at: t)
+        stepFrames(rt, count: 4, t: &t)
+
+        let layoutR22 = reads.r22
+        let infoR22 = findInfo(rt, key: "row-22")
+        #expect(layoutR22 != nil && infoR22 != nil)
+        let scene = rt.frame(at: t)
+        let rectKind = Float(PrimitiveKind.roundedRect.rawValue)
+        let drawnR22 = scene.primitives.first { prim in
+            prim.params.y == rectKind
+                && prim.fill.x > 0.9 && prim.fill.y < 0.05 && prim.fill.z < 0.05
+        }
+        #expect(drawnR22 != nil)
+        if let lr = layoutR22, let dr = drawnR22 {
+            #expect(abs(lr[0] - dr.rect.x) < 0.5)
+            #expect(abs(lr[1] - dr.rect.y) < 0.5)
+            #expect(abs(lr[2] - dr.rect.z) < 0.5)
+            #expect(abs(lr[3] - dr.rect.w) < 0.5)
+        }
+        // Row 0 is above overscan window [600 - 240, ...] when scrolled to y = 600
+        #expect(findInfo(rt, key: "row-0") == nil)
+    }
+
+    @Test("headless_screen_layout: screenRect follows window origin on VirtualDesktop")
+    func screenRectsFollowWindowOnVirtualDesktop() throws {
+        let json = """
+        {
+          "displays": [
+            { "id": 10, "frame": [0, 0, 1280, 800], "scale": 2.0 },
+            { "id": 20, "frame": [1280, 0, 1440, 900], "scale": 1.0, "primary": true }
+          ],
+          "pointer": [1320, 40]
+        }
+        """
+        let desktop = try VirtualDesktop.fromScript(jsonData: Data(json.utf8), scale: 1.0)
+        struct ScreenState {
+            var local: [Float]? = nil
+            var screen: [Float]? = nil
+        }
+        let app = App<ScreenState>(
+            title: "screen-rect",
+            size: Vec2(300, 200),
+            state: ScreenState(),
+            view: { _, _ in
+                col().size(300, 200).child(
+                    el().key("box").absolute(x: 24, y: 18).size(40, 30)
+                        .onLayout { st, r in st.local = r }
+                        .onScreenLayout { st, r in st.screen = r }
+                )
+            }
+        )
+        let win = DesktopWindow<ScreenState>(key: "w", app: app, scale: 1.0)
+        win.start(desktop: desktop)
+        _ = win.runtime.frame(at: 0.0)
+        _ = win.runtime.frame(at: 0.02)
+
+        let origin0 = win.frame
+        if let loc = win.runtime.state.local, let scr = win.runtime.state.screen {
+            #expect(abs(scr[0] - (Float(origin0[0]) + loc[0])) < 0.5)
+            #expect(abs(scr[1] - (Float(origin0[1]) + loc[1])) < 0.5)
+        } else {
+            Issue.record("Expected local and screen rects after initial frame")
+        }
+
+        // Move window onto display 0 (frame [0, 0, 1280, 800]) via AppHandle.place and verify screenLayout updates.
+        app.sharedHandle.place(.index(0), placement: .rect(MotionRect(left: 120, top: 80, right: 420, bottom: 280)))
+        _ = win.drain(desktop: desktop, t: 0.1)
+        _ = win.runtime.frame(at: 0.12)
+        _ = win.runtime.frame(at: 0.14)
+        #expect(abs(win.frame[0] - 120.0) < 0.5 && abs(win.frame[1] - 80.0) < 0.5)
+        if let loc = win.runtime.state.local, let scr = win.runtime.state.screen {
+            #expect(abs(loc[0] - 24.0) < 0.5 && abs(loc[1] - 18.0) < 0.5)
+            #expect(abs(scr[0] - 144.0) < 0.5 && abs(scr[1] - 98.0) < 0.5)
+        } else {
+            Issue.record("Expected updated screenRect after VirtualDesktop place")
+        }
+    }
+
+    @Test("onScrollOffset and chainScrollOffset report ScrollPos")
+    func onScrollOffsetAndChainScrollOffsetReportScrollPos() {
+        final class ScrollLog: @unchecked Sendable {
+            var direct: [ScrollPos] = []
+            var chained: [ScrollPos] = []
+        }
+        let log = ScrollLog()
+        let rt = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(200, 100),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { _, _ in
+            col().key("scroll").size(200, 100).scrollY()
+                .onScrollOffset { log.direct.append($0) }
+                .chainScrollOffset { log.chained.append($0) }
+                .child(el().key("tall").size(200, 320))
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        t += 1.0 / 120.0
+        rt.update(at: t) { _, tx in
+            tx.scrollToInstant("scroll", x: 0, y: 85)
+        }
+        _ = rt.frame(at: t)
+        stepFrames(rt, count: 4, t: &t)
+
+        #expect(!log.direct.isEmpty && !log.chained.isEmpty)
+        if let lastDirect = log.direct.last, let lastChained = log.chained.last {
+            #expect(lastDirect == lastChained)
+            #expect(abs(lastDirect.offset.y - 85.0) < 0.5)
+            #expect(abs(lastDirect.max.y - 220.0) < 0.5)
+            #expect(abs(lastDirect.viewport.y - 100.0) < 0.5)
+            #expect(abs(lastDirect.drawn.y - 100.0) < 0.5)
+        }
+    }
+
+    @Test("layout_diagnostics: collapsed scroll warns once and keeps layout")
+    func collapsedScrollWarnsOnceAndKeepsLayout() {
+        LayoutDiagnostics.resetWarnedSitesForTesting()
+        let rt = Runtime<Int>(
+            state: 0,
+            viewport: Vec2(200, 100),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { _, _ in
+            col().size(200, 0).child(
+                col().key("collapsed-scroll").grow(1).basis(0).scrollY()
+                    .child(el().size(200, 120))
+            )
+        }
+        _ = rt.frame(at: 0.0)
+        rt.invalidate(at: 0.1)
+        _ = rt.frame(at: 0.1)
+
+        #expect(LayoutDiagnostics.hasWarned(matching: "collapsed-scroll"))
+        let collapsed = findInfo(rt, key: "collapsed-scroll")
+        #expect(collapsed != nil)
+        #expect(abs((collapsed?.rect[3] ?? -1) - 0.0) < 0.5)
+    }
 }

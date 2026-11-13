@@ -199,10 +199,10 @@ public enum PortableGlyphFont {
 
 /// Pure-Swift fallback SVG icon rasterizer when CoreGraphics is unavailable.
 public enum PortableSVGRasterizer {
-    public static func rasterize(_ icon: SVGIcon, pixelSize: Int) -> [UInt8] {
-        let px = max(4, pixelSize)
+    public static func rasterize(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> [UInt8] {
+        let px = max(drawnSize != nil ? 1 : 4, pixelSize)
         var buf = [UInt8](repeating: 0, count: px * px)
-        let scale = Float(px) / max(1.0, icon.viewBox)
+        let scale = max(1e-4, drawnSize ?? Float(px)) / max(1.0, icon.viewBox)
         var points: [(Float, Float)] = []
         var cx: Float = 0
         var cy: Float = 0

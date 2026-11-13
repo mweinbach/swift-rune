@@ -1098,17 +1098,20 @@ public struct PlaceRequest: Sendable, Equatable {
     public var position: Vec2?
     public var size: Vec2?
     public var display: DisplayTarget?
+    public var placement: OverlayPlacement?
     public var activate: Bool
 
     public init(
         position: Vec2? = nil,
         size: Vec2? = nil,
         display: DisplayTarget? = nil,
+        placement: OverlayPlacement? = nil,
         activate: Bool = true
     ) {
         self.position = position
         self.size = size
         self.display = display
+        self.placement = placement
         self.activate = activate
     }
 }
