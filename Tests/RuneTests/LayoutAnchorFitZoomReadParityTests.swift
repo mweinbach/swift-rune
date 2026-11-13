@@ -242,4 +242,51 @@ struct LayoutAnchorFitZoomReadParityTests {
             Issue.record("missing unscaled-tip element")
         }
     }
+
+    // MARK: - crates/rune/src/runtime/tests/layout_reads.rs (`few_and_many_reads_see_the_same_rects`)
+
+    @Test("few_and_many_reads_see_the_same_rects")
+    func fewAndManyReadsSeeTheSameRects() {
+        final class SeenBox {
+            var seen: [[Float]?] = []
+        }
+        struct Cells {
+            var width: Float
+            var reads: Int
+            var seen: SeenBox
+        }
+
+        for reads in [2, 12] {
+            let box = SeenBox()
+            let rt = Runtime<Cells>(
+                state: Cells(width: 20.0, reads: reads, seen: box),
+                viewport: Vec2(400.0, 200.0),
+                pixelScale: 1.0
+            ) { s, cx in
+                var seen: [[Float]?] = (0..<s.reads).map { i in cx.layoutSize("cell\(i)") }
+                seen.append(cx.layoutSize("panel/cell3"))
+                seen.append(cx.layoutSize("missing"))
+                s.seen.seen = seen
+                func makeCells(_ w: Float) -> [El<Cells>] {
+                    (0..<12).map { i in el().key("cell\(i)").w(w + Float(i)).h(10.0) }
+                }
+                return col()
+                    .child(row().key("other").children(makeCells(1.0)))
+                    .child(row().key("panel").children(makeCells(s.width)))
+            }
+            _ = rt.frame(at: 0.0)
+            _ = rt.frame(at: 1.0 / 60.0)
+            rt.update(at: 2.0 / 60.0) { s, _ in s.width = 30.0 }
+            for step in 0..<3 {
+                _ = rt.frame(at: Double(step + 3) / 60.0)
+            }
+            let seen = box.seen
+            #expect(seen.count == reads + 2)
+            for i in 0..<reads {
+                #expect(seen[i] == [1.0 + Float(i), 10.0], "\(reads) reads: cell\(i) resolves first keyed sibling")
+            }
+            #expect(seen[reads] == [33.0, 10.0], "\(reads) reads: scoped selector finds panel cell")
+            #expect(seen[reads + 1] == nil, "\(reads) reads: missing returns nil")
+        }
+    }
 }

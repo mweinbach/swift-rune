@@ -86,13 +86,31 @@ struct LineClampParityTests {
 
     @Test("stops_after_n_lines_with_an_ellipsis_and_measures_n_lines")
     func stopsAfterNLinesWithEllipsis() {
-        let rt = makeClamp(Self.title, lines: 2, width: 200.0)
+        let rt = makeClamp(Self.title, lines: 3, width: 200.0)
         let d = drawnDetails(rt)
-        #expect(d.elided != nil)
-        #expect(d.lineCount == 2)
-        #expect(d.text.hasSuffix("…"), "\(d.text)")
-        #expect(d.height == 32.0)
-        #expect(d.text.count < Self.title.count)
+        guard let e = d.elided else {
+            Issue.record("expected title to elide past three lines at 200 pt")
+            return
+        }
+        #expect(d.text.hasSuffix("…") && !String(d.text.dropLast()).hasSuffix(" "), "\(d.text)")
+        #expect(e.tail == Self.title.utf8.count)
+        #expect(d.lineCount == 3 && d.height == 48.0)
+        let elInfo = rt.elements().first { $0.key == "t" }
+        #expect(elInfo?.text == Self.title)
+
+        rt.setViewport(Vec2(320.0, 400.0), pixelScale: 2.0)
+        _ = rt.frame(at: 0.1)
+        let wider = drawnDetails(rt)
+        #expect(wider.text.utf8.count > d.text.utf8.count && wider.lineCount == 3 && wider.height == 48.0, "\(wider.text)")
+
+        rt.setViewport(Vec2(2000.0, 400.0), pixelScale: 2.0)
+        _ = rt.frame(at: 0.2)
+        let all = drawnDetails(rt)
+        #expect(all.text == Self.title && all.elided == nil && all.lineCount == 1 && all.height == 16.0)
+
+        rt.setViewport(Vec2(200.0, 400.0), pixelScale: 2.0)
+        _ = rt.frame(at: 0.3)
+        #expect(drawnDetails(rt).text == d.text)
     }
 
     @Test("text_within_the_limit_is_untouched")
