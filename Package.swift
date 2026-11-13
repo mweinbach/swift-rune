@@ -91,6 +91,14 @@ let package = Package(
         .executable(name: "rune-motion-bench", targets: ["RuneMotionBench"]),
         .executable(name: "rune-interaction-cost", targets: ["RuneInteractionCost"]),
         .executable(name: "rune-rewind-cost", targets: ["RuneRewindCost"]),
+        .executable(name: "rune-luau-bench", targets: ["RuneLuauBench"]),
+        .executable(name: "rune-cache-pan-zoom", targets: ["RuneCachePanZoom"]),
+        .executable(name: "rune-upload-bench", targets: ["RuneUploadBench"]),
+        .executable(name: "rune-taffy-adapter-bench", targets: ["RuneTaffyAdapterBench"]),
+        .executable(name: "rune-gpu-springs", targets: ["RuneGpuSprings"]),
+        .executable(name: "rune-zoom-sweep", targets: ["RuneZoomSweep"]),
+        .executable(name: "rune-text-gpu", targets: ["RuneTextGpu"]),
+        .executable(name: "rune-tree-swap", targets: ["RuneTreeSwap"]),
     ],
     targets: [
         .target(
@@ -514,6 +522,46 @@ let package = Package(
             dependencies: ["Rune", "RunePerf"],
             path: "Sources/Examples/RuneRewindCost"
         ),
+        .executableTarget(
+            name: "RuneLuauBench",
+            dependencies: ["Rune", "RuneLuau"],
+            path: "Sources/Examples/RuneLuauBench"
+        ),
+        .executableTarget(
+            name: "RuneCachePanZoom",
+            dependencies: ["Rune", "RunePerf"],
+            path: "Sources/Examples/RuneCachePanZoom"
+        ),
+        .executableTarget(
+            name: "RuneUploadBench",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneUploadBench"
+        ),
+        .executableTarget(
+            name: "RuneTaffyAdapterBench",
+            dependencies: ["Rune", "RunePerf", "RuneTaffy"],
+            path: "Sources/Examples/RuneTaffyAdapterBench"
+        ),
+        .executableTarget(
+            name: "RuneGpuSprings",
+            dependencies: ["Rune", "RuneMotion"],
+            path: "Sources/Examples/RuneGpuSprings"
+        ),
+        .executableTarget(
+            name: "RuneZoomSweep",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneZoomSweep"
+        ),
+        .executableTarget(
+            name: "RuneTextGpu",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneTextGpu"
+        ),
+        .executableTarget(
+            name: "RuneTreeSwap",
+            dependencies: ["Rune"],
+            path: "Sources/Examples/RuneTreeSwap"
+        ),
         .testTarget(
             name: "RuneMotionTests",
             dependencies: ["RuneMotion"],
@@ -666,6 +714,14 @@ let package = Package(
                 "RuneMotionBench",
                 "RuneInteractionCost",
                 "RuneRewindCost",
+                "RuneLuauBench",
+                "RuneCachePanZoom",
+                "RuneUploadBench",
+                "RuneTaffyAdapterBench",
+                "RuneGpuSprings",
+                "RuneZoomSweep",
+                "RuneTextGpu",
+                "RuneTreeSwap",
                 "OpenCodeTheme",
             ],
             path: "Tests/RuneExamplesTests"

@@ -1,11 +1,19 @@
 import Foundation
 import Testing
 @testable import Rune
+@testable import RuneCachePanZoom
+@testable import RuneGpuSprings
 @testable import RuneInteractionCost
+@testable import RuneLuauBench
 @testable import RuneMotion
 @testable import RuneMotionBench
 @testable import RunePopupMenu
 @testable import RuneRewindCost
+@testable import RuneTaffyAdapterBench
+@testable import RuneTextGpu
+@testable import RuneTreeSwap
+@testable import RuneUploadBench
+@testable import RuneZoomSweep
 
 @Suite("Content crate-level examples parity", .serialized)
 @MainActor
@@ -96,5 +104,108 @@ struct ContentExamplesParityTests {
         #expect(report.output.contains("scenario=stream rewind=off metric=p50_ms"))
         #expect(report.output.contains("scenario=fold rewind=on metric=p99_ms"))
         #expect(report.output.contains("scenario=minute rewind=on metric=bytes median=\(report.minuteBytes) frames=20"))
+    }
+
+    @Test("rune-luau-bench runs Luau perf gates and behavior checks cleanly", .disabled("Blocked on #464: RuneLuau UI.swift:1206 numeric key & LuauVM.swift:116 markStack unwind"))
+    func luauBenchSmoke() {
+        let report = RuneLuauBenchApp.run(scale: .smoke)
+        #expect(report.idle.frames == 30)
+        #expect(report.idle.framesAsked == 0)
+        #expect(report.idle.vmCalls == 0)
+        #expect(report.memoHit.vmCalls == 0)
+        #expect(report.reload.stateKept)
+        #expect(report.checks.count == 6)
+        for c in report.checks {
+            #expect(c.ok, "check \(c.name) failed: \(c.detail)")
+        }
+        let json = report.json()
+        #expect(json.contains("\"checks\":"))
+        #expect(report.formatted().contains("hot reload, compile + swap"))
+    }
+
+    @Test("rune-cache-pan-zoom benchmarks uncached vs cached Live pan/zoom layers")
+    func cachePanZoomSmoke() throws {
+        let report = try RuneCachePanZoomApp.runReport(samples: 1, cards: 10, frames: 6)
+        #expect(report.lines.count == 32)
+        #expect(report.output.contains("mode=uncached case=pan metric=cpu_ms"))
+        #expect(report.output.contains("mode=cached case=pan_zoom metric=targets"))
+        let cachedTargets = report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "targets" }
+        #expect((cachedTargets?.median ?? 0) >= 0)
+    }
+
+    @Test("rune-upload-bench measures steady and scroll 2000-instance GPU upload frames")
+    func uploadBenchSmoke() throws {
+        let report = try RuneUploadBenchApp.runReport(frames: 8, warmup: 2, count: 400)
+        #expect(report.results.count == 2)
+        #expect(report.results.allSatisfy { $0.cpuUs > 0 && $0.frameUs >= $0.cpuUs * 0.5 })
+        #expect(report.output.contains("scene=steady"))
+        #expect(report.output.contains("scene=scroll"))
+    }
+
+    @Test("rune-taffy-adapter-bench compares LayoutStore vs TaffyTree and runs KitchenSink digest")
+    func taffyAdapterBenchSmoke() {
+        let isolated = RuneTaffyAdapterBenchApp.runIsolatedPairedBench(samples: 2, rows: 40)
+        #expect(isolated.contains { $0.contains("STRUCTURAL_40_ROWS") })
+        #expect(isolated.contains { $0.contains("ISOLATED metric=cold_build_solve_ms") })
+        let runtime = RuneTaffyAdapterBenchApp.runRuntimeSuite(samples: 1, rowCount: 30, cellCount: 60)
+        #expect(runtime.contains { $0.contains("RECT_DIGEST adapter=compact step=0") })
+        #expect(runtime.contains { $0.contains("RECT_DIGEST adapter=compact step=1") })
+        #expect(runtime.contains { $0.contains("RUNTIME adapter=compact metric=grid_to_list_swap_layout_ms") })
+    }
+
+    @Test("rune-gpu-springs passes differential, bench, and 8-primitive pixel parity checks")
+    func gpuSpringsSmoke() throws {
+        let report = try RuneGpuSpringsApp.runReport(diffIterations: 64, counts: [1, 32], runs: 2, frames: 8)
+        #expect(report.diff.failures == 0)
+        #expect(report.diff.samples == 64 * 4 * 5)
+        #expect(report.bench.count == 2)
+        for row in report.bench {
+            #expect(row.maxPixelDelta <= 2, "pixel delta \(row.maxPixelDelta) for \(row.nodeCount) nodes")
+            #expect(row.animatingDuringMotion)
+            #expect(!row.animatingAfterSettle)
+        }
+        #expect(report.primitives.kindsChecked == 8)
+        #expect(report.primitives.maxDelta <= 2)
+    }
+
+    @Test("rune-zoom-sweep sweeps liveScale and fontScale while preserving settled glyphs")
+    func zoomSweepSmoke() throws {
+        let report = try RuneZoomSweepApp.runReport(frames: 12, cards: 10)
+        #expect(report.cases.count == 2)
+        for c in report.cases {
+            #expect(c.finalGlyphCount > 100)
+            #expect(c.frameMedianMs >= 0 && c.frameMedianMs.isFinite)
+        }
+        #expect(report.output.contains("case=live_zoom_10s"))
+        #expect(report.output.contains("case=font_sweep_10s"))
+    }
+
+    @Test("rune-text-gpu renders rest/zoom PNGs and measures still/scroll/zoom metrics")
+    func textGpuSmoke() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("rune-text-gpu-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let snap = try RuneTextGpuApp.runSnap(directory: tmp, scale: 1.0, scales: [1.0, 1.3])
+        #expect(snap.writtenFiles == 10)
+        #expect(snap.totalGlyphs > 0)
+        #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("rest-light.png").path))
+        #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("zoom1-moving-dark.png").path))
+
+        let perf = try RuneTextGpuApp.runPerf(scale: 1.5, frames: 6, warmup: 2)
+        #expect(perf.glyphs > 0)
+        #expect(perf.metrics.count == 3)
+        #expect(perf.output.contains("case=still"))
+        #expect(perf.output.contains("case=zoom"))
+    }
+
+    @Test("rune-tree-swap benchmarks list <-> grid replacement across first, quick, recent, and stale")
+    func treeSwapSmoke() throws {
+        let report = try RuneTreeSwapApp.runReport(samples: 1, cells: 40)
+        #expect(report.results.count == 8)
+        #expect(report.output.contains("dir=grid-list case=first"))
+        #expect(report.output.contains("dir=list-grid case=stale"))
+        for r in report.results {
+            #expect(r.rowsBuilt > 0)
+            #expect(r.rowsSettled > 0)
+        }
     }
 }
