@@ -284,4 +284,198 @@ struct RuneKnobsTests {
         #expect(sideShell.keyId == "knobs-side-shell")
         #expect(sideShell.children.count == 2)
     }
+
+    @Test func randomStaysInRangeOnStepsAndSeedsFromClock() {
+        let kA = Knob.float("a", min: 0, max: 10, default: 2, step: 0.5)
+        let kB = Knob.float("b", min: -5, max: 5, default: 0, step: 0.25)
+        let g = KnobGroup("G", region: "g", knobs: [kA, kB])
+
+        var knobs = Knobs()
+        for _ in 0..<200 {
+            knobs.random(g)
+            let va = knobs.get(kA)
+            let vb = knobs.get(kB)
+            #expect(va >= 0 && va <= 10)
+            #expect(vb >= -5 && vb <= 5)
+            #expect(abs((va / 0.5) - (va / 0.5).rounded()) < 1e-4)
+            #expect(abs((vb / 0.25) - (vb / 0.25).rounded()) < 1e-4)
+        }
+        let didUndo = knobs.undo()
+        #expect(didUndo)
+        #expect(knobs.canUndo)
+
+        // Seed is initialized from the clock on first random(), so two instances separated in time can differ.
+        var k1 = Knobs()
+        k1.random(g)
+        let v1 = k1.get(kA)
+        var differed = false
+        for _ in 0..<12 {
+            Thread.sleep(forTimeInterval: 0.0005)
+            var k2 = Knobs()
+            k2.random(g)
+            if abs(k2.get(kA) - v1) > 1e-5 {
+                differed = true
+                break
+            }
+        }
+        #expect(differed)
+    }
+
+    @Test func sideKeyLeavesEscapeAndTabAndSettlesTx() {
+        let g1 = KnobGroup("Left", region: "left", knobs: [Knob.float("l", min: 0, max: 10, default: 5, step: 0.5)])
+        let g2 = KnobGroup("Right", region: "right", knobs: [Knob.float("r", min: 0, max: 10, default: 2, step: 1)])
+        let groups = [g1, g2]
+
+        var state = TestAppState()
+        state.knobs.show()
+        let handler = RuneKnobs.sideKey(groups: groups, keyPath: \TestAppState.knobs)
+
+        var txEsc = Tx()
+        #expect(!handler(&state, KeyEvent(key: .escape), &txEsc))
+        #expect(state.knobs.open)
+        #expect(!txEsc.settleRequested)
+
+        var txTab = Tx()
+        #expect(!handler(&state, KeyEvent(key: .tab), &txTab))
+        #expect(!txTab.settleRequested)
+
+        var txStep = Tx()
+        #expect(handler(&state, KeyEvent(key: .arrowRight), &txStep))
+        #expect(abs(state.knobs.get(g1.knobs[0]) - 5.5) < 1e-5)
+        #expect(txStep.settleRequested)
+
+        var txSwitch = Tx()
+        #expect(handler(&state, KeyEvent(key: .text("]")), &txSwitch))
+        #expect(state.knobs.current(in: groups)?.name == "Right")
+        #expect(txSwitch.settleRequested)
+    }
+
+    @Test func treePlanModesKeyWalkingAndFiltering() {
+        let l = Knob.float("left_pad", min: 0, max: 20, default: 4, step: 1).about("Left inner margin")
+        let r = Knob.float("right_pad", min: 0, max: 20, default: 8, step: 1)
+        let mode = Knob.choice("mode", labels: ["Flat", "Glow", "Glass"], default: 0)
+        let groups = [
+            KnobGroup("Left", region: "left", knobs: [l, mode]).under("Layout"),
+            KnobGroup("Right", region: "right", knobs: [r]).under("Effects"),
+        ]
+
+        var knobs = Knobs()
+        knobs.show()
+        knobs.setFolded("Layout", false)
+        knobs.setFolded("Left", false)
+        let treePlan = KnobTree.plan(knobs: knobs, groups: groups)
+        let treeRows = KnobTree.rows(in: treePlan)
+        #expect(treeRows.contains(.page("Layout")))
+        #expect(treeRows.contains(.group(0)))
+
+        // Stepping down walks into knobs and arrowRight steps the knob or choice.
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .arrowDown)))
+        #expect(knobs.treeAt == .group(0))
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .arrowDown)))
+        #expect(knobs.treeAt == .knob(groupIndex: 0, knobIndex: 0))
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(knobs.get(l) == 5)
+
+        // ArrowLeft on a group header folds it; arrowRight unfolds it.
+        knobs.treeAt = .group(0)
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .arrowLeft)))
+        #expect(knobs.folded.contains("Left"))
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .arrowRight)))
+        #expect(!knobs.folded.contains("Left"))
+
+        // '/' starts filter, Esc stops editing while preserving query, second Esc clears, third Esc closes.
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .text("/"))))
+        #expect(knobs.filtering)
+        knobs.setQuery("margin")
+        let filtered = KnobTree.plan(knobs: knobs, groups: groups)
+        #expect(filtered.sections.count == 1)
+        #expect(filtered.sections[0].subs[0].knobs == [0])
+
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .escape)))
+        #expect(!knobs.filtering && knobs.query == "margin")
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .escape)))
+        #expect(knobs.query.isEmpty && knobs.open)
+        #expect(KnobTree.handleKey(&knobs, groups: groups, event: KeyEvent(key: .escape)))
+        #expect(!knobs.open)
+
+        // On-screen mode highlights seen region groups first; tabs mode follows selected tab.
+        knobs.show()
+        knobs.set(RuneKnobsDefaults.layout, 1)
+        let onScreen = KnobTree.plan(knobs: knobs, groups: groups, seen: [1])
+        #expect(onScreen.sections.first?.subs.first?.groupIndex == 1)
+        knobs.set(RuneKnobsDefaults.layout, 2)
+        knobs.tab = "Effects"
+        let tabbed = KnobTree.plan(knobs: knobs, groups: groups)
+        #expect(tabbed.sections.count == 1 && tabbed.sections[0].subs[0].groupIndex == 1)
+    }
+
+    @Test func runtimePanelInteractionsAndInlineSizing() {
+        let l = Knob.float("rim", min: 0, max: 10, default: 5, step: 0.1)
+        let wide = Knob.float("A rather long slider label here", min: 0, max: 100, default: 50, step: 1)
+        let many = Knob.choice("Corner style", labels: ["Sharp", "Soft", "Round", "Pill", "Squircle"], default: 0)
+        let groups = [
+            KnobGroup("Left", region: "left", knobs: [l, wide, many]),
+            KnobGroup("Inner", region: "inner", knobs: [Knob.float("inner_pad", min: 0, max: 20, default: 4, step: 1)]),
+        ]
+
+        var initial = TestAppState()
+        initial.knobs.show()
+        let rt = Runtime<TestAppState>(
+            state: initial,
+            viewport: Vec2(1000, 700),
+            pixelScale: 1.0
+        ) { state, _ in
+            col()
+                .key("root")
+                .wFull()
+                .hFull()
+                .child(RuneKnobs.layer(knobs: state.knobs, groups: groups, style: .dark(), keyPath: \TestAppState.knobs))
+        }
+        for i in 0..<4 {
+            _ = rt.frame(at: Double(i) / 60.0)
+        }
+
+        if let panel = rt.element(byKey: "knobs-floating-panel") {
+            let center = Vec2(panel.rect[0] + panel.rect[2] * 0.5, panel.rect[1] + panel.rect[3] * 0.5)
+            rt.pointerMove(to: center, at: 0.1)
+            rt.pointerDown(at: center, at: 0.1)
+            rt.pointerUp(at: center, at: 0.11)
+            _ = rt.frame(at: 0.12)
+        }
+
+        // Inline layout stays within a narrow column and wide tracks grow.
+        struct InlineState {
+            var knobs = Knobs()
+            var width: Float
+        }
+        func renderInline(_ width: Float) -> [ElementInfo] {
+            let inlineRt = Runtime<InlineState>(
+                state: InlineState(width: width),
+                viewport: Vec2(400, 700),
+                pixelScale: 1.0
+            ) { s, _ in
+                El<InlineState>(direction: .row)
+                    .wFull()
+                    .hFull()
+                    .child(
+                        col().key("column").w(s.width).child(
+                            RuneKnobs.inline(knobs: s.knobs, groups: groups, style: .dark(), showHeader: false, keyPath: \InlineState.knobs)
+                        )
+                    )
+            }
+            for i in 0..<4 {
+                _ = inlineRt.frame(at: Double(i) / 60.0)
+            }
+            return inlineRt.elements()
+        }
+
+        for w in [Float(200), Float(240), Float(300)] {
+            let els = renderInline(w)
+            let panel = els.first(where: { $0.key == "knobs-panel" })
+            #expect(panel != nil)
+            if let p = panel {
+                #expect(p.rect[0] >= -0.01 && p.rect[0] + p.rect[2] <= w + 0.01)
+            }
+        }
+    }
 }

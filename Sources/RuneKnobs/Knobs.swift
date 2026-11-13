@@ -94,7 +94,7 @@ public struct Knobs: Sendable, Equatable {
     /// Undo/redo stacks.
     public var undoStack: [[String: Float]] = []
     public var redoStack: [[String: Float]] = []
-    private var seed: UInt64 = 0x9E3779B97F4A7C15
+    private var seed: UInt64 = 0
 
     public init() {}
 
@@ -513,7 +513,11 @@ public struct Knobs: Sendable, Equatable {
 
     public mutating func random(_ group: KnobGroup) {
         checkpoint()
-        if seed == 0 { seed = 1 }
+        if seed == 0 {
+            let wall = UInt64(max(0.0, Date().timeIntervalSince1970) * 1_000_000_000.0)
+            let mono = UInt64(max(0.0, ProcessInfo.processInfo.systemUptime) * 1_000_000_000.0)
+            seed = (wall ^ mono.byteSwapped) | 1
+        }
         for k in group.knobs {
             seed ^= seed << 13
             seed ^= seed >> 7
@@ -951,6 +955,25 @@ public enum RuneKnobs {
             return true
         default:
             return false
+        }
+    }
+
+    /// Wraps `Knobs.panelKey` as a side-column key handler, leaving `Esc` and `Tab` for the host view (`rune_knobs::side_key`).
+    public static func sideKey<S>(
+        groups: [KnobGroup],
+        keyPath: WritableKeyPath<S, Knobs>
+    ) -> (inout S, KeyEvent, inout Tx) -> Bool {
+        return { state, event, tx in
+            switch event.key {
+            case .escape, .tab:
+                return false
+            default:
+                let taken = state[keyPath: keyPath].panelKey(groups: groups, event: event)
+                if taken {
+                    tx.settle()
+                }
+                return taken
+            }
         }
     }
 }

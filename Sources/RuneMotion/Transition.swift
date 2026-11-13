@@ -182,10 +182,62 @@ public struct Transition: Sendable, Hashable {
     /// Smallest scale permitted with `.allowSmallScale()`.
     public static let smallScaleFloor: Float = 0.5
 
-    public var insertion: TransitionEffect
-    public var removal: TransitionEffect
-    public var popLayout: Bool
-    public var springs: SpringPair
+    private final class Storage: @unchecked Sendable {
+        var insertion: TransitionEffect
+        var removal: TransitionEffect
+        var popLayout: Bool
+        var springs: SpringPair
+
+        init(
+            insertion: TransitionEffect,
+            removal: TransitionEffect,
+            popLayout: Bool,
+            springs: SpringPair
+        ) {
+            self.insertion = insertion
+            self.removal = removal
+            self.popLayout = popLayout
+            self.springs = springs
+        }
+
+        func clone() -> Storage {
+            Storage(insertion: insertion, removal: removal, popLayout: popLayout, springs: springs)
+        }
+    }
+
+    private var storage: Storage
+
+    public var insertion: TransitionEffect {
+        get { storage.insertion }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.insertion = newValue
+        }
+    }
+
+    public var removal: TransitionEffect {
+        get { storage.removal }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.removal = newValue
+        }
+    }
+
+    public var popLayout: Bool {
+        get { storage.popLayout }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.popLayout = newValue
+        }
+    }
+
+    public var springs: SpringPair {
+        get { storage.springs }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.springs = newValue
+        }
+    }
 
     public init(
         insertion: TransitionEffect,
@@ -193,10 +245,7 @@ public struct Transition: Sendable, Hashable {
         popLayout: Bool = true,
         springs: SpringPair = MotionTokens.SETTLE_PAIR
     ) {
-        self.insertion = insertion
-        self.removal = removal
-        self.popLayout = popLayout
-        self.springs = springs
+        self.storage = Storage(insertion: insertion, removal: removal, popLayout: popLayout, springs: springs)
     }
 
     public init(
@@ -204,10 +253,23 @@ public struct Transition: Sendable, Hashable {
         popLayout: Bool = true,
         springs: SpringPair = MotionTokens.SETTLE_PAIR
     ) {
-        self.insertion = effect
-        self.removal = effect
-        self.popLayout = popLayout
-        self.springs = springs
+        self.storage = Storage(insertion: effect, removal: effect, popLayout: popLayout, springs: springs)
+    }
+
+    public static func == (lhs: Transition, rhs: Transition) -> Bool {
+        lhs.storage === rhs.storage || (
+            lhs.storage.insertion == rhs.storage.insertion &&
+            lhs.storage.removal == rhs.storage.removal &&
+            lhs.storage.popLayout == rhs.storage.popLayout &&
+            lhs.storage.springs == rhs.storage.springs
+        )
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(storage.insertion)
+        hasher.combine(storage.removal)
+        hasher.combine(storage.popLayout)
+        hasher.combine(storage.springs)
     }
 
     public static let identity = Transition(symmetric: .identity)

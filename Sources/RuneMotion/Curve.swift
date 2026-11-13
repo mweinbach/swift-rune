@@ -127,18 +127,46 @@ public enum VelocityRule: Sendable, Hashable {
     case uniform(Float)
 }
 
+private final class VelocityStorage: @unchecked Sendable {
+    var lanes: MotionLanes
+    init(_ lanes: MotionLanes) { self.lanes = lanes }
+    static let zero = VelocityStorage(.zero)
+}
+
 /// Typed velocity wrapper matching an `Animatable`'s lanes (units per second).
 public struct Velocity<T: Animatable>: Sendable, Hashable {
-    public var lanes: MotionLanes
+    private var storage: VelocityStorage
 
-    public static var zero: Velocity<T> { Velocity(lanes: .zero) }
+    public var lanes: MotionLanes {
+        get { storage.lanes }
+        set {
+            if !isKnownUniquelyReferenced(&storage) {
+                storage = VelocityStorage(storage.lanes)
+            }
+            storage.lanes = newValue
+        }
+    }
+
+    public static var zero: Velocity<T> { Velocity(storage: .zero) }
+
+    private init(storage: VelocityStorage) {
+        self.storage = storage
+    }
 
     public init(lanes: MotionLanes) {
-        self.lanes = lanes
+        self.storage = VelocityStorage(lanes)
     }
 
     public init(_ raw: T) {
-        self.lanes = raw.toLanes()
+        self.storage = VelocityStorage(raw.toLanes())
+    }
+
+    public static func == (lhs: Velocity<T>, rhs: Velocity<T>) -> Bool {
+        lhs.storage === rhs.storage || lhs.storage.lanes == rhs.storage.lanes
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(storage.lanes)
     }
 }
 

@@ -27,22 +27,103 @@ public enum Travel: Sendable, Hashable, Codable {
 
 /// How a frame change animates: per-axis curves, directional edge lead, and travel space.
 public struct LayoutAnim: Sendable, Hashable {
-    public var x: Anim<Float>
-    public var y: Anim<Float>
-    public var leadCurve: Anim<Float>?
-    public var trailCurve: Anim<Float>?
-    public var travel: Travel
+    private final class Storage: @unchecked Sendable {
+        var x: Anim<Float>
+        var y: Anim<Float>
+        var leadCurve: Anim<Float>?
+        var trailCurve: Anim<Float>?
+        var travel: Travel
+
+        init(
+            x: Anim<Float>,
+            y: Anim<Float>,
+            leadCurve: Anim<Float>?,
+            trailCurve: Anim<Float>?,
+            travel: Travel
+        ) {
+            self.x = x
+            self.y = y
+            self.leadCurve = leadCurve
+            self.trailCurve = trailCurve
+            self.travel = travel
+        }
+
+        func clone() -> Storage {
+            Storage(x: x, y: y, leadCurve: leadCurve, trailCurve: trailCurve, travel: travel)
+        }
+    }
+
+    private var storage: Storage
+
+    public var x: Anim<Float> {
+        get { storage.x }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.x = newValue
+        }
+    }
+
+    public var y: Anim<Float> {
+        get { storage.y }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.y = newValue
+        }
+    }
+
+    public var leadCurve: Anim<Float>? {
+        get { storage.leadCurve }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.leadCurve = newValue
+        }
+    }
+
+    public var trailCurve: Anim<Float>? {
+        get { storage.trailCurve }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.trailCurve = newValue
+        }
+    }
+
+    public var travel: Travel {
+        get { storage.travel }
+        set {
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.travel = newValue
+        }
+    }
 
     public static let instant = LayoutAnim(x: .instant, y: .instant)
 
+    public static func == (lhs: LayoutAnim, rhs: LayoutAnim) -> Bool {
+        lhs.storage === rhs.storage || (
+            lhs.storage.x == rhs.storage.x &&
+            lhs.storage.y == rhs.storage.y &&
+            lhs.storage.leadCurve == rhs.storage.leadCurve &&
+            lhs.storage.trailCurve == rhs.storage.trailCurve &&
+            lhs.storage.travel == rhs.storage.travel
+        )
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(storage.x)
+        hasher.combine(storage.y)
+        hasher.combine(storage.leadCurve)
+        hasher.combine(storage.trailCurve)
+        hasher.combine(storage.travel)
+    }
+
     public var lead: (Anim<Float>, Anim<Float>)? {
         get {
-            if let l = leadCurve, let t = trailCurve { return (l, t) }
+            if let l = storage.leadCurve, let t = storage.trailCurve { return (l, t) }
             return nil
         }
         set {
-            leadCurve = newValue?.0
-            trailCurve = newValue?.1
+            if !isKnownUniquelyReferenced(&storage) { storage = storage.clone() }
+            storage.leadCurve = newValue?.0
+            storage.trailCurve = newValue?.1
         }
     }
 
@@ -52,29 +133,23 @@ public struct LayoutAnim: Sendable, Hashable {
         lead: (Anim<Float>, Anim<Float>)? = nil,
         travel: Travel = .parent
     ) {
-        self.x = x
-        self.y = y ?? x
-        self.leadCurve = lead?.0
-        self.trailCurve = lead?.1
-        self.travel = travel
+        self.storage = Storage(
+            x: x,
+            y: y ?? x,
+            leadCurve: lead?.0,
+            trailCurve: lead?.1,
+            travel: travel
+        )
     }
 
     public init(_ spring: Spring) {
         let a = Anim<Float>(curve: Curve.from(spring))
-        self.x = a
-        self.y = a
-        self.leadCurve = nil
-        self.trailCurve = nil
-        self.travel = .parent
+        self.storage = Storage(x: a, y: a, leadCurve: nil, trailCurve: nil, travel: .parent)
     }
 
     public init(_ pair: SpringPair) {
         let a = Anim<Float>(curve: Curve.from(pair.enter))
-        self.x = a
-        self.y = a
-        self.leadCurve = nil
-        self.trailCurve = nil
-        self.travel = .parent
+        self.storage = Storage(x: a, y: a, leadCurve: nil, trailCurve: nil, travel: .parent)
     }
 
     /// Legacy compatibility initializer used by `Runtime` and existing tests.
@@ -85,11 +160,13 @@ public struct LayoutAnim: Sendable, Hashable {
         travel: Travel = .parent
     ) {
         let sx = widthScale.map { spring.withDuration(spring.duration * $0) } ?? spring
-        self.x = Anim(curve: Curve.from(sx))
-        self.y = Anim(curve: Curve.from(spring))
-        self.leadCurve = leadingSpring.map { Anim(curve: Curve.from($0)) }
-        self.trailCurve = leadingSpring.map { _ in Anim(curve: Curve.from(spring)) }
-        self.travel = travel
+        self.storage = Storage(
+            x: Anim(curve: Curve.from(sx)),
+            y: Anim(curve: Curve.from(spring)),
+            leadCurve: leadingSpring.map { Anim(curve: Curve.from($0)) },
+            trailCurve: leadingSpring.map { _ in Anim(curve: Curve.from(spring)) },
+            travel: travel
+        )
     }
 
     public static func axes(_ x: Anim<Float>, _ y: Anim<Float>) -> LayoutAnim {

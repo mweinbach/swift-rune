@@ -755,4 +755,153 @@ struct StoreParityTests {
         for _ in 0..<120 { _ = m2.step() }
         #expect(abs(m2.now - 1.0) < 1e-9)
     }
+
+    @Test("quality_jittered_sampling_and_retarget_audit_stay_bounded")
+    func qualityJitteredSamplingAndRetargetAuditStayBounded() {
+        var scene = Scene()
+        scene.store.auditRetargets(true)
+        scene.insert(NodeId(1), NodeSpec(MotionRect.fromXYWH(0, 0, 200, 200)), .initial)
+        scene.insert(NodeId(2), NodeSpec(MotionRect.fromXYWH(10, 10, 50, 50)).parent(NodeId(1)), .initial)
+        _ = scene.frameAt(0.0)
+        var now = 0.0
+        var seed: UInt32 = 7
+        for i in 0..<300 {
+            seed = seed &* 1664525 &+ 1013904223
+            now += 1.0 / 120.0 + Double(seed % 12000) / 1e6
+            scene.setTime(now)
+            if i % 7 == 0 {
+                let x = Float(seed % 300)
+                scene.setFrame(NodeId(1), MotionRect.fromXYWH(x, x / 2.0, 200, 200), Spring(duration: 0.4, bounce: 0.0))
+                scene.setFrame(NodeId(2), MotionRect.fromXYWH(x / 4.0, x / 3.0, 50, 50), Spring(duration: 0.3, bounce: 0.0))
+            }
+            _ = scene.frame()
+            let (samples, err) = scene.samplingError()
+            #expect(samples == 8)
+            #expect(err < 0.016)
+        }
+        let audit = scene.store.takeRetargetAudit()
+        #expect(audit.lanes > 100)
+        #expect(audit.maxVelocityError < 0.001)
+    }
+
+    @Test("math_full_range_exp_and_sin_cos_match_std")
+    func mathFullRangeExpAndSinCosMatchStd() {
+        var x: Float = -87.0
+        while x < 88.0 {
+            let ours = Double(MotionMath.exp(x))
+            let theirs = Foundation.exp(Double(x))
+            #expect(abs((ours - theirs) / theirs) < 4e-7)
+            x += 0.0137
+        }
+        #expect(MotionMath.exp(0.0) == 1.0)
+        #expect(MotionMath.exp(-100.0) == 0.0)
+        #expect(MotionMath.exp(100.0) == .infinity)
+
+        var angle: Float = -2000.0
+        while angle < 2000.0 {
+            let (s, c) = MotionMath.sinCos(angle)
+            let xd = Double(angle)
+            #expect(abs(Double(s) - Foundation.sin(xd)) < 4e-7)
+            #expect(abs(Double(c) - Foundation.cos(xd)) < 4e-7)
+            angle += 0.0731
+        }
+    }
+
+    @Test("easing_bezier_monotone_exact_solve_and_piecewise")
+    func easingBezierMonotoneExactSolveAndPiecewise() {
+        let b = CubicBezier(0.2, 0.8, 0.2, 1.0)
+        for i in 1..<1000 {
+            let x = Float(i) / 1000.0
+            let t = b.solveCurveX(x)
+            let back = b.sampleCurveX(t)
+            #expect(abs(back - x) < 1e-5)
+        }
+
+        let pw = Easing.piecewise([Vec2(0, 0), Vec2(0.5, 0.8), Vec2(1.0, 1.0)])
+        #expect(abs(pw.sample(0.25) - 0.4) < 1e-6)
+        #expect(abs(pw.sample(0.75) - 0.9) < 1e-6)
+        let (y, slope) = pw.evalWithSlope(0.25)
+        #expect(abs(y - 0.4) < 1e-6 && abs(slope - 1.6) < 1e-6)
+    }
+
+    @Test("value_affine_anchor_hex_srgb_and_oklab_helpers")
+    func valueAffineAnchorHexSrgbAndOklabHelpers() {
+        let r = MotionRect.fromXYWH(10, 20, 100, 50)
+        let lanes = r.toLanes()
+        #expect(lanes.l0 == 10 && lanes.l1 == 20 && lanes.l2 == 110 && lanes.l3 == 70)
+        #expect(MotionRect.fromLanes(lanes) == r)
+
+        let t = Transform2D(tx: 0, ty: 0, sx: 1, sy: 1, rot: .pi / 2)
+        let m = t.toAffine(anchor: Vec2(10, 10))
+        let x = m[0] * 10 + m[2] * 10 + m[4]
+        let y = m[1] * 10 + m[3] * 10 + m[5]
+        #expect(abs(x - 10) < 1e-4 && abs(y - 10) < 1e-4)
+
+        for c in [MotionColor.hex(0xff3b30), MotionColor.hex(0x34c759), MotionColor.hex(0x007aff), .white] {
+            let lab = MotionColor.linearToOKLab(
+                r: MotionColor.srgbDecode(c.r),
+                g: MotionColor.srgbDecode(c.g),
+                b: MotionColor.srgbDecode(c.b)
+            )
+            let lin = MotionColor.oklabToLinear(L: lab.L, a: lab.a, b: lab.b)
+            let br = MotionColor.srgbEncode(lin.r.clamped(to: 0...1))
+            let bg = MotionColor.srgbEncode(lin.g.clamped(to: 0...1))
+            let bb = MotionColor.srgbEncode(lin.b.clamped(to: 0...1))
+            #expect(abs(c.r - br) < 1e-3 && abs(c.g - bg) < 1e-3 && abs(c.b - bb) < 1e-3)
+        }
+        #expect(MotionColor.transparent.a == 0 && MotionColor.black.r == 0 && MotionColor.white.withAlpha(0.5).a == 0.5)
+    }
+
+    @Test("looping_delayed_cooling_linear_slide_and_clock_reference")
+    func loopingDelayedCoolingLinearSlideAndClockReference() {
+        let beats = [Beat(at: 0.0, opacity: 0.0), Beat(at: 0.5, opacity: 1.0)]
+        let seqSpec = LoopSpec.sequence(MotionSequence(frames: beats, delay: 0.2))
+        var seqTrack = LoopTrack(spec: seqSpec, now: 0.0)
+        seqTrack.finish()
+        #expect(!seqTrack.isActive(at: 0.3))
+        #expect(seqTrack.pendingStart(at: 0.3) == nil)
+        #expect(seqTrack.pose(at: 0.3, reduced: false)?.opacity == 1.0)
+        seqTrack.advance(by: 1.0)
+        #expect(seqTrack.pose(at: 0.3, reduced: false)?.opacity == 1.0)
+        seqTrack.setEnabled(false, at: 1.0)
+        #expect(!seqTrack.isActive(at: 10.0))
+        seqTrack.setEnabled(true, at: 2.0)
+        #expect(seqTrack.pendingStart(at: 2.0) == 2.2)
+        #expect(!seqTrack.isActive(at: 2.1))
+        #expect(seqTrack.pose(at: 2.1, reduced: false)?.opacity == 0.0)
+
+        var delayed = LoopTrack(spec: LoopSpec.opacity(period: 1.0, delay: 2.0, low: 0.0, high: 1.0), now: 3.0)
+        #expect(delayed.pendingStart(at: 3.0) == 5.0)
+        delayed.shift(by: 0.5)
+        #expect(delayed.pendingStart(at: 3.0) == 5.5)
+        delayed.shift(by: -0.25)
+        #expect(delayed.pendingStart(at: 3.0) == 5.25)
+        #expect(!delayed.isActive(at: 5.0))
+        #expect(delayed.isActive(at: 5.25))
+
+        let slide = LoopTrack(spec: LoopSpec.slide(period: 2.0, from: Vec2(-1, 0), to: Vec2(3, 0)).easing(.linear), now: 0.0)
+        let xs = (0..<240).map { slide.offset(at: Double($0) / 120.0, reduced: false)!.x }
+        #expect(xs[0] == -1.0)
+        for i in 1..<xs.count {
+            #expect(abs((xs[i] - xs[i - 1]) - (4.0 / 240.0)) < 1e-4)
+        }
+        #expect(slide.offset(at: 2.0, reduced: false) == Vec2(-1, 0))
+        #expect(slide.offset(at: 0.37, reduced: true) == Vec2(1, 0))
+        #expect(slide.sample(at: 0.37, reduced: false) == 1.0)
+
+        let rot = LoopTrack(spec: LoopSpec.rotation(period: 0.9), now: 0.0)
+        var clk = Clock.manual(hz: 120.0)
+        for _ in 0..<17 { _ = clk.step() }
+        let first = rot.sample(at: clk.now, reduced: false)
+        clk.pause(realNow: 0.0)
+        for _ in 0..<40 { _ = clk.step() }
+        #expect(rot.sample(at: clk.now, reduced: false) == first)
+        clk.resume(realNow: 0.0)
+        clk.setScale(0.25, realNow: 0.0)
+        _ = clk.step()
+        let reference = Float((17.0 / 120.0 + 0.25 / 120.0) / 0.9) * (.pi * 2.0)
+        #expect(abs(rot.sample(at: clk.now, reduced: false) - reference) < 1e-6)
+        clk.seek(to: 0.45)
+        #expect(abs(rot.sample(at: clk.now, reduced: false) - .pi) < 1e-6)
+    }
 }

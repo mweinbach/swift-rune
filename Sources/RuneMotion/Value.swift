@@ -413,8 +413,7 @@ public struct Transform2D: Animatable, Hashable {
     /// 2x3 column-major affine matrix `[a, b, c, d, tx, ty]` applying this transform about `anchor`.
     @inlinable
     public func toAffine(anchor: Vec2) -> [Float] {
-        let s = sinf(rot)
-        let c = cosf(rot)
+        let (s, c) = MotionMath.sinCos(rot)
         let a = c * sx
         let b = s * sx
         let cc = -s * sy
@@ -446,6 +445,9 @@ public struct MotionColor: Animatable, Hashable {
 
     public static let laneCount = 4
     public static let zeroValue = MotionColor(r: 0, g: 0, b: 0, a: 0)
+    public static let transparent = MotionColor(r: 0, g: 0, b: 0, a: 0)
+    public static let black = MotionColor(r: 0, g: 0, b: 0, a: 1)
+    public static let white = MotionColor(r: 1, g: 1, b: 1, a: 1)
 
     @inlinable
     public init(r: Float, g: Float, b: Float, a: Float = 1.0) {
@@ -453,6 +455,65 @@ public struct MotionColor: Animatable, Hashable {
         self.g = g
         self.b = b
         self.a = a
+    }
+
+    /// `0xRRGGBB` with alpha 1.
+    @inlinable
+    public static func hex(_ rgb: UInt32) -> MotionColor {
+        MotionColor(
+            r: Float((rgb >> 16) & 0xff) / 255.0,
+            g: Float((rgb >> 8) & 0xff) / 255.0,
+            b: Float(rgb & 0xff) / 255.0,
+            a: 1.0
+        )
+    }
+
+    @inlinable
+    public func withAlpha(_ alpha: Float) -> MotionColor {
+        MotionColor(r: r, g: g, b: b, a: alpha)
+    }
+
+    @inlinable
+    public static func srgbDecode(_ c: Float) -> Float {
+        c <= 0.040_45 ? (c / 12.92) : powf((c + 0.055) / 1.055, 2.4)
+    }
+
+    @inlinable
+    public static func srgbEncode(_ c: Float) -> Float {
+        c <= 0.003_130_8 ? (c * 12.92) : (1.055 * powf(c, 1.0 / 2.4) - 0.055)
+    }
+
+    @inlinable
+    public static func linearToOKLab(r: Float, g: Float, b: Float) -> (L: Float, a: Float, b: Float) {
+        let rr = max(0, r)
+        let gg = max(0, g)
+        let bb = max(0, b)
+        let l = 0.4122214708 * rr + 0.5363325363 * gg + 0.0514459929 * bb
+        let m = 0.2119034982 * rr + 0.6806995451 * gg + 0.1073969566 * bb
+        let s = 0.0883024619 * rr + 0.2817188376 * gg + 0.6299787005 * bb
+        let l_ = cbrtf(l)
+        let m_ = cbrtf(m)
+        let s_ = cbrtf(s)
+        return (
+            L: 0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            a: 1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            b: 0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_
+        )
+    }
+
+    @inlinable
+    public static func oklabToLinear(L: Float, a: Float, b: Float) -> (r: Float, g: Float, b: Float) {
+        let l_ = L + 0.3963377774 * a + 0.2158037573 * b
+        let m_ = L - 0.1055613458 * a - 0.0638541728 * b
+        let s_ = L - 0.0894841775 * a - 1.2914855480 * b
+        let l = l_ * l_ * l_
+        let m = m_ * m_ * m_
+        let s = s_ * s_ * s_
+        return (
+            r: +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            g: -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            b: -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        )
     }
 
     @inlinable
