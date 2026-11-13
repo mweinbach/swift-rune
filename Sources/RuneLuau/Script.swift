@@ -90,13 +90,19 @@ internal final class SignalRegistry: @unchecked Sendable {
 
 /// Configuration for hosting a `Script`.
 public struct ScriptOptions: @unchecked Sendable {
+    public typealias AroundWriteHook = @Sendable (_ state: inout Any, _ tx: UnsafeMutablePointer<Tx>?, _ body: (UnsafeMutablePointer<Tx>?) -> Void) -> Void
+    public typealias AroundReadHook = @Sendable (_ state: Any, _ body: () -> Void) -> Void
+
     public var palette: Palette = defaultPalette()
     public var shadows: Shadows? = nil
     public var setup: (@Sendable (LuauHost) throws -> Void)? = nil
     public var start: (@Sendable (LuauVM, LuauTable, UInt64) throws -> Void)? = nil
+    public var around: AroundWriteHook? = nil
+    public var aroundRead: AroundReadHook? = nil
     public var nodes: [HostNode] = []
     public var timeLimit: Duration = .milliseconds(250)
     public var instructionLimit: Int? = nil
+    public var memoryLimit: Int = 64 << 20
     public var onLog: (@Sendable (LogLevel, String) -> Void)? = nil
     public var baseTextStyle: TextStyle = TextStyle(size: 13, weight: 400)
     public var weights: [Float] = [400, 500, 600, 700]
@@ -115,6 +121,12 @@ public struct ScriptOptions: @unchecked Sendable {
     public func start(_ f: @escaping @Sendable (LuauVM, LuauTable, UInt64) throws -> Void) -> ScriptOptions {
         var copy = self; copy.start = f; return copy
     }
+    public func around(_ f: @escaping AroundWriteHook) -> ScriptOptions {
+        var copy = self; copy.around = f; return copy
+    }
+    public func aroundRead(_ f: @escaping AroundReadHook) -> ScriptOptions {
+        var copy = self; copy.aroundRead = f; return copy
+    }
     public func node(_ n: HostNode) -> ScriptOptions {
         var copy = self; copy.nodes.append(n); return copy
     }
@@ -124,8 +136,14 @@ public struct ScriptOptions: @unchecked Sendable {
     public func instructionLimit(_ limit: Int?) -> ScriptOptions {
         var copy = self; copy.instructionLimit = limit; return copy
     }
+    public func memoryLimit(_ bytes: Int) -> ScriptOptions {
+        var copy = self; copy.memoryLimit = bytes; return copy
+    }
     public func onLog(_ f: @escaping @Sendable (LogLevel, String) -> Void) -> ScriptOptions {
         var copy = self; copy.onLog = f; return copy
+    }
+    public func text(_ base: TextStyle, weights: [Float] = [400, 500, 600, 700]) -> ScriptOptions {
+        var copy = self; copy.baseTextStyle = base; copy.weights = weights; return copy
     }
 }
 
@@ -149,21 +167,25 @@ public final class Script: @unchecked Sendable {
     private var vm: LuauVM?
     private var vmID: UInt64 = 0
     private var moduleTable: LuauTable?
-    private var viewTable: LuauTable?
     private var sched: LuauTaskScheduler?
     private var signals = SignalRegistry()
     private var fireFn: LuauValue = .nil
     private var currentSources: Sources
     private var failedError: ScriptError?
-    private var version: UInt64 = 1
+    public private(set) var version: UInt64 = 1
     private var salt: UInt64 = 1
     private var clock: Double = 0.0
     private var nextDeadline: Double = .infinity
     private var _metrics = ScriptMetrics()
     private var logLines: [LogLine] = []
     private let shared = SharedScriptState()
-    private var activeEnv: UIRenderEnv?
+    private var prewarmedBase: (vm: LuauVM, vmID: UInt64, sched: LuauTaskScheduler, signals: SignalRegistry, fireFn: LuauValue)?
+    private var warnedMessages: Set<String> = []
     private var virtualListStates: [String: VirtualListState] = [:]
+    private var rowKeyCaches: [String: (ver: UInt64, map: [Int: String])] = [:]
+    private var visibleRowRanges: [String: (Int, Int)] = [:]
+    private var trackedScrollKeysBySurface: [String: [String]] = [:]
+    private var pendingPressMods: Mods = Mods()
     private var watcher: LuauFolderWatcher?
 
     public init(name: String, sources: Sources, options: ScriptOptions = ScriptOptions()) {
@@ -190,6 +212,10 @@ public final class Script: @unchecked Sendable {
     public var log: [LogLine] { logLines }
     public var metrics: ScriptMetrics { _metrics }
     public var sources: Sources { currentSources }
+    public var vmId: UInt64? { vm == nil ? nil : vmID }
+    public var module: LuauTable? { moduleTable }
+    public func memoPrefix() -> String { prefix }
+    public func memory() -> Int { vm?.estimatedMemoryBytes() ?? 0 }
 
     /// Runs due tasks, timers, host async completions, and folder-watch reloads.
     @discardableResult
@@ -197,7 +223,7 @@ public final class Script: @unchecked Sendable {
         clock = now
         var reloaded = false
         if let watcher {
-            let (_, ready) = watcher.takeReady()
+            let (saving, ready) = watcher.takeReady()
             if let ready {
                 switch ready {
                 case .success(let (newSources, compiled, compileDur)):
@@ -215,6 +241,8 @@ public final class Script: @unchecked Sendable {
                 case .failure(let err):
                     appendLog(.error, err.message)
                 }
+            } else if saving {
+                prewarm()
             }
         }
 
@@ -226,10 +254,8 @@ public final class Script: @unchecked Sendable {
         let resumed = runTimed {
             sched.poll(vm: vm, now: now)
         }
-        settle(tx: &tx)
-        if resumed == 0 {
-            version &-= 1
-        }
+        let changed = sched.takeChanged()
+        settle(tx: &tx, bumpVersion: resumed > 0 || changed)
         return reloaded || resumed > 0
     }
 
@@ -242,19 +268,51 @@ public final class Script: @unchecked Sendable {
     public func surface<State>(_ cx: Cx<State>, name: String) -> El<State> {
         let dark = cx.systemDark
         let id = "\(prefix)\(name)"
-        let deps = mix(version, salt)
+        let tracked = trackedScrollKeysBySurface[name] ?? []
+        var scrollHasher = Hasher()
+        scrollHasher.combine(cx.viewport.x.bitPattern)
+        scrollHasher.combine(cx.viewport.y.bitPattern)
+        for k in tracked {
+            let off = cx.scrollOffset(of: k)
+            scrollHasher.combine(k)
+            scrollHasher.combine(off.x.bitPattern)
+            scrollHasher.combine(off.y.bitPattern)
+        }
+        let scrollDep = UInt64(bitPattern: Int64(scrollHasher.finalize()))
+        let deps = mix(mix(version, salt), scrollDep)
+        let viewport = cx.viewport
         return Rune.memo(id, deps: deps) {
-            renderUncached(name: name, dark: dark, State.self).key(id)
+            aroundRead(state: ()) {
+                renderUncached(
+                    name: name,
+                    dark: dark,
+                    viewport: viewport,
+                    scrollLookup: { cx.scrollOffset(of: $0) },
+                    State.self
+                ).key(id)
+            }
         }
     }
 
     /// Renders surface `name` immediately without memoization.
-    public func renderUncached<State>(name: String, dark: Bool, _ type: State.Type = State.self) -> El<State> {
+    public func renderUncached<State>(
+        name: String,
+        dark: Bool,
+        viewport: Vec2 = .zero,
+        scrollLookup: ((String) -> Vec2)? = nil,
+        _ type: State.Type = State.self
+    ) -> El<State> {
         let card: (String) -> El<State> = { [weak self] msg in
             let palette = self?.options.palette ?? defaultPalette()
             return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] _, _ in
                 guard let self else { return }
-                _ = try? self.reload(self.currentSources)
+                do {
+                    _ = try self.reload(self.currentSources)
+                } catch let err as ScriptError {
+                    self.fail(err)
+                } catch {
+                    self.fail(ScriptError(kind: .runtime, message: error.localizedDescription))
+                }
             }
         }
         if let failedError {
@@ -263,17 +321,9 @@ public final class Script: @unchecked Sendable {
         guard let vm, let moduleTable else {
             return card("the script isn't running")
         }
-        let renderFn = moduleTable.rawGet(name)
-        guard !renderFn.isNil else {
+        let renderFnVal = moduleTable.rawGet(name)
+        guard !renderFnVal.isNil else {
             return card("init.luau exports no \(name) function")
-        }
-
-        // Install UI bridge for this State type if not yet installed on this VM
-        if viewTable == nil {
-            let envGetter: @Sendable () -> UIRenderEnv? = { [weak self] in self?.activeEnv }
-            let existingUI = vm.registeredModules["@rune/ui"]?.asTable
-            LuauUIBridge.install(into: vm, stateType: State.self, table: existingUI, hostNodes: options.nodes, currentEnv: envGetter)
-            viewTable = LuauUIBridge.makeViewTable(for: vm, stateType: State.self, currentEnv: envGetter)
         }
 
         let env = UIRenderEnv(
@@ -282,39 +332,220 @@ public final class Script: @unchecked Sendable {
             salt: salt,
             version: version,
             dark: dark,
+            viewport: viewport,
+            scrollLookup: scrollLookup,
             palette: options.palette,
             shadows: options.shadows,
             baseTextStyle: options.baseTextStyle,
             weights: options.weights,
             prefix: prefix
         )
-        activeEnv = env
-        defer { activeEnv = nil }
 
         do {
-            let el: El<State> = try runTimed {
-                viewTable?.rawSet("dark", value: .bool(dark))
-                let res = try vm.call(value: renderFn, args: [viewTable.map { .table($0) } ?? .nil]).first ?? .nil
-                return try LuauUIBridge.unwrapEl(res, State.self)
+            let el: El<State> = try LuauUIBridge.withSession(vm: vm, stateType: State.self, env: env) { viewTable in
+                try runTimed {
+                    let res = try vm.call(value: renderFnVal, args: [.table(viewTable)]).first ?? .nil
+                    return try LuauUIBridge.unwrapEl(res, State.self)
+                }
             }
+            trackedScrollKeysBySurface[name] = env.trackedScrollKeys
             _metrics.renders += 1
             if env.memoFailed {
                 salt &+= 1
             }
+            noteSchedule()
             return el
         } catch let err as LuauRuntimeError {
             let se = err.toScriptError()
             appendLog(.error, se.message)
             salt &+= 1
+            noteSchedule()
             return card(se.message)
         } catch let err as ScriptError {
             appendLog(.error, err.message)
             salt &+= 1
+            noteSchedule()
             return card(err.message)
         } catch {
             appendLog(.error, error.localizedDescription)
             salt &+= 1
+            noteSchedule()
             return card(error.localizedDescription)
+        }
+    }
+
+    /// Renders a Luau callback function `(view, ...args) -> El` as a memoized surface.
+    public func renderFn<State>(
+        _ id: String,
+        version fnVersion: UInt64,
+        dark: Bool,
+        state: State? = nil,
+        fn: LuauValue,
+        args: [LuauValue] = [],
+        viewport: Vec2 = .zero,
+        scrollLookup: ((String) -> Vec2)? = nil
+    ) -> El<State> {
+        let surfaceID = "\(prefix)fn:\(id)"
+        let tracked = trackedScrollKeysBySurface[surfaceID] ?? []
+        var scrollHasher = Hasher()
+        scrollHasher.combine(viewport.x.bitPattern)
+        scrollHasher.combine(viewport.y.bitPattern)
+        for k in tracked {
+            let off = scrollLookup?(k) ?? .zero
+            scrollHasher.combine(k)
+            scrollHasher.combine(off.x.bitPattern)
+            scrollHasher.combine(off.y.bitPattern)
+        }
+        let scrollDep = UInt64(bitPattern: Int64(scrollHasher.finalize()))
+        let deps = mix(mix(mix(version, salt), fnVersion), scrollDep)
+        let card: (String) -> El<State> = { [weak self] msg in
+            let palette = self?.options.palette ?? defaultPalette()
+            return LuauCard.errorCard(message: msg, palette: palette, dark: dark) { [weak self] _, _ in
+                guard let self else { return }
+                do {
+                    _ = try self.reload(self.currentSources)
+                } catch let err as ScriptError {
+                    self.fail(err)
+                } catch {
+                    self.fail(ScriptError(kind: .runtime, message: error.localizedDescription))
+                }
+            }
+        }
+        return Rune.memo(surfaceID, deps: deps) {
+            aroundRead(state: state as Any) {
+                if let failedError {
+                    return card(failedError.message)
+                }
+                guard let vm else {
+                    return card("the script isn't running")
+                }
+                let env = UIRenderEnv(
+                    script: self,
+                    vmID: vmID,
+                    salt: salt,
+                    version: version,
+                    dark: dark,
+                    viewport: viewport,
+                    scrollLookup: scrollLookup,
+                    palette: options.palette,
+                    shadows: options.shadows,
+                    baseTextStyle: options.baseTextStyle,
+                    weights: options.weights,
+                    prefix: "\(surfaceID):"
+                )
+                do {
+                    let el: El<State> = try LuauUIBridge.withSession(vm: vm, stateType: State.self, env: env) { viewTable in
+                        try runTimed {
+                            let res = try vm.call(value: fn, args: [.table(viewTable)] + args).first ?? .nil
+                            return try LuauUIBridge.unwrapEl(res, State.self)
+                        }
+                    }
+                    trackedScrollKeysBySurface[surfaceID] = env.trackedScrollKeys
+                    _metrics.renders += 1
+                    if env.memoFailed {
+                        salt &+= 1
+                    }
+                    noteSchedule()
+                    return el.key(surfaceID)
+                } catch let err as LuauRuntimeError {
+                    let se = err.toScriptError()
+                    appendLog(.error, se.message)
+                    salt &+= 1
+                    noteSchedule()
+                    return card(se.message)
+                } catch let err as ScriptError {
+                    appendLog(.error, err.message)
+                    salt &+= 1
+                    noteSchedule()
+                    return card(err.message)
+                } catch {
+                    appendLog(.error, error.localizedDescription)
+                    salt &+= 1
+                    noteSchedule()
+                    return card(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Convenience `renderFn` using `Cx<State>` for viewport, dark mode, and live scroll lookup.
+    public func renderFn<State>(
+        _ cx: Cx<State>,
+        id: String,
+        version fnVersion: UInt64 = 0,
+        fn: LuauValue,
+        args: [LuauValue] = []
+    ) -> El<State> {
+        renderFn(
+            id,
+            version: fnVersion,
+            dark: cx.systemDark,
+            state: nil as State?,
+            fn: fn,
+            args: args,
+            viewport: cx.viewport,
+            scrollLookup: { cx.scrollOffset(of: $0) }
+        )
+    }
+
+    /// Spawns a Luau function or thread on the task scheduler (without an active `Tx`).
+    public func spawnFn(_ fn: LuauValue, args: [LuauValue] = []) throws {
+        var dummy = Tx()
+        try spawnFn(fn, args: args, tx: &dummy)
+    }
+
+    /// Spawns a Luau function or thread on the task scheduler and settles against `tx`.
+    public func spawnFn(_ fn: LuauValue, args: [LuauValue] = [], tx: inout Tx) throws {
+        guard let vm, let sched else {
+            throw failedError ?? ScriptError(kind: .missing, message: "not running")
+        }
+        try enterThrowing(tx: &tx) {
+            if case .closure(let cl) = fn {
+                let thread = vm.createThread(closure: cl)
+                sched.run(vm: vm, thread: thread, args: args)
+            } else {
+                _ = try vm.call(value: fn, args: args)
+            }
+        }
+    }
+
+    /// Evaluates a Luau function synchronously and returns its raw `LuauValue` results.
+    @discardableResult
+    public func evalFn(_ fn: LuauValue, args: [LuauValue] = []) throws -> [LuauValue] {
+        guard let vm else {
+            throw failedError ?? ScriptError(kind: .missing, message: "not running")
+        }
+        return try enterThrowing {
+            try vm.call(value: fn, args: args)
+        }
+    }
+
+    /// Builds a fresh base VM ahead of the next reload.
+    public func prewarm() {
+        guard prewarmedBase == nil else { return }
+        prewarmedBase = try? buildBaseVM()
+    }
+
+    /// Swaps in pre-compiled sources with an externally measured compile duration.
+    @discardableResult
+    public func reloadCompiled(
+        _ sources: Sources,
+        compiled: CompiledSources,
+        compileDuration: Duration
+    ) throws -> ReloadReport {
+        do {
+            var report = try swap(compiled: compiled)
+            report.compileDuration = compileDuration
+            currentSources = sources
+            noteReload(report)
+            return report
+        } catch let err as ScriptError {
+            appendLog(.error, err.message)
+            throw err
+        } catch {
+            let se = ScriptError(kind: .runtime, message: error.localizedDescription)
+            appendLog(.error, se.message)
+            throw se
         }
     }
 
@@ -322,13 +553,19 @@ public final class Script: @unchecked Sendable {
     @discardableResult
     public func reload(_ sources: Sources) throws -> ReloadReport {
         let compileStart = ContinuousClock.now
-        let compiled = try sources.compile()
+        let compiled: CompiledSources
+        do {
+            compiled = try sources.compile()
+        } catch let err as ScriptError {
+            appendLog(.error, err.message)
+            throw err
+        } catch {
+            let se = ScriptError(kind: .runtime, message: error.localizedDescription)
+            appendLog(.error, se.message)
+            throw se
+        }
         let compileDur = compileStart.duration(to: .now)
-        var report = try swap(compiled: compiled)
-        report.compileDuration = compileDur
-        currentSources = sources
-        noteReload(report)
-        return report
+        return try reloadCompiled(sources, compiled: compiled, compileDuration: compileDur)
     }
 
     /// Watches `directory` for `.luau` file changes and reloads automatically on the next `poll`.
@@ -343,10 +580,14 @@ public final class Script: @unchecked Sendable {
     public func fire(_ name: String, args: [LuauData] = []) -> Bool {
         guard let vm, let sig = signals.map[name], !fireFn.isNil else { return false }
         let luauArgs = [sig] + args.map { $0.toLuau() }
-        enter {
-            _ = try vm.call(value: fireFn, args: luauArgs)
+        do {
+            try enterThrowing {
+                _ = try vm.call(value: fireFn, args: luauArgs)
+            }
+            return true
+        } catch {
+            return false
         }
-        return true
     }
 
     /// Calls exported function `name` in a new task.
@@ -355,12 +596,22 @@ public final class Script: @unchecked Sendable {
             throw failedError ?? ScriptError(kind: .missing, message: "not running")
         }
         let fn = moduleTable.rawGet(name)
-        guard case .closure(let cl) = fn else {
+        let isCallable: Bool = switch fn {
+        case .closure, .nativeFunction: true
+        case .table: vm.getMetamethod(of: fn, name: "__call") != nil
+        default: false
+        }
+        guard isCallable else {
             throw ScriptError(kind: .missing, message: "no function \(name)")
         }
         try enterThrowing {
-            let thread = vm.createThread(closure: cl)
-            sched.run(vm: vm, thread: thread, args: args.map { $0.toLuau() })
+            let luauArgs = args.map { $0.toLuau() }
+            if case .closure(let cl) = fn {
+                let thread = vm.createThread(closure: cl)
+                sched.run(vm: vm, thread: thread, args: luauArgs)
+            } else {
+                _ = try vm.call(value: fn, args: luauArgs)
+            }
         }
     }
 
@@ -387,6 +638,20 @@ public final class Script: @unchecked Sendable {
 
     // MARK: - Internal Lifecycle
 
+    internal func warnOnce(_ message: String) {
+        if warnedMessages.insert(message).inserted {
+            appendLog(.warn, message)
+        }
+    }
+
+    internal func logError(_ message: String) {
+        appendLog(.error, message)
+    }
+
+    internal func incrementRowsMetric() {
+        _metrics.rows += 1
+    }
+
     internal func virtualListState(forKey key: String) -> VirtualListState {
         if let existing = virtualListStates[key] { return existing }
         let s = VirtualListState()
@@ -394,16 +659,116 @@ public final class Script: @unchecked Sendable {
         return s
     }
 
-    internal func handleCallback(fn: LuauValue, vmID: UInt64, event: LuauValue, tx: inout Tx) {
-        guard self.vmID == vmID, let vm, let sched else { return }
-        enter(tx: &tx) {
-            if case .closure(let cl) = fn {
-                let thread = vm.createThread(closure: cl)
-                sched.run(vm: vm, thread: thread, args: [event])
-            } else {
-                _ = try vm.call(value: fn, args: [event])
+    internal func cachedRowKey(for listKey: String, version: UInt64, index: Int) -> String? {
+        guard let entry = rowKeyCaches[listKey], entry.ver == version else { return nil }
+        return entry.map[index]
+    }
+
+    internal func storeRowKey(_ key: String, for listKey: String, version: UInt64, index: Int) {
+        if var entry = rowKeyCaches[listKey], entry.ver == version {
+            entry.map[index] = key
+            rowKeyCaches[listKey] = entry
+        } else {
+            rowKeyCaches[listKey] = (ver: version, map: [index: key])
+        }
+    }
+
+    internal func recordVisibleRowsChange(for listKey: String, first: Int, last: Int) -> Bool {
+        if let prev = visibleRowRanges[listKey], prev == (first, last) {
+            return false
+        }
+        visibleRowRanges[listKey] = (first, last)
+        return true
+    }
+
+    internal func stashPressMods(_ mods: Mods) {
+        pendingPressMods = mods
+    }
+
+    internal func consumePressMods() -> Mods {
+        let m = pendingPressMods
+        pendingPressMods = Mods()
+        return m
+    }
+
+    internal func pressEventMods(_ mods: Mods) -> (shift: Bool, alt: Bool, mod: Bool) {
+        #if os(macOS)
+        return (mods.shift, mods.alt, mods.cmd)
+        #else
+        return (mods.shift, mods.alt, mods.ctrl)
+        #endif
+    }
+
+    internal func aroundWrite<State>(state: inout State, tx: inout Tx, _ body: (inout Tx) -> Void) {
+        guard let hook = options.around else {
+            body(&tx)
+            return
+        }
+        var boxed: Any = state
+        withUnsafeMutablePointer(to: &tx) { txPtr in
+            hook(&boxed, txPtr) { innerTxPtr in
+                var localTx = innerTxPtr?.pointee ?? txPtr.pointee
+                body(&localTx)
+                if let innerTxPtr {
+                    innerTxPtr.pointee = localTx
+                } else {
+                    txPtr.pointee = localTx
+                }
             }
         }
+        if let updated = boxed as? State {
+            state = updated
+        }
+    }
+
+    internal func aroundWriteOptional(state: inout Any, tx: UnsafeMutablePointer<Tx>?, _ body: (UnsafeMutablePointer<Tx>?) -> Void) {
+        guard let hook = options.around else {
+            body(tx)
+            return
+        }
+        hook(&state, tx, body)
+    }
+
+    internal func aroundRead<R>(state: Any, _ body: () -> R) -> R {
+        guard let hook = options.aroundRead else {
+            return body()
+        }
+        var result: R!
+        hook(state) {
+            result = body()
+        }
+        return result
+    }
+
+    internal func callHandlerIfCurrent(vmID: UInt64, fn: LuauValue, arg: LuauValue) throws {
+        guard self.vmID == vmID, let vm, let sched else { return }
+        if case .closure(let cl) = fn {
+            let thread = vm.createThread(closure: cl)
+            sched.run(vm: vm, thread: thread, args: [arg])
+        } else {
+            _ = try vm.call(value: fn, args: [arg])
+        }
+    }
+
+    private func buildBaseVM() throws -> (vm: LuauVM, vmID: UInt64, sched: LuauTaskScheduler, signals: SignalRegistry, fireFn: LuauValue) {
+        let newVM = LuauVM()
+        let newID = Self.allocVMID()
+        let newSched = LuauTaskScheduler(shared: shared, clock: clock)
+        let newSignals = SignalRegistry()
+
+        newVM.memoryLimitBytes = options.memoryLimit
+        newVM.onPrint = { [weak self] line in self?.appendLog(.info, line) }
+        newVM.onWarn = { [weak self] line in self?.appendLog(.warn, line) }
+
+        let prelude = try LuauTaskScheduler.install(into: newVM, sched: newSched)
+        LuauUIBridge.installStatic(into: newVM, hostNodes: options.nodes)
+
+        let host = LuauHost(vm: newVM, shared: shared, signals: newSignals, prelude: prelude)
+        if let setupFn = options.setup {
+            try setupFn(host)
+        }
+        let fireVal = prelude.rawGet("fire")
+        return (newVM, newID, newSched, newSignals, fireVal)
     }
 
     private func swap(compiled: CompiledSources) throws -> ReloadReport {
@@ -412,34 +777,28 @@ public final class Script: @unchecked Sendable {
         if let oldVM = vm, let oldMod = moduleTable {
             let saveFn = oldMod.rawGet("saveHotState")
             if !saveFn.isNil {
-                savedHotState = try? runTimed {
-                    let res = try oldVM.call(value: saveFn).first ?? .nil
-                    return LuauData.fromLuau(res)
+                do {
+                    savedHotState = try runTimed {
+                        let res = try oldVM.call(value: saveFn).first ?? .nil
+                        return LuauData.fromLuau(res)
+                    }
+                } catch let err as LuauRuntimeError {
+                    appendLog(.warn, "saveHotState: \(err.toScriptError().message)")
+                } catch {
+                    appendLog(.warn, "saveHotState: \(error.localizedDescription)")
                 }
             }
         }
 
-        let newVM = LuauVM()
-        let newID = Self.allocVMID()
-        let newSched = LuauTaskScheduler(shared: shared, clock: clock)
-        let newSignals = SignalRegistry()
+        let base = try prewarmedBase ?? buildBaseVM()
+        prewarmedBase = nil
+        let newVM = base.vm
+        let newID = base.vmID
+        let newSched = base.sched
+        let newSignals = base.signals
 
-        newVM.onPrint = { [weak self] line in self?.appendLog(.info, line) }
-        newVM.onWarn = { [weak self] line in self?.appendLog(.warn, line) }
-
-        let prelude = try LuauTaskScheduler.install(into: newVM, sched: newSched)
         LuauRequire.install(into: newVM, compiled: compiled)
-
-        let host = LuauHost(vm: newVM, shared: shared, signals: newSignals, prelude: prelude)
-        if let setupFn = options.setup {
-            try setupFn(host)
-        }
-
-        // Register @rune/ui table before entry module runs so `local ui = require("@rune/ui")` captures it;
-        // renderUncached<State> populates its typed El<State> constructors in-place.
-        if newVM.registeredModules["@rune/ui"] == nil {
-            newVM.registeredModules["@rune/ui"] = .table(LuauTable())
-        }
+        newVM.sandbox()
 
         // Run entry module
         let entryVal = try runTimed(on: newVM) {
@@ -478,14 +837,14 @@ public final class Script: @unchecked Sendable {
         self.vm = newVM
         self.vmID = newID
         self.moduleTable = modTable
-        self.viewTable = nil
         self.sched = newSched
         self.signals = newSignals
-        self.fireFn = prelude.rawGet("fire")
+        self.fireFn = base.fireFn
         self.failedError = nil
+        self.warnedMessages.removeAll()
         self.salt &+= 1
         var dummyTx = Tx()
-        settle(tx: &dummyTx)
+        settle(tx: &dummyTx, bumpVersion: true)
 
         return ReloadReport(compileDuration: .zero, swapDuration: swapStart.duration(to: .now))
     }
@@ -505,7 +864,7 @@ public final class Script: @unchecked Sendable {
         return out
     }
 
-    private func enter(tx: inout Tx, _ body: () throws -> Void) {
+    internal func enter(tx: inout Tx, _ body: () throws -> Void) {
         guard let vm, let sched else { return }
         do {
             try runTimed {
@@ -519,15 +878,20 @@ public final class Script: @unchecked Sendable {
         } catch {
             appendLog(.error, error.localizedDescription)
         }
-        settle(tx: &tx)
+        settle(tx: &tx, bumpVersion: true)
     }
 
-    private func enter(_ body: () throws -> Void) {
+    internal func enter(_ body: () throws -> Void) {
         var tx = Tx()
         enter(tx: &tx, body)
     }
 
     private func enterThrowing<R>(_ body: () throws -> R) throws -> R {
+        var tx = Tx()
+        return try enterThrowing(tx: &tx, body)
+    }
+
+    private func enterThrowing<R>(tx: inout Tx, _ body: () throws -> R) throws -> R {
         guard let vm, let sched else {
             throw failedError ?? ScriptError(kind: .missing, message: "not running")
         }
@@ -537,25 +901,33 @@ public final class Script: @unchecked Sendable {
                 sched.drainDefers(vm: vm)
                 return r
             }
-            var tx = Tx()
-            settle(tx: &tx)
+            settle(tx: &tx, bumpVersion: true)
             return result
         } catch let err as LuauRuntimeError {
             let se = err.toScriptError()
             appendLog(.error, se.message)
-            var tx = Tx()
-            settle(tx: &tx)
+            settle(tx: &tx, bumpVersion: true)
             throw se
         } catch let err as ScriptError {
             appendLog(.error, err.message)
-            var tx = Tx()
-            settle(tx: &tx)
+            settle(tx: &tx, bumpVersion: true)
             throw err
         }
     }
 
-    private func settle(tx: inout Tx) {
-        version &+= 1
+    private func settle(tx: inout Tx, bumpVersion: Bool = true) {
+        if bumpVersion {
+            version &+= 1
+        }
+        noteSchedule(tx: &tx)
+    }
+
+    private func noteSchedule() {
+        var tx = Tx()
+        noteSchedule(tx: &tx)
+    }
+
+    private func noteSchedule(tx: inout Tx) {
         guard let sched else { return }
         for err in sched.errors {
             appendLog(.error, err.message)
@@ -586,6 +958,17 @@ public final class Script: @unchecked Sendable {
     private func noteReload(_ report: ReloadReport) {
         _metrics.reloads += 1
         _metrics.lastReload = report
+        let compileMs = durationMs(report.compileDuration)
+        let swapMs = durationMs(report.swapDuration)
+        let totalMs = compileMs + swapMs
+        appendLog(
+            .info,
+            String(format: "reloaded in %.2f ms: compile %.2f ms, swap %.2f ms", totalMs, compileMs, swapMs)
+        )
+    }
+
+    private func durationMs(_ d: Duration) -> Double {
+        Double(d.components.seconds) * 1000.0 + Double(d.components.attoseconds) * 1e-15
     }
 
     private func mix(_ a: UInt64, _ b: UInt64) -> UInt64 {
