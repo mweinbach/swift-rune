@@ -429,7 +429,9 @@ struct FeedbackAndInputsTests {
             )
         }
         rt.frame(at: 0.0)
-        let initialGlyphs = rt.elements().filter { !$0.exiting && ($0.key?.hasPrefix("counter#") == true) }
+        let initialGlyphs = rt.elements()
+            .filter { !$0.exiting && ($0.key?.hasPrefix("counter#") == true) }
+            .sorted { $0.rect[0] < $1.rect[0] }
         #expect(initialGlyphs.count == 2)
         let onesNineKey = initialGlyphs.last?.key
 
@@ -437,7 +439,9 @@ struct FeedbackAndInputsTests {
         rt.markNeedsCommit()
         rt.frame(at: 0.06)
         for i in 1...40 { rt.frame(at: 0.06 + Double(i) / 60.0) }
-        let updatedGlyphs = rt.elements().filter { !$0.exiting && ($0.key?.hasPrefix("counter#") == true) }
+        let updatedGlyphs = rt.elements()
+            .filter { !$0.exiting && ($0.key?.hasPrefix("counter#") == true) }
+            .sorted { $0.rect[0] < $1.rect[0] }
         #expect(updatedGlyphs.count == 3)
         let afterNineKey = updatedGlyphs.last?.key
         #expect(onesNineKey != nil && onesNineKey == afterNineKey)

@@ -262,6 +262,13 @@ struct ShellAndTabStripTests {
         #expect(rt.state.sidebar.isPeeking)
         #expect(rt.element(byKey: "sv-sidebar-peek") != nil)
 
+        // Move into peek drawer then off it to close peek, then toggle re-opens sidebar
+        rt.pointerMove(to: Vec2(40, 50), at: 0.135)
+        rt.frame(at: 0.136)
+        rt.pointerMove(to: Vec2(400, 200), at: 0.14)
+        rt.frame(at: 0.145)
+        #expect(!rt.state.sidebar.isPeeking)
+
         let togRect = try #require(rt.element(byKey: "sv-sidebar-toggle")).rect
         rt.pointerDown(at: Vec2(togRect[0] + togRect[2] * 0.5, togRect[1] + togRect[3] * 0.5), at: 0.15)
         rt.pointerUp(at: Vec2(togRect[0] + togRect[2] * 0.5, togRect[1] + togRect[3] * 0.5), at: 0.16)
