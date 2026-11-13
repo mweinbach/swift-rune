@@ -283,6 +283,7 @@ public struct ElementHandlers<State> {
     public var onSecondaryClick: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerDown: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerUp: ((inout State, PointerPress, inout Tx) -> Void)?
+    public var onPointerMove: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onHover: ((inout State, Bool, inout Tx) -> Void)?
     public var onDrag: ((inout State, Drag, inout Tx) -> Void)?
     public var onDragEnd: ((inout State, Bool, inout Tx) -> Void)?
@@ -347,6 +348,7 @@ public struct El<State> {
     public var focusGroup: Bool = false
     public var isModal: Bool = false
     public var isInert: Bool = false
+    public var isHit: Bool = false
 
     // Accessibility metadata
     public var a11yLabel: String? = nil
@@ -1006,6 +1008,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Marks the drawn, ancestor-clipped rectangle as an explicit native overlay input hit region (`El::hit`).
+    public func hit() -> Self {
+        var copy = self
+        copy.isHit = true
+        return copy
+    }
+
     public func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
     public func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
     public func help(_ h: String) -> Self { var c = self; c.a11yHelp = h; return c }
@@ -1057,6 +1066,13 @@ public struct El<State> {
     public func onPointerUp(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onPointerUp = handler
+        return copy
+    }
+
+    /// Observes pointer movement over this element without creating a native overlay input region (`El::on_pointer_move`).
+    public func onPointerMove(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onPointerMove = handler
         return copy
     }
 

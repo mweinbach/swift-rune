@@ -305,6 +305,41 @@ public final class Runtime<State> {
         }
     }
 
+    /// Whether a layout/view re-evaluation commit is currently pending.
+    public var hasPendingCommit: Bool { needsCommit }
+
+    /// Presented hit-test boxes (in logical points) for non-inert `.hit()` elements, used by `OverlayInput.regions`.
+    public func overlayInteractiveRegions() -> [MotionRect] {
+        var regions: [MotionRect] = []
+        for node in flatNodes {
+            if node.effectiveInert || !node.el.isHit { continue }
+            let infoRect = presentedRectByPath[node.path] ?? node.targetRect
+            let hitBox = intersectRects(node.clipRect, infoRect)
+            if hitBox.width > 0 && hitBox.height > 0 {
+                regions.append(hitBox)
+            }
+        }
+        return regions
+    }
+
+    /// True when the primary hit target at `point` is a bare `.windowDrag()` region with no
+    /// interactive press/double-press/drag/dragOut/textbox behavior (`titlebar::bare_drag_region`).
+    public func isBareTitlebarDragRegion(at point: Vec2) -> Bool {
+        guard let hit = hitTest(at: point) else { return false }
+        let node = hit.node
+        guard node.el.isWindowDrag else { return false }
+        let h = node.el.handlers
+        return h.onClick == nil &&
+            h.onClickPress == nil &&
+            h.onDoubleClick == nil &&
+            h.onSecondaryClick == nil &&
+            h.onPointerDown == nil &&
+            h.onDrag == nil &&
+            h.editLens == nil &&
+            node.el.runtimeExtras["dragOut"] == nil &&
+            node.el.role != .textInput
+    }
+
     @inline(__always)
     private func dirtyCommit(at now: Double) {
         needsCommit = true
@@ -1454,6 +1489,21 @@ public final class Runtime<State> {
             }
             dirtyCommit(at: now)
         }
+
+        if let moveHit = hitTest(at: pos, predicate: { $0.el.handlers.onPointerMove != nil }),
+           let onMove = moveHit.node.el.handlers.onPointerMove {
+            let press = PointerPress(
+                window: pos,
+                local: Vec2(pos.x - moveHit.rect.x, pos.y - moveHit.rect.y),
+                elementSize: Vec2(moveHit.rect.width, moveHit.rect.height),
+                button: .primary,
+                mods: mods,
+                clicks: 0
+            )
+            var tx = Tx()
+            onMove(&state, press, &tx)
+            applyTx(tx, at: now)
+        }
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
@@ -2004,6 +2054,10 @@ public final class Runtime<State> {
             nextWakeDeadline = min(nextWakeDeadline ?? candidate, candidate)
         }
         if tx.quitRequested {
+            quitRequested = true
+        }
+        if (tx.runtimeActions["relaunchRequested"] as? Bool) == true {
+            relaunchRequested = true
             quitRequested = true
         }
         if tx.blurFocusRequested {

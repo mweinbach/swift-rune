@@ -289,14 +289,30 @@ public final class AppHandle<State>: @unchecked Sendable {
 
 // MARK: - Multi-Window Specs (window/spec.rs)
 
-/// Strongly-typed secondary window specification (`rune::WindowSpec<S>`).
+/// Strongly-typed window specification (`rune::WindowSpec<S>`).
 /// Named `AppWindowSpec` to coexist cleanly with `DesktopIntegration.WindowSpec`.
 public struct AppWindowSpec<State> {
-    public var app: App<State>
+    public var key: String
+    public var appSpec: AppSpec<State>
     public var options: WindowOptions
     public var macosWindow: MacWindowOptions
+    public var chrome: Chrome
+    public var titlebar: Titlebar?
+    public var openAs: OpenAs
     public var openInactive: Bool
+    public var inactive: Bool {
+        get { openInactive }
+        set { openInactive = newValue }
+    }
+    public var keepRunning: Bool
     public var onCreated: ((WindowHandle) -> Void)?
+    public var onReady: ((WindowHandle) -> Void)?
+    public var onQuit: ((inout State, inout Tx) -> Void)?
+    public var onReopen: ((inout State, Bool, inout Tx) -> Bool)?
+    public var onOpenUrl: ((inout State, String, inout Tx) -> Void)?
+    public var childWindows: [AnyWindowSpec]
+    public var args: [String]?
+    private let runAction: (@MainActor ([String]?) throws -> Void)?
 
     public init(
         app: App<State>,
@@ -305,15 +321,61 @@ public struct AppWindowSpec<State> {
         openInactive: Bool? = nil,
         onCreated: ((WindowHandle) -> Void)? = nil
     ) {
-        self.app = app
+        self.key = app.title
+        self.appSpec = app.intoSpec()
         self.options = options ?? app.windowOptionsValue
         self.macosWindow = macosWindow ?? app.macosWindowValue
+        self.chrome = app.chromeStyle
+        self.titlebar = app.customTitlebar
+        self.openAs = app.openAs
         self.openInactive = openInactive ?? app.isOpenInactive
+        self.keepRunning = app.keepsRunning
         self.onCreated = onCreated
+        self.onReady = app.onReadyHook
+        self.onQuit = app.onQuitHook
+        self.onReopen = app.onReopenHook
+        self.onOpenUrl = app.onOpenUrlHook
+        self.childWindows = []
+        self.args = app.runOptions.arguments
+        nonisolated(unsafe) let localApp = app
+        self.runAction = { arguments in
+            try localApp.run(arguments: arguments)
+        }
+    }
+
+    public init(key: String, app: AppSpec<State>) {
+        self.key = key
+        self.appSpec = app
+        self.options = .default
+        self.macosWindow = MacWindowOptions()
+        self.chrome = .default
+        self.titlebar = nil
+        self.openAs = .normal
+        self.openInactive = false
+        self.keepRunning = false
+        self.onCreated = nil
+        self.onReady = nil
+        self.onQuit = nil
+        self.onReopen = nil
+        self.onOpenUrl = nil
+        self.childWindows = []
+        self.args = nil
+        self.runAction = nil
     }
 
     public static func fromApp(_ app: App<State>) -> AppWindowSpec<State> {
         AppWindowSpec(app: app)
+    }
+
+    public func args(_ arguments: [String]) -> AppWindowSpec<State> {
+        var copy = self
+        copy.args = arguments
+        return copy
+    }
+
+    /// Resolves this window's CLI args: explicit per-window args never inspect `inherited`.
+    public func resolveArgs(inherited: () -> ToolingArgs = { ToolingArgs() }) -> ToolingArgs {
+        RuneMultiWindow.windowArgs(explicit: args, inherited: inherited)
     }
 
     public func options(_ options: WindowOptions) -> AppWindowSpec<State> {
@@ -330,9 +392,43 @@ public struct AppWindowSpec<State> {
         return copy
     }
 
+    public func chrome(_ chrome: Chrome) -> AppWindowSpec<State> {
+        var copy = self
+        copy.chrome = chrome
+        return copy
+    }
+
+    public func titlebar(_ titlebar: Titlebar) -> AppWindowSpec<State> {
+        var copy = self
+        copy.titlebar = titlebar
+        return copy
+    }
+
     public func openInactive(_ on: Bool = true) -> AppWindowSpec<State> {
         var copy = self
         copy.openInactive = on
+        return copy
+    }
+
+    public func inactive(_ on: Bool = true) -> AppWindowSpec<State> {
+        openInactive(on)
+    }
+
+    public func maximized(_ on: Bool) -> AppWindowSpec<State> {
+        var copy = self
+        copy.openAs = copy.openAs.maximized(on)
+        return copy
+    }
+
+    public func fullScreen(_ on: Bool) -> AppWindowSpec<State> {
+        var copy = self
+        copy.openAs = copy.openAs.fullScreen(on)
+        return copy
+    }
+
+    public func keepRunning(_ on: Bool = true) -> AppWindowSpec<State> {
+        var copy = self
+        copy.keepRunning = on
         return copy
     }
 
@@ -342,20 +438,58 @@ public struct AppWindowSpec<State> {
         return copy
     }
 
-    @MainActor
+    public func onReady(_ body: @escaping (WindowHandle) -> Void) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onReady = body
+        return copy
+    }
+
+    public func onQuit(_ body: @escaping (inout State, inout Tx) -> Void) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onQuit = body
+        return copy
+    }
+
+    public func onReopen(_ body: @escaping (inout State, Bool, inout Tx) -> Bool) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onReopen = body
+        return copy
+    }
+
+    public func onOpenUrl(_ body: @escaping (inout State, String, inout Tx) -> Void) -> AppWindowSpec<State> {
+        var copy = self
+        copy.onOpenUrl = body
+        return copy
+    }
+
+    public func window<Child>(_ spec: AppWindowSpec<Child>) -> (AppWindowSpec<State>, WindowHandle) {
+        let handle = WindowHandle(key: spec.key)
+        var copy = self
+        var child = spec
+        child.key = spec.key
+        child.keepRunning = true
+        copy.childWindows.append(AnyWindowSpec.secondary(child, handle: handle))
+        return (copy, handle)
+    }
+
     public func boxed() -> AnyWindowSpec {
-        let localApp = app
-        return AnyWindowSpec(title: localApp.title, size: localApp.size, dark: localApp.dark) { arguments in
-            try localApp.run(arguments: arguments)
+        if let runAction {
+            return AnyWindowSpec(self, handle: WindowHandle(key: key), secondary: false, runner: runAction)
         }
+        return AnyWindowSpec(self, handle: nil, secondary: false)
     }
 }
 
-/// Type-erased window specification returned by `App.window(_:)` (`rune::AnyWindowSpec`).
+/// Type-erased window specification returned by `App.window(_:)` or `AppWindowSpec.boxed()` (`rune::AnyWindowSpec`).
 public struct AnyWindowSpec {
+    public var key: String
     public var title: String
     public var size: Vec2
     public var dark: Bool?
+    public let handle: WindowHandle
+    public let secondary: Bool
+    private var childWindows: [AnyWindowSpec]
+    private let entry: HostedWindowEntry?
     private let runner: @MainActor ([String]?) throws -> Void
 
     public init(
@@ -364,10 +498,58 @@ public struct AnyWindowSpec {
         dark: Bool? = nil,
         runner: @escaping @MainActor ([String]?) throws -> Void
     ) {
+        self.key = title
         self.title = title
         self.size = size
         self.dark = dark
+        self.handle = WindowHandle(key: title)
+        self.secondary = false
+        self.childWindows = []
+        self.entry = nil
         self.runner = runner
+    }
+
+    public init<State>(
+        _ spec: AppWindowSpec<State>,
+        handle: WindowHandle? = nil,
+        secondary: Bool = false,
+        runner: (@MainActor ([String]?) throws -> Void)? = nil
+    ) {
+        let h = handle ?? WindowHandle(key: spec.key)
+        let entry = TypedHostedWindowEntry(spec: spec, handle: h, secondary: secondary)
+        self.key = spec.key
+        self.title = spec.appSpec.title
+        self.size = spec.appSpec.size
+        self.dark = spec.appSpec.dark
+        self.handle = h
+        self.secondary = secondary
+        self.childWindows = spec.childWindows
+        self.entry = entry
+        nonisolated(unsafe) let capturedEntry = entry
+        self.runner = runner ?? { arguments in
+            let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
+            _ = try capturedEntry.runHeadless(args: parsed)
+        }
+    }
+
+    public static func secondary<State>(
+        _ spec: AppWindowSpec<State>,
+        handle: WindowHandle
+    ) -> AnyWindowSpec {
+        AnyWindowSpec(spec, handle: handle, secondary: true)
+    }
+
+    public func makeHostEntry() -> HostedWindowEntry {
+        guard let entry else {
+            preconditionFailure("AnyWindowSpec created without an AppWindowSpec has no HostedWindowEntry")
+        }
+        return entry
+    }
+
+    public mutating func takeChildWindows() -> [AnyWindowSpec] {
+        let children = childWindows
+        childWindows.removeAll()
+        return children
     }
 
     @MainActor
@@ -904,6 +1086,7 @@ public extension Tx {
     /// Requests quitting and relaunching the app (`Tx::relaunch`).
     mutating func relaunch() {
         runtimeActions["relaunchApp"] = true
+        runtimeActions["relaunchRequested"] = true
         quit()
     }
 

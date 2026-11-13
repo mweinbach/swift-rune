@@ -943,38 +943,165 @@ public final class UrlOpener: @unchecked Sendable {
     }
 
     public static func validate(_ raw: String) throws -> String {
+        try checkLink(raw, relative: false)
+    }
+
+    public static func checkSameTab(_ raw: String) throws -> String {
+        #if os(WASI)
+        return try checkLink(raw, relative: true)
+        #else
+        return try checkLink(raw, relative: false)
+        #endif
+    }
+
+    internal static func checkLink(_ raw: String, relative: Bool) throws -> String {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw OpenUrlError.empty }
-        guard trimmed.count <= maxLength else { throw OpenUrlError.invalid }
-        let forbidden = CharacterSet.whitespacesAndNewlines.union(.controlCharacters).union(CharacterSet(charactersIn: "\\\"<>`^{|}"))
-        if trimmed.unicodeScalars.contains(where: { forbidden.contains($0) }) {
+        let utf8 = Array(trimmed.utf8)
+        let forbiddenChars = CharacterSet(charactersIn: "\\\"<>`^{|}")
+        let hasBadScalar = trimmed.unicodeScalars.contains { scalar in
+            CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || CharacterSet.controlCharacters.contains(scalar)
+                || forbiddenChars.contains(scalar)
+        }
+        if utf8.count > maxLength || hasBadScalar || badPercent(utf8) {
             throw OpenUrlError.invalid
+        }
+        if relative {
+            if let idx = trimmed.firstIndex(where: { $0 == ":" || $0 == "/" || $0 == "?" || $0 == "#" }) {
+                if trimmed[idx] != ":" {
+                    return trimmed
+                }
+            } else {
+                return trimmed
+            }
         }
         guard let colonIdx = trimmed.firstIndex(of: ":") else {
             throw OpenUrlError.invalid
         }
         let scheme = String(trimmed[..<colonIdx]).lowercased()
         let rest = String(trimmed[trimmed.index(after: colonIdx)...])
-        guard !scheme.isEmpty else { throw OpenUrlError.invalid }
+        guard
+            let first = scheme.first,
+            first.isASCII,
+            first.isLetter,
+            scheme.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == ".") })
+        else {
+            throw OpenUrlError.invalid
+        }
         switch scheme {
         case "http", "https":
             guard rest.hasPrefix("//") else { throw OpenUrlError.invalid }
-            let after = String(rest.dropFirst(2))
-            let hostPart = after.split(whereSeparator: { $0 == "/" || $0 == "?" || $0 == "#" }).first.map(String.init) ?? ""
-            guard !hostPart.isEmpty, !hostPart.contains("["), !hostPart.contains("]") else {
+            let after = rest.dropFirst(2)
+            let tailStart = after.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? after.endIndex
+            let authority = String(after[..<tailStart])
+            let tail = after[tailStart...]
+            if tail.contains("[") || tail.contains("]") || !validAuthority(authority) {
                 throw OpenUrlError.invalid
             }
         case "mailto":
-            guard !rest.isEmpty, !rest.hasPrefix("//") else { throw OpenUrlError.invalid }
+            if rest.isEmpty || rest.hasPrefix("//") || rest.contains("[") || rest.contains("]") {
+                throw OpenUrlError.invalid
+            }
         default:
             throw OpenUrlError.unsupportedScheme(scheme)
         }
         return "\(scheme):\(rest)"
     }
 
+    private static func badPercent(_ bytes: [UInt8]) -> Bool {
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == 0x25 {
+                guard i + 2 < bytes.count else { return true }
+                let a = bytes[i + 1]
+                let b = bytes[i + 2]
+                if !isAsciiHexDigit(a) || !isAsciiHexDigit(b) || (a == 0x30 && b == 0x30) {
+                    return true
+                }
+                i += 3
+            } else {
+                i += 1
+            }
+        }
+        return false
+    }
+
+    private static func isAsciiHexDigit(_ b: UInt8) -> Bool {
+        (0x30...0x39).contains(b) || (0x41...0x46).contains(b) || (0x61...0x66).contains(b)
+    }
+
+    private static func validAuthority(_ authority: String) -> Bool {
+        let hostPort: String
+        if let atIdx = authority.lastIndex(of: "@") {
+            let userinfo = authority[..<atIdx]
+            if userinfo.isEmpty || userinfo.contains("[") || userinfo.contains("]") || userinfo.contains("@") {
+                return false
+            }
+            hostPort = String(authority[authority.index(after: atIdx)...])
+        } else {
+            hostPort = authority
+        }
+
+        let port: String?
+        if hostPort.hasPrefix("[") {
+            let rest = hostPort.dropFirst()
+            guard let closeIdx = rest.firstIndex(of: "]") else { return false }
+            let ipv6 = rest[..<closeIdx]
+            let portPart = rest[rest.index(after: closeIdx)...]
+            guard
+                ipv6.count >= 2,
+                ipv6.contains(":"),
+                !ipv6.hasPrefix("."),
+                !ipv6.contains(".."),
+                ipv6.allSatisfy({ $0.isASCII && ($0.isHexDigit || $0 == ":" || $0 == ".") })
+            else {
+                return false
+            }
+            if !portPart.isEmpty && !portPart.hasPrefix(":") {
+                return false
+            }
+            port = portPart.hasPrefix(":") ? String(portPart.dropFirst()) : nil
+        } else if hostPort.contains("[") || hostPort.contains("]") {
+            return false
+        } else {
+            let host: String
+            if let colonIdx = hostPort.firstIndex(of: ":") {
+                host = String(hostPort[..<colonIdx])
+                port = String(hostPort[hostPort.index(after: colonIdx)...])
+            } else {
+                host = hostPort
+                port = nil
+            }
+            if host.isEmpty || host.hasPrefix(".") || host.contains("..") || host.contains("%") || host.contains(":") {
+                return false
+            }
+        }
+
+        if let p = port {
+            return !p.isEmpty && p.allSatisfy { $0.isASCII && $0.isNumber } && UInt16(p) != nil
+        }
+        return true
+    }
+
+    internal static func percentEncodeNonAscii(_ url: String) -> String {
+        let utf8 = url.utf8
+        if utf8.allSatisfy({ $0 < 0x80 }) { return url }
+        var out = ""
+        out.reserveCapacity(utf8.count + 16)
+        for byte in utf8 {
+            if byte < 0x80 {
+                out.append(Character(UnicodeScalar(byte)))
+            } else {
+                out.append(String(format: "%%%02X", byte))
+            }
+        }
+        return out
+    }
+
     @discardableResult
     public func open(_ raw: String, sameTab: Bool = false) throws -> String {
-        let normalized = try Self.validate(raw)
+        let normalized = sameTab ? try Self.checkSameTab(raw) : try Self.validate(raw)
         let req = OpenUrlRequest(url: normalized, sameTab: sameTab)
         if headless {
             lock.lock()
@@ -983,8 +1110,12 @@ public final class UrlOpener: @unchecked Sendable {
             return normalized
         }
         #if os(macOS)
-        guard let nsUrl = URL(string: normalized), NSWorkspace.shared.open(nsUrl) else {
-            throw OpenUrlError.failed("NSWorkspace refused to open \(normalized)")
+        let ascii = Self.percentEncodeNonAscii(normalized)
+        guard let nsUrl = URL(string: ascii) else {
+            throw OpenUrlError.invalid
+        }
+        guard NSWorkspace.shared.open(nsUrl) else {
+            throw OpenUrlError.failed("no app opened it")
         }
         return normalized
         #elseif canImport(UIKit) && !os(watchOS)
@@ -1124,6 +1255,8 @@ public enum MenuError: Error, Sendable, Equatable {
     case unknownItem(String)
     case ambiguousTitle(String)
     case disabled(String)
+    case inUse
+    case backend(String)
 }
 
 public struct NativeMenuItem<State> {
@@ -1180,14 +1313,14 @@ public final class NativeMenuBar<State> {
         self.items = newItems
     }
 
-    public func dispatch(id: String, state: inout State, tx: inout Tx) throws {
-        guard let item = items.first(where: { !$0.isSeparator && $0.id == id }) else {
-            throw MenuError.unknownItem(id)
-        }
-        guard item.enabled else {
-            throw MenuError.disabled(id)
-        }
-        item.action(&state, &tx)
+    public func setValidatedItems(_ newItems: [NativeMenuItem<State>]) throws {
+        try NativeMenuValidator.validate(newItems)
+        self.items = newItems
+    }
+
+    public func dispatch(id selector: String, state: inout State, tx: inout Tx) throws {
+        let idx = try NativeMenuValidator.lookupIndex(selector: selector, in: items)
+        items[idx].action(&state, &tx)
     }
 
     #if os(macOS)
@@ -1893,7 +2026,10 @@ public enum QuitMachine {
             return (.quitting(hooks: .owed, after: after), effects)
         case (.quitting(let hooks, let currentAfter), .start(let ending, let nextAfter)):
             let mergedAfter: QuitAfter = (currentAfter == .relaunch || nextAfter == .relaunch) ? .relaunch : .exit
-            return (.quitting(hooks: hooks, after: mergedAfter), ending ? [.closeAndExit] : [])
+            var effects: [QuitEffect] = []
+            if hooks == .owed { effects.append(.runHooks) }
+            if ending { effects.append(.closeAndExit) }
+            return (.quitting(hooks: hooks, after: mergedAfter), effects)
         case (.quitting(_, let after), .hooksRan):
             return (.quitting(hooks: .ran, after: after), [])
         case (.quitting, .windowsClosed):
@@ -2025,10 +2161,15 @@ extension Tx {
 
     /// Requests opening an `http:`, `https:`, or `mailto:` URL.
     public mutating func openUrl(_ url: String, sameTab: Bool = false) throws {
-        let normalized = try UrlOpener.validate(url)
+        let normalized = sameTab ? try UrlOpener.checkSameTab(url) : try UrlOpener.validate(url)
         var list = (runtimeActions["openUrlRequests"] as? [OpenUrlRequest]) ?? []
         list.append(OpenUrlRequest(url: normalized, sameTab: sameTab))
         runtimeActions["openUrlRequests"] = list
+    }
+
+    /// Requests opening a URL in the same tab on web (allows relative paths on web; rejects on native).
+    public mutating func openUrlSameTab(_ url: String) throws {
+        try openUrl(url, sameTab: true)
     }
 
     /// Initiates an outbound OS drag session with `item`.
@@ -2071,20 +2212,44 @@ public enum ScreenEdge: String, Sendable, Equatable {
 
 public enum OverlayPlacement: Sendable, Equatable {
     case edge(ScreenEdge, margin: Float)
+    case edgeAligned(ScreenEdge, margin: Float, align: OverlayAlign, inset: Float)
     case rect(MotionRect)
     case fullDisplay
+
+    public static func edge(
+        _ edge: ScreenEdge,
+        margin: Float,
+        align: OverlayAlign,
+        inset: Float = 0
+    ) -> OverlayPlacement {
+        .edgeAligned(edge, margin: margin, align: align, inset: inset)
+    }
 }
 
 public enum OverlayKeyPolicy: Sendable, Equatable {
     case nonActivating
     case activating
+    case none
 }
 
 public struct OverlayOptions: Sendable, Equatable {
     public var placement: OverlayPlacement
+    public var legacyPlacement: OverlayPlacement?
+    public var display: DisplayTarget
+    public var followPointer: Bool
+    public var level: OverlayLevel
+    public var excludeFromCapture: Bool
     public var keyPolicy: OverlayKeyPolicy
+    public var input: OverlayInput
+    public var prewarm: Bool
     public var releaseGpuWhenHidden: Bool
+    public var releaseGpuAfter: Double?
     public var levelOffset: Int
+    public var interactive: Bool
+    public var srgbBlend: Bool
+    public var macosLevel: Int?
+    public var modifierKeys: Bool
+    public var animateReveal: Bool
 
     public init(
         placement: OverlayPlacement = .edge(.top, margin: 16),
@@ -2093,15 +2258,74 @@ public struct OverlayOptions: Sendable, Equatable {
         levelOffset: Int = 0
     ) {
         self.placement = placement
+        self.legacyPlacement = nil
+        self.display = .primary
+        self.followPointer = false
+        self.level = .status
+        self.excludeFromCapture = false
         self.keyPolicy = keyPolicy
+        self.input = .legacy
+        self.prewarm = false
         self.releaseGpuWhenHidden = releaseGpuWhenHidden
+        self.releaseGpuAfter = releaseGpuWhenHidden ? 0.0 : nil
         self.levelOffset = levelOffset
+        self.interactive = false
+        self.srgbBlend = true
+        self.macosLevel = nil
+        self.modifierKeys = false
+        self.animateReveal = false
+    }
+
+    public init(
+        placement: OverlayPlacement? = nil,
+        display: DisplayTarget = .primary,
+        followPointer: Bool = false,
+        level: OverlayLevel = .status,
+        excludeFromCapture: Bool = false,
+        keyPolicy: OverlayKeyPolicy = .nonActivating,
+        input: OverlayInput = .legacy,
+        prewarm: Bool = false,
+        releaseGpuWhenHidden: Bool = false,
+        releaseGpuAfter: Double? = nil,
+        levelOffset: Int = 0,
+        interactive: Bool = false,
+        srgbBlend: Bool = true,
+        macosLevel: Int? = nil,
+        modifierKeys: Bool = false,
+        animateReveal: Bool = false
+    ) {
+        self.placement = placement ?? .edge(.top, margin: 16)
+        self.legacyPlacement = placement
+        self.display = display
+        self.followPointer = followPointer
+        self.level = level
+        self.excludeFromCapture = excludeFromCapture
+        self.keyPolicy = keyPolicy
+        self.input = input
+        self.prewarm = prewarm
+        self.releaseGpuWhenHidden = releaseGpuWhenHidden
+        self.releaseGpuAfter = releaseGpuAfter ?? (releaseGpuWhenHidden ? 0.0 : nil)
+        self.levelOffset = levelOffset
+        self.interactive = interactive
+        self.srgbBlend = srgbBlend
+        self.macosLevel = macosLevel
+        self.modifierKeys = modifierKeys
+        self.animateReveal = animateReveal
+    }
+
+    public var resolvedPlacement: OverlayPlacement? {
+        legacyPlacement ?? placement
     }
 }
 
 public struct OverlaySpec<State> {
     public var name: String
     public var size: Vec2
+    public var edge: ScreenEdge
+    public var margin: Float
+    public var align: OverlayAlign
+    public var inset: Float
+    public var interactive: Bool
     public var options: OverlayOptions
     public var makeState: () -> State
     public var view: (State, inout Cx<State>) -> El<State>
@@ -2109,87 +2333,801 @@ public struct OverlaySpec<State> {
     public init(
         name: String,
         size: Vec2,
+        edge: ScreenEdge = .top,
+        margin: Float = 0,
+        align: OverlayAlign = .center,
+        inset: Float = 0,
+        interactive: Bool = false,
         options: OverlayOptions = OverlayOptions(),
         makeState: @escaping () -> State,
         view: @escaping (State, inout Cx<State>) -> El<State>
     ) {
         self.name = name
         self.size = size
-        self.options = options
+        self.edge = edge
+        self.margin = margin
+        self.align = align
+        self.inset = inset
+        self.interactive = interactive
+        var merged = options
+        if interactive {
+            merged.interactive = true
+        }
+        self.options = merged
         self.makeState = makeState
         self.view = view
     }
+
+    public func configured(_ options: OverlayOptions) -> ConfiguredOverlay<State> {
+        var copy = options
+        if interactive { copy.interactive = true }
+        return ConfiguredOverlay(spec: self, options: copy)
+    }
 }
 
+/// Builder wrapper preserving source compatibility on `OverlaySpec` (`overlay/options.rs`).
+public struct ConfiguredOverlay<State> {
+    public var spec: OverlaySpec<State>
+    public var options: OverlayOptions
+    public var onKey: ((inout State, KeyEvent, inout Tx) -> Bool)?
+    public var onFocus: ((inout State, Bool, inout Tx) -> Void)?
+    public var poll: ((inout State, Double, inout Tx) -> Bool)?
+    public var onCreated: ((OverlayCreated) -> Void)?
+    public var setup: ((inout State, Waker) -> Void)?
+
+    public init(spec: OverlaySpec<State>, options: OverlayOptions? = nil) {
+        self.spec = spec
+        var resolved = options ?? spec.options
+        if spec.interactive { resolved.interactive = true }
+        self.options = resolved
+    }
+
+    public func onKey(_ handler: @escaping (inout State, KeyEvent, inout Tx) -> Bool) -> Self {
+        var copy = self; copy.onKey = handler; return copy
+    }
+
+    public func onFocus(_ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
+        var copy = self; copy.onFocus = handler; return copy
+    }
+
+    public func poll(_ handler: @escaping (inout State, Double, inout Tx) -> Bool) -> Self {
+        var copy = self; copy.poll = handler; return copy
+    }
+
+    public func onCreated(_ handler: @escaping (OverlayCreated) -> Void) -> Self {
+        var copy = self; copy.onCreated = handler; return copy
+    }
+
+    public func setup(_ handler: @escaping (inout State, Waker) -> Void) -> Self {
+        var copy = self; copy.setup = handler; return copy
+    }
+
+    public func srgbBlend(_ enabled: Bool) -> Self {
+        var copy = self; copy.options.srgbBlend = enabled; return copy
+    }
+
+    public func macosLevel(_ level: Int) -> Self {
+        var copy = self; copy.options.macosLevel = level; return copy
+    }
+
+    public func modifierKeys(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.modifierKeys = enabled; return copy
+    }
+
+    public func animateReveal(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.animateReveal = enabled; return copy
+    }
+
+    public func releaseGpuWhenHidden() -> Self {
+        var copy = self
+        copy.options.releaseGpuWhenHidden = true
+        copy.options.releaseGpuAfter = 0.0
+        return copy
+    }
+
+    public func releaseGpuAfter(_ seconds: Double) -> Self {
+        var copy = self
+        copy.options.releaseGpuAfter = max(0.0, seconds)
+        copy.options.releaseGpuWhenHidden = seconds <= 0.0
+        return copy
+    }
+
+    public func prewarm(_ enabled: Bool = true) -> Self {
+        var copy = self; copy.options.prewarm = enabled; return copy
+    }
+
+    public func makeHandle() -> OverlayHandle<State> {
+        OverlayHandle(configured: self)
+    }
+}
+
+/// Live handle to a floating overlay (`overlay.rs`), backed on macOS by a real `NSPanel` + `MetalRenderer` + `Runtime`.
 public final class OverlayHandle<State>: @unchecked Sendable {
     private let lock = NSLock()
     public let name: String
     public private(set) var isVisible: Bool = false
     public private(set) var size: Vec2
     public private(set) var options: OverlayOptions
-    private var state: State
+    public private(set) var placementSpec: OverlayGeometry.Placement
+    public private(set) var availability: OverlayAvailability = .pending
+    public private(set) var failure: String? = nil
+    public private(set) var surfaceDescription: String? = nil
+    public private(set) var surfaceStats: OverlaySurfaceSnapshot = OverlaySurfaceSnapshot()
+    public private(set) var overlayPresence: OverlayPresence = .initial
+    public private(set) var releasePolicy: OverlayGpuRelease
+    public private(set) var isDirty: Bool = true
+    public private(set) var isIdle: Bool = true
+    public private(set) var isFrameless: Bool = true
+    public private(set) var systemDark: Bool = true
+    public private(set) var systemContrast: Bool = false
+    public private(set) var systemScrollBars = SystemScrollBars.current()
+    public private(set) var wakeDeadline: Double? = nil
+    private var cachedWindowNumber: UInt32? = nil
+    private var cachedCapabilities = OverlayCapabilities()
+
+    public let runtime: Runtime<State>
+    private let pollHandler: ((inout State, Double, inout Tx) -> Bool)?
+    private let focusHandler: ((inout State, Bool, inout Tx) -> Void)?
+    private let onCreatedHandler: ((OverlayCreated) -> Void)?
+    private var didRunSetup: Bool = false
+    private let setupHandler: ((inout State, Waker) -> Void)?
 
     #if os(macOS)
-    @MainActor private var panel: NSPanel?
+    @MainActor private var macHost: RuneOverlayMacOSHost<State>?
     #endif
 
-    public init(spec: OverlaySpec<State>) {
+    public convenience init(spec: OverlaySpec<State>) {
+        self.init(configured: ConfiguredOverlay(spec: spec))
+    }
+
+    public init(configured: ConfiguredOverlay<State>) {
+        let spec = configured.spec
+        let opts = configured.options
         self.name = spec.name
-        self.size = spec.size
-        self.options = spec.options
-        self.state = spec.makeState()
+        self.size = Vec2(max(1, spec.size.x), max(1, spec.size.y))
+        self.options = opts
+        self.placementSpec = OverlayGeometry.Placement(
+            size: self.size,
+            edge: spec.edge,
+            margin: spec.margin,
+            align: spec.align,
+            inset: spec.inset
+        )
+        #if os(macOS)
+        let isMacOS = true
+        #else
+        let isMacOS = false
+        #endif
+        self.releasePolicy = OverlayGpuRelease.make(afterSeconds: opts.releaseGpuAfter, isMacOS: isMacOS)
+        self.pollHandler = configured.poll
+        self.focusHandler = configured.onFocus
+        self.onCreatedHandler = configured.onCreated
+        self.setupHandler = configured.setup
+
+        let prefs = SystemPreferences.current()
+        let dark = prefs.darkMode ?? true
+        self.systemDark = dark
+        self.systemContrast = prefs.contrast != nil
+
+        let initialState = spec.makeState()
+        let onKey = configured.onKey
+        let rt = Runtime<State>(
+            state: initialState,
+            viewport: self.size,
+            pixelScale: 2.0,
+            systemDark: dark,
+            reducedMotion: prefs.reducedMotion,
+            onKey: onKey.map { handler in
+                { state, event, tx in handler(&state, event, &tx) }
+            },
+            view: spec.view
+        )
+        rt.srgbBlend = opts.srgbBlend
+        rt.clearColor = Color.transparent
+        self.runtime = rt
+
+        if let setupHandler {
+            didRunSetup = true
+            var st = rt.state
+            setupHandler(&st, rt.waker)
+            rt.state = st
+            rt.markNeedsCommit(settle: true)
+        }
+
+        #if os(macOS)
+        if opts.prewarm {
+            runOnMainActor {
+                let host = self.makeMacHostIfNeeded()
+                host.prewarm()
+                self.lock.lock()
+                self.surfaceDescription = host.surfaceDescription
+                self.cachedWindowNumber = host.windowNumber
+                self.cachedCapabilities = host.capabilities
+                self.lock.unlock()
+            }
+        }
+        #else
+        lock.lock()
+        self.availability = .available
+        self.surfaceDescription = "Software headless overlay"
+        lock.unlock()
+        #endif
+    }
+
+    #if os(macOS)
+    @MainActor
+    private func makeMacHostIfNeeded() -> RuneOverlayMacOSHost<State> {
+        if let macHost { return macHost }
+        lock.lock()
+        let currentSize = size
+        let currentPlacement = placementSpec
+        let currentOptions = options
+        let release = releasePolicy == .now
+        lock.unlock()
+
+        let host = RuneOverlayMacOSHost<State>(
+            size: currentSize,
+            placement: currentPlacement,
+            options: currentOptions,
+            releaseWhenHidden: release
+        )
+        host.onCreated = { [weak self] created in
+            guard let self else { return }
+            self.lock.lock()
+            self.availability = .available
+            self.cachedWindowNumber = created.windowNumber
+            self.cachedCapabilities = created.capabilities
+            self.lock.unlock()
+            self.onCreatedHandler?(created)
+        }
+        host.onPanelStateChanged = { [weak self] winNum, caps in
+            guard let self else { return }
+            self.lock.lock()
+            self.cachedWindowNumber = winNum
+            self.cachedCapabilities = caps
+            self.lock.unlock()
+        }
+        host.onFadeCompleted = { [weak self] _, ordered in
+            guard let self, !ordered else { return }
+            self.lock.lock()
+            let now: Double
+            if let fadeEnd = self.overlayPresence.fadeEnd {
+                now = max(Date().timeIntervalSinceReferenceDate, fadeEnd)
+            } else {
+                now = Date().timeIntervalSinceReferenceDate
+            }
+            let effects = self.overlayPresence.step(.due(now: now), release: self.releasePolicy)
+            self.isVisible = false
+            if !self.overlayPresence.isDrawing {
+                self.isFrameless = true
+                self.isIdle = true
+                self.isDirty = false
+                self.wakeDeadline = self.overlayPresence.deadline
+            }
+            self.lock.unlock()
+            if effects.contains(.releaseGpu) {
+                self.macHost?.releasePanel()
+            }
+        }
+        host.onFailure = { [weak self] msg in
+            self?.lock.lock()
+            self?.failure = msg
+            self?.availability = .unavailable
+            self?.lock.unlock()
+        }
+        host.onSurfaceSnapshot = { [weak self] snap in
+            self?.lock.lock()
+            self?.surfaceStats = snap
+            self?.lock.unlock()
+        }
+        host.shouldKeepDrawing = { [weak self] in
+            guard let self else { return false }
+            self.lock.lock()
+            let keep = self.overlayPresence.isDrawing && !self.overlayPresence.isOccluded &&
+                (self.isDirty || !self.isIdle || self.runtime.isAnimating || self.wakeDeadline != nil)
+            self.lock.unlock()
+            return keep
+        }
+        host.configureView = { [weak self] view in
+            guard let self else { return }
+            view.onEvaluateFrame = { [weak self] now, settle in
+                guard let self else {
+                    return (
+                        RefScene(width: 1, height: 1, srgbBlend: true, clearColor: .zero, glyphs: R8Atlas(), images: RGBA8Atlas(), primitives: []),
+                        [],
+                        false,
+                        true
+                    )
+                }
+                return self.evaluateLockedFrame(at: now, forceSettle: settle)
+            }
+            view.onPointerMove = { [weak self] pt, mods, now in
+                self?.withLockedRuntime { rt in
+                    rt.pointerMove(to: pt, mods: mods, at: now)
+                }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerExit = { [weak self] now in
+                self?.withLockedRuntime { rt in rt.pointerExit(at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerDown = { [weak self] pt, btn, mods, now in
+                self?.withLockedRuntime { rt in rt.pointerDown(at: pt, button: btn, mods: mods, at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onPointerUp = { [weak self] pt, btn, mods, now in
+                self?.withLockedRuntime { rt in rt.pointerUp(at: pt, button: btn, mods: mods, at: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onWheel = { [weak self] wev, pt, now in
+                self?.withLockedRuntime { rt in rt.wheel(wev, at: pt, now: now) }
+                view.renderFrame(settle: false, visible: true, drawing: true)
+            }
+            view.onKeyDown = { [weak self] kev, now in
+                guard let self else { return false }
+                let handled = self.withLockedRuntime { rt in rt.keyDown(kev, at: now) }
+                if handled {
+                    view.renderFrame(settle: false, visible: true, drawing: true)
+                }
+                return handled
+            }
+            view.onAppearanceChanged = { [weak self] dark in
+                self?.setThemeDark(dark)
+            }
+            view.onNeedsResyncGeometry = { [weak self] w, h, scale in
+                self?.withLockedRuntime { rt in
+                    rt.viewport = Vec2(max(1, w), max(1, h))
+                    rt.pixelScale = max(0.5, scale)
+                }
+            }
+        }
+        self.macHost = host
+        return host
+    }
+    #endif
+
+    public var windowNumber: UInt32? {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedWindowNumber
+    }
+
+    public var capabilities: OverlayCapabilities {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedCapabilities
+    }
+
+    public var captureExclusion: OverlaySupport {
+        capabilities.captureExclusion
     }
 
     public func show() {
+        fadeIn(0.0)
+    }
+
+    public func hide() {
+        fadeOut(0.0)
+    }
+
+    public func fadeIn(_ durationSeconds: Double) {
+        let dur = max(0.0, durationSeconds)
         lock.lock()
+        let wasFading = overlayPresence.isFading
+        _ = overlayPresence.step(.show, release: releasePolicy)
         isVisible = true
+        isFrameless = false
+        let settle = !wasFading && !options.animateReveal
+        if settle {
+            runtime.markNeedsCommit(settle: true)
+        }
+        isDirty = true
+        isIdle = false
         lock.unlock()
+
         #if os(macOS)
-        Task { @MainActor in
-            if self.panel == nil {
-                let p = NSPanel(
-                    contentRect: NSRect(x: 0, y: 0, width: CGFloat(self.size.x), height: CGFloat(self.size.y)),
-                    styleMask: [.nonactivatingPanel, .borderless],
-                    backing: .buffered,
-                    defer: false
-                )
-                p.level = .statusBar
-                p.isOpaque = false
-                p.backgroundColor = .clear
-                p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                self.panel = p
-            }
-            self.panel?.orderFrontRegardless()
+        runOnMainActor {
+            let host = self.makeMacHostIfNeeded()
+            host.show(fadeSeconds: dur, settleBeforeReveal: settle)
+            self.lock.lock()
+            self.surfaceDescription = host.surfaceDescription
+            self.cachedWindowNumber = host.windowNumber
+            self.cachedCapabilities = host.capabilities
+            self.lock.unlock()
         }
         #endif
     }
 
-    public func hide() {
+    public func fadeOut(_ durationSeconds: Double, now: Double = Date().timeIntervalSinceReferenceDate) {
+        let dur = max(0.0, durationSeconds)
         lock.lock()
+        let effects = overlayPresence.step(.hide(fadeSeconds: dur, now: now), release: releasePolicy)
         isVisible = false
-        let release = options.releaseGpuWhenHidden
+        for effect in effects {
+            switch effect {
+            case .stopDrawing:
+                isFrameless = true
+                isIdle = true
+                wakeDeadline = nil
+            case .hideWindow:
+                if let deadline = overlayPresence.deadline {
+                    wakeDeadline = deadline
+                }
+            case .releaseGpu:
+                break
+            }
+        }
+        lock.unlock()
+
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.hide(fadeSeconds: dur)
+        }
+        #endif
+    }
+
+    public func advanceDue(at now: Double) {
+        lock.lock()
+        let effects = overlayPresence.step(.due(now: now), release: releasePolicy)
+        for effect in effects {
+            switch effect {
+            case .stopDrawing:
+                isFrameless = true
+                isIdle = true
+                wakeDeadline = nil
+            case .hideWindow:
+                break
+            case .releaseGpu:
+                break
+            }
+        }
         lock.unlock()
         #if os(macOS)
-        Task { @MainActor in
-            self.panel?.orderOut(nil)
-            if release {
-                self.panel = nil
+        if effects.contains(.releaseGpu) {
+            runOnMainActor {
+                self.macHost?.releasePanel()
             }
+        }
+        #endif
+    }
+
+    @discardableResult
+    public func setOccluded(_ covered: Bool) -> Bool {
+        lock.lock()
+        let accepted = overlayPresence.setOccluded(covered)
+        lock.unlock()
+        return accepted
+    }
+
+    public func requestKeys() {
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.requestKeys()
+        }
+        #endif
+    }
+
+    public func setInput(_ input: OverlayInput) {
+        lock.lock()
+        options.input = input
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setFollowPointer(_ follow: Bool) {
+        lock.lock()
+        options.followPointer = follow
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func refollowPointer() {
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.placePanel()
+        }
+        #endif
+    }
+
+    public func setPlacement(_ placement: OverlayPlacement?) {
+        lock.lock()
+        options.legacyPlacement = placement
+        if let placement {
+            options.placement = placement
+        }
+        let currentPlacement = placementSpec
+        let opts = options
+        isDirty = true
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setDisplay(_ display: DisplayTarget) {
+        lock.lock()
+        options.display = display
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setEdge(_ edge: ScreenEdge) {
+        lock.lock()
+        placementSpec.edge = edge
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func place(edge: ScreenEdge, margin: Float) {
+        lock.lock()
+        placementSpec.edge = edge
+        placementSpec.margin = margin
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setAlign(_ align: OverlayAlign, inset: Float) {
+        lock.lock()
+        placementSpec.align = align
+        placementSpec.inset = inset
+        options.legacyPlacement = nil
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func resize(_ newSize: Vec2) {
+        let clamped = Vec2(max(1, newSize.x), max(1, newSize.y))
+        lock.lock()
+        size = clamped
+        placementSpec.size = clamped
+        runtime.viewport = clamped
+        isDirty = true
+        let currentPlacement = placementSpec
+        let opts = options
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        }
+        #endif
+    }
+
+    public func setMacosLevel(_ level: Int) {
+        lock.lock()
+        options.macosLevel = level
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.setMacosLevel(level)
+        }
+        #endif
+    }
+
+    public func setExcludeFromCapture(_ exclude: Bool) {
+        lock.lock()
+        options.excludeFromCapture = exclude
+        lock.unlock()
+        #if os(macOS)
+        runOnMainActor {
+            self.macHost?.setCaptureExclusion(exclude)
         }
         #endif
     }
 
     public func update(_ body: (inout State) -> Void) {
         lock.lock()
-        body(&state)
+        var s = runtime.state
+        body(&s)
+        runtime.state = s
+        runtime.markNeedsCommit(settle: false)
+        isDirty = true
+        isIdle = false
         lock.unlock()
+    }
+
+    public func updateTx(_ body: (inout State, inout Tx) -> Void) {
+        _ = updateIf { state, tx in
+            body(&state, &tx)
+            return true
+        }
+    }
+
+    @discardableResult
+    public func updateIf(_ body: (inout State, inout Tx) -> Bool) -> Bool {
+        lock.lock()
+        var s = runtime.state
+        var tx = Tx()
+        let changed = body(&s, &tx)
+        runtime.state = s
+        if changed {
+            runtime.markNeedsCommit(settle: tx.settleRequested)
+            isDirty = true
+            isIdle = false
+        }
+        if let wake = tx.runtimeActions["wakeAfter"] as? Double {
+            wakeDeadline = runtime.currentTime + wake
+            isIdle = false
+        }
+        lock.unlock()
+        return changed
     }
 
     public func readState<R>(_ body: (State) -> R) -> R {
         lock.lock()
         defer { lock.unlock() }
-        return body(state)
+        return body(runtime.state)
     }
+
+    public func setThemeDark(_ dark: Bool) {
+        lock.lock()
+        if systemDark != dark || runtime.systemDark != dark {
+            systemDark = dark
+            runtime.systemDark = dark
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func setScrollBars(_ prefs: SystemScrollBars) {
+        lock.lock()
+        if systemScrollBars != prefs {
+            systemScrollBars = prefs
+            runtime.markNeedsCommit(settle: false)
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func setContrast(_ highContrast: Bool) {
+        lock.lock()
+        if systemContrast != highContrast {
+            systemContrast = highContrast
+            runtime.markNeedsCommit(settle: false)
+            isDirty = true
+            isIdle = false
+        }
+        lock.unlock()
+    }
+
+    public func deliverFocus(_ focused: Bool) {
+        lock.lock()
+        if let focusHandler {
+            var s = runtime.state
+            var tx = Tx()
+            focusHandler(&s, focused, &tx)
+            runtime.state = s
+            runtime.markNeedsCommit(settle: tx.settleRequested)
+            isDirty = true
+        }
+        lock.unlock()
+    }
+
+    /// Evaluates a single frame deterministically at `now` (used both live and in headless tests).
+    @discardableResult
+    public func present(at now: Double) -> RefScene? {
+        lock.lock()
+        if let deadline = overlayPresence.deadline, deadline <= now {
+            _ = overlayPresence.step(.due(now: now), release: releasePolicy)
+        }
+        guard overlayPresence.isDrawing else {
+            isFrameless = true
+            isIdle = true
+            lock.unlock()
+            return nil
+        }
+        isFrameless = false
+        let (scene, _, _, _) = evaluateStateAndFrameLocked(at: now, forceSettle: false)
+        lock.unlock()
+        return scene
+    }
+
+    private func evaluateLockedFrame(
+        at now: Double,
+        forceSettle: Bool
+    ) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return evaluateStateAndFrameLocked(at: now, forceSettle: forceSettle)
+    }
+
+    private func evaluateStateAndFrameLocked(
+        at now: Double,
+        forceSettle: Bool
+    ) -> (scene: RefScene, regions: [MotionRect], isAnimating: Bool, srgbBlend: Bool) {
+        if forceSettle {
+            runtime.markNeedsCommit(settle: true)
+        }
+        var pollAskedNextFrame = false
+        if let pollHandler {
+            var s = runtime.state
+            var tx = Tx()
+            let changed = pollHandler(&s, now, &tx)
+            runtime.state = s
+            if changed {
+                runtime.markNeedsCommit(settle: tx.settleRequested)
+            }
+            if let wake = tx.runtimeActions["wakeAfter"] as? Double {
+                wakeDeadline = now + wake
+                pollAskedNextFrame = true
+            } else {
+                wakeDeadline = nil
+            }
+        }
+
+        let scene = runtime.frame(at: now)
+        let regions = runtime.overlayInteractiveRegions()
+        isDirty = false
+        isIdle = !(runtime.isAnimating || pollAskedNextFrame)
+        surfaceStats = OverlaySurfaceSnapshot(
+            frameCount: surfaceStats.frameCount &+ 1,
+            pixelWidth: scene.width,
+            pixelHeight: scene.height,
+            backingScale: runtime.pixelScale,
+            srgbBlend: runtime.srgbBlend,
+            isVisible: isVisible,
+            isDrawing: overlayPresence.isDrawing,
+            isAnimating: runtime.isAnimating
+        )
+        return (scene, regions, runtime.isAnimating, runtime.srgbBlend)
+    }
+
+    private func withLockedRuntime<R>(_ body: (Runtime<State>) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(runtime)
+    }
+
+    #if os(macOS)
+    private func runOnMainActor(_ work: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { work() }
+        } else {
+            Task { @MainActor in work() }
+        }
+    }
+    #endif
 }
 
 // MARK: - 12. Web Scene Export (runtime/web/)

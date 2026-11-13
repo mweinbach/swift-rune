@@ -1,0 +1,619 @@
+import Foundation
+import RuneMotion
+import RuneRef
+
+// MARK: - Display & Run Options (window/spec.rs)
+
+/// Native display identifier (`rune::NativeDisplayId`).
+public enum NativeDisplayId: Hashable, Sendable, Codable {
+    case macOS(UInt32)
+    case wayland(String)
+    case other(UInt64)
+}
+
+/// Platform display identifier (`rune::DisplayId`).
+public struct RuneDisplayId: Hashable, Sendable, Codable {
+    public var native: NativeDisplayId?
+
+    public init(native: NativeDisplayId? = nil) {
+        self.native = native
+    }
+}
+
+/// A display in desktop physical-pixel coordinates (`rune::Display`).
+public struct DisplayInfo: Equatable, Sendable {
+    public var id: RuneDisplayId?
+    public var name: String?
+    public var position: (Int32, Int32)
+    public var size: (UInt32, UInt32)
+    public var scale: Double
+    public var primary: Bool
+
+    public init(
+        id: RuneDisplayId? = nil,
+        name: String? = nil,
+        position: (Int32, Int32) = (0, 0),
+        size: (UInt32, UInt32) = (1440, 900),
+        scale: Double = 2.0,
+        primary: Bool = true
+    ) {
+        self.id = id
+        self.name = name
+        self.position = position
+        self.size = size
+        self.scale = scale
+        self.primary = primary
+    }
+
+    public var nativeId: NativeDisplayId? {
+        id?.native
+    }
+
+    /// `(x, y, width, height)` in the native global top-left coordinate space.
+    public var nativeBounds: [Double] {
+        let divisor: Double
+        if case .wayland = nativeId {
+            divisor = max(scale, 0.001)
+        } else {
+            divisor = 1.0
+        }
+        return [
+            Double(position.0),
+            Double(position.1),
+            Double(size.0) / divisor,
+            Double(size.1) / divisor,
+        ]
+    }
+
+    public static func == (lhs: DisplayInfo, rhs: DisplayInfo) -> Bool {
+        lhs.id == rhs.id &&
+            lhs.name == rhs.name &&
+            lhs.position == rhs.position &&
+            lhs.size == rhs.size &&
+            lhs.scale == rhs.scale &&
+            lhs.primary == rhs.primary
+    }
+}
+
+// MARK: - Window Attributes Snapshot (window/spec.rs)
+
+/// Snapshot of computed native window creation attributes (mirrors `winit::window::WindowAttributes`).
+public struct WindowAttributesSnapshot: Equatable, Sendable {
+    public var title: String
+    public var innerSize: (Float, Float)
+    public var minInnerSize: (Float, Float)
+    public var maxInnerSize: (Float, Float)?
+    public var position: (Int32, Int32)?
+    public var physicalSize: (UInt32, UInt32)?
+    public var resizable: Bool
+    public var maximizeButtonEnabled: Bool
+    public var transparent: Bool
+    public var decorations: Bool
+    public var visible: Bool
+    public var alwaysOnTop: Bool
+
+    public static func == (lhs: WindowAttributesSnapshot, rhs: WindowAttributesSnapshot) -> Bool {
+        lhs.title == rhs.title &&
+            lhs.innerSize == rhs.innerSize &&
+            lhs.minInnerSize == rhs.minInnerSize &&
+            lhs.maxInnerSize?.0 == rhs.maxInnerSize?.0 &&
+            lhs.maxInnerSize?.1 == rhs.maxInnerSize?.1 &&
+            lhs.position?.0 == rhs.position?.0 &&
+            lhs.position?.1 == rhs.position?.1 &&
+            lhs.physicalSize?.0 == rhs.physicalSize?.0 &&
+            lhs.physicalSize?.1 == rhs.physicalSize?.1 &&
+            lhs.resizable == rhs.resizable &&
+            lhs.maximizeButtonEnabled == rhs.maximizeButtonEnabled &&
+            lhs.transparent == rhs.transparent &&
+            lhs.decorations == rhs.decorations &&
+            lhs.visible == rhs.visible &&
+            lhs.alwaysOnTop == rhs.alwaysOnTop
+    }
+}
+
+// MARK: - WindowPlacement & TitlebarSet (window/spec.rs, window/titlebar.rs)
+
+/// A window's place on the desktop in physical pixels (`rune::WindowPlacement`).
+public struct WindowPlacement: Equatable, Sendable {
+    public var position: (Int32, Int32)
+    public var contentPosition: (Int32, Int32)
+    public var contentSize: (UInt32, UInt32)
+    public var scale: Double
+    public var maximized: Bool
+    public var minimized: Bool
+    public var fullScreen: Bool
+    public var restore: ((Int32, Int32), (UInt32, UInt32))?
+    public var display: ((Int32, Int32), (UInt32, UInt32))?
+
+    public init(
+        position: (Int32, Int32) = (0, 0),
+        contentPosition: (Int32, Int32) = (0, 0),
+        contentSize: (UInt32, UInt32) = (0, 0),
+        scale: Double = 1.0,
+        maximized: Bool = false,
+        minimized: Bool = false,
+        fullScreen: Bool = false,
+        restore: ((Int32, Int32), (UInt32, UInt32))? = nil,
+        display: ((Int32, Int32), (UInt32, UInt32))? = nil
+    ) {
+        self.position = position
+        self.contentPosition = contentPosition
+        self.contentSize = contentSize
+        self.scale = scale
+        self.maximized = maximized
+        self.minimized = minimized
+        self.fullScreen = fullScreen
+        self.restore = restore
+        self.display = display
+    }
+
+    public static func == (lhs: WindowPlacement, rhs: WindowPlacement) -> Bool {
+        lhs.position == rhs.position &&
+            lhs.contentPosition == rhs.contentPosition &&
+            lhs.contentSize == rhs.contentSize &&
+            lhs.scale == rhs.scale &&
+            lhs.maximized == rhs.maximized &&
+            lhs.minimized == rhs.minimized &&
+            lhs.fullScreen == rhs.fullScreen &&
+            lhs.restore?.0.0 == rhs.restore?.0.0 &&
+            lhs.restore?.0.1 == rhs.restore?.0.1 &&
+            lhs.restore?.1.0 == rhs.restore?.1.0 &&
+            lhs.restore?.1.1 == rhs.restore?.1.1 &&
+            lhs.display?.0.0 == rhs.display?.0.0 &&
+            lhs.display?.0.1 == rhs.display?.0.1 &&
+            lhs.display?.1.0 == rhs.display?.1.0 &&
+            lhs.display?.1.1 == rhs.display?.1.1
+    }
+}
+
+/// View-level overrides over base titlebar (`TitlebarSet`).
+public struct TitlebarSet: Equatable, Sendable {
+    public var titlebar: Titlebar?
+    public var height: Float?
+
+    public init(titlebar: Titlebar? = nil, height: Float? = nil) {
+        self.titlebar = titlebar
+        self.height = height
+    }
+
+    public func over(_ base: Titlebar) -> Titlebar {
+        var resolved = titlebar ?? base
+        if let height {
+            resolved.height = height
+        }
+        return resolved
+    }
+}
+
+extension El {
+    /// Marks this element as a titlebar drag region (`El::window_drag`).
+    public func windowDrag(_ enabled: Bool = true) -> Self {
+        var copy = self
+        if enabled {
+            copy.runtimeExtras["windowDrag"] = true
+        } else {
+            copy.runtimeExtras.removeValue(forKey: "windowDrag")
+        }
+        return copy
+    }
+
+    public var isWindowDrag: Bool {
+        (runtimeExtras["windowDrag"] as? Bool) == true
+    }
+}
+
+// MARK: - Window Memory Rest State Machine (#819 window/rest.rs)
+
+/// Pure state machine managing idle GPU resource trimming (`crates/rune/src/window/rest.rs`).
+public struct WindowRestMachine: Equatable, Sendable {
+    public static let restAfter: TimeInterval = 10.0
+    public static let pressedAfter: TimeInterval = 1.0
+
+    public enum State: Equatable, Sendable {
+        case rested
+        case drawing(due: TimeInterval)
+        case idle
+    }
+
+    public enum Event: Equatable, Sendable {
+        case drew(now: TimeInterval, lowMemory: Bool)
+        case unseen
+        case woke(now: TimeInterval)
+    }
+
+    public enum Effect: Equatable, Sendable {
+        case giveBackUnused
+        case giveBackAll
+    }
+
+    public private(set) var state: State
+
+    public init(state: State = .rested) {
+        self.state = state
+    }
+
+    public var deadline: TimeInterval? {
+        switch state {
+        case .drawing(let due):
+            return due
+        case .rested, .idle:
+            return nil
+        }
+    }
+
+    @discardableResult
+    public mutating func step(_ event: Event) -> [Effect] {
+        switch (state, event) {
+        case (_, .drew(let now, let lowMemory)):
+            let delay = lowMemory ? Self.pressedAfter : Self.restAfter
+            state = .drawing(due: now + delay)
+            return []
+        case (.drawing(let due), .woke(let now)) where now >= due:
+            state = .idle
+            return [.giveBackUnused]
+        case (.drawing, .unseen), (.idle, .unseen):
+            state = .rested
+            return [.giveBackAll]
+        case (.drawing, .woke), (.idle, .woke), (.rested, .woke), (.rested, .unseen):
+            return []
+        }
+    }
+}
+
+// MARK: - WindowHandle & Request Queue (window/handle.rs)
+
+/// Snapshot of a window's frame counters (`SurfaceStats`).
+public struct WindowSurfaceStats: Equatable, Sendable {
+    public var redraws: UInt64
+    public var presents: UInt64
+    public var failedDrawables: UInt64
+    public var loopTurns: UInt64
+
+    public init(
+        redraws: UInt64 = 0,
+        presents: UInt64 = 0,
+        failedDrawables: UInt64 = 0,
+        loopTurns: UInt64 = 0
+    ) {
+        self.redraws = redraws
+        self.presents = presents
+        self.failedDrawables = failedDrawables
+        self.loopTurns = loopTurns
+    }
+}
+
+/// Request sent through a `WindowHandle`, either queued before binding or dispatched live.
+public enum WindowHandleRequest: Equatable, Sendable {
+    case focus
+    case open
+    case close
+    case show
+    case hide
+    case setPosition(x: Int32, y: Int32)
+    case setAlwaysOnTop(Bool)
+    case resize(width: Float, height: Float, animate: Bool)
+    case center
+    case setTitle(String)
+    case setTaskbar(TaskbarState)
+    case flash(Bool)
+    case setClickThrough(Bool)
+}
+
+// MARK: - Multi-Window Host Registry (window/spec.rs)
+
+/// Platform-erased host session protocol created by `AnyWindowSpec`.
+public protocol HostedWindowEntry: AnyObject {
+    var key: String { get }
+    var title: String { get }
+    var size: Vec2 { get }
+    var minSize: Vec2? { get }
+    var darkOverride: Bool? { get }
+    var options: WindowOptions { get }
+    var macosWindow: MacWindowOptions { get }
+    var chrome: Chrome { get }
+    var titlebar: Titlebar? { get }
+    var openAs: OpenAs { get }
+    var inactive: Bool { get }
+    var keepRunning: Bool { get }
+    var secondary: Bool { get }
+    var handle: WindowHandle { get }
+
+    func createRuntime(pixelScale: Float, systemDark: Bool, reducedMotion: Bool, waker: Waker) -> AnyObject
+    func frame(runtimeObj: AnyObject, at time: Double) -> RefScene
+    func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float)
+    func setFocused(runtimeObj: AnyObject, focused: Bool)
+    func setSystemDark(runtimeObj: AnyObject, dark: Bool)
+    func windowTitle(runtimeObj: AnyObject) -> String?
+    func quitRequested(runtimeObj: AnyObject) -> Bool
+    func relaunchRequested(runtimeObj: AnyObject) -> Bool
+    func isAnimating(runtimeObj: AnyObject) -> Bool
+    func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double)
+    func pointerExit(runtimeObj: AnyObject, at: Double)
+    func pointerDown(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
+    func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
+    func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double)
+    func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool
+    func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double)
+    func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
+    func runQuitHook(runtimeObj: AnyObject)
+    func runReopenHook(runtimeObj: AnyObject, hasVisibleWindows: Bool) -> Bool
+    func runOpenUrlHook(runtimeObj: AnyObject, url: String)
+    func fireOnCreated()
+    func fireOnReady()
+    func trimIdleCaches(runtimeObj: AnyObject, all: Bool)
+    func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
+}
+
+final class TypedHostedWindowEntry<State>: HostedWindowEntry {
+    private var spec: AppWindowSpec<State>
+    let secondary: Bool
+    let handle: WindowHandle
+    private var didFireCreated = false
+
+    init(spec: AppWindowSpec<State>, handle: WindowHandle, secondary: Bool) {
+        self.spec = spec
+        self.handle = handle
+        self.secondary = secondary
+    }
+
+    var key: String { spec.key }
+    var title: String { spec.appSpec.title }
+    var size: Vec2 { spec.appSpec.size }
+    var minSize: Vec2? { spec.appSpec.minSize }
+    var darkOverride: Bool? { spec.appSpec.dark }
+    var options: WindowOptions { spec.options }
+    var macosWindow: MacWindowOptions { spec.macosWindow }
+    var chrome: Chrome { spec.chrome }
+    var titlebar: Titlebar? { spec.titlebar }
+    var openAs: OpenAs { spec.openAs }
+    var inactive: Bool { spec.inactive }
+    var keepRunning: Bool { spec.keepRunning }
+
+    func createRuntime(pixelScale: Float, systemDark: Bool, reducedMotion: Bool, waker: Waker) -> AnyObject {
+        let initialState = spec.appSpec.makeState()
+        let rt = Runtime<State>(
+            state: initialState,
+            viewport: spec.appSpec.size,
+            pixelScale: pixelScale,
+            systemDark: spec.appSpec.dark ?? systemDark,
+            reducedMotion: reducedMotion,
+            waker: waker,
+            onKey: spec.appSpec.onKey,
+            view: spec.appSpec.view
+        )
+        rt.windowTitle = spec.appSpec.title
+        rt.urlOpener.headless = false
+        if let onQuit = spec.onQuit {
+            nonisolated(unsafe) weak let weakRt = rt
+            nonisolated(unsafe) let quitFn = onQuit
+            QuitLifecycle.registerQuitHook(key: rt) {
+                guard let r = weakRt else { return }
+                var tx = Tx()
+                quitFn(&r.state, &tx)
+                r.markNeedsCommit()
+            }
+        }
+        return rt
+    }
+
+    private func rt(_ obj: AnyObject) -> Runtime<State> {
+        // Guaranteed by TypedHostedWindowEntry lifecycle.
+        obj as! Runtime<State>
+    }
+
+    func frame(runtimeObj: AnyObject, at time: Double) -> RefScene {
+        rt(runtimeObj).frame(at: time)
+    }
+
+    func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float) {
+        let r = rt(runtimeObj)
+        r.viewport = viewport
+        r.pixelScale = pixelScale
+    }
+
+    func setFocused(runtimeObj: AnyObject, focused: Bool) {
+        rt(runtimeObj).windowFocused = focused
+    }
+
+    func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
+        rt(runtimeObj).systemDark = dark
+    }
+
+    func windowTitle(runtimeObj: AnyObject) -> String? {
+        rt(runtimeObj).windowTitle
+    }
+
+    func quitRequested(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).quitRequested
+    }
+
+    func relaunchRequested(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).relaunchRequested
+    }
+
+    func isAnimating(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).isAnimating
+    }
+
+    func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double) {
+        rt(runtimeObj).pointerMove(to: to, mods: mods, at: at)
+    }
+
+    func pointerExit(runtimeObj: AnyObject, at: Double) {
+        rt(runtimeObj).pointerExit(at: at)
+    }
+
+    func pointerDown(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at time: Double) {
+        rt(runtimeObj).pointerDown(at: at, button: button, mods: mods, at: time)
+    }
+
+    func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at time: Double) {
+        rt(runtimeObj).pointerUp(at: at, button: button, mods: mods, at: time)
+    }
+
+    func wheel(runtimeObj: AnyObject, event: WheelEvent, at: Vec2, now: Double) {
+        rt(runtimeObj).wheel(event, at: at, now: now)
+    }
+
+    func keyDown(runtimeObj: AnyObject, event: KeyEvent, at: Double) -> Bool {
+        rt(runtimeObj).keyDown(event, at: at)
+    }
+
+    func fileDrop(runtimeObj: AnyObject, event: FileDropPhase, at: Double) {
+        rt(runtimeObj).fileDrop(event, at: at)
+    }
+
+    func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool {
+        guard spec.titlebar != nil || spec.chrome.dragRegions else {
+            return false
+        }
+        return rt(runtimeObj).isBareTitlebarDragRegion(at: point)
+    }
+
+    func runQuitHook(runtimeObj: AnyObject) {
+        guard let onQuit = spec.onQuit else { return }
+        let r = rt(runtimeObj)
+        var tx = Tx()
+        onQuit(&r.state, &tx)
+        r.markNeedsCommit()
+    }
+
+    func runReopenHook(runtimeObj: AnyObject, hasVisibleWindows: Bool) -> Bool {
+        guard let onReopen = spec.onReopen else { return false }
+        let r = rt(runtimeObj)
+        var tx = Tx()
+        let handled = onReopen(&r.state, hasVisibleWindows, &tx)
+        if tx.quitRequested {
+            _ = QuitLifecycle.send(.start(ending: false, after: .exit))
+        }
+        r.markNeedsCommit()
+        return handled
+    }
+
+    func runOpenUrlHook(runtimeObj: AnyObject, url: String) {
+        guard let onOpenUrl = spec.onOpenUrl else { return }
+        let r = rt(runtimeObj)
+        var tx = Tx()
+        onOpenUrl(&r.state, url, &tx)
+        if tx.quitRequested {
+            _ = QuitLifecycle.send(.start(ending: false, after: .exit))
+        }
+        r.markNeedsCommit()
+    }
+
+    func fireOnCreated() {
+        guard !didFireCreated else { return }
+        didFireCreated = true
+        spec.onCreated?(handle)
+    }
+
+    func fireOnReady() {
+        spec.onReady?(handle)
+    }
+
+    func trimIdleCaches(runtimeObj: AnyObject, all: Bool) {
+        let _ = (runtimeObj, all)
+        // Renderer-level GPU memory trim hooks run on the host window controller.
+    }
+
+    func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
+        try HeadlessRunner.run(spec.appSpec, args: args)
+    }
+}
+
+/// Errors from multi-window key validation or launch (`window::spec::validate`).
+public enum MultiWindowError: Error, LocalizedError, Equatable {
+    case emptyOrDuplicateKey(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .emptyOrDuplicateKey(let key):
+            return "empty or duplicate window key: \(key)"
+        }
+    }
+}
+
+/// Multi-window flattening, validation, dynamic opening, and native launch (`crates/rune/src/window/spec.rs`).
+public enum RuneMultiWindow {
+    private static let openedLock = NSLock()
+    nonisolated(unsafe) private static var pendingOpened: [AnyWindowSpec] = []
+
+    /// Each window followed depth-first by any secondary windows attached via `window(_:)`.
+    public static func flatten(_ windows: [AnyWindowSpec]) -> [AnyWindowSpec] {
+        var out: [AnyWindowSpec] = []
+        for var w in windows {
+            let children = w.takeChildWindows()
+            out.append(w)
+            out.append(contentsOf: flatten(children))
+        }
+        return out
+    }
+
+    /// Ensures every window has a non-empty, unique key.
+    public static func validate(_ windows: [AnyWindowSpec]) throws {
+        var seen = Set<String>()
+        for w in windows {
+            guard !w.key.isEmpty, seen.insert(w.key).inserted else {
+                throw MultiWindowError.emptyOrDuplicateKey(w.key)
+            }
+        }
+    }
+
+    /// Queues a new window to open in the running event loop at the end of the turn (`open_window`).
+    @discardableResult
+    public static func openWindow<State>(
+        _ spec: AppWindowSpec<State>,
+        headless: Bool = false
+    ) -> WindowHandle {
+        let anySpec = AnyWindowSpec(spec, handle: WindowHandle(key: spec.key), secondary: false)
+        if !headless {
+            openedLock.lock()
+            pendingOpened.append(anySpec)
+            openedLock.unlock()
+        }
+        return anySpec.handle
+    }
+
+    /// Resolves CLI arguments for a secondary window (`tooling::window_args`):
+    /// explicit per-window args (even empty) never read the host CLI.
+    public static func windowArgs(explicit: [String]?, inherited: () -> ToolingArgs) -> ToolingArgs {
+        if let explicit {
+            return ToolingArgs.parse(explicit)
+        }
+        return inherited()
+    }
+
+    /// Drains windows queued via `openWindow`.
+    public static func takeOpened() -> [AnyWindowSpec] {
+        openedLock.lock()
+        let out = pendingOpened
+        pendingOpened.removeAll()
+        openedLock.unlock()
+        return out
+    }
+
+    /// Runs a multi-window application (`run_windows`).
+    @MainActor
+    public static func runWindows(
+        _ windows: [AnyWindowSpec],
+        options: RunOptions = RunOptions(),
+        arguments: [String]? = nil
+    ) throws {
+        let flat = flatten(windows)
+        try validate(flat)
+        let parsed = arguments.map { ToolingArgs.parse($0) } ?? ToolingArgs.parse()
+        if parsed.isHeadlessRequested {
+            if let first = flat.first {
+                _ = try first.makeHostEntry().runHeadless(args: parsed)
+            }
+            return
+        }
+        #if os(macOS)
+        try RuneMultiWindowHost.run(flat, options: options, parsed: parsed)
+        #else
+        if let first = flat.first {
+            _ = try first.makeHostEntry().runHeadless(args: parsed)
+        }
+        #endif
+    }
+}
