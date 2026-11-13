@@ -1126,4 +1126,100 @@ struct OverlaysAndTableTests {
         press(.tab)
         #expect(focusedKey() == "item2")
     }
+
+    @Test("Tooltip wraps labels inside maxWidth and leaves short labels and nowrap chips unshrunk (tests/tooltip.rs)")
+    func tooltipLabelWrapsInsideMaxWidth() throws {
+        let long = "PR #123 · Open · CI passing · Move the sidebar search into the toolbar and keep its results"
+        func makeRt(_ which: UInt8) -> Runtime<UInt8> {
+            let rt = Runtime(state: which, viewport: Vec2(800, 400), systemDark: true) { s, _ in
+                var layer: [El<UInt8>] = []
+                let tipBase = Tooltip<UInt8>("t").trigger(text("?")).open(true)
+                let trigger: El<UInt8> = {
+                    switch s {
+                    case 0:
+                        return tipBase
+                            .label(long)
+                            .render(style: TooltipStyle.neutral(dark: true).maxWidth(160.0).padding(8.0, 5.0), layer: &layer)
+                    case 1:
+                        let k = Kit.neutral(dark: true)
+                        return tipBase
+                            .appearance(.standard)
+                            .text(k, "\(long) \(long)")
+                            .build(kit: k, layer: &layer)
+                    case 3:
+                        return tipBase
+                            .child(text(long).wrapText())
+                            .child(text("⌘K").noWrap().key("chip"))
+                            .render(style: TooltipStyle.neutral(dark: true).maxWidth(160.0).padding(8.0, 5.0), layer: &layer)
+                    default:
+                        return tipBase
+                            .label("Help")
+                            .render(style: TooltipStyle.neutral(dark: true).maxWidth(160.0).padding(8.0, 5.0), layer: &layer)
+                    }
+                }()
+                return RuneKit.root(col().wFull().pt(200.0).itemsCenter().child(trigger), layer)
+            }
+            rt.frame(at: 0.0)
+            for _ in 0..<60 { rt.frame(at: 1.0) }
+            return rt
+        }
+
+        let rt0 = makeRt(0)
+        let tip0 = try #require(rt0.elements().first { $0.key == "t-tooltip" }).rect
+        let w0 = try #require(rt0.elements().first { $0.text == long }).rect
+        #expect(abs(tip0[2] - 160.0) < 0.01)
+        #expect(w0[0] >= tip0[0] + 8.0 && w0[0] + w0[2] <= tip0[0] + tip0[2] - 8.0)
+        #expect(w0[3] > 30.0 && tip0[3] >= w0[3] + 10.0)
+
+        let rt1 = makeRt(1)
+        let tip1 = try #require(rt1.elements().first { $0.key == "t-tooltip" }).rect
+        let w1 = try #require(rt1.elements().first { $0.text == "\(long) \(long)" }).rect
+        #expect(abs(tip1[2] - 320.0) < 0.01)
+        #expect(w1[0] + w1[2] <= tip1[0] + tip1[2] && w1[3] > 20.0)
+
+        let rt3 = makeRt(3)
+        let tip3 = try #require(rt3.elements().first { $0.key == "t-tooltip" }).rect
+        let w3 = try #require(rt3.elements().first { $0.text == long }).rect
+        let chip3 = try #require(rt3.elements().first { $0.key == "chip" }).rect
+        #expect(abs(tip3[2] - 160.0) < 0.01)
+        #expect(w3[2] <= tip3[2] - 16.0 && w3[0] + w3[2] <= chip3[0])
+        #expect(chip3[0] + chip3[2] <= tip3[0] + tip3[2] - 8.0 + 0.01 && chip3[2] > 10.0)
+        #expect(w3[3] > 30.0)
+
+        let rt2 = makeRt(2)
+        let tip2 = try #require(rt2.elements().first { $0.key == "t-tooltip" }).rect
+        let w2 = try #require(rt2.elements().first { $0.text == "Help" }).rect
+        #expect(tip2[2] < 60.0 && abs(tip2[2] - (w2[2] + 16.0)) < 0.5)
+    }
+
+    @Test("TooltipStyle.helpLook, Kit.windowTitlebar 44pt height, and HoverCard parity")
+    func tooltipStyleHelpLookAndHoverCardParity() throws {
+        struct S { var open = true }
+        let k = Kit.neutral(dark: true)
+        let look = TooltipStyle.fromKit(k, .standard).helpLook()
+        #expect(look.maxW == 320.0)
+        #expect(look.delaySeconds == 0.4)
+        #expect(look.skipSeconds == 0.3)
+        #expect(abs(look.fadeEnter - 0.12) < 1e-6)
+        #expect(abs(look.fadeExit - 0.08) < 1e-6)
+        #expect(abs(look.fadeScale - 0.96) < 1e-6)
+        #expect(look.key.upper)
+        #expect(look.key.height == 14.0 && look.rowGap == 6.0)
+
+        let rt = Runtime(state: S(), viewport: Vec2(480, 320), systemDark: true) { s, _ in
+            var layer: [El<S>] = []
+            let bar: El<S> = k.windowTitlebar(key: "win-bar", title: "App")
+            let hc = HoverCard<S>("hc")
+                .trigger(text("Hover me"))
+                .child(text("Preview details"))
+                .open(s.open)
+                .build(kit: k, layer: &layer)
+            return RuneKit.root(col().wFull().child(bar).child(hc), layer)
+        }
+        rt.frame(at: 0.0)
+        let barInfo = try #require(rt.elements().first { $0.key == "win-bar" })
+        #expect(abs(barInfo.rect[3] - 44.0) < 0.01)
+        let cardInfo = try #require(rt.elements().first { $0.key == "hc-card" })
+        #expect(cardInfo.rect[2] >= 200.0 && cardInfo.rect[2] <= 320.0)
+    }
 }

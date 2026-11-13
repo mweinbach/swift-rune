@@ -8,6 +8,15 @@ public enum Side: String, Sendable, Hashable {
     case bottom
     case left
     case right
+
+    public var runeSide: Rune.Side {
+        switch self {
+        case .top: .top
+        case .bottom: .bottom
+        case .left: .left
+        case .right: .right
+        }
+    }
 }
 
 /// Alignment along the cross axis of an anchored overlay (`rune::Align`).
@@ -15,6 +24,14 @@ public enum Align: String, Sendable, Hashable {
     case start
     case center
     case end
+
+    public var runeAlign: Rune.Align {
+        switch self {
+        case .start: .start
+        case .center: .center
+        case .end: .end
+        }
+    }
 }
 
 /// Where an overlay sits relative to its trigger (`rune_kit::Placement`).
