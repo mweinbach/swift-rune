@@ -1548,6 +1548,54 @@ public struct Scene: Sendable {
         nodes[i].dirty = true
     }
 
+    /// Re-links `parentIdx`'s children so active seen slots follow `orderedSlots` (preserving any exiting tail).
+    private mutating func syncSiblingOrder(parent parentIdx: UInt32, orderedSlots: [Int]) {
+        guard !orderedSlots.isEmpty else { return }
+        let seenSet = Set(orderedSlots)
+        var mismatch = false
+        var idx = 0
+        var cur = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
+        while cur != Self.noneIdx {
+            let ci = Int(cur)
+            if seenSet.contains(ci) {
+                if idx >= orderedSlots.count || orderedSlots[idx] != ci {
+                    mismatch = true
+                    break
+                }
+                idx += 1
+            }
+            cur = nodes[ci].nextSibling
+        }
+        if !mismatch && idx == orderedSlots.count {
+            return
+        }
+
+        var combined = orderedSlots
+        var c = (parentIdx == Self.noneIdx) ? rootHead : nodes[Int(parentIdx)].firstChild
+        while c != Self.noneIdx {
+            let ci = Int(c)
+            if !seenSet.contains(ci) {
+                combined.append(ci)
+            }
+            c = nodes[ci].nextSibling
+        }
+
+        let first = combined.first.map(UInt32.init) ?? Self.noneIdx
+        let last = combined.last.map(UInt32.init) ?? Self.noneIdx
+        if parentIdx == Self.noneIdx {
+            rootHead = first
+            rootTail = last
+        } else {
+            nodes[Int(parentIdx)].firstChild = first
+            nodes[Int(parentIdx)].lastChild = last
+        }
+        for (k, ci) in combined.enumerated() {
+            nodes[ci].prevSibling = k > 0 ? UInt32(combined[k - 1]) : Self.noneIdx
+            nodes[ci].nextSibling = k + 1 < combined.count ? UInt32(combined[k + 1]) : Self.noneIdx
+        }
+        orderDirty = true
+    }
+
     internal mutating func removeNow(_ i: Int) {
         var c = nodes[i].firstChild
         while c != Self.noneIdx {
@@ -1645,6 +1693,8 @@ public struct Scene: Sendable {
         }
 
         var seen = Set<NodeId>(minimumCapacity: specs.count)
+        var orderedByParent: [UInt32: [Int]] = [:]
+        var parentKeysOrder: [UInt32] = []
         for spec in specs {
             seen.insert(spec.id)
             let parentOrigin = spec.parent.flatMap { worldOrigins[$0] } ?? .zero
@@ -1671,12 +1721,16 @@ public struct Scene: Sendable {
                     localSpec.transition = Transition.none
                 }
 
+                // Keep existing frame across `insert` so `insertDelayed` does not start a 0.40s `REFLOW`
+                // animation before `setFrame`/`landFrame` below applies `spec.layoutAnim`.
+                var insertSpec = localSpec
+                insertSpec.frame = nodes[existingIdx].frame
                 if wasExiting, !cut, let m = matchedStarts[spec.id] {
-                    insert(spec.id, localSpec, .initial)
+                    insert(spec.id, insertSpec, .initial)
                     landFrame(spec.id, localFrame)
                     applyMatchedFlight(existingIdx, spec: spec, match: m)
                 } else {
-                    insert(spec.id, localSpec, cut ? .initial : .animated)
+                    insert(spec.id, insertSpec, cut ? .initial : .animated)
 
                     if let (curPos, curVel) = preWorld, let la = spec.layoutAnim, !store.reducedMotion && !cut {
                         nodes[existingIdx].frame = localFrame
@@ -1765,6 +1819,19 @@ public struct Scene: Sendable {
                     if spec.blur != 0 { nodes[i].baseBlur = spec.blur }
                     if let border = spec.border { nodes[i].border = border; nodes[i].hasBorder = true }
                 }
+            }
+            if let committedSlot = slot(spec.id) {
+                let pIdx = nodes[committedSlot].parent
+                if orderedByParent[pIdx] == nil {
+                    parentKeysOrder.append(pIdx)
+                }
+                orderedByParent[pIdx, default: []].append(committedSlot)
+            }
+        }
+
+        for pIdx in parentKeysOrder {
+            if let orderedSlots = orderedByParent[pIdx] {
+                syncSiblingOrder(parent: pIdx, orderedSlots: orderedSlots)
             }
         }
 
