@@ -189,6 +189,9 @@ public struct ToolingArgs: Sendable, Equatable {
     public var tracePath: String? = nil
     public var traceAll: Bool = false
     public var videoPath: String? = nil
+    public var htmlPath: String? = nil
+    public var htmlTemplatePath: String? = nil
+    public var htmlWidths: [Float] = []
     public var extraArgs: [String] = []
 
     public init() {}
@@ -203,6 +206,7 @@ public struct ToolingArgs: Sendable, Equatable {
             || stripPath != nil
             || videoPath != nil
             || tracePath != nil
+            || htmlPath != nil
             || listScenes
             || listWindows
     }
@@ -395,6 +399,18 @@ public struct ToolingArgs: Sendable, Equatable {
                 out.reducedMotion = true
             case "--cpu", "--force-cpu":
                 out.forceCPU = true
+            case "--html":
+                if i + 1 < arguments.count { out.htmlPath = arguments[i + 1]; i += 1 }
+            case "--html-template":
+                if i + 1 < arguments.count { out.htmlTemplatePath = arguments[i + 1]; i += 1 }
+            case "--html-widths":
+                if i + 1 < arguments.count {
+                    out.htmlWidths = arguments[i + 1]
+                        .split(separator: ",")
+                        .compactMap { Float($0.trimmingCharacters(in: .whitespaces)) }
+                        .filter { $0 > 0 }
+                    i += 1
+                }
             default:
                 out.extraArgs.append(arg)
             }
@@ -860,6 +876,27 @@ public enum HeadlessRunner {
                 print(name)
             }
             return Output(finalFrame: Frame(width: 1, height: 1, rgba: [0, 0, 0, 255]), treeJSON: Data("{}".utf8))
+        }
+        if let htmlPath = args.htmlPath {
+            registerFonts(spec.fonts)
+            _ = try ToolingHTML.exportToFile(
+                spec: spec,
+                outputPath: htmlPath,
+                widths: args.htmlWidths,
+                height: args.viewportOverride?.y,
+                scale: args.pixelScale,
+                dark: args.darkOverride ?? spec.dark ?? true,
+                templatePath: args.htmlTemplatePath,
+                sceneName: args.sceneName
+            )
+            let vp = args.viewportOverride ?? spec.size
+            let w = max(1, Int((vp.x * args.pixelScale).rounded()))
+            let h = max(1, Int((vp.y * args.pixelScale).rounded()))
+            return Output(
+                finalFrame: Frame(width: w, height: h, rgba: [UInt8](repeating: 0, count: w * h * 4)),
+                treeJSON: Data("{}".utf8),
+                windowKeys: availableWindows
+            )
         }
 
         registerFonts(spec.fonts)
