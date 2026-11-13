@@ -1,5 +1,8 @@
 import Foundation
 import Rune
+#if canImport(Metal)
+import Metal
+#endif
 
 public let maxLights = 8
 public let flagOccluder: UInt32 = 1
@@ -337,16 +340,32 @@ public struct LightSettings: Sendable, Equatable {
     }
 }
 
-public struct LightScene: Sendable {
+public struct LightScene: @unchecked Sendable {
     public var prims: [Prim]
     public var lights: [Light]
     public var settings: LightSettings
+    #if canImport(Metal)
+    /// Optional full-resolution extra linear emission texture (e.g. effect arcs) fed into the GI scene pass.
+    public var emission: MTLTexture?
 
+    public init(
+        prims: [Prim],
+        lights: [Light],
+        settings: LightSettings = LightSettings(),
+        emission: MTLTexture? = nil
+    ) {
+        self.prims = prims
+        self.lights = lights
+        self.settings = settings
+        self.emission = emission
+    }
+    #else
     public init(prims: [Prim], lights: [Light], settings: LightSettings = LightSettings()) {
         self.prims = prims
         self.lights = lights
         self.settings = settings
     }
+    #endif
 }
 
 public struct LightTimings: Sendable, Equatable {
