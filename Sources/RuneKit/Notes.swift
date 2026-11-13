@@ -349,13 +349,14 @@ extension Kit {
                     .key("\(key)-fact-\(idx)")
                     .role(.listItem)
                     .label(rowLabel)
+                    .positionInSet(idx + 1, size: rows.count)
                     .wFull()
                     .py(7)
                     .itemsCenter()
                     .justifyBetween()
                     .gap(16)
-                    .child(text(item.label.uppercased()).font(ty.smallMedium).color(c.textMuted))
-                    .child(right)
+                    .child(text(item.label.uppercased()).font(ty.smallMedium).color(c.textMuted).a11yHidden())
+                    .child(right.a11yHidden())
             )
         }
         return list
@@ -403,9 +404,9 @@ extension Kit {
             let tone = noteStatusColor(step.status)
             var left: El<State> = row().gap(8).itemsCenter().grow(1).minW(0)
                 .child(el().size(7).rounded(3.5).bg(tone))
-                .child(text(step.title).font(ty.uiMedium).color(c.textBase))
+                .child(text(step.title).font(ty.uiMedium).color(c.textBase).a11yHidden())
             if let note = step.note {
-                left = left.child(text(note).font(ty.small).color(c.textMuted))
+                left = left.child(text(note).font(ty.small).color(c.textMuted).a11yHidden())
             }
             let stepLabel = [step.title, step.status, step.note].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
             list = list.child(
@@ -413,13 +414,14 @@ extension Kit {
                     .key("\(key)-step-\(idx)")
                     .role(.listItem)
                     .label(stepLabel)
+                    .positionInSet(idx + 1, size: steps.count)
                     .wFull()
                     .py(7)
                     .itemsCenter()
                     .justifyBetween()
                     .gap(12)
                     .child(left)
-                    .child(text(step.status).font(ty.smallMedium).color(tone))
+                    .child(text(step.status).font(ty.smallMedium).color(tone).a11yHidden())
             )
         }
         return list
@@ -481,7 +483,7 @@ extension Kit {
     private func drawNoteCallout<State>(key: String, label: String?, body: String) -> El<State> {
         var content: El<State> = col().wFull().gap(4)
         if let label {
-            content = content.child(text(label.uppercased()).font(ty.smallMedium).color(c.info.fg))
+            content = content.child(text(label.uppercased()).font(ty.smallMedium).color(c.info.fg).a11yHidden())
         }
         content = content.child(markdown(body, key: "\(key)-md"))
         return row()

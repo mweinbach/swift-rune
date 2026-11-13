@@ -12,7 +12,17 @@ struct ActionsKeybindAndA11yParityTests {
         rt.elements().first(where: { !$0.exiting && $0.key == key })?.rect
     }
 
-    // MARK: - Button Label & Actions (`tests/button_label.rs`, `src/actions.rs`)
+    private func projectAccessibility<S>(_ root: El<S>, viewport: Vec2 = Vec2(640, 800)) -> AccessibilityNode? {
+        func buildInput(_ el: El<S>) -> LayoutInputNode {
+            LayoutInputNode(style: el.layout, children: el.children.map(buildInput))
+        }
+        let layout = LayoutEngine.compute(root: buildInput(root), viewport: viewport)
+        return AccessibilityTreeBuilder.project(element: root, layout: layout)
+    }
+
+    private func collectA11yLabels(_ node: AccessibilityNode) -> [String] {
+        [node.label].compactMap { $0 } + node.children.flatMap(collectA11yLabels)
+    }
 
     @MainActor
     @Test("Rolling button label sizes at rest identically to plain text button")
@@ -124,6 +134,9 @@ struct ActionsKeybindAndA11yParityTests {
                 st.count += 1
                 st.log.append("inc")
             },
+            ActionItem(id: "save", title: "Save", shortcut: "⌘S") { st in
+                st.log.append("save")
+            },
             ActionItem(id: "locked", title: "Locked", disabled: true) { st in
                 st.log.append("locked")
             },
@@ -142,13 +155,28 @@ struct ActionsKeybindAndA11yParityTests {
         #expect(state.count == 2)
 
         let kit = Kit.neutral(dark: true)
+        let builtBtn = kit.actionButton(
+            key: "solo",
+            label: .text("Save"),
+            leadingIcon: KitIcons.lock,
+            help: nil,
+            shortcut: "⌘S"
+        ) { _, _ in } as El<AppState>
+        #expect(builtBtn.a11yDescription == "")
+        #expect(builtBtn.a11yShortcutHint == "⌘S")
+        #expect(builtBtn.children.allSatisfy { $0.isA11yHidden })
+
         let rt = Runtime<AppState>(state: AppState(), viewport: Vec2(400, 120), pixelScale: 1.0, systemDark: true) { _, _ in
             kit.actionBar(key: "bar", items: items)
         }
         _ = rt.frame(at: 0.0)
         let incBtn = rt.elements().first(where: { $0.key == "bar-inc" })
+        let saveBtn = rt.elements().first(where: { $0.key == "bar-save" })
         let lockedBtn = rt.elements().first(where: { $0.key == "bar-locked" })
         #expect(incBtn?.help == "Increase counter  ⌘+")
+        #expect(incBtn?.a11yDescription == "Increase counter")
+        #expect(saveBtn?.help == "Save  ⌘S")
+        #expect(saveBtn?.a11yDescription == "")
         #expect(incBtn?.focusable == true)
         #expect(lockedBtn?.focusable == false)
 
@@ -232,7 +260,14 @@ struct ActionsKeybindAndA11yParityTests {
         #expect(kbGhost?.role == .group && kbGhost?.label == "Ctrl Space")
         #expect(els.contains(where: { $0.text == "K" }))
         #expect(els.contains(where: { $0.text == "Space" }))
-        #expect(els.contains(where: { $0.key == "key0" }) && els.contains(where: { $0.key == "key1" }))
+        #expect(els.filter { $0.key == "key0" || $0.key == "key1" }.allSatisfy { $0.a11yHidden })
+        let kbEl: El<Int> = kit.keybind(["⌘", "k"], variant: .neutral)
+        if let tree = projectAccessibility(kbEl) {
+            let labels = collectA11yLabels(tree)
+            #expect(labels == ["⌘ k"])
+        } else {
+            Issue.record("Expected AccessibilityNode for keybind")
+        }
     }
 
     // MARK: - Budget & CSS (`src/budget.rs`, `src/css.rs`, `src/kit.rs`)
@@ -402,6 +437,30 @@ struct ActionsKeybindAndA11yParityTests {
         let callout = els.first(where: { $0.key == "note/p2" })
         #expect(callout?.role == .group && callout?.label == "warning")
         #expect(els.contains(where: { ($0.text ?? "").contains("Back up first.") }))
+
+        // Verify positionInSet & a11yHidden no-echo parity on Notes elements
+        let noteEl: El<DocState> = kit.note(noteSrc, key: "note")
+        func findEl(_ node: El<DocState>, key: String) -> El<DocState>? {
+            if node.keyId == key { return node }
+            for ch in node.children {
+                if let hit = findEl(ch, key: key) { return hit }
+            }
+            return nil
+        }
+        #expect(findEl(noteEl, key: "note/p0-fact-0")?.a11yPosInSet?.position == 1)
+        #expect(findEl(noteEl, key: "note/p0-fact-0")?.a11yPosInSet?.size == 2)
+        #expect(findEl(noteEl, key: "note/p0-fact-1")?.a11yPosInSet?.position == 2)
+        #expect(findEl(noteEl, key: "note/p0-fact-1")?.a11yPosInSet?.size == 2)
+        #expect(findEl(noteEl, key: "note/p1-step-0")?.a11yPosInSet?.position == 1)
+        #expect(findEl(noteEl, key: "note/p1-step-0")?.a11yPosInSet?.size == 2)
+        if let tree = projectAccessibility(noteEl) {
+            let labels = collectA11yLabels(tree)
+            #expect(labels.contains("Status: done shipped"))
+            #expect(!labels.contains("STATUS") && !labels.contains("WARNING"))
+            #expect(!labels.contains("done"))
+        } else {
+            Issue.record("Expected AccessibilityNode for note")
+        }
 
         // Mermaid diagram figure label
         #expect(els.contains(where: { $0.label == "Flowchart" }))

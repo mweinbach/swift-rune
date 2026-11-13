@@ -180,31 +180,38 @@ extension Kit {
 
         let cleanHelp = help?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanShortcut = shortcut?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tip: String? = switch (cleanHelp, cleanShortcut) {
-        case let (h?, s?) where !h.isEmpty && !s.isEmpty: "\(h)  \(s)"
-        case let (h?, _) where !h.isEmpty: h
-        case let (_, s?) where !s.isEmpty: s
+        let cleanLabel = labelSpec.accessibleLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tip: String? = switch (cleanHelp, cleanLabel, cleanShortcut) {
+        case let (h?, _, s?) where !h.isEmpty && !s.isEmpty: "\(h)  \(s)"
+        case let (h?, l, s?) where h.isEmpty && !l.isEmpty && !s.isEmpty: "\(l)  \(s)"
+        case let (nil, l, s?) where !l.isEmpty && !s.isEmpty: "\(l)  \(s)"
+        case let (_, _, s?) where !s.isEmpty: s
+        case let (h?, _, _) where !h.isEmpty: h
         default: nil
         }
         if let tip {
             node = node.help(tip)
         }
+        node = node.description(cleanHelp ?? "")
+        if let cleanShortcut, !cleanShortcut.isEmpty {
+            node = node.shortcutHint(cleanShortcut)
+        }
 
         if let svg = leadingIcon {
-            node = node.child(icon(svg, size: 14).key("icon").color(fgCol))
+            node = node.child(icon(svg, size: 14).key("icon").color(fgCol).a11yHidden())
         }
         switch labelSpec {
         case let .text(title):
-            node = node.child(text(title).key("label").font(fontStyle).color(fgCol).noWrap())
+            node = node.child(text(title).key("label").font(fontStyle).color(fgCol).noWrap().a11yHidden())
         case let .rolling(rollingKey, title):
             node = node
                 .animateLayout(motion.control)
-                .child(rollingText(key: rollingKey, title, font: fontStyle, color: fgCol))
+                .child(rollingText(key: rollingKey, title, font: fontStyle, color: fgCol).a11yHidden())
         case let .custom(_, builder):
-            node = node.child(builder(fontStyle, fgCol))
+            node = node.child(builder(fontStyle, fgCol).a11yHidden())
         }
         if let svg = trailingIcon {
-            node = node.child(icon(svg, size: 14).key("trailing-icon").color(fgCol))
+            node = node.child(icon(svg, size: 14).key("trailing-icon").color(fgCol).a11yHidden())
         }
 
         if disabled {

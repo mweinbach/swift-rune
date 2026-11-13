@@ -257,7 +257,9 @@ extension Kit {
                 if borderCol.a > 0 {
                     box = box.border(1.0, borderCol)
                 }
-                return box.child(text(Kit.keycapLabel(cap)).font(font).color(inkCol).noWrap())
+                return box
+                    .child(text(Kit.keycapLabel(cap)).font(font).color(inkCol).noWrap())
+                    .a11yHidden()
             })
     }
 
