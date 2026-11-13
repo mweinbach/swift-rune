@@ -7,6 +7,49 @@ import Glibc
 import Musl
 #endif
 
+/// Bounded nonblocking URL channel matching `std::sync::mpsc::sync_channel::<PathBuf>` for
+/// `PerfConfig.incidents(channel:)`.
+public final class PerfIncidentChannel: @unchecked Sendable {
+    public let capacity: Int
+    private let lock = NSLock()
+    private var buffer: [URL] = []
+    private let available = DispatchSemaphore(value: 0)
+
+    public init(capacity: Int = 16) {
+        self.capacity = max(1, capacity)
+    }
+
+    @discardableResult
+    public func trySend(_ url: URL) -> Bool {
+        lock.lock()
+        guard buffer.count < capacity else {
+            lock.unlock()
+            return false
+        }
+        buffer.append(url)
+        lock.unlock()
+        available.signal()
+        return true
+    }
+
+    public func tryReceive() -> URL? {
+        guard available.wait(timeout: .now()) == .success else { return nil }
+        lock.lock()
+        let out = buffer.isEmpty ? nil : buffer.removeFirst()
+        lock.unlock()
+        return out
+    }
+
+    public func receive(timeout: TimeInterval) -> URL? {
+        let deadline: DispatchTime = .now() + .nanoseconds(Int(max(0, timeout) * 1_000_000_000))
+        guard available.wait(timeout: deadline) == .success else { return nil }
+        lock.lock()
+        let out = buffer.isEmpty ? nil : buffer.removeFirst()
+        lock.unlock()
+        return out
+    }
+}
+
 /// Configuration for `PerfFileRecorder` (`crates/rune-perf/src/lib.rs::Config`).
 /// One process/launch per directory; separate directories should be used for dev and captures.
 public struct PerfConfig: Sendable {
@@ -14,7 +57,9 @@ public struct PerfConfig: Sendable {
     public var app: String
     public var build: String
     public var incidentHandler: (@Sendable (URL) -> Void)?
-    /// Bounded notification queue capacity matching upstream `sync_channel` (`nil` = unbounded / direct callback).
+    /// Optional bounded channel matching `sync_channel` (`Config::incidents`).
+    public var incidentChannel: PerfIncidentChannel?
+    /// Bounded notification queue capacity when using `incidentHandler` (`nil` = unbounded / direct).
     public var incidentQueueCapacity: Int?
 
     public init(
@@ -22,13 +67,15 @@ public struct PerfConfig: Sendable {
         app: String,
         build: String = "",
         incidentQueueCapacity: Int? = nil,
-        incidentHandler: (@Sendable (URL) -> Void)? = nil
+        incidentHandler: (@Sendable (URL) -> Void)? = nil,
+        incidentChannel: PerfIncidentChannel? = nil
     ) {
         self.directory = directory
         self.app = app
         self.build = build
         self.incidentQueueCapacity = incidentQueueCapacity
         self.incidentHandler = incidentHandler
+        self.incidentChannel = incidentChannel
     }
 
     public func build(_ build: String) -> PerfConfig {
@@ -41,6 +88,12 @@ public struct PerfConfig: Sendable {
         var copy = self
         copy.incidentQueueCapacity = max(1, capacity)
         copy.incidentHandler = handler
+        return copy
+    }
+
+    public func incidents(channel: PerfIncidentChannel) -> PerfConfig {
+        var copy = self
+        copy.incidentChannel = channel
         return copy
     }
 }
@@ -359,6 +412,12 @@ final class PerfRotatingLog {
         try? handle?.close()
     }
 
+    func resetHandleForTest() {
+        try? handle?.close()
+        handle = nil
+        currentSize = 0
+    }
+
     func append(jsonObject: [String: Any]) throws {
         var line = try JSONSerialization.data(withJSONObject: jsonObject, options: [.sortedKeys])
         line.append(0x0A)
@@ -425,8 +484,27 @@ final class PerfStoreWriter {
     private(set) var flushDue: Date?
     private(set) var wroteAnything = false
 
-    private let hookLock = NSLock()
-    private var hookInFlightCount = 0
+    private final class HookGate: @unchecked Sendable {
+        let lock = NSLock()
+        var inFlightCount = 0
+
+        func tryEnter(capacity: Int) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard inFlightCount < capacity else { return false }
+            inFlightCount += 1
+            return true
+        }
+
+        func leave() {
+            lock.lock()
+            inFlightCount = max(0, inFlightCount - 1)
+            lock.unlock()
+        }
+    }
+
+    private let hookGate = HookGate()
+    private let hookQueue = DispatchQueue(label: "rune.perf.incident-hook", qos: .utility)
 
     init(
         config: PerfConfig,
@@ -580,7 +658,7 @@ final class PerfStoreWriter {
 
         let before = pendingIncidents.count
         pendingIncidents.removeAll { $0.name == name }
-        if pendingIncidents.count < before, config.incidentHandler != nil {
+        if pendingIncidents.count < before, (config.incidentHandler != nil || config.incidentChannel != nil) {
             hookDroppedCount += 1
         }
 
@@ -603,17 +681,23 @@ final class PerfStoreWriter {
     }
 
     private func notifyHook(url: URL) {
-        guard let handler = config.incidentHandler else { return }
-        if let cap = config.incidentQueueCapacity {
-            hookLock.lock()
-            let canDeliver = hookInFlightCount < cap
-            if canDeliver {
-                hookInFlightCount += 1
-            } else {
+        if let channel = config.incidentChannel {
+            if !channel.trySend(url) {
                 hookDroppedCount += 1
             }
-            hookLock.unlock()
-            guard canDeliver else { return }
+        }
+        guard let handler = config.incidentHandler else { return }
+        if let cap = config.incidentQueueCapacity {
+            guard hookGate.tryEnter(capacity: cap) else {
+                hookDroppedCount += 1
+                return
+            }
+            let gate = hookGate
+            hookQueue.async {
+                defer { gate.leave() }
+                handler(url)
+            }
+            return
         }
         handler(url)
     }

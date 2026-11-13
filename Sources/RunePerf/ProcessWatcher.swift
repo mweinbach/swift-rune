@@ -323,8 +323,10 @@ public enum Procwatch {
         #if os(macOS) || os(iOS) || os(tvOS) || os(visionOS) || os(Linux)
         #if canImport(Darwin)
         let sock = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        #else
+        #elseif canImport(Glibc)
         let sock = Glibc.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #elseif canImport(Musl)
+        let sock = Musl.socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
         #endif
         guard sock >= 0 else {
             throw PerfRecorderError.io("socket creation failed")
@@ -381,6 +383,9 @@ public enum Procwatch {
                     close(client)
                     continue
                 }
+
+                var rcvTimeout = timeval(tv_sec: 1, tv_usec: 0)
+                _ = setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, socklen_t(MemoryLayout<timeval>.size))
 
                 var reqBuf = [UInt8](repeating: 0, count: 1024)
                 _ = recv(client, &reqBuf, reqBuf.count, 0)

@@ -131,16 +131,8 @@ struct RunePerfUpstreamTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        final class NotifyBox: @unchecked Sendable {
-            let lock = NSLock()
-            var urls: [URL] = []
-            func append(_ u: URL) { lock.lock(); urls.append(u); lock.unlock() }
-            var count: Int { lock.lock(); defer { lock.unlock() }; return urls.count }
-        }
-        let box = NotifyBox()
-        let config = PerfConfig(directory: dir, app: "fixture").build("1.0").incidents(capacity: 1) { url in
-            box.append(url)
-        }
+        let channel = PerfIncidentChannel(capacity: 1)
+        let config = PerfConfig(directory: dir, app: "fixture").build("1.0").incidents(channel: channel)
         let health = PerfFileRecorder.SharedHealth()
         let writer = PerfStoreWriter(config: config, startNanos: DispatchTime.now().uptimeNanoseconds, health: health)
         for n in 0..<40 {
@@ -159,7 +151,9 @@ struct RunePerfUpstreamTests {
 
         #expect(writer.incidentsCount == 40)
         #expect(writer.hookDroppedCount == 39)
-        #expect(box.count == 1)
+        let firstNotified = channel.tryReceive()
+        #expect(firstNotified != nil)
+        #expect(channel.tryReceive() == nil)
 
         let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
         let incidentFiles = files.filter { $0.lastPathComponent.hasPrefix("perf-incident-") }
@@ -178,6 +172,25 @@ struct RunePerfUpstreamTests {
         #expect(frames["ui_allocated_bytes"] is NSNull)
         #expect((snap["write_errors"] as? NSNumber)?.intValue == 0)
 
+        // Draining the channel allows subsequent incident notifications to succeed (no lifetime cap).
+        writer.accept(FrameSample(window: 99, seq: 99, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 200_000))
+        writer.flush()
+        #expect(channel.tryReceive() != nil)
+
+        // Also check bounded async handler overload releases slots after execution.
+        let hookSem = DispatchSemaphore(value: 0)
+        let handlerConfig = PerfConfig(directory: dir, app: "fixture").incidents(capacity: 1) { _ in
+            hookSem.signal()
+        }
+        let handlerWriter = PerfStoreWriter(config: handlerConfig, startNanos: DispatchTime.now().uptimeNanoseconds, health: health)
+        handlerWriter.accept(FrameSample(window: 100, seq: 100, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 1000))
+        handlerWriter.flush()
+        #expect(hookSem.wait(timeout: .now() + 2) == .success)
+        Thread.sleep(forTimeInterval: 0.02)
+        handlerWriter.accept(FrameSample(window: 101, seq: 101, outcome: .drawn, updateMs: 300.0, renderMs: 1.0, timestampMs: 3000))
+        handlerWriter.flush()
+        #expect(hookSem.wait(timeout: .now() + 2) == .success)
+
         // Log rotation parity (128-byte cap)
         let logDir = dir.appendingPathComponent("log-rot", isDirectory: true)
         try FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
@@ -192,6 +205,70 @@ struct RunePerfUpstreamTests {
                 _ = try JSONSerialization.jsonObject(with: Data(line.utf8))
             }
         }
+
+        // Stale-size partial write recovery + absent-dir write error + atomic_json oversize error
+        let staleSpaces = Data(repeating: 0x20, count: 125)
+        try staleSpaces.write(to: logDir.appendingPathComponent("perf.log"))
+        log.resetHandleForTest()
+        try log.append(jsonObject: ["seq": 51])
+        let curAttrs = try FileManager.default.attributesOfItem(atPath: logDir.appendingPathComponent("perf.log").path)
+        let rotAttrs = try FileManager.default.attributesOfItem(atPath: logDir.appendingPathComponent("perf.log.1").path)
+        #expect(((curAttrs[.size] as? NSNumber)?.intValue ?? 999) <= 128)
+        #expect((rotAttrs[.size] as? NSNumber)?.intValue == 125)
+
+        let absentHealth = PerfFileRecorder.SharedHealth()
+        let absentConfig = PerfConfig(directory: dir.appendingPathComponent("absent", isDirectory: true), app: "fixture")
+        let absentWriter = PerfStoreWriter(config: absentConfig, startNanos: DispatchTime.now().uptimeNanoseconds, health: absentHealth)
+        absentWriter.writeSnapshot()
+        #expect(absentHealth.errorCount >= 1)
+
+        var threwOversize = false
+        do {
+            try PerfStoreWriter.writeAtomicJSON(directory: dir, name: "big.json", object: ["k": "oversize"], limit: 1)
+        } catch {
+            threwOversize = true
+        }
+        #expect(threwOversize)
+    }
+
+    @Test func replacementAcquiresAfterOldOwnerReleases() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeperf-handoff-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let lockPath = dir.appendingPathComponent(".perf.lock").path
+        let lockFd = lockPath.withCString { open($0, O_CREAT | O_RDWR, 0o644) }
+        #expect(lockFd >= 0)
+        #expect(flock(lockFd, LOCK_EX | LOCK_NB) == 0)
+        var lockReleased = false
+        defer {
+            if !lockReleased {
+                flock(lockFd, LOCK_UN)
+                close(lockFd)
+            }
+        }
+
+        let channel = PerfIncidentChannel(capacity: 1)
+        let config = PerfConfig(directory: dir, app: "replacement").incidents(channel: channel)
+        let recorder = try PerfFileRecorder.start(config: config)
+        #expect(recorder.record(FrameSample(window: 1, seq: 1, outcome: .drawn, updateMs: 300.0, renderMs: 1.0)))
+
+        flock(lockFd, LOCK_UN)
+        close(lockFd)
+        lockReleased = true
+
+        let notifiedURL = channel.receive(timeout: 5.0)
+        #expect(notifiedURL != nil)
+        if let url = notifiedURL {
+            #expect(FileManager.default.fileExists(atPath: url.path))
+        }
+        recorder.shutdown()
+
+        let snapData = try Data(contentsOf: dir.appendingPathComponent("perf.json"))
+        let snap = try #require(try JSONSerialization.jsonObject(with: snapData) as? [String: Any])
+        let frames = try #require(snap["frames"] as? [String: Any])
+        #expect((frames["total"] as? NSNumber)?.intValue == 1)
     }
 
     @Test func perfFileRecorderLockContentionCancellationAndStartShutdown() throws {
