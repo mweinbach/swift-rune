@@ -825,6 +825,8 @@ public final class Runtime<State> {
     internal var lastVirtualFillMoved: Bool = false
     internal var lastFocusSelectedPaths: Set<String> = []
     internal var lastRevealSelectedPaths: Set<String> = []
+    internal var currentCommitInstant: Bool = false
+    internal var currentFrameCommitInstant: Bool = false
     internal var loopRuntime = LoopRuntime()
     internal var loopClock = LoopClock()
     internal var elSliceRenderState = ElSliceRenderState()
@@ -1236,7 +1238,28 @@ public final class Runtime<State> {
     /// True when the primary hit target at `point` is a bare `.windowDrag()` region with no
     /// interactive press/double-press/drag/dragOut/textbox behavior (`titlebar::bare_drag_region`).
     public func isBareTitlebarDragRegion(at point: Vec2) -> Bool {
-        guard let hit = hitTest(at: point) else { return false }
+        guard let hit = hitTest(at: point, predicate: { node in
+            let h = node.el.handlers
+            return node.el.isWindowDrag ||
+                node.el.explicitHit ||
+                node.el.isModal ||
+                node.el.pressBg != nil ||
+                node.el.pressScaleFactor != nil ||
+                node.el.pressFocusesBelow ||
+                self.nodeTakesFocus(node.el) ||
+                h.onClick != nil ||
+                h.onClickPress != nil ||
+                h.onBackgroundPress != nil ||
+                h.onDoubleClick != nil ||
+                h.onSecondaryClick != nil ||
+                h.onPointerDown != nil ||
+                h.onDrag != nil ||
+                h.dragOut != nil ||
+                node.el.attachedDragOutItem != nil ||
+                h.editLens != nil ||
+                node.el.role == .textInput ||
+                node.el.runtimeExtras["dragOut"] != nil
+        }) else { return false }
         let node = hit.node
         guard node.el.isWindowDrag else { return false }
         let h = node.el.handlers
@@ -1625,6 +1648,7 @@ public final class Runtime<State> {
         }
         stepKitDragRepeatOnFrame(at: now)
         stepKitHoverDelaysOnFrame(at: now)
+        let preCommitGrowthDt: Double = lastGrowthStepTime.map { max(0, min(0.1, now - $0)) } ?? 0
         var growthMoving = advanceGrowthRows(at: now)
         fireHoverDelays(at: now)
         flushPendingSentKeys(at: now)
@@ -1697,7 +1721,9 @@ public final class Runtime<State> {
                 scene: scene,
                 tracks: &loopRuntime.tracks
             )
+            kitHooks.frameGrowthStepDt = preCommitGrowthDt
             commitTree(at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
+            kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
             flushHiddenDropSteps(at: now)
             if didEdgeScroll {
@@ -1745,6 +1771,7 @@ public final class Runtime<State> {
             for (path, maxExt) in scrollMaxExtents {
                 let nid = NodeId.hash("scroll:" + path)
                 if var cur = scrollStore.get(nid, Props.SCROLL) {
+                    var wasGliding = false
                     if scrollGlidingPaths.contains(path),
                        scrollStore.isMoving(nid, Props.SCROLL),
                        let target = scrollStore.target(nid, Props.SCROLL),
@@ -1755,15 +1782,20 @@ public final class Runtime<State> {
                         cur = target
                         scrollStore.snap(nid, Props.SCROLL, to: target)
                         scrollGlidingPaths.remove(path)
+                        wasGliding = true
                     }
                     let clamped = Vec2(
                         cur.x.clamped(to: 0...maxExt.x),
                         cur.y.clamped(to: 0...maxExt.y)
                     )
+                    let handGliding = isScrollHandGliding(path: path)
+                    if wasGliding {
+                        clearScrollHandGliding(path: path)
+                    }
                     if scrollOffsets[path] != clamped {
                         scrollOffsets[path] = clamped
                         frameMovedScrollPaths.insert(path)
-                        if !scrollGlidingPaths.contains(path) {
+                        if (!wasGliding && !scrollGlidingPaths.contains(path)) || handGliding {
                             markScrollMovedByHand(path: path)
                         }
                         anyScrollMoved = true
@@ -1784,6 +1816,7 @@ public final class Runtime<State> {
             }
         } else if !scrollGlidingPaths.isEmpty {
             scrollGlidingPaths.removeAll(keepingCapacity: true)
+            clearAllScrollHandGliding()
             if !needsCommit {
                 directScrolledPaths.removeAll(keepingCapacity: true)
             }
@@ -1836,11 +1869,14 @@ public final class Runtime<State> {
         elSliceRenderState.loopCatchUp.loopsStepped(hostNow: currentTime, animEnd: animNow)
         syncLoopOffsetsToScene(animNow: animNow)
         refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
+        endUnseenExits(on: &scene, activeFlightIds: activeFlightIds)
         let frameOut = scene.frame(at: animNow)
         landGroupFadesAfterFrame()
         wordRevealStore.tick { [scene, animNow] id in
             scene.store.nodeTimeScale(id) != 1.0 ? scene.store.nodeTime(id) : animNow
         }
+        tellScrollOffsetsAfterSceneFrame(at: animNow, instant: currentFrameCommitInstant)
+        currentFrameCommitInstant = false
         let liveActive: Bool
         if liveVisible {
             liveActive = updateLiveBindings(at: animNow)
@@ -1886,6 +1922,7 @@ public final class Runtime<State> {
             || growthMoving
             || growthRows.values.contains { $0.track.moving }
             || growthStacks.values.contains { !$0.pendingHeights.isEmpty }
+            || kitHooks.growthStacks.values.contains { !$0.closing.isEmpty }
             || virtualFill.isFilling
             || tooltipFading(at: now)
             || hasActiveMotionLoops(at: now)
@@ -1895,7 +1932,7 @@ public final class Runtime<State> {
             || activeWordReveals
         var sources: UInt32 = 0
         if tracksAnimating { sources |= AnimSource.tracks }
-        if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
+        if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) || kitHooks.growthStacks.values.contains(where: { !$0.closing.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
         if activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
@@ -1973,6 +2010,7 @@ public final class Runtime<State> {
         measureFramePhase(.commit) {
             activeExplicitSnap = pendingCommitKind.snaps
             let explicitSettle = pendingCommitKind == .settle
+            let explicitInstant = pendingCommitKind == .instant
             let commitKind: TxCommit = resizeSnap
                 ? TxCommit(snaps: true, lands: pendingCommitKind.lands)
                 : pendingCommitKind
@@ -1987,6 +2025,11 @@ public final class Runtime<State> {
             if commitCut || commitKind.lands {
                 lastWasSettled = true
             }
+            currentCommitInstant = commitCut || explicitInstant
+            if currentCommitInstant {
+                currentFrameCommitInstant = true
+            }
+            defer { currentCommitInstant = false }
 
             if commitCut {
                 activeFlightIds.removeAll()
@@ -2381,7 +2424,12 @@ public final class Runtime<State> {
                 memoPass: memo.currentPass
             )
         }
-        var layoutRoot = expandedRoot
+        var layoutRoot = prepareGrowthStacksBeforeLayout(
+            in: expandedRoot,
+            cut: cut,
+            snaps: commitKind.snaps,
+            lands: commitKind.lands
+        )
         var solvedRoot = measureFramePhase(.layout) {
             retainedLayout.compute(
                 root: layoutRoot,
@@ -2848,7 +2896,7 @@ public final class Runtime<State> {
                 animateOffset: (el.styleSpring != nil || commitMotion != nil || el.layoutAnim != nil),
                 paintSpring: paintSp,
                 offsetAnim: selfInstantLayoutOrStyle ? nil : el.offsetMotionAnim,
-                opacityAnim: selfInstantStyle ? nil : el.opacityMotionAnim,
+                opacityAnim: (selfInstantStyle ? nil : el.opacityMotionAnim) ?? (selfInstantLayoutOrStyle ? nil : el.kitOpacityAnim),
                 scaleAnim: selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim,
                 rotateAnim: selfInstantLayoutOrStyle ? nil : el.rotateMotionAnim,
                 iconTurn: el.iconRotation,
@@ -3722,6 +3770,13 @@ public final class Runtime<State> {
         }
         let keepsFlights = !activeResizeSnap && commitKind.snaps && !commitKind.lands && viewCommitCount > 1 && !cut && !reducedMotion
         scene.keepFlights(keepsFlights)
+        let unseenOmittedToUnmount = applyUnseenPresenceBeforeCommit(
+            prevNodes: prevFlatNodesSnapshot,
+            specs: &specs,
+            cut: commitCut,
+            on: &scene,
+            activeFlightIds: activeFlightIds.subtracting(extraMatchedRemovedIds)
+        )
         if !extraMatchedRemovedIds.isEmpty {
             let extraSet = Set(extraMatchedRemovedIds)
             let filteredOverrides = childExitOverrides.filter { !extraSet.contains($0.childId) }
@@ -3891,6 +3946,8 @@ public final class Runtime<State> {
                 scene.set(rs.id, prop, rs.target)
             }
         }
+        unmountOmittedUnseenNodes(unseenOmittedToUnmount, on: &scene)
+        syncClosingGrowthFrames(on: &scene)
         scene.keepFlights(false)
         if applyUnseenPresenceAfterCommit(specs: specs, cut: commitCut, to: &scene) {
             isAnimating = true
@@ -4141,7 +4198,7 @@ public final class Runtime<State> {
                 )
                 scrollOffsets[flatNodes[i].path] = clamped
                 flatNodes[i].scrollShift = Vec2(flatNodes[i].flow == .rtl ? -clamped.x : clamped.x, clamped.y)
-                dispatchScrollOffsetObserverIfChanged(for: flatNodes[i], at: now)
+                dispatchScrollOffsetObserverIfChanged(for: flatNodes[i], at: cxSettings.scaledTime(at: now), instant: false)
                 if flatNodes[i].el.scrollEdgeFadeWidth > 0 || flatNodes[i].el.scrollFadeStyle.end != nil {
                     scrollFadeInfo = computeScrollFadeSpec(for: flatNodes[i])
                 }
@@ -4416,7 +4473,7 @@ public final class Runtime<State> {
             guard let g = findFocusGroupAncestor(of: i), g != i else { return true }
             let members = all.filter { findFocusGroupAncestor(of: $0) == g && $0 != g }
             let chosen = members.first(where: { flatNodes[$0].path == focusedPath })
-                ?? members.first(where: { flatNodes[$0].el.itemSelected })
+                ?? members.first(where: { flatNodes[$0].el.itemSelected || flatNodes[$0].el.isFocusSelected })
                 ?? members.first
             return chosen == i
         }
@@ -5087,6 +5144,7 @@ public final class Runtime<State> {
         var newVideoSnaps: [String: VideoSnapshot] = [:]
         var newDrawnRectByPath: [String: MotionRect] = [:]
         var newRectSpringingById: [NodeId: Bool] = [:]
+        kitHooks.unseenPresence.beginFrame()
 
         let flyingRootIds: Set<NodeId> = Set(frameOut.nodes.compactMap { p in
             guard let snap = nodeById[p.id], !p.isExiting else {
@@ -5561,7 +5619,7 @@ public final class Runtime<State> {
                 var e = lens.get(state)
                 if el.isSecure {
                     e.isSecure = true
-                    if el.isRevealed { e.isRevealed = true }
+                    if let rev = el.revealedOverride { e.isRevealed = rev }
                 }
                 return e
             }
@@ -5614,6 +5672,14 @@ public final class Runtime<State> {
             unseenPresence.recordPaintedNode(
                 id: p.id,
                 inView: isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
+            )
+            let drawnArr = Self.rotatedBoundsArray(rect, turn: effRotate)
+            kitHooks.unseenPresence.recordFrameNode(
+                id: p.id,
+                visible: visClip.width > 0 && visClip.height > 0 && onScreenForEmit,
+                inhOpacity: p.isExiting ? (el.opacity * ancestorOpacity * groupFactor).clamped(to: 0...1) : alpha,
+                drawn: MotionRect.fromXYWH(drawnArr[0], drawnArr[1], drawnArr[2], drawnArr[3]),
+                ownStickyShift: Vec2(ownStickyDelta.x, ownStickyDelta.y)
             )
 
             let devRect = SIMD4<Float>(
@@ -7381,6 +7447,7 @@ public final class Runtime<State> {
                 refreshHoverAndSyncTracks(at: now, wallNow: currentTime, cut: false)
             }
         }
+        kitHooks.unseenPresence.recordPostBuildFilterSeen(nodes: flatNodes)
         helpState.hits = newHelpHits
         helpState.interactiveHits = newInteractiveHits
         updateHelp(at: now, primitives: &primitives)
@@ -7692,13 +7759,19 @@ public final class Runtime<State> {
         if let old = hoveredPath {
             hoveredPath = nil
             hoveredKey = nil
+            var ranAnyHover = false
+            var hoverAllLiveOnly = true
             if let oldIdx = nodeByPath[old], !flatNodes[oldIdx].el.hasKitHoverDelays,
                let cb = flatNodes[oldIdx].el.handlers.onHover {
                 var tx = makeTx(at: now)
                 cb(&state, false, &tx)
-                applyTx(tx, at: now)
+                ranAnyHover = true
+                hoverAllLiveOnly = tx.liveOnlyRequested
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
             }
-            dirtyCommit(at: now)
+            if (ranAnyHover && !hoverAllLiveOnly) || hoverVisualNeedsCommit(oldPath: old, newPath: nil) {
+                dirtyCommit(at: now)
+            }
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -7884,10 +7957,10 @@ public final class Runtime<State> {
                         applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onHover")
                     }
                     isDispatchingHover = false
-                    let hoverSkippedCommit = ranAnyHover
-                        ? (hoverAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
-                        : (moveDispatched && moveAllLiveOnly && !hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath))
-                    if !hoverSkippedCommit || linkChanged || helpTargetChanges(at: pos) {
+                    let hoverNeedsCommit = (ranAnyHover && !hoverAllLiveOnly)
+                        || (!ranAnyHover && moveDispatched && !moveAllLiveOnly)
+                        || hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)
+                    if hoverNeedsCommit || linkChanged || helpTargetChanges(at: pos) {
                         suppressRevealFromHoverCommit = true
                         dirtyCommit(at: now)
                         changed = true
@@ -8650,10 +8723,13 @@ public final class Runtime<State> {
         kitHooks.isDispatchingByKeys = true
         activeByKeys = true
         currentKeyRepeat = isRepeat
+        let prevKitKeyRepeat = kitHooks.isKeyRepeat
+        kitHooks.isKeyRepeat = isRepeat
         defer {
             kitHooks.isDispatchingByKeys = prevKitByKeys
             activeByKeys = prevByKeys
             currentKeyRepeat = prevRepeat
+            kitHooks.isKeyRepeat = prevKitKeyRepeat
         }
         suppressRevealFromHoverCommit = false
         dismissHelp(at: now)
@@ -8734,7 +8810,7 @@ public final class Runtime<State> {
                 var edit = editLens.get(state)
                 if fNode.el.isSecure {
                     edit.isSecure = true
-                    if fNode.el.isRevealed { edit.isRevealed = true }
+                    if let rev = fNode.el.revealedOverride { edit.isRevealed = rev }
                 }
                 // Upstream `secure_text.rs:536,558`: copy/cut on secure text input stay blocked even when revealed.
                 if edit.isSecure && ev.mods.primaryCommand &&
@@ -8817,7 +8893,8 @@ public final class Runtime<State> {
             }
 
             // Space/Enter/ContextMenu activates focused text links first, then buttons/rows (`takesReturn`).
-            if ev.mods == .none && (ev.key == .space || ev.key == .enter) && !isRepeat {
+            let isSpaceKey = (ev.key == .space || ev.key == .text(" "))
+            if ev.mods == .none && (isSpaceKey || ev.key == .enter) && !isRepeat {
                 if activateFocusedLink(at: now) {
                     return true
                 }
@@ -8860,7 +8937,7 @@ public final class Runtime<State> {
                 fNode.el.role == .link || fNode.el.role == .row ||
                 fNode.el.role == .gridCell || fNode.el.focusHighlightColor != nil
             if fNode.el.handlers.editLens == nil && ev.mods == .none &&
-               (ev.key == .space || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
+               (isSpaceKey || (ev.key == .enter && (takesReturn || defaultButtonNode() == nil))) {
                 if isRepeat { return true }
                 if let onClick = fNode.el.handlers.onClick {
                     focusVisible = true
@@ -8891,42 +8968,9 @@ public final class Runtime<State> {
                 return true
             }
 
-            // Arrow-key & Home/End roving inside `.focusGroup()` ancestor!
-            if fNode.el.handlers.editLens == nil && ev.mods == .none,
-               (ev.key == .arrowRight || ev.key == .arrowDown || ev.key == .arrowLeft || ev.key == .arrowUp || ev.key == .home || ev.key == .end),
-               let groupIdx = findFocusGroupAncestor(of: fIdx) {
-                let isRtl = flatNodes[groupIdx].flow == .rtl
-                let targetJump: Int?
-                let forward: Bool
-                switch ev.key {
-                case .home:
-                    targetJump = 0
-                    forward = true
-                case .end:
-                    targetJump = -1
-                    forward = false
-                case .arrowDown:
-                    targetJump = nil
-                    forward = true
-                case .arrowUp:
-                    targetJump = nil
-                    forward = false
-                case .arrowRight:
-                    targetJump = nil
-                    forward = !isRtl
-                case .arrowLeft:
-                    targetJump = nil
-                    forward = isRtl
-                default:
-                    targetJump = nil
-                    forward = true
-                }
-                if moveFocusInGroup(groupIndex: groupIdx, forward: forward, jumpEndpoint: targetJump, at: now) {
-                    hoveredHighlightActive = false
-                    focusVisible = true
-                    dirtyCommit(at: now)
-                    return true
-                }
+            // Arrow / Home / End / type-select roving inside `.focusGroup()` ancestor!
+            if handleFocusGroupKey(ev, focusedIndex: fIdx, at: now) {
+                return true
             }
         }
 
@@ -8993,6 +9037,15 @@ public final class Runtime<State> {
                 applyTx(tx, at: now)
                 return true
             }
+        }
+
+        if dispatchContextMenuKey(
+            ev,
+            at: now,
+            drawnRectByPath: drawnRectByPath,
+            presentedRectByPath: presentedRectByPath
+        ) {
+            return true
         }
 
         // 4. Root / global `onKey` handler (unhandled keys bubble to `globalOnKey`; ShortcutRegistry stays gated under modal)
@@ -9972,7 +10025,7 @@ public final class Runtime<State> {
         var edit = editLens.get(state)
         if el.isSecure {
             edit.isSecure = true
-            if el.isRevealed { edit.isRevealed = true }
+            if let rev = el.revealedOverride { edit.isRevealed = rev }
         }
         let isCopyOrCut = ev.mods.primaryCommand &&
             (ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C") ||
@@ -10029,6 +10082,22 @@ public final class Runtime<State> {
 
     /// Delivers a window focus transition to `onFocus`, deduplicating redundant transitions and
     /// leaving the runtime un-staled when `onFocus` is unset (`app.rs:973-992`).
+    @discardableResult
+    internal func cancelActiveDragOnBlur(at now: Double) -> Bool {
+        guard let drag = activeDrag else { return false }
+        state = drag.stateSnapshotBeforeDrag
+        activeDrag = nil
+        pressedPath = nil
+        pressedKey = nil
+        if let idx = nodeByPath[drag.path], let onEnd = flatNodes[idx].el.handlers.onDragEnd {
+            var tx = makeTx(at: now)
+            onEnd(&state, true, &tx)
+            applyTx(tx, at: now)
+        }
+        dirtyCommit(at: now)
+        return true
+    }
+
     public func dispatchFocus(_ focused: Bool, at now: Double? = nil) {
         guard windowFocused != focused else { return }
         let t = now ?? currentTime
@@ -10159,7 +10228,7 @@ public final class Runtime<State> {
             var edit = prevEdit
             if el.isSecure {
                 edit.isSecure = true
-                if el.isRevealed { edit.isRevealed = true }
+                if let rev = el.revealedOverride { edit.isRevealed = rev }
             }
             let outcome = edit.applyIme(event)
             switch outcome {
@@ -10541,17 +10610,123 @@ public final class Runtime<State> {
         return nil
     }
 
+    private func focusGroupMembers(groupIndex: Int, excludeEditable: Bool = false) -> [Int] {
+        let prefix = flatNodes[groupIndex].path + "/"
+        return flatNodes.indices.filter { i in
+            (flatNodes[i].path == flatNodes[groupIndex].path || flatNodes[i].path.hasPrefix(prefix)) &&
+            canFocusIndex(i) &&
+            (!excludeEditable || flatNodes[i].el.handlers.editLens == nil)
+        }
+    }
+
+    private func activateFocusGroupMember(
+        groupIndex: Int,
+        members: [Int],
+        curIdx: Int,
+        targetPos: Int,
+        at now: Double
+    ) {
+        let nextNode = flatNodes[members[targetPos]]
+        focusedPath = nextNode.path
+        focusedKey = nextNode.key
+        focusedLinkIndex = nil
+        hoveredHighlightActive = false
+        focusVisible = true
+        pendingScrollReveals.append(.intoView(scope: nil, key: nextNode.key ?? nextNode.path))
+
+        let follows = nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[groupIndex].el.isFocusFollowsSelection
+        if follows && members[targetPos] != members[curIdx] {
+            if let onClick = nextNode.el.handlers.onClick {
+                var tx = makeTx(at: now)
+                onClick(&state, &tx)
+                applyTx(tx, at: now)
+            } else if let onClickPress = nextNode.el.handlers.onClickPress {
+                let r = presentedRectByPath[nextNode.path] ?? nextNode.targetRect
+                let press = PointerPress(
+                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
+                    local: Vec2(r.width * 0.5, r.height * 0.5),
+                    elementSize: Vec2(r.width, r.height),
+                    button: .primary,
+                    mods: .none,
+                    clicks: 1
+                )
+                var tx = makeTx(at: now)
+                onClickPress(&state, press, &tx)
+                applyTx(tx, at: now)
+            }
+        }
+    }
+
+    private func handleFocusGroupKey(_ ev: KeyEvent, focusedIndex fIdx: Int, at now: Double) -> Bool {
+        guard flatNodes[fIdx].el.handlers.editLens == nil,
+              !ev.mods.cmd, !ev.mods.ctrl, !ev.mods.alt,
+              let groupIdx = findFocusGroupAncestor(of: fIdx) else {
+            return false
+        }
+        let groupNode = flatNodes[groupIdx]
+        if ev.mods == .none {
+            let isRtl = groupNode.flow == .rtl
+            var nav: (forward: Bool, jump: Int?)? = nil
+            switch ev.key {
+            case .home: nav = (true, 0)
+            case .end: nav = (false, -1)
+            case .arrowDown: nav = (true, nil)
+            case .arrowUp: nav = (false, nil)
+            case .arrowRight: nav = (!isRtl, nil)
+            case .arrowLeft: nav = (isRtl, nil)
+            default: break
+            }
+            if let nav {
+                kitHooks.typeSelectBuffer = ""
+                if moveFocusInGroup(groupIndex: groupIdx, forward: nav.forward, jumpEndpoint: nav.jump, at: now) {
+                    dirtyCommit(at: now)
+                    return true
+                }
+                return false
+            }
+        }
+        let groupRole = groupNode.el.role
+        let typeSelectAllowed = (groupRole == .menu || groupRole == .listbox || groupRole == .list || groupRole == .tree || groupRole == .tabList)
+        guard typeSelectAllowed, case .text(let typed) = ev.key else { return false }
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+
+        let members = focusGroupMembers(groupIndex: groupIdx, excludeEditable: true)
+        guard !members.isEmpty,
+              let curPath = focusedPath,
+              let curIdx = members.firstIndex(where: { flatNodes[$0].path == curPath }) else {
+            return false
+        }
+        if now - kitHooks.typeSelectLastTime > 0.8 {
+            kitHooks.typeSelectBuffer = ""
+        }
+        kitHooks.typeSelectLastTime = now
+        kitHooks.typeSelectBuffer += typed.lowercased()
+        guard let first = kitHooks.typeSelectBuffer.first else { return false }
+        let cycle = kitHooks.typeSelectBuffer.allSatisfy { $0 == first }
+        let matchPrefix = cycle ? String(first) : kitHooks.typeSelectBuffer
+        let order = (0..<members.count).map { k in
+            cycle ? (curIdx + 1 + k) % members.count : k
+        }
+        guard let targetPos = order.first(where: { idx in
+            let el = flatNodes[members[idx]].el
+            let label = (el.a11yLabel ?? el.plainText ?? "").lowercased()
+            return label.hasPrefix(matchPrefix)
+        }) else {
+            return false
+        }
+        activateFocusGroupMember(groupIndex: groupIdx, members: members, curIdx: curIdx, targetPos: targetPos, at: now)
+        dirtyCommit(at: now)
+        return true
+    }
+
     private func moveFocusInGroup(
         groupIndex: Int,
         forward: Bool,
         jumpEndpoint: Int? = nil,
         at now: Double
     ) -> Bool {
-        let prefix = flatNodes[groupIndex].path + "/"
-        let members = flatNodes.indices.filter { i in
-            (flatNodes[i].path == flatNodes[groupIndex].path || flatNodes[i].path.hasPrefix(prefix)) &&
-            canFocusIndex(i)
-        }
+        let members = focusGroupMembers(groupIndex: groupIndex)
         guard !members.isEmpty,
               let curPath = focusedPath,
               let curIdx = members.firstIndex(where: { flatNodes[$0].path == curPath }) else {
@@ -10572,33 +10747,7 @@ public final class Runtime<State> {
         } else {
             return false
         }
-        let nextNode = flatNodes[members[nextPos]]
-        focusedPath = nextNode.path
-        focusedKey = nextNode.key
-        focusedLinkIndex = nil
-        pendingScrollReveals.append(.intoView(scope: nil, key: nextNode.key ?? nextNode.path))
-
-        let follows = nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[groupIndex].el.isFocusFollowsSelection
-        if follows && members[nextPos] != members[curIdx] {
-            if let onClick = nextNode.el.handlers.onClick {
-                var tx = makeTx(at: now)
-                onClick(&state, &tx)
-                applyTx(tx, at: now)
-            } else if let onClickPress = nextNode.el.handlers.onClickPress {
-                let r = presentedRectByPath[nextNode.path] ?? nextNode.targetRect
-                let press = PointerPress(
-                    window: Vec2(r.x + r.width * 0.5, r.y + r.height * 0.5),
-                    local: Vec2(r.width * 0.5, r.height * 0.5),
-                    elementSize: Vec2(r.width, r.height),
-                    button: .primary,
-                    mods: .none,
-                    clicks: 1
-                )
-                var tx = makeTx(at: now)
-                onClickPress(&state, press, &tx)
-                applyTx(tx, at: now)
-            }
-        }
+        activateFocusGroupMember(groupIndex: groupIndex, members: members, curIdx: curIdx, targetPos: nextPos, at: now)
         return true
     }
 
@@ -10606,7 +10755,7 @@ public final class Runtime<State> {
         var resolvedEdit = edit
         if node.el.isSecure {
             resolvedEdit.isSecure = true
-            if node.el.isRevealed { resolvedEdit.isRevealed = true }
+            if let rev = node.el.revealedOverride { resolvedEdit.isRevealed = rev }
         }
         let rect = presentedRectByPath[node.path] ?? node.targetRect
         let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)

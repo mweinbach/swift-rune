@@ -863,6 +863,7 @@ public struct ElementHandlers<State> {
     public var onFarFromBottom: (min: Float, frameKey: String?, handler: (inout State, Bool) -> Void)?
     public var onScrollOffset: ((ScrollPos) -> Void)?
     public var onScroll: ((inout State, ScrollPos, inout Tx) -> Void)?
+    public var onScrollOffsetToken: UInt64 = 0
     public var onVisibleRows: ((inout State, Range<Int>) -> Bool)?
     public var onDrawnLayout: ((inout State, [Float], inout Tx) -> Void)?
     public var onVisible: ((inout State, Bool, inout Tx) -> Void)?
@@ -1227,7 +1228,11 @@ public struct El<State> {
     public var isHit: Bool = false
     public var explicitHit: Bool { get { isHit } set { isHit = newValue } }
     public var isSecure: Bool = false
-    public var isRevealed: Bool = false
+    public var revealedOverride: Bool? = nil
+    public var isRevealed: Bool {
+        get { revealedOverride ?? false }
+        set { revealedOverride = newValue }
+    }
 
     // Cold / CoW properties (keeps `El<State>` compact on worker thread stacks)
     public var richSpans: [TextSpan]? { get { _cold?.data.richSpans } set { ensureCold().data.richSpans = newValue } }
@@ -1756,6 +1761,7 @@ public struct El<State> {
     public func onScrollOffset(_ handler: @escaping (ScrollPos) -> Void) -> Self {
         var copy = self
         copy.handlers.onScrollOffset = handler
+        copy.handlers.onScrollOffsetToken = allocateScrollOffsetHandlerToken()
         return copy
     }
 
@@ -1769,6 +1775,7 @@ public struct El<State> {
         } else {
             copy.handlers.onScrollOffset = handler
         }
+        copy.handlers.onScrollOffsetToken = allocateScrollOffsetHandlerToken()
         return copy
     }
 

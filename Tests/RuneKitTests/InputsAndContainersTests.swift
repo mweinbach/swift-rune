@@ -497,16 +497,20 @@ struct InputsAndContainersTests {
     }
 
     @MainActor
-    @Test("Secure TextInput suppresses copy button, hides accessibility text when revealed, and masks when hidden")
-    func secureTextInputAndAreaBehavior() {
+    @Test("Secure TextInput suppresses copy button, hides a11y text, matches caret X when revealed, and masks when hidden")
+    func secureTextInputAndAreaBehavior() throws {
         struct Form {
+            var plain: TextEdit
             var secret: TextEdit
             var area: TextEdit
             var revealed = true
             var submitted = 0
         }
 
-        var sec = TextEdit("hunter2")
+        var plain = TextEdit("hé🙂 world")
+        plain.setCursor(utf8Offset: 3)
+        var sec = TextEdit("hé🙂 world")
+        sec.setCursor(utf8Offset: 3)
         sec.isSecure = true
         sec.isRevealed = true
         var secArea = TextEdit("line1\nline2\nline3\nline4\nline5", multiline: true)
@@ -514,8 +518,12 @@ struct InputsAndContainersTests {
         secArea.isRevealed = false
 
         let kit = Kit.neutral(dark: true)
-        let rt = Runtime<Form>(state: Form(secret: sec, area: secArea), viewport: Vec2(360, 260), pixelScale: 1.0, systemDark: true) { s, _ in
+        let rt = Runtime<Form>(state: Form(plain: plain, secret: sec, area: secArea), viewport: Vec2(360, 260), pixelScale: 1.0, systemDark: true) { s, _ in
             col().gap(8.0)
+                .child(
+                    TextInput(key: "plain", \.plain)
+                        .build(kit)
+                )
                 .child(
                     TextInput(key: "secret", \.secret)
                         .secure()
@@ -535,9 +543,33 @@ struct InputsAndContainersTests {
 
         var t = 0.0
         _ = rt.frame(at: t)
+        rt.update { _, tx in tx.focus("secret-input") }
+        t += 0.016
+        _ = rt.frame(at: t)
+        #expect(rt.hasSecureFocus)
         #expect(rt.element(byKey: "secret-action") == nil)
-        #expect(rt.element(byKey: "secret-input")?.secure == true)
-        #expect(rt.element(byKey: "secret-input")?.text == nil)
+        let secretInp = try #require(rt.element(byKey: "secret-input"))
+        #expect(secretInp.secure == true)
+        #expect(secretInp.text == nil)
+        let secretCaret = try #require(secretInp.caret)
+
+        // Caret x offset inside revealed secure TextInput matches plain TextInput at the same byte (`tests/text_input_press.rs:489`)
+        rt.update { _, tx in tx.focus("plain-input") }
+        t += 0.016
+        _ = rt.frame(at: t)
+        let plainInp = try #require(rt.element(byKey: "plain-input"))
+        let plainCaret = try #require(plainInp.caret)
+        #expect(abs((secretCaret[0] - secretInp.rect[0]) - (plainCaret[0] - plainInp.rect[0])) < 0.01)
+
+        // Masking off moves caret to bullet width
+        rt.update { st, tx in
+            st.revealed = false
+            tx.focus("secret-input")
+        }
+        t += 0.016
+        _ = rt.frame(at: t)
+        let maskedCaret = try #require(rt.element(byKey: "secret-input")?.caret)
+        #expect(maskedCaret[0] != secretCaret[0])
 
         let areaInput = rt.element(byKey: "area-input")!
         click(rt, at: center(of: areaInput.rect), t: &t)
@@ -756,5 +788,77 @@ struct InputsAndContainersTests {
             _ = colRt.frame(at: 0.08)
             #expect(colRt.state)
         }
+    }
+
+    @Test("TextInput.dir(.auto/.rtl) and TextInput/TextArea/TextField forward richStyle, spans/decorations, and pill hooks")
+    func textInputsDirAndRichForwardersParity() throws {
+        struct S {
+            var rtlAuto = TextEdit("مرحبا")
+            var richInput = TextEdit("hi ")
+            var area = TextEdit("quoted\ncode")
+            var field = TextEdit("tag ")
+        }
+        var initState = S()
+        initState.richInput.insertPill(id: "user:1", label: "@ava")
+        initState.field.insertPill(id: "agent:2", label: "@bot")
+
+        let kit = Kit.neutral(dark: true)
+        let accentBg = Color.srgb(0.2, 0.5, 0.9, 1.0)
+        let accentFg = Color.srgb(0.95, 0.95, 1.0, 1.0)
+        let customStyle = RichStyle(
+            codeFg: Color.srgb(1, 0.8, 0.3, 1),
+            codeBg: Color.srgb(0.2, 0.2, 0.3, 1),
+            codeBlockBg: Color.srgb(0.15, 0.15, 0.2, 1),
+            link: Color.srgb(0.3, 0.7, 1.0, 1),
+            quoteBar: Color.srgb(0.8, 0.4, 0.2, 1),
+            marker: Color.srgb(0.6, 0.6, 0.7, 1)
+        )
+
+        let rt = Runtime(state: initState, viewport: Vec2(420, 400), systemDark: true) { _, _ in
+            col().gap(8).p(12).children([
+                TextInput<S>(key: "rtl-auto", \.rtlAuto)
+                    .dir(.auto)
+                    .width(260)
+                    .build(kit),
+                TextInput<S>(key: "rich-in", \.richInput)
+                    .spans([RichSpan(0..<2).color(Color.srgb(1, 0.2, 0.2, 1))])
+                    .decorations([RichSpan(0..<2).color(Color.srgb(0.1, 0.9, 0.4, 1)).bg(Color.srgb(0.1, 0.3, 0.1, 1))])
+                    .richStyle(customStyle)
+                    .pillColors(accentBg, accentFg)
+                    .pillIcon { _ in kit.glyph.search }
+                    .pillStyle { id in id == "user:1" ? PillStyle.default.bg(accentBg).fg(accentFg).bold() : .default }
+                    .build(kit),
+                TextArea<S>(key: "rich-area", \.area)
+                    .dir(.ltr)
+                    .richStyle(customStyle)
+                    .decorations([RichSpan(0..<6).bold()])
+                    .pillColors(accentBg, accentFg)
+                    .pillIcon { _ in kit.glyph.copy }
+                    .pillStyle { _ in .default }
+                    .build(kit),
+                TextField<S>(key: "rich-field", "Tag", \.field)
+                    .dir(.ltr)
+                    .spans([RichSpan(0..<3).italic()])
+                    .richStyle(customStyle)
+                    .pillColors(accentBg, accentFg)
+                    .pillIcon { _ in kit.glyph.search }
+                    .pillStyle { _ in PillStyle.default.bg(accentBg) }
+                    .build(kit),
+            ])
+        }
+        let frame = rt.frame(at: 0.0)
+        // RTL auto text input shapes right-to-left glyphs near the right edge of its 260pt field.
+        let rtlBox = try #require(rt.element(byKey: "rtl-auto-input")?.rect)
+        var t = 0.01
+        click(rt, at: center(of: rtlBox), t: &t)
+        if let caretRect = rt.element(byKey: "rtl-auto-input")?.caret {
+            #expect(caretRect[0] > rtlBox[0] + rtlBox[2] * 0.5)
+        }
+        // Rich decorations + pills emit chip/pill backgrounds and image/icon quads (more primitives than plain text).
+        #expect(frame.primitives.count > 12)
+        let richIn = try #require(rt.element(byKey: "rich-in-input"))
+        #expect(richIn.text == "hi @ava")
+        let richField = try #require(rt.element(byKey: "rich-field-input"))
+        #expect(richField.text == "tag @bot")
     }
 }

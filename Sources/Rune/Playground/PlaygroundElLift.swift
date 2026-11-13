@@ -41,7 +41,7 @@ extension El {
         out.isInert = isInert
         out.isHit = isHit
         out.isSecure = isSecure
-        out.isRevealed = isRevealed
+        out.revealedOverride = revealedOverride
 
         // Cold properties (copied only when non-default to avoid unnecessary allocations)
         if let richSpans { out.richSpans = richSpans }

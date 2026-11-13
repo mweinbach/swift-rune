@@ -59,15 +59,40 @@ struct WidgetsAndShellTests {
         #expect(state.selected == LineRange.line(1))
     }
 
-    @Test("Grip tracks live drag and detects lost release on unobserved pointer moves")
+    @Test("Grip tracks live drag in either order, lost release, and replacement press (`grip.rs:101,122,132`)")
     func gripLostReleaseDetection() {
         var grip = Grip<Int>.idle
         #expect(grip.press(7, at: Vec2(0, 0)) == nil)
+        for x in 1..<5 {
+            let at = Vec2(Float(x), 0)
+            // Observer first, second observer at same point, then drag.
+            #expect(grip.pointerMoved(to: at) == nil)
+            #expect(grip.pointerMoved(to: at) == nil)
+            #expect(grip.moved(to: at) == 7)
+        }
+        for x in 5..<9 {
+            let at = Vec2(Float(x), 0)
+            // Drag first, then observer.
+            #expect(grip.moved(to: at) == 7)
+            #expect(grip.pointerMoved(to: at) == nil)
+        }
+        #expect(grip.release() == 7)
+        #expect(grip.release() == nil)
+
+        // Move the drag never hears lets go
+        grip.press(7, at: Vec2(0, 0))
         #expect(grip.pointerMoved(to: Vec2(1, 0)) == nil)
-        #expect(grip.moved(to: Vec2(1, 0)) == 7)
-        #expect(grip.pointerMoved(to: Vec2(2, 0)) == nil)
-        #expect(grip.pointerMoved(to: Vec2(3, 0)) == 7)
+        #expect(grip.pointerMoved(to: Vec2(2, 0)) == 7)
         #expect(!grip.isHeld)
+        #expect(grip.pointerMoved(to: Vec2(3, 0)) == nil)
+        #expect(grip.moved(to: Vec2(3, 0)) == nil)
+
+        // New press replaces a grip whose release was lost
+        grip.press(1, at: Vec2(0, 0))
+        #expect(grip.press(2, at: Vec2(9, 9)) == 1)
+        #expect(grip.data == 2)
+        #expect(grip.lose() == 2)
+        #expect(grip.lose() == nil)
     }
 
     @Test("ShortcutRecorderState captures chords, validates modifiers, handles Escape and Backspace")

@@ -7,6 +7,22 @@ public enum TitlebarAction: Equatable, Sendable {
     case doubleClick
 }
 
+internal struct RuntimeGrowthClosingRow: Sendable {
+    var segment: String
+    var nodeId: NodeId
+    var track: GrowTrack
+    var spring: Spring
+    var edge: StreamEdge
+    var originalLocalRect: MotionRect
+}
+
+internal struct KitGrowthStackState: Sendable {
+    var order: [String] = []
+    var closing: [String: RuntimeGrowthClosingRow] = [:]
+    var spacerPaths: [NodeId: String] = [:]
+    var isNewStack: Bool = true
+}
+
 internal struct KitRuntimeHooksState {
     var titlebar = TitlebarMachine()
     var doubleClickInterval: Double = 0.5
@@ -16,12 +32,18 @@ internal struct KitRuntimeHooksState {
     var windowFocused: Bool = true
     var windowFocusReportedState: Bool? = nil
     var pendingWindowFocusTransitions: [(focused: Bool, at: Double)] = []
+    var frameGrowthStepDt: Double = 0
+    var typeSelectBuffer: String = ""
+    var typeSelectLastTime: Double = -10.0
     var isDispatchingByKeys: Bool = false
     var isDispatchingFocusLost: Bool = false
     var pressRepeat = PressRepeatMachine()
     var pressRepeatPayload: PressRepeatPayload? = nil
     var requestedDragRepeatDelay: Double? = nil
     var pendingTxFocusVisible: Bool? = nil
+    var isKeyRepeat: Bool = false
+    var unseenPresence = KitUnseenPresenceState()
+    var growthStacks: [String: KitGrowthStackState] = [:]
 }
 
 extension Tx {
@@ -90,6 +112,17 @@ extension El {
 
     internal var kitWindowFocusHandlers: [(inout Any, Bool, inout Tx) -> Void] {
         (runtimeExtras[kitWindowFocusHandlersKey] as? [(inout Any, Bool, inout Tx) -> Void]) ?? []
+    }
+
+    /// Animates opacity transitions for this element using an explicit `Anim<Float>` curve (delay + velocity rule).
+    public func animateOpacity(_ anim: Anim<Float>) -> Self {
+        var copy = self
+        copy.runtimeExtras["rune.kit.opacityAnim"] = anim
+        return copy
+    }
+
+    internal var kitOpacityAnim: Anim<Float>? {
+        runtimeExtras["rune.kit.opacityAnim"] as? Anim<Float>
     }
 }
 
@@ -370,5 +403,54 @@ extension Runtime {
                 }
             }
         }
+    }
+
+    /// Dispatches Menu / Shift+F10 to the focused element's or ancestor's `onSecondaryClick` at its bottom-left (`secondary.rs:122`).
+    internal func dispatchContextMenuKey(
+        _ ev: KeyEvent,
+        at now: Double,
+        drawnRectByPath: [String: MotionRect],
+        presentedRectByPath: [String: MotionRect]
+    ) -> Bool {
+        let m = ev.mods
+        let plain = !m.cmd && !m.ctrl && !m.alt && !m.logo
+        let menuKey: Bool = switch ev.key {
+        case .contextMenu: plain
+        case .f(10): plain && m.shift
+        default: false
+        }
+        guard menuKey,
+              let fp = focusedPath,
+              let fIdx = nodeByPath[fp],
+              fIdx < flatNodes.count,
+              !flatNodes[fIdx].effectiveInert else {
+            return false
+        }
+        let fNode = flatNodes[fIdx]
+        let box = drawnRectByPath[fNode.path] ?? presentedRectByPath[fNode.path] ?? fNode.targetRect
+        let pt = Vec2(box.left, box.bottom)
+        var walkIdx: Int? = fIdx
+        while let curIdx = walkIdx {
+            let cur = flatNodes[curIdx]
+            if cur.effectiveInert { return false }
+            if let onSecondary = cur.el.handlers.onSecondaryClick {
+                let nr = presentedRectByPath[cur.path] ?? cur.targetRect
+                let press = PointerPress(
+                    window: pt,
+                    local: Vec2(pt.x - nr.x, pt.y - nr.y),
+                    elementSize: Vec2(nr.width, nr.height),
+                    button: .secondary,
+                    mods: m,
+                    clicks: 1
+                )
+                var tx = makeTx(at: now, button: .secondary)
+                onSecondary(&state, press, &tx)
+                applyTx(tx, at: now)
+                return true
+            }
+            if cur.el.isModal { return false }
+            walkIdx = cur.parentIndex
+        }
+        return false
     }
 }

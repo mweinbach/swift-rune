@@ -336,10 +336,8 @@ public struct Combobox<State> {
                 }
                 .onKey { s, ev, tx in
                     switch ev.key {
-                    case .enter, .space, .arrowDown, .arrowUp:
-                        toggleFromTrigger(&s, &tx)
-                        return true
-                    case .text(" "):
+                    case .enter, .space, .arrowDown, .arrowUp, .text(" "):
+                        if tx.keyRepeat() { return true }
                         toggleFromTrigger(&s, &tx)
                         return true
                     default:
@@ -406,11 +404,13 @@ public struct Combobox<State> {
                 var currentCombo = ComboboxState()
                 upd(&s) { currentCombo = $0 }
                 if currentCombo.search.preedit != nil {
-                    return false
+                    return ev.key == .enter || ev.key == .escape
                 }
                 if ev.key == .escape {
-                    upd(&s) { $0.close() }
-                    tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
+                    if !tx.keyRepeat() {
+                        upd(&s) { $0.close() }
+                        tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
+                    }
                     return true
                 }
                 if ev.mods.alt || ev.mods.logo {
@@ -421,6 +421,7 @@ public struct Combobox<State> {
                 let act = currentCombo.activeIndex(in: opts, filtered: enabled)
 
                 if ev.key == .enter {
+                    if tx.keyRepeat() { return true }
                     let chosenID = act.map { opts[$0].id }
                     upd(&s) { $0.close() }
                     tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)

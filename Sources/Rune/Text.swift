@@ -3255,6 +3255,7 @@ public final class TextSystem: @unchecked Sendable {
 
         if authText.isEmpty {
             let emptyH = Self.specLineHeight(lineCount: 1, lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
+            let emptyOriginX: Float = (style.direction == .rtl ? (maxWidth ?? 0) : 0)
             return ShapedText(
                 size: Vec2(0, emptyH),
                 lineCount: 1,
@@ -3262,7 +3263,8 @@ public final class TextSystem: @unchecked Sendable {
                 glyphs: [],
                 underlines: [],
                 backgrounds: [],
-                lineStrings: [(0, "", 0, 0, nil)]
+                lineStrings: [(0, "", 0, emptyOriginX, nil)],
+                forcedDirection: style.direction
             )
         }
         recordShapeCall()
@@ -3534,7 +3536,13 @@ public final class TextSystem: @unchecked Sendable {
                 break
             }
             let paraShapedSub = shapedNS.substring(with: NSRange(location: u16Start, length: max(0, hardEnd - u16Start)))
-            let paraIsRTL = Self.isRTLParagraph(paraShapedSub)
+            let paraIsRTL: Bool = {
+                switch style.direction {
+                case .rtl: return true
+                case .ltr: return false
+                case nil: return Self.isRTLParagraph(paraShapedSub)
+                }
+            }()
 
             var segStart = u16Start
             if segStart == hardEnd {
@@ -3660,7 +3668,7 @@ public final class TextSystem: @unchecked Sendable {
                         authSubstr: "",
                         widthPx: 0,
                         trailingWsPx: 0,
-                        isRTL: false,
+                        isRTL: style.direction == .rtl,
                         isParaLast: true
                     ))
                 }
