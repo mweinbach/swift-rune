@@ -213,9 +213,9 @@ extension Runtime {
                   !scrollRequestsState.owns(vpPath),
                   !directScrolledPaths.contains(vpPath),
                   let anchorIdx = keys.firstIndex(of: anchorKey) {
-            let prefixDelta = prefix[anchorIdx] - vState.lastAnchorPrefixY
-            if abs(prefixDelta) > 0.25 {
-                curOffsetY = max(0, min(max(0, total - vpH), curOffsetY + prefixDelta))
+            let expectedY = prefix[anchorIdx] + vState.lastAnchorLocalY
+            if abs(expectedY - curOffsetY) > 0.25 {
+                curOffsetY = max(0, min(max(0, total - vpH), expectedY))
                 scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
                 let nid = NodeId.hash("scroll:\(vpPath)")
                 scrollStore.snap(nid, Props.SCROLL, to: scrollOffsets[vpPath] ?? .zero)
@@ -247,11 +247,9 @@ extension Runtime {
             let ai = vis.lowerBound
             vState.lastAnchorKey = keys[ai]
             vState.lastAnchorLocalY = max(0, curOffsetY - prefix[ai])
-            vState.lastAnchorPrefixY = prefix[ai]
         } else if stickyPin {
             vState.lastAnchorKey = nil
             vState.lastAnchorLocalY = 0
-            vState.lastAnchorPrefixY = 0
         }
 
         vState.lastMountedRange = mounted
@@ -654,11 +652,9 @@ extension Runtime {
                 let ai = vis.lowerBound
                 vState.lastAnchorKey = vState.lastKeys[ai]
                 vState.lastAnchorLocalY = max(0, offsetY - prefix[ai])
-                vState.lastAnchorPrefixY = prefix[ai]
             } else if stickyPin {
                 vState.lastAnchorKey = nil
                 vState.lastAnchorLocalY = 0
-                vState.lastAnchorPrefixY = 0
             }
             if vState.measuredByKey.count > RuntimeVirtualListState.maxCachedKeys {
                 let keepSet = Set(vState.lastKeys)
@@ -683,6 +679,101 @@ extension Runtime {
                 }
             }
         }
+    }
+
+    /// Re-anchors and expands active virtual lists after a full measure pass when newly measured
+    /// row heights shift the scroll anchor or overflow the mounted overscan window (`measure.rs:135`).
+    internal func prepareVirtualRemeasureAfterFullPass(
+        _ pass: MeasurePassResult,
+        savedVirtuals: [String: RuntimeVirtualListState],
+        savedScrollOffsets: [String: Vec2],
+        savedScrollMaxExtents: [String: Vec2],
+        savedScrollViewportSizes: [String: Vec2],
+        savedScrollContentSizes: [String: Vec2],
+        savedWasPinned: Set<String>,
+        savedGrowthRows: [String: RuntimeGrowthEntry]
+    ) -> Bool {
+        guard pass.virtualExpansion.anyVirtualList else { return false }
+        var heightsByList: [String: [String: Float]] = [:]
+        for mapping in pass.virtualExpansion.rowMappings {
+            let rowPath = "\(mapping.listPath)/\(mapping.rowSegment)"
+            guard let rIdx = pass.byPath[rowPath] else { continue }
+            let h = pass.nodes[rIdx].targetRect.height
+            if h > 0.5 {
+                heightsByList[mapping.listPath, default: [:]][mapping.rowKey] = h
+            }
+        }
+
+        var updatedLists: [String: RuntimeVirtualListState] = [:]
+        var updatedScrollYs: [String: Float] = [:]
+        for listPath in activeVirtualPaths {
+            guard let vBefore = savedVirtuals[listPath],
+                  var vAfter = virtualLists[listPath],
+                  vBefore.lastKeys == vAfter.lastKeys,
+                  !vBefore.lastMountedRange.isEmpty else {
+                continue
+            }
+            let scrollIdx = pass.byPath[listPath].flatMap {
+                !pass.nodes[$0].el.layout.scrollAxes.isEmpty ? $0 : pass.nodes[$0].enclosingVScrollIndex
+            }
+            let scrollPath = scrollIdx.map { pass.nodes[$0].path } ?? listPath
+            if scrollRequestsState.owns(scrollPath) || directScrolledPaths.contains(scrollPath) {
+                continue
+            }
+            let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
+            let vpH = scrollIdx.map { max(1, pass.nodes[$0].targetRect.height) } ?? max(1, viewport.y)
+            let stickyPin = scrollIdx.map { pass.nodes[$0].el.layout.stickBottom } == true
+                && savedWasPinned.contains(scrollPath)
+            let (prefixBefore, _) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
+            let oldY = savedScrollOffsets[scrollPath]?.y ?? 0
+            let visBefore = vBefore.visibleRange(offset: oldY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
+
+            if let measured = heightsByList[listPath] {
+                for (rk, h) in measured {
+                    vAfter.measuredByKey[rk] = h
+                }
+            }
+            let (prefixAfter, totalAfter) = vAfter.computeOffsets(keys: vAfter.lastKeys, estimated: est)
+            let nextY: Float
+            if stickyPin {
+                nextY = max(0, totalAfter - vpH)
+            } else if let aIdx = visBefore.isEmpty ? nil : visBefore.lowerBound,
+                      aIdx < prefixBefore.count,
+                      aIdx < prefixAfter.count {
+                let delta = prefixAfter[aIdx] - prefixBefore[aIdx]
+                nextY = max(0, min(max(0, totalAfter - vpH), oldY + delta))
+                vAfter.lastAnchorKey = vAfter.lastKeys[aIdx]
+                vAfter.lastAnchorLocalY = max(0, oldY - prefixBefore[aIdx])
+            } else {
+                nextY = oldY
+            }
+            let shifted = abs(nextY - oldY) > 0.05
+            let windowShort = vAfter.needsWindow(offset: nextY, viewport: vpH, prefix: prefixAfter, count: vAfter.lastKeys.count, pinned: stickyPin)
+            if shifted || windowShort {
+                updatedLists[listPath] = vAfter
+                if shifted {
+                    updatedScrollYs[scrollPath] = nextY
+                }
+            }
+        }
+        guard !updatedLists.isEmpty else { return false }
+
+        virtualLists = savedVirtuals
+        scrollOffsets = savedScrollOffsets
+        scrollMaxExtents = savedScrollMaxExtents
+        scrollViewportSizes = savedScrollViewportSizes
+        scrollContentSizes = savedScrollContentSizes
+        wasPinnedToBottom = savedWasPinned
+        growthRows = savedGrowthRows
+        for (lp, vl) in updatedLists {
+            virtualLists[lp] = vl
+        }
+        for (sp, ny) in updatedScrollYs {
+            let nextOff = Vec2(scrollOffsets[sp]?.x ?? 0, ny)
+            scrollOffsets[sp] = nextOff
+            scrollStore.snap(NodeId.hash("scroll:\(sp)"), Props.SCROLL, to: nextOff)
+        }
+        return true
     }
 
     internal func stepVirtualFillAfterCommit(now: Double) {
