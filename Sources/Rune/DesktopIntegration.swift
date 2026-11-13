@@ -2570,6 +2570,8 @@ public enum PlaygroundTxRequest: Sendable, Equatable {
     case close
     case replay
     case trigger(Character)
+    case toggle
+    case keep
 }
 
 // MARK: - 10. Tx & El Extensions
@@ -2588,6 +2590,16 @@ extension Tx {
     /// Closes the built-in Playground UI.
     public mutating func closePlayground() {
         enqueuePlaygroundRequest(.close)
+    }
+
+    /// Toggles the built-in Playground UI open or closed (`Tx::toggle_playground`).
+    public mutating func togglePlayground() {
+        enqueuePlaygroundRequest(.toggle)
+    }
+
+    /// Closes the playground while keeping the active scene's edits (`Tx::keep_playground`).
+    public mutating func keepPlayground() {
+        enqueuePlaygroundRequest(.keep)
     }
 
     /// Replays the open Playground story and runs its `'r'` trigger (`Tx::replay_playground`).

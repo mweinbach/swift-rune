@@ -71,6 +71,7 @@ public struct ElementMotionMeta: Sendable, Equatable {
     public var liveIntent: UInt16
     public var virtualExtent: Bool
     public var loopPhase: Double?
+    public var carriedScrolled: [Float]?
 
     public init(
         scrolling: Bool = false,
@@ -78,7 +79,8 @@ public struct ElementMotionMeta: Sendable, Equatable {
         revealing: Bool = false,
         liveIntent: UInt16 = 0,
         virtualExtent: Bool = false,
-        loopPhase: Double? = nil
+        loopPhase: Double? = nil,
+        carriedScrolled: [Float]? = nil
     ) {
         self.scrolling = scrolling
         self.inGrowingRow = inGrowingRow
@@ -86,6 +88,7 @@ public struct ElementMotionMeta: Sendable, Equatable {
         self.liveIntent = liveIntent
         self.virtualExtent = virtualExtent
         self.loopPhase = loopPhase
+        self.carriedScrolled = carriedScrolled
     }
 }
 
@@ -309,7 +312,7 @@ public final class MotionGateRecording: @unchecked Sendable {
                     scale: e.scale,
                     flags: flags,
                     phase: m.loopPhase.map(Float.init) ?? .nan,
-                    scrolled: e.scrolled
+                    scrolled: m.carriedScrolled ?? e.scrolled
                 )
             ))
             if let paints {

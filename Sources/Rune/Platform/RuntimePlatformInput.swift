@@ -11,6 +11,9 @@ extension Runtime {
     // MARK: - State Mutation Bridge
 
     internal func withErasedState(_ body: (inout Any, inout Tx) -> Void, at now: Double) {
+        if playgroundWithErasedState(body, at: now) {
+            return
+        }
         var tx = Tx()
         var boxed: Any = state
         body(&boxed, &tx)
@@ -210,11 +213,15 @@ extension Runtime {
         endDropHover(at: now)
 
         var handledByElement = false
-        if let pt = targetPt, let hit = dropTargetHitTest(at: pt, for: urls) {
+        let resolvedHit: (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? =
+            targetPt.flatMap { dropTargetHitTest(at: $0, for: urls) } ?? (targetPt == nil ? rootDropTarget(for: urls) : nil)
+        if let hit = resolvedHit {
             let (accepted, rejected) = hit.spec.split(urls)
             if !accepted.isEmpty, let onFiles = hit.spec.onDropFiles {
                 var tx = Tx()
-                tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
+                if let pt = targetPt {
+                    tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
+                }
                 onFiles(&state, accepted, &tx)
                 applyTx(tx, at: now)
                 if !tx.liveOnlyRequested { dirtyCommit(at: now) }
@@ -222,7 +229,9 @@ extension Runtime {
             }
             if !rejected.isEmpty, let onRejected = hit.spec.onDropRejected {
                 var tx = Tx()
-                tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
+                if let pt = targetPt {
+                    tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
+                }
                 onRejected(&state, rejected, &tx)
                 applyTx(tx, at: now)
                 if !tx.liveOnlyRequested { dirtyCommit(at: now) }

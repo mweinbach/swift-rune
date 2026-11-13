@@ -340,7 +340,7 @@ public final class Runtime<State> {
     public private(set) var closeWindowRequested: Bool = false
     public private(set) var minimizeRequested: Bool = false
     public private(set) var relaunchRequested: Bool = false
-    public private(set) var nextWakeDeadline: Double? = nil
+    public internal(set) var nextWakeDeadline: Double? = nil
     public var helpDelay: Double = 0.5
     public var nativeHelp: Bool = false
     public var clipboard = ClipboardContent("")
@@ -356,7 +356,8 @@ public final class Runtime<State> {
     public let memo = MemoCache()
     internal var cxSettings = RuntimeShellSettings()
     public var playgroundHost: PlaygroundHost<State>? = nil
-    public private(set) var playgroundRequests: [PlaygroundTxRequest] = []
+    public internal(set) var playgroundRequests: [PlaygroundTxRequest] = []
+    internal var playgroundLiveStorage: AnyObject? = nil
     public var shortcutRegistry: ShortcutRegistry? = nil
     public private(set) var imeReset: Bool = false
 
@@ -394,13 +395,13 @@ public final class Runtime<State> {
 
     // Input & focus state
     public private(set) var pointerPosition: Vec2 = Vec2(-10000, -10000)
-    public private(set) var hoveredPath: String? = nil
-    public private(set) var hoveredKey: String? = nil
-    public private(set) var pressedPath: String? = nil
-    public private(set) var pressedKey: String? = nil
+    public internal(set) var hoveredPath: String? = nil
+    public internal(set) var hoveredKey: String? = nil
+    public internal(set) var pressedPath: String? = nil
+    public internal(set) var pressedKey: String? = nil
     public internal(set) var focusedPath: String? = nil
     public internal(set) var focusedKey: String? = nil
-    public private(set) var focusVisible: Bool = false
+    public internal(set) var focusVisible: Bool = false
     private var webFocusTabStartPath: String? = nil
     private var dirChord: DirChord = .idle
     private var lastPinnedGlyphMask: UInt32 = 0
@@ -540,7 +541,7 @@ public final class Runtime<State> {
     internal let residentCacheTracker = ResidentLayerTracker()
     internal var retainedLayout = RetainedLayoutCoordinator()
     internal var needsCommit: Bool = true
-    private var forceInitialSettle: Bool = true
+    internal var forceInitialSettle: Bool = true
     private var pendingEventTime: Double? = nil
 
     public init(
@@ -739,6 +740,12 @@ public final class Runtime<State> {
         if let edgeWake = nextSelectableEdgeScrollWakeDeadline(after: now) {
             best = best.map { min($0, edgeWake) } ?? edgeWake
         }
+        if let pgDue = playgroundNextWakeDeadline(after: now) {
+            best = best.map { min($0, pgDue) } ?? pgDue
+        }
+        if let explicit = self.nextWakeDeadline, explicit >= now {
+            best = best.map { min($0, explicit) } ?? explicit
+        }
         return best
     }
 
@@ -793,6 +800,8 @@ public final class Runtime<State> {
         liveStore.pixelScale = pixelScale
         _ = runPoll(at: now)
         flushPlatformFrameWork(at: now)
+        pollPlaygroundIfNeeded(at: now)
+        applyPlaygroundIfNeeded(at: now)
 
         if let attempt = virtualFill.wake(at: now) {
             if virtualFill.step(.due(attempt: attempt, now: now)) == .draw {
@@ -1086,7 +1095,7 @@ public final class Runtime<State> {
                 geometry: currentMemoGeometry()
             ) {
                 measureFramePhase(.view) {
-                    view(state, &cx)
+                    buildPlaygroundViewIfAttached(cx: &cx)
                 }
             }
         }
@@ -1379,9 +1388,9 @@ public final class Runtime<State> {
 
             var effectiveFill = el.background
             if isPressed, let pBg = el.pressBg {
-                effectiveFill = blendColorOver(bottom: effectiveFill, top: pBg)
+                effectiveFill = blendColorOver(bottom: effectiveFill, top: pBg, srgb: srgbBlend)
             } else if isHovered, let hBg = el.hoverBg {
-                effectiveFill = blendColorOver(bottom: effectiveFill, top: hBg)
+                effectiveFill = blendColorOver(bottom: effectiveFill, top: hBg, srgb: srgbBlend)
             }
 
             var effectiveScale = Vec2(el.scale.x * anchorScaleFactor, el.scale.y * anchorScaleFactor)
@@ -1614,6 +1623,7 @@ public final class Runtime<State> {
             prevFocusedKey: prevFocusedKey,
             prevFocusVisible: prevFocusVisible
         )
+        reconcilePlaygroundAfterCommit(at: now)
 
         // Resolve cross-parent matched-geometry (`flightId` / `matched`) flights against last-seen rects.
         var matchedStarts: [NodeId: MatchedFlightStart] = [:]
@@ -1734,7 +1744,6 @@ public final class Runtime<State> {
                         }
                         continue
                     }
-                    guard isFreshOrExiting(dstNode.nodeId) else { continue }
                     let dstExtent = laidOutTextExtent(for: dstNode, rect: dstNode.targetRect, in: newFlat)
                     var tf = TextFlightState(
                         sourceKey: req.source,
@@ -1924,8 +1933,11 @@ public final class Runtime<State> {
             pressableRoles.contains(el.role)
     }
 
-    private func canFocusIndex(_ idx: Int) -> Bool {
+    internal func canFocusIndex(_ idx: Int) -> Bool {
         guard idx >= 0 && idx < flatNodes.count else { return false }
+        if playgroundLive?.pressing == true && !isNodeUnder(idx, predicate: Self.isPlaygroundStageKey) {
+            return false
+        }
         let node = flatNodes[idx]
         guard nodeTakesFocus(node.el) && !node.effectiveInert && !node.el.a11yDisabled else { return false }
         var walk: Int? = idx
@@ -2621,7 +2633,22 @@ public final class Runtime<State> {
             let isFocused = (focusedPath == snap.path) && !p.isExiting
             let isHovered = (hoveredPath == snap.path) && !p.isExiting && !snap.effectiveInert
             let isPressed = (pressedPath == snap.path) && !p.isExiting && !snap.effectiveInert
-            let scrolled = scrollOffsets[snap.path] ?? .zero
+            let scrolled: Vec2 = {
+                if !el.layout.scrollAxes.isEmpty {
+                    return scrollOffsets[snap.path] ?? .zero
+                }
+                var sum = Vec2.zero
+                var cur = snap.parentIndex
+                while let pIdx = cur, flatNodes.indices.contains(pIdx) {
+                    let pNode = flatNodes[pIdx]
+                    if let off = scrollOffsets[pNode.path] {
+                        sum.x += off.x
+                        sum.y += off.y
+                    }
+                    cur = pNode.parentIndex
+                }
+                return sum
+            }()
 
             var caretOut: [Float]? = nil
             var textTruncated = false
@@ -3771,6 +3798,24 @@ public final class Runtime<State> {
         return (hit.node.path, hit.node.key, hit.rect, spec)
     }
 
+    internal func rootDropTarget(for urls: [URL]) -> (path: String, key: String?, rect: MotionRect, spec: DropSpec<State>)? {
+        let rootIdx: Int?
+        if let mPath = activeModalPath, let mIdx = nodeByPath[mPath] {
+            rootIdx = mIdx
+        } else if !flatNodes.isEmpty {
+            rootIdx = playgroundAppRootNodeIndex()
+        } else {
+            rootIdx = nil
+        }
+        guard let idx = rootIdx, flatNodes.indices.contains(idx) else { return nil }
+        let node = flatNodes[idx]
+        guard !node.effectiveInert, let spec = node.el.handlers.drop else { return nil }
+        let (accepted, rejected) = spec.split(urls)
+        guard !accepted.isEmpty || (!rejected.isEmpty && spec.claimsRejects) else { return nil }
+        let rect = presentedRectByPath[node.path] ?? node.targetRect
+        return (node.path, node.key, rect, spec)
+    }
+
     internal func dropTarget(byPath path: String) -> (rect: MotionRect, spec: DropSpec<State>)? {
         guard let idx = nodeByPath[path] else { return nil }
         let node = flatNodes[idx]
@@ -4016,6 +4061,7 @@ public final class Runtime<State> {
             return
         }
 
+        playgroundPointerDown(at: pos, at: now)
         let interactiveHit = hitTestDetailed(at: pos) { node in
             let h = node.el.handlers
             return h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil ||
@@ -4386,6 +4432,10 @@ public final class Runtime<State> {
             return true
         }
 
+        if playgroundNav(ev, isRepeat: isRepeat, at: now) {
+            return true
+        }
+
         // 2. Focused element & ancestor chain
         if let fPath = focusedPath, let fIdx = nodeByPath[fPath] {
             let fNode = flatNodes[fIdx]
@@ -4461,6 +4511,15 @@ public final class Runtime<State> {
                 let outcome = edit.handleKey(ev, layout: editLayout)
                 switch outcome {
                 case .ignored:
+                    if edit.didRequestBlur && activeModalPath == nil {
+                        if !isRepeat {
+                            focusedPath = nil
+                            focusedKey = nil
+                            syncedEditFocusedPaths.removeAll()
+                            dirtyCommit(at: now)
+                        }
+                        return true
+                    }
                     break
                 case .navigation:
                     editLens.set(&state, edit)
@@ -4603,13 +4662,19 @@ public final class Runtime<State> {
         }
 
         // 4. Root / global `onKey` handler (only when no active modal blocks background shortcuts)
-        if activeModalPath == nil, let globalOnKey {
-            var tx = makeTx(at: now)
-            let taken = globalOnKey(&state, ev, &tx)
-            Tx.took(taken, &tx)
-            if taken {
-                applyTx(tx, at: now)
-                return true
+        if activeModalPath == nil {
+            if let live = playgroundLive {
+                if !live.typing(appState: state), let handled = playgroundAppKey(ev, at: now), handled {
+                    return true
+                }
+            } else if let globalOnKey {
+                var tx = makeTx(at: now)
+                let taken = globalOnKey(&state, ev, &tx)
+                Tx.took(taken, &tx)
+                if taken {
+                    applyTx(tx, at: now)
+                    return true
+                }
             }
         }
 
@@ -4627,7 +4692,88 @@ public final class Runtime<State> {
             return true
         }
 
+        if pageScroll(ev, at: now) {
+            return true
+        }
+
+        if playgroundKey(ev, at: now) {
+            return true
+        }
+
         return false
+    }
+
+    /// Pages the focused, hovered, or first overflowing vertical scroll container on PageUp/PageDown/Home/End (`keys.rs:116-155`).
+    private func pageScroll(_ ev: KeyEvent, at now: Double) -> Bool {
+        switch ev.key {
+        case .pageUp, .pageDown, .home, .end:
+            break
+        default:
+            return false
+        }
+        if ev.mods.cmd || ev.mods.alt || ev.mods.ctrl { return false }
+
+        let staged = playgroundLive?.pressing == true
+        func pageable(_ idx: Int) -> Bool {
+            guard flatNodes.indices.contains(idx) else { return false }
+            let node = flatNodes[idx]
+            guard node.el.layout.scrollAxes.contains(.vertical),
+                  !node.effectiveInert,
+                  (scrollMaxExtents[node.path]?.y ?? 0) > 0.5 else {
+                return false
+            }
+            if case .exiting = scene.phase(node.nodeId) { return false }
+            if staged && !isNodeUnder(idx, predicate: { Self.isPlaygroundStageKey($0) }) {
+                return false
+            }
+            return true
+        }
+        func around(_ startIdx: Int) -> Int? {
+            var cur: Int? = startIdx
+            while let i = cur, flatNodes.indices.contains(i) {
+                if pageable(i) { return i }
+                cur = flatNodes[i].parentIndex
+            }
+            return nil
+        }
+
+        let focusedIdx: Int? = {
+            guard var path = focusedPath else { return nil }
+            while true {
+                if let idx = nodeByPath[path] { return idx }
+                guard let slash = path.lastIndex(of: "/") else { return nil }
+                path = String(path[..<slash])
+            }
+        }()
+        let hoveredIdx = hitTest(at: pointerPosition)?.node.index
+        guard let targetIdx = focusedIdx.flatMap(around)
+            ?? hoveredIdx.flatMap(around)
+            ?? flatNodes.indices.first(where: pageable) else {
+            return false
+        }
+
+        let node = flatNodes[targetIdx]
+        let path = node.path
+        let maxY = scrollMaxExtents[path]?.y ?? 0
+        let viewportH = scrollViewportSizes[path]?.y ?? node.targetRect.height
+        let page = max(0.0, viewportH * 0.9)
+        var cur = scrollOffsets[path] ?? .zero
+        let targetY: Float
+        switch ev.key {
+        case .pageUp: targetY = cur.y - page
+        case .pageDown: targetY = cur.y + page
+        case .home: targetY = 0
+        default: targetY = maxY
+        }
+        cur.y = targetY.clamped(to: 0...maxY)
+        scrollOffsets[path] = cur
+        let nid = NodeId.hash("scroll:" + path)
+        scrollStore.snap(nid, Props.SCROLL, to: cur)
+        if node.el.layout.stickBottom {
+            if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
+        }
+        dirtyCommit(at: now)
+        return true
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
@@ -4876,41 +5022,8 @@ public final class Runtime<State> {
         } else if (tx.runtimeActions["detachRewind"] as? Bool) == true {
             rewindRecorder = nil
         }
-        if let pgReqs = tx.runtimeActions["playgroundRequests"] as? [PlaygroundTxRequest] {
-            playgroundRequests.append(contentsOf: pgReqs)
-            if let pg = playgroundHost, pg.isEnabled {
-                for req in pgReqs {
-                    switch req {
-                    case .open:
-                        pg.open()
-                    case let .openAt(story, variant):
-                        do {
-                            try pg.openAt(story: story, variant: variant)
-                            if let fresh = pg.freshTransform {
-                                state = fresh(state)
-                            }
-                            if let v = pg.currentVariant {
-                                v.apply(&state)
-                            }
-                            dirtyCommit(at: now)
-                        } catch {
-                            pg.open()
-                        }
-                    case .close:
-                        pg.close()
-                    case .replay:
-                        var followTx = Tx()
-                        pg.replay(on: &state, tx: &followTx)
-                        applyTx(followTx, at: now, markDirtyIfNotLiveOnly: markDirtyIfNotLiveOnly)
-                    case .trigger(let ch):
-                        var followTx = Tx()
-                        if pg.fireTrigger(ch, on: &state, tx: &followTx) {
-                            applyTx(followTx, at: now, markDirtyIfNotLiveOnly: markDirtyIfNotLiveOnly)
-                        }
-                    }
-                }
-            }
-        }
+        var mutableTx = tx
+        latchPlaygroundRequests(from: &mutableTx)
         if let title = tx.windowTitle {
             windowTitle = title
         }
@@ -5209,6 +5322,9 @@ public final class Runtime<State> {
             finishComposition(at: t)
         }
         if let hook = onFocus {
+            if playgroundDispatchFocus(focused, hook: hook, at: t) {
+                return
+            }
             update(at: t) { s, tx in hook(&s, focused, &tx) }
         } else {
             needsCommit = prevStale
@@ -5811,11 +5927,28 @@ internal func snapBorderWidthPx(_ widthPt: Float, scale: Float) -> Float {
 }
 
 @inline(__always)
-internal func blendColorOver(bottom: Color, top: Color) -> Color {
+internal func blendColorOver(bottom: Color, top: Color, srgb: Bool = false) -> Color {
     let ta = top.a.clamped(to: 0...1)
     let ba = bottom.a.clamped(to: 0...1)
     let outA = ta + ba * (1.0 - ta)
     if outA <= 1e-5 { return .transparent }
+    if srgb {
+        let tr = RefShader.linearToSRGB(top.r)
+        let tg = RefShader.linearToSRGB(top.g)
+        let tb = RefShader.linearToSRGB(top.b)
+        let br = RefShader.linearToSRGB(bottom.r)
+        let bg = RefShader.linearToSRGB(bottom.g)
+        let bb = RefShader.linearToSRGB(bottom.b)
+        let sr = (tr * ta + br * ba * (1.0 - ta)) / outA
+        let sg = (tg * ta + bg * ba * (1.0 - ta)) / outA
+        let sb = (tb * ta + bb * ba * (1.0 - ta)) / outA
+        return Color(
+            r: RefShader.srgbToLinear(sr),
+            g: RefShader.srgbToLinear(sg),
+            b: RefShader.srgbToLinear(sb),
+            a: outA
+        )
+    }
     let r = (top.r * ta + bottom.r * ba * (1.0 - ta)) / outA
     let g = (top.g * ta + bottom.g * ba * (1.0 - ta)) / outA
     let b = (top.b * ta + bottom.b * ba * (1.0 - ta)) / outA

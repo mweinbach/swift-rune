@@ -152,8 +152,13 @@ public final class MotionGateRun<S>: @unchecked Sendable {
     public func step() {
         let tel = RuntimeMotionTelemetry.of(rt)
         let commitsBefore = rt.viewCommitCount
+        let playedBefore = rt.playgroundPlayedKeys
         tel.virtualTime += dt
         _ = rt.renderFrame(at: tel.virtualTime)
+        if rt.playgroundPlayedKeys > playedBefore {
+            rec.input("play.press")
+            tel.commitWhy |= CommitWhy.input
+        }
         if rt.viewCommitCount > commitsBefore && tel.commitWhy == 0 {
             tel.commitWhy |= CommitWhy.dirty
         }
@@ -245,9 +250,13 @@ private enum MotionGateSampleHelper {
         let els = rt.elements()
         let now = tel.virtualTime
 
-        var nodeByPath: [String: Runtime<S>.FlatNode] = [:]
+        var elByPath: [String: El<S>] = [:]
+        elByPath.reserveCapacity(rt.flatNodes.count + rt.exitingSnapshots.count)
+        for n in rt.exitingSnapshots.values {
+            elByPath[n.path] = n.el
+        }
         for n in rt.flatNodes {
-            nodeByPath[n.path] = n
+            elByPath[n.path] = n.el
         }
 
         // Clean stale loop/sequence entries
@@ -266,8 +275,7 @@ private enum MotionGateSampleHelper {
         for (i, e) in els.enumerated() {
             let pIntent = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedIntent[p] : nil } ?? 0
             let pInstant = e.parentIndex.flatMap { p in (p >= 0 && p < i) ? inheritedInstant[p] : nil } ?? false
-            let node = nodeByPath[e.path]
-            let el = node?.el
+            let el = elByPath[e.path]
 
             let ownIntent = (el?.runtimeExtras[MotionGateExtraKey.motionIntent] as? UInt16) ?? 0
             let totalIntent = pIntent | ownIntent
@@ -300,13 +308,28 @@ private enum MotionGateSampleHelper {
                 }
             }
 
+            var carriedX: Float = 0
+            var carriedY: Float = 0
+            var curParentIdx = e.parentIndex
+            while let pIdx = curParentIdx, pIdx >= 0, pIdx < els.count {
+                if let pEl = elByPath[els[pIdx].path], !pEl.layout.scrollAxes.isEmpty {
+                    let sc = els[pIdx].scrolled
+                    if sc.count >= 2 {
+                        carriedX += sc[0]
+                        carriedY += sc[1]
+                    }
+                }
+                curParentIdx = els[pIdx].parentIndex
+            }
+
             let meta = ElementMotionMeta(
                 scrolling: false,
                 inGrowingRow: (el?.runtimeExtras[MotionGateExtraKey.growingRow] as? Bool) ?? false,
                 revealing: (el?.runtimeExtras[MotionGateExtraKey.revealing] as? Bool) ?? false,
                 liveIntent: totalIntent,
                 virtualExtent: false,
-                loopPhase: phase
+                loopPhase: phase,
+                carriedScrolled: [carriedX, carriedY]
             )
             metas.append(meta)
 

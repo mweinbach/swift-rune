@@ -305,13 +305,15 @@ struct RunePlatformIncrement6Tests {
         let host = PlaygroundHost<PGCliState>()
             .enabled(true)
             .story(PlaygroundStory(path: "Slide") { s, _, _ in
-                el().key("puck").w(s.width).h(20).bg(Color(r: 0.9, g: 0.2, b: 0.2, a: 1))
+                el().wFull().hFull().child(
+                    el().key("puck").w(s.width).h(20).bg(Color(r: 0.9, g: 0.2, b: 0.2, a: 1))
+                )
             })
             .variant("Slide", name: "Small") { $0.width = 20 }
             .variant("Slide", name: "Big") { $0.width = 48 }
 
-        let pgApp = App(title: "PG", size: Vec2(120, 80), state: PGCliState()) { _, _ in
-            el().w(120).h(80)
+        let pgApp = App(title: "PG", size: Vec2(960, 240), state: PGCliState()) { _, _ in
+            el().w(960).h(240)
         }
         .playground(host)
 

@@ -602,6 +602,7 @@ public struct App<State> {
     public var makeState: () -> State
     public var view: (State, inout Cx<State>) -> El<State>
     public var scenes: [String: (inout State, inout Tx) -> Void] = [:]
+    public var sceneOrder: [String] = []
 
     public var srgbBlendEnabled: Bool = true
     public var fontSmoothingMode: FontSmoothing = .systemDefault
@@ -621,7 +622,7 @@ public struct App<State> {
     public var releasesGpuWhenClosed: Bool = false
     public var gpuBackendPreference: GpuBackend = .auto
     public var isAccessory: Bool = false
-    public var usesStandardMenus: Bool = true
+    public var usesStandardMenus: Bool = false
 
     public var fontData: [Data] = []
     public var fontFamilies: [String] = []
@@ -825,6 +826,9 @@ public struct App<State> {
     public func windowless(_ on: Bool = true) -> App<State> {
         var copy = self
         copy.isWindowless = on
+        if on {
+            copy.keepsRunning = true
+        }
         return copy
     }
 
@@ -1009,6 +1013,9 @@ public struct App<State> {
     public func scene(_ name: String, _ apply: @escaping (inout State, inout Tx) -> Void) -> App<State> {
         var copy = self
         copy.scenes[name] = apply
+        if !copy.sceneOrder.contains(name) {
+            copy.sceneOrder.append(name)
+        }
         return copy
     }
 
@@ -1055,6 +1062,7 @@ public struct App<State> {
             onKey: onKeyHook,
             view: view
         )
+        spec.sceneOrder = sceneOrder
         spec.srgbBlend = srgbBlendEnabled
         return spec
     }
@@ -1105,6 +1113,41 @@ public struct App<State> {
         sharedHandle.shared.setWaker(waker)
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
             setupHook?(waker)
+        }
+        return runtime
+    }
+
+    /// Creates a headless `Runtime<State>` matching upstream `App::headless_runtime`,
+    /// attaching `playgroundHost` if enabled without reading command-line flags.
+    public func headlessRuntime(
+        size viewportSize: Vec2? = nil,
+        env: Env = Env()
+    ) -> Runtime<State> {
+        HeadlessRunner.registerFonts(fontData)
+        let runtime = makeRuntime(
+            viewport: viewportSize ?? size,
+            pixelScale: env.scale,
+            systemDark: dark ?? env.systemDark,
+            reducedMotion: false,
+            waker: Waker()
+        )
+        let resolvedChrome = customTitlebar?.macChrome(chromeStyle) ?? chromeStyle
+        if resolvedChrome.fullSizeContent && !(windowOptionsValue.borderless || chromeStyle.borderless) {
+            runtime.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
+        } else {
+            runtime.cxSettings.titlebarInset = 0.0
+        }
+        if let pg = playgroundHost {
+            runtime.playgroundHost = pg
+            _ = try? PlaygroundAttach.attach(
+                runtime: runtime,
+                host: pg,
+                scenes: scenes,
+                sceneOrder: sceneOrder,
+                makeState: makeState,
+                windowed: false,
+                forceAttach: true
+            )
         }
         return runtime
     }

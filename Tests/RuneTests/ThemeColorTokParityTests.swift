@@ -48,6 +48,10 @@ struct ThemeColorTokParityTests {
         let pLin = Color(r: 0.25, g: 0.5, b: 1.0, a: 0.5).premul(0.5)
         #expect(abs(pLin.w - 0.25) < 1e-6)
         #expect(abs(pLin.x - 0.0625) < 1e-6)
+        let pSrgb = Color(r: 0.25, g: 0.5, b: 1.0, a: 0.5).premulSRGB(0.5)
+        #expect(abs(pSrgb.w - 0.25) < 1e-6)
+        #expect(abs(pSrgb.x - RefShader.linearToSRGB(0.25) * 0.25) < 1e-6)
+        #expect(abs(pSrgb.z - 0.25) < 1e-6)
         #expect(Color.white.hex() == "#ffffffff")
         #expect(hex("#f0a") == Color.hex("#ff00aa"))
         #expect(hex("#1234") == nil) // #rgb, #rrggbb, #rrggbbaa only for top-level hex()
@@ -292,6 +296,35 @@ struct ThemeColorTokParityTests {
             Issue.record("Expected ThemeError.invalidColor for unknown color reference")
         } catch let err as ThemeError {
             #expect(err == .invalidColor(token: "bad-token", value: "not-a-color-or-palette-key"))
+        }
+    }
+
+    @Test("Theme.fromJSON throws missingMode instead of falling back to opposite mode")
+    func missingModeThrowsThemeError() throws {
+        let lightOnlyJSON = """
+        {
+          "name": "light-only",
+          "light": { "bg": "#ffffff" }
+        }
+        """
+        do {
+            _ = try Theme.fromJSON(lightOnlyJSON, dark: true)
+            Issue.record("Expected ThemeError.missingMode(dark)")
+        } catch let err as ThemeError {
+            #expect(err == .missingMode("dark"))
+        }
+
+        let darkOnlyJSON = """
+        {
+          "name": "dark-only",
+          "dark": { "bg": "#111111" }
+        }
+        """
+        do {
+            _ = try Theme.fromJSON(darkOnlyJSON, dark: false)
+            Issue.record("Expected ThemeError.missingMode(light)")
+        } catch let err as ThemeError {
+            #expect(err == .missingMode("light"))
         }
     }
 }
