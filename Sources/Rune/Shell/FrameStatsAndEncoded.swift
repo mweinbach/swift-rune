@@ -12,7 +12,13 @@ public enum FrameOutcome: String, Sendable, Equatable, Codable {
 
 /// Telemetry reported after encoding or presenting a frame (`rune::FrameEncoded`).
 public struct FrameEncoded: Sendable, Equatable, Codable {
+    public var at: Double
     public var outcome: FrameOutcome
+    public var window: String?
+    public var seq: UInt64
+    public var presentsAt: Double?
+    public var started: Double?
+    public var refreshHz: Double?
     public var frameMs: Double
     public var updateMs: Double
     public var encodeMs: Double
@@ -35,9 +41,21 @@ public struct FrameEncoded: Sendable, Equatable, Codable {
         animating: Bool = false,
         compositorAnimating: Bool = false,
         drawCount: Int = 0,
-        compositorSummary: String? = nil
+        compositorSummary: String? = nil,
+        at: Double = 0.0,
+        window: String? = nil,
+        seq: UInt64 = 0,
+        presentsAt: Double? = nil,
+        started: Double? = nil,
+        refreshHz: Double? = nil
     ) {
+        self.at = at
         self.outcome = outcome
+        self.window = window
+        self.seq = seq
+        self.presentsAt = presentsAt
+        self.started = started
+        self.refreshHz = refreshHz
         self.frameMs = frameMs
         self.updateMs = updateMs
         self.encodeMs = encodeMs
@@ -58,7 +76,9 @@ public final class FrameReports<State> {
     /// Minimum interval between `onFrameDrawn` state updates (upstream throttles state callbacks so
     /// high-refresh loops aren't self-invalidated at 120Hz). Set to `0` for immediate delivery.
     public var drawnInterval: Double
+    public var windowKey: String?
     public private(set) var droppedCount: Int = 0
+    public private(set) var reportCount: UInt64 = 0
 
     private var pendingDrawn: FrameEncoded?
     private var lastDrawnAt: Double = -.infinity
@@ -66,21 +86,31 @@ public final class FrameReports<State> {
     public init(
         onFrameEncoded: ((FrameEncoded) -> Void)? = nil,
         onFrameDrawn: ((inout State, FrameEncoded, inout Tx) -> Void)? = nil,
-        drawnInterval: Double = 0.1
+        drawnInterval: Double = 0.1,
+        windowKey: String? = nil
     ) {
         self.onFrameEncoded = onFrameEncoded
         self.onFrameDrawn = onFrameDrawn
         self.drawnInterval = max(0.0, drawnInterval)
+        self.windowKey = windowKey
     }
 
     /// Emits `onFrameEncoded` immediately (when set) and queues a drawn report if `outcome == .drawn`.
     public func record(_ encoded: FrameEncoded) {
-        onFrameEncoded?(encoded)
-        guard onFrameDrawn != nil, encoded.outcome == .drawn else { return }
+        var entry = encoded
+        if entry.seq == 0 {
+            entry.seq = reportCount
+        }
+        if entry.window == nil {
+            entry.window = windowKey
+        }
+        reportCount &+= 1
+        onFrameEncoded?(entry)
+        guard onFrameDrawn != nil, entry.outcome == .drawn else { return }
         if pendingDrawn != nil {
             droppedCount += 1
         }
-        pendingDrawn = encoded
+        pendingDrawn = entry
     }
 
     /// Flushes a queued `onFrameDrawn` callback if `drawnInterval` has elapsed (or `force` is true).
@@ -543,6 +573,20 @@ public func takeFramePhases() -> [Double] {
 /// Accumulates wall + CPU duration into a `FramePhase` slot on the current thread.
 public func recordFramePhase(_ phase: FramePhase, wallMs: Double, cpuMs: Double = 0.0) {
     FramePhaseStorage.record(phase, wallMs: wallMs, cpuMs: cpuMs)
+}
+
+/// Measures wall + thread CPU time of `body` and accumulates it into `phase`.
+@inline(__always)
+public func measureFramePhase<T>(_ phase: FramePhase, _ body: () throws -> T) rethrows -> T {
+    let wallStart = DispatchTime.now().uptimeNanoseconds
+    let cpuStart = threadCpuMs()
+    defer {
+        let wallEnd = DispatchTime.now().uptimeNanoseconds
+        let wallMs = Double(wallEnd &- wallStart) / 1_000_000.0
+        let cpuMs = max(0.0, threadCpuMs() - cpuStart)
+        FramePhaseStorage.record(phase, wallMs: wallMs, cpuMs: cpuMs)
+    }
+    return try body()
 }
 
 // MARK: - Window / Shell / Options Types (window/spec.rs, window/titlebar.rs, lib.rs)

@@ -67,6 +67,14 @@ public final class AppShared<State>: @unchecked Sendable {
         }
     }
 
+    /// Installs the event loop waker and wakes immediately (`Shared::connect`).
+    public func connect(_ newWaker: Waker) {
+        lock.lock()
+        waker = newWaker
+        lock.unlock()
+        newWaker.wake()
+    }
+
     public var isVisible: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -199,6 +207,20 @@ public final class AppShared<State>: @unchecked Sendable {
         mutateAndWake { req in
             req.updateIfs.append(updateIf)
         }
+    }
+
+    /// Takes all coalesced requests atomically without holding the lock across user callbacks (`Shared::take`).
+    public func take() -> AppDrainedRequests<State> {
+        drain()
+    }
+
+    /// Atomically takes and clears any pending `place` request (`Shared::take_place`).
+    public func takePlace() -> PlaceRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        let out = pending.place
+        pending.place = nil
+        return out
     }
 
     /// Takes all coalesced requests atomically without holding the lock across user callbacks.
@@ -612,6 +634,7 @@ public struct App<State> {
     public var turnScopeHook: ((inout State, (inout State) -> Void) -> Void)? = nil
     public var onReopenHook: ((inout State, Bool, inout Tx) -> Bool)? = nil
     public var onOpenUrlHook: ((inout State, String, inout Tx) -> Void)? = nil
+    public var sameTabRouterHook: ((String) -> Bool)? = nil
     public var onWindowHook: ((WindowHandle) -> Void)? = nil
     public var onReadyHook: ((WindowHandle) -> Void)? = nil
     public var onFrameEncodedHook: ((FrameEncoded) -> Void)? = nil
@@ -784,6 +807,12 @@ public struct App<State> {
         return copy
     }
 
+    public func args(_ arguments: [String]) -> App<State> {
+        var copy = self
+        copy.runOptions.arguments = arguments
+        return copy
+    }
+
     public func windowless(_ on: Bool = true) -> App<State> {
         var copy = self
         copy.isWindowless = on
@@ -910,6 +939,13 @@ public struct App<State> {
     public func onOpenUrl(_ hook: @escaping (inout State, String, inout Tx) -> Void) -> App<State> {
         var copy = self
         copy.onOpenUrlHook = hook
+        return copy
+    }
+
+    /// Web SPA same-origin router hook; stored for API parity and no-op on native (`App::same_tab_router`).
+    public func sameTabRouter(_ route: @escaping (String) -> Bool) -> App<State> {
+        var copy = self
+        copy.sameTabRouterHook = route
         return copy
     }
 
@@ -1133,6 +1169,15 @@ public extension Tx {
     /// Forces a view rebuild even if no state closure reported mutation (`Tx::commit`).
     mutating func commit() {
         runtimeActions["forceCommit"] = true
+    }
+
+    /// Overrides the spring used by layout/flight animations created by this commit (`Tx::motion`).
+    mutating func motion(_ spring: Spring) {
+        runtimeActions["motionSpring"] = spring
+    }
+
+    internal var motionSpringRequest: Spring? {
+        runtimeActions["motionSpring"] as? Spring
     }
 
     internal var isCloseWindowRequested: Bool {

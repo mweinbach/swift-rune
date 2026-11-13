@@ -365,17 +365,30 @@ public final class Runtime<State> {
     private var seenMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     private var committedMatchedByFlightId: [String: MatchedSeenSnapshot] = [:]
     private var activeFlightIds: Set<NodeId> = []
+    private var launchedFlightIds: Set<NodeId> = []
+    private var unclippedMatchedFlightIds: Set<NodeId> = []
     private struct PendingFlightRequest {
         var source: String
         var destination: String
         var sourceNodeId: NodeId?
         var sourceRect: MotionRect?
+        var sourceTextRect: MotionRect?
         var sourceCorners: Corners?
         var sourceFill: MotionColor?
+        var sourceText: String?
+        var sourceSpans: [TextSpan]?
+        var sourceTextStyle: TextStyle?
+        var sourceTextColor: Color?
+        var motionSpring: Spring?
+        var remainingAttempts: Int = 2
     }
     private struct ActiveTextFlight {
         var targetNodeId: NodeId
         var state: TextFlightState
+        var sourceText: String?
+        var sourceSpans: [TextSpan]?
+        var sourceTextStyle: TextStyle
+        var sourceTextColor: Color?
     }
     private var pendingTextFlights: [PendingFlightRequest] = []
     private var pendingLaunches: [PendingFlightRequest] = []
@@ -632,7 +645,9 @@ public final class Runtime<State> {
 
     private func frameWithBlendScope(at now: Double) -> RefScene {
         let (frameOut, animNow) = stepToFrameOutputScaled(at: now)
-        let sceneOut = buildRefScene(frameOut: frameOut, now: animNow)
+        let sceneOut = measureFramePhase(.paint) {
+            buildRefScene(frameOut: frameOut, now: animNow)
+        }
         if memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
         }
@@ -739,7 +754,8 @@ public final class Runtime<State> {
             kept.reserveCapacity(activeTextFlights.count)
             for var entry in activeTextFlights {
                 if let p = frameOut.nodes.first(where: { $0.id == entry.targetNodeId && !$0.isExiting }) {
-                    let settled = entry.state.measure(target: p.rect, now: animNow, reducedMotion: reducedMotion)
+                    let targetExtent = nodeById[p.id].map { laidOutTextExtent(for: $0, rect: p.rect) } ?? p.rect
+                    let settled = entry.state.measure(target: targetExtent, now: animNow, reducedMotion: reducedMotion)
                     if !settled {
                         kept.append(entry)
                     }
@@ -762,6 +778,8 @@ public final class Runtime<State> {
         let activeIds = Set(frameOut.nodes.map(\.id))
         exitingSnapshots = exitingSnapshots.filter { activeIds.contains($0.key) }
         activeFlightIds = activeFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
+        launchedFlightIds = launchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
+        unclippedMatchedFlightIds = unclippedMatchedFlightIds.filter { activeIds.contains($0) && scene.isEdgeAnimating($0) }
 
         return (frameOut, animNow)
     }
@@ -790,16 +808,20 @@ public final class Runtime<State> {
     }
 
     private func commitTree(at now: Double, cut: Bool) {
-        if cut {
-            enterDelays.removeAll()
-            releasedEnterDelays.removeAll()
-            activeFlightIds.removeAll()
+        measureFramePhase(.commit) {
+            if cut {
+                enterDelays.removeAll()
+                releasedEnterDelays.removeAll()
+                activeFlightIds.removeAll()
+                launchedFlightIds.removeAll()
+                unclippedMatchedFlightIds.removeAll()
+            }
+            let sincePass = memo.nextPass()
+            MemoSnapshot.enter {
+                commitTreePass(at: now, cut: cut, settlePass: 0)
+            }
+            memo.keepSince(sincePass)
         }
-        let sincePass = memo.nextPass()
-        MemoSnapshot.enter {
-            commitTreePass(at: now, cut: cut, settlePass: 0)
-        }
-        memo.keepSince(sincePass)
     }
 
     private func currentFocusedCaret() -> (keyPath: String, rect: [Float])? {
@@ -885,7 +907,9 @@ public final class Runtime<State> {
                 envHash: envHash,
                 geometry: currentMemoGeometry()
             ) {
-                view(state, &cx)
+                measureFramePhase(.view) {
+                    view(state, &cx)
+                }
             }
         }
         cxSettings.viewDefaults = cx.envState.defaults
@@ -917,13 +941,15 @@ public final class Runtime<State> {
             clearColor = rootEl.background
         }
 
-        let solvedRoot = retainedLayout.compute(
-            root: rootEl,
-            state: state,
-            viewport: viewport,
-            pixelScale: pixelScale,
-            textSystem: textSystem
-        )
+        let solvedRoot = measureFramePhase(.layout) {
+            retainedLayout.compute(
+                root: rootEl,
+                state: state,
+                viewport: viewport,
+                pixelScale: pixelScale,
+                textSystem: textSystem
+            )
+        }
 
         // Flatten tree, assign unique structural/keyed paths, clamp scroll offsets, and collect NodeSpecs
         var newFlat: [FlatNode] = []
@@ -1334,6 +1360,11 @@ public final class Runtime<State> {
         var matchedStarts: [NodeId: MatchedFlightStart] = [:]
         var newCommittedMatched: [String: MatchedSeenSnapshot] = [:]
         var matchedRootPaths: [String] = []
+        let isFreshOrExiting: (NodeId) -> Bool = { nid in
+            guard self.scene.hasNode(nid) else { return true }
+            if case .exiting = self.scene.phase(nid) { return true }
+            return false
+        }
         for node in newFlat {
             guard let fid = node.el.flightId else { continue }
             let nid = node.nodeId
@@ -1345,7 +1376,7 @@ public final class Runtime<State> {
                 fill: node.el.background.motionColor,
                 opacity: node.el.opacity
             )
-            if !cut, !scene.hasNode(nid),
+            if !cut, isFreshOrExiting(nid),
                let prev = seenMatchedByFlightId[fid] ?? committedMatchedByFlightId[fid],
                prev.id != nid {
                 matchedStarts[nid] = MatchedFlightStart(
@@ -1358,6 +1389,11 @@ public final class Runtime<State> {
                 )
                 matchedRootPaths.append(node.path)
                 activeFlightIds.insert(nid)
+                if pendingUnclippedFlights {
+                    unclippedMatchedFlightIds.insert(nid)
+                } else {
+                    unclippedMatchedFlightIds.remove(nid)
+                }
             }
         }
         if !matchedRootPaths.isEmpty {
@@ -1378,72 +1414,189 @@ public final class Runtime<State> {
             pendingTextFlights.removeAll()
             pendingUnclippedFlights = false
             activeTextFlights.removeAll()
+            launchedFlightIds.removeAll()
+            unclippedMatchedFlightIds.removeAll()
+        } else if reducedMotion || forceInitialSettle {
+            pendingLaunches.removeAll()
+            pendingTextFlights.removeAll()
+            pendingUnclippedFlights = false
         } else {
             let scaledNow = cxSettings.scaledTime(at: now)
             if !pendingLaunches.isEmpty {
                 let launches = pendingLaunches
                 pendingLaunches.removeAll()
-                for req in launches {
-                    guard let srcRect = req.sourceRect,
-                          let dstNode = findNodeForFlightSelector(req.destination, in: newFlat),
-                          !scene.hasNode(dstNode.nodeId) else { continue }
+                var deferredLaunches: [PendingFlightRequest] = []
+                for var req in launches {
+                    guard let srcTextOriginRect = req.sourceTextRect ?? req.sourceRect else { continue }
+                    guard let dstNode = findNodeForFlightSelector(req.destination, in: newFlat) else {
+                        if req.remainingAttempts > 1 {
+                            req.remainingAttempts -= 1
+                            deferredLaunches.append(req)
+                        }
+                        continue
+                    }
+                    guard isFreshOrExiting(dstNode.nodeId) else { continue }
+                    let firstTextOff = firstTextDescendantOffset(under: dstNode, in: newFlat)
+                    let startRect = MotionRect.fromXYWH(
+                        srcTextOriginRect.x - firstTextOff.x,
+                        srcTextOriginRect.y - firstTextOff.y,
+                        dstNode.targetRect.width,
+                        dstNode.targetRect.height
+                    )
                     matchedStarts[dstNode.nodeId] = MatchedFlightStart(
                         fromId: req.sourceNodeId ?? dstNode.nodeId,
-                        startRect: srcRect,
-                        startCorners: req.sourceCorners ?? dstNode.el.corners,
-                        startFill: req.sourceFill ?? dstNode.el.background.motionColor,
+                        startRect: startRect,
+                        startCorners: dstNode.el.corners,
+                        startFill: dstNode.el.background.motionColor,
                         startOpacity: 1.0,
-                        spring: dstNode.el.flightSpring ?? MotionTokens.REFLOW
+                        spring: req.motionSpring ?? dstNode.el.flightSpring ?? MotionTokens.REFLOW
                     )
                     let p = dstNode.path
                     for i in 0..<specs.count where newFlat[i].path.hasPrefix(p + "/") {
                         specs[i].transition = nil
                     }
                     activeFlightIds.insert(dstNode.nodeId)
+                    launchedFlightIds.insert(dstNode.nodeId)
+                }
+                if !deferredLaunches.isEmpty {
+                    pendingLaunches.append(contentsOf: deferredLaunches)
                 }
             }
             if !pendingTextFlights.isEmpty {
                 let flights = pendingTextFlights
                 pendingTextFlights.removeAll()
-                for req in flights {
-                    guard let srcRect = req.sourceRect,
-                          let dstNode = findNodeForFlightSelector(req.destination, in: newFlat),
-                          !scene.hasNode(dstNode.nodeId) else { continue }
+                var deferredFlights: [PendingFlightRequest] = []
+                for var req in flights {
+                    guard let srcRect = req.sourceTextRect ?? req.sourceRect else { continue }
+                    guard let dstNode = findNodeForFlightSelector(req.destination, in: newFlat) else {
+                        if req.remainingAttempts > 1 {
+                            req.remainingAttempts -= 1
+                            deferredFlights.append(req)
+                        }
+                        continue
+                    }
+                    guard isFreshOrExiting(dstNode.nodeId) else { continue }
+                    let dstExtent = laidOutTextExtent(for: dstNode, rect: dstNode.targetRect, in: newFlat)
                     var tf = TextFlightState(
                         sourceKey: req.source,
                         targetKey: req.destination,
                         source: srcRect,
                         born: scaledNow,
-                        unclipped: true
+                        unclipped: true,
+                        spring: req.motionSpring
                     )
-                    _ = tf.measure(target: dstNode.targetRect, now: scaledNow, reducedMotion: reducedMotion)
+                    _ = tf.measure(target: dstExtent, now: scaledNow, reducedMotion: reducedMotion)
                     activeTextFlights.removeAll { $0.targetNodeId == dstNode.nodeId }
-                    activeTextFlights.append(ActiveTextFlight(targetNodeId: dstNode.nodeId, state: tf))
+                    activeTextFlights.append(ActiveTextFlight(
+                        targetNodeId: dstNode.nodeId,
+                        state: tf,
+                        sourceText: req.sourceText,
+                        sourceSpans: req.sourceSpans,
+                        sourceTextStyle: req.sourceTextStyle ?? dstNode.el.textStyle,
+                        sourceTextColor: req.sourceTextColor
+                    ))
+                }
+                if !deferredFlights.isEmpty {
+                    pendingTextFlights.append(contentsOf: deferredFlights)
                 }
             }
             pendingUnclippedFlights = false
         }
 
-        scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: cut, matchedStarts: matchedStarts)
+        measureFramePhase(.apply) {
+            scene.commit(specs, at: cxSettings.scaledTime(at: now), initialCut: cut, matchedStarts: matchedStarts)
+        }
     }
 
     private func findNodeForFlightSelector(_ selector: String, in nodes: [FlatNode]) -> FlatNode? {
         nodes.first { FlightSelector.selects(selector, path: $0.path, key: $0.key) }
     }
 
-    private func makePendingFlightRequest(source: String, destination: String) -> PendingFlightRequest {
+    private func firstTextDescendantOffset(under root: FlatNode, in nodes: [FlatNode]) -> Vec2 {
+        if root.el.plainText != nil || root.el.richSpans != nil {
+            return Vec2(root.el.layout.padding.left, root.el.layout.padding.top)
+        }
+        let prefix = root.path + "/"
+        if let desc = nodes.first(where: { $0.path.hasPrefix(prefix) && ($0.el.plainText != nil || $0.el.richSpans != nil) }) {
+            return Vec2(
+                (desc.targetRect.x + desc.el.layout.padding.left) - root.targetRect.x,
+                (desc.targetRect.y + desc.el.layout.padding.top) - root.targetRect.y
+            )
+        }
+        return .zero
+    }
+
+    private func laidOutTextExtent(for node: FlatNode, rect: MotionRect, in nodes: [FlatNode]? = nil) -> MotionRect {
+        let searchNodes = nodes ?? flatNodes
+        let textNode: FlatNode
+        let textBoxRect: MotionRect
+        if node.el.plainText != nil || node.el.richSpans != nil {
+            textNode = node
+            textBoxRect = rect
+        } else if let desc = searchNodes.first(where: {
+            $0.path.hasPrefix(node.path + "/") && ($0.el.plainText != nil || $0.el.richSpans != nil)
+        }) {
+            textNode = desc
+            textBoxRect = MotionRect.fromXYWH(
+                rect.x + (desc.targetRect.x - node.targetRect.x),
+                rect.y + (desc.targetRect.y - node.targetRect.y),
+                desc.targetRect.width,
+                desc.targetRect.height
+            )
+        } else {
+            return rect
+        }
+
+        let padL = textNode.el.layout.padding.left
+        let padT = textNode.el.layout.padding.top
+        let padR = textNode.el.layout.padding.right
+        let padB = textNode.el.layout.padding.bottom
+        let innerW = max(0, textBoxRect.width - padL - padR)
+        let innerH = max(0, textBoxRect.height - padT - padB)
+        let shaped = textSystem.shape(
+            text: textNode.el.plainText ?? "",
+            spans: textNode.el.richSpans,
+            style: textNode.el.textStyle,
+            maxWidth: innerW > 0 ? innerW + 0.5 : nil,
+            pixelScale: pixelScale,
+            emitGlyphs: false
+        )
+        let extentW = innerW > 0 ? min(innerW, shaped.size.x) : shaped.size.x
+        let extentH = innerH > 0 ? min(innerH, shaped.size.y) : shaped.size.y
+        return MotionRect.fromXYWH(
+            textBoxRect.x + padL,
+            textBoxRect.y + padT,
+            max(1, extentW),
+            max(1, extentH)
+        )
+    }
+
+    private func makePendingFlightRequest(source: String, destination: String, motionSpring: Spring? = nil) -> PendingFlightRequest {
         let srcNode = findNodeForFlightSelector(source, in: flatNodes)
+        let srcLastEl = lastElements.first(where: { !$0.exiting && FlightSelector.selects(source, path: $0.path, key: $0.key) })
         let srcRect = srcNode.map { scene.currentRect($0.nodeId) ?? $0.targetRect }
-            ?? lastElements.first(where: { !$0.exiting && FlightSelector.selects(source, path: $0.path, key: $0.key) }).flatMap {
+            ?? srcLastEl.flatMap {
                 $0.rect.count >= 4 ? MotionRect.fromXYWH($0.rect[0], $0.rect[1], $0.rect[2], $0.rect[3]) : nil
             }
+        let srcTextRect: MotionRect? = {
+            if let srcNode, let srcRect {
+                return laidOutTextExtent(for: srcNode, rect: srcRect, in: flatNodes)
+            }
+            return srcRect
+        }()
         return PendingFlightRequest(
             source: source,
             destination: destination,
             sourceNodeId: srcNode?.nodeId,
             sourceRect: srcRect,
+            sourceTextRect: srcTextRect,
             sourceCorners: srcNode?.el.corners,
-            sourceFill: srcNode?.el.background.motionColor
+            sourceFill: srcNode?.el.background.motionColor,
+            sourceText: srcNode?.el.plainText ?? srcLastEl?.text,
+            sourceSpans: srcNode?.el.richSpans,
+            sourceTextStyle: srcNode?.el.textStyle,
+            sourceTextColor: srcNode?.el.textColor ?? srcLastEl?.textColor,
+            motionSpring: motionSpring
         )
     }
 
@@ -1918,12 +2071,13 @@ public final class Runtime<State> {
         var newVideoSig: UInt64 = 0
         var newVideoSnaps: [String: VideoSnapshot] = [:]
 
-        let activeTextFlightIds = Set(activeTextFlights.map(\.targetNodeId))
         let flyingRootIds: Set<NodeId> = Set(frameOut.nodes.compactMap { p in
             guard let snap = nodeById[p.id], !p.isExiting else {
                 return nil
             }
-            if activeTextFlightIds.contains(p.id) || activeFlightIds.contains(p.id) {
+            if activeFlightIds.contains(p.id)
+                || launchedFlightIds.contains(p.id)
+                || unclippedMatchedFlightIds.contains(p.id) {
                 return p.id
             }
             if snap.el.flightId != nil && scene.isEdgeAnimating(p.id) {
@@ -1965,22 +2119,22 @@ public final class Runtime<State> {
             let textFlightSource = textFlightTarget == nil
                 ? activeTextFlights.first(where: { FlightSelector.selects($0.state.sourceKey, path: snap.path, key: snap.key) })
                 : nil
-            let rawRect = textFlightTarget?.state.presented ?? presentedRectById[p.id] ?? p.rect
+            let rawRect = presentedRectById[p.id] ?? p.rect
             let ownOp = ownOpacityById[p.id] ?? p.opacity
             let groupFactor: Float = {
                 guard let (restOp, hovOp) = el.groupOpacity else { return 1.0 }
                 return nearestGroupHovered ? hovOp : restOp
             }()
-            let flightAlpha: Float = {
+            let textFlightGlyphAlpha: Float = {
                 if let tf = textFlightTarget {
-                    return tf.state.alphas(target: p.rect, now: now, reducedMotion: reducedMotion).target
+                    return tf.state.alphas(target: tf.state.destination, now: now, reducedMotion: reducedMotion).target
                 }
                 if let sf = textFlightSource {
                     return sf.state.alphas(target: sf.state.destination, now: now, reducedMotion: reducedMotion).source
                 }
                 return 1.0
             }()
-            let alpha = (ownOp * ancestorOpacity * groupFactor * flightAlpha).clamped(to: 0...1)
+            let alpha = (ownOp * ancestorOpacity * groupFactor).clamped(to: 0...1)
             let rawScaleVec = presentedScaleById[p.id] ?? p.scale
             let rect: MotionRect
             let scaleVec: Vec2
@@ -2533,7 +2687,7 @@ public final class Runtime<State> {
 
                     // Text glyphs
                     for g in shaped.glyphs {
-                        let gc = (g.color ?? textCol).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let gc = (g.color ?? textCol).scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
                                 (textOriginX + g.rect.x * scaleVec.x) * pxScale,
@@ -2591,21 +2745,24 @@ public final class Runtime<State> {
                             textTruncated = true
                         }
                     }
-                    for g in shaped.glyphs {
-                        let gc = (g.color ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        primitives.append(attachFade(.glyph(
-                            rect: SIMD4<Float>(
-                                (textOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                (textOriginY + g.rect.y * scaleVec.y) * pxScale,
-                                g.rect.z * scaleVec.x * pxScale,
-                                g.rect.w * scaleVec.y * pxScale
-                            ),
-                            uv: g.uv,
-                            color: gc,
-                            gamma: systemDark ? 0.88 : 1.05,
-                            clip: devClip,
-                            turn: useLayer ? 0 : effRotate
-                        )))
+                    let glyphAlpha = localAlpha * textFlightGlyphAlpha
+                    if glyphAlpha > 0.0005 {
+                        for g in shaped.glyphs {
+                            let gc = (g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            primitives.append(attachFade(.glyph(
+                                rect: SIMD4<Float>(
+                                    (textOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                    (textOriginY + g.rect.y * scaleVec.y) * pxScale,
+                                    g.rect.z * scaleVec.x * pxScale,
+                                    g.rect.w * scaleVec.y * pxScale
+                                ),
+                                uv: g.uv,
+                                color: gc,
+                                gamma: systemDark ? 0.88 : 1.05,
+                                clip: devClip,
+                                turn: useLayer ? 0 : effRotate
+                            )))
+                        }
                     }
                 }
 
@@ -2848,6 +3005,8 @@ public final class Runtime<State> {
             )
         }
         for lifted in liftedFlights {
+            let isUnclippedFlight = launchedFlightIds.contains(lifted.node.id)
+                || unclippedMatchedFlightIds.contains(lifted.node.id)
             emitSubtree(
                 lifted.node,
                 ancestorOpacity: lifted.ancestorOpacity,
@@ -2857,11 +3016,101 @@ public final class Runtime<State> {
                 parentPath: lifted.parentPath,
                 nearestGroupHovered: lifted.nearestGroupHovered,
                 flightCover: nil,
-                flightClipOverride: nil,
+                flightClipOverride: isUnclippedFlight ? windowRect : nil,
                 emitLiftedNow: true
             )
         }
         seenMatchedByFlightId = newSeenMatched
+
+        if !activeTextFlights.isEmpty {
+            let unclippedDevClip = SIMD4<Float>(0, 0, Float(devW), Float(devH))
+            for entry in activeTextFlights {
+                let (srcAlpha, _) = entry.state.alphas(
+                    target: entry.state.destination,
+                    now: now,
+                    reducedMotion: reducedMotion
+                )
+                let presentedRect = entry.state.presented
+                let targetSnap = nodeById[entry.targetNodeId]
+                let targetLeaf = entry.state.targetKey
+                    .split(separator: "/")
+                    .last
+                    .map(String.init)
+                    ?? entry.state.targetKey
+                let flightText = entry.sourceText ?? targetSnap?.el.plainText ?? ""
+                let flightStyle = entry.sourceTextStyle
+                let flightColor = entry.sourceTextColor
+                    ?? targetSnap?.el.textColor
+                    ?? defaultViewFg
+                    ?? Tok.theme(dark: systemDark).text
+                if srcAlpha > 0.0005 && (!flightText.isEmpty || entry.sourceSpans != nil) {
+                    let srcExtent = entry.state.source
+                    let shaped = textSystem.shape(
+                        text: flightText,
+                        spans: entry.sourceSpans,
+                        style: flightStyle,
+                        maxWidth: srcExtent.width + 0.5,
+                        pixelScale: pxScale,
+                        emitGlyphs: true
+                    )
+                    let sx = srcExtent.width > 0.5 ? presentedRect.width / srcExtent.width : 1.0
+                    let sy = srcExtent.height > 0.5 ? presentedRect.height / srcExtent.height : 1.0
+                    for g in shaped.glyphs {
+                        let gc = (g.color ?? flightColor).scaleAlpha(srcAlpha).simd4(srgb: srgbBlend)
+                        primitives.append(.glyph(
+                            rect: SIMD4<Float>(
+                                (presentedRect.x + g.rect.x * sx) * pxScale,
+                                (presentedRect.y + g.rect.y * sy) * pxScale,
+                                g.rect.z * sx * pxScale,
+                                g.rect.w * sy * pxScale
+                            ),
+                            uv: g.uv,
+                            color: gc,
+                            gamma: systemDark ? 0.88 : 1.05,
+                            clip: unclippedDevClip
+                        ))
+                    }
+                }
+                infos.append(ElementInfo(
+                    path: "flight-source/\(targetLeaf)",
+                    key: nil,
+                    parentIndex: nil,
+                    role: .text,
+                    rect: presentedRect.xywh,
+                    target: entry.state.destination.xywh,
+                    visible: presentedRect.xywh,
+                    opacity: srcAlpha,
+                    scale: 1.0,
+                    blur: 0,
+                    radius: 0,
+                    fill: .transparent,
+                    textColor: flightColor,
+                    text: flightText,
+                    label: nil,
+                    help: nil,
+                    selected: nil,
+                    expanded: nil,
+                    level: nil,
+                    itemSelected: false,
+                    focusable: false,
+                    focused: false,
+                    focusVisible: false,
+                    inert: true,
+                    moving: true,
+                    exiting: false,
+                    hover: 0,
+                    press: 0,
+                    scrolled: [0, 0],
+                    caret: nil,
+                    secure: false,
+                    disabled: false,
+                    checked: nil,
+                    a11yValue: nil,
+                    a11yDescription: nil,
+                    a11yHidden: true
+                ))
+            }
+        }
 
         lastElements = infos
         presentedRectByPath = newRectByPath
@@ -4042,14 +4291,16 @@ public final class Runtime<State> {
             forceInitialSettle = true
         }
         if !tx.textFlights.isEmpty {
+            let springOverride = tx.motionSpringRequest
             for (src, dst) in tx.textFlights {
-                pendingTextFlights.append(makePendingFlightRequest(source: src, destination: dst))
+                pendingTextFlights.append(makePendingFlightRequest(source: src, destination: dst, motionSpring: springOverride))
             }
             dirtyCommit(at: now)
         }
         if !tx.launches.isEmpty {
+            let springOverride = tx.motionSpringRequest
             for (src, dst) in tx.launches {
-                pendingLaunches.append(makePendingFlightRequest(source: src, destination: dst))
+                pendingLaunches.append(makePendingFlightRequest(source: src, destination: dst, motionSpring: springOverride))
             }
             dirtyCommit(at: now)
         }
