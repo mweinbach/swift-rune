@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 
 public enum RuneLightShaders: Sendable {
     public static let commonPrelude: String = """
@@ -1237,4 +1238,21 @@ public enum RuneLightShaders: Sendable {
         return float4(o, 1.0f);
     }
     """
+
+    #if canImport(Metal)
+    public static var resourceBundle: Bundle { Bundle.module }
+
+    public static var precompileEntries: [PrecompiledMetallib.ShaderEntry] {
+        [
+            PrecompiledMetallib.ShaderEntry(name: "light_gbuffer", source: gbufferShader, requiredFunction: "gbuffer_vertex"),
+            PrecompiledMetallib.ShaderEntry(name: "light_field", source: fieldShader, requiredFunction: "field_kernel"),
+            PrecompiledMetallib.ShaderEntry(name: "light_shadow", source: shadowShader, requiredFunction: "shadow_kernel"),
+            PrecompiledMetallib.ShaderEntry(name: "light_gi_scene", source: giSceneShader, requiredFunction: "gi_scene_kernel"),
+            PrecompiledMetallib.ShaderEntry(name: "light_gi_cascade", source: giCascadeShader, requiredFunction: "gi_cascade_kernel"),
+            PrecompiledMetallib.ShaderEntry(name: "light_gi_fluence", source: giFluenceShader, requiredFunction: "gi_fluence_kernel"),
+            PrecompiledMetallib.ShaderEntry(name: "light_composite", source: compositeShader, requiredFunction: "composite_vertex"),
+            PrecompiledMetallib.ShaderEntry(name: "light_glass", source: glassShader, requiredFunction: "glass_vertex"),
+        ]
+    }
+    #endif
 }

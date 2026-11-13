@@ -1,4 +1,5 @@
 import Foundation
+import Rune
 #if canImport(Metal)
 import Metal
 #endif
@@ -98,15 +99,21 @@ public final class LightRenderer: @unchecked Sendable {
         let gh = max((((self.height + 7) / 8) + 15) / 16 * 16, 16)
         self.giSize = (gw, gh)
 
-        func makeLib(_ source: String, _ name: String) throws -> MTLLibrary {
+        func makeLib(_ source: String, _ name: String, requiredFunction: String) throws -> MTLLibrary {
             do {
-                return try device.makeLibrary(source: source, options: nil)
+                return try ShaderLibraryCache.load(
+                    named: "light_\(name)",
+                    source: source,
+                    requiredFunction: requiredFunction,
+                    bundle: .module,
+                    on: device
+                )
             } catch {
                 throw LightRendererError.shaderCompileFailed("\(name): \(error)")
             }
         }
 
-        let gbufLib = try makeLib(RuneLightShaders.gbufferShader, "gbuffer")
+        let gbufLib = try makeLib(RuneLightShaders.gbufferShader, "gbuffer", requiredFunction: "gbuffer_vertex")
         guard let gbufVs = gbufLib.makeFunction(name: "gbuffer_vertex"),
               let gbufFs = gbufLib.makeFunction(name: "gbuffer_fragment") else {
             throw LightRendererError.shaderCompileFailed("Missing gbuffer entry points")
@@ -119,7 +126,7 @@ public final class LightRenderer: @unchecked Sendable {
         self.gbufPipeline = try device.makeRenderPipelineState(descriptor: gbufDesc)
 
         func makeCompute(_ source: String, _ fn: String, _ name: String) throws -> MTLComputePipelineState {
-            let lib = try makeLib(source, name)
+            let lib = try makeLib(source, name, requiredFunction: fn)
             guard let kernel = lib.makeFunction(name: fn) else {
                 throw LightRendererError.shaderCompileFailed("Missing \(fn) kernel")
             }
@@ -132,7 +139,7 @@ public final class LightRenderer: @unchecked Sendable {
         self.giCascadePipeline = try makeCompute(RuneLightShaders.giCascadeShader, "gi_cascade_kernel", "gi_cascade")
         self.giFluencePipeline = try makeCompute(RuneLightShaders.giFluenceShader, "gi_fluence_kernel", "gi_fluence")
 
-        let compLib = try makeLib(RuneLightShaders.compositeShader, "composite")
+        let compLib = try makeLib(RuneLightShaders.compositeShader, "composite", requiredFunction: "composite_vertex")
         guard let compVs = compLib.makeFunction(name: "composite_vertex"),
               let compFs = compLib.makeFunction(name: "composite_fragment") else {
             throw LightRendererError.shaderCompileFailed("Missing composite entry points")

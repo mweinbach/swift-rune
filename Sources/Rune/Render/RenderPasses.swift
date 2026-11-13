@@ -714,6 +714,7 @@ public enum ShaderLibraryCache {
         named name: String,
         source: String,
         requiredFunction: String,
+        bundle: Bundle? = nil,
         on device: MTLDevice
     ) throws -> MTLLibrary {
         let key = Key(deviceId: UInt(bitPattern: ObjectIdentifier(device)), name: name)
@@ -725,7 +726,13 @@ public enum ShaderLibraryCache {
         box.lock.unlock()
 
         let resolved: MTLLibrary
-        if let precompiled = findPrecompiled(named: name, requiredFunction: requiredFunction, on: device) {
+        if let precompiled = PrecompiledMetallib.load(
+            named: name,
+            source: source,
+            requiredFunction: requiredFunction,
+            bundle: bundle,
+            on: device
+        ) {
             resolved = precompiled
         } else {
             resolved = try device.makeLibrary(source: source, options: nil)
@@ -737,23 +744,17 @@ public enum ShaderLibraryCache {
         return resolved
     }
 
-    private static func findPrecompiled(
-        named name: String,
-        requiredFunction: String,
-        on device: MTLDevice
-    ) -> MTLLibrary? {
-        let bundles: [Bundle] = [Bundle.main, Bundle(for: LayerBlurPipeline.self)]
-        for bundle in bundles {
-            if let url = bundle.url(forResource: name, withExtension: "metallib"),
-               let lib = try? device.makeLibrary(URL: url),
-               lib.functionNames.contains(requiredFunction) {
-                return lib
-            }
+    public static func invalidateForTesting(device: MTLDevice? = nil, named: String? = nil) {
+        box.lock.lock()
+        defer { box.lock.unlock() }
+        if let device, let named {
+            box.libs.removeValue(forKey: Key(deviceId: UInt(bitPattern: ObjectIdentifier(device)), name: named))
+        } else if let device {
+            let id = UInt(bitPattern: ObjectIdentifier(device))
+            box.libs = box.libs.filter { $0.key.deviceId != id }
+        } else {
+            box.libs.removeAll()
         }
-        if let def = device.makeDefaultLibrary(), def.functionNames.contains(requiredFunction) {
-            return def
-        }
-        return nil
     }
 }
 

@@ -106,6 +106,9 @@ let package = Package(
                 "RuneTaffy",
             ],
             path: "Sources/Rune",
+            resources: [
+                .copy("Resources/Metal"),
+            ],
             linkerSettings: [
                 .linkedLibrary("user32", .when(platforms: [.windows])),
                 .linkedLibrary("gdi32", .when(platforms: [.windows])),
@@ -149,12 +152,18 @@ let package = Package(
         .target(
             name: "RuneFX",
             dependencies: ["RuneMotion", "Rune"],
-            path: "Sources/RuneFX"
+            path: "Sources/RuneFX",
+            resources: [
+                .copy("Resources/Metal"),
+            ]
         ),
         .target(
             name: "RuneLight",
             dependencies: ["Rune"],
-            path: "Sources/RuneLight"
+            path: "Sources/RuneLight",
+            resources: [
+                .copy("Resources/Metal"),
+            ]
         ),
         .target(
             name: "RuneKnobs",
