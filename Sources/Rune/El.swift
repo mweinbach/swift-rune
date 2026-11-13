@@ -1604,6 +1604,17 @@ public struct El<State> {
     public func positionInSet(_ position: Int, size: Int) -> Self { var c = self; c.a11yPosInSet = (position, size); return c }
     public func shortcutHint(_ keys: String) -> Self { var c = self; c.a11yShortcutHint = keys; return c }
 
+    /// The pointer shape shown while hovering or pressing this element (`el::layout::cursor`).
+    public func cursor(_ cursor: Cursor) -> Self {
+        var c = self
+        c.runtimeExtras["cursor"] = cursor
+        return c
+    }
+
+    internal var attachedCursor: Cursor? {
+        runtimeExtras["cursor"] as? Cursor
+    }
+
     public func href(_ url: String) -> Self {
         var c = self
         c.a11yHref = url

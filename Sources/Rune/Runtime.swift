@@ -305,6 +305,8 @@ public final class Runtime<State> {
     internal var cxSettings = RuntimeShellSettings()
     public var playgroundHost: PlaygroundHost<State>? = nil
     public private(set) var playgroundRequests: [PlaygroundTxRequest] = []
+    public var shortcutRegistry: ShortcutRegistry? = nil
+    public private(set) var imeReset: Bool = false
 
     internal var popupQueue: PopupQueueState = .closed
     internal var popupNeedsLayout: Bool = false
@@ -1741,6 +1743,9 @@ public final class Runtime<State> {
 
         focusedPath = nextIdx.map { flatNodes[$0].path }
         focusedKey = nextIdx.flatMap { flatNodes[$0].key }
+        if prevFocusedPath != focusedPath {
+            imeReset = true
+        }
     }
 
     // MARK: - Live Property Evaluation
@@ -3474,6 +3479,7 @@ public final class Runtime<State> {
             if focusedPath != nil {
                 focusedPath = nil
                 focusedKey = nil
+                imeReset = true
                 dirtyCommit(at: now)
             }
             return
@@ -3485,6 +3491,9 @@ public final class Runtime<State> {
             webFocusTabStartPath = node.path
         }
         if nodeTakesFocus(node.el) {
+            if focusedPath != node.path {
+                imeReset = true
+            }
             focusedPath = node.path
             focusedKey = node.key
         }
@@ -3956,6 +3965,15 @@ public final class Runtime<State> {
             }
         }
 
+        // 5. Shortcut registry dispatch (only when no active modal blocks global shortcuts)
+        if activeModalPath == nil, let registry = shortcutRegistry {
+            let result = registry.dispatch(ev)
+            if result != .unhandled {
+                dirtyCommit(at: now)
+                return true
+            }
+        }
+
         return false
     }
 
@@ -4383,11 +4401,183 @@ public final class Runtime<State> {
         let t = now ?? currentTime
         let prevStale = needsCommit
         windowFocused = focused
+        if !focused {
+            finishComposition(at: t)
+        }
         if let hook = onFocus {
             update(at: t) { s, tx in hook(&s, focused, &tx) }
         } else {
             needsCommit = prevStale
         }
+    }
+
+    /// Consumes and clears the pending IME composition reset flag (`Runtime::ime_reset`).
+    public func consumeImeReset() -> Bool {
+        let was = imeReset
+        imeReset = false
+        return was
+    }
+
+    /// Whether the currently focused element accepts text/IME input.
+    public var hasFocusedTextInput: Bool {
+        guard let fp = focusedPath,
+              let idx = nodeByPath[fp],
+              !flatNodes[idx].effectiveInert else {
+            return false
+        }
+        let el = flatNodes[idx].el
+        return el.handlers.editLens != nil || el.role == .textInput
+    }
+
+    /// Whether the currently focused element requires secure keyboard input (`Runtime::has_secure_focus`).
+    public var hasSecureFocus: Bool {
+        guard let fp = focusedPath else { return false }
+        return elementIsSecure(fp)
+    }
+
+    /// Returns a reconversion/surrounding text snapshot for the focused non-secure `TextEdit` (`Runtime::ime_text`).
+    public func focusedImeSnapshot(maxContextBytes: Int = 1024) -> ImeText? {
+        guard let fp = focusedPath,
+              let idx = nodeByPath[fp],
+              !flatNodes[idx].effectiveInert,
+              let editLens = flatNodes[idx].el.handlers.editLens else {
+            return nil
+        }
+        var edit = editLens.get(state)
+        if flatNodes[idx].el.isSecure {
+            edit.isSecure = true
+        }
+        return edit.imeTextSnapshot(maxContextBytes: maxContextBytes)
+    }
+
+    /// Returns the focused input caret rect in window coordinates, if available.
+    public func focusedCaretRect() -> MotionRect? {
+        guard let c = (currentFocusedCaret() ?? cxSettings.lastCommittedCaret)?.rect,
+              c.count >= 4 else {
+            return nil
+        }
+        return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+    }
+
+    /// Commits any open preedit composition on focus loss or window deactivation (`Runtime::finish_composition`).
+    public func finishComposition(at now: Double? = nil) {
+        let t = now ?? currentTime
+        imeReset = true
+        guard let fp = focusedPath,
+              let idx = nodeByPath[fp],
+              let editLens = flatNodes[idx].el.handlers.editLens else {
+            _ = dispatchIme(.cancel, at: t)
+            return
+        }
+        var edit = editLens.get(state)
+        if let activePreedit = edit.preedit?.text, edit.finishPreedit() {
+            editLens.set(&state, edit)
+            if let onChange = flatNodes[idx].el.handlers.onTextChange {
+                var tx = Tx()
+                onChange(&state, edit.text, &tx)
+                applyTx(tx, at: t)
+            }
+            _ = dispatchIme(.commit(activePreedit), at: t)
+            dirtyCommit(at: t)
+        }
+    }
+
+    /// Applies an AppKit/OS `ImeEvent` to the focused `TextEdit` and forwards to `onIme` (`Runtime::ime`).
+    @discardableResult
+    public func dispatchImeEvent(_ event: ImeEvent, at now: Double? = nil) -> Bool {
+        let t = now ?? currentTime
+        var handledByEdit = false
+        if let fp = focusedPath,
+           let idx = nodeByPath[fp],
+           !flatNodes[idx].effectiveInert,
+           let editLens = flatNodes[idx].el.handlers.editLens {
+            var edit = editLens.get(state)
+            if flatNodes[idx].el.isSecure {
+                edit.isSecure = true
+                if flatNodes[idx].el.isRevealed { edit.isRevealed = true }
+            }
+            let outcome = edit.applyIme(event)
+            switch outcome {
+            case .ignored:
+                break
+            case .navigation:
+                editLens.set(&state, edit)
+                dirtyCommit(at: t)
+                handledByEdit = true
+            case .modified:
+                editLens.set(&state, edit)
+                if let onChange = flatNodes[idx].el.handlers.onTextChange {
+                    var tx = Tx()
+                    onChange(&state, edit.text, &tx)
+                    applyTx(tx, at: t)
+                }
+                dirtyCommit(at: t)
+                handledByEdit = true
+            case .submit, .copy:
+                editLens.set(&state, edit)
+                dirtyCommit(at: t)
+                handledByEdit = true
+            }
+        }
+
+        let shellIme: Ime
+        switch event {
+        case .preedit(let str, let cursorUTF8, let clauses):
+            shellIme = .preedit(ImePreedit(text: str, cursorUTF8: cursorUTF8, clauses: clauses))
+        case .commit(let str):
+            shellIme = .commit(str)
+        case .select:
+            return handledByEdit
+        case .enabled:
+            shellIme = .enabled
+        case .disabled:
+            shellIme = .disabled
+        }
+        let handledByHook = dispatchIme(shellIme, at: t)
+        return handledByEdit || handledByHook
+    }
+
+    /// Resolves the pointer cursor shape under the current pointer / press target (`Runtime::cursor`).
+    public func currentCursor() -> Cursor {
+        guard pointerPosition.x >= 0,
+              pointerPosition.y >= 0,
+              pointerPosition.x < viewport.x,
+              pointerPosition.y < viewport.y else {
+            return .default
+        }
+
+        let targetPath = pressedPath ?? hoveredPath
+        var curIdx: Int?
+        if let tp = targetPath, let idx = nodeByPath[tp], !flatNodes[idx].effectiveInert {
+            curIdx = idx
+        } else if let hit = hitTest(at: pointerPosition, predicate: { _ in true }) {
+            curIdx = nodeByPath[hit.node.path]
+        }
+        guard var idx = curIdx else { return .default }
+
+        let leafEl = flatNodes[idx].el
+        if leafEl.attachedCursor == nil {
+            if leafEl.handlers.editLens != nil || leafEl.role == .textInput {
+                return .text
+            }
+            if leafEl.role == .link || leafEl.a11yHref != nil {
+                return .pointer
+            }
+        }
+        while true {
+            if let c = flatNodes[idx].el.attachedCursor {
+                return c
+            }
+            guard let parent = flatNodes[idx].parentIndex else {
+                return .default
+            }
+            idx = parent
+        }
+    }
+
+    /// Native help tooltip hit regions (`Runtime::help_regions`).
+    public func helpRegionsList() -> [(MotionRect, String)] {
+        helpState.regions.map { (MotionRect.fromXYWH($0.rect.x, $0.rect.y, $0.rect.z, $0.rect.w), $0.text) }
     }
 
     public func dispatchModifiers(_ mods: Mods, at now: Double? = nil) {

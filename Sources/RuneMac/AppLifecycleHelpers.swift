@@ -147,10 +147,13 @@ public enum AppLifecycleHelpers {
     /// `.regular` and unhides without activating once macOS hides it (or after 5 seconds).
     @MainActor
     public static func quietLaunchIfNeeded(
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String]? = nil
     ) {
-        guard environment[quietEnvVar] != nil else { return }
-        unsetenv(quietEnvVar)
+        let resolvedEnv = environment ?? ProcessInfo.processInfo.environment
+        guard resolvedEnv[quietEnvVar] != nil else { return }
+        if environment == nil {
+            unsetenv(quietEnvVar)
+        }
         _ = setActivationPolicy(.prohibited)
         scheduleQuietRestore(attempt: 0)
     }
@@ -171,6 +174,22 @@ public enum AppLifecycleHelpers {
     }
     #endif
 
+    /// Resolves the home directory preferring explicit `homeDirectory` and `$HOME` over `FileManager`.
+    public static func resolvedHomeDirectory(
+        explicit: URL? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if let explicit { return explicit }
+        if let envHome = environment["HOME"], !envHome.isEmpty {
+            return URL(fileURLWithPath: envHome, isDirectory: true)
+        }
+        #if os(macOS)
+        return FileManager.default.homeDirectoryForCurrentUser
+        #else
+        return URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        #endif
+    }
+
     /// Marks this process as busy in `~/Library/Caches/mac-app/busy/<pid>` so external
     /// relaunch scripts wait before swapping the app.
     public static func setBusy(
@@ -179,7 +198,7 @@ public enum AppLifecycleHelpers {
         homeDirectory: URL? = nil
     ) {
         #if os(macOS)
-        let baseHome = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        let baseHome = resolvedHomeDirectory(explicit: homeDirectory)
         let dir = baseHome
             .appendingPathComponent("Library/Caches/mac-app/busy", isDirectory: true)
         let marker = dir.appendingPathComponent(String(pid), isDirectory: false)
@@ -198,7 +217,7 @@ public enum AppLifecycleHelpers {
         homeDirectory: URL? = nil
     ) -> Bool {
         #if os(macOS)
-        let baseHome = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        let baseHome = resolvedHomeDirectory(explicit: homeDirectory)
         let marker = baseHome
             .appendingPathComponent("Library/Caches/mac-app/busy/\(pid)", isDirectory: false)
         return FileManager.default.fileExists(atPath: marker.path)

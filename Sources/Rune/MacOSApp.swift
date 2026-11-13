@@ -211,6 +211,15 @@ public enum MacOSApp {
             }
         )
 
+        let shortcutBridge = MacOSHostShortcutBridge()
+        shortcutBridge.sync(registry: runtime.shortcutRegistry)
+        let systemObserver = MacOSSystemObserver { [weak runtime, weak hostView] in
+            guard let runtime else { return }
+            runtime.setSystemContrast(SystemPreferences.current().contrast)
+            runtime.markNeedsCommit()
+            hostView?.requestRender()
+        }
+
         let delegate = RuneAppDelegate(
             keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
@@ -240,6 +249,8 @@ public enum MacOSApp {
                 }
             },
             onTerminate: {
+                _ = systemObserver
+                shortcutBridge.clear()
                 windowlessDriver.stop()
                 hostView.stopTimer()
                 hostView.cancelActiveModals()
@@ -295,7 +306,9 @@ public enum MacOSApp {
             } else {
                 window.makeKeyAndOrderFront(nil)
                 window.makeFirstResponder(hostView)
-                app.activate(ignoringOtherApps: true)
+                if !appBuilder.isAccessory {
+                    app.activate(ignoringOtherApps: true)
+                }
             }
             if appBuilder.openAs.isMaximized {
                 window.zoom(nil)
@@ -382,7 +395,7 @@ private final class RuneAppDelegate: NSObject, NSApplicationDelegate, NSWindowDe
 }
 
 @MainActor
-private final class RuneMetalHostView<State>: NSView {
+private final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputClient {
     private let runtime: Runtime<State>
     private let renderer: MetalRenderer
     private let metalLayer = CAMetalLayer()
@@ -398,7 +411,7 @@ private final class RuneMetalHostView<State>: NSView {
     private let onReady: ((WindowHandle) -> Void)?
     private var didFireReady: Bool = false
     private var lastFrameTime: Double = 0.0
-    private var animTimer: Timer?
+    private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
     private let popupPresenter = MacOSPopupMenuPresenter()
@@ -406,6 +419,15 @@ private final class RuneMetalHostView<State>: NSView {
     private let dragOutCoordinator = MacOSDragOutCoordinator()
     private var materialHost: RuneMaterialHost?
     private var restingGiveBackDone: Bool = false
+    private let accessibilityHost = MacOSAccessibilityHost()
+    private lazy var textInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
+        guard let self else { return }
+        if self.runtime.dispatchImeEvent(imeEvent, at: self.nowSeconds()) {
+            self.requestRender()
+        }
+    }
+    private var lastAppliedCursor: Cursor = .default
+    private var didInitialA11ySync = false
 
     init(
         frame: NSRect,
@@ -490,8 +512,8 @@ private final class RuneMetalHostView<State>: NSView {
     }
 
     func stopTimer() {
-        animTimer?.invalidate()
-        animTimer = nil
+        displayLinkDriver?.stop()
+        displayLinkDriver = nil
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -587,7 +609,7 @@ private final class RuneMetalHostView<State>: NSView {
             renderer.giveBack(all: hidden, residentCaches: false)
         }
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
-        _ = surfaceMeter?.redraw(paced: animTimer != nil)
+        _ = surfaceMeter?.redraw(paced: displayLinkDriver?.isRunning ?? false)
 
         var drawCount = 0
         if let drawable = metalLayer.nextDrawable() {
@@ -666,23 +688,53 @@ private final class RuneMetalHostView<State>: NSView {
             devStatsReceiver?(stats)
         }
         pumpPlatformActions()
+        syncPlatformBridges(treeCommitted: !didInitialA11ySync || runtime.viewCommitCount != commitsBefore)
 
         if isAnim {
-            if animTimer == nil {
-                let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-                    Task { @MainActor in
-                        self?.renderTick()
-                    }
+            if displayLinkDriver == nil {
+                let driver = MacOSDisplayLinkDriver { [weak self] in
+                    self?.renderTick()
                 }
-                RunLoop.main.add(timer, forMode: .common)
-                animTimer = timer
+                displayLinkDriver = driver
             }
+            displayLinkDriver?.start(in: self)
         } else {
             stopTimer()
         }
     }
 
+    private func syncPlatformBridges(treeCommitted: Bool) {
+        let focused = window?.isKeyWindow ?? true
+        let imeAllowed = runtime.hasFocusedTextInput && !runtime.hasSecureFocus && focused
+        let cancelIme = runtime.consumeImeReset()
+        let caretRect = MacOSHostViewHelper.caretScreenRect(caret: runtime.focusedCaretRect(), in: self)
+        textInputBridge.sync(
+            imeText: imeAllowed ? runtime.focusedImeSnapshot() : nil,
+            caretScreenRect: caretRect,
+            cancelExisting: cancelIme,
+            in: self
+        )
+
+        MacOSHostViewHelper.applyCursor(runtime.currentCursor(), previous: &lastAppliedCursor, in: self)
+
+        if treeCommitted {
+            didInitialA11ySync = true
+            let snapshot = runtime.accessibilitySnapshot()
+            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+                MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
+                    guard let self else { return }
+                    if self.runtime.performAccessibilityAction(id, action: action, at: self.nowSeconds()) {
+                        self.requestRender()
+                    }
+                }
+            }
+        }
+    }
+
     private func applyDrainedRequests(_ req: AppDrainedRequests<State>) {
+        if let dockIcon = req.dockIcon {
+            MacOSDockIconApplier.apply(dockIcon)
+        }
         if req.quit {
             NSApplication.shared.terminate(nil)
             return
@@ -740,14 +792,7 @@ private final class RuneMetalHostView<State>: NSView {
     }
 
     private func mods(for event: NSEvent) -> Mods {
-        let f = event.modifierFlags
-        return Mods(
-            shift: f.contains(.shift),
-            ctrl: f.contains(.control),
-            alt: f.contains(.option),
-            cmd: f.contains(.command),
-            logo: f.contains(.command)
-        )
+        MacOSKeyMapper.mods(for: event)
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -818,40 +863,13 @@ private final class RuneMetalHostView<State>: NSView {
     }
 
     private func makeKeyEvent(from event: NSEvent) -> KeyEvent? {
-        let m = mods(for: event)
-        let key: Key
-        switch event.keyCode {
-        case 36, 76: key = .enter
-        case 48: key = .tab
-        case 53: key = .escape
-        case 51: key = .backspace
-        case 117: key = .delete
-        case 49: key = .space
-        case 123: key = .arrowLeft
-        case 124: key = .arrowRight
-        case 126: key = .arrowUp
-        case 125: key = .arrowDown
-        case 115: key = .home
-        case 119: key = .end
-        case 116: key = .pageUp
-        case 121: key = .pageDown
-        default:
-            let chars = event.characters ?? ""
-            let ign = event.charactersIgnoringModifiers ?? chars
-            if m.cmd, ign.count == 1, let ch = ign.lowercased().first {
-                key = .command(ch)
-            } else if !chars.isEmpty {
-                key = .text(chars)
-            } else {
-                return nil
-            }
-        }
-        return KeyEvent(key: key, mods: m)
+        MacOSKeyMapper.makeKeyEvent(from: event)
     }
 
     @discardableResult
-    func dispatchKeyEvent(_ ev: KeyEvent) -> Bool {
+    func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false) -> Bool {
         let handled = MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds())
+        _ = isRepeat
         renderTick()
         return handled
     }
@@ -859,11 +877,102 @@ private final class RuneMetalHostView<State>: NSView {
     @discardableResult
     func dispatchNativeKeyEvent(_ event: NSEvent) -> Bool {
         guard let kev = makeKeyEvent(from: event) else { return false }
-        return dispatchKeyEvent(kev)
+        return dispatchKeyEvent(kev, isRepeat: event.isARepeat)
     }
 
     override func keyDown(with event: NSEvent) {
+        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus {
+            let imeResult = textInputBridge.processKeyDown(event, in: self)
+            if imeResult == .handledByIME {
+                renderTick()
+                return
+            }
+        }
         _ = dispatchNativeKeyEvent(event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        let now = nowSeconds()
+        if let mapped = MacOSKeyMapper.modifierKeyEvent(keyCode: event.keyCode, flags: event.modifierFlags) {
+            runtime.dispatchModifiers(mapped.mods, at: now)
+            _ = runtime.keyDown(mapped.event, at: now)
+        } else {
+            runtime.dispatchModifiers(mods(for: event), at: now)
+        }
+        renderTick()
+    }
+
+    // MARK: - NSTextInputClient
+
+    func insertText(_ string: Any, replacementRange: NSRange) {
+        textInputBridge.insertText(string, replacementRange: replacementRange)
+    }
+
+    func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        textInputBridge.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+    }
+
+    func unmarkText() {
+        textInputBridge.unmarkText()
+    }
+
+    func selectedRange() -> NSRange {
+        textInputBridge.selectedRange()
+    }
+
+    func markedRange() -> NSRange {
+        textInputBridge.markedRange()
+    }
+
+    func hasMarkedText() -> Bool {
+        textInputBridge.hasMarkedText()
+    }
+
+    func attributedSubstring(forProposedRange range: NSRange, actualRange: NSRangePointer?) -> NSAttributedString? {
+        textInputBridge.attributedSubstring(forProposedRange: range, actualRange: actualRange)
+    }
+
+    func validAttributesForMarkedText() -> [NSAttributedString.Key] {
+        textInputBridge.validAttributesForMarkedText()
+    }
+
+    func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        textInputBridge.firstRect(forCharacterRange: range, actualRange: actualRange)
+    }
+
+    func characterIndex(for point: NSPoint) -> Int {
+        textInputBridge.characterIndex(for: point)
+    }
+
+    override func doCommand(by selector: Selector) {
+        textInputBridge.doCommand(by: selector)
+    }
+
+    // MARK: - NSAccessibility
+
+    nonisolated override func isAccessibilityElement() -> Bool {
+        false
+    }
+
+    nonisolated override func accessibilityChildren() -> [Any]? {
+        guard Thread.isMainThread else { return nil }
+        return MainActor.assumeIsolated {
+            MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
+        }.value
+    }
+
+    nonisolated override var accessibilityFocusedUIElement: Any? {
+        guard Thread.isMainThread else { return nil }
+        return MainActor.assumeIsolated {
+            MacOSUnsafeSendableBox(accessibilityHost.accessibilityFocusedUIElement())
+        }.value
+    }
+
+    nonisolated override func accessibilityHitTest(_ point: NSPoint) -> Any? {
+        guard Thread.isMainThread else { return super.accessibilityHitTest(point) }
+        return MainActor.assumeIsolated {
+            MacOSUnsafeSendableBox(accessibilityHost.accessibilityHitTest(point, in: self))
+        }.value ?? super.accessibilityHitTest(point)
     }
 
     // MARK: - Standard Menu Bar Responder Selectors (native_menu/standard_macos.rs)
