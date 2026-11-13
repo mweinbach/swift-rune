@@ -761,6 +761,34 @@ public final class ScrollBarLiveSlot: @unchecked Sendable {
         return Vec2(r.width, r.height)
     }
 
+    public func pageTargetOffset(
+        along: Float,
+        trackLength: Float,
+        style: KitScrollBarStyle
+    ) -> Float? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .pages(let dir) = pressTracker.activePress else {
+            return nil
+        }
+        let thumb = liveThumb.get()
+        let currentStart = (style.horizontal ? thumb.left : thumb.top) - style.trackStartInset
+        let currentLen = style.horizontal ? thumb.width : thumb.height
+        let stillNeedsPage = dir > 0
+            ? (along >= currentStart + currentLen)
+            : (along <= currentStart)
+        guard stillNeedsPage else {
+            return nil
+        }
+        let step = max(1.0, lastMetrics.viewport * 0.9)
+        let nextOffset = (lastMetrics.offset + Float(dir) * step).clamped(to: 0...lastMetrics.maxScroll)
+        if abs(nextOffset - lastMetrics.offset) < 1e-4 {
+            return nil
+        }
+        lastMetrics.offset = nextOffset
+        return nextOffset
+    }
+
     public func dragIfThumb(
         along: Float,
         windowPoint: Vec2,
@@ -1107,7 +1135,23 @@ extension El {
                 )
                 switch result {
                 case .page(let toward):
-                    tx.scrollPage(viewportKey, Int(toward))
+                    let step = max(1.0, slot.lastMetrics.viewport * 0.9)
+                    let targetOffset = (slot.lastMetrics.offset + Float(toward) * step).clamped(to: 0...slot.lastMetrics.maxScroll)
+                    if let pageOffset = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
+                        tx.scrollTo(
+                            viewportKey,
+                            offset: effectiveStyle.horizontal ? Vec2(pageOffset, 0) : Vec2(0, pageOffset),
+                            animated: true
+                        )
+                    } else if abs(targetOffset - slot.lastMetrics.offset) >= 1e-4 {
+                        tx.scrollTo(
+                            viewportKey,
+                            offset: effectiveStyle.horizontal ? Vec2(targetOffset, 0) : Vec2(0, targetOffset),
+                            animated: true
+                        )
+                    }
+                    tx.dragRepeatAfter(0.30)
+                    tx.liveOnly()
                 case .jump(let nextOffset):
                     tx.scrollTo(
                         viewportKey,
@@ -1120,8 +1164,24 @@ extension El {
                 }
             }
             .onDrag { _, d, tx in
+                let trackDims = (d.size.x > 0 && d.size.y > 0) ? d.size : slot.liveTrackSize()
                 let along = (effectiveStyle.horizontal ? d.local.x : d.local.y) - effectiveStyle.trackStartInset
-                if let nextOffset = slot.dragIfThumb(along: along, windowPoint: d.window, trackSize: d.size, style: effectiveStyle) {
+                if tx.isDragRepeat {
+                    let trackSpan = max(
+                        effectiveStyle.minThumb,
+                        (effectiveStyle.horizontal ? trackDims.x : trackDims.y)
+                            - effectiveStyle.trackStartInset
+                            - effectiveStyle.trackEndInset
+                    )
+                    if let nextPage = slot.pageTargetOffset(along: along, trackLength: trackSpan, style: effectiveStyle) {
+                        tx.scrollTo(
+                            viewportKey,
+                            offset: effectiveStyle.horizontal ? Vec2(nextPage, 0) : Vec2(0, nextPage),
+                            animated: true
+                        )
+                        tx.dragRepeatAfter(0.05)
+                    }
+                } else if let nextOffset = slot.dragIfThumb(along: along, windowPoint: d.window, trackSize: trackDims, style: effectiveStyle) {
                     tx.scrollTo(
                         viewportKey,
                         offset: effectiveStyle.horizontal ? Vec2(nextOffset, 0) : Vec2(0, nextOffset),

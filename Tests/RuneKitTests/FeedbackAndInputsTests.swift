@@ -830,8 +830,7 @@ struct FeedbackAndInputsTests {
         #expect(rt.state.recorder.shortcut == nil)
     }
 
-    @Test("Disabling a focused ShortcutRecorder cancels active capture (tests/shortcut_recorder.rs:90)",
-          .disabled("Blocked on @el: Runtime does not emit PhysicalInput.focusLost or El.onBlur when a focused element becomes disabled(true)"))
+    @Test("Disabling a focused ShortcutRecorder cancels active capture (tests/shortcut_recorder.rs:90)")
     func disablingFocusedRecorderCancelsCapture() throws {
         struct S {
             var recorder = ShortcutRecorderState()

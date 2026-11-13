@@ -324,9 +324,9 @@ public struct Combobox<State> {
                     }
                 }
                 if wasOpen {
-                    tx.focus(triggerKey)
+                    tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                 } else {
-                    tx.focus(searchKey)
+                    tx.focus(searchKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                 }
             }
 
@@ -357,7 +357,7 @@ public struct Combobox<State> {
             .open(open)
             .onCloseTx { s, tx in
                 upd(&s) { $0.close() }
-                tx.focus(triggerKey)
+                tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
             }
 
         guard open else {
@@ -410,7 +410,7 @@ public struct Combobox<State> {
                 }
                 if ev.key == .escape {
                     upd(&s) { $0.close() }
-                    tx.focus(triggerKey)
+                    tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                     return true
                 }
                 if ev.mods.alt || ev.mods.logo {
@@ -423,7 +423,7 @@ public struct Combobox<State> {
                 if ev.key == .enter {
                     let chosenID = act.map { opts[$0].id }
                     upd(&s) { $0.close() }
-                    tx.focus(triggerKey)
+                    tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                     if let chosenID {
                         chooseCb?(&s, chosenID, &tx)
                     }
@@ -521,7 +521,7 @@ public struct Combobox<State> {
             }
             .onChoose { s, id, tx in
                 upd(&s) { $0.close() }
-                tx.focus(triggerKey)
+                tx.focus(triggerKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                 chooseCb?(&s, id, &tx)
             }
             .buildList(kit: k, cx: cx)

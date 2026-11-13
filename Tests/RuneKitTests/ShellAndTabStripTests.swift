@@ -304,15 +304,15 @@ struct ShellAndTabStripTests {
         // Edge hover peeks sidebar over workspace, then toggle re-opens
         let edgeRect = try #require(rt.element(byKey: "sv-peek-edge")).rect
         rt.pointerMove(to: Vec2(edgeRect[0] + 4, edgeRect[1] + 50), at: 0.12)
-        rt.frame(at: 0.13)
+        rt.frame(at: 0.18)
         #expect(rt.state.sidebar.isPeeking)
         #expect(rt.element(byKey: "sv-sidebar-peek") != nil)
 
-        // Move into peek drawer then off it to close peek, then toggle re-opens sidebar
-        rt.pointerMove(to: Vec2(40, 50), at: 0.135)
-        rt.frame(at: 0.136)
-        rt.pointerMove(to: Vec2(400, 200), at: 0.14)
-        rt.frame(at: 0.145)
+        // Move into peek drawer then off it past grace to close peek, then toggle re-opens sidebar
+        rt.pointerMove(to: Vec2(40, 50), at: 0.19)
+        rt.frame(at: 0.20)
+        rt.pointerMove(to: Vec2(400, 200), at: 0.21)
+        rt.frame(at: 0.37)
         #expect(!rt.state.sidebar.isPeeking)
 
         let togRect = try #require(rt.element(byKey: "sv-sidebar-toggle")).rect
@@ -495,11 +495,29 @@ struct ShellAndTabStripTests {
         #expect(!rt.isBareTitlebarDragRegion(at: Vec2(605, 22)))
     }
 
-    @Test(
-        "WindowTitlebar emits OS TitlebarAction on pointer down and double-click zoom",
-        .disabled("Blocked on @el: Runtime.takeTitlebarAction() / TitlebarAction not in main yet")
-    )
-    func windowTitlebarPlatformActionsBlockedOnEl() {}
+    @Test("WindowTitlebar emits OS TitlebarAction on pointer down and double-click zoom")
+    func windowTitlebarPlatformActions() throws {
+        struct S {}
+        let k = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(640, 240), systemDark: false) { _, _ in
+            WindowTitlebar<S>(key: "tb", title: "Docs")
+                .leading(k.button(key: "tb-btn", "Home") { _, _ in })
+                .build(k)
+        }
+        rt.frame(at: 0.0)
+        rt.pointerDown(at: Vec2(320, 14), at: 0.05)
+        #expect(rt.takeTitlebarAction() == .drag)
+        rt.pointerUp(at: Vec2(320, 14), at: 0.06)
+        rt.pointerDown(at: Vec2(320, 14), at: 0.15)
+        #expect(rt.takeTitlebarAction() == .doubleClick)
+        rt.pointerUp(at: Vec2(320, 14), at: 0.16)
+
+        // Pressing interactive child does not trigger bare titlebar drag
+        let btnRect = try #require(rt.element(byKey: "tb-btn")).rect
+        rt.pointerDown(at: Vec2(btnRect[0] + btnRect[2] * 0.5, btnRect[1] + btnRect[3] * 0.5), at: 0.25)
+        #expect(rt.takeTitlebarAction() == nil)
+        rt.pointerUp(at: Vec2(btnRect[0] + btnRect[2] * 0.5, btnRect[1] + btnRect[3] * 0.5), at: 0.26)
+    }
 
     @Test("TabStrip exposes Tab role group, single Tab stop re-entry, and ArrowLeft/Right focus roving")
     func tabStripFocusGroup() throws {
@@ -1111,7 +1129,7 @@ struct ShellAndTabStripTests {
 
         let edgeRect = try #require(rt.element(byKey: "sv-peek-edge")).rect
         rt.pointerMove(to: Vec2(edgeRect[0] + 4, edgeRect[1] + 40), at: 0.08)
-        rt.frame(at: 0.09)
+        rt.frame(at: 0.14)
         #expect(rt.state.sidebar.isPeeking)
         #expect(rt.element(byKey: "sv-pane-surface") != nil)
         let peekEl = try #require(rt.element(byKey: "sv-sidebar-peek"))
@@ -1138,9 +1156,92 @@ struct ShellAndTabStripTests {
         #expect(try #require(rt.element(byKey: "pg-toolbar")).rect[3] == 48.0)
     }
 
-    @Test(
-        "SidebarPeek dwell delays and window-blur cancel (shell_desktop.rs:200-296)",
-        .disabled("Blocked on @el: El.hoverDelays(_:_:) and El.onWindowFocus(_:) do not exist in Sources/Rune/El.swift")
-    )
-    func sidebarPeekDwellAndBlurBlockedOnEl() {}
+    @Test("SidebarPeek dwell delays, hold margin/grace, toggle dock, and window-blur cancel (shell_desktop.rs:200-296)")
+    func sidebarPeekDwellAndBlur() throws {
+        struct S {
+            var sidebar = PaneState(width: 276).range(180, 420).collapsed()
+            var picked = 0
+        }
+        let k = Kit.neutral(dark: false)
+        let peekCfg = SidebarPeek()
+            .edge(16, delay: 0.04)
+            .toggleDelay(0.08)
+            .hold(margin: 15, grace: 0.10)
+        func makeRt() -> Runtime<S> {
+            let rt = Runtime(state: S(), viewport: Vec2(1000, 600), systemDark: false) { s, _ in
+                SplitView<S>(key: "sv") { _ in el().key("workspace").sizeFull() }
+                    .frameInset(8)
+                    .sidebar(\.sidebar, current: s.sidebar) { _ in
+                        col().child(
+                            k.button(key: "row2", "Row 2") { st, _ in st.picked = 2 }
+                        )
+                    }
+                    .sidebarToggle(SidebarToggle<S>().edge(16))
+                    .sidebarPeek(peekCfg)
+                    .toolbar(Toolbar<S>(title: "Main").build(k))
+                    .build(s, kit: k)
+            }
+            var now = 0.0
+            rt.frame(at: now)
+            for _ in 0..<60 { now += 1.0 / 60.0; rt.frame(at: now) }
+            return rt
+        }
+
+        // 1. Edge dwell (40ms) -> peeks; titlebar band & quick pass don't peek; hold margin & 100ms grace
+        let rt1 = makeRt()
+        var t = 2.0
+        rt1.pointerMove(to: Vec2(12, 40), at: t)
+        t += 0.2; rt1.frame(at: t)
+        #expect(!rt1.state.sidebar.isPeeking, "titlebar band does not peek")
+
+        rt1.pointerMove(to: Vec2(12, 300), at: t)
+        t += 0.02; rt1.frame(at: t)
+        rt1.pointerMove(to: Vec2(400, 300), at: t)
+        t += 0.2; rt1.frame(at: t)
+        #expect(!rt1.state.sidebar.isPeeking, "quick pass shorter than 40ms does not peek")
+
+        rt1.pointerMove(to: Vec2(12, 300), at: t)
+        t += 0.03; rt1.frame(at: t)
+        #expect(!rt1.state.sidebar.isPeeking, "not before 40ms")
+        t += 0.02; rt1.frame(at: t)
+        #expect(rt1.state.sidebar.isPeeking, "after resting 40ms")
+        t += 0.5; rt1.frame(at: t)
+
+        let rowRect = try #require(rt1.element(byKey: "row2")).rect
+        let rx = rowRect[0] + rowRect[2] * 0.5
+        let ry = rowRect[1] + rowRect[3] * 0.5
+        rt1.pointerMove(to: Vec2(rx, ry), at: t)
+        rt1.pointerDown(at: Vec2(rx, ry), at: t + 0.005)
+        rt1.pointerUp(at: Vec2(rx, ry), at: t + 0.01)
+        t += 0.02; rt1.frame(at: t)
+        #expect(rt1.state.picked == 2)
+        #expect(rt1.state.sidebar.isPeeking)
+
+        rt1.pointerMove(to: Vec2(276 + 10, 300), at: t)
+        t += 0.2; rt1.frame(at: t)
+        #expect(rt1.state.sidebar.isPeeking, "kept within 15pt hold margin")
+
+        rt1.pointerMove(to: Vec2(600, 300), at: t)
+        t += 0.09; rt1.frame(at: t)
+        #expect(rt1.state.sidebar.isPeeking, "kept within 100ms leave grace")
+        t += 0.02; rt1.frame(at: t)
+        #expect(!rt1.state.sidebar.isPeeking && !rt1.state.sidebar.isOpen)
+
+        // 2. Toggle dwell (80ms) peeks & clicking docks
+        let rt2 = makeRt()
+        var t2 = 2.0
+        let tog = try #require(rt2.element(byKey: "sv-sidebar-toggle")).rect
+        let tx = tog[0] + tog[2] * 0.5
+        let ty = tog[1] + tog[3] * 0.5
+        rt2.pointerMove(to: Vec2(tx, ty), at: t2)
+        t2 += 0.07; rt2.frame(at: t2)
+        #expect(!rt2.state.sidebar.isPeeking, "not before 80ms")
+        t2 += 0.02; rt2.frame(at: t2)
+        #expect(rt2.state.sidebar.isPeeking, "after resting 80ms on toggle")
+
+        // 3. Window blur cancels peek
+        rt2.windowFocus(false, at: t2 + 0.01)
+        rt2.frame(at: t2 + 0.02)
+        #expect(!rt2.state.sidebar.isPeeking, "window losing focus ends peek")
+    }
 }

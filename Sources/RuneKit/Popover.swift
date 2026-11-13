@@ -421,7 +421,7 @@ public struct Popover<State> {
                 variant: .ghost
             ) { s, tx in
                 closeHandler?(&s, &tx)
-                tx.focus(returnKey)
+                tx.focus(returnKey, focusVisible: tx.byKeys || tx.isFocusVisible)
             }.key("close")
             closeBtn = closeBtn.size(20, 20)
             content = content.child(
@@ -463,14 +463,14 @@ public struct Popover<State> {
                 .hFull()
                 .onClick { s, tx in
                     close(&s, &tx)
-                    tx.focus(returnKey)
+                    tx.focus(returnKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                 }
                 .focusable(false)
             content = content
                 .onKey { s, ev, tx in
                     if ev.key == .escape {
                         close(&s, &tx)
-                        tx.focus(returnKey)
+                        tx.focus(returnKey, focusVisible: tx.byKeys || tx.isFocusVisible)
                         return true
                     }
                     return false

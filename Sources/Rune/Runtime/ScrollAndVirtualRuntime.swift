@@ -23,6 +23,8 @@ extension Runtime {
             tx.setCurrentTextSelection(sel)
         }
         tx.button = button
+        tx.runtimeActions["focusVisible"] = focusVisible
+        tx.runtimeActions["byKeys"] = kitHooks.isDispatchingByKeys
         return tx
     }
 
@@ -1150,18 +1152,25 @@ extension Runtime {
                 }
             }
 
-            if let onScrollOffset = node.el.handlers.onScrollOffset {
-                let pos = ScrollPos(
-                    offset: cur,
-                    max: maxExt,
-                    viewport: vp,
-                    drawn: Vec2(node.targetRect.width, node.targetRect.height)
-                )
-                if lastScrollOffsetReports[path] != pos {
-                    lastScrollOffsetReports[path] = pos
-                    dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
-                }
-            }
+            dispatchScrollOffsetObserverIfChanged(for: node)
+        }
+    }
+
+    internal func dispatchScrollOffsetObserverIfChanged(for node: FlatNode) {
+        guard let onScrollOffset = node.el.handlers.onScrollOffset else { return }
+        let path = node.path
+        let cur = scrollOffsets[path] ?? .zero
+        let maxExt = scrollMaxExtents[path] ?? .zero
+        let vp = scrollViewportSizes[path] ?? Vec2(node.targetRect.width, node.targetRect.height)
+        let pos = ScrollPos(
+            offset: cur,
+            max: maxExt,
+            viewport: vp,
+            drawn: Vec2(node.targetRect.width, node.targetRect.height)
+        )
+        if lastScrollOffsetReports[path] != pos {
+            lastScrollOffsetReports[path] = pos
+            dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
         }
     }
 

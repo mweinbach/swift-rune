@@ -389,7 +389,7 @@ public struct ShortcutRecorder<State> {
         let errorText: String? = rec.error.map { err in
             errorFormatter?(err, rec.refusedChord) ?? err.defaultMessage(for: rec.refusedChord)
         }
-        var elTree: El<State> = kit.shortcutRecorder(
+        return kit.shortcutRecorder(
             key: key,
             state: rec,
             label: label,
@@ -405,54 +405,47 @@ public struct ShortcutRecorder<State> {
                     onChange?(&s, chord)
                 }
                 s[keyPath: stateKeyPath] = recCopy
-            }
-        )
-        // Keep focusLost wired even when disabled so focus loss cancels an active capture
-        // while ignoring all other physical inputs (matching crates/rune-kit/src/shortcut_recorder.rs:235-236).
-        elTree = elTree.onPhysicalInput { s, ev, tx in
-            if disabled {
-                if case .focusLost = ev {} else { return false }
-            }
-            guard let mapped = Self.mapPhysicalInput(ev) else { return false }
-            var recCopy = s[keyPath: stateKeyPath]
-            let wasRecording = recCopy.isRecording
-            let handled = recCopy.handleWithValidator(
-                mapped,
-                allowUnmodified: allowUnmodified
-            ) { chord in
-                onChange?(&s, chord)
-            }
-            s[keyPath: stateKeyPath] = recCopy
-            if wasRecording && !recCopy.isRecording {
-                tx.blur()
-            }
-            return handled
-        }
-        if !disabled {
-            elTree = elTree
-                .focusable(true)
-                .onKey { s, ev, tx in
-                    guard let event = Self.mapKeyEvent(ev) else { return false }
-                    var recCopy = s[keyPath: stateKeyPath]
-                    let wasRecording = recCopy.isRecording
-                    if case .capturing(let err, let ref, _) = recCopy.phase {
-                        // El.onKey only delivers keyDown (never keyUp).
-                        recCopy.phase = .capturing(error: err, refused: ref, finishing: nil)
+            },
+            controlTransform: { control in
+                // Keep focusLost wired on the focusable control even when disabled so disabling a focused
+                // recorder cancels an active capture while ignoring all other physical inputs
+                // (matching crates/rune-kit/src/shortcut_recorder.rs:235-236).
+                var out = control.onPhysicalInput { s, ev, tx in
+                    if disabled {
+                        if case .focusLost = ev {} else { return false }
                     }
+                    guard let mapped = Self.mapPhysicalInput(ev) else { return false }
+                    var recCopy = s[keyPath: stateKeyPath]
                     let handled = recCopy.handleWithValidator(
-                        event,
+                        mapped,
                         allowUnmodified: allowUnmodified
                     ) { chord in
                         onChange?(&s, chord)
                     }
                     s[keyPath: stateKeyPath] = recCopy
-                    if wasRecording && !recCopy.isRecording {
-                        tx.blur()
-                    }
                     return handled
                 }
-        }
-        return elTree
+                if !disabled {
+                    out = out.onKey { s, ev, _ in
+                        guard let event = Self.mapKeyEvent(ev) else { return false }
+                        var recCopy = s[keyPath: stateKeyPath]
+                        if case .capturing(let err, let ref, _) = recCopy.phase {
+                            // El.onKey only delivers keyDown (never keyUp).
+                            recCopy.phase = .capturing(error: err, refused: ref, finishing: nil)
+                        }
+                        let handled = recCopy.handleWithValidator(
+                            event,
+                            allowUnmodified: allowUnmodified
+                        ) { chord in
+                            onChange?(&s, chord)
+                        }
+                        s[keyPath: stateKeyPath] = recCopy
+                        return handled
+                    }
+                }
+                return out
+            }
+        )
     }
 
     static func mapModifiers(_ mods: Mods) -> ShortcutModifiers {
@@ -665,7 +658,8 @@ extension Kit {
         disabled: Bool = false,
         errorText: String? = nil,
         onBegin: @escaping (inout State) -> Void,
-        onClear: ((inout State) -> Void)? = nil
+        onClear: ((inout State) -> Void)? = nil,
+        controlTransform: ((El<State>) -> El<State>)? = nil
     ) -> El<State> {
         let caps = state.keycaps
         let placeholder = state.isRecording ? "Press shortcut" : "Record shortcut"
@@ -728,6 +722,10 @@ extension Kit {
             control = control
                 .focusRing(c.borderFocus, offset: 2.0)
                 .onClick { s in onBegin(&s) }
+        }
+
+        if let controlTransform {
+            control = controlTransform(control)
         }
 
         var root: El<State> = col().key("\(key)-field").gap(4).child(control)
