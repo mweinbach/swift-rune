@@ -512,19 +512,16 @@ extension Runtime {
             return found
         }
 
-        func walk(
+        // Iterative traversal + `@inline(never)` keep `-Onone` stack frames small on deep trees (avoiding 512KB Cooperative thread SIGBUS).
+        @inline(never)
+        func stepGrowthNode(
             el: El<State>,
             res: LayoutEngine.ResultNode,
-            parentPath: String,
-            siblingIndex: Int,
-            siblingKeysSeen: inout [String: Int],
+            path: String,
             inGrowthSpec: GrowthSpec?,
             parentStackPath: String?,
             enclosingScrollPath: String?
-        ) {
-            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
-            let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
-
+        ) -> String? {
             var ownStackPath = parentStackPath
             if el.growthSpec != nil {
                 seenStackPaths.insert(path)
@@ -670,37 +667,58 @@ extension Runtime {
                     )
                 }
             }
+            return ownStackPath
+        }
 
-            let nextGrowth = el.growthSpec
-            let nextScrollPath = el.layout.scrollAxes.isEmpty ? enclosingScrollPath : path
-            if !el.children.isEmpty && el.children.count == res.children.count {
+        let rootPath = rootEl.keyId.map { "/@\($0)" } ?? "/0"
+        var workStack: [(
+            el: El<State>,
+            res: LayoutEngine.ResultNode,
+            path: String,
+            inGrowthSpec: GrowthSpec?,
+            parentStackPath: String?,
+            enclosingScrollPath: String?
+        )] = [
+            (
+                el: rootEl,
+                res: rootResult,
+                path: rootPath,
+                inGrowthSpec: nil,
+                parentStackPath: nil,
+                enclosingScrollPath: nil
+            )
+        ]
+        while let item = workStack.popLast() {
+            let ownStackPath = stepGrowthNode(
+                el: item.el,
+                res: item.res,
+                path: item.path,
+                inGrowthSpec: item.inGrowthSpec,
+                parentStackPath: item.parentStackPath,
+                enclosingScrollPath: item.enclosingScrollPath
+            )
+            let nextGrowth = item.el.growthSpec
+            let nextScrollPath = item.el.layout.scrollAxes.isEmpty ? item.enclosingScrollPath : item.path
+            if !item.el.children.isEmpty && item.el.children.count == item.res.children.count {
                 var childSeen: [String: Int] = [:]
-                for i in 0..<el.children.count {
-                    walk(
-                        el: el.children[i],
-                        res: res.children[i],
-                        parentPath: path,
-                        siblingIndex: i,
-                        siblingKeysSeen: &childSeen,
+                var childPaths: [String] = []
+                childPaths.reserveCapacity(item.el.children.count)
+                for i in 0..<item.el.children.count {
+                    let (seg, _) = layoutPathSegment(keyId: item.el.children[i].keyId, siblingIndex: i, siblingKeysSeen: &childSeen)
+                    childPaths.append("\(item.path)/\(seg)")
+                }
+                for i in (0..<item.el.children.count).reversed() {
+                    workStack.append((
+                        el: item.el.children[i],
+                        res: item.res.children[i],
+                        path: childPaths[i],
                         inGrowthSpec: nextGrowth,
                         parentStackPath: ownStackPath,
                         enclosingScrollPath: nextScrollPath
-                    )
+                    ))
                 }
             }
         }
-
-        var rootSeen: [String: Int] = [:]
-        walk(
-            el: rootEl,
-            res: rootResult,
-            parentPath: "",
-            siblingIndex: 0,
-            siblingKeysSeen: &rootSeen,
-            inGrowthSpec: nil,
-            parentStackPath: nil,
-            enclosingScrollPath: nil
-        )
         growthRows = growthRows.filter { seenGrowthKeys.contains($0.key) }
         growthStacks = growthStacks.compactMap { (k, v) -> (String, RuntimeGrowthStackState)? in
             guard seenStackPaths.contains(k) else { return nil }
