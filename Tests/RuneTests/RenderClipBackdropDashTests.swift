@@ -1,0 +1,728 @@
+import Foundation
+import Testing
+@testable import Rune
+import RuneMotion
+import RuneRef
+
+#if canImport(Metal) && canImport(QuartzCore)
+import Metal
+import QuartzCore
+
+@Suite("Render Clip, Backdrop, Alpha & BorderDash Parity Tests")
+struct RenderClipBackdropDashTests {
+    private func sampleRGBA(_ frame: Frame, x: Int, y: Int) -> (r: UInt8, g: UInt8, b: UInt8, a: UInt8) {
+        let cx = max(0, min(frame.width - 1, x))
+        let cy = max(0, min(frame.height - 1, y))
+        let off = (cy * frame.width + cx) * 4
+        return (frame.rgba[off], frame.rgba[off + 1], frame.rgba[off + 2], frame.rgba[off + 3])
+    }
+
+    private func stripes<State>(_ w: Float, _ h: Float, stripeWidth: Float = 4) -> El<State> {
+        let count = Int(ceil(w / stripeWidth))
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let blue = Color(r: 0, g: 0, b: 1, a: 1)
+        return row().size(w, h).children(
+            (0..<count).map { i in
+                el().size(stripeWidth, h).bg(i.isMultiple(of: 2) ? red : blue)
+            }
+        )
+    }
+
+    // MARK: - Group 1: tests/clip.rs (6 tests)
+
+    /// Upstream: `crates/rune/tests/clip.rs:37` `overflowing_scroll_content_stays_inside_the_box_as_it_scrolls`
+    @Test("clip.rs:37 overflowing_scroll_content_stays_inside_the_box_as_it_scrolls")
+    func overflowingScrollContentStaysInsideBoxAsItScrolls() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40).bg(.black)
+                .child(
+                    col().key("scroll").size(20, 20).scrollY().scrollEdgeFade(0).clip()
+                        .child(el().key("tall").size(20, 80).bg(red))
+                )
+        }
+        rt.clearColor = .black
+
+        let rf0 = rt.renderFrame(at: 0.0)
+        // Tall child primitive is clipped tightly to [0, 0, 20, 20] and has no unrequested fade (fade.z == 0)
+        let tallInst0 = try #require(rf0.instances.last(where: { $0.params.y == KIND_RECT && $0.fill.x > 0.9 }))
+        #expect(tallInst0.clip == SIMD4<Float>(0, 0, 20, 20))
+        #expect(tallInst0.fade.z == 0)
+
+        let img0 = try renderer.renderOffscreen(rf0)
+        #expect(sampleRGBA(img0, x: 10, y: 10).r > 240)
+        #expect(sampleRGBA(img0, x: 10, y: 10).g < 10)
+        #expect(sampleRGBA(img0, x: 30, y: 10).r < 10)
+        #expect(sampleRGBA(img0, x: 10, y: 30).r < 10)
+
+        // Scroll down and verify content remains strictly clipped to [0, 0, 20, 20]
+        rt.wheel(WheelEvent(dx: 0, dy: -20), at: Vec2(10, 10), now: 0.1)
+        let rf1 = rt.renderFrame(at: 0.1)
+        let tallInst1 = try #require(rf1.instances.last(where: { $0.params.y == KIND_RECT && $0.fill.x > 0.9 }))
+        #expect(tallInst1.clip == SIMD4<Float>(0, 0, 20, 20))
+        #expect(tallInst1.rect.y < -0.5)
+
+        let img1 = try renderer.renderOffscreen(rf1)
+        #expect(sampleRGBA(img1, x: 10, y: 10).r > 240)
+        #expect(sampleRGBA(img1, x: 30, y: 10).r < 10)
+        #expect(sampleRGBA(img1, x: 10, y: 30).r < 10)
+    }
+
+    /// Upstream: `crates/rune/tests/clip.rs:64` `a_press_outside_the_box_misses_clipped_content`
+    @Test("clip.rs:64 a_press_outside_the_box_misses_clipped_content")
+    func pressOutsideBoxMissesClippedContent() {
+        struct S { var hits = 0 }
+        let rt = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40)
+                .child(
+                    col().size(20, 20).clip()
+                        .child(
+                            col().size(40, 40)
+                                .child(
+                                    el().key("btn").size(40, 40)
+                                        .onClick { s, _ in s.hits += 1 }
+                                )
+                        )
+                )
+        }
+        _ = rt.frame(at: 0.0)
+        #expect(rt.element(byKey: "btn")?.visible == [0, 0, 20, 20])
+
+        // Press inside the 20x20 clip box hits
+        rt.pointerMove(to: Vec2(10, 10), at: 0.01)
+        rt.pointerDown(at: Vec2(10, 10), button: .primary, at: 0.01)
+        rt.pointerUp(at: Vec2(10, 10), button: .primary, at: 0.02)
+        #expect(rt.state.hits == 1)
+
+        // Press at (30, 10): inside child's 40x40 layout rect, but outside parent's 20x20 clip -> must miss
+        rt.pointerMove(to: Vec2(30, 10), at: 0.03)
+        rt.pointerDown(at: Vec2(30, 10), button: .primary, at: 0.03)
+        rt.pointerUp(at: Vec2(30, 10), button: .primary, at: 0.04)
+        #expect(rt.state.hits == 1)
+    }
+
+    /// Upstream: `crates/rune/tests/clip.rs:78` `an_explicit_soft_clip_still_wins`
+    @Test("clip.rs:78 an_explicit_soft_clip_still_wins")
+    func explicitSoftClipStillWins() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40).bg(.black)
+                .child(
+                    col().size(24, 24).clip().clipSoft(6)
+                        .child(el().size(24, 60).bg(red))
+                )
+        }
+        rt.clearColor = .black
+
+        let rf = rt.renderFrame(at: 0.0)
+        // Look at the packed fade on the soft-clipped layer/instance: all 4 edges preserve explicit fade width 6
+        let faded = try #require(rf.instances.first(where: { $0.fade.z != 0 || ($0.fade.x != 0 || $0.fade.y != 0) }))
+        let decoded = unpackFade(faded.fade)
+        #expect(abs(decoded.width.x - 6.0) < 0.25)
+        #expect(abs(decoded.width.y - 6.0) < 0.25)
+        #expect(abs(decoded.width.z - 6.0) < 0.25)
+        #expect(abs(decoded.width.w - 6.0) < 0.25)
+
+        let img = try renderer.renderOffscreen(rf)
+        // Edge pixel at (1, 12) is attenuated below center (12, 12)
+        let edgePx = sampleRGBA(img, x: 1, y: 12)
+        let midPx = sampleRGBA(img, x: 12, y: 12)
+        #expect(edgePx.r > 0 && edgePx.r < 120)
+        #expect(midPx.r > 240)
+        // Outside box stays black
+        #expect(sampleRGBA(img, x: 30, y: 12).r < 5)
+    }
+
+    /// Upstream: `crates/rune/tests/clip.rs:90` `packed_fades_survive_group_layer_projection_without_double_application`
+    @Test("clip.rs:90 packed_fades_survive_group_layer_projection_without_double_application")
+    func packedFadesSurviveGroupLayerProjectionWithoutDoubleApplication() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+
+        for (scale, rounded): (Float, Float) in [(1.0, 0.0), (1.0, 10.0), (2.0, 0.0), (2.0, 10.0)] {
+            // 1. Group layer (opacity 0.5 with multiple children so KIND_LAYER stays isolated) inside faded ancestor
+            let rtLayer = Runtime<S>(state: S(), viewport: Vec2(64, 64), pixelScale: scale) { _, _ in
+                var outer: El<S> = col().size(48, 48).clip().clipFade(left: 16)
+                if rounded > 0 { outer = outer.clipRounded(rounded) }
+                return col().size(64, 64).bg(.black)
+                    .child(
+                        outer.child(
+                            col().size(48, 48).opacity(0.5)
+                                .children([
+                                    el().size(48, 24).bg(.white),
+                                    el().size(48, 24).bg(.white),
+                                ])
+                        )
+                    )
+            }
+            rtLayer.clearColor = .black
+
+            // 2. Direct single-fade baseline without nested opacity group wrapper
+            let rtDirect = Runtime<S>(state: S(), viewport: Vec2(64, 64), pixelScale: scale) { _, _ in
+                var outer: El<S> = col().size(48, 48).clip().clipFade(left: 16)
+                if rounded > 0 { outer = outer.clipRounded(rounded) }
+                return col().size(64, 64).bg(.black)
+                    .child(
+                        outer.children([
+                            el().size(48, 24).bg(Color.white.alpha(0.5)),
+                            el().size(48, 24).bg(Color.white.alpha(0.5)),
+                        ])
+                    )
+            }
+            rtDirect.clearColor = .black
+
+            let rfLayer = rtLayer.renderFrame(at: 0.0)
+            // Verify packed fade stays on outer scope and inner primitives inside KIND_LAYER do not re-apply it
+            var layerDepth = 0
+            var sawLayerWithFade = false
+            for inst in rfLayer.instances {
+                if inst.params.y == KIND_LAYER {
+                    if unpackFade(inst.fade).width.x > 1.0 {
+                        sawLayerWithFade = true
+                    }
+                    layerDepth += 1
+                } else if inst.params.y == KIND_LAYER_END {
+                    layerDepth = max(0, layerDepth - 1)
+                } else if layerDepth >= 2 && inst.params.y == KIND_RECT {
+                    #expect(unpackFade(inst.fade).width == .zero)
+                }
+            }
+            #expect(sawLayerWithFade)
+
+            let imgLayer = try renderer.renderOffscreen(rfLayer)
+            let imgDirect = try renderer.renderOffscreen(rtDirect.renderFrame(at: 0.0))
+
+            // Sample along horizontal mid-line inside the 16pt left fade zone
+            for xPt in [4, 8, 12, 24] {
+                let px = Int((Float(xPt) * scale).rounded())
+                let py = Int((24.0 * scale).rounded())
+                let a = sampleRGBA(imgLayer, x: px, y: py)
+                let b = sampleRGBA(imgDirect, x: px, y: py)
+                #expect(abs(Int(a.r) - Int(b.r)) <= 3, "scale=\(scale) rounded=\(rounded) x=\(xPt): layer=\(a.r) vs direct=\(b.r)")
+            }
+        }
+    }
+
+    /// Upstream: `crates/rune/tests/clip.rs:122` `narrower_nested_edge_and_streaming_mask_survive_outer_fades`
+    @Test("clip.rs:122 narrower_nested_edge_and_streaming_mask_survive_outer_fades")
+    func narrowerNestedEdgeAndStreamingMaskSurviveOuterFades() throws {
+        let renderer = try MetalRenderer()
+
+        // Part A: Narrower inner clipFade survives outer clipFade without getting erased
+        struct ClipS {}
+        let rtNested = Runtime<ClipS>(state: ClipS(), viewport: Vec2(80, 60), pixelScale: 1.0) { _, _ in
+            col().size(80, 60).bg(.black)
+                .child(
+                    col().size(80, 60).clip().clipFade(left: 24)
+                        .child(
+                            col().size(60, 60).clip().clipFade(top: 10)
+                                .child(el().size(60, 60).bg(.white))
+                        )
+                )
+        }
+        rtNested.clearColor = .black
+        let rfNested = rtNested.renderFrame(at: 0.0)
+        // Outer fade (left: 24) and narrower inner fade (top: 10) must BOTH appear across instances/layers
+        let widths = rfNested.instances.map { unpackFade($0.fade).width }
+        #expect(widths.contains(where: { abs($0.x - 24.0) < 0.5 }))
+        #expect(widths.contains(where: { abs($0.y - 10.0) < 0.5 }))
+
+        let imgNested = try renderer.renderOffscreen(rfNested)
+        // (40, 2) is inside outer non-faded x-range [24..80] but inside inner top fade [0..10] -> attenuated
+        #expect(sampleRGBA(imgNested, x: 40, y: 2).r < 120)
+        // (6, 30) is inside outer left fade [0..24] -> attenuated
+        #expect(sampleRGBA(imgNested, x: 6, y: 30).r < 120)
+        // (40, 30) is clear of both fades -> bright white
+        #expect(sampleRGBA(imgNested, x: 40, y: 30).r > 245)
+
+        // Part B: Streaming/growth feather row inside an outer clipFade preserves both streaming mask & outer fade
+        struct StreamS { var h: Float = 20 }
+        let rtStream = Runtime<StreamS>(state: StreamS(), viewport: Vec2(120, 80), pixelScale: 1.0) { s, _ in
+            col().size(120, 80).bg(.black)
+                .child(
+                    col().size(120, 80).clip().clipFade(left: 20)
+                        .child(
+                            col().size(120, 80).growth(GrowthSpec(spring: MotionTokens.SNAP, edge: .feather))
+                                .child(el().key("row").size(120, s.h).streaming().bg(.white))
+                        )
+                )
+        }
+        _ = rtStream.frame(at: 0.0)
+        rtStream.update(at: 0.01) { s, _ in s.h = 60 }
+        let streamScene = rtStream.frame(at: 0.03)
+        let streamRF = rtStream.renderFrame(at: 0.03)
+        // Outer fade (left: 20 -> invSpan 0.05 in RefScene, width 20 in RenderFrame) + growth animation active
+        let hasOuterLeftFade = streamScene.primitives.contains { abs($0.fade.z - 0.05) < 0.005 && $0.fade.x == 1.0 }
+            && streamRF.instances.contains { abs(unpackFade($0.fade).width.x - 20.0) < 0.5 }
+        let hasGrowthFade = streamScene.primitives.contains { $0.fade.z > 0.01 && $0.fade.y < -0.5 }
+        #expect(hasOuterLeftFade)
+        #expect(hasGrowthFade || rtStream.isAnimating)
+    }
+
+    /// Upstream: `crates/rune/tests/clip.rs:204` `a_linear_fade_falls_in_proportion_to_distance_from_the_edge`
+    @Test("clip.rs:204 a_linear_fade_falls_in_proportion_to_distance_from_the_edge")
+    func linearFadeFallsInProportionToDistanceFromEdge() throws {
+        let renderer = try MetalRenderer()
+
+        // 1. CPU RefScene path via Runtime.frame(at:)
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(60, 20), pixelScale: 1.0) { _, _ in
+            col().size(60, 20).bg(.black)
+                .child(
+                    col().size(60, 20).clip().clipFadeLinear(left: 20)
+                        .child(el().size(60, 20).bg(.white))
+                )
+        }
+        rt.clearColor = .black
+        let scene = rt.frame(at: 0.0)
+        // RefScene encodes directional linear fade [dirX=1, dirY=0, invSpan=1/20, minAlpha=0]
+        #expect(scene.primitives.contains { abs($0.fade.z - 0.05) < 0.002 && $0.fade.x == 1.0 })
+        let cpuImg = try RuneRef.render(scene)
+        // Pixel centers at x = 3 (3.5/20), 9 (9.5/20), 15 (15.5/20) must be linear (NOT smoothstep)
+        let c3 = cpuImg.pixel(x: 3, y: 10).x
+        let c9 = cpuImg.pixel(x: 9, y: 10).x
+        let c15 = cpuImg.pixel(x: 15, y: 10).x
+        let c30 = cpuImg.pixel(x: 30, y: 10).x
+        #expect(c3 > 30 && c3 < 70) // ~45 in linear (~0.175 * 255) vs smoothstep (~21)
+        #expect(abs(Int(c9) - 121) < 12)
+        #expect(c15 > 180 && c15 < 220) // ~198 in linear vs smoothstep (~223)
+        #expect(c30 > 250)
+
+        // 2. Metal GPU clip_ramp linear path via packFade(width: -20)
+        let rect = SIMD4<Float>(0, 0, 60, 20)
+        let packedLinear = packFade(
+            width: SIMD4<Float>(-20, 0, 0, 0),
+            origin: SIMD4<Float>(0, 0, 60, 20),
+            clip: SIMD4<Float>(0, 0, 60, 20)
+        )
+        #expect(abs(unpackFade(packedLinear).width.x - (-20.0)) < 0.05)
+
+        let rf = RenderFrame(
+            width: 60,
+            height: 20,
+            srgbBlend: true,
+            clearColor: SIMD4<Float>(0, 0, 0, 1),
+            glyphs: GlyphAtlas().compositedAtlas(),
+            glyphGeneration: 0,
+            images: RGBA8Atlas(),
+            imageRevision: 0,
+            instances: [
+                RenderInstance(
+                    rect: rect,
+                    fill: SIMD4<Float>(1, 1, 1, 1),
+                    params: SIMD4<Float>(0, KIND_RECT, 0, 1),
+                    clip: rect,
+                    fade: packedLinear
+                )
+            ]
+        )
+        let gpuImg = try renderer.renderOffscreen(rf)
+        let g3 = sampleRGBA(gpuImg, x: 3, y: 10).r
+        let g9 = sampleRGBA(gpuImg, x: 9, y: 10).r
+        let g15 = sampleRGBA(gpuImg, x: 15, y: 10).r
+        let g30 = sampleRGBA(gpuImg, x: 30, y: 10).r
+        #expect(abs(Double(g3) - 255.0 * (3.5 / 20.0)) < 4.0)
+        #expect(abs(Double(g9) - 255.0 * (9.5 / 20.0)) < 4.0)
+        #expect(abs(Double(g15) - 255.0 * (15.5 / 20.0)) < 4.0)
+        #expect(g30 == 255)
+    }
+
+    // MARK: - Group 2: tests/backdrop_blur.rs (4) + backdrop_tests.rs:7 + surface_alpha.rs:14 (6 tests)
+
+    /// Upstream: `crates/rune/tests/backdrop_blur.rs:103` `without_backdrop_blur_the_frame_is_unchanged`
+    @Test("backdrop_blur.rs:103 without_backdrop_blur_the_frame_is_unchanged")
+    func withoutBackdropBlurFrameIsUnchanged() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let tint = Color(r: 0, g: 1, b: 0, a: 0.4)
+        let rtZero = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40)
+                .child(stripes(40, 40))
+                .child(el().size(20, 20).absolute(x: 10, y: 10).bg(tint).backdropBlur(0))
+        }
+        let rtNone = Runtime<S>(state: S(), viewport: Vec2(40, 40), pixelScale: 1.0) { _, _ in
+            col().size(40, 40)
+                .child(stripes(40, 40))
+                .child(el().size(20, 20).absolute(x: 10, y: 10).bg(tint))
+        }
+        let rfZero = rtZero.renderFrame(at: 0.0)
+        let rfNone = rtNone.renderFrame(at: 0.0)
+        #expect(!rfZero.instances.contains { $0.params.y == KIND_BACKDROP_BLUR })
+        #expect(rfZero.instances == rfNone.instances)
+
+        let imgZero = try renderer.renderOffscreen(rfZero)
+        let imgNone = try renderer.renderOffscreen(rfNone)
+        #expect(imgZero.rgba == imgNone.rgba)
+    }
+
+    /// Upstream: `crates/rune/tests/backdrop_blur.rs:113` `two_bars_each_blur_their_own_backdrop`
+    @Test("backdrop_blur.rs:113 two_bars_each_blur_their_own_backdrop")
+    func twoBarsEachBlurTheirOwnBackdrop() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(120, 60), pixelScale: 1.0) { _, _ in
+            col().size(120, 60)
+                .child(stripes(120, 60))
+                .child(el().size(36, 40).absolute(x: 8, y: 10).rounded(6).backdropBlur(12))
+                .child(el().size(36, 40).absolute(x: 76, y: 10).rounded(6).backdropBlur(12))
+        }
+        let rf = rt.renderFrame(at: 0.0)
+        let blurs = rf.instances.filter { $0.params.y == KIND_BACKDROP_BLUR }
+        #expect(blurs.count == 2)
+
+        let img = try renderer.renderOffscreen(rf)
+        // Both blurred bars blend adjacent red+blue stripes into purple
+        let leftBar = sampleRGBA(img, x: 26, y: 30)
+        let rightBar = sampleRGBA(img, x: 94, y: 30)
+        #expect(leftBar.r > 40 && leftBar.b > 40)
+        #expect(rightBar.r > 40 && rightBar.b > 40)
+        // Unblurred stripe gap at x=57 (stripe 14, even -> red) stays crisp pure red
+        let gapPx = sampleRGBA(img, x: 57, y: 30)
+        #expect(gapPx.r > 230 && gapPx.b < 15)
+    }
+
+    /// Upstream: `crates/rune/tests/backdrop_blur.rs:136` `a_faded_bar_blurs_the_window_not_its_own_layer`
+    @Test("backdrop_blur.rs:136 a_faded_bar_blurs_the_window_not_its_own_layer")
+    func fadedBarBlursWindowNotOwnLayer() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(80, 60), pixelScale: 1.0) { _, _ in
+            col().size(80, 60)
+                .child(stripes(80, 60))
+                .child(
+                    el().size(40, 40).absolute(x: 20, y: 10)
+                        .rounded(6)
+                        .opacity(0.5)
+                        .backdropBlur(12)
+                        .bg(Color(r: 0, g: 1, b: 0, a: 0.1))
+                )
+        }
+        let rf = rt.renderFrame(at: 0.0)
+        let blurIdx = try #require(rf.instances.firstIndex(where: { $0.params.y == KIND_BACKDROP_BLUR }))
+        // Backdrop blur instance is emitted at top-level (before or outside any layer for the bar itself) with opacity 0.5
+        #expect(abs(rf.instances[blurIdx].fill.w - 0.5) < 0.05)
+        if let layerIdx = rf.instances.firstIndex(where: { $0.params.y == KIND_LAYER }) {
+            #expect(blurIdx < layerIdx)
+        }
+
+        let img = try renderer.renderOffscreen(rf)
+        // Center of faded blurred bar must still show blurred red/blue stripes from window behind, not transparent black
+        let center = sampleRGBA(img, x: 40, y: 30)
+        #expect(center.r > 30 && center.b > 30)
+    }
+
+    /// Upstream: `crates/rune/tests/backdrop_blur.rs:191` `scrolled_content_changes_the_blur_and_a_still_frame_stays_idle`
+    @Test("backdrop_blur.rs:191 scrolled_content_changes_the_blur_and_a_still_frame_stays_idle")
+    func scrolledContentChangesBlurAndStillFrameStaysIdle() throws {
+        let renderer = try MetalRenderer()
+        struct S {}
+        let red = Color(r: 1, g: 0, b: 0, a: 1)
+        let blue = Color(r: 0, g: 0, b: 1, a: 1)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(80, 80), pixelScale: 1.0) { _, _ in
+            col().size(80, 80)
+                .child(
+                    col().key("list").size(80, 80).scrollY().scrollEdgeFade(0).clip()
+                        .children([
+                            el().size(80, 40).bg(red),
+                            el().size(80, 80).bg(blue),
+                        ])
+                )
+                .child(
+                    el().size(80, 32).absolute(x: 0, y: 0)
+                        .backdropBlur(12)
+                        .bg(Color.white.alpha(0.05))
+                )
+        }
+
+        let rf0 = rt.renderFrame(at: 0.0)
+        let commitsAfter0 = rt.viewCommitCount
+        #expect(rt.hasPendingCommit == false)
+        #expect(rt.isAnimating == false)
+        let img0 = try renderer.renderOffscreen(rf0)
+        let pxBefore = sampleRGBA(img0, x: 40, y: 16)
+        #expect(pxBefore.r > pxBefore.b)
+
+        // Still frame with no input does not stay dirty or keep committing
+        let rfIdle = rt.renderFrame(at: 0.05)
+        #expect(rt.hasPendingCommit == false)
+        #expect(rt.viewCommitCount == commitsAfter0)
+        #expect(rfIdle.instances == rf0.instances)
+
+        // Scroll blue block up under the blurred bar -> blurred pixels shift from red-dominant to blue-dominant
+        rt.wheel(WheelEvent(dx: 0, dy: -40), at: Vec2(40, 50), now: 0.1)
+        let rf1 = rt.renderFrame(at: 0.1)
+        let img1 = try renderer.renderOffscreen(rf1)
+        let pxAfter = sampleRGBA(img1, x: 40, y: 16)
+        #expect(pxAfter.b > pxAfter.r)
+        #expect(abs(Int(pxAfter.b) - Int(pxBefore.b)) > 80)
+        #expect(rt.hasPendingCommit == false)
+    }
+
+    /// Upstream: `crates/rune/src/render/backdrop_tests.rs:7` `backdrop_pool_is_lazy_reused_resized_and_follows_live_formats`
+    @Test("backdrop_tests.rs:7 backdrop_pool_is_lazy_reused_resized_and_follows_live_formats")
+    func backdropPoolIsLazyReusedResizedAndFollowsLiveFormats() throws {
+        let renderer = try MetalRenderer()
+        let emptyAtlas = GlyphAtlas().compositedAtlas()
+
+        // 1. Ordinary frame without backdrop slots allocates 0 pool targets
+        let plainFrame = RenderFrame(
+            width: 32,
+            height: 32,
+            srgbBlend: true,
+            clearColor: SIMD4<Float>(0, 0, 0, 1),
+            glyphs: emptyAtlas,
+            glyphGeneration: 0,
+            images: RGBA8Atlas(),
+            imageRevision: 0,
+            instances: [
+                RenderInstance(rect: SIMD4<Float>(0, 0, 16, 16), fill: SIMD4<Float>(1, 0, 0, 1), params: SIMD4<Float>(0, KIND_RECT, 0, 1))
+            ]
+        )
+        _ = try renderer.renderOffscreen(plainFrame)
+        #expect(renderer.layerStats().allocations == 0)
+
+        // 2. Effect slot requesting backdrop allocates lazily (params.x == 1.0) and delivers site.backdrop
+        let effectFrame = RenderFrame(
+            width: 32,
+            height: 32,
+            srgbBlend: true,
+            clearColor: SIMD4<Float>(0.2, 0.4, 0.6, 1),
+            glyphs: emptyAtlas,
+            glyphGeneration: 0,
+            images: RGBA8Atlas(),
+            imageRevision: 0,
+            instances: [
+                RenderInstance(rect: SIMD4<Float>(0, 0, 32, 32), fill: SIMD4<Float>(1, 0, 0, 1), params: SIMD4<Float>(0, KIND_RECT, 0, 1)),
+                RenderInstance(rect: SIMD4<Float>(4, 4, 24, 24), params: SIMD4<Float>(1, KIND_EFFECT, 0, 1), clip: SIMD4<Float>(0, 0, 32, 32))
+            ]
+        )
+        var seenSizes: [(Int, Int, MTLPixelFormat)] = []
+        _ = try renderer.renderOffscreen(effectFrame, backdropHook: { phase, site in
+            if case .backdrop = phase, let b = site.backdrop {
+                seenSizes.append((b.width, b.height, b.pixelFormat))
+            }
+        })
+        let allocAfterFirst = renderer.layerStats().allocations
+        #expect(allocAfterFirst == 1)
+        #expect(seenSizes.count == 1)
+        #expect(seenSizes[0] == (32, 32, .bgra8Unorm))
+
+        // 3. Re-drawing with the same size & format reuses the pooled slot with zero new allocations
+        _ = try renderer.renderOffscreen(effectFrame, backdropHook: { phase, site in
+            if case .backdrop = phase, let b = site.backdrop {
+                seenSizes.append((b.width, b.height, b.pixelFormat))
+            }
+        })
+        #expect(renderer.layerStats().allocations == allocAfterFirst)
+
+        // 4. Resize & switch live target formats (.bgra8Unorm -> .bgra8Unorm_srgb -> .rgba16Float): follows each format/size and reuses same-format size!
+        let specs: [(Int, Int, MTLPixelFormat)] = [
+            (48, 40, .bgra8Unorm_srgb),
+            (64, 48, .rgba16Float),
+            (48, 40, .bgra8Unorm_srgb),
+        ]
+        var allocBeforeSameFormatRepeat: UInt64 = 0
+        for (idx, (w, h, fmt)) in specs.enumerated() {
+            let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: fmt, width: w, height: h, mipmapped: false)
+            desc.usage = [.renderTarget, .shaderRead]
+            let target = try #require(renderer.device.makeTexture(descriptor: desc))
+            let cb = try #require(renderer.commandQueue.makeCommandBuffer())
+            let f = RenderFrame(
+                width: w,
+                height: h,
+                srgbBlend: (fmt == .bgra8Unorm),
+                clearColor: SIMD4<Float>(0, 0, 0, 1),
+                glyphs: emptyAtlas,
+                glyphGeneration: 0,
+                images: RGBA8Atlas(),
+                imageRevision: 0,
+                instances: effectFrame.instances
+            )
+            if idx == 2 {
+                allocBeforeSameFormatRepeat = renderer.layerStats().allocations
+            }
+            renderer.drawWithBackdrop(frame: f, into: target, commandBuffer: cb) { phase, site in
+                if case .backdrop = phase, let b = site.backdrop {
+                    seenSizes.append((b.width, b.height, b.pixelFormat))
+                }
+            }
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
+        #expect(seenSizes.count == 5)
+        #expect(seenSizes[2] == (48, 40, .bgra8Unorm_srgb))
+        #expect(seenSizes[3] == (64, 48, .rgba16Float))
+        #expect(seenSizes[4] == (48, 40, .bgra8Unorm_srgb))
+        #expect(renderer.layerStats().allocations == allocBeforeSameFormatRepeat)
+    }
+
+    /// Upstream: `crates/rune/src/render/surface_alpha.rs:14` `gpu_straight_alpha_matches_cpu_reference`
+    @Test("surface_alpha.rs:14 gpu_straight_alpha_matches_cpu_reference")
+    func gpuStraightAlphaMatchesCpuReference() throws {
+        let renderer = try MetalRenderer()
+        let emptyAtlas = GlyphAtlas().compositedAtlas()
+
+        // Match upstream premultiplied clear colors: half-transparent teal, fully transparent, opaque color
+        let clears: [SIMD4<Float>] = [
+            SIMD4<Float>(0.125, 0.25, 0.375, 0.5),
+            SIMD4<Float>(0, 0, 0, 0),
+            SIMD4<Float>(0.4, 0.6, 0.1, 1.0),
+        ]
+
+        func expectedStraight(_ premulLinear: SIMD4<Float>, srgbBlend: Bool) -> [UInt8] {
+            let a = premulLinear.w
+            if a <= 0 {
+                return [0, 0, 0, 0]
+            }
+            let aByte = UInt8((a * 255.0).rounded())
+            if srgbBlend {
+                // Direct linear unorm8 unpremultiplication matching MetalRenderer.renderOffscreen srgbBlend=true
+                let rf = min(255.0, (Float(UInt8((premulLinear.x * 255.0).rounded())) / (Float(aByte) / 255.0)).rounded())
+                let gf = min(255.0, (Float(UInt8((premulLinear.y * 255.0).rounded())) / (Float(aByte) / 255.0)).rounded())
+                let bf = min(255.0, (Float(UInt8((premulLinear.z * 255.0).rounded())) / (Float(aByte) / 255.0)).rounded())
+                return [UInt8(rf), UInt8(gf), UInt8(bf), aByte]
+            }
+            // Linear -> sRGB encoded premul bytes -> HeadlessRunner.straightAlpha CPU reference
+            var px: [UInt8] = [
+                UInt8((RefShader.linearToSRGB(premulLinear.x) * 255.0).rounded()),
+                UInt8((RefShader.linearToSRGB(premulLinear.y) * 255.0).rounded()),
+                UInt8((RefShader.linearToSRGB(premulLinear.z) * 255.0).rounded()),
+                aByte,
+            ]
+            HeadlessRunner.straightAlpha(&px)
+            return px
+        }
+
+        for srgbBlend in [false, true] {
+            for clear in clears {
+                let rf = RenderFrame(
+                    width: 4,
+                    height: 4,
+                    srgbBlend: srgbBlend,
+                    clearColor: clear,
+                    glyphs: emptyAtlas,
+                    glyphGeneration: 0,
+                    images: RGBA8Atlas(),
+                    imageRevision: 0,
+                    instances: []
+                )
+                let frame = try renderer.renderOffscreen(rf)
+                let want = expectedStraight(clear, srgbBlend: srgbBlend)
+                for y in 0..<4 {
+                    for x in 0..<4 {
+                        let got = sampleRGBA(frame, x: x, y: y)
+                        #expect(abs(Int(got.r) - Int(want[0])) <= 1, "clear=\(clear) srgbBlend=\(srgbBlend) R got=\(got.r) want=\(want[0])")
+                        #expect(abs(Int(got.g) - Int(want[1])) <= 1, "clear=\(clear) srgbBlend=\(srgbBlend) G got=\(got.g) want=\(want[1])")
+                        #expect(abs(Int(got.b) - Int(want[2])) <= 1, "clear=\(clear) srgbBlend=\(srgbBlend) B got=\(got.b) want=\(want[2])")
+                        #expect(abs(Int(got.a) - Int(want[3])) <= 1, "clear=\(clear) srgbBlend=\(srgbBlend) A got=\(got.a) want=\(want[3])")
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Group 3: tests/border_dash.rs (2 tests)
+
+    private enum CapsuleMode {
+        case solid
+        case dashed
+        case filledDashed
+        case gradientDashed
+    }
+
+    private func makeCapsuleFrame(mode: CapsuleMode, pixelScale: Float = 2.0) -> RenderFrame {
+        struct S {}
+        let rim = Color.rgba8(255, 255, 255, 255)
+        let dark = Color.rgba8(18, 22, 28, 255)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(68, 22), pixelScale: pixelScale) { _, _ in
+            var card: El<S> = el().size(60, 14).absolute(x: 4, y: 4).rounded(7)
+            switch mode {
+            case .solid:
+                card = card.border(1.0, rim)
+            case .dashed:
+                card = card.dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0)
+            case .filledDashed:
+                card = card.bg(dark).dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0)
+            case .gradientDashed:
+                card = card.bg(dark).dashedBorder(1.0, rim, dash: 8, gap: 4, phase: 2.0).borderGradient(width: 1.0, top: rim, bottom: dark)
+            }
+            return col().size(68, 22).child(card)
+        }
+        var rf = rt.renderFrame(at: 0.0)
+        rf.clearColor = .zero
+        return rf
+    }
+
+    /// Upstream: `crates/rune/tests/border_dash.rs:47` `a_dashed_border_is_its_own_ring_over_the_fill`
+    @Test("border_dash.rs:47 a_dashed_border_is_its_own_ring_over_the_fill")
+    func dashedBorderIsItsOwnRingOverFill() {
+        let dashed = makeCapsuleFrame(mode: .dashed)
+        #expect(dashed.instances.count == 1)
+        #expect(dashed.instances[0].params.y == KIND_DASHED)
+        #expect(dashed.instances[0].params.x == 2.0) // 1pt * scale 2
+
+        let filled = makeCapsuleFrame(mode: .filledDashed)
+        #expect(filled.instances.count == 2)
+        #expect(filled.instances[0].params.y == KIND_RECT)
+        #expect(filled.instances[1].params.y == KIND_DASHED)
+        #expect(filled.instances[1].uv == SIMD4<Float>(16, 8, 4, 0)) // (8, 4, 2) * scale 2
+
+        let grad = makeCapsuleFrame(mode: .gradientDashed)
+        #expect(grad.instances.contains(where: { $0.params.y == KIND_GRADIENT && $0.params.x == 2.0 }))
+    }
+
+    /// Upstream: `crates/rune/tests/border_dash.rs:62` `dashes_antialias_like_the_solid_border_and_show_the_fill_between`
+    @Test("border_dash.rs:62 dashes_antialias_like_the_solid_border_and_show_the_fill_between")
+    func dashesAntialiasLikeSolidBorderAndShowFillBetween() throws {
+        let renderer = try MetalRenderer()
+        let solid = try renderer.renderOffscreen(makeCapsuleFrame(mode: .solid))
+        let dashed = try renderer.renderOffscreen(makeCapsuleFrame(mode: .dashed))
+        let filled = try renderer.renderOffscreen(makeCapsuleFrame(mode: .filledDashed))
+
+        // At scale 2, capsule rect is [8, 8, 120, 28] with radii=14, borderWidth=2 (top edge y=8..10, flat x in [22..114]).
+        // Verify dash segments match solid AA pixels vertically while gaps are transparent in `dashed`
+        var sawDashMatchingSolid = false
+        var sawClearGap = false
+        for x in stride(from: 24, through: 108, by: 2) {
+            let d = sampleRGBA(dashed, x: x, y: 9)
+            let dPrev = sampleRGBA(dashed, x: x - 2, y: 9)
+            let dNext = sampleRGBA(dashed, x: x + 2, y: 9)
+            if d.a > 200 && dPrev.a > 200 && dNext.a > 200 {
+                // Interior of dash away from longitudinal end-cap matches solid border AA vertically within <= 2
+                for y in 7...11 {
+                    let dy = sampleRGBA(dashed, x: x, y: y)
+                    let sy = sampleRGBA(solid, x: x, y: y)
+                    #expect(abs(Int(dy.r) - Int(sy.r)) <= 2)
+                    #expect(abs(Int(dy.a) - Int(sy.a)) <= 2)
+                }
+                sawDashMatchingSolid = true
+            } else if d.a == 0 {
+                // Gap in `filled` shows dark fill RGBA(18, 22, 28, 255) instead of rim white!
+                let f = sampleRGBA(filled, x: x, y: 9)
+                #expect(f.a > 240)
+                #expect(f.r < 40 && f.g < 40 && f.b < 45)
+                sawClearGap = true
+            }
+        }
+        #expect(sawDashMatchingSolid && sawClearGap)
+
+        // Curved top-right corner arc (center x=114, y=22, radius=13): contains both solid-matching dashes and transparent gaps
+        var cornerLit = 0
+        var cornerGap = 0
+        for deg in stride(from: 5, through: 85, by: 5) {
+            let rad = Float(deg) * (.pi / 180.0)
+            let px = Int((114.0 + 13.0 * sin(rad)).rounded())
+            let py = Int((22.0 - 13.0 * cos(rad)).rounded())
+            let da = sampleRGBA(dashed, x: px, y: py).a
+            let sa = sampleRGBA(solid, x: px, y: py).a
+            if da > 120 && abs(Int(da) - Int(sa)) <= 3 { cornerLit += 1 }
+            if da < 15 { cornerGap += 1 }
+        }
+        #expect(cornerLit > 0 && cornerGap > 0)
+    }
+}
+#endif
