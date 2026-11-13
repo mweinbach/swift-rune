@@ -191,6 +191,20 @@ struct MarkdownFullParityTests {
         }
 
         // Every prefix of JUICE and multi-block doc parses identically through incremental MarkdownDocCache
+        // (and held_table holds incomplete pipe headers until delimiter row arrives).
+        var held = MarkdownTailStream()
+        for pending in ["| File | Change |", "| File | Change |\n", "| File | Change |\n|-"] {
+            held.reset(pending)
+            #expect(held.document(streaming: true).blocks.isEmpty)
+        }
+        held.reset("Intro.\n\n| File | Change |\n|-")
+        #expect(held.document(streaming: true).blocks.count == 1)
+        held.reset("Intro.\n\n| File | Change |\n|---|---|\n| a | b |")
+        #expect(held.document(streaming: true).blocks.count == 2)
+        if case .table = held.document(streaming: true).blocks[1] {} else {
+            Issue.record("Expected table once delimiter completes")
+        }
+
         let multiDoc = """
         # Title
 
@@ -235,14 +249,18 @@ struct MarkdownFullParityTests {
     @Test("Reference definition invalidates cache properly and doc cache capacity preserves older docs")
     func referenceDefinitionAndCacheEviction() {
         let cache = MarkdownDocCache(capacity: 24)
-        let before = cache.docCached("[x]\n\nsome text")
-        let after = cache.docCached("[x]\n\nsome text\n\n[x]: https://example.com")
+        let before = cache.docCached("[x]\n\nsecond block\n\nthird block")
+        let after = cache.docCached("[x]\n\nsecond block\n\nthird block\n\n[x]: https://example.com")
         #expect(before.blocks != after.blocks)
         if case let .para(inl) = after.blocks[0] {
             #expect(inl.links.first?.url == "https://example.com")
         } else {
             Issue.record("Expected para with resolved reference link")
         }
+
+        // Bare www. autolinks resolve with http:// scheme parity (`autolink.rs:83`).
+        let wwwMatches = MarkdownAutolink.scan("see www.example.org.")
+        #expect(wwwMatches.first?.url == "http://www.example.org")
     }
 
     // MARK: - Search / Find Parity (tests/markdown_find.rs)

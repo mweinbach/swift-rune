@@ -250,7 +250,7 @@ public enum MarkdownAutolink {
                     if display.count > prefixInfo.prefixLen {
                         let afterPrefix = String(display.dropFirst(prefixInfo.prefixLen))
                         if isValidDomain(afterPrefix, isWWW: prefixInfo.isWWW) {
-                            let url = prefixInfo.isWWW ? "https://\(display)" : display
+                            let url = prefixInfo.isWWW ? "http://\(display)" : display
                             matches.append(Match(range: idx..<trimmedEnd, url: url, display: display, isEmail: false))
                             idx = trimmedEnd
                             continue
@@ -1157,7 +1157,8 @@ public final class MarkdownDocCache: @unchecked Sendable {
             .filter({ entries[$0].autolink == autolink && source.utf8.count > entries[$0].source.utf8.count && source.hasPrefix(entries[$0].source) })
             .max(by: { entries[$0].source.utf8.count < entries[$1].source.utf8.count }) {
             let base = entries[bestIdx].doc
-            incremental = Self.incrementalExtend(base: base, source: source, autolink: autolink)
+            let baseLen = entries[bestIdx].source.utf8.count
+            incremental = Self.incrementalExtend(base: base, baseLen: baseLen, source: source, autolink: autolink)
         }
         lock.unlock()
 
@@ -1174,12 +1175,24 @@ public final class MarkdownDocCache: @unchecked Sendable {
         return parsed
     }
 
-    private static func incrementalExtend(base: MarkdownParsedDoc, source: String, autolink: Bool) -> MarkdownParsedDoc? {
-        // Keep everything strictly before the last safe cut (avoid merging into the cut block)
-        guard base.cuts.count >= 2 else { return nil }
-        let cutIdx = base.cuts.count - 2
+    private static func incrementalExtend(base: MarkdownParsedDoc, baseLen: Int, source: String, autolink: Bool) -> MarkdownParsedDoc? {
+        // Keep everything strictly before the last safe cut that starts on a finished line;
+        // a reference link definition (`[id]: url`) can invalidate links anywhere in the document.
+        guard !source.contains("]:") else { return nil }
+        guard let cutIdx = base.cuts.lastIndex(where: { cut in
+            guard cut.at > 0,
+                  cut.at <= baseLen,
+                  cut.blocks < base.blocks.count,
+                  let prefixTail = utf8Slice(source, range: cut.at..<baseLen) else {
+                return false
+            }
+            return prefixTail.contains("\n")
+        }) else {
+            return nil
+        }
         let cut = base.cuts[cutIdx]
-        guard cut.at > 0, cut.at < source.utf8.count, let tailStr = utf8Slice(source, range: cut.at..<source.utf8.count) else {
+        guard cut.at < source.utf8.count,
+              let tailStr = utf8Slice(source, range: cut.at..<source.utf8.count) else {
             return nil
         }
         let tail = MarkdownParser.parseDocument(tailStr, autolink: autolink)
@@ -1192,7 +1205,7 @@ public final class MarkdownDocCache: @unchecked Sendable {
         out.tasks = Array(base.tasks.prefix(cut.tasks)) + shiftedTailTasks
         out.blockStarts = Array(base.blockStarts.prefix(cut.blocks)) + tail.blockStarts.map { $0 + cut.at }
         out.maps = Array(base.maps.prefix(cut.blocks)) + tail.maps.map { $0.shiftedSrc(cut.at) }
-        out.cuts = Array(base.cuts.prefix(cutIdx + 1)) + tail.cuts.map {
+        out.cuts = Array(base.cuts.prefix(cutIdx)) + tail.cuts.map {
             MarkdownCut(at: $0.at + cut.at, blocks: $0.blocks + cut.blocks, sources: $0.sources + cut.sources, tasks: $0.tasks + cut.tasks)
         }
         return out
@@ -1252,8 +1265,8 @@ public struct MarkdownStream: Sendable, Equatable {
             }
         }
 
-        var out = source
         if let fence = openFence {
+            var out = source
             if !out.hasSuffix("\n") {
                 out.append("\n")
             }
@@ -1261,11 +1274,20 @@ public struct MarkdownStream: Sendable, Equatable {
             return out
         }
 
-        if let patch = MarkdownTailStream.closeTail(source) {
-            let prefixEnd = source.utf8.index(source.utf8.startIndex, offsetBy: min(patch.cut, source.utf8.count))
-            return String(source[..<prefixEnd]) + patch.closers
+        let work: String
+        if let end = MarkdownTailStream.heldTableEndByte(in: source, parseLastBlock: {
+            MarkdownParser.parseDocument(source, autolink: true).blocks.last
+        }) {
+            work = utf8Slice(source, range: 0..<end) ?? source
+        } else {
+            work = source
         }
-        return out
+
+        if let patch = MarkdownTailStream.closeTail(work) {
+            let prefixEnd = work.utf8.index(work.utf8.startIndex, offsetBy: min(patch.cut, work.utf8.count))
+            return String(work[..<prefixEnd]) + patch.closers
+        }
+        return work
     }
 }
 
@@ -1310,10 +1332,63 @@ public struct MarkdownTailStream: Sendable, Equatable {
         }
         let s = stabilizedSource
         var doc = MarkdownDocCache.shared.docCached(s, autolink: autolink)
-        if let patch = Self.closeTail(source), patch.inCode {
+        let work = Self.heldTableEndByte(in: source, parseLastBlock: {
+            MarkdownParser.parseDocument(source, autolink: autolink).blocks.last
+        }).flatMap { utf8Slice(source, range: 0..<$0) } ?? source
+        if let patch = Self.closeTail(work), patch.inCode {
             Self.dropClosingPad(in: &doc)
         }
         return doc
+    }
+
+    static func heldTableEndByte(in source: String, parseLastBlock: () -> MarkdownDocBlock?) -> Int? {
+        let b = Array(source.utf8)
+        let bodyEnd = (b.last == 0x0A) ? (b.count - 1) : b.count
+        let open = (bodyEnd == b.count)
+        func lineStart(before end: Int) -> Int {
+            var p = end
+            while p > 0 && b[p - 1] != 0x0A { p -= 1 }
+            return p
+        }
+        func lineSlice(_ start: Int, _ end: Int) -> String {
+            String(decoding: b[start..<end], as: UTF8.self)
+        }
+        func isPiped(_ s: String) -> Bool {
+            s.drop(while: { $0 == " " || $0 == "\t" }).hasPrefix("|")
+        }
+        func isDelim(_ s: String) -> Bool {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            return !trimmed.isEmpty && trimmed.allSatisfy { "|:- ".contains($0) }
+        }
+        func headerStart(at lineAt: Int) -> Int? {
+            guard lineAt >= 1 else { return nil }
+            let prevEnd = lineAt - 1
+            let s = lineStart(before: prevEnd)
+            let prevStr = lineSlice(s, prevEnd)
+            guard isPiped(prevStr) && !isDelim(prevStr) else { return nil }
+            if s > 0 {
+                let aboveEnd = s - 1
+                let aboveStart = lineStart(before: aboveEnd)
+                if isPiped(lineSlice(aboveStart, aboveEnd)) { return nil }
+            }
+            return s
+        }
+        let lineAt = lineStart(before: bodyEnd)
+        let curStr = lineSlice(lineAt, bodyEnd)
+        guard isPiped(curStr) else { return nil }
+        if case .table = parseLastBlock() {
+            return nil
+        }
+        if open {
+            if isDelim(curStr), let h = headerStart(at: lineAt) {
+                return h
+            }
+            return lineAt
+        }
+        if lineAt == 0 { return lineAt }
+        let prevEnd = lineAt - 1
+        let prevStart = lineStart(before: prevEnd)
+        return isPiped(lineSlice(prevStart, prevEnd)) ? nil : lineAt
     }
 
     /// Computes tail stabilization patch on the last line/paragraph of `source`.
