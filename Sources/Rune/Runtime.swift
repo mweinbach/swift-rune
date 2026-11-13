@@ -1782,7 +1782,10 @@ public final class Runtime<State> {
                 shadowTrackCounts.removeValue(forKey: nid)
             }
         }
-        let rawAnimating = frameOut.isAnimating
+        // Tracks only holding for delayed starts (`enterDelay`) draw nothing new until wake:
+        // keep `isAnimating == false` and clear `AnimSource.tracks` so the host sleeps until `nextWakeDeadline`.
+        let tracksAnimating = frameOut.isAnimating && scene.store.waitingUntil() == nil
+        let rawAnimating = tracksAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
             || liveActive
@@ -1797,10 +1800,10 @@ public final class Runtime<State> {
             || hasMovingScaleSettle
             || activeWordReveals
         var sources: UInt32 = 0
-        if frameOut.isAnimating { sources |= AnimSource.tracks }
+        if tracksAnimating { sources |= AnimSource.tracks }
         if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
-        if scene.store.waitingUntil() != nil || activeWordReveals { sources |= AnimSource.reveal }
+        if activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
         if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }

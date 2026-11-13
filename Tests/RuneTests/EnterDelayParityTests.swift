@@ -75,9 +75,13 @@ struct EnterDelayParityTests {
         rt.update(at: 0.0) { s, _ in s.rows = 1 }
         let t1 = 1.0 / Self.hz
         _ = rt.frame(at: t1)
+        #expect(!rt.isAnimating, "waiting sleeps instead of spinning")
+        #expect(rt.animSources == 0)
         #expect(rt.scene.store.waitingUntil() != nil, "waiting schedules a wake instead of moving")
         let t2 = t1 + 1.0 / Self.hz
         _ = rt.frame(at: t2)
+        #expect(!rt.isAnimating, "waiting draws nothing new")
+        #expect(rt.animSources == 0)
         #expect(rt.scene.store.touched().isEmpty, "waiting draws nothing new")
         guard let wake = rt.nextWakeDeadline(after: t2) else {
             Issue.record("Expected wake deadline for enterDelay start")
@@ -88,6 +92,8 @@ struct EnterDelayParityTests {
         _ = rt.frame(at: tWake)
         #expect(rowProgress(rt, 0)?.opacity == 0.0)
         _ = rt.frame(at: tWake + 0.1)
+        #expect(rt.isAnimating, "the entrance runs")
+        #expect((rt.animSources & AnimSource.tracks) != 0)
         #expect((rowProgress(rt, 0)?.opacity ?? 0.0) > 0.0)
     }
 
