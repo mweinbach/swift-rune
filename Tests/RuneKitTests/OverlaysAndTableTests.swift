@@ -575,6 +575,59 @@ struct OverlaysAndTableTests {
         #expect(rt.elements().first(where: { $0.focused })?.key == "models-value-trigger")
     }
 
+    @Test("Combobox keystroke filter shrinks empty state, restores on backspace, and fits custom trigger inside viewport (tests/combobox.rs)")
+    func comboboxKeystrokeFilterAndCustomTriggerFit() throws {
+        // Keystroke filtering -> empty shrink -> backspace restore
+        let rt = makeComboRuntime()
+        let searchRect = try #require(rt.elements().first { $0.key == "models-search" }).rect
+        rt.pointerDown(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.05)
+        rt.pointerUp(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.06)
+        rt.frame(at: 0.07)
+
+        let openH = try #require(rt.elements().first { $0.key == "models-content" }).rect[3]
+        _ = rt.keyDown(KeyEvent(key: .text("zz"), mods: .none), at: 0.1)
+        for i in 1...60 { rt.frame(at: 0.1 + Double(i) / 60.0) }
+        let emptyH = try #require(rt.elements().first { $0.key == "models-content" }).rect[3]
+        #expect(emptyH < openH - 100.0)
+        #expect(rt.elements().contains { $0.key == "empty" && $0.opacity == 1.0 })
+
+        _ = rt.keyDown(KeyEvent(key: .backspace, mods: .none), at: 1.2)
+        _ = rt.keyDown(KeyEvent(key: .backspace, mods: .none), at: 1.21)
+        for i in 1...60 { rt.frame(at: 1.21 + Double(i) / 60.0) }
+        let restoredH = try #require(rt.elements().first { $0.key == "models-content" }).rect[3]
+        #expect(abs(restoredH - openH) < 1.0)
+
+        // Custom trigger + maxHeight(2000) fits window viewport and opens search + reveals item-199
+        let options = (0..<200).map { ComboboxItem(id: "item-\($0)", label: String(format: "Model %03d", $0)) }
+        let kit = Kit.neutral(dark: true)
+        let rtCustom = Runtime(state: ComboApp(), viewport: Vec2(400, 300), systemDark: true) { s, cx in
+            var layer: [El<ComboApp>] = []
+            let trigger: El<ComboApp> = row().key("custom").size(120, 28).focusable(true).child(text("Pick"))
+            let cb = Combobox<ComboApp>("models", state: \.combo, options: options)
+                .trigger(trigger)
+                .maxHeight(2000)
+                .build(s, kit: kit, layer: &layer, cx: cx)
+            return RuneKit.root(col().pt(40).child(row().child(cb)), layer)
+        }
+        rtCustom.frame(at: 0.0)
+        let cust = try #require(rtCustom.elements().first { $0.key == "custom" }?.rect)
+        rtCustom.pointerDown(at: Vec2(cust[0] + 10, cust[1] + 10), at: 0.05)
+        rtCustom.pointerUp(at: Vec2(cust[0] + 10, cust[1] + 10), at: 0.06)
+        rtCustom.frame(at: 0.07)
+        rtCustom.frame(at: 0.08)
+        #expect(rtCustom.state.combo.isOpen)
+        #expect(rtCustom.elements().first(where: \.focused)?.key == "models-search")
+        let content = try #require(rtCustom.elements().first { $0.key == "models-content" }?.rect)
+        #expect(content[1] + content[3] <= 300.01)
+
+        _ = rtCustom.keyDown(KeyEvent(key: .arrowUp, mods: .none), at: 0.1)
+        rtCustom.frame(at: 0.11)
+        rtCustom.frame(at: 0.12)
+        #expect(rtCustom.state.combo.active == "item-199")
+        let last = rtCustom.elements().first { $0.key == "models-option-item-199" }
+        #expect((last?.visible[3] ?? 0) > 0)
+    }
+
     // MARK: - PopupList (popup_list.rs)
 
     @Test("PopupList virtualizes, reveals active, handles hover/click without blurring composer")

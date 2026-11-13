@@ -346,7 +346,12 @@ public struct SidebarRow<State> {
     private var titleText: String
     private var subtitleText: String?
     private var leadingEl: El<State>?
+    private var leadingIsAvatar: Bool = false
     private var iconSpec: (svg: SVGIcon, color: Color?)?
+    private var heightOverride: Float?
+    private var titleStyleOverride: TextStyle?
+    private var subtitleStyleOverride: TextStyle?
+    private var subtitleColorOverride: Color?
     private var indentLevel: Int = 0
     private var selected: Bool = false
     private var active: Bool = false
@@ -382,6 +387,11 @@ public struct SidebarRow<State> {
     }
 
     public func subtitle(_ value: String?) -> Self { var c = self; c.subtitleText = value; return c }
+    public func avatar(_ element: El<State>?) -> Self { var c = self; c.leadingEl = element; c.leadingIsAvatar = element != nil; return c }
+    public func height(_ points: Float) -> Self { var c = self; c.heightOverride = max(1.0, points); return c }
+    public func titleStyle(_ style: TextStyle) -> Self { var c = self; c.titleStyleOverride = style; return c }
+    public func subtitleStyle(_ style: TextStyle) -> Self { var c = self; c.subtitleStyleOverride = style; return c }
+    public func subtitleColor(_ color: Color) -> Self { var c = self; c.subtitleColorOverride = color; return c }
     public func icon(_ svg: SVGIcon, color: Color? = nil) -> Self {
         var c = self
         c.iconSpec = (svg, color)
@@ -473,11 +483,11 @@ public struct SidebarRow<State> {
     }
 
     public func build(_ k: Kit) -> El<State> {
-        let height = subtitleText == nil ? SidebarConstants.rowHeight : SidebarConstants.twoLineRowHeight
+        let height = heightOverride ?? (subtitleText == nil ? SidebarConstants.rowHeight : SidebarConstants.twoLineRowHeight)
         let padLeft = SidebarConstants.inset + Float(indentLevel) * SidebarConstants.indent
         let bg: Color = (selected || active) ? k.c.surfaceRaised : .transparent
         let fg: Color = isDisabled ? k.c.textFaint : ((selected || active) ? k.c.textBase : k.c.textMuted)
-        let subColor = k.c.textFaint
+        let subColor = subtitleColorOverride ?? k.c.textFaint
 
         let descParts: [String] = {
             var parts: [String] = []
@@ -522,7 +532,11 @@ public struct SidebarRow<State> {
         }
 
         if let leadingEl {
-            content = content.child(leadingEl)
+            if leadingIsAvatar {
+                content = content.child(el().w(16).h(16).center().a11yHidden().child(leadingEl))
+            } else {
+                content = content.child(leadingEl)
+            }
         } else if let iconSpec {
             content = content.child(Rune.icon(iconSpec.svg, size: 15).color(iconSpec.color ?? k.c.iconMuted).a11yHidden())
         }
@@ -533,7 +547,7 @@ public struct SidebarRow<State> {
                 .minW(0)
                 .py(2)
                 .px(4)
-                .font(k.ty.ui)
+                .font(titleStyleOverride ?? k.ty.ui)
                 .color(k.c.textBase)
                 .bg(k.c.bgBase)
                 .rounded(k.radius.xs)
@@ -553,10 +567,12 @@ public struct SidebarRow<State> {
             }
             content = content.child(input)
         } else {
+            let resolvedTitleStyle = titleStyleOverride ?? ((subtitleText != nil || selected) ? k.ty.uiMedium : k.ty.ui)
+            let resolvedSubtitleStyle = subtitleStyleOverride ?? k.ty.small
             var textBlock: El<State> = col().grow(1).minW(0).gap(1).a11yHidden()
-                .child(text(titleText).font(selected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
+                .child(text(titleText).key("\(keyId)-label").font(resolvedTitleStyle).color(fg).ellipsis())
             if let subtitleText, !subtitleText.isEmpty {
-                textBlock = textBlock.child(text(subtitleText).font(k.ty.small).color(subColor).ellipsis())
+                textBlock = textBlock.child(text(subtitleText).key("\(keyId)-subtitle").font(resolvedSubtitleStyle).color(subColor).ellipsis())
             }
             content = content.child(textBlock)
         }
@@ -598,7 +614,13 @@ public struct SidebarRow<State> {
                 content = content.hover(k.c.surfaceHover)
             }
             if renameConfig == nil, let onClickFn {
-                content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
+                if selectOnlyFlag {
+                    content = content.onClick(onClickFn).focusable(false).focusSelected(selected)
+                } else {
+                    content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
+                }
+            } else if selectOnlyFlag {
+                content = content.focusable(false).focusSelected(selected)
             }
             if renameConfig == nil, let onDoubleClickFn, !selectOnlyFlag {
                 content = content.onDoubleClick(onDoubleClickFn)
@@ -909,6 +931,13 @@ public struct SplitView<State> {
                 rootRow = rootRow
                     .child(sbPane)
                     .child(buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true))
+            } else if pane.isResizing {
+                rootRow = rootRow.child(
+                    buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true)
+                        .w(0)
+                        .opacity(0)
+                        .a11yHidden()
+                )
             } else if sidebarPeekValue.isEnabled {
                 let sbKeyPath = sidebarCfg.keyPath
                 let edgeTrigger: El<State> = el()

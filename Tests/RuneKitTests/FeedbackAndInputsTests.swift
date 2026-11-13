@@ -768,6 +768,114 @@ struct FeedbackAndInputsTests {
         _ = rt.physicalInput(.key(key: .backspace, mods: Mods(), pressed: false, repeat: false), at: 0.21)
         #expect(rt.state.recorder.shortcut == nil)
         #expect(rt.state.committed.last ?? ShortcutChord(key: "x", modifiers: [.command]) == nil)
+
+        // Commit Cmd+M, then conflict keeps old binding, shows error naming refused chord & keeps refused keycaps
+        rt.pointerDown(at: pt, at: 0.22)
+        rt.pointerUp(at: pt, at: 0.23)
+        rt.frame(at: 0.24)
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.25)
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.26)
+        rt.frame(at: 0.27)
+        let cmdM = ShortcutChord(key: "m", modifiers: [.command])
+        #expect(rt.state.recorder.shortcut == cmdM)
+
+        // Conflict on Cmd+P keeps Cmd+M, displays error naming ⌘ P, keeps recording & keycaps on refused chord
+        rt.state.rejectNext = true
+        rt.pointerDown(at: pt, at: 0.28)
+        rt.pointerUp(at: pt, at: 0.29)
+        rt.frame(at: 0.30)
+        _ = rt.physicalInput(.key(key: .keyP, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.31)
+        _ = rt.physicalInput(.key(key: .keyP, mods: Mods(), pressed: false, repeat: false), at: 0.32)
+        rt.frame(at: 0.33)
+        #expect(rt.state.recorder.isRecording)
+        #expect(rt.state.recorder.shortcut == cmdM)
+        #expect(rt.state.recorder.error == .conflict)
+        #expect(rt.state.recorder.keycaps == ["⌘", "P"])
+        #expect(rt.element(byKey: "phys-rec-error")?.text == "⌘P is already in use.")
+
+        // Recording unchanged Cmd+M cancels without calling onChange; markUnregistered retries it cleanly
+        let countBeforeSame = rt.state.committed.count
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.34)
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.35)
+        rt.frame(at: 0.36)
+        #expect(!rt.state.recorder.isRecording)
+        #expect(rt.state.committed.count == countBeforeSame)
+
+        rt.state.recorder.markUnregistered()
+        rt.pointerDown(at: pt, at: 0.37)
+        rt.pointerUp(at: pt, at: 0.38)
+        rt.frame(at: 0.39)
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(cmd: true), pressed: true, repeat: false), at: 0.40)
+        _ = rt.physicalInput(.key(key: .keyM, mods: Mods(), pressed: false, repeat: false), at: 0.41)
+        rt.frame(at: 0.42)
+        #expect(!rt.state.recorder.isRecording)
+        #expect(rt.state.committed.count == countBeforeSame + 1)
+
+        // FocusLost cancels active capture cleanly; clear button clears shortcut
+        rt.pointerDown(at: pt, at: 0.43)
+        rt.pointerUp(at: pt, at: 0.44)
+        rt.frame(at: 0.45)
+        #expect(rt.state.recorder.isRecording)
+        _ = rt.physicalInput(.focusLost, at: 0.46)
+        rt.frame(at: 0.47)
+        #expect(!rt.state.recorder.isRecording && !rt.state.recorder.isSwallowing)
+
+        let clearRect = try #require(rt.element(byKey: "phys-rec-clear")).rect
+        rt.pointerDown(at: Vec2(clearRect[0] + clearRect[2] * 0.5, clearRect[1] + clearRect[3] * 0.5), at: 0.48)
+        rt.pointerUp(at: Vec2(clearRect[0] + clearRect[2] * 0.5, clearRect[1] + clearRect[3] * 0.5), at: 0.49)
+        rt.frame(at: 0.50)
+        #expect(rt.state.recorder.shortcut == nil)
+    }
+
+    @Test("RollingText countdown preserves prefix identity and rolls entering/exiting glyphs by value direction")
+    func rollingTextCountdownAndValueDirectionRuntime() throws {
+        struct S { var text = "0:30"; var val = 30.0 }
+        let kit = Kit.neutral(dark: true)
+        let store = RollingTextStore()
+        let rt = Runtime(state: S(), viewport: Vec2(300, 120), pixelScale: 2.0, systemDark: true) { s, _ in
+            col().p(20).child(
+                RollingText<S>(key: "cd", value: s.text, font: kit.ty.mono, kit: kit, store: store)
+                    .value(s.val)
+                    .build()
+            )
+        }
+        _ = rt.frame(at: 0.0)
+        let before = rt.elements()
+            .filter { !$0.exiting && ($0.key?.hasPrefix("cd#") ?? false) }
+            .sorted { $0.rect[0] < $1.rect[0] }
+        #expect(before.compactMap(\.text) == ["0", ":", "3", "0"])
+
+        // Count down 30 -> 29: "0" and ":" keep keys & stay put, "3","0" exit down while "2","9" enter from top
+        rt.update { s, _ in s.text = "0:29"; s.val = 29.0 }
+        var now = 0.0
+        for _ in 0..<10 {
+            now += 1.0 / 120.0
+            _ = rt.frame(at: now)
+        }
+        let activeMid = rt.elements().filter { !$0.exiting && ($0.key?.hasPrefix("cd#") ?? false) }
+        #expect(activeMid.contains { $0.key == before[0].key && $0.rect[1] == before[0].rect[1] })
+        #expect(activeMid.contains { $0.key == before[1].key && $0.rect[1] == before[1].rect[1] })
+        let exitingDown = rt.elements().filter { $0.exiting && ($0.key == before[2].key || $0.key == before[3].key) }
+        #expect(!exitingDown.isEmpty)
+        for ex in exitingDown {
+            #expect(ex.rect[1] > before[2].rect[1] + 0.5)
+        }
+        let entering = activeMid.filter { $0.key != before[0].key && $0.key != before[1].key }
+        #expect(entering.count == 2)
+        for ent in entering {
+            #expect(ent.rect[1] < ent.target[1] - 0.5)
+        }
+
+        // Settle and reverse back up 29 -> 30: entering "3" rolls up from below
+        for _ in 0..<120 {
+            now += 1.0 / 120.0
+            _ = rt.frame(at: now)
+        }
+        rt.update { s, _ in s.text = "0:30"; s.val = 30.0 }
+        now += 1.0 / 120.0
+        _ = rt.frame(at: now)
+        let risingThree = try #require(rt.elements().first { !$0.exiting && ($0.key?.hasPrefix("cd#") ?? false) && $0.text == "3" })
+        #expect(risingThree.rect[1] > risingThree.target[1] + 1.0)
     }
 
     @Test(

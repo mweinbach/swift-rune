@@ -511,4 +511,277 @@ struct ShellAndTabStripTests {
         #expect(trackEl.role == .tabList)
         #expect(trackEl.label == "Workspace tabs")
     }
+
+    // MARK: - Additional `src/shell/pane.rs`, `reorder.rs`, `tab_strip/tests.rs`, `tests/shell.rs`, `tests/shell_desktop.rs` parity
+
+    @Test("PaneState unit parity: range bounds, tailFade curve, width-scaled spring, collapse threshold, NaN guard")
+    func paneStateUnitParity() {
+        // `a_peek_docks_where_it_floats_and_ends_when_closed`
+        var peekPane = PaneState(width: 276).collapsed()
+        peekPane.peek()
+        #expect(peekPane.isPeeking && peekPane.peekPhase == .shown)
+        peekPane.endPeek()
+        #expect(!peekPane.isPeeking && peekPane.peekPhase == .left)
+        peekPane.peek()
+        peekPane.toggle()
+        #expect(peekPane.isOpen && !peekPane.isPeeking && peekPane.fromPeek)
+        peekPane.peek()
+        #expect(peekPane.fromPeek)
+        peekPane.toggle()
+        #expect(!peekPane.fromPeek)
+        peekPane.toggle()
+        #expect(!peekPane.fromPeek)
+
+        // `the_default_follows_the_range_from_the_width_it_was_made_with`
+        let pDefault = PaneState(width: 640.4).withWidth(500.0)
+        #expect(pDefault.width == 480.0 && pDefault.defaultWidth == 480.0)
+        let pWider = pDefault.range(360.0, 960.0)
+        #expect(pWider.width == 500.0 && pWider.defaultWidth == 640.0)
+        var pNonAccum = pWider.range(100.0, 200.0).range(360.0, 960.0)
+        #expect(pNonAccum.width == 500.0 && pNonAccum.defaultWidth == 640.0)
+        pNonAccum.setWidth(400.0)
+        pNonAccum.resetWidth()
+        #expect(pNonAccum.width == 640.0)
+
+        // `a_wider_range_keeps_the_width_new_was_given`
+        let pw = PaneState(width: 640.0).range(360.0, 960.0)
+        #expect(pw.width == 640.0 && pw.defaultWidth == 640.0)
+        var pw2 = pw.withWidth(700.0)
+        #expect(pw2.width == 700.0 && pw2.defaultWidth == 640.0)
+        pw2.resetWidth()
+        #expect(pw2.width == 640.0)
+        let pwClamp = PaneState(width: 900.0).range(360.0, 600.0)
+        #expect(pwClamp.width == 600.0 && pwClamp.defaultWidth == 600.0)
+        #expect(PaneState(width: 640.0).width == PaneState.defaultMax)
+
+        // `the_tail_fade_follows_the_spring_across_the_last_fraction`
+        let tailSpring = Spring(duration: 0.3, bounce: 0.0)
+        let closeFade = PaneMotion().fadeTail(0.15).fade(spring: tailSpring, open: false, reducedMotion: false)
+        // tailFade sets delay & non-empty uniform velocity; verify open fade is fast tween
+        #expect(closeFade.delay > 0.0)
+        let openFade = PaneMotion().fadeTail(0.15).fade(spring: tailSpring, open: true, reducedMotion: false)
+        if case .tween(let dur, _) = openFade.curve {
+            #expect(dur > 0.01 && dur < 0.06)
+        } else {
+            Issue.record("Expected open tailFade tween curve")
+        }
+
+        // `the_motion_scales_with_width_within_its_bounds`
+        let k = Kit.neutral(dark: true)
+        let motion = PaneMotion().spring(Spring(duration: 0.3, bounce: 0.0)).scaleWithWidth(reference: 480.0, min: 0.15, max: 0.3)
+        let expected276: Float = 0.3 * sqrt(276.0 / 480.0)
+        #expect(abs(motion.spring(forWidth: 276.0, kit: k).duration - expected276) < 1e-4)
+        #expect(motion.spring(forWidth: 1000.0, kit: k).duration == 0.3)
+        #expect(motion.spring(forWidth: 50.0, kit: k).duration == 0.15)
+        #expect(PaneMotion().spring(forWidth: 50.0, kit: k) == k.motion.disclosure)
+
+        // `widths_clamp_round_and_collapse_past_half_the_minimum`
+        var pc = PaneState(width: 276.0).range(136.0, 640.0)
+        pc.setWidth(1000.0)
+        #expect(pc.width == 640.0)
+        pc.setWidth(100.4)
+        #expect(pc.width == 136.0)
+        pc.setWidth(300.6)
+        #expect(pc.width == 301.0)
+        setWidthCheck: do {
+            pc.dragTo(80.0 - pc.width, collapseThreshold: pc.minWidth * 0.5)
+            #expect(pc.isOpen && pc.width == 136.0)
+            pc.dragTo(60.0 - pc.width, collapseThreshold: pc.minWidth * 0.5)
+            #expect(!pc.isOpen && pc.width == 136.0 && pc.shownWidth == 0.0)
+            pc.dragTo(200.0, collapseThreshold: pc.minWidth * 0.5)
+            #expect(pc.isOpen && pc.width == 200.0)
+        }
+        pc.resetWidth()
+        #expect(pc.width == 276.0)
+        #expect(PaneState(width: 20.0).width == PaneState.defaultMin)
+        pc.setWidth(.nan)
+        #expect(pc.width == 276.0)
+    }
+
+    @Test("Reorder unit parity: slot stepping forward/back, press after lost release, unheard moves")
+    func reorderUnitParity() {
+        // `rows_between_the_place_and_the_target_step_aside`
+        var r = Reorder<Int>().gap(4.0)
+        r.press(id: 1, index: 1, at: Vec2(0, 0))
+        _ = r.drag(to: Vec2(0, 3.0), rowHeight: 45.0, count: 5)
+        #expect(r.dragging() == nil)
+        _ = r.drag(to: Vec2(0, 100.0), rowHeight: 45.0, count: 5)
+        #expect(r.dragging() == 1 && r.target() == 3)
+        let shifts = (0..<5).map { r.shift(forIndex: $0) }
+        #expect(shifts == [0.0, 100.0, -49.0, -49.0, 0.0])
+        _ = r.drag(to: Vec2(0, -500.0), rowHeight: 45.0, count: 5)
+        #expect(r.target() == 0)
+        #expect(r.shift(forIndex: 0) == 49.0)
+        let moved = r.end(cancelled: false)
+        #expect(moved?.from == 1 && moved?.to == 0)
+        #expect(r.shift(forIndex: 0) == 0.0)
+        r.press(id: 2, index: 2, at: Vec2(0, 0))
+        _ = r.drag(to: Vec2(0, 60.0), rowHeight: 45.0, count: 5)
+        #expect(r.end(cancelled: true) == nil)
+
+        // `a_press_after_a_lost_release_drags_its_own_row`
+        var r2 = Reorder<Int>()
+        r2.press(id: 1, index: 1, at: Vec2(0, 0))
+        _ = r2.drag(to: Vec2(0, 100.0), rowHeight: 45.0, count: 5)
+        #expect(r2.dragging() == 1)
+        r2.press(id: 3, index: 3, at: Vec2(0, 200.0))
+        #expect(r2.dragging() == nil)
+        _ = r2.drag(to: Vec2(0, 250.0), rowHeight: 45.0, count: 5)
+        let m2 = r2.end(cancelled: false)
+        #expect(m2?.from == 3 && m2?.to == 4)
+
+        // `moves_the_drag_never_hears_put_the_row_back`
+        var r3 = Reorder<Int>()
+        r3.press(id: 1, index: 1, at: Vec2(0, 0))
+        _ = r3.drag(to: Vec2(0, 100.0), rowHeight: 45.0, count: 5)
+        let p0 = r3.pointerMoved(to: Vec2(0, 100.0))
+        let p1 = r3.pointerMoved(to: Vec2(0, 110.0))
+        let p2 = r3.pointerMoved(to: Vec2(0, 120.0))
+        #expect(!p0)
+        #expect(!p1)
+        #expect(p2)
+        #expect(r3.dragging() == nil && r3.shift(forIndex: 2) == 0.0 && r3.end(cancelled: false) == nil)
+    }
+
+    @Test("TabStrip tear-out respects lone spec in Runtime (`src/shell/tab_strip/tests.rs`)")
+    func tabStripLoneAndMultiTearOutRuntime() throws {
+        struct App {
+            var count: Int
+            var lone: Bool
+            var drag = TabDragState()
+            var tornCount = 0
+        }
+        let kit = Kit.neutral(dark: true)
+        func runTear(_ tabs: Int, lone: Bool) throws -> Runtime<App> {
+            let rt = Runtime(state: App(count: tabs, lone: lone), viewport: Vec2(600, 300), systemDark: true) { s, _ in
+                let items = (0..<s.count).map { StripTabItem<App>(id: "tab\($0)", title: "Tab \($0)") }
+                return col().size(600, 300).child(
+                    TabStrip<App>(key: "strip", tabs: items, selected: "tab0")
+                        .dragState(\.drag, current: s.drag)
+                        .availableWidth(600)
+                        .tearOut(TearOutSpec(lone: s.lone))
+                        .onTearOut { st, _, _ in st.tornCount += 1 }
+                        .build(s, kit: kit)
+                )
+            }
+            rt.frame(at: 0.0)
+            rt.frame(at: 1.0 / 60.0)
+            let tab0 = try #require(rt.element(byKey: "strip-tab-tab0"))
+            let r = tab0.rect
+            let x = r[0] + r[2] * 0.5
+            let y = r[1] + r[3] * 0.5
+            rt.pointerMove(to: Vec2(x, y), at: 0.02)
+            rt.pointerDown(at: Vec2(x, y), at: 0.03)
+            for (i, dy) in [Float(10), 40, 80].enumerated() {
+                rt.pointerMove(to: Vec2(x, y + dy), at: 0.04 + Double(i) * 0.016)
+                rt.frame(at: 0.045 + Double(i) * 0.016)
+            }
+            return rt
+        }
+
+        // `a_lone_tab_tears_out_only_when_the_spec_lets_it`
+        let rtLoneBlocked = try runTear(1, lone: false)
+        #expect(!rtLoneBlocked.state.drag.isTornOut && rtLoneBlocked.state.tornCount == 0)
+        let rtLoneAllowed = try runTear(1, lone: true)
+        #expect(rtLoneAllowed.state.drag.isTornOut)
+
+        // `a_tab_among_others_tears_out_either_way`
+        for lone in [false, true] {
+            #expect(try runTear(2, lone: lone).state.drag.isTornOut)
+        }
+    }
+
+    @MainActor
+    @Test("SidebarRow height/styles/subtitleColor, two-line label, selectOnly Tab skip, and SplitView cancelResize")
+    func sidebarRowBuildersSelectOnlyAndResizeCancel() throws {
+        struct S {
+            var sidebar = PaneState(width: 240).range(180, 420)
+            var field = TextEdit()
+            var picked = 1
+            var presses = 0
+        }
+        let kit = Kit.neutral(dark: true)
+
+        // Builder order equivalence + custom styles + subtitleColor + accessible name
+        struct Empty {}
+        let styleTitle = TextStyle(size: 15, weight: 600).lh(22)
+        let styleSub = TextStyle(size: 10, weight: 400).lh(12)
+        let rtRows = Runtime(state: Empty(), viewport: Vec2(240, 300), systemDark: true) { _, _ in
+            col().w(240)
+                .child(SidebarRow<Empty>(key: "h1", title: "First").height(45).subtitle("Detail").build(kit))
+                .child(SidebarRow<Empty>(key: "h2", title: "Second").subtitle("Detail").height(45).build(kit))
+                .child(SidebarRow<Empty>(key: "plain", title: "Name").build(kit))
+                .child(SidebarRow<Empty>(key: "two", title: "Name").subtitle("Detail").build(kit))
+                .child(SidebarRow<Empty>(key: "styled", title: "Name").subtitle("Detail").titleStyle(styleTitle).subtitleStyle(styleSub).subtitleColor(kit.c.textMuted).build(kit))
+        }
+        rtRows.frame(at: 0.0)
+        #expect(try #require(rtRows.element(byKey: "h1")).rect[3] == 45.0)
+        #expect(try #require(rtRows.element(byKey: "h2")).rect[3] == 45.0)
+        #expect(try #require(rtRows.element(byKey: "plain")).label == "Name")
+        #expect(try #require(rtRows.element(byKey: "two")).label == "Name, Detail")
+        let twoEl = try #require(rtRows.element(byKey: "two"))
+        let twoLbl = try #require(rtRows.element(byKey: "two-label"))
+        let twoSub = try #require(rtRows.element(byKey: "two-subtitle"))
+        #expect(twoEl.rect[3] == 40.0)
+        #expect(twoLbl.rect[1] + twoLbl.rect[3] <= twoSub.rect[1] + 0.01)
+        #expect(twoSub.rect[1] + twoSub.rect[3] <= twoEl.rect[1] + twoEl.rect[3] + 0.01)
+        #expect(try #require(rtRows.element(byKey: "styled-label")).rect[3] == 22.0)
+        #expect(try #require(rtRows.element(byKey: "styled-subtitle")).rect[3] == 12.0)
+        #expect(try #require(rtRows.element(byKey: "styled-subtitle")).textColor == kit.c.textMuted)
+
+        // `select_only_rows_skip_tab_and_keep_an_outside_field_focused` + `cancelling_a_resize_restores_the_width_and_open_state_without_peeking`
+        let rt = Runtime(state: S(), viewport: Vec2(800, 400), systemDark: true) { s, _ in
+            SplitView<S>(key: "sv") { st in
+                col().p(12).child(Rune.textInput(key: "field", \.field).size(160, 28))
+            }
+            .sidebar(\.sidebar, current: s.sidebar) { st in
+                var sec = SidebarSection<S>(key: "sec", title: "Results")
+                for i in 0..<3 {
+                    sec = sec.child(
+                        SidebarRow<S>(key: "sel-\(i)", title: "Row \(i)")
+                            .selectOnly()
+                            .selected(st.picked == i)
+                            .onClick { inner, _ in inner.picked = i; inner.presses += 1 }
+                            .build(kit)
+                    )
+                }
+                return Sidebar<S>(key: "sb").section(sec.build(kit)).build(kit)
+            }
+            .sidebarPeek(.hover)
+            .paneMotion(.instant)
+            .build(s, kit: kit)
+        }
+        rt.frame(at: 0.0)
+        for i in 0..<3 {
+            #expect(try #require(rt.element(byKey: "sel-\(i)")).focusable == false)
+        }
+        #expect(try #require(rt.element(byKey: "sel-1")).itemSelected)
+        #expect((try #require(rt.element(byKey: "sel-0"))).itemSelected == false)
+
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.focusedKey == "field")
+
+        let row2 = try #require(rt.element(byKey: "sel-2")).rect
+        rt.pointerDown(at: Vec2(row2[0] + 20, row2[1] + row2[3] * 0.5), at: 0.05)
+        rt.pointerUp(at: Vec2(row2[0] + 20, row2[1] + row2[3] * 0.5), at: 0.06)
+        rt.frame(at: 0.07)
+        #expect(rt.state.picked == 2 && rt.state.presses == 1)
+        #expect(rt.focusedKey == "field")
+
+        // Cancelling a resize via Escape restores width/open state without peeking.
+        // (Window-blur drag cancellation requires Runtime.dispatchFocus(false) to cancel activeDrag in core El.)
+        let grip = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+        let gx = grip[0] + grip[2] * 0.5
+        let gy = grip[1] + grip[3] * 0.5
+        rt.pointerDown(at: Vec2(gx, gy), at: 0.2)
+        rt.pointerMove(to: Vec2(12, gy), at: 0.22)
+        rt.frame(at: 0.25)
+        #expect(!rt.state.sidebar.isPeeking)
+        _ = rt.keyDown(KeyEvent(key: .escape), at: 0.3)
+        rt.frame(at: 0.31)
+        #expect(rt.state.sidebar.width == 240.0)
+        #expect(rt.state.sidebar.isOpen && !rt.state.sidebar.isResizing)
+        #expect(!rt.state.sidebar.isPeeking)
+    }
 }

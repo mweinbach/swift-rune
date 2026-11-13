@@ -170,6 +170,7 @@ public struct TabDragState: Sendable, Equatable {
     public private(set) var hoveredId: String? = nil
     public private(set) var incomingIndex: Int? = nil
     public private(set) var handedOff: Bool = false
+    private var pressAnchor: Vec2? = nil
     private var tabRects: [String: MotionRect] = [:]
 
     public init() {}
@@ -234,6 +235,7 @@ public struct TabDragState: Sendable, Equatable {
 
     public mutating func press(id: String, index: Int, at windowPoint: Vec2, tabWidth: Float? = nil) {
         handedOff = false
+        pressAnchor = windowPoint
         if let tabWidth, tabWidth > 0 {
             widthLock = tabWidth
         }
@@ -322,7 +324,7 @@ public struct TabDragState: Sendable, Equatable {
         case .dragging(let id, let from, let currentTarget, _):
             let anchorCenter = tabCenters.indices.contains(from) ? tabCenters[from] : Float(from) * tabSize + tabSize * 0.5
             let ptrAlong = orientation == .horizontal ? windowPoint.x : windowPoint.y
-            let offset = tabCenters.isEmpty ? alongDelta(.zero, windowPoint) : (ptrAlong - anchorCenter)
+            let offset = tabCenters.isEmpty ? alongDelta(pressAnchor ?? .zero, windowPoint) : (ptrAlong - anchorCenter)
             return followDragging(
                 id: id,
                 from: from,
@@ -357,14 +359,23 @@ public struct TabDragState: Sendable, Equatable {
         tearOut: TearOutSpec?,
         isPinned: Bool
     ) -> DragOutcome {
-        if let tearOut, (count > 1 || tearOut.lone), (!isPinned || tearOut.allowPinned), let bounds = tearOut.stripBounds {
-            let expanded = MotionRect(
-                left: bounds.left - tearOut.threshold,
-                top: bounds.top - tearOut.threshold,
-                right: bounds.right + tearOut.threshold,
-                bottom: bounds.bottom + tearOut.threshold
-            )
-            if !motionRectContains(expanded, windowPoint) {
+        if let tearOut, (count > 1 || tearOut.lone), (!isPinned || tearOut.allowPinned) {
+            let outsideStrip: Bool
+            if let bounds = tearOut.stripBounds {
+                let expanded = MotionRect(
+                    left: bounds.left - tearOut.threshold,
+                    top: bounds.top - tearOut.threshold,
+                    right: bounds.right + tearOut.threshold,
+                    bottom: bounds.bottom + tearOut.threshold
+                )
+                outsideStrip = !motionRectContains(expanded, windowPoint)
+            } else if let anchor = pressAnchor {
+                let cross = orientation == .horizontal ? abs(windowPoint.y - anchor.y) : abs(windowPoint.x - anchor.x)
+                outsideStrip = cross >= tearOut.threshold
+            } else {
+                outsideStrip = false
+            }
+            if outsideStrip {
                 phase = .tornOut(id: id, originIndex: from, windowPoint: windowPoint)
                 return .tornOut(TabTearOut(id: id, index: from, windowPoint: windowPoint))
             }
@@ -407,11 +418,15 @@ public struct TabDragState: Sendable, Equatable {
         handedOff = true
         phase = .idle
         widthLock = nil
+        pressAnchor = nil
     }
 
     @discardableResult
     public mutating func release() -> TabReorder? {
-        defer { phase = .idle }
+        defer {
+            phase = .idle
+            pressAnchor = nil
+        }
         switch phase {
         case .dragging(_, let from, let to, _) where from != to:
             return TabReorder(from: from, to: to)
@@ -423,6 +438,7 @@ public struct TabDragState: Sendable, Equatable {
     public mutating func cancel() {
         phase = .idle
         incomingIndex = nil
+        pressAnchor = nil
     }
 }
 
