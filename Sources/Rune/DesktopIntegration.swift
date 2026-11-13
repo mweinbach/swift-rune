@@ -2137,6 +2137,11 @@ public struct AppDirs: Sendable, Equatable {
         return resolveWithHome(appId: appId, homeURL: homeURL, lookup: nonEmpty, isRooted: false)
     }
 
+    /// Resolves the `config` base directory (`crate::dirs::config_base`), honoring `RUNE_DIRS_ROOT` even without `HOME`.
+    internal static func configBase(lookup: (String) -> String?) -> URL? {
+        fromEnv(appId: "app", lookup: lookup)?.config.deletingLastPathComponent()
+    }
+
     public static func resolve(appId: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> AppDirs {
         if let resolved = fromEnv(appId: appId, lookup: { environment[$0] }) {
             return resolved
@@ -2250,32 +2255,10 @@ public final class Prefs: @unchecked Sendable {
 
     /// Resolves the root preferences directory via `lookup` (`prefs::config_dir`), returning `nil` if unconfigured.
     public static func configDir(lookup: (String) -> String?) -> URL? {
-        func nonEmpty(_ key: String) -> String? {
-            guard let v = lookup(key), !v.isEmpty else { return nil }
-            return v
-        }
-        if let custom = nonEmpty(AppDirs.prefsDirEnv) {
+        if let custom = lookup(AppDirs.prefsDirEnv), !custom.isEmpty {
             return URL(fileURLWithPath: custom, isDirectory: true)
         }
-        #if os(macOS) || os(iOS)
-        guard let home = nonEmpty("HOME") else { return nil }
-        return URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent("Library/Application Support", isDirectory: true)
-        #elseif os(Windows)
-        if let appData = nonEmpty("APPDATA") {
-            return URL(fileURLWithPath: appData, isDirectory: true)
-        }
-        guard let home = nonEmpty("HOME") else { return nil }
-        return URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent("AppData/Roaming", isDirectory: true)
-        #else
-        if let xdg = nonEmpty("XDG_CONFIG_HOME"), xdg.hasPrefix("/") {
-            return URL(fileURLWithPath: xdg, isDirectory: true)
-        }
-        guard let home = nonEmpty("HOME") else { return nil }
-        return URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent(".config", isDirectory: true)
-        #endif
+        return AppDirs.configBase(lookup: lookup)
     }
 
     public static func open(appId: String, environment: [String: String] = ProcessInfo.processInfo.environment) -> Prefs {
