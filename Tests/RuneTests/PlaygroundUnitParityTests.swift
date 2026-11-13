@@ -493,6 +493,26 @@ struct PlaygroundCoreUnitParityTests {
         rt.frame(at: stepClock(&t))
     }
 
+    @Test("replacing stage cancels titlebar press")
+    func replacingStageCancelsTitlebarPress() {
+        let bar: (UnitReal, inout Cx<UnitReal>) -> El<UnitReal> = { _, _ in
+            el().key("bar").size(120, 50).windowDrag()
+        }
+        let pg = unitBasePlayground().page("First", view: bar).page("Second", view: bar)
+        let (rt, t) = unitRuntimeWith(pg, open: nil)
+        rt.setCaption(TitlebarCaption(height: 28.0))
+        try? rt.openPlayground(at: "First", variant: nil)
+        let firstCenter = centerOf(rt, "bar")
+        rt.pointerDown(at: firstCenter, button: .secondary, at: t)
+        try? rt.openPlayground(at: "Second", variant: nil)
+        let secondCenter = centerOf(rt, "bar")
+        rt.pointerUp(at: secondCenter, button: .secondary, at: t)
+        #expect(rt.takeWindowMenu() == nil)
+        rt.pointerDown(at: secondCenter, button: .secondary, at: t)
+        rt.pointerUp(at: secondCenter, button: .secondary, at: t)
+        #expect(rt.takeWindowMenu() != nil)
+    }
+
     @Test("root handlers reach the app above the bar and the stage")
     func rootHandlersReachAppAboveBarAndStage() {
         var (rt, t) = unitRuntime(open: nil)

@@ -157,7 +157,8 @@ extension Runtime {
     }
 
     internal func captureLiveOnlyViewPrint() -> LiveOnlyViewPrint {
-        let entries = flatNodes.map { node -> LiveOnlyNodePrint in
+        let entries = flatNodes.compactMap { node -> LiveOnlyNodePrint? in
+            if case .exiting = scene.phase(node.nodeId) { return nil }
             let el = node.el
             let hasLiveFill = el.liveBindings.contains { $0.target == .fill }
             let textVal: String?
@@ -183,14 +184,19 @@ extension Runtime {
         return LiveOnlyViewPrint(nodes: entries)
     }
 
+    internal func viewPrint() -> LiveOnlyViewPrint {
+        captureLiveOnlyViewPrint()
+    }
+
     /// Handles a `Tx.liveOnly()` skip in debug builds: returns `true` when debug builds force
     /// a check commit (`0.25s` after the last commit) and `false` when the view build is skipped.
     internal func recordLiveOnlySkip(handler: String, at now: Double) -> Bool {
         #if DEBUG
-        if liveOnlyCheckEnabled && (now - lastLiveCommitClock >= liveOnlyCheckInterval) {
+        if liveOnlyCheckEnabled && !needsCommit && !hasPendingActions && (now - lastLiveCommitClock >= liveOnlyCheckInterval) {
             if pendingLiveOnlyCheck == nil {
                 pendingLiveOnlyCheck = (handler, captureLiveOnlyViewPrint())
             }
+            liveChecks += 1
             return true
         }
         #endif

@@ -320,24 +320,39 @@ public enum SurfaceMissed: Sendable, Equatable {
 
 /// Snapshot published to `App.devStats` (`rune::SurfaceStats`).
 public struct SurfaceStats: Sendable, Equatable, Codable {
+    public static let staleSeconds: Double = 2.0
+
     public var name: String
     public var totals: SurfaceCounts
     public var rates: SurfaceCounts
     public var pacing: Pacing
     public var spinWarning: String?
+    public internal(set) var publishedAt: Double?
 
     public init(
         name: String = "",
         totals: SurfaceCounts = SurfaceCounts(),
         rates: SurfaceCounts = SurfaceCounts(),
         pacing: Pacing = .idle,
-        spinWarning: String? = nil
+        spinWarning: String? = nil,
+        publishedAt: Double? = nil
     ) {
         self.name = name
         self.totals = totals
         self.rates = rates
         self.pacing = pacing
         self.spinWarning = spinWarning
+        self.publishedAt = publishedAt
+    }
+
+    /// Zeroes per-second rates if no roll was published within `staleSeconds` (`SurfaceStats::aged`).
+    public func aged(at now: Double) -> SurfaceStats {
+        var copy = self
+        if let publishedAt, max(0.0, now - publishedAt) <= Self.staleSeconds {
+            return copy
+        }
+        copy.rates = SurfaceCounts()
+        return copy
     }
 
     public func summary() -> String {
@@ -376,6 +391,7 @@ public final class SurfaceMeter: @unchecked Sendable {
     private var waited: Bool = false
     private var spin: SpinState = .calm
     private var spinWarning: String?
+    private var lastPublishedAt: Double? = nil
 
     public init(name: String, now: Double? = nil) {
         self.name = name
@@ -391,7 +407,8 @@ public final class SurfaceMeter: @unchecked Sendable {
             totals: totals,
             rates: rates,
             pacing: pacing,
-            spinWarning: spinWarning
+            spinWarning: spinWarning,
+            publishedAt: lastPublishedAt
         )
     }
 
@@ -485,6 +502,7 @@ public final class SurfaceMeter: @unchecked Sendable {
         guard elapsed >= 1.0 else { return nil }
         let delta = totals - base
         rates = delta.scaledPerSecond(elapsed: elapsed)
+        lastPublishedAt = now
         base = totals
         started = now
 

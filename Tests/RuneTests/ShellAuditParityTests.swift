@@ -345,6 +345,28 @@ struct ShellAuditParityTests {
         var tx = Tx()
         #expect(reports.flush(state: &state, tx: &tx, at: 10.2, force: false) == true)
         #expect(drawnCount == 1)
+
+        // encoded_tests.rs:87 - WindowSpec inherits App's onFrameEncoded until it sets its own.
+        var appHooks = 0
+        var winHooks = 0
+        let baseApp = App<Int>(state: 0) { _, _ in el() }.onFrameEncoded { _ in appHooks += 1 }
+        let inherited = AppWindowSpec.fromApp(baseApp, key: "inherited")
+        let overridden = inherited.onFrameEncoded { _ in winHooks += 1 }
+        inherited.onFrameEncoded?(FrameEncoded(outcome: .drawn, at: 0.0, window: "inherited"))
+        overridden.onFrameEncoded?(FrameEncoded(outcome: .drawn, at: 0.0, window: "overridden"))
+        #expect(appHooks == 1 && winHooks == 1)
+
+        // encoded_tests.rs:103 - Inspector hook reads the Runtime that presented the frame.
+        var inspectedText: String?
+        let rt = Runtime<Int>(state: 42, viewport: Vec2(100, 100), pixelScale: 1.0) { s, _ in
+            text("\(s)").key("val")
+        }
+        _ = rt.frame(at: 0.0)
+        let inspectReports = FrameReports<Int>(onInspectDrawn: { runtime in
+            inspectedText = runtime.element(byKey: "val")?.text
+        })
+        inspectReports.inspect(rt)
+        #expect(inspectedText == "42")
     }
 
     @Test("SurfaceMeter rates roll per second, go stale, publish totals immediately, and distinguish unpaced")
@@ -380,6 +402,12 @@ struct ShellAuditParityTests {
         let s3 = meter.currentStats()
         #expect((s3.rates.redraws, s3.rates.unpaced, s3.rates.presents) == (30, 30, 30))
         #expect((s3.totals.redraws, s3.totals.presents) == (180, 180))
+
+        let fresh = s3.aged(at: 4.0)
+        #expect(fresh.rates.presents == 30)
+        let stale = s3.aged(at: 5.5)
+        #expect(stale.rates == SurfaceCounts())
+        #expect(stale.totals.presents == 180)
 
         // Only redraws that waited for nothing count as unpaced
         let uMeter = SurfaceMeter(name: "u", now: 0.0)
@@ -430,23 +458,29 @@ struct ShellAuditParityTests {
             #expect(parentCx.envState.reads.layoutReads.count == 2)
         }
 
-        // 2. cx.layoutWith and cx.windowLayoutWith record into layoutReads and rebuild memo on change
+        // 2. cx.layoutWith, cx.windowLayoutWith, and whole-rect 0.5pt tolerance (`memo.rs:1244, 1267`)
         struct Probe { var width: Float = 100; var y: Float = 0; var ticks: Int = 0 }
         var layoutWithBuilds = 0
         var winWithBuilds = 0
+        var winWholeBuilds = 0
         let probeRt = Runtime<Probe>(state: Probe(), viewport: Vec2(300, 300), pixelScale: 1.0) { s, cx in
             col().size(300, 300)
                 .child(el().key("gap").size(10, s.y))
                 .child(el().key("probe").size(s.width, 10))
-                .child(memo("lw", 0) {
+                .child(memo("lw", 0) { () -> El<Probe> in
                     layoutWithBuilds += 1
-                    let w = cx.layoutWith("probe") { $0[2] } ?? -1
+                    let w: Float = cx.layoutWith("probe") { $0[2] } ?? -1
                     return text("lw:\(w)").key("lw-label")
                 })
-                .child(memo("wlw", 0) {
+                .child(memo("wlw", 0) { () -> El<Probe> in
                     winWithBuilds += 1
-                    let y = cx.windowLayoutWith("probe") { $0[1] } ?? -1
+                    let y: Float = cx.windowLayoutWith("probe") { $0[1] } ?? -1
                     return text("wlw:\(y)").key("wlw-label")
+                })
+                .child(memo("r3", 0) { () -> El<Probe> in
+                    winWholeBuilds += 1
+                    let y: Float = cx.windowLayout("probe")?[1] ?? -1
+                    return text("r3:\(y)").key("r3-label")
                 })
                 .child(text("tick:\(s.ticks)").key("tick"))
         }
@@ -454,17 +488,25 @@ struct ShellAuditParityTests {
         _ = probeRt.frame(at: 0.01) // settle read pass
         let lwStable = layoutWithBuilds
         let wlwStable = winWithBuilds
+        let wholeStable = winWholeBuilds
         for _ in 0..<3 {
             probeRt.update(at: 0.02) { s, _ in s.ticks += 1 }
             _ = probeRt.frame(at: 0.02)
         }
         #expect(layoutWithBuilds == lwStable)
         #expect(winWithBuilds == wlwStable)
+        #expect(winWholeBuilds == wholeStable)
 
-        // Sub-0.5pt move rebuilds under Swift exact == policy
+        // Sub-0.5pt move: projection (`windowLayoutWith`) uses exact == and rebuilds,
+        // while whole-rect (`windowLayout`) keeps its 0.5pt tolerance until delta >= 0.5pt.
         probeRt.update(at: 0.03) { s, _ in s.y = 0.3 }
         _ = probeRt.frame(at: 0.03)
         #expect(winWithBuilds > wlwStable)
+        #expect(winWholeBuilds == wholeStable)
+
+        probeRt.update(at: 0.035) { s, _ in s.y = 0.6 }
+        _ = probeRt.frame(at: 0.035)
+        #expect(winWholeBuilds > wholeStable)
 
         probeRt.update(at: 0.04) { s, _ in s.width = 150 }
         _ = probeRt.frame(at: 0.04)
@@ -569,13 +611,62 @@ struct ShellAuditParityTests {
         _ = vRt.frame(at: 0.16)
         #expect(rowBuilds == afterScrollBackBuilds)
 
-        // 7. Memoized TextEdit preedit + anchor equality parity
-        let e1 = TextEdit("ab")
-        var e2 = e1
-        e2.selectAll()
-        #expect(e1 != e2)
-        _ = e2.applyIme(.preedit("X", cursorUTF8: 1..<1, clauses: []))
-        #expect(e2.preedit?.text == "X")
+        // 7. Memoized TextEdit caret movement + IME composition (`memo.rs:1159`)
+        struct ImeState { var edit = TextEdit("ab") }
+        let imeRt = Runtime<ImeState>(state: ImeState(), viewport: Vec2(200, 100), pixelScale: 1.0) { s, _ in
+            col().size(200, 100).child(
+                memo("field", s.edit) {
+                    textInput(key: "field", \ImeState.edit).size(200, 40)
+                }
+            )
+        }
+        _ = imeRt.frame(at: 0.0)
+        imeRt.pointerDown(at: Vec2(20, 20), at: 0.005)
+        imeRt.pointerUp(at: Vec2(20, 20), at: 0.006)
+        _ = imeRt.frame(at: 0.01)
+        _ = imeRt.keyDown(KeyEvent(key: .arrowLeft), at: 1.0 / 60.0)
+        _ = imeRt.frame(at: 1.0 / 60.0)
+        _ = imeRt.dispatchImeEvent(.preedit("X", cursorUTF8: nil, clauses: []), at: 2.0 / 60.0)
+        _ = imeRt.frame(at: 2.0 / 60.0)
+        #expect(imeRt.state.edit.preedit?.text == "X")
+        _ = imeRt.dispatchImeEvent(.commit("X"), at: 3.0 / 60.0)
+        _ = imeRt.frame(at: 3.0 / 60.0)
+        #expect(imeRt.state.edit.text == "aXb")
+
+        var selEdit1 = TextEdit("ab")
+        let selEdit0 = selEdit1
+        selEdit1.selectAll()
+        #expect(selEdit0 != selEdit1)
+
+        // 8. cx.caret read inside reused memo keeps following caret (`memo.rs:1285`)
+        struct CaretState { var edit = TextEdit("") }
+        let caretRt = Runtime<CaretState>(state: CaretState(), viewport: Vec2(300, 300), pixelScale: 1.0) { _, cx in
+            col().size(300, 300)
+                .child(textInput(key: "field", \CaretState.edit).size(300, 40))
+                .child(memo("label", 0) { () -> El<CaretState> in
+                    let x: Float = cx.caret("field")?[0] ?? -1
+                    return text("caret \(x)").key("label")
+                })
+        }
+        _ = caretRt.frame(at: 0.0)
+        caretRt.pointerDown(at: Vec2(20, 20), at: 0.005)
+        caretRt.pointerUp(at: Vec2(20, 20), at: 0.006)
+        _ = caretRt.frame(at: 1.0 / 60.0)
+        _ = caretRt.frame(at: 1.0 / 60.0)
+        let caretStart = caretRt.element(byKey: "label")?.text
+        #expect(caretStart != nil && caretStart != "caret -1.0")
+        for step in 1...3 {
+            let t = Double(step + 1) * (1.0 / 60.0)
+            _ = caretRt.keyDown(KeyEvent(key: .text("w")), at: t)
+            _ = caretRt.frame(at: t)
+            _ = caretRt.frame(at: t)
+        }
+        #expect(caretRt.element(byKey: "label")?.text != caretStart)
+
+        // 9. memo records caller file/line location (`memo.rs:1312`)
+        let expectedLine = #line + 1
+        let locBuilt: El<Int> = memo("id", 0) { el() }
+        #expect(locBuilt.keyLocation.hasPrefix("\(#fileID):\(expectedLine):"))
     }
 
     @Test("withFontFamilies nests, bumps fontEpoch, and affects TextSystem.measure")
@@ -830,7 +921,7 @@ struct ShellAuditParityTests {
             #expect(maxJerk(dist: d) <= reachMost)
         }
 
-        // 5. eases_into_target
+        // 5. eases_into_target (`growth.rs:667`)
         for streaming in [false, true] {
             var t = GrowTrack.settled(0)
             t.streaming = streaming
@@ -838,14 +929,15 @@ struct ShellAuditParityTests {
             var speeds: [Float] = []
             var p: Float = 0
             for _ in 0..<120 {
-                t.step(spring: Growth.spring, edge: .feather, carryingTail: false)
-                t.step(spring: Growth.spring, edge: .feather, carryingTail: false)
+                for _ in 0..<4 {
+                    t.step(spring: Growth.spring, edge: .feather, carryingTail: false)
+                }
                 speeds.append(t.h - p)
                 p = t.h
             }
-            let peakSpeed = speeds.max() ?? 0
-            let tailSpeed = speeds.last(where: { $0 > 0 }) ?? 0
-            #expect(peakSpeed > 0 && tailSpeed < peakSpeed)
+            for (w0, w1) in zip(speeds, speeds.dropFirst()) {
+                #expect(!(w0 >= 0.5 && w1 <= 0.15 * w0), "stop-dead frame at \(w0) -> \(w1)")
+            }
         }
 
         // 6. a_glide_handed_to_a_whole_row_mid_way_carries_on

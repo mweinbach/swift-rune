@@ -966,6 +966,9 @@ public final class Runtime<State> {
     internal var rectSpringingById: [NodeId: Bool] = [:]
     private var lastCommittedSpecs: [NodeSpec] = []
     public internal(set) var liveOnlyEvents: UInt64 = 0
+    public var liveOnlySkips: UInt64 { liveOnlyEvents }
+    public internal(set) var liveChecks: UInt64 = 0
+    public var commitWhy: UInt16 = 0
     public internal(set) var liveOnlyWarnings: [String] = []
     internal var liveOnlyCheckEnabled: Bool = true
     internal var lastLiveCommitClock: Double = -.infinity
@@ -1235,7 +1238,18 @@ public final class Runtime<State> {
     }
 
     @inline(__always)
-    internal func dirtyCommit(at now: Double, external: Bool = true) {
+    internal func dirtyCommit(
+        at now: Double,
+        external: Bool = true,
+        clearLiveCheck: Bool = true,
+        why: UInt16 = 0
+    ) {
+        if clearLiveCheck {
+            pendingLiveOnlyCheck = nil
+        }
+        if why != 0 {
+            commitWhy |= why
+        }
         needsCommit = true
         if external {
             hasExternalDirtyCommit = true
@@ -2774,7 +2788,8 @@ public final class Runtime<State> {
                         let dup = "\(rawK)#dup\(count)"
                         childResolvedKey = dup
                         childSegment = "@\(dup)"
-                        warnings.append("Duplicate sibling key '\(rawK)' renamed to '\(dup)' under \(path)")
+                        let locSuffix = childEl.keyLocation.isEmpty ? "" : " (\(childEl.keyLocation))"
+                        warnings.append("Duplicate sibling key '\(rawK)' renamed to '\(dup)' under \(path)\(locSuffix)")
                     }
                 } else {
                     childResolvedKey = nil
@@ -4964,7 +4979,9 @@ public final class Runtime<State> {
                 nodeTurn = ancestorTurn
             }
 
-            let parentWindowClip: MotionRect = flightClipOverride ?? snap.clipRect
+            let parentWindowClip: MotionRect = flightClipOverride
+                ?? inh.clip.map { intersectRects(MotionRect.fromXYWH(0, 0, viewport.x, viewport.y), $0) }
+                ?? snap.clipRect
             let effectiveOuterClip: MotionRect
             let effectiveHitClip: MotionRect
             let childLocalTurnClip: MotionRect?
@@ -5065,7 +5082,9 @@ public final class Runtime<State> {
                 }
             }
 
-            var visClip = flightClipOverride ?? (inh.clip.map { intersectRects(snap.clipRect, $0) } ?? snap.clipRect)
+            var visClip = flightClipOverride
+                ?? inh.clip.map { intersectRects(MotionRect.fromXYWH(0, 0, viewport.x, viewport.y), $0) }
+                ?? snap.clipRect
             if let rev = p.revealClip {
                 visClip = intersectRects(visClip, rev)
             }
@@ -6681,7 +6700,7 @@ public final class Runtime<State> {
                 childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
 
                 let childClip: MotionRect?
-                if el.layout.clipOverflow {
+                if el.layout.clipOverflow || el.clipRadius != nil || el.clipCorners != nil || el.clipFade != nil {
                     let snappedPt = MotionRect(
                         left: snappedEdgesPx[0] / pxScale,
                         top: snappedEdgesPx[1] / pxScale,
@@ -7135,7 +7154,10 @@ public final class Runtime<State> {
                     continue
                 }
                 if predicate(node) {
-                    matches.append((node, geom.rect, Vec2(localWindowPt.x - geom.rect.x, localWindowPt.y - geom.rect.y)))
+                    let sc = presentedScaleByPath[path] ?? Vec2(1, 1)
+                    let sx = abs(sc.x) > 1e-6 ? sc.x : 1.0
+                    let sy = abs(sc.y) > 1e-6 ? sc.y : 1.0
+                    matches.append((node, geom.rect, Vec2((localWindowPt.x - geom.rect.x) / sx, (localWindowPt.y - geom.rect.y) / sy)))
                 }
                 if firstBlockerPath == nil && (geom.hasVisualBlocker || geom.isInteractiveBlocker) {
                     firstBlockerPath = path
@@ -7149,7 +7171,10 @@ public final class Runtime<State> {
                     continue
                 }
                 if predicate(node) {
-                    matches.append((node, infoRect, Vec2(point.x - infoRect.x, point.y - infoRect.y)))
+                    let sc = presentedScaleByPath[path] ?? Vec2(1, 1)
+                    let sx = abs(sc.x) > 1e-6 ? sc.x : 1.0
+                    let sy = abs(sc.y) > 1e-6 ? sc.y : 1.0
+                    matches.append((node, infoRect, Vec2((point.x - infoRect.x) / sx, (point.y - infoRect.y) / sy)))
                 }
                 let hasVis = node.el.background.a > 0.001 || node.el.gradient != nil ||
                     (node.el.borderWidth > 0 && node.el.borderColor.a > 0.001) ||
@@ -8060,6 +8085,12 @@ public final class Runtime<State> {
         }
     }
 
+    /// `Runtime::physical_with_fallback` convenience alias.
+    @discardableResult
+    public func physicalWithFallback(_ event: PhysicalInput, fallback: KeyEvent? = nil, at now: Double) -> Bool {
+        physicalInput(event, fallbackKey: fallback, at: now)
+    }
+
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
         let prevCode = currentPhysicalKey
@@ -8099,8 +8130,10 @@ public final class Runtime<State> {
                 if flatNodes[curIdx].effectiveInert { break }
                 if let onPhys = flatNodes[curIdx].el.handlers.onPhysicalInput {
                     var tx = makeTx(at: now)
-                    if onPhys(&state, event, &tx) {
-                        applyTx(tx, at: now)
+                    let taken = onPhys(&state, event, &tx)
+                    _ = Tx.took(taken, &tx)
+                    if taken {
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput")
                         return true
                     }
                 }
@@ -8112,8 +8145,10 @@ public final class Runtime<State> {
             for node in flatNodes.reversed() where !node.effectiveInert {
                 if let onPhys = node.el.handlers.onPhysicalInput {
                     var tx = makeTx(at: now)
-                    if onPhys(&state, event, &tx) {
-                        applyTx(tx, at: now)
+                    let taken = onPhys(&state, event, &tx)
+                    _ = Tx.took(taken, &tx)
+                    if taken {
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, liveOnlyLabel: "onPhysicalInput")
                         return true
                     }
                 }
@@ -8927,7 +8962,8 @@ public final class Runtime<State> {
         at now: Double,
         markDirtyIfNotLiveOnly: Bool = true,
         external: Bool = true,
-        liveOnlyLabel: String = "handler"
+        liveOnlyLabel: String = "handler",
+        why: UInt16 = CommitWhy.input
     ) {
         if let cb = tx.clipboardWrite {
             clipboard = cb
@@ -8997,6 +9033,7 @@ public final class Runtime<State> {
         }
         if tx.isMinimizeRequested {
             minimizeRequested = true
+            _ = minimizeStep(.asked)
         }
         if tx.isRelaunchRequested {
             relaunchRequested = true
@@ -9183,10 +9220,10 @@ public final class Runtime<State> {
         if tx.liveOnlyRequested {
             livePendingDirty = true
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
-                dirtyCommit(at: now, external: external)
+                dirtyCommit(at: now, external: external, clearLiveCheck: false)
             }
         } else if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
-            dirtyCommit(at: now, external: external)
+            dirtyCommit(at: now, external: external, why: why)
         }
     }
 
@@ -9320,7 +9357,7 @@ public final class Runtime<State> {
             if shouldDirty {
                 perfWatch.meter.poll()
             }
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: shouldDirty, why: shouldDirty ? CommitWhy.poll : 0)
             return changed
         }
     }
@@ -9336,7 +9373,7 @@ public final class Runtime<State> {
             } else {
                 body(&state, &tx)
             }
-            applyTx(tx, at: t, markDirtyIfNotLiveOnly: true)
+            applyTx(tx, at: t, markDirtyIfNotLiveOnly: true, why: CommitWhy.dirty)
         }
     }
 
@@ -9358,7 +9395,8 @@ public final class Runtime<State> {
                 changed = body(&state, &tx)
             }
             let hadFocusBeforeUpdate = (focusedPath != nil || focusedKey != nil)
-            applyTx(tx, at: t, markDirtyIfNotLiveOnly: changed || tx.isForceCommitRequested)
+            let shouldDirty = changed || tx.isForceCommitRequested
+            applyTx(tx, at: t, markDirtyIfNotLiveOnly: shouldDirty, why: shouldDirty ? CommitWhy.dirty : 0)
             return changed || (tx.blurFocusRequested && hadFocusBeforeUpdate)
         }
     }
@@ -9754,6 +9792,9 @@ public final class Runtime<State> {
             }
             return commitCount != prevCommits
         }
+        if let deadline = nextWakeDeadline, t >= deadline {
+            nextWakeDeadline = nil
+        }
         let pollChanged = runPoll(at: t)
         return pollChanged || needsCommit
     }
@@ -9777,6 +9818,12 @@ public final class Runtime<State> {
     @discardableResult
     public func shellTakeMinimize() -> Bool {
         minimizeStep(.taken)
+    }
+
+    /// Clears a latched minimize request when the shell declines or ignores it (`Runtime::ignore_minimize`).
+    public func ignoreMinimize(_ reason: String = "") {
+        _ = reason
+        _ = minimizeStep(.lost)
     }
 
     @discardableResult

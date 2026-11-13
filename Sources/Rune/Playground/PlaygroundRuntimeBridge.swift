@@ -505,6 +505,7 @@ extension Runtime {
         }
         pressedPath = nil
         pressedKey = nil
+        clearTitlebarPress()
         hoveredPath = nil
         hoveredKey = nil
         dragFilesLeave(at: now)
