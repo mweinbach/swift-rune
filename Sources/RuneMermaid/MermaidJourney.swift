@@ -71,7 +71,7 @@ enum JourneyParser {
         MermaidChart.hue(i + 6)
     }
 
-    private static func mood(_ score: Float, paint: MermaidTheme) -> Color {
+    static func mood(_ score: Float, paint: MermaidTheme) -> Color {
         let h = 25.0 + (score - 1.0) / 4.0 * 125.0
         return MermaidChart.isDark(paint) ? oklch(0.7, 0.14, h) : oklch(0.8, 0.14, h)
     }

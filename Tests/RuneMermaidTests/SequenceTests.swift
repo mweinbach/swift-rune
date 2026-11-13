@@ -150,6 +150,37 @@ struct SequenceTests {
         #expect(MermaidParser.parse("sequenceDiagram\n\(deep)A->>B: hi") == nil)
     }
 
+    @Test("unreadable sources reject and bad lines are skipped")
+    func unreadableRejectedAndBadLinesSkipped() {
+        for src in ["sequenceDiagram", "sequenceDiagram\nA something B", "sequenceDiagram\n->>B: no sender\nend\nelse x"] {
+            #expect(MermaidParser.parse(src) == nil, "Expected nil for \(src)")
+        }
+        for src in [
+            "sequenceDiagram\nA something B\nA->>B: hi",
+            "sequenceDiagram\n->>B: no sender\nA->>B: hi",
+            "sequenceDiagram\nA->>: no receiver\nA->>B: hi",
+            "sequenceDiagram\nend\nelse x\nA->>B: hi",
+            "sequenceDiagram\nNote sideways of A: x\nNote over A no colon\nA->>B: hi",
+        ] {
+            let s = seq(src)
+            let msgCount = s.events.filter {
+                if case .message = $0 { return true }
+                return false
+            }.count
+            #expect(msgCount == 1, "Expected 1 message for \(src)")
+            #expect(s.participants.count == 2, "Bad line must not add participants for \(src)")
+        }
+        let openFrame = seq("sequenceDiagram\nloop unclosed\n  A->>B: hi\nbox unclosed\n  participant C")
+        if case .end? = openFrame.events.last {
+        } else {
+            Issue.record("Expected open frame to close with .end")
+        }
+        #expect(openFrame.participants.count == 3 && openFrame.participants[2].group == 0)
+
+        let jsonType = seq("sequenceDiagram\nparticipant A@{ \"type\": \"database\" }\nA->>B: hi")
+        #expect(jsonType.participants[0].label == "A")
+    }
+
     @Test("every prefix draws or falls back without crashing")
     func prefixesNeverCrash() {
         assertPrefixesNeverCrash(

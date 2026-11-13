@@ -136,6 +136,15 @@ struct StateClassERTests {
 
     @Test("class diagram lenient block skipping and prefix fuzzing")
     func classLenientAndPrefixes() {
+        for bad in ["classDiagram", "classDiagram\n}", "classDiagram\njust garbage words here"] {
+            #expect(MermaidParser.parse(bad) == nil, "Expected nil for \(bad)")
+        }
+        let open = cls("classDiagram\nclass Open {\n  +x")
+        #expect(open.classes[0].fields == ["+x"])
+        let skipped = cls("classDiagram\njust garbage words here\nclass Bad<<x {\n  +y\n}\nA --> B")
+        #expect(skipped.classes.map(\.id) == ["A", "B"])
+        #expect(skipped.edges.count == 1)
+
         let c = cls("classDiagram\nnamespace outer {\n  namespace inner {\n    class Hidden {\n      +x\n    }\n  }\n  class Kept\n}")
         #expect(c.classes.map(\.id) == ["Kept"])
         #expect(c.classes[0].namespace == 0)
@@ -206,5 +215,25 @@ struct StateClassERTests {
         for t in ["CUSTOMER", "ORDER", "places", "string", "name", "PK"] {
             #expect(texts.contains(t), "Missing label \(t)")
         }
+    }
+
+    @Test("ER bad lines and blocks are skipped")
+    func erBadLinesAndBlocksSkipped() {
+        let d = er("""
+        erDiagram
+         A ||--o{ B : ok
+         this is not a relation
+         C ??--?? D : nope
+         E bad name {
+           string x
+         }
+         B {
+           string fine
+           not-an-attribute
+         }
+        """)
+        #expect(d.entities.map(\.id) == ["A", "B"])
+        #expect(d.entities[1].attrs.count == 1)
+        #expect(MermaidParser.parse("erDiagram\n  nothing here at all") == nil)
     }
 }

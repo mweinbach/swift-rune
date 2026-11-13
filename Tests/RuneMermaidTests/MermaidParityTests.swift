@@ -458,6 +458,59 @@ struct MermaidParityTests {
         let oneLineH = measureBalanced("newest", font: light.font).size.y
         #expect(balanced.wrap && balanced.size.y < oneLineH * 2.5)
         #expect(balanced.size.x < 160.0)
+
+        // edges_leave_a_subgraph_steeply (layered_draw_tests.rs:192)
+        for width: Float in [680.0, 2000.0] {
+            let c = draw(chat, dark: false, width: width)
+            guard case let .fill(pts, _)? = c.ops.first else {
+                Issue.record("Expected cluster fill")
+                continue
+            }
+            let b = pts.reduce((Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)) {
+                (min($0.0, $1.x), min($0.1, $1.y), max($0.2, $1.x), max($0.3, $1.y))
+            }
+            let turned = (b.3 - b.1) > (b.2 - b.0)
+            var crossings = 0
+            for op in c.ops {
+                if case let .stroke(linePts, closed, _, _, _) = op, !closed {
+                    for i in 0..<max(0, linePts.count - 1) {
+                        let a = linePts[i], z = linePts[i + 1]
+                        let aAlong = turned ? a.y : a.x
+                        let zAlong = turned ? z.y : z.x
+                        let aAcross = turned ? a.x : a.y
+                        let edge = turned ? b.3 : b.2
+                        let loAcross = turned ? b.0 : b.1
+                        let hiAcross = turned ? b.2 : b.3
+                        if (aAlong - edge) * (zAlong - edge) < 0.0 && aAcross > loAcross && aAcross < hiAcross {
+                            crossings += 1
+                            let slope = abs((turned ? z.x : z.y) - aAcross) / abs(zAlong - aAlong)
+                            #expect(slope < 0.6, "Slope \(slope) >= 0.6 at width \(width)")
+                        }
+                    }
+                }
+            }
+            #expect(crossings == 2, "Expected 2 exits at width \(width)")
+        }
+
+        // an_edge_runs_straight_through_its_label (layered_draw_tests.rs:237)
+        for width: Float in [420.0, 680.0, 2000.0] {
+            let c = draw(chat, dark: false, width: width)
+            let openLines: [[Vec2]] = c.ops.compactMap {
+                if case let .stroke(pts, closed, _, _, _) = $0, !closed, pts.count >= 2 { return pts }
+                return nil
+            }
+            for text in ["newest turn is a question", "newest turn is a result you haven't read"] {
+                let l = c.labels.first { $0.text == text }!
+                let r = rect(l)
+                let off: (Vec2) -> Float = { p in max(r.0 - p.x, max(p.x - r.2, max(r.1 - p.y, p.y - r.3))) }
+                let ends = openLines.flatMap { [$0.first!, $0.last!] }.filter { off($0) > -0.5 && off($0) < 10.0 }
+                #expect(ends.count == 2, "Expected 2 ends around \(text) at width \(width)")
+                if ends.count == 2 {
+                    let a = ends[0], b = ends[1]
+                    #expect(abs(a.x - b.x) < 1.0 || abs(a.y - b.y) < 1.0, "Line jogged through \(text)")
+                }
+            }
+        }
     }
 
     // MARK: - Route, Shapes, Ink, Hover, Parts Parity
@@ -469,6 +522,19 @@ struct MermaidParityTests {
         let p3 = scene("flowchart TD\nA[Start] --> B[Step] --> A")!
         let p4 = scene("flowchart LR\nsubgraph S[Box]\nA --> B\nend\nX --> S")!
         #expect(!p1.ops.isEmpty && p2.pieces.count >= 5 && !p3.ops.isEmpty && !p4.ops.isEmpty)
+
+        // arrows_point_into_the_node_they_reach (route_tests.rs:50)
+        guard case let .flowchart(arrowF)? = MermaidParser.parse("flowchart TD\n  A[Audio] --> B[Parakeet]") else {
+            Issue.record("Expected flowchart")
+            return
+        }
+        let arrowC = FlowchartParser.drawCanvas(arrowF, paint: dark, hover: (.edges, dark.text))!
+        let tip = arrowC.ops.compactMap { op -> Vec2? in
+            if case let .fill(pts, col) = op, col == dark.line, pts.count == 3 { return pts[0] }
+            return nil
+        }.first
+        let bTop = arrowC.regions[1].map(\.y).min()!
+        #expect(tip != nil && abs((tip?.y ?? 0) - bTop) < 0.5)
     }
 
     @Test("triangle ray exit and cylinder rims behave per shape spec")
@@ -522,6 +588,61 @@ struct MermaidParityTests {
             return nil
         }
         #expect(alphas.count >= 2 && alphas.allSatisfy { $0 == 1.0 })
+
+        // a_line_is_no_brighter_at_its_joints_under_its_head_or_round_a_corner (ink_tests.rs:53)
+        func insideCount(_ pts: [Vec2], _ p: Vec2) -> Int {
+            var odd = false
+            var j = pts.count - 1
+            for i in 0..<pts.count {
+                let a = pts[i], c = pts[j]
+                if (a.y > p.y) != (c.y > p.y) && p.x < (c.x - a.x) * (p.y - a.y) / (c.y - a.y) + a.x {
+                    odd.toggle()
+                }
+                j = i
+            }
+            return odd ? 1 : 0
+        }
+        func covers(_ a: Vec2, _ b: Vec2, width: Float, roundCap: Bool, p: Vec2) -> Bool {
+            let len = max(CanvasMath.dist(a, b), 1e-6)
+            let d = Vec2((b.x - a.x) / len, (b.y - a.y) / len)
+            let t = (p.x - a.x) * d.x + (p.y - a.y) * d.y
+            let n = abs((p.x - a.x) * -d.y + (p.y - a.y) * d.x)
+            if roundCap {
+                return CanvasMath.dist(p, CanvasMath.lerp(a, b, min(max(t / len, 0.0), 1.0))) <= width / 2.0
+            }
+            return t >= 0.0 && t <= len && n <= width / 2.0
+        }
+        func painted(_ ops: [CanvasOp], surface: Color, p: Vec2) -> Color {
+            ops.reduce(surface) { under, op in
+                switch op {
+                case let .fill(pts, col):
+                    let count = insideCount(pts, p)
+                    return (0..<count).reduce(under) { u, _ in InkFlattener.over(col, u) }
+                case let .stroke(pts, closed, width, roundCap, col):
+                    var segs: [(Vec2, Vec2)] = (0..<max(0, pts.count - 1)).map { (pts[$0], pts[$0 + 1]) }
+                    if closed && pts.count > 2 {
+                        segs.append((pts.last!, pts.first!))
+                    }
+                    return segs.filter { covers($0.0, $0.1, width: width, roundCap: roundCap, p: p) }
+                        .reduce(under) { u, _ in InkFlattener.over(col, u) }
+                }
+            }
+        }
+        let flowSrc = "flowchart LR\n  R1[Retry at once] -->|fails| R2[Back off 1 s]\n  R2 -->|fails| Off[Offline]\n  R1 -->|ok| On[Online]"
+        let flowOps = scene(flowSrc, paint: dark)!.ops
+        var checked = 0
+        for op in flowOps {
+            guard case let .stroke(pts, closed, _, _, _) = op, pts.count >= 2 else { continue }
+            let segs = (0..<(pts.count - 1)).map { (pts[$0], pts[$0 + 1]) }
+            let longest = segs.max { CanvasMath.dist($0.0, $0.1) < CanvasMath.dist($1.0, $1.1) }!
+            let body = painted(flowOps, surface: dark.surface, p: CanvasMath.lerp(longest.0, longest.1, 0.5))
+            for p in pts.dropFirst(closed ? 0 : 1) {
+                let lift = painted(flowOps, surface: dark.surface, p: p).luminance - body.luminance
+                #expect(lift < 0.002, "Brighter by \(lift) at \(p)")
+                checked += 1
+            }
+        }
+        #expect(checked > 40)
     }
 
     @Test("hover lineHits split diagonal lines, cutAway excludes nodes, and spots carry stable keys")
@@ -581,9 +702,17 @@ struct MermaidParityTests {
             }
         }
         let full = retries.joined(separator: "\n")
+        let before = scene(full, paint: dark)!
         let streamedFinal = MermaidScenes.growing(full, theme: dark, hover: nil)
-        let nonStreamed = scene(full, paint: dark)
-        #expect(streamedFinal != nil && nonStreamed != nil)
+        let after = scene(full, paint: dark)!
+        func centres(_ s: MermaidScene) -> [String: Vec2] {
+            Dictionary(uniqueKeysWithValues: s.pieces.filter { $0.key.hasPrefix("n:") && !$0.key.contains(".") }.map {
+                ($0.key, Vec2($0.at.x + $0.size.x / 2.0, $0.at.y + $0.size.y / 2.0))
+            })
+        }
+        #expect(streamedFinal != nil)
+        #expect(centres(before) == centres(after))
+        #expect(before.size == after.size)
 
         // Node to subgraph promotion: "subgraph S" replacing node S should build cleanly while holding memory
         let beforeSub = "flowchart TD\nA --> S\nS --> B"
@@ -643,8 +772,14 @@ struct MermaidParityTests {
         #expect(MermaidParser.parse("journey\ntitle Empty\nsection A") == nil)
 
         // Timeline
+        let acrossTimeline = scene("timeline\n2001 : a\n2002 : b\n2003 : c", paint: light)!
+        let acrossYs = ["2001", "2002", "2003"].map { t in acrossTimeline.labels.first { $0.text == t }!.at.y }
+        #expect(abs(acrossYs[0] - acrossYs[1]) < 0.5 && abs(acrossYs[1] - acrossYs[2]) < 0.5)
         let manyTimeline = "timeline\n" + (2000..<2012).map { "\($0) : event" }.joined(separator: "\n")
-        #expect(scene(manyTimeline, paint: light) != nil)
+        let downTimeline = scene(manyTimeline, paint: light)!
+        func timelineY(_ t: String) -> Float { downTimeline.labels.first { $0.text == t }!.at.y }
+        #expect(timelineY("2001") > timelineY("2000") && timelineY("2011") > timelineY("2010"))
+        #expect(downTimeline.size.x <= Canvas.room(for: light) + 2.01)
         #expect(MermaidParser.parse("timeline\n  title Nothing") == nil)
 
         // Git
@@ -688,6 +823,9 @@ struct MermaidParityTests {
         func labelAt(_ t: String) -> Vec2 { blockScene.labels.first { $0.text == t }!.at }
         #expect(labelAt("One").x < labelAt("Two").x && abs(labelAt("One").y - labelAt("Two").y) < 1.0)
         #expect(labelAt("Three").y > labelAt("One").y + 10.0)
+        let autoBlock = scene("block\nOne Two Three", paint: light)!
+        let autoYs = autoBlock.labels.map(\.at.y)
+        #expect(autoYs.allSatisfy { abs($0 - autoYs[0]) < 1.0 })
         #expect(MermaidParser.parse("block-beta\n  columns 2") == nil)
 
         // C4 & Requirement
@@ -746,24 +884,43 @@ struct MermaidParityTests {
             $0.plainText == "go" && $0.textColor == litColor && $0.keyId?.hasPrefix("t") == true && $0.transition == Transition.none
         })
 
-        // Verify Runtime actually lights up hover group shapes when pointer moves onto a spot
+        // a_label_lights_itself_and_its_edge (hover_tests.rs:65)
+        let labelSpotScene = scene("flowchart LR\n  A -->|go on| B\n  B --> C", paint: light, hover: (.edges, litColor))!
+        let goIdx = labelSpotScene.labels.firstIndex { $0.text == "go on" }!
+        let goLabel = labelSpotScene.labels[goIdx]
+        let goCenter = Vec2(goLabel.at.x + goLabel.size.x / 2.0, goLabel.at.y + goLabel.size.y / 2.0)
+        let overGo = labelSpotScene.hovers.filter { h in
+            let r = h.rect
+            return goCenter.x >= r.0 && goCenter.x <= r.0 + r.2 && goCenter.y >= r.1 && goCenter.y <= r.1 + r.3
+        }
+        #expect(!overGo.isEmpty)
+        #expect(overGo.allSatisfy { $0.key.hasPrefix("hover:e:A>B.") && $0.labels == [goIdx] })
+
+        // hovering_an_edge_lights_it_instantly_and_leaving_drops_it (hover_tests.rs:101)
+        let stateHoverScene = scene("stateDiagram-v2\n  Idle --> Busy : start", paint: light, hover: (.edges, litColor))!
         struct S {}
-        let rt = Runtime<S>(state: S(), viewport: Vec2(600, 400)) { _, _ in
-            sOn.el(paint: dark, streaming: false)
+        let rt = Runtime<S>(state: S(), viewport: Vec2(400, 400)) { _, _ in
+            col().wFull().child(stateHoverScene.el(paint: MermaidTheme.neutral(dark: false), streaming: false))
         }
         let isRedLit: (SIMD4<Float>) -> Bool = { $0.x > 0.9 && $0.y < 0.1 && $0.z < 0.1 }
         let restScene = rt.frame(at: 0)
-        let restVisibleLit = restScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.05 }
-        #expect(restVisibleLit.isEmpty)
+        #expect(restScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.05 }.isEmpty)
 
-        // Move pointer to the first hover spot's center (rt.find locates keyed hover El)
-        if let firstSpotKey = hoverEls.first?.keyId, let center = rt.find(firstSpotKey) {
-            rt.pointerMove(to: center, at: 0.1)
-            let hoveredScene = rt.frame(at: 0.1)
-            let hoveredVisibleLit = hoveredScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.9 }
-            #expect(!hoveredVisibleLit.isEmpty)
-        } else {
-            Issue.record("Expected hover spot keyId to be locatable in Runtime")
+        let labelSpot = rt.elements().first { $0.key == "hover:e:Idle>Busy.t" }
+        #expect(labelSpot != nil)
+        if let spot = labelSpot, spot.rect.count >= 4 {
+            let r = spot.rect
+            rt.pointerMove(to: Vec2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0), at: 1.0 / 60.0)
+            let hoveredScene = rt.frame(at: 1.0 / 60.0)
+            #expect(!hoveredScene.primitives.filter { isRedLit($0.fill) && $0.fill.w > 0.9 }.isEmpty)
+            #expect(rt.element(byKey: "hover:e:Idle>Busy.t")?.hover == 1.0)
+            #expect(rt.element(byKey: "hover:n:Idle")?.hover == 0.0)
+
+            rt.pointerMove(to: Vec2(1.0, 399.0), at: 2.0 / 60.0)
+            for step in 2...13 {
+                _ = rt.frame(at: Double(step) / 60.0)
+            }
+            #expect(rt.element(byKey: "hover:e:Idle>Busy.t")?.hover == 0.0)
         }
 
         let sOff = scene(src, paint: dark, hover: nil)!
@@ -945,7 +1102,7 @@ struct MermaidParityTests {
         for dir in ["LR", "TD"] {
             let planDir = plan.replacingOccurrences(of: "flowchart LR", with: "flowchart \(dir)")
             for width: Float in [680, 4000] {
-                let (f, c) = draw(planDir, width: width)
+                let (_, c) = draw(planDir, width: width)
                 let boxes: [(Float, Float, Float, Float)] = c.ops.compactMap {
                     if case let .fill(pts, _) = $0, pts.count > 8 { return bounds(pts) }
                     return nil

@@ -30,7 +30,22 @@ struct OpenCodeIconsTests {
 
         #expect(OpenCodeProviderIcons.all.count == 102)
         #expect(OpenCodeProviderIcons.ids.count == 102)
-        #expect(!OpenCodeProviderIcons.fallback.paths.isEmpty)
+        #expect(OpenCodeProviderIcons.ids.contains("anthropic") && OpenCodeProviderIcons.ids.contains("openai"))
+        for id in OpenCodeProviderIcons.ids {
+            let data = OpenCodeProviderIcons.providerData(for: id)
+            let icon = OpenCodeProviderIcons.named(id)
+            #expect(data != nil && icon != nil, "no mark for \(id)")
+            if let data, let icon {
+                #expect(data.name == id)
+                let paints = data.body.contains("currentColor") || data.body.contains("fill=\"#")
+                #expect(data.viewBox > 0.0 && icon.viewBox > 0.0 && paints, "\(id) takes the text colour or its own")
+                #expect(!data.body.contains("transform") && !data.body.contains("<g"), "\(id) is flat")
+            }
+        }
+        #expect(OpenCodeProviderIcons.named("not-a-provider") == nil)
+        #expect(OpenCodeProviderIcons.fallback == OpenCodeProviderIcons.synthetic)
+        #expect(OpenCodeProviderIcons.data(named: "synthetic")?.name == "synthetic")
+        #expect(!OpenCodeProviderIcons.fallback.paths.isEmpty || OpenCodeProviderIcons.fallback.body != nil)
         #expect(OpenCodeProviderIcons.named("openai") != nil)
         #expect(OpenCodeProviderIcons.providerData(for: "anthropic") != nil)
     }

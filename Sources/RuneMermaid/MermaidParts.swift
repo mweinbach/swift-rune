@@ -110,6 +110,9 @@ struct ScenePiece {
             .offset(at.x * scale, at.y * scale)
             .size(size.x * scale, size.y * scale)
             .transition(enter)
+        if streaming {
+            node = node.animate(MotionTokens.SETTLE).animateLayout()
+        }
         node.shapes = shapes
         return node
     }

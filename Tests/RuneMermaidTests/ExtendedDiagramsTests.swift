@@ -62,10 +62,24 @@ struct ExtendedDiagramsTests {
         #expect(p?.showData == true)
         #expect(p?.slices.count == 3)
         #expect(PieParser.formatNumber(386.0) == "386")
+        #expect(PieParser.formatNumber(85.5) == "85.5")
+        #expect(PieParser.formatNumber(1.0 / 3.0) == "0.33")
         #expect(PieParser.formatNumber(12.50) == "12.5")
         #expect(canRenderMermaid(src))
         #expect(renderMermaid(src, theme: light) as El<Int>? != nil)
         #expect(renderMermaidDrawing(src, theme: dark) as MermaidDrawing<Int>? != nil)
+
+        if let pieScene = renderScene(MermaidParser.parse("pie showData\n\"Dogs\" : 70\n\"Cats\" : 26\n\"Fish\" : 4")!, theme: light) {
+            let texts = pieScene.labels.map(\.text)
+            for t in ["70%", "26%", "Dogs", "Cats", "Fish", "70", "4"] {
+                #expect(texts.contains(t), "Missing pie label \(t)")
+            }
+            #expect(!texts.contains("4%"))
+        } else {
+            Issue.record("Expected pie percentages scene")
+        }
+        let budget = "pie\n" + (0...MermaidLimits.maxItems).map { "\"s\($0)\" : 1" }.joined(separator: "\n")
+        #expect(MermaidParser.parse(budget) == nil)
     }
 
     @Test("date calendar arithmetic, dayjs parsing, spans, and d3 formatting")
@@ -79,10 +93,16 @@ struct ExtendedDiagramsTests {
             #expect(MermaidDate.format(t, fmt: "%Y-%m-%d") == "2024-03-15")
             #expect(MermaidDate.format(t, fmt: "%b %e") == "Mar 15")
             if let sp = MermaidDate.parseSpan("3d") {
+                #expect(sp == .ms(3.0 * MermaidDate.day))
                 #expect(MermaidDate.format(sp.after(t), fmt: "%Y-%m-%d") == "2024-03-18")
             } else {
                 Issue.record("Expected 3d span to parse")
             }
+            #expect(MermaidDate.parseSpan("1.5h") == .ms(1.5 * MermaidDate.hour))
+            #expect(MermaidDate.parseSpan("2w") == .ms(14.0 * MermaidDate.day))
+            #expect(MermaidDate.parseSpan("3x") == nil)
+            let jan31 = Double(MermaidDate.daysFromCivil(2024, 1, 31)) * MermaidDate.day
+            #expect(MermaidDate.Span.months(1.0).after(jan31) == Double(MermaidDate.daysFromCivil(2024, 2, 29)) * MermaidDate.day)
             if let mo = MermaidDate.parseSpan("1M") {
                 #expect(MermaidDate.format(mo.after(t), fmt: "%Y-%m-%d") == "2024-04-15")
             } else {
@@ -118,6 +138,45 @@ struct ExtendedDiagramsTests {
         #expect(scene?.title == "A Gantt Diagram")
         #expect(renderMermaid(src, theme: light) as El<Int>? != nil)
         #expect(renderMermaidDrawing(src, theme: dark) as MermaidDrawing<Int>? != nil)
+
+        func day(_ y: Int64, _ m: Int, _ d: Int) -> Double {
+            Double(MermaidDate.daysFromCivil(y, m, d)) * MermaidDate.day
+        }
+        if case let .gantt(fwd)? = MermaidParser.parse("gantt\nB :b, after a, 1d\nA :a, 2024-03-01, 2d\nC :c, after d, 1d\nD :d, after c, 1d") {
+            let bTask = fwd.tasks.first { $0.name == "B" }
+            #expect(bTask?.start == day(2024, 3, 3))
+            #expect(fwd.tasks.count == 2)
+        } else {
+            Issue.record("Expected gantt forward links")
+        }
+
+        if case let .gantt(exc)? = MermaidParser.parse("gantt\nexcludes weekends, 2024-01-09\nA :2024-01-05, 3d\nB :2024-01-05, 2024-01-08") {
+            #expect(exc.tasks.first { $0.name == "A" }?.end == day(2024, 1, 11))
+            #expect(exc.tasks.first { $0.name == "B" }?.end == day(2024, 1, 8))
+            #expect(exc.excludes.weekdays[0] && exc.excludes.weekdays[6])
+        } else {
+            Issue.record("Expected gantt excludes")
+        }
+        if case let .gantt(fri)? = MermaidParser.parse("gantt\nweekend friday\nexcludes weekends\nA :2024-01-04, 2d") {
+            #expect(fri.tasks.first { $0.name == "A" }?.end == day(2024, 1, 8))
+        } else {
+            Issue.record("Expected gantt weekend friday")
+        }
+
+        if case let .gantt(inc)? = MermaidParser.parse("gantt\ndateFormat DD/MM/YYYY\ninclusiveEndDates\nnot a task\nA :01/02/2024, 03/02/2024\nB :what, ever\nC :after nobody, 1d") {
+            #expect(inc.tasks.count == 1)
+            #expect(inc.tasks[0].end == day(2024, 2, 4))
+        } else {
+            Issue.record("Expected gantt inclusiveEndDates")
+        }
+        #expect(MermaidParser.parse("gantt\ntitle Nothing\nsection Empty") == nil)
+
+        if let planScene = renderScene(MermaidParser.parse("gantt\ntitle Plan\nsection Work\nShort :2024-01-01, 1d\nA much longer task name :2024-01-02, 20d")!, theme: dark) {
+            let texts = planScene.labels.map(\.text)
+            #expect(texts.contains("Work") && texts.contains("Short") && texts.contains("A much longer task name"))
+        } else {
+            Issue.record("Expected gantt plan scene")
+        }
     }
 
     @Test("timeline parses horizontal and vertical TD layouts and continuation events")
@@ -219,6 +278,18 @@ struct ExtendedDiagramsTests {
         #expect(el != nil)
         let drawing: MermaidDrawing<Int>? = renderMermaidDrawing(src, theme: dark)
         #expect(drawing != nil)
+
+        if let mm = renderScene(MermaidParser.parse("mindmap\n  Centre\n    One\n    Two\n    Three\n    Four")!, theme: dark) {
+            func midX(_ t: String) -> Float {
+                let l = mm.labels.first { $0.text == t }!
+                return l.at.x + l.size.x / 2.0
+            }
+            let centre = midX("Centre")
+            #expect(midX("One") > centre && midX("Two") > centre)
+            #expect(midX("Three") < centre && midX("Four") < centre)
+        } else {
+            Issue.record("Expected mindmap split scene")
+        }
     }
 
     @Test("quadrantChart parses axes, quadrant labels, points, and classDef styles")
@@ -239,6 +310,14 @@ struct ExtendedDiagramsTests {
         #expect(canRenderMermaid(src))
         #expect(renderMermaid(src, theme: light) as El<Int>? != nil)
         #expect(renderMermaidDrawing(src, theme: dark) as MermaidDrawing<Int>? != nil)
+
+        if let qScene = renderScene(MermaidParser.parse("quadrantChart\nquadrant-1 Q1\nquadrant-3 Q3\nHigh: [0.9, 0.9]\nLow: [0.1, 0.1]")!, theme: light) {
+            func at(_ t: String) -> Vec2 { qScene.labels.first { $0.text == t }!.at }
+            #expect(at("High").x > at("Low").x && at("High").y < at("Low").y)
+            #expect(at("Q1").x > at("Q3").x && at("Q1").y < at("Q3").y)
+        } else {
+            Issue.record("Expected quadrant points scene")
+        }
     }
 
     @Test("xychart-beta parses vertical and horizontal bar/line charts and auto-scales")
@@ -278,6 +357,14 @@ struct ExtendedDiagramsTests {
         #expect(canRenderMermaid(src))
         #expect(renderMermaid(src, theme: light) as El<Int>? != nil)
         #expect(renderMermaidDrawing(src, theme: dark) as MermaidDrawing<Int>? != nil)
+
+        if let skScene = renderScene(MermaidParser.parse("sankey-beta\nSolar,Grid,10\nWind,Grid,20\nGrid,Homes,30")!, theme: dark) {
+            func at(_ prefix: String) -> Vec2 { skScene.labels.first { $0.text.hasPrefix(prefix) }!.at }
+            #expect(at("Solar").x < at("Grid").x && at("Grid").x < at("Homes").x)
+            #expect(skScene.labels.contains { $0.text == "Grid 30" })
+        } else {
+            Issue.record("Expected sankey flow scene")
+        }
     }
 
     @Test("block-beta parses columns, spans, nested blocks, space, block arrows, and edges")
@@ -323,6 +410,28 @@ struct ExtendedDiagramsTests {
         """
         #expect(canRenderMermaid(dynSrc))
         #expect(renderMermaidDrawing(dynSrc, theme: dark) as MermaidDrawing<Int>? != nil)
+
+        if case let .c4(dyn)? = MermaidParser.parse("C4Dynamic\n    Container(a, \"App\")\n    ContainerDb(b, \"DB\")\n    RelIndex(1, a, b, \"Reads\")\n    Rel(b, a, \"Rows\")") {
+            #expect(dyn.edges.compactMap(\.label) == ["1: Reads", "2: Rows"])
+        } else {
+            Issue.record("Expected C4Dynamic edges")
+        }
+        let deepC4 = "C4Deployment\n" + String(repeating: "Deployment_Node(n, \"N\") {\n", count: MermaidLimits.maxDepth + 1) + "Node(x, \"X\")"
+        #expect(MermaidParser.parse(deepC4) == nil)
+
+        if let c4CardScene = renderScene(
+            MermaidParser.parse("C4Container\nSystem_Boundary(s, \"Shop\") {\nContainer(web, \"Web\", \"Rust\", \"Serves pages\")\n}\nPerson(u, \"User\")\nRel(u, web, \"Visits\", \"HTTPS\")")!,
+            theme: dark
+        ) {
+            for t in ["«container»", "[Rust]", "Serves pages", "«person»", "Shop\n[System]", "Visits\n[HTTPS]"] {
+                #expect(c4CardScene.labels.contains { $0.text == t }, "Missing C4 label \(t)")
+            }
+            let userY = c4CardScene.labels.first { $0.text == "User" }!.at.y
+            let webY = c4CardScene.labels.first { $0.text == "Web" }!.at.y
+            #expect(userY < webY)
+        } else {
+            Issue.record("Expected C4Container card scene")
+        }
     }
 
     @Test("requirementDiagram parses requirements, elements, fields, and relations")
@@ -372,5 +481,35 @@ struct ExtendedDiagramsTests {
             #expect(s2.x >= s1.x - 0.01)
             #expect(s2.y >= s1.y - 0.01)
         }
+
+        // a_streaming_diagram_glides_inside_a_growth_row (parts_tests.rs:94)
+        let two = "flowchart TD\n  A[Start] --> B[End]\n"
+        func makeGrowthRuntime() -> Runtime<String> {
+            Runtime<String>(state: two, viewport: Vec2(600, 600)) { src, _ in
+                let children: [El<String>] = renderMermaidStreaming(src, theme: MermaidTheme.neutral(dark: true), hover: (.edges, MermaidTheme.neutral(dark: true).text))
+                    .map { [$0] } ?? []
+                return col()
+                    .key("stack")
+                    .wFull()
+                    .growth(GrowthSpec.default)
+                    .child(col().key("row").wFull().children(children))
+            }
+        }
+        let rtSettled = makeGrowthRuntime()
+        _ = rtSettled.frame(at: 0.0)
+        let beforeY = rtSettled.element(byKey: "n:B")!.rect[1]
+        rtSettled.update { s, _ in s += "  Z[First] --> A\n" }
+        for step in 1...90 {
+            _ = rtSettled.frame(at: Double(step) / 60.0)
+        }
+        let afterY = rtSettled.element(byKey: "n:B")!.rect[1]
+        #expect(abs(afterY - beforeY) > 10.0)
+
+        let rtMid = makeGrowthRuntime()
+        _ = rtMid.frame(at: 0.0)
+        rtMid.update { s, _ in s += "  Z[First] --> A\n" }
+        _ = rtMid.frame(at: 1.0 / 60.0)
+        let midY = rtMid.element(byKey: "n:B")!.rect[1]
+        #expect(abs(midY - beforeY) < abs(afterY - beforeY) - 1.0)
     }
 }

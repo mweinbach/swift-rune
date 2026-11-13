@@ -211,6 +211,32 @@ struct FlowchartTests {
         #expect(MermaidParser.parse("graph TD\n\(wide)") == nil)
     }
 
+    @Test("quoted edge labels, nested brackets, styles, and dashed ids")
+    func quotedEdgeLabelsAndDashedIds() {
+        let f = flow("""
+        flowchart LR
+         A[Audio] --> B[Parakeet writes text<br/>'went to the capuchin']
+         B --> C{Any word that looks<br/>or sounds like a term?}
+         C -- no --> F[Paste as is]
+         C -- "capuchin ≈ Cappuccino" --> D[Score the same audio twice:<br/>as 'capuchin' and as 'Cappuccino']
+         D --> E(Call fn(x)) --> G[items[0]]
+         G -->|"a | b"| F
+         style D fill:#dcf5dc
+        """)
+        let toD = f.edges.first { f.nodes[$0.to].id == "D" }
+        #expect(toD?.label == "capuchin ≈ Cappuccino")
+        let toF = f.edges.last { f.nodes[$0.to].id == "F" }
+        #expect(toF?.label == "a | b")
+        #expect(f.nodes.first { $0.id == "E" }?.label == "Call fn(x)")
+        #expect(f.nodes.first { $0.id == "G" }?.label == "items[0]")
+        #expect(f.nodes.first { $0.id == "D" }?.style.fill != nil)
+
+        let dashed = flow("graph TD\n  web-server[\"Web (edge) server\"] --> db[(\"Postgres<br/>primary\")]")
+        #expect(dashed.nodes[0].id == "web-server")
+        #expect(dashed.nodes[0].label == "Web (edge) server")
+        #expect(dashed.nodes[1].label == "Postgres\nprimary")
+    }
+
     @Test("every prefix parses or falls back without crashing")
     func prefixesNeverCrash() {
         assertPrefixesNeverCrash(

@@ -239,7 +239,7 @@ enum C4Parser {
         }
     }
 
-    private static func stereotype(_ e: C4Diagram.Element) -> String {
+    static func stereotype(_ e: C4Diagram.Element) -> String {
         let base: String
         switch e.base {
         case .person: base = "person"
