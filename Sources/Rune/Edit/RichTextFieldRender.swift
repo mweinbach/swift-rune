@@ -2,11 +2,14 @@ import Foundation
 
 extension El {
     /// Attaches ephemeral display decorations (such as syntax highlights or lint underlines) to a text field
-    /// without storing them in `TextEdit` history (`rune::El::decorations`).
+    /// without storing them in `TextEdit` history, or sets display spans on static text (`rune::El::decorations`).
     public func decorations(_ spans: [RichSpan]) -> Self {
-        var copy = self
-        copy.runtimeExtras["inputDecorations"] = spans
-        return copy
+        if handlers.editLens != nil {
+            var copy = self
+            copy.runtimeExtras["inputDecorations"] = spans
+            return copy
+        }
+        return self.spans(spans)
     }
 
     internal var inputDecorations: [RichSpan] {

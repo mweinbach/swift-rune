@@ -1018,88 +1018,105 @@ public struct SplitView<State> {
 
     public func build(_ state: State, kit k: Kit) -> El<State> {
         let spring = paneMotionValue.spring(reducedMotion: reducedMotionValue)
+        let sidebarToggleEl = buildSidebarToggleEl(kit: k)
+        var rootRow: El<State> = row().key(keyId).sizeFull().bg(k.c.layer01)
+        for sbEl in buildSidebarElements(state, kit: k, spring: spring, sidebarToggleEl: sidebarToggleEl) {
+            rootRow = rootRow.child(sbEl)
+        }
+        rootRow = rootRow.child(buildMainColumn(state, kit: k, sidebarToggleEl: sidebarToggleEl))
+        for insEl in buildInspectorElements(state, kit: k, spring: spring) {
+            rootRow = rootRow.child(insEl)
+        }
+        return rootRow
+    }
 
-        func buildGrip(
-            key gripKey: String,
-            cfg: PaneConfig,
-            positiveGrows: Bool
-        ) -> El<State> {
-            let keyPath = cfg.keyPath
-            let isActive = cfg.state.isResizing
-            var handle: El<State> = col()
-                .key(gripKey)
-                .role(.splitter)
-                .label(positiveGrows ? "Resize sidebar" : "Resize inspector")
-                .rangeValue(cfg.state.width, min: cfg.state.minWidth, max: cfg.state.maxWidth)
-                .rangeStep(Self.gripStep)
-                .w(Self.gripWidth)
-                .hFull()
-                .center()
-                .gap(Self.gripStep - 2)
-                .bg(.transparent)
-                .borderSides(
-                    right: positiveGrows ? 0 : 1.0,
-                    left: positiveGrows ? 1.0 : 0,
-                    color: k.c.borderMuted
+    private func buildGrip(
+        key gripKey: String,
+        cfg: PaneConfig,
+        positiveGrows: Bool,
+        kit k: Kit
+    ) -> El<State> {
+        let keyPath = cfg.keyPath
+        let isActive = cfg.state.isResizing
+        var handle: El<State> = col()
+            .key(gripKey)
+            .role(.splitter)
+            .label(positiveGrows ? "Resize sidebar" : "Resize inspector")
+            .rangeValue(cfg.state.width, min: cfg.state.minWidth, max: cfg.state.maxWidth)
+            .rangeStep(Self.gripStep)
+            .w(Self.gripWidth)
+            .hFull()
+            .center()
+            .gap(Self.gripStep - 2)
+            .bg(.transparent)
+            .borderSides(
+                right: positiveGrows ? 0 : 1.0,
+                left: positiveGrows ? 1.0 : 0,
+                color: k.c.borderMuted
+            )
+            .onPointerDown { s, press, _ in
+                guard press.button == .primary else { return }
+                s[keyPath: keyPath].pressGrip(at: press.window)
+            }
+            .onDrag { s, drag, _ in
+                s[keyPath: keyPath].dragGrip(
+                    deltaX: drag.delta.x,
+                    at: drag.window,
+                    positiveGrows: positiveGrows
                 )
-                .onPointerDown { s, press, _ in
-                    guard press.button == .primary else { return }
-                    s[keyPath: keyPath].pressGrip(at: press.window)
+            }
+            .onDragEnd { s, cancelled, _ in
+                if cancelled {
+                    s[keyPath: keyPath].cancelResize()
+                } else {
+                    s[keyPath: keyPath].releaseGrip()
                 }
-                .onDrag { s, drag, _ in
-                    s[keyPath: keyPath].dragGrip(
-                        deltaX: drag.delta.x,
-                        at: drag.window,
-                        positiveGrows: positiveGrows
-                    )
-                }
-                .onDragEnd { s, cancelled, _ in
-                    if cancelled {
-                        s[keyPath: keyPath].cancelResize()
-                    } else {
-                        s[keyPath: keyPath].releaseGrip()
+            }
+            .onDoubleClick { s, _ in
+                s[keyPath: keyPath].resetWidth()
+            }
+        let dotAlpha: Float = isActive ? 0.55 : Self.dotFade
+        for _ in 0..<3 {
+            handle = handle.child(el().w(2).h(2).rounded(1).bg(k.c.textMuted.alpha(dotAlpha)).a11yHidden())
+        }
+        return handle
+    }
+
+    private func buildSidebarToggleEl(kit k: Kit) -> El<State>? {
+        guard let cfg = sidebarCfg, showSidebarToggle else { return nil }
+        var toggleBtn = SidebarToggle<State>(
+            key: "\(keyId)-sidebar-toggle",
+            keyPath: cfg.keyPath
+        )
+        .open(!cfg.state.isCollapsed)
+        .size(sidebarToggleSpec.controlSize)
+        .pastLights(sidebarToggleSpec.pastLightsOffset)
+        .edge(sidebarToggleSpec.edgeOffset)
+        .gap(sidebarToggleSpec.trailingGap)
+        .inHeader(sidebarToggleSpec.isInHeader)
+        .unread(sidebarToggleSpec.hasUnread)
+        .shortcut(sidebarToggleSpec.shortcutHint)
+        .build(k)
+        if sidebarPeekValue.isEnabled && cfg.state.isCollapsed {
+            let sbKp = cfg.keyPath
+            toggleBtn = toggleBtn
+                .hoverDelays(sidebarPeekValue.toggleDelaySeconds, 0)
+                .onHover { s, hovering, _ in
+                    if hovering {
+                        s[keyPath: sbKp].peek()
                     }
                 }
-                .onDoubleClick { s, _ in
-                    s[keyPath: keyPath].resetWidth()
-                }
-            let dotAlpha: Float = isActive ? 0.55 : Self.dotFade
-            for _ in 0..<3 {
-                handle = handle.child(el().w(2).h(2).rounded(1).bg(k.c.textMuted.alpha(dotAlpha)).a11yHidden())
-            }
-            return handle
         }
+        return toggleBtn
+    }
 
-        // Main center column (optional top toolbar + content)
+    private func buildMainColumn(
+        _ state: State,
+        kit k: Kit,
+        sidebarToggleEl: El<State>?
+    ) -> El<State> {
         var mainCol: El<State> = col().key("\(keyId)-main").role(.main).grow(1).minW(0).hFull()
         var effectiveToolbar = toolbarEl
-        let sidebarToggleEl: El<State>? = sidebarCfg.flatMap { cfg in
-            guard showSidebarToggle else { return nil }
-            var toggleBtn = SidebarToggle<State>(
-                key: "\(keyId)-sidebar-toggle",
-                keyPath: cfg.keyPath
-            )
-            .open(!cfg.state.isCollapsed)
-            .size(sidebarToggleSpec.controlSize)
-            .pastLights(sidebarToggleSpec.pastLightsOffset)
-            .edge(sidebarToggleSpec.edgeOffset)
-            .gap(sidebarToggleSpec.trailingGap)
-            .inHeader(sidebarToggleSpec.isInHeader)
-            .unread(sidebarToggleSpec.hasUnread)
-            .shortcut(sidebarToggleSpec.shortcutHint)
-            .build(k)
-            if sidebarPeekValue.isEnabled && cfg.state.isCollapsed {
-                let sbKp = cfg.keyPath
-                toggleBtn = toggleBtn
-                    .hoverDelays(sidebarPeekValue.toggleDelaySeconds, 0)
-                    .onHover { s, hovering, _ in
-                        if hovering {
-                            s[keyPath: sbKp].peek()
-                        }
-                    }
-            }
-            return toggleBtn
-        }
         if let sidebarCfg, let toggleBtn = sidebarToggleEl, sidebarCfg.state.isCollapsed {
             let leadPad = max(
                 0,
@@ -1143,143 +1160,151 @@ public struct SplitView<State> {
         } else {
             mainCol = mainCol.child(bodyEl)
         }
+        return mainCol
+    }
 
-        var rootRow: El<State> = row().key(keyId).sizeFull().bg(k.c.layer01)
-
-        if let sidebarCfg {
-            let pane = sidebarCfg.state
-            let sbW = pane.shownWidth
-            if sbW > 0 {
-                var sbPane: El<State> = col()
-                    .key("\(keyId)-sidebar-pane")
-                    .role(.region)
-                    .label("Sidebar")
-                    .w(sbW)
-                    .hFull()
-                    .p(sidebarPaddingValue)
-                    .pt(max(sidebarPaddingValue, titlebarInsetValue.top))
-                    .clip(true)
-                    .child(sidebarCfg.builder(state))
-                if let spring, !pane.fromPeek {
-                    sbPane = sbPane.animateLayout(spring)
-                }
-                if !pane.isCollapsed, showSidebarToggle, sidebarToggleSpec.isInHeader, let toggleBtn = sidebarToggleEl {
-                    sbPane = sbPane.child(
-                        row()
-                            .key("\(keyId)-sidebar-toggle-slot")
-                            .pin(top: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5), right: max(8, sidebarPaddingValue))
-                            .child(toggleBtn)
-                    )
-                }
-                rootRow = rootRow
-                    .child(sbPane)
-                    .child(buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true))
-            } else if pane.isResizing {
-                rootRow = rootRow.child(
-                    buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true)
-                        .w(0)
-                        .opacity(0)
-                        .a11yHidden()
+    private func buildSidebarElements(
+        _ state: State,
+        kit k: Kit,
+        spring: Spring?,
+        sidebarToggleEl: El<State>?
+    ) -> [El<State>] {
+        guard let sidebarCfg else { return [] }
+        let pane = sidebarCfg.state
+        let sbW = pane.shownWidth
+        if sbW > 0 {
+            var sbPane: El<State> = col()
+                .key("\(keyId)-sidebar-pane")
+                .role(.region)
+                .label("Sidebar")
+                .w(sbW)
+                .hFull()
+                .p(sidebarPaddingValue)
+                .pt(max(sidebarPaddingValue, titlebarInsetValue.top))
+                .clip(true)
+                .child(sidebarCfg.builder(state))
+            if let spring, !pane.fromPeek {
+                sbPane = sbPane.animateLayout(spring)
+            }
+            if !pane.isCollapsed, showSidebarToggle, sidebarToggleSpec.isInHeader, let toggleBtn = sidebarToggleEl {
+                sbPane = sbPane.child(
+                    row()
+                        .key("\(keyId)-sidebar-toggle-slot")
+                        .pin(top: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5), right: max(8, sidebarPaddingValue))
+                        .child(toggleBtn)
                 )
-            } else if sidebarPeekValue.isEnabled {
-                let sbKeyPath = sidebarCfg.keyPath
-                let edgeTop = sidebarPeekValue.belowY ?? max(titlebarInsetValue.top, frameInsetValue + Toolbar<State>.height)
-                if !pane.isPeeking {
-                    let edgeTrigger: El<State> = el()
-                        .key("\(keyId)-peek-edge")
-                        .a11yHidden()
-                        .pin(top: edgeTop, bottom: 0, left: 0)
-                        .w(sidebarPeekValue.edgeWidth)
-                        .z(34)
-                        .hoverDelays(sidebarPeekValue.edgeDelaySeconds, 0)
-                        .onHover { s, hovering, _ in
-                            if hovering {
-                                s[keyPath: sbKeyPath].peek()
-                            }
-                        }
-                    rootRow = rootRow.child(edgeTrigger)
-                } else {
-                    let holdZone: El<State> = el()
-                        .key("\(keyId)-peek-hold")
-                        .a11yHidden()
-                        .pin(top: 0, bottom: 0, left: 0)
-                        .w(pane.width + sidebarPeekValue.holdMargin)
-                        .z(34)
-                        .hoverDelays(0, sidebarPeekValue.holdGraceSeconds)
-                        .onHover { s, hovering, _ in
-                            if !hovering {
-                                s[keyPath: sbKeyPath].endPeek()
-                            }
-                        }
-                        .onWindowFocus { s, focused, _ in
-                            if !focused {
-                                s[keyPath: sbKeyPath].endPeek()
-                            }
-                        }
-                    rootRow = rootRow.child(holdZone)
-                }
-                if pane.isPeeking {
-                    let peekSurface: El<State> = el()
-                        .key("\(keyId)-pane-surface")
-                        .pin(top: 0, right: 0, bottom: 0, left: 0)
-                        .bg(k.c.layer01)
-                        .a11yHidden()
-                    var peekDrawer: El<State> = col()
-                        .key("\(keyId)-sidebar-peek")
-                        .role(.region)
-                        .label("Sidebar")
-                        .pin(top: max(8, titlebarInsetValue.top + 8), bottom: 8, left: 8)
-                        .w(pane.width)
-                        .rounded(k.radius.lg)
-                        .bg(k.c.layer01)
-                        .border(1.0, k.c.borderBase)
-                        .shadows(k.shadowLayers(k.elevation.overlay))
-                        .z(35)
-                        .clip(true)
-                        .onKey { s, ev, _ in
-                            if ev.key == .escape {
-                                s[keyPath: sbKeyPath].endPeek()
-                                return true
-                            }
-                            return false
-                        }
-                        .child(peekSurface)
-                        .child(sidebarCfg.builder(state))
-                    if reducedMotionValue && sidebarPeekValue.reducedFadeSeconds > 0 {
-                        peekDrawer = peekDrawer.transition(.opacity)
-                    } else if let peekSpring = reducedMotionValue ? nil : (sidebarPeekValue.springOverride ?? spring) {
-                        peekDrawer = peekDrawer.animateLayout(peekSpring)
+            }
+            return [
+                sbPane,
+                buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true, kit: k),
+            ]
+        }
+        if pane.isResizing {
+            return [
+                buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true, kit: k)
+                    .w(0)
+                    .opacity(0)
+                    .a11yHidden(),
+            ]
+        }
+        guard sidebarPeekValue.isEnabled else { return [] }
+        let sbKeyPath = sidebarCfg.keyPath
+        let edgeTop = sidebarPeekValue.belowY ?? max(titlebarInsetValue.top, frameInsetValue + Toolbar<State>.height)
+        var out: [El<State>] = []
+        if !pane.isPeeking {
+            let edgeTrigger: El<State> = el()
+                .key("\(keyId)-peek-edge")
+                .a11yHidden()
+                .pin(top: edgeTop, bottom: 0, left: 0)
+                .w(sidebarPeekValue.edgeWidth)
+                .z(34)
+                .hoverDelays(sidebarPeekValue.edgeDelaySeconds, 0)
+                .onHover { s, hovering, _ in
+                    if hovering {
+                        s[keyPath: sbKeyPath].peek()
                     }
-                    rootRow = rootRow.child(peekDrawer)
                 }
-            }
-        }
-
-        rootRow = rootRow.child(mainCol)
-
-        if let inspectorCfg {
-            let pane = inspectorCfg.state
-            let insW = pane.shownWidth
-            if insW > 0 {
-                var insPane: El<State> = col()
-                    .key("\(keyId)-inspector-pane")
-                    .role(.region)
-                    .label("Inspector")
-                    .w(insW)
-                    .hFull()
-                    .p(sidebarPaddingValue)
-                    .clip(true)
-                    .child(inspectorCfg.builder(state))
-                if let spring {
-                    insPane = insPane.animateLayout(spring)
+            out.append(edgeTrigger)
+        } else {
+            let holdZone: El<State> = el()
+                .key("\(keyId)-peek-hold")
+                .a11yHidden()
+                .pin(top: 0, bottom: 0, left: 0)
+                .w(pane.width + sidebarPeekValue.holdMargin)
+                .z(34)
+                .hoverDelays(0, sidebarPeekValue.holdGraceSeconds)
+                .onHover { s, hovering, _ in
+                    if !hovering {
+                        s[keyPath: sbKeyPath].endPeek()
+                    }
                 }
-                rootRow = rootRow
-                    .child(buildGrip(key: "\(keyId)-inspector-grip", cfg: inspectorCfg, positiveGrows: false))
-                    .child(insPane)
+                .onWindowFocus { s, focused, _ in
+                    if !focused {
+                        s[keyPath: sbKeyPath].endPeek()
+                    }
+                }
+            out.append(holdZone)
+            let peekSurface: El<State> = el()
+                .key("\(keyId)-pane-surface")
+                .pin(top: 0, right: 0, bottom: 0, left: 0)
+                .bg(k.c.layer01)
+                .a11yHidden()
+            var peekDrawer: El<State> = col()
+                .key("\(keyId)-sidebar-peek")
+                .role(.region)
+                .label("Sidebar")
+                .pin(top: max(8, titlebarInsetValue.top + 8), bottom: 8, left: 8)
+                .w(pane.width)
+                .rounded(k.radius.lg)
+                .bg(k.c.layer01)
+                .border(1.0, k.c.borderBase)
+                .shadows(k.shadowLayers(k.elevation.overlay))
+                .z(35)
+                .clip(true)
+                .onKey { s, ev, _ in
+                    if ev.key == .escape {
+                        s[keyPath: sbKeyPath].endPeek()
+                        return true
+                    }
+                    return false
+                }
+                .child(peekSurface)
+                .child(sidebarCfg.builder(state))
+            if reducedMotionValue && sidebarPeekValue.reducedFadeSeconds > 0 {
+                peekDrawer = peekDrawer.transition(.opacity)
+            } else if let peekSpring = reducedMotionValue ? nil : (sidebarPeekValue.springOverride ?? spring) {
+                peekDrawer = peekDrawer.animateLayout(peekSpring)
             }
+            out.append(peekDrawer)
         }
+        return out
+    }
 
-        return rootRow
+    private func buildInspectorElements(
+        _ state: State,
+        kit k: Kit,
+        spring: Spring?
+    ) -> [El<State>] {
+        guard let inspectorCfg else { return [] }
+        let pane = inspectorCfg.state
+        let insW = pane.shownWidth
+        guard insW > 0 else { return [] }
+        var insPane: El<State> = col()
+            .key("\(keyId)-inspector-pane")
+            .role(.region)
+            .label("Inspector")
+            .w(insW)
+            .hFull()
+            .p(sidebarPaddingValue)
+            .clip(true)
+            .child(inspectorCfg.builder(state))
+        if let spring {
+            insPane = insPane.animateLayout(spring)
+        }
+        return [
+            buildGrip(key: "\(keyId)-inspector-grip", cfg: inspectorCfg, positiveGrows: false, kit: k),
+            insPane,
+        ]
     }
 }
 

@@ -652,7 +652,7 @@ public final class Runtime<State> {
     private var activeExplicitSnap: Bool = false
     internal var suppressViewportCommitFlag: Bool = false
     internal var lastCommitMotionSpring: Spring? = nil
-    private var lastScaledAnimNow: Double = 0.0
+    internal var lastScaledAnimNow: Double = 0.0
 
     internal var popupQueue: PopupQueueState = .closed
     internal var popupNeedsLayout: Bool = false
@@ -786,6 +786,8 @@ public final class Runtime<State> {
     internal var lastRevealSelectedPaths: Set<String> = []
     internal var loopRuntime = LoopRuntime()
     internal var loopClock = LoopClock()
+    internal var wordRevealStore = WordRevealStore()
+    private var timeScaledNodeIds: Set<NodeId> = []
     internal var selectionState = RuntimeSelectionState()
     public var assistiveTechnology: Bool = false
     public var isTracing: Bool = false {
@@ -1636,6 +1638,9 @@ public final class Runtime<State> {
         // Sample Scene & Live property bindings using scaled animation clock
         refreshHoverAndSyncTracks(at: animNow, wallNow: now, cut: false)
         let frameOut = scene.frame(at: animNow)
+        wordRevealStore.tick { [scene, animNow] id in
+            scene.store.nodeTimeScale(id) != 1.0 ? scene.store.nodeTime(id) : animNow
+        }
         let liveActive: Bool
         if liveVisible {
             _ = liveWake.takeVisible()
@@ -1661,6 +1666,7 @@ public final class Runtime<State> {
             activeTextFlights = kept
         }
 
+        let activeWordReveals = wordRevealStore.hasActiveFades { scene.store.nodeTimeScale($0) }
         let rawAnimating = frameOut.isAnimating
             || scrollStore.isAnimating
             || liveStore.isAnimating
@@ -1674,11 +1680,12 @@ public final class Runtime<State> {
             || hasActiveMotionLoops(at: now)
             || hasActiveSelectableEdgeScroll
             || !activeTextFlights.isEmpty
+            || activeWordReveals
         var sources: UInt32 = 0
         if frameOut.isAnimating { sources |= AnimSource.tracks }
         if growthMoving || growthRows.values.contains(where: { $0.track.moving }) || growthStacks.values.contains(where: { !$0.pendingHeights.isEmpty }) { sources |= AnimSource.growth }
         if scrollStore.isAnimating { sources |= AnimSource.scroll }
-        if !enterDelays.isEmpty { sources |= AnimSource.reveal }
+        if !enterDelays.isEmpty || activeWordReveals { sources |= AnimSource.reveal }
         if liveStore.isAnimating || liveActive { sources |= AnimSource.live }
         if virtualFill.isFilling { sources |= AnimSource.virtualFill }
         if hasActiveMotionLoops(at: now) { sources |= AnimSource.loop }
@@ -3587,6 +3594,38 @@ public final class Runtime<State> {
                 scene.traceNamespace(n.nodeId, ns)
             }
         }
+        let nodeTimeScales = ShellSliceRenderHelpers.propagateTimeScales(
+            nodes: pass.nodes,
+            scene: &scene,
+            trackedIds: &timeScaledNodeIds,
+            wordRevealStore: &wordRevealStore
+        )
+        let commitScaledNow = cxSettings.scaledTime(at: now)
+        let revealEntries: [WordRevealCommitEntry] = pass.nodes.indices.compactMap { i in
+            let n = pass.nodes[i]
+            guard let fade = n.el.elRevealWordFade else { return nil }
+            let txt = n.el.liveText?.get()
+                ?? n.el.plainText
+                ?? n.el.richSpans?.map(\.text).joined()
+                ?? ""
+            let nodeScale = i < nodeTimeScales.count ? nodeTimeScales[i] : 1.0
+            let isScaled = nodeScale != 1.0
+            let t = isScaled ? scene.store.nodeTime(n.nodeId) : commitScaledNow
+            return WordRevealCommitEntry(id: n.nodeId, text: txt, fade: fade, nodeTime: t, timeScaled: isScaled)
+        }
+        if !revealEntries.isEmpty || !wordRevealStore.phases.isEmpty {
+            let retainIds = Set(pass.nodes.map(\.nodeId)).union(exitingSnapshots.keys)
+            wordRevealStore.commit(
+                entries: revealEntries,
+                retainIds: retainIds,
+                prevMountedIds: prevMountedIds,
+                cut: commitCut,
+                reducedMotion: reducedMotion
+            )
+            if wordRevealStore.hasActiveFades(timeScaleOf: { scene.store.nodeTimeScale($0) }) {
+                isAnimating = true
+            }
+        }
         for item in pendingBorderBottoms {
             if let seed = item.seed {
                 scene.set(item.id, Props.BORDER_BOTTOM, seed)
@@ -4487,7 +4526,8 @@ public final class Runtime<State> {
             var hasLiveTransform = false
             var hasLiveSpatialSpring = false
 
-            if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: currentTime) {
+            let loopWall = scene.store.nodeTimeScale(p.id) != 1.0 ? scene.store.nodeTime(p.id) : currentTime
+            if let ls = sampleLoopPresentation(id: p.id, nodeSize: baseRect.size, wallNow: loopWall) {
                 op *= ls.opacity
                 rot += ls.rotation
                 ownDelta.x += ls.offset.x
@@ -5102,7 +5142,17 @@ public final class Runtime<State> {
             }()
 
             let totalShapePieces = el.shapes.reduce(0) { $0 + $1.pieceCount }
-            let useLayer = (blurPt >= 0.5) || el.isolatedLayer || (alpha > 0.001 && alpha < 1.0 && totalShapePieces > 1)
+            let layerOp = el.elLayerOpacity
+            let paintAlphaTotal = (alpha * layerOp).clamped(to: 0...1)
+            let hasChildren = !(childrenByParent[p.id]?.isEmpty ?? true)
+            let ownPaints = ShellSliceRenderHelpers.countOwnPaints(
+                el,
+                hasText: paintedLabelValue != nil || el.richSpans != nil,
+                totalShapePieces: totalShapePieces
+            )
+            let useLayer = (blurPt >= 0.5)
+                || el.isolatedLayer
+                || (paintAlphaTotal > 0.001 && paintAlphaTotal < 0.999 && (totalShapePieces > 1 || (layerOp < 0.999 && (hasChildren || ownPaints >= 2))))
             let devClip = SIMD4<Float>(
                 visClip.left * pxScale,
                 visClip.top * pxScale,
@@ -5201,13 +5251,13 @@ public final class Runtime<State> {
                 if useLayer {
                     primitives.append(.layerBegin(
                         rect: devRect,
-                        opacity: alpha,
+                        opacity: paintAlphaTotal,
                         blurRadius: blurPt * pxScale,
                         clip: devClip,
                         turn: effRotate
                     ))
                 }
-                let localAlpha: Float = useLayer ? 1.0 : alpha
+                let localAlpha: Float = ((useLayer ? 1.0 : paintAlphaTotal) * el.elPaintAlpha).clamped(to: 0...1)
 
                 // 0. Backdrop blur if requested
                 if el.backdropBlur >= 0.5 {
@@ -6042,9 +6092,36 @@ public final class Runtime<State> {
                         srgbBlend: srgbBlend,
                         devClip: devClip,
                         rot: useLayer ? 0 : effRotate,
+                        spanRadius: el.elSpanRadius,
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
+                    if !el.elStrikes.isEmpty, let txt = paintedLabelValue {
+                        let strikeQuads = ShellSliceRenderHelpers.strikeQuads(
+                            strikes: el.elStrikes,
+                            richSpans: el.richSpans,
+                            text: txt,
+                            shaped: shaped,
+                            textSystem: textSystem,
+                            styleSize: el.textStyle.size,
+                            defaultTextColor: defaultTextColor,
+                            textOriginX: textOriginX,
+                            textOriginY: textOriginY,
+                            scaleVec: scaleVec,
+                            pxScale: pxScale,
+                            localAlpha: localAlpha,
+                            srgbBlend: srgbBlend
+                        )
+                        for sq in strikeQuads {
+                            primitives.append(attachFade(.roundedRect(
+                                rect: sq.rect,
+                                radii: .zero,
+                                fill: sq.color,
+                                clip: devClip,
+                                turn: useLayer ? 0 : effRotate
+                            )))
+                        }
+                    }
                     var highlightInks: [TextLinkInkRange] = []
                     var combinedHighlights = el.textHighlights ?? []
                     let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
@@ -6125,8 +6202,22 @@ public final class Runtime<State> {
                                 turn: useLayer ? 0 : effRotate
                             ))
                         }
+                        let revealClock = scene.store.nodeTimeScale(p.id) != 1.0 ? scene.store.nodeTime(p.id) : lastScaledAnimNow
+                        let wordFadeMask = (el.elRevealWordFade != nil)
+                            ? wordRevealStore.mask(
+                                for: p.id,
+                                text: paintedLabelValue ?? "",
+                                shaped: shaped,
+                                textSystem: textSystem,
+                                pixelScale: pxScale,
+                                now: revealClock
+                            )
+                            : nil
                         for g in shaped.glyphs {
-                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(glyphAlpha).simd4(srgb: srgbBlend)
+                            let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
+                            let effGlyphAlpha = glyphAlpha * wordAlpha
+                            if effGlyphAlpha <= 0.0005 { continue }
+                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? g.color ?? defaultTextColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
@@ -6155,7 +6246,8 @@ public final class Runtime<State> {
                     }
                 }
 
-                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput)
+                // 9. Focus ring & focus-within ring when keyboard-focus-visible (or forced by Cx::forceFocusRings / focused textInput), else El.outline
+                let primsBeforeFocus = primitives.count
                 if !hasActiveTextLinks(el) {
                     emitFocusRingIfNeeded(
                         el: el,
@@ -6173,6 +6265,26 @@ public final class Runtime<State> {
                         devH: devH,
                         into: &primitives
                     )
+                }
+                if primitives.count == primsBeforeFocus, let ol = el.elOutline, localAlpha > 0.0005 {
+                    let avgOutlineScale = (scaleVec.x + scaleVec.y) * 0.5
+                    if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
+                        outline: ol,
+                        devRect: devRect,
+                        devRadii: devRadii,
+                        pxScale: pxScale,
+                        avgScale: avgOutlineScale
+                    ) {
+                        primitives.append(attachFade(.roundedRect(
+                            rect: og.rect,
+                            radii: og.radii,
+                            fill: .zero,
+                            borderColor: ol.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderWidth: og.widthPx,
+                            clip: devClip,
+                            turn: useLayer ? 0 : effRotate
+                        )))
+                    }
                 }
             }
 
@@ -6408,7 +6520,7 @@ public final class Runtime<State> {
                 ))
             }
 
-            let childAncestorOp: Float = (shouldEmit && useLayer) ? 1.0 : alpha
+            let childAncestorOp: Float = ((shouldEmit && useLayer) ? 1.0 : paintAlphaTotal).clamped(to: 0...1)
             let nextOuterClip: MotionRect? = (nodeTurn != nil) ? effectiveOuterClip : nil
             let nextGroupHovered = (el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil)
                 ? isGroupHovered(snap)
