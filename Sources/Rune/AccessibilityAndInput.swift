@@ -1286,6 +1286,15 @@ public struct ParsedShortcut: Sendable, Hashable, CustomStringConvertible {
         return out
     }
 
+    /// Whether this shortcut carries Ctrl/Alt/Super or is a function key (`f1`–`f24`).
+    public var hasBindingModifier: Bool {
+        if (mods & (Self.ctrlBit | Self.altBit | Self.superBit)) != 0 { return true }
+        guard keyName.hasPrefix("f"), keyName.count > 1, let num = Int(keyName.dropFirst()) else {
+            return false
+        }
+        return (1...24).contains(num)
+    }
+
     /// Parses an accelerator resolving `"mod"`/`"primary"` for `platform` (`parse.rs:29`).
     public static func parseOn(_ input: String, platform: KeyPlatform = .current) throws -> ParsedShortcut {
         var mods: UInt8 = 0
@@ -1369,22 +1378,76 @@ public struct ParsedShortcut: Sendable, Hashable, CustomStringConvertible {
         }
     }
 
+    private static let physicalKeyPairs: [(PhysicalKeyCode, String)] = [
+        (.keyA, "a"), (.keyB, "b"), (.keyC, "c"), (.keyD, "d"), (.keyE, "e"), (.keyF, "f"), (.keyG, "g"), (.keyH, "h"),
+        (.keyI, "i"), (.keyJ, "j"), (.keyK, "k"), (.keyL, "l"), (.keyM, "m"), (.keyN, "n"), (.keyO, "o"), (.keyP, "p"),
+        (.keyQ, "q"), (.keyR, "r"), (.keyS, "s"), (.keyT, "t"), (.keyU, "u"), (.keyV, "v"), (.keyW, "w"), (.keyX, "x"),
+        (.keyY, "y"), (.keyZ, "z"),
+        (.digit0, "0"), (.digit1, "1"), (.digit2, "2"), (.digit3, "3"), (.digit4, "4"),
+        (.digit5, "5"), (.digit6, "6"), (.digit7, "7"), (.digit8, "8"), (.digit9, "9"),
+        (.f1, "f1"), (.f2, "f2"), (.f3, "f3"), (.f4, "f4"), (.f5, "f5"), (.f6, "f6"), (.f7, "f7"), (.f8, "f8"),
+        (.f9, "f9"), (.f10, "f10"), (.f11, "f11"), (.f12, "f12"), (.f13, "f13"), (.f14, "f14"), (.f15, "f15"), (.f16, "f16"),
+        (.f17, "f17"), (.f18, "f18"), (.f19, "f19"), (.f20, "f20"), (.f21, "f21"), (.f22, "f22"), (.f23, "f23"), (.f24, "f24"),
+        (.escape, "escape"), (.enter, "enter"), (.space, "space"), (.tab, "tab"), (.backspace, "backspace"), (.delete, "delete"), (.insert, "insert"),
+        (.home, "home"), (.end, "end"), (.pageUp, "pageup"), (.pageDown, "pagedown"),
+        (.arrowLeft, "left"), (.arrowRight, "right"), (.arrowUp, "up"), (.arrowDown, "down"),
+        (.minus, "minus"), (.equal, "equal"), (.comma, "comma"), (.period, "period"), (.slash, "slash"),
+        (.semicolon, "semicolon"), (.quote, "quote"), (.bracketLeft, "bracketleft"), (.bracketRight, "bracketright"),
+        (.backslash, "backslash"), (.backquote, "backquote"),
+    ]
+
+    private static let physicalKeyByName: [String: PhysicalKeyCode] = Dictionary(
+        uniqueKeysWithValues: physicalKeyPairs.map { ($0.1, $0.0) }
+    )
+    private static let nameByPhysicalKey: [PhysicalKeyCode: String] = Dictionary(
+        uniqueKeysWithValues: physicalKeyPairs.map { ($0.0, $0.1) }
+    )
+
+    /// Builds a shortcut from a hardware key code and modifier flags (`shortcuts/keys.rs:28`).
+    public static func fromPhysicalKey(
+        _ key: PhysicalKeyCode,
+        mods: Mods = .none,
+        platform: KeyPlatform = .current
+    ) throws -> ParsedShortcut {
+        guard let name = nameByPhysicalKey[key] else {
+            throw ShortcutError.invalidAccelerator("\(key)")
+        }
+        var bits: UInt8 = 0
+        if mods.ctrl || (!platform.isMac && mods.cmd) { bits |= ctrlBit }
+        if mods.alt { bits |= altBit }
+        if mods.shift { bits |= shiftBit }
+        if mods.logo || (platform.isMac && mods.cmd) { bits |= superBit }
+        return ParsedShortcut(mods: bits, keyName: name)
+    }
+
+    /// The physical hardware key corresponding to this shortcut (`shortcuts/keys.rs:38`).
+    public var physicalKey: PhysicalKeyCode? {
+        Self.physicalKeyByName[keyName]
+    }
+
+    /// Modifiers represented as logical `Mods` (`shortcuts/keys.rs:50`).
+    public func modifiers(on platform: KeyPlatform = .current) -> Mods {
+        Mods(
+            shift: (mods & Self.shiftBit) != 0,
+            ctrl: (mods & Self.ctrlBit) != 0,
+            alt: (mods & Self.altBit) != 0,
+            cmd: (mods & (platform.isMac ? Self.superBit : Self.ctrlBit)) != 0,
+            logo: (mods & Self.superBit) != 0
+        )
+    }
+
+    /// Refuses bare shortcuts without ⌘/⌃/⌥ (or Ctrl/Alt/Super) unless F1–F24 (`shortcuts/keys.rs:43`).
+    public func requireModifier(on platform: KeyPlatform = .current) throws {
+        let isFunction = keyName.hasPrefix("f") && keyName.count > 1 && Int(keyName.dropFirst()) != nil
+        if isFunction || (mods & (Self.ctrlBit | Self.altBit | Self.superBit)) != 0 {
+            return
+        }
+        let names = platform.isMac ? "⌘, ⌃ or ⌥" : "Ctrl, Alt or Super"
+        throw ShortcutError.invalidAccelerator("\(self) needs \(names)")
+    }
+
     private static func isKnownPhysicalKeyName(_ name: String) -> Bool {
-        if name.count == 1, let ch = name.first, ch.isASCII, (ch.isLowercase || ch.isNumber) {
-            return true
-        }
-        if name.hasPrefix("f"), let n = Int(name.dropFirst()), (1...24).contains(n), !name.dropFirst().hasPrefix("0") {
-            return true
-        }
-        switch name {
-        case "escape", "enter", "tab", "space", "backspace", "delete", "insert",
-             "home", "end", "pageup", "pagedown", "left", "right", "up", "down",
-             "minus", "equal", "comma", "period", "slash", "semicolon", "quote",
-             "bracketleft", "bracketright", "backslash", "backquote":
-            return true
-        default:
-            return false
-        }
+        physicalKeyByName[name] != nil
     }
 }
 
@@ -1570,17 +1633,20 @@ public final class ShortcutEngine {
     public let title: String
     public var bindings: ShortcutBindingsState<any ShortcutBackendDriver>
     public let claims: ShortcutProcessClaims
+    public var allowUnmodified: Bool
     private let connect: () -> Result<any ShortcutBackendDriver, ShortcutError>
 
     public init(
         title: String,
         bindings: ShortcutBindingsState<any ShortcutBackendDriver> = .disconnected,
         claims: ShortcutProcessClaims = .shared,
+        allowUnmodified: Bool = false,
         connect: @escaping () -> Result<any ShortcutBackendDriver, ShortcutError> = { .failure(.rejectedByOS("unsupported")) }
     ) {
         self.title = title
         self.bindings = bindings
         self.claims = claims
+        self.allowUnmodified = allowUnmodified
         self.connect = connect
     }
 
@@ -1602,6 +1668,9 @@ public final class ShortcutEngine {
 
     @discardableResult
     public func register(id: UInt32, shortcut: ParsedShortcut) -> Result<Void, ShortcutError> {
+        if !allowUnmodified && !shortcut.hasBindingModifier {
+            return .failure(.unmodifiedDisallowed)
+        }
         let alreadyClaimed = claims.isClaimed(shortcut)
         let effects = stepShortcutBindings(&bindings, event: .register(id: id, shortcut: shortcut, claimed: alreadyClaimed))
         for effect in effects {

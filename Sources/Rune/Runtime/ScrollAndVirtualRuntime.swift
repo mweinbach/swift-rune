@@ -826,6 +826,7 @@ extension Runtime {
         substeps = min(substeps, 240)
 
         let stepOrigin = (prevNow ?? (now - dt))
+        let startHeights = growthRows.mapValues { $0.track.h }
         var anyChanged = false
         var anyMoving = false
         if substeps > 0 {
@@ -844,7 +845,10 @@ extension Runtime {
                     growthStacks[sp] = stack
                 }
                 for (k, var entry) in working {
-                    if !entry.track.moving { continue }
+                    let wasMoving = entry.track.moving
+                    if !wasMoving && entry.track.h == entry.track.target && entry.track.v == 0 {
+                        continue
+                    }
                     let prevH = entry.track.h
                     let prevM = entry.track.mask
                     entry.track.step(spring: entry.spring, edge: entry.edge, carryingTail: false)
@@ -852,13 +856,15 @@ extension Runtime {
                         entry.contentSlide = nil
                     }
                     working[k] = entry
-                    if abs(entry.track.h - prevH) > 0.05 || abs(entry.track.mask - prevM) > 0.05 || !entry.track.moving {
+                    if abs(entry.track.h - prevH) > 1e-5 || abs(entry.track.mask - prevM) > 0.05 || (wasMoving && !entry.track.moving) {
                         anyChanged = true
                     }
                 }
             }
             growthRows = working
-            anyMoving = growthRows.values.contains { $0.track.moving }
+            anyMoving = growthRows.contains { k, entry in
+                entry.track.moving || abs(entry.track.h - (startHeights[k] ?? entry.track.h)) > 1e-5
+            }
         }
         flushReleasedHolds(at: now)
         let hasPendingHold = growthStacks.values.contains { !$0.pendingHeights.isEmpty }

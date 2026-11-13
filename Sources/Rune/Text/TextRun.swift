@@ -26,6 +26,9 @@ private final class RunCellLayoutCache: @unchecked Sendable {
         var singleStyle = style
         singleStyle.wrap = .noWrap
         singleStyle.maxLines = 0
+        if singleStyle.fontSmoothing == .systemDefault {
+            singleStyle.fontSmoothing = textSystem.smoothing
+        }
         let scale = max(1.0, pixelScale)
         let isPortable: Bool = {
             #if canImport(CoreText) && canImport(CoreGraphics)
@@ -254,63 +257,11 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         let b1 = text.utf8.index(text.utf8.startIndex, offsetBy: utf8Starts[gi + 1])
         let cellStr = String(text[b0..<b1])
 
-        var glyphsOut: [PositionedGlyph] = []
+        let glyphsOut: [PositionedGlyph]
         #if canImport(CoreText) && canImport(CoreGraphics)
-        if emitGlyphs {
-            let cellStartPx = xsPx[gi]
-            for cg in capturedGlyphs where cg.graphemeIndex == gi {
-                let gxPx = cg.runPosXPx - cellStartPx
-                let gyPx = baselineYPx - cg.runPosYPx
-                if cg.isColor, let colorEntry = textSystem.glyphAtlas.rasterizeColorGlyph(
-                    font: cg.font,
-                    glyph: cg.glyph,
-                    fontSizePx: cg.fontSizePx
-                ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
-                    let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
-                    let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
-                    glyphsOut.append(PositionedGlyph(
-                        rect: SIMD4<Float>(
-                            quadXPx * invS,
-                            quadYPx * invS,
-                            Float(colorEntry.pixelSize.x) * invS,
-                            Float(colorEntry.pixelSize.y) * invS
-                        ),
-                        uv: .zero,
-                        color: nil,
-                        colorGlyphIndex: colorEntry.index
-                    ))
-                    continue
-                }
-                let floorX = floorf(gxPx)
-                let subX = gxPx - floorX
-                let floorY = floorf(gyPx)
-                let subY = gyPx - floorY
-                let binY = UInt8((Int((subY * 4.0).rounded())) % 4)
-                guard let entry = textSystem.glyphAtlas.rasterizeGlyph(
-                    font: cg.font,
-                    glyph: cg.glyph,
-                    fontSizePx: cg.fontSizePx,
-                    subpixelX: subX,
-                    subpixelYBin: binY,
-                    smoothing: style.fontSmoothing
-                ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
-                    continue
-                }
-                let quadXPx = floorX + entry.bearingPx.x
-                let quadYPx = floorY + entry.bearingPx.y
-                glyphsOut.append(PositionedGlyph(
-                    rect: SIMD4<Float>(
-                        quadXPx * invS,
-                        quadYPx * invS,
-                        Float(entry.pixelSize.x) * invS,
-                        Float(entry.pixelSize.y) * invS
-                    ),
-                    uv: entry.uv,
-                    color: nil,
-                    atlasPage: entry.page
-                ))
-            }
-        }
+        glyphsOut = emitGlyphs
+            ? emitCapturedGlyphs(graphemeIndex: gi, using: textSystem, originXPx: -xsPx[gi], baselineYPx: baselineYPx)
+            : []
         return ShapedText(
             size: Vec2(wPt, hPt),
             lineCount: 1,
@@ -322,38 +273,9 @@ internal final class TextRunCellLayout: @unchecked Sendable {
             forcedDirection: style.direction
         )
         #else
-        if emitGlyphs {
-            let isMono = style.family == .monospace
-            let baselineY = lhPt * 0.78
-            var xPt: Float = 0
-            for pc in portableChars where pc.graphemeIndex == gi {
-                for sc in pc.char.unicodeScalars {
-                    let adv = PortableGlyphFont.advanceRatio(for: sc, mono: isMono) * style.size
-                    let entry = textSystem.glyphAtlas.rasterizePortableGlyph(
-                        scalar: sc,
-                        fontSize: style.size,
-                        weight: style.weight,
-                        italic: style.italic,
-                        monospace: isMono,
-                        scale: s
-                    )
-                    if entry.pixelSize.x > 0 && entry.pixelSize.y > 0 {
-                        glyphsOut.append(PositionedGlyph(
-                            rect: SIMD4<Float>(
-                                xPt + entry.bearingPx.x * invS,
-                                baselineY + entry.bearingPx.y * invS,
-                                Float(entry.pixelSize.x) * invS,
-                                Float(entry.pixelSize.y) * invS
-                            ),
-                            uv: entry.uv,
-                            color: nil,
-                            atlasPage: entry.page
-                        ))
-                    }
-                    xPt += adv
-                }
-            }
-        }
+        glyphsOut = emitGlyphs
+            ? emitPortableGlyphs(graphemeIndex: gi, using: textSystem, startXPt: 0, baselineYPt: lhPt * 0.78)
+            : []
         return ShapedText(
             size: Vec2(wPt, hPt),
             lineCount: 1,
@@ -366,6 +288,141 @@ internal final class TextRunCellLayout: @unchecked Sendable {
         )
         #endif
     }
+
+    /// Emits `PositionedGlyph` quads for the grapheme starting at `byteOffset`,
+    /// with the run's top-left positioned at `originPt` in logical points (`glyph_emit.rs:104`).
+    func glyphsIn(
+        atByte byteOffset: Int,
+        using textSystem: TextSystem,
+        originPt: Vec2
+    ) -> [PositionedGlyph] {
+        guard let gi = graphemeIndex(atByte: byteOffset) else { return [] }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        let originXPx = originPt.x * pixelScale
+        let originBaselinePx = (originPt.y * pixelScale + baselineYPx).rounded()
+        return emitCapturedGlyphs(
+            graphemeIndex: gi,
+            using: textSystem,
+            originXPx: originXPx,
+            baselineYPx: originBaselinePx
+        )
+        #else
+        let startXPt = originPt.x + xsPx[gi] / pixelScale
+        let baselinePt = originPt.y + style.resolvedLineHeight * 0.78
+        return emitPortableGlyphs(
+            graphemeIndex: gi,
+            using: textSystem,
+            startXPt: startXPt,
+            baselineYPt: baselinePt
+        )
+        #endif
+    }
+
+    #if canImport(CoreText) && canImport(CoreGraphics)
+    private func emitCapturedGlyphs(
+        graphemeIndex gi: Int,
+        using textSystem: TextSystem,
+        originXPx: Float,
+        baselineYPx targetBaselinePx: Float
+    ) -> [PositionedGlyph] {
+        let invS = 1.0 / pixelScale
+        var glyphsOut: [PositionedGlyph] = []
+        for cg in capturedGlyphs where cg.graphemeIndex == gi {
+            let gxPx = originXPx + cg.runPosXPx
+            let gyPx = targetBaselinePx - cg.runPosYPx
+            if cg.isColor, let colorEntry = textSystem.glyphAtlas.rasterizeColorGlyph(
+                font: cg.font,
+                glyph: cg.glyph,
+                fontSizePx: cg.fontSizePx
+            ), colorEntry.pixelSize.x > 0 && colorEntry.pixelSize.y > 0 {
+                let quadXPx = roundf(gxPx) + colorEntry.bearingPx.x
+                let quadYPx = roundf(gyPx) + colorEntry.bearingPx.y
+                glyphsOut.append(PositionedGlyph(
+                    rect: SIMD4<Float>(
+                        quadXPx * invS,
+                        quadYPx * invS,
+                        Float(colorEntry.pixelSize.x) * invS,
+                        Float(colorEntry.pixelSize.y) * invS
+                    ),
+                    uv: .zero,
+                    color: nil,
+                    colorGlyphIndex: colorEntry.index
+                ))
+                continue
+            }
+            let floorX = floorf(gxPx)
+            let subX = gxPx - floorX
+            let floorY = floorf(gyPx)
+            let subY = gyPx - floorY
+            let binY = UInt8((Int((subY * 4.0).rounded())) % 4)
+            guard let entry = textSystem.glyphAtlas.rasterizeGlyph(
+                font: cg.font,
+                glyph: cg.glyph,
+                fontSizePx: cg.fontSizePx,
+                subpixelX: subX,
+                subpixelYBin: binY,
+                smoothing: style.fontSmoothing
+            ), entry.pixelSize.x > 0 && entry.pixelSize.y > 0 else {
+                continue
+            }
+            let quadXPx = floorX + entry.bearingPx.x
+            let quadYPx = floorY + entry.bearingPx.y
+            glyphsOut.append(PositionedGlyph(
+                rect: SIMD4<Float>(
+                    quadXPx * invS,
+                    quadYPx * invS,
+                    Float(entry.pixelSize.x) * invS,
+                    Float(entry.pixelSize.y) * invS
+                ),
+                uv: entry.uv,
+                color: nil,
+                atlasPage: entry.page
+            ))
+        }
+        return glyphsOut
+    }
+    #else
+    private func emitPortableGlyphs(
+        graphemeIndex gi: Int,
+        using textSystem: TextSystem,
+        startXPt: Float,
+        baselineYPt: Float
+    ) -> [PositionedGlyph] {
+        let s = pixelScale
+        let invS = 1.0 / s
+        let isMono = style.family == .monospace
+        var glyphsOut: [PositionedGlyph] = []
+        var xPt = startXPt
+        for pc in portableChars where pc.graphemeIndex == gi {
+            for sc in pc.char.unicodeScalars {
+                let adv = PortableGlyphFont.advanceRatio(for: sc, mono: isMono) * style.size
+                let entry = textSystem.glyphAtlas.rasterizePortableGlyph(
+                    scalar: sc,
+                    fontSize: style.size,
+                    weight: style.weight,
+                    italic: style.italic,
+                    monospace: isMono,
+                    scale: s
+                )
+                if entry.pixelSize.x > 0 && entry.pixelSize.y > 0 {
+                    glyphsOut.append(PositionedGlyph(
+                        rect: SIMD4<Float>(
+                            xPt + entry.bearingPx.x * invS,
+                            baselineYPt + entry.bearingPx.y * invS,
+                            Float(entry.pixelSize.x) * invS,
+                            Float(entry.pixelSize.y) * invS
+                        ),
+                        uv: entry.uv,
+                        color: nil,
+                        atlasPage: entry.page
+                    ))
+                }
+                xPt += adv
+            }
+        }
+        return glyphsOut
+    }
+    #endif
 }
 
 extension TextSystem {
@@ -392,5 +449,13 @@ extension TextSystem {
     ) -> ShapedText? {
         let rl = RunCellLayoutCache.shared.getOrCreate(run: run, textSystem: self, style: style, pixelScale: pixelScale)
         return rl.shapeCell(atByte: byteOffset, using: self, emitGlyphs: emitGlyphs)
+    }
+
+    internal func cachedRunCellLayout(
+        _ run: TextRun,
+        style: TextStyle,
+        pixelScale: Float
+    ) -> TextRunCellLayout {
+        RunCellLayoutCache.shared.getOrCreate(run: run, textSystem: self, style: style, pixelScale: pixelScale)
     }
 }

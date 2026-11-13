@@ -321,11 +321,13 @@ extension TextEdit {
     }
 
     public func allowsRichMark(_ mark: RichMark) -> Bool {
+        guard isRichEnabled else { return false }
         guard let allowedRichMarks else { return true }
         return allowedRichMarks.contains(mark.allowBit)
     }
 
     public func allowsBlock(_ block: Block) -> Bool {
+        guard isRichEnabled else { return false }
         guard let allowedBlocks else { return true }
         return allowedBlocks.contains(block.allowBit)
     }
@@ -705,7 +707,7 @@ extension TextEdit {
     }
 
     public mutating func removeMark(_ mark: RichMark) {
-        guard !isSecure else { return }
+        guard !isSecure && isRichEnabled else { return }
         syncRichInvariants()
         let r = selectedUTF8Range
         if r.isEmpty {
@@ -1899,6 +1901,11 @@ extension TextEdit {
     private mutating func pasteRich(html: String, plain: String, keepPills: Bool) {
         if isSecure || html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             paste(plain)
+            return
+        }
+        if !isRichEnabled {
+            let textOnly = plain.isEmpty ? Self.fromHTML(html).text : plain
+            paste(textOnly)
             return
         }
         var frag = Self.fromHTML(html)
