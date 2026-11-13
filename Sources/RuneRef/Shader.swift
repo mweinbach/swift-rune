@@ -588,7 +588,7 @@ public enum RefShader {
             let alpha = prim.fill.w * ringCov * dCov
             outPremul = SIMD4<Float>(prim.fill.x * alpha, prim.fill.y * alpha, prim.fill.z * alpha, alpha)
 
-        case .layerBegin, .layerEnd, .backdropBlur:
+        case .layerBegin, .layerEnd, .backdropBlur, .effectSlot:
             return .zero
         }
 

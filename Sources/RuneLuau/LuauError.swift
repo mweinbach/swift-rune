@@ -45,16 +45,18 @@ internal struct LuauRuntimeError: Error, LocalizedError {
     let value: LuauValue
     let traceback: String
     let isTimeout: Bool
+    let isMemory: Bool
 
     var errorDescription: String? {
         let msg = value.displayString
         return traceback.isEmpty ? msg : "\(msg)\n\(traceback)"
     }
 
-    init(value: LuauValue, traceback: String = "", isTimeout: Bool = false) {
+    init(value: LuauValue, traceback: String = "", isTimeout: Bool = false, isMemory: Bool = false) {
         self.value = value
         self.traceback = traceback
         self.isTimeout = isTimeout
+        self.isMemory = isMemory
     }
 
     func toScriptError() -> ScriptError {
@@ -62,6 +64,9 @@ internal struct LuauRuntimeError: Error, LocalizedError {
         let full = traceback.isEmpty ? msg : "\(msg)\n\(traceback)"
         if isTimeout || msg.contains(watchdogMessage) {
             return ScriptError(kind: .timeout, message: full)
+        }
+        if isMemory {
+            return ScriptError(kind: .memory, message: full)
         }
         return ScriptError(kind: .runtime, message: full)
     }

@@ -25,8 +25,12 @@ struct RuneParityV2Tests {
         #expect(decoded.swiftOnlyExecutables == ["RuneParityCLI"])
 
         let staging = try #require(decoded.crates.first(where: { $0.upstreamPath == "crates/rune-staging" }))
-        #expect(staging.swiftTarget == nil)
-        #expect(staging.swiftPath == nil)
-        #expect(staging.status == "missing")
+        #expect(staging.swiftTarget == "RuneStaging")
+        #expect(staging.swiftPath == "Sources/RuneStaging")
+        #expect(staging.status == "mostly")
+
+        let devGuard = try #require(decoded.extraBins?.first(where: { $0.upstreamPath == "tools/rune-dev-guard" }))
+        #expect(devGuard.swiftTarget == nil)
+        #expect(devGuard.status == "missing")
     }
 }

@@ -171,6 +171,9 @@ internal enum LuauStdlib {
             guard case .table(let t) = args.first else {
                 throw LuauRuntimeError(value: .string("bad argument #1 to 'setmetatable' (table expected)"))
             }
+            if t.isFrozen {
+                throw LuauRuntimeError(value: .string("attempt to modify a readonly table"))
+            }
             if let existing = t.metatable, !existing.rawGet("__metatable").isNil {
                 throw LuauRuntimeError(value: .string("cannot change a protected metatable"))
             }
@@ -463,12 +466,14 @@ internal enum LuauStdlib {
             return .values([.string(String(str.reversed()))])
         }))
 
-        s.rawSet("rep", value: .nativeFunction(LuauNativeFunction(name: "string.rep") { _, _, args in
+        s.rawSet("rep", value: .nativeFunction(LuauNativeFunction(name: "string.rep") { vm, _, args in
             guard case .string(let str) = args.first, let n = args.dropFirst().first?.asInt else {
                 throw LuauRuntimeError(value: .string("bad arguments to 'rep'"))
             }
             let sep = (args.count > 2 ? args[2].asString : nil) ?? ""
             if n <= 0 { return .values([.string("")]) }
+            let estimated = n.multipliedReportingOverflow(by: max(1, str.utf8.count + sep.utf8.count))
+            try vm.noteAllocation(estimated.overflow ? Int.max : estimated.partialValue)
             let out = Array(repeating: str, count: n).joined(separator: sep)
             return .values([.string(out)])
         }))
@@ -768,9 +773,13 @@ internal enum LuauStdlib {
     private static func installTable(into g: LuauTable, vm: LuauVM) {
         let t = LuauTable()
 
-        t.rawSet("create", value: .nativeFunction(LuauNativeFunction(name: "table.create") { _, _, args in
+        t.rawSet("create", value: .nativeFunction(LuauNativeFunction(name: "table.create") { vm, _, args in
             let count = args.first?.asInt ?? 0
             let fill = args.count > 1 ? args[1] : .nil
+            if count > 0 {
+                let estimated = count.multipliedReportingOverflow(by: 32)
+                try vm.noteAllocation(estimated.overflow ? Int.max : estimated.partialValue)
+            }
             let tbl = LuauTable(arrayCapacity: max(0, count))
             if !fill.isNil && count > 0 {
                 tbl.array = Array(repeating: fill, count: count)

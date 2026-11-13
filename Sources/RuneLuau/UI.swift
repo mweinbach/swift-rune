@@ -41,10 +41,31 @@ public enum Prop: @unchecked Sendable {
 }
 
 /// A script function a host node can run on press/hover.
+/// Modifier key state delivered to `NodeArgs.onPress` / `NodeArgs.onPressWith` callbacks.
+public struct Press: Sendable, Equatable {
+    public var key: String?
+    public var shift: Bool
+    public var alt: Bool
+    public var mod: Bool
+
+    public init(key: String? = nil, shift: Bool = false, alt: Bool = false, mod: Bool = false) {
+        self.key = key
+        self.shift = shift
+        self.alt = alt
+        self.mod = mod
+    }
+}
+
 public struct Handler: @unchecked Sendable {
     internal let fn: LuauValue
     internal let vmID: UInt64
     internal weak var script: Script?
+
+    internal init(fn: LuauValue, vmID: UInt64, script: Script?) {
+        self.fn = fn
+        self.vmID = vmID
+        self.script = script
+    }
 }
 
 /// A host-provided UI node constructor (`ui.<name>`).
@@ -65,13 +86,21 @@ public final class HostNode: @unchecked Sendable {
 public final class NodeArgs: @unchecked Sendable {
     public let content: String?
     private let props: [(String, Prop)]
+    internal let rawProps: [(String, LuauValue)]
     private let rawChildren: [Any]
-    private let env: UIRenderEnv
+    internal let env: UIRenderEnv
     private var usedKeys: Set<String> = []
 
-    internal init(content: String?, props: [(String, Prop)], children: [Any], env: UIRenderEnv) {
+    internal init(
+        content: String?,
+        props: [(String, Prop)],
+        rawProps: [(String, LuauValue)] = [],
+        children: [Any],
+        env: UIRenderEnv
+    ) {
         self.content = content
         self.props = props
+        self.rawProps = rawProps
         self.rawChildren = children
         self.env = env
     }
@@ -128,6 +157,77 @@ public final class NodeArgs: @unchecked Sendable {
         return nil
     }
 
+    /// Builds an `El` click callback invoking a Luau `Handler` with press event details.
+    public func onPress<State>(_ type: State.Type = State.self, handler: Handler) -> (@Sendable (inout State, inout Tx) -> Void) {
+        onPressWith(type, handler: handler, key: string("key"))
+    }
+
+    /// Builds an `El` click callback invoking a Luau `Handler` with an explicit key and modifier state.
+    public func onPressWith<State>(
+        _ type: State.Type = State.self,
+        handler: Handler,
+        key: String? = nil,
+        press: Press? = nil
+    ) -> (@Sendable (inout State, inout Tx) -> Void) {
+        let vmID = handler.vmID
+        let fn = handler.fn
+        let script = handler.script
+        return { state, tx in
+            guard let script else { return }
+            let mods = script.consumePressMods()
+            let m = script.pressEventMods(mods)
+            let p = press ?? Press(key: key, shift: m.shift, alt: m.alt, mod: m.mod)
+            let ev = LuauTable()
+            ev.rawSet("kind", value: .string("press"))
+            if let k = p.key ?? key { ev.rawSet("key", value: .string(k)) }
+            ev.rawSet("shift", value: .bool(p.shift))
+            ev.rawSet("alt", value: .bool(p.alt))
+            ev.rawSet("mod", value: .bool(p.mod))
+            script.aroundWrite(state: &state, tx: &tx) { tx in
+                script.enter(tx: &tx) {
+                    try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
+                }
+            }
+        }
+    }
+
+    /// Invokes a Luau `Handler` asynchronously without an active `Tx`.
+    public func pressLater(handler: Handler, press: Press = Press()) {
+        guard let script = handler.script else { return }
+        let ev = LuauTable()
+        ev.rawSet("kind", value: .string("press"))
+        if let k = press.key { ev.rawSet("key", value: .string(k)) }
+        ev.rawSet("shift", value: .bool(press.shift))
+        ev.rawSet("alt", value: .bool(press.alt))
+        ev.rawSet("mod", value: .bool(press.mod))
+        var dummyState: Any = ()
+        script.aroundWriteOptional(state: &dummyState, tx: nil) { _ in
+            script.enter {
+                try script.callHandlerIfCurrent(vmID: handler.vmID, fn: handler.fn, arg: .table(ev))
+            }
+        }
+    }
+
+    /// Builds an `El` hover callback invoking a Luau `Handler`.
+    public func onHover<State>(_ type: State.Type = State.self, handler: Handler) -> (@Sendable (inout State, Bool, inout Tx) -> Void) {
+        let vmID = handler.vmID
+        let fn = handler.fn
+        let script = handler.script
+        let capturedKey = string("key")
+        return { state, entered, tx in
+            guard let script else { return }
+            let ev = LuauTable()
+            ev.rawSet("kind", value: .string("hover"))
+            if let capturedKey { ev.rawSet("key", value: .string(capturedKey)) }
+            ev.rawSet("entered", value: .bool(entered))
+            script.aroundWrite(state: &state, tx: &tx) { tx in
+                script.enter(tx: &tx) {
+                    try script.callHandlerIfCurrent(vmID: vmID, fn: fn, arg: .table(ev))
+                }
+            }
+        }
+    }
+
     internal func wasRead(_ name: String) -> Bool {
         usedKeys.contains(name)
     }
@@ -135,17 +235,33 @@ public final class NodeArgs: @unchecked Sendable {
 
 /// Active render environment for a `Script` render pass.
 internal final class UIRenderEnv: @unchecked Sendable {
+    private static let nextEpochLock = NSLock()
+    nonisolated(unsafe) private static var nextEpoch: UInt64 = 1
+
+    private static func allocEpoch() -> UInt64 {
+        nextEpochLock.lock()
+        defer { nextEpochLock.unlock() }
+        let e = nextEpoch
+        nextEpoch += 1
+        return e
+    }
+
     weak var script: Script?
     let vmID: UInt64
     let salt: UInt64
     let version: UInt64
     let dark: Bool
+    let viewport: Vec2
+    let scrollLookup: ((String) -> Vec2)?
     let palette: Palette
     let shadows: Shadows?
     let baseTextStyle: TextStyle
     let weights: [Float]
     let prefix: String
+    let renderEpoch: UInt64
     var memoFailed: Bool = false
+    var trackedScrollKeys: [String] = []
+    private var colorCache: [String: Color] = [:]
 
     init(
         script: Script?,
@@ -153,6 +269,8 @@ internal final class UIRenderEnv: @unchecked Sendable {
         salt: UInt64,
         version: UInt64,
         dark: Bool,
+        viewport: Vec2 = .zero,
+        scrollLookup: ((String) -> Vec2)? = nil,
         palette: @escaping Palette,
         shadows: Shadows?,
         baseTextStyle: TextStyle,
@@ -164,11 +282,18 @@ internal final class UIRenderEnv: @unchecked Sendable {
         self.salt = salt
         self.version = version
         self.dark = dark
+        self.viewport = viewport
+        self.scrollLookup = scrollLookup
         self.palette = palette
         self.shadows = shadows
         self.baseTextStyle = baseTextStyle
         self.weights = weights
         self.prefix = prefix
+        self.renderEpoch = Self.allocEpoch()
+    }
+
+    func warnOnce(_ message: String) {
+        script?.warnOnce(message)
     }
 
     func resolveColor(_ token: String) throws -> Color {
@@ -176,12 +301,18 @@ internal final class UIRenderEnv: @unchecked Sendable {
             if let c = Color.hex(token) {
                 return c
             }
-            throw LuauRuntimeError(value: .string("invalid hex color '\(token)'"))
+            throw LuauRuntimeError(value: .string("\(token) is not a #rrggbb or #rrggbbaa colour"))
+        }
+        if let cached = colorCache[token] {
+            return cached
         }
         if let c = palette(token, dark) {
+            colorCache[token] = c
             return c
         }
-        throw LuauRuntimeError(value: .string("unknown color token '\(token)'"))
+        warnOnce("unknown colour \(token)")
+        colorCache[token] = .transparent
+        return .transparent
     }
 
     var defaultTextColor: Color {
@@ -192,218 +323,126 @@ internal final class UIRenderEnv: @unchecked Sendable {
 /// Box stored inside a `LuauUserdata` representing a built `El<State>`.
 internal final class LuauElBox<State>: @unchecked Sendable {
     let element: El<State>
-    init(_ element: El<State>) { self.element = element }
+    let renderEpoch: UInt64
+    var used: Bool = false
+
+    init(_ element: El<State>, renderEpoch: UInt64) {
+        self.element = element
+        self.renderEpoch = renderEpoch
+    }
 }
 
-/// Helper protocol so `Script` and `UI` can install `@rune/ui` for a specific `State`.
-internal enum LuauUIBridge {
-    @discardableResult
-    static func install<State>(
-        into vm: LuauVM,
-        stateType: State.Type,
-        table existingTable: LuauTable? = nil,
-        hostNodes: [HostNode],
-        currentEnv: @escaping @Sendable () -> UIRenderEnv?
-    ) -> LuauTable {
-        let ui = existingTable ?? LuauTable()
+internal enum ContainerKind {
+    case row, col, box, spacer
+}
 
-        ui.rawSet("hex", value: .nativeFunction(LuauNativeFunction(name: "ui.hex") { _, _, args in
-            guard case .string(let s) = args.first, s.hasPrefix("#"), (s.count == 7 || s.count == 9), Color.hex(s) != nil else {
-                throw LuauRuntimeError(value: .string("ui.hex needs \"#RRGGBB\" or \"#RRGGBBAA\""))
-            }
-            return .values([.string(s)])
-        }))
+internal protocol AnyUIRenderSession: AnyObject {
+    var env: UIRenderEnv { get }
+    func buildContainer(_ kind: ContainerKind, args: [LuauValue]) throws -> LuauValue
+    func buildText(_ args: [LuauValue]) throws -> LuauValue
+    func buildEach(vm: LuauVM, args: [LuauValue]) throws -> LuauValue
+    func buildVirtualList(vm: LuauVM, args: [LuauValue]) throws -> LuauValue
+    func buildHostNode(_ node: HostNode, args: [LuauValue]) throws -> LuauValue
+    func viewMemo(vm: LuauVM, args: [LuauValue]) throws -> LuauValue
+}
 
-        func makeContainer(_ name: String, base: @escaping @Sendable () -> El<State>) -> LuauValue {
-            .nativeFunction(LuauNativeFunction(name: "ui.\(name)") { _, _, args in
-                guard let env = currentEnv() else {
-                    throw LuauRuntimeError(value: .string("ui nodes can only be built while rendering"))
-                }
-                let (layers, childrenVal) = parseContainerArgs(args)
-                var el = base()
-                el = try applyProps(layers, to: el, isText: false, env: env)
-                if let childrenVal {
-                    let kids = try extractChildren(childrenVal, State.self, env: env)
-                    el = el.children(kids)
-                }
-                return .values([.userdata(LuauUserdata(payload: LuauElBox(el), typeTag: "El"))])
-            })
-        }
+internal final class LuauUIBridgeContext: @unchecked Sendable {
+    var activeSession: (any AnyUIRenderSession)?
+    let uiTable: LuauTable
+    let viewTable: LuauTable
+    var handlerSlots: [LuauValue] = []
+    var handlerWrappers: [LuauValue] = []
+    var handlerCursor: Int = 0
 
-        ui.rawSet("row", value: makeContainer("row") { Rune.row() as El<State> })
-        ui.rawSet("col", value: makeContainer("col") { Rune.col() as El<State> })
-        ui.rawSet("box", value: makeContainer("box") { Rune.el() as El<State> })
-        ui.rawSet("spacer", value: makeContainer("spacer") { Rune.spacer() as El<State> })
+    init(uiTable: LuauTable, viewTable: LuauTable) {
+        self.uiTable = uiTable
+        self.viewTable = viewTable
+    }
+}
 
-        ui.rawSet("text", value: .nativeFunction(LuauNativeFunction(name: "ui.text") { _, _, args in
-            guard let env = currentEnv() else {
-                throw LuauRuntimeError(value: .string("ui.text can only be built while rendering"))
-            }
-            guard let first = args.first else {
-                throw LuauRuntimeError(value: .string("ui.text needs a string"))
-            }
-            let (layers, valueStartIdx) = parseTextArgs(args)
-            let template: String
-            switch first {
-            case .string(let s): template = s
-            case .number(let n): template = LuauValue.formatNumber(n)
-            default: throw LuauRuntimeError(value: .string("ui.text needs a string, got \(first.typeName)"))
-            }
-            let content = try interpolateText(template, values: Array(args.dropFirst(valueStartIdx)))
-            var el = Rune.text(content) as El<State>
-            el = try applyProps(layers, to: el, isText: true, env: env)
-            return .values([.userdata(LuauUserdata(payload: LuauElBox(el), typeTag: "El"))])
-        }))
+internal final class UIRenderSession<State>: AnyUIRenderSession {
+    let env: UIRenderEnv
 
-        ui.rawSet("each", value: .nativeFunction(LuauNativeFunction(name: "ui.each") { vm, _, args in
-            guard let env = currentEnv() else {
-                throw LuauRuntimeError(value: .string("ui.each can only be called while rendering"))
-            }
-            guard args.count >= 4, case .table(let items) = args[0] else {
-                throw LuauRuntimeError(value: .string("ui.each needs items, key, version, build"))
-            }
-            let keyBy = args[1]
-            let versionBy = args[2]
-            let buildFn = args[3]
-            let len = items.rawLength
-            let out = LuauTable(arrayCapacity: len)
-
-            for i in 1...max(1, len) {
-                if i > len { break }
-                let item = items.rawGet(i)
-                let keyVal: LuauValue
-                if case .string(let field) = keyBy, case .table(let it) = item {
-                    keyVal = it.rawGet(field)
-                } else {
-                    keyVal = try vm.call(value: keyBy, args: [item, .number(Double(i))]).first ?? .nil
-                }
-                let itemKey = keyVal.displayString
-
-                let verVal: LuauValue
-                if case .string(let field) = versionBy, case .table(let it) = item {
-                    verVal = it.rawGet(field)
-                } else {
-                    verVal = try vm.call(value: versionBy, args: [item, .number(Double(i))]).first ?? .nil
-                }
-                let verHash = mixHash(versionHash(verVal), env.salt)
-                let built = Rune.memo("\(env.prefix)\(itemKey)", deps: verHash) { () -> El<State> in
-                    do {
-                        let res = try vm.call(value: buildFn, args: [item, .number(Double(i))]).first ?? .nil
-                        return try unwrapEl(res, State.self).key(itemKey)
-                    } catch {
-                        env.memoFailed = true
-                        return Rune.el() as El<State>
-                    }
-                }
-                out.array.append(.userdata(LuauUserdata(payload: LuauElBox(built), typeTag: "El")))
-            }
-            return .values([.table(out)])
-        }))
-
-        ui.rawSet("virtualList", value: .nativeFunction(LuauNativeFunction(name: "ui.virtualList") { vm, _, args in
-            guard let env = currentEnv() else {
-                throw LuauRuntimeError(value: .string("ui.virtualList can only be built while rendering"))
-            }
-            guard case .table(let props) = args.first else {
-                throw LuauRuntimeError(value: .string("ui.virtualList needs a props table"))
-            }
-            let count = max(0, props.rawGet("count").asInt ?? 0)
-            let estimate = Float(max(1.0, props.rawGet("estimatedRowHeight").coercedNumber ?? 32.0))
-            let renderRow = props.rawGet("renderRow")
-            guard !renderRow.isNil else {
-                throw LuauRuntimeError(value: .string("ui.virtualList needs renderRow"))
-            }
-            let rowKeyFn = props.rawGet("rowKey")
-            let gap = Float(props.rawGet("gap").coercedNumber ?? 0.0)
-            let keyStr = props.rawGet("key").isNil ? "list" : props.rawGet("key").displayString
-            let listVersionVal = props.rawGet("version")
-            let listVersion = mixHash(listVersionVal.isNil ? env.version : versionHash(listVersionVal), env.salt)
-            let rowVersionsTbl = props.rawGet("rowVersions").asTable
-            let ownScroll = props.rawGet("scrollY").asBool ?? true
-
-            let listState = env.script?.virtualListState(forKey: keyStr) ?? VirtualListState()
-            let rowCount = count
-
-            var listEl: El<State> = Rune.virtualRows(
-                key: "\(env.prefix)\(keyStr)",
-                state: listState,
-                count: rowCount,
-                estimatedHeight: estimate,
-                scrollY: 0,
-                viewportHeight: 600,
-                rowKey: { idx in
-                    if !rowKeyFn.isNil {
-                        if let k = try? vm.call(value: rowKeyFn, args: [.number(Double(idx + 1))]).first {
-                            return k.displayString
-                        }
-                    }
-                    return String(idx)
-                },
-                buildRow: { idx in
-                    let rowVer = rowVersionsTbl.map { mixHash(versionHash($0.rawGet(idx + 1)), listVersion) } ?? listVersion
-                    let rowID = "\(env.prefix)\(keyStr)/row/\(idx)"
-                    return Rune.memo(rowID, deps: rowVer) {
-                        do {
-                            let res = try vm.call(value: renderRow, args: [.number(Double(idx + 1))]).first ?? .nil
-                            return try unwrapEl(res, State.self)
-                        } catch {
-                            return LuauCard.rowError(message: error.localizedDescription)
-                        }
-                    }
-                }
-            ).gap(gap).wFull()
-
-            if ownScroll {
-                listEl = listEl.scrollY()
-            }
-            // Apply standard container props (excluding virtualList-specific keys)
-            let skipKeys: Set<String> = ["count", "estimatedRowHeight", "renderRow", "rowKey", "version", "rowVersions", "onVisibleRows", "onPress", "scrollY"]
-            listEl = try applyProps([props], to: listEl, isText: false, env: env, skipKeys: skipKeys)
-            return .values([.userdata(LuauUserdata(payload: LuauElBox(listEl), typeTag: "El"))])
-        }))
-
-        // Host nodes
-        for node in hostNodes {
-            ui.rawSet(node.name, value: .nativeFunction(LuauNativeFunction(name: "ui.\(node.name)") { _, _, args in
-                guard let env = currentEnv() else {
-                    throw LuauRuntimeError(value: .string("ui.\(node.name) can only be built while rendering"))
-                }
-                let nodeArgs = try buildHostNodeArgs(args, State.self, env: env)
-                guard let built = try node.build(nodeArgs) as? El<State> else {
-                    throw LuauRuntimeError(value: .string("ui.\(node.name) returned wrong El<State> type"))
-                }
-                return .values([.userdata(LuauUserdata(payload: LuauElBox(built), typeTag: "El"))])
-            }))
-        }
-
-        vm.registeredModules["@rune/ui"] = .table(ui)
-        return ui
+    init(env: UIRenderEnv) {
+        self.env = env
     }
 
-    static func makeViewTable<State>(
-        for vm: LuauVM,
-        stateType: State.Type,
-        currentEnv: @escaping @Sendable () -> UIRenderEnv?
-    ) -> LuauTable {
-        let view = LuauTable()
-        view.rawSet("dark", value: .bool(false))
-        view.rawSet("Memo", value: .nativeFunction(LuauNativeFunction(name: "view:Memo") { vm, _, args in
-            guard let env = currentEnv() else {
-                throw LuauRuntimeError(value: .string("view:Memo can only be called while rendering"))
+    func buildContainer(_ kind: ContainerKind, args: [LuauValue]) throws -> LuauValue {
+        let base: El<State> = switch kind {
+        case .row: Rune.row()
+        case .col: Rune.col()
+        case .box: Rune.el()
+        case .spacer: Rune.spacer()
+        }
+        let (layers, childrenVal) = LuauUIBridge.parseContainerArgs(args)
+        var el = try LuauUIBridge.applyProps(layers, to: base, isText: false, env: env)
+        if let childrenVal {
+            let kids = try LuauUIBridge.extractChildren(childrenVal, State.self, env: env)
+            el = el.children(kids)
+        }
+        return .userdata(LuauUserdata(payload: LuauElBox(el, renderEpoch: env.renderEpoch), typeTag: "El"))
+    }
+
+    func buildText(_ args: [LuauValue]) throws -> LuauValue {
+        guard let first = args.first else {
+            throw LuauRuntimeError(value: .string("ui.text needs a string"))
+        }
+        let (layers, valueStartIdx) = LuauUIBridge.parseTextArgs(args)
+        let template: String
+        switch first {
+        case .string(let s): template = s
+        case .number(let n): template = LuauValue.formatNumber(n)
+        default: throw LuauRuntimeError(value: .string("ui.text needs a string, got \(first.typeName)"))
+        }
+        let content = try LuauUIBridge.interpolateText(template, values: Array(args.dropFirst(valueStartIdx)))
+        var el = Rune.text(content) as El<State>
+        el = try LuauUIBridge.applyProps(layers, to: el, isText: true, env: env)
+        return .userdata(LuauUserdata(payload: LuauElBox(el, renderEpoch: env.renderEpoch), typeTag: "El"))
+    }
+
+    func buildEach(vm: LuauVM, args: [LuauValue]) throws -> LuauValue {
+        guard args.count >= 4, case .table(let items) = args[0] else {
+            throw LuauRuntimeError(value: .string("ui.each needs items, key, version, build"))
+        }
+        let keyBy = args[1]
+        let versionBy = args[2]
+        let buildFn = args[3]
+        let len = items.rawLength
+        let out = LuauTable(arrayCapacity: len)
+
+        for i in 1...max(1, len) {
+            if i > len { break }
+            let item = items.rawGet(i)
+            let keyVal: LuauValue
+            if case .string(let field) = keyBy {
+                guard case .table(let it) = item else {
+                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is not a table"))
+                }
+                keyVal = it.rawGet(field)
+            } else {
+                keyVal = try vm.call(value: keyBy, args: [item, .number(Double(i))]).first ?? .nil
             }
-            guard args.count >= 4 else {
-                throw LuauRuntimeError(value: .string("view:Memo needs (key, version, build)"))
+            guard !keyVal.isNil else {
+                throw LuauRuntimeError(value: .string("ui.each: key for item \(i) is nil"))
             }
-            let keyStr = args[1].displayString
-            let ver = mixHash(versionHash(args[2]), env.salt)
-            let buildFn = args[3]
-            let memoID = "\(env.prefix)\(keyStr)"
+            let itemKey = keyVal.displayString
+
+            let verVal: LuauValue
+            if case .string(let field) = versionBy {
+                guard case .table(let it) = item else {
+                    throw LuauRuntimeError(value: .string("ui.each: item \(i) is not a table"))
+                }
+                verVal = it.rawGet(field)
+            } else {
+                verVal = try vm.call(value: versionBy, args: [item, .number(Double(i))]).first ?? .nil
+            }
+            let verHash = LuauUIBridge.mixHash(LuauUIBridge.versionHash(verVal), env.salt)
             var capturedError: Error?
-            let el = Rune.memo(memoID, deps: ver) { () -> El<State> in
+            let built = Rune.memo("\(env.prefix)\(itemKey)", deps: verHash) { () -> El<State> in
                 do {
-                    let res = try vm.call(value: buildFn, args: []).first ?? .nil
-                    let built = try unwrapEl(res, State.self)
-                    return built.keyId == nil ? built.key(memoID) : built
+                    let res = try vm.call(value: buildFn, args: [item, .number(Double(i))]).first ?? .nil
+                    let node = try LuauUIBridge.unwrapEl(res, State.self)
+                    return node.keyId == nil ? node.key(itemKey) : node
                 } catch {
                     capturedError = error
                     env.memoFailed = true
@@ -413,14 +452,364 @@ internal enum LuauUIBridge {
             if let capturedError {
                 throw capturedError
             }
-            return .values([.userdata(LuauUserdata(payload: LuauElBox(el), typeTag: "El"))])
+            out.array.append(.userdata(LuauUserdata(payload: LuauElBox(built, renderEpoch: env.renderEpoch), typeTag: "El")))
+        }
+        return .table(out)
+    }
+
+    func buildVirtualList(vm: LuauVM, args: [LuauValue]) throws -> LuauValue {
+        guard case .table(let props) = args.first else {
+            throw LuauRuntimeError(value: .string("ui.virtualList needs a props table"))
+        }
+        let countVal = props.rawGet("count")
+        guard let rawCount = countVal.asInt else {
+            throw LuauRuntimeError(value: .string("ui.virtualList count must be a number"))
+        }
+        let count = max(0, rawCount)
+        let estimate = Float(max(1.0, props.rawGet("estimatedRowHeight").coercedNumber ?? 32.0))
+        let renderRow = props.rawGet("renderRow")
+        guard !renderRow.isNil else {
+            throw LuauRuntimeError(value: .string("ui.virtualList needs renderRow"))
+        }
+        let rowKeyFn = props.rawGet("rowKey")
+        let rowErrorFn = props.rawGet("rowError")
+        let onVisibleRowsFn = props.rawGet("onVisibleRows")
+        switch onVisibleRowsFn {
+        case .nil, .closure, .nativeFunction:
+            break
+        default:
+            throw LuauRuntimeError(value: .string("ui.virtualList onVisibleRows can't be a \(onVisibleRowsFn.typeName)"))
+        }
+        if !props.rawGet("onPress").isNil {
+            env.warnOnce("ui.virtualList takes no onPress")
+        }
+        let gap = Float(props.rawGet("gap").coercedNumber ?? 0.0)
+        let keyStr = props.rawGet("key").isNil ? "list" : props.rawGet("key").displayString
+        let containerKey = "\(env.prefix)\(keyStr)"
+        env.trackedScrollKeys.append(containerKey)
+
+        let listVersionVal = props.rawGet("version")
+        let keysVersion = listVersionVal.isNil ? env.version : LuauUIBridge.versionHash(listVersionVal)
+        let listVersion = LuauUIBridge.mixHash(keysVersion, env.salt)
+        let rowVersionsTbl = props.rawGet("rowVersions").asTable
+        let ownScroll = props.rawGet("scrollY").asBool ?? true
+
+        let liveScrollY = env.scrollLookup?(containerKey).y ?? 0
+        let explicitH = props.rawGet("h").coercedNumber.map { Float($0) }
+        let viewportHeight = max(1, explicitH ?? (env.viewport.y > 0 ? env.viewport.y : 600))
+
+        let listState = env.script?.virtualListState(forKey: containerKey) ?? VirtualListState()
+        listState.gap = gap
+        let items: [VirtualItemSpec] = (0..<count).map { idx in
+            let cachedKey = env.script?.cachedRowKey(for: containerKey, version: keysVersion, index: idx)
+            return VirtualItemSpec(key: cachedKey ?? "row-\(idx)", estimatedHeight: estimate)
+        }
+        listState.setItems(items)
+        let window = listState.computeWindow(scrollY: liveScrollY, viewportHeight: viewportHeight)
+
+        var container = El<State>(direction: .column)
+            .gap(gap)
+            .wFull()
+
+        if window.beforeHeight > 0 {
+            container = container.child(
+                El<State>(direction: .row)
+                    .key("\(containerKey)-before-spacer")
+                    .wFull()
+                    .h(window.beforeHeight)
+                    .shrink(0)
+            )
+        }
+
+        for idx in window.mountedRange {
+            container = container.child(
+                try buildVirtualRow(
+                    vm: vm,
+                    idx: idx,
+                    containerKey: containerKey,
+                    keysVersion: keysVersion,
+                    listVersion: listVersion,
+                    rowKeyFn: rowKeyFn,
+                    rowVersionsTbl: rowVersionsTbl,
+                    renderRow: renderRow,
+                    rowErrorFn: rowErrorFn
+                )
+            )
+        }
+
+        if window.afterHeight > 0 {
+            container = container.child(
+                El<State>(direction: .row)
+                    .key("\(containerKey)-after-spacer")
+                    .wFull()
+                    .h(window.afterHeight)
+                    .shrink(0)
+            )
+        }
+
+        if ownScroll {
+            container = container.scrollY()
+        }
+
+        let skipKeys: Set<String> = [
+            "count", "estimatedRowHeight", "renderRow", "rowKey", "rowError",
+            "version", "rowVersions", "onVisibleRows", "onPress", "scrollY",
+        ]
+        container = try LuauUIBridge.applyProps([props], to: container, isText: false, env: env, skipKeys: skipKeys)
+        container = container.key(containerKey)
+
+        if !onVisibleRowsFn.isNil {
+            let visFirst = window.visibleRange.isEmpty ? 0 : window.visibleRange.lowerBound + 1
+            let visLast = window.visibleRange.isEmpty ? 0 : window.visibleRange.upperBound
+            if let script = env.script, script.recordVisibleRowsChange(for: containerKey, first: visFirst, last: visLast) {
+                let event = LuauTable()
+                event.rawSet("kind", value: .string("visible-rows"))
+                event.rawSet("first", value: .number(Double(visFirst)))
+                event.rawSet("last", value: .number(Double(visLast)))
+                let vmID = env.vmID
+                var dummyState: Any = ()
+                script.aroundWriteOptional(state: &dummyState, tx: nil) { txPtr in
+                    var tx = txPtr?.pointee ?? Tx()
+                    script.enter(tx: &tx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: onVisibleRowsFn, arg: .table(event))
+                    }
+                    txPtr?.pointee = tx
+                }
+            }
+        }
+
+        return .userdata(LuauUserdata(payload: LuauElBox(container, renderEpoch: env.renderEpoch), typeTag: "El"))
+    }
+
+    @inline(never)
+    private func buildVirtualRow(
+        vm: LuauVM,
+        idx: Int,
+        containerKey: String,
+        keysVersion: UInt64,
+        listVersion: UInt64,
+        rowKeyFn: LuauValue,
+        rowVersionsTbl: LuauTable?,
+        renderRow: LuauValue,
+        rowErrorFn: LuauValue
+    ) throws -> El<State> {
+        let resolvedRowKey: String
+        if let cached = env.script?.cachedRowKey(for: containerKey, version: keysVersion, index: idx) {
+            resolvedRowKey = cached
+        } else if !rowKeyFn.isNil {
+            let k = try vm.call(value: rowKeyFn, args: [.number(Double(idx + 1))]).first ?? .nil
+            let s = k.isNil ? String(idx + 1) : k.displayString
+            env.script?.storeRowKey(s, for: containerKey, version: keysVersion, index: idx)
+            resolvedRowKey = s
+        } else {
+            resolvedRowKey = String(idx + 1)
+        }
+
+        let rowVer = rowVersionsTbl.map {
+            LuauUIBridge.mixHash(LuauUIBridge.versionHash($0.rawGet(idx + 1)), listVersion)
+        } ?? listVersion
+        let rowID = "\(containerKey)/\(resolvedRowKey)"
+        return Rune.memo(rowID, deps: rowVer) { () -> El<State> in
+            env.script?.incrementRowsMetric()
+            do {
+                let res = try vm.call(value: renderRow, args: [.number(Double(idx + 1))]).first ?? .nil
+                let rowEl = try LuauUIBridge.unwrapEl(res, State.self)
+                return rowEl.keyId == nil ? rowEl.key(rowID) : rowEl
+            } catch {
+                let msg = error.localizedDescription
+                env.script?.logError(msg)
+                if !rowErrorFn.isNil,
+                   let fallback = try? vm.call(value: rowErrorFn, args: [.number(Double(idx + 1)), .string(msg)]).first,
+                   let el = try? LuauUIBridge.unwrapEl(fallback, State.self) {
+                    return el.keyId == nil ? el.key(rowID) : el
+                }
+                return (LuauCard.rowError(message: msg) as El<State>).key(rowID)
+            }
+        }
+    }
+
+    func buildHostNode(_ node: HostNode, args: [LuauValue]) throws -> LuauValue {
+        let nodeArgs = try LuauUIBridge.buildHostNodeArgs(args, State.self, env: env)
+        let rawBuilt: Any
+        do {
+            rawBuilt = try node.build(nodeArgs)
+        } catch let err as LuauRuntimeError {
+            throw LuauRuntimeError(
+                value: .string("ui.\(node.name): \(err.value.displayString)"),
+                traceback: err.traceback,
+                isTimeout: err.isTimeout,
+                isMemory: err.isMemory
+            )
+        } catch let err as ScriptError {
+            throw ScriptError(kind: err.kind, message: "ui.\(node.name): \(err.message)")
+        } catch {
+            throw LuauRuntimeError(value: .string("ui.\(node.name): \(error.localizedDescription)"))
+        }
+        guard var built = rawBuilt as? El<State> else {
+            throw LuauRuntimeError(value: .string("ui.\(node.name) returned wrong El<State> type"))
+        }
+        if !nodeArgs.rawProps.isEmpty {
+            let unread = LuauTable()
+            for (k, v) in nodeArgs.rawProps where !nodeArgs.wasRead(k) {
+                unread.rawSet(k, value: v)
+            }
+            if !unread.hash.isEmpty {
+                built = try LuauUIBridge.applyProps([unread], to: built, isText: false, env: env)
+            }
+        }
+        return .userdata(LuauUserdata(payload: LuauElBox(built, renderEpoch: env.renderEpoch), typeTag: "El"))
+    }
+
+    func viewMemo(vm: LuauVM, args: [LuauValue]) throws -> LuauValue {
+        guard args.count >= 4,
+              case .string(let keyStr) = args[1] else {
+            throw LuauRuntimeError(value: .string("view:Memo needs (key: string, version, build)"))
+        }
+        let ver = LuauUIBridge.mixHash(LuauUIBridge.versionHash(args[2]), env.salt)
+        let buildFn = args[3]
+        let memoID = "\(env.prefix)\(keyStr)"
+        var capturedError: Error?
+        let el = Rune.memo(memoID, deps: ver) { () -> El<State> in
+            do {
+                let res = try vm.call(value: buildFn, args: []).first ?? .nil
+                let built = try LuauUIBridge.unwrapEl(res, State.self)
+                return built.keyId == nil ? built.key(memoID) : built
+            } catch {
+                capturedError = error
+                env.memoFailed = true
+                return Rune.el() as El<State>
+            }
+        }
+        if let capturedError {
+            throw capturedError
+        }
+        return .userdata(LuauUserdata(payload: LuauElBox(el, renderEpoch: env.renderEpoch), typeTag: "El"))
+    }
+}
+
+/// Helper so `Script` and `UI` install `@rune/ui` once per VM and swap active typed render sessions per render pass.
+internal enum LuauUIBridge {
+    private static func requireSession(_ vm: LuauVM, _ name: String) throws -> any AnyUIRenderSession {
+        guard let session = vm.getAppData(LuauUIBridgeContext.self)?.activeSession else {
+            throw LuauRuntimeError(value: .string("\(name) can only be built while rendering"))
+        }
+        return session
+    }
+
+    @discardableResult
+    static func installStatic(
+        into vm: LuauVM,
+        hostNodes: [HostNode]
+    ) -> LuauUIBridgeContext {
+        if let existing = vm.getAppData(LuauUIBridgeContext.self) {
+            return existing
+        }
+        let ui = LuauTable()
+
+        ui.rawSet("hex", value: .nativeFunction(LuauNativeFunction(name: "ui.hex") { _, _, args in
+            guard case .string(let s) = args.first, s.hasPrefix("#"), (s.count == 7 || s.count == 9), Color.hex(s) != nil else {
+                throw LuauRuntimeError(value: .string("ui.hex needs \"#RRGGBB\" or \"#RRGGBBAA\""))
+            }
+            return .values([.string(s)])
         }))
 
-        view.rawSet("Handler", value: .nativeFunction(LuauNativeFunction(name: "view:Handler") { _, _, args in
-            return .values([args.count > 1 ? args[1] : .nil])
+        func makeContainer(_ name: String, kind: ContainerKind) -> LuauValue {
+            .nativeFunction(LuauNativeFunction(name: "ui.\(name)") { vm, _, args in
+                let session = try LuauUIBridge.requireSession(vm, "ui nodes")
+                return .values([try session.buildContainer(kind, args: args)])
+            })
+        }
+
+        ui.rawSet("row", value: makeContainer("row", kind: .row))
+        ui.rawSet("col", value: makeContainer("col", kind: .col))
+        ui.rawSet("box", value: makeContainer("box", kind: .box))
+        ui.rawSet("spacer", value: makeContainer("spacer", kind: .spacer))
+
+        ui.rawSet("text", value: .nativeFunction(LuauNativeFunction(name: "ui.text") { vm, _, args in
+            let session = try LuauUIBridge.requireSession(vm, "ui.text")
+            return .values([try session.buildText(args)])
         }))
 
-        return view
+        ui.rawSet("each", value: .nativeFunction(LuauNativeFunction(name: "ui.each") { vm, _, args in
+            let session = try LuauUIBridge.requireSession(vm, "ui.each")
+            return .values([try session.buildEach(vm: vm, args: args)])
+        }))
+
+        ui.rawSet("virtualList", value: .nativeFunction(LuauNativeFunction(name: "ui.virtualList") { vm, _, args in
+            let session = try LuauUIBridge.requireSession(vm, "ui.virtualList")
+            return .values([try session.buildVirtualList(vm: vm, args: args)])
+        }))
+
+        for node in hostNodes {
+            ui.rawSet(node.name, value: .nativeFunction(LuauNativeFunction(name: "ui.\(node.name)") { vm, _, args in
+                let session = try LuauUIBridge.requireSession(vm, "ui.\(node.name)")
+                return .values([try session.buildHostNode(node, args: args)])
+            }))
+        }
+
+        ui.isFrozen = true
+        vm.registeredModules["@rune/ui"] = .table(ui)
+
+        let view = LuauTable()
+        view.rawSet("dark", value: .bool(false))
+        view.rawSet("Memo", value: .nativeFunction(LuauNativeFunction(name: "view:Memo") { vm, _, args in
+            guard let session = vm.getAppData(LuauUIBridgeContext.self)?.activeSession else {
+                throw LuauRuntimeError(value: .string("view:Memo can only be called while rendering"))
+            }
+            return .values([try session.viewMemo(vm: vm, args: args)])
+        }))
+        view.rawSet("Handler", value: .nativeFunction(LuauNativeFunction(name: "view:Handler") { vm, _, args in
+            let fn = args.count > 1 ? args[1] : .nil
+            guard case .closure = fn else {
+                if case .nativeFunction = fn {
+                    return .values([fn])
+                }
+                throw LuauRuntimeError(value: .string("view:Handler needs a function"))
+            }
+            guard let ctx = vm.getAppData(LuauUIBridgeContext.self) else {
+                return .values([fn])
+            }
+            let idx = ctx.handlerCursor
+            ctx.handlerCursor += 1
+            if idx < ctx.handlerSlots.count {
+                ctx.handlerSlots[idx] = fn
+                return .values([ctx.handlerWrappers[idx]])
+            }
+            ctx.handlerSlots.append(fn)
+            let wrapper = LuauValue.nativeFunction(LuauNativeFunction(name: "view.handlerWrapper") { vm, _, callArgs in
+                guard let ctx = vm.getAppData(LuauUIBridgeContext.self), idx < ctx.handlerSlots.count else {
+                    return .values([])
+                }
+                return .values(try vm.call(value: ctx.handlerSlots[idx], args: callArgs))
+            })
+            ctx.handlerWrappers.append(wrapper)
+            return .values([wrapper])
+        }))
+
+        let ctx = LuauUIBridgeContext(uiTable: ui, viewTable: view)
+        vm.setAppData(ctx)
+        return ctx
+    }
+
+    static func withSession<State, R>(
+        vm: LuauVM,
+        stateType: State.Type = State.self,
+        env: UIRenderEnv,
+        body: (LuauTable) throws -> R
+    ) rethrows -> R {
+        let ctx = vm.getAppData(LuauUIBridgeContext.self) ?? installStatic(into: vm, hostNodes: [])
+        let prevSession = ctx.activeSession
+        let prevDark = ctx.viewTable.rawGet("dark")
+        let prevCursor = ctx.handlerCursor
+        ctx.activeSession = UIRenderSession<State>(env: env)
+        ctx.viewTable.rawSet("dark", value: .bool(env.dark))
+        ctx.handlerCursor = 0
+        defer {
+            ctx.activeSession = prevSession
+            ctx.viewTable.rawSet("dark", value: prevDark)
+            ctx.handlerCursor = prevCursor
+        }
+        return try body(ctx.viewTable)
     }
 
     static func unwrapEl<State>(_ val: LuauValue, _ type: State.Type) throws -> El<State> {
@@ -435,10 +824,21 @@ internal enum LuauUIBridge {
 
     private static func isKeyedTable(_ val: LuauValue) -> Bool {
         guard case .table(let t) = val else { return false }
-        return !t.hash.isEmpty || t.rawLength == 0
+        if t.rawLength > 0 {
+            return false
+        }
+        return t.hashOrder.contains { hk in
+            switch hk {
+            case .string: return true
+            case .number(let bits):
+                let d = Double(bitPattern: bits)
+                return !(d.isFinite && d >= 1.0 && d.rounded(.towardZero) == d)
+            default: return true
+            }
+        }
     }
 
-    private static func parseContainerArgs(_ args: [LuauValue]) -> ([LuauTable], LuauValue?) {
+    fileprivate static func parseContainerArgs(_ args: [LuauValue]) -> ([LuauTable], LuauValue?) {
         let t0 = args.count > 0 ? args[0] : .nil
         let t1 = args.count > 1 ? args[1] : .nil
         let t2 = args.count > 2 ? args[2] : .nil
@@ -467,7 +867,7 @@ internal enum LuauUIBridge {
         return ([], nil)
     }
 
-    private static func parseTextArgs(_ args: [LuauValue]) -> ([LuauTable], Int) {
+    fileprivate static func parseTextArgs(_ args: [LuauValue]) -> ([LuauTable], Int) {
         let a1 = args.count > 1 ? args[1] : .nil
         let a2 = args.count > 2 ? args[2] : .nil
         if case .table(let t1) = a1 {
@@ -488,7 +888,7 @@ internal enum LuauUIBridge {
         return ([], 1)
     }
 
-    private static func interpolateText(_ template: String, values: [LuauValue]) throws -> String {
+    fileprivate static func interpolateText(_ template: String, values: [LuauValue]) throws -> String {
         if values.isEmpty { return template }
         var out = ""
         var i = template.startIndex
@@ -515,32 +915,56 @@ internal enum LuauUIBridge {
         return out
     }
 
-    private static func extractChildren<State>(_ val: LuauValue, _ type: State.Type, env: UIRenderEnv) throws -> [El<State>] {
+    fileprivate static func extractChildren<State>(_ val: LuauValue, _ type: State.Type, env: UIRenderEnv) throws -> [El<State>] {
         guard case .table(let t) = val else { return [] }
         var result: [El<State>] = []
         let len = t.rawLength
-        for i in 1...max(1, len) {
-            if i > len { break }
+        var indices: [Int] = len > 0 ? Array(1...len) : []
+        var extra: [Int] = []
+        for hk in t.hashOrder {
+            if case .number(let bits) = hk {
+                let d = Double(bitPattern: bits)
+                if d.isFinite, d >= 1.0, d.rounded(.towardZero) == d, d <= Double(Int.max) {
+                    let idx = Int(d)
+                    if idx > len {
+                        extra.append(idx)
+                    }
+                }
+            }
+        }
+        if !extra.isEmpty {
+            extra.sort()
+            indices.append(contentsOf: extra)
+        }
+        for i in indices {
             let item = t.rawGet(i)
             switch item {
-            case .nil:
+            case .nil, .bool(false):
                 continue
             case .string(let s):
                 result.append((Rune.text(s) as El<State>).font(env.baseTextStyle).color(env.defaultTextColor))
+            case .number(let n):
+                result.append((Rune.text(LuauValue.formatNumber(n)) as El<State>).font(env.baseTextStyle).color(env.defaultTextColor))
             case .userdata(let u):
-                if let box = u.payload as? LuauElBox<State> {
-                    result.append(box.element)
+                guard let box = u.payload as? LuauElBox<State> else {
+                    throw LuauRuntimeError(value: .string("child \(i) is a userdata, not a ui node"))
                 }
-            case .table:
-                result.append(contentsOf: try extractChildren(item, State.self, env: env))
+                if box.renderEpoch != env.renderEpoch {
+                    throw LuauRuntimeError(value: .string("elements cannot be saved across renders"))
+                }
+                if box.used {
+                    throw LuauRuntimeError(value: .string("each element can only be placed once"))
+                }
+                box.used = true
+                result.append(box.element)
             default:
-                throw LuauRuntimeError(value: .string("ui child must be a node or string, got \(item.typeName)"))
+                throw LuauRuntimeError(value: .string("child \(i) is a \(item.typeName), not a ui node"))
             }
         }
         return result
     }
 
-    private static func buildHostNodeArgs<State>(_ args: [LuauValue], _ type: State.Type, env: UIRenderEnv) throws -> NodeArgs {
+    fileprivate static func buildHostNodeArgs<State>(_ args: [LuauValue], _ type: State.Type, env: UIRenderEnv) throws -> NodeArgs {
         var idx = 0
         var content: String? = nil
         if idx < args.count, case .string(let s) = args[idx] {
@@ -548,9 +972,11 @@ internal enum LuauUIBridge {
             idx += 1
         }
         var props: [(String, Prop)] = []
+        var rawProps: [(String, LuauValue)] = []
         func collectProps(_ tbl: LuauTable) {
             for hk in tbl.hashOrder {
                 guard case .string(let k) = hk, let v = tbl.hash[hk], !v.isNil else { continue }
+                rawProps.append((k, v))
                 let prop: Prop? = switch v {
                 case .bool(let b): .bool(b)
                 case .number(let n): .number(n)
@@ -575,28 +1001,34 @@ internal enum LuauUIBridge {
         if idx < args.count {
             let cVal = args[idx]
             if case .userdata(let u) = cVal, let box = u.payload as? LuauElBox<State> {
+                if box.renderEpoch != env.renderEpoch {
+                    throw LuauRuntimeError(value: .string("elements cannot be saved across renders"))
+                }
+                if box.used {
+                    throw LuauRuntimeError(value: .string("each element can only be placed once"))
+                }
+                box.used = true
                 kids = [box.element]
             } else if case .table = cVal {
                 kids = try extractChildren(cVal, State.self, env: env)
             }
         }
-        return NodeArgs(content: content, props: props, children: kids, env: env)
+        return NodeArgs(content: content, props: props, rawProps: rawProps, children: kids, env: env)
     }
 
-    private static func applyProps<State>(
-        _ tables: [LuauTable],
-        to element: El<State>,
-        isText: Bool,
-        env: UIRenderEnv,
-        skipKeys: Set<String> = []
-    ) throws -> El<State> {
-        var el = element
+    private enum LuauSizeSpec {
+        case px(Float)
+        case frac(Float)
+        case full
+    }
+
+    private struct ApplyPropState {
         var keyStr: String? = nil
         var padAll: Float? = nil
         var padSides: UInt8 = 0
         var borderWidth: Float? = nil
         var borderColor: Color? = nil
-        var textStyle = env.baseTextStyle
+        var textStyle: TextStyle
         var textColor: Color? = nil
         var scrollX = false
         var scrollY = false
@@ -604,228 +1036,384 @@ internal enum LuauUIBridge {
         var onPressVal: LuauValue? = nil
         var onHoverVal: LuauValue? = nil
         var isDisabled = false
+    }
 
-        func num(_ v: LuauValue, _ name: String) throws -> Float {
-            guard let d = v.coercedNumber else {
-                throw LuauRuntimeError(value: .string("\(name) must be a number, got \(v.typeName)"))
-            }
-            return Float(d)
+    private static func propNum(_ v: LuauValue, _ name: String) throws -> Float {
+        guard let d = v.coercedNumber else {
+            throw LuauRuntimeError(value: .string("\(name) must be a number, got \(v.typeName)"))
         }
+        return Float(d)
+    }
 
-        for tbl in tables {
-            for hk in tbl.hashOrder {
-                guard case .string(let k) = hk, let v = tbl.hash[hk], !v.isNil else { continue }
-                if skipKeys.contains(k) { continue }
-                switch k {
-                case "key": keyStr = v.displayString
-                case "w":
-                    if case .string("full") = v { el = el.wFull() }
-                    else { el = el.w(try num(v, "w")) }
-                case "h":
-                    if case .string("full") = v { el = el.hFull() }
-                    else { el = el.h(try num(v, "h")) }
-                case "minW": el = el.minW(try num(v, k))
-                case "maxW": el = el.maxW(try num(v, k))
-                case "minH": el = el.minH(try num(v, k))
-                case "maxH": el = el.maxH(try num(v, k))
-                case "grow": el = el.grow(try num(v, k))
-                case "shrink": if v.isTruthy { el = el.shrink(1) } else { el = el.shrink(0) }
-                case "pad": padAll = try num(v, k)
-                case "px":
-                    let n = try num(v, k)
-                    el = el.px(n)
-                    padSides |= 0b1010
-                case "py":
-                    let n = try num(v, k)
-                    el = el.py(n)
-                    padSides |= 0b0101
-                case "pt": el = el.pt(try num(v, k)); padSides |= 0b0001
-                case "pr": el = el.pr(try num(v, k)); padSides |= 0b0010
-                case "pb": el = el.pb(try num(v, k)); padSides |= 0b0100
-                case "pl": el = el.pl(try num(v, k)); padSides |= 0b1000
-                case "m": el = el.m(try num(v, k))
-                case "mx": el = el.mx(try num(v, k))
-                case "my": el = el.my(try num(v, k))
-                case "mt": el = el.mt(try num(v, k))
-                case "mr": el = el.mr(try num(v, k))
-                case "mb": el = el.mb(try num(v, k))
-                case "ml": el = el.ml(try num(v, k))
-                case "opacity": el = el.opacity(try num(v, k))
-                case "label": if let s = v.asString { el = el.label(s) }
-                case "help": if let s = v.asString { el = el.help(s) }
-                case "gap": el = el.gap(try num(v, k))
-                case "align":
-                    switch v.asString {
-                    case "start": el = el.itemsStart()
-                    case "center": el = el.itemsCenter()
-                    case "end": el = el.itemsEnd()
-                    case "stretch": el = el.itemsStretch()
-                    default: throw LuauRuntimeError(value: .string("invalid align '\(v.displayString)'"))
-                    }
-                case "justify":
-                    switch v.asString {
-                    case "start": el = el.justifyStart()
-                    case "center": el = el.justifyCenter()
-                    case "end": el = el.justifyEnd()
-                    case "between": el = el.justifyBetween()
-                    default: throw LuauRuntimeError(value: .string("invalid justify '\(v.displayString)'"))
-                    }
-                case "center": if v.isTruthy { el = el.center() }
-                case "wrap":
-                    if !isText && v.isTruthy { el = el.flexWrap(true) }
-                case "fill":
-                    if let s = v.asString { el = el.bg(try env.resolveColor(s)) }
-                case "hover":
-                    if let s = v.asString { el = el.hover(try env.resolveColor(s)) }
-                case "press":
-                    if let s = v.asString { el = el.press(try env.resolveColor(s)) }
-                case "border":
-                    if let s = v.asString { borderColor = try env.resolveColor(s) }
-                case "borderWidth":
-                    borderWidth = try num(v, k)
-                case "radius":
-                    el = el.rounded(try num(v, k))
-                case "corners":
-                    if case .table(let ct) = v {
-                        let c0 = Float(ct.rawGet(1).coercedNumber ?? 0)
-                        let c1 = Float(ct.rawGet(2).coercedNumber ?? 0)
-                        let c2 = Float(ct.rawGet(3).coercedNumber ?? 0)
-                        let c3 = Float(ct.rawGet(4).coercedNumber ?? 0)
-                        el = el.corners(c0, c1, c2, c3)
-                    }
-                case "clip":
-                    if v.isTruthy { el = el.clip(true) }
-                case "scrollY":
-                    if v.isTruthy { scrollY = true }
-                case "scrollX":
-                    if v.isTruthy { scrollX = true }
-                case "stickBottom":
-                    stickBottom = v.isTruthy
-                case "pin":
-                    if case .table(let pt) = v {
-                        el = el.pin(
-                            top: pt.rawGet("top").coercedNumber.map { Float($0) },
-                            right: pt.rawGet("right").coercedNumber.map { Float($0) },
-                            bottom: pt.rawGet("bottom").coercedNumber.map { Float($0) },
-                            left: pt.rawGet("left").coercedNumber.map { Float($0) }
-                        )
-                    }
-                case "color":
-                    if let s = v.asString { textColor = try env.resolveColor(s) }
-                case "size":
-                    textStyle.size = try num(v, k)
-                case "weight":
-                    switch v.asString {
-                    case "regular": textStyle.weight = env.weights[0]
-                    case "medium": textStyle.weight = env.weights[1]
-                    case "semibold": textStyle.weight = env.weights[2]
-                    case "bold": textStyle.weight = env.weights[3]
-                    default: textStyle.weight = try num(v, k)
-                    }
-                case "lineHeight":
-                    textStyle.lineHeight = try num(v, k)
-                case "tracking":
-                    textStyle.letterSpacing = try num(v, k)
-                case "mono":
-                    if v.isTruthy { textStyle.family = .monospace }
-                case "noWrap":
-                    if v.isTruthy { textStyle.wrap = .noWrap }
-                case "truncate":
-                    if v.isTruthy { textStyle.wrap = .ellipsis }
-                case "textAlign":
-                    switch v.asString {
-                    case "start": textStyle.align = .leading
-                    case "center": textStyle.align = .center
-                    case "end": textStyle.align = .trailing
-                    default: break
-                    }
-                case "focusable":
-                    if v.isTruthy { el = el.focusable(true) }
-                case "disabled":
-                    isDisabled = v.isTruthy
-                case "selected":
-                    if v.isTruthy, let c = env.palette("selected", env.dark) {
-                        el = el.bg(c)
-                    }
-                case "shadow":
-                    if let s = v.asString, let list = env.shadows?(s, env.dark) {
-                        el = el.shadows(list)
-                    }
-                case "onPress":
-                    onPressVal = v
-                case "onHover":
-                    onHoverVal = v
-                case "role":
-                    if let s = v.asString, let r = ElementRole(rawValue: s) {
-                        el = el.role(r)
-                    }
-                default:
-                    break
-                }
-            }
+    private static func propFlag(_ v: LuauValue, _ name: String) throws -> Bool {
+        guard case .bool(let b) = v else {
+            throw LuauRuntimeError(value: .string("\(name) must be a boolean, got \(v.typeName)"))
         }
+        return b
+    }
 
-        if let p = padAll {
-            if padSides == 0 {
+    private static func propStr(_ v: LuauValue, _ name: String) throws -> String {
+        guard case .string(let s) = v else {
+            throw LuauRuntimeError(value: .string("\(name) must be a string, got \(v.typeName)"))
+        }
+        return s
+    }
+
+    private static func propSize(_ v: LuauValue, _ name: String) throws -> LuauSizeSpec {
+        switch v {
+        case .number(let n):
+            return .px(Float(n))
+        case .string("full"):
+            return .full
+        case .string(let s) where s.hasSuffix("%"):
+            let prefix = String(s.dropLast())
+            guard let pct = Float(prefix) else {
+                throw LuauRuntimeError(value: .string("\(name): invalid percentage '\(s)'"))
+            }
+            return .frac(pct / 100.0)
+        case .string(let s):
+            throw LuauRuntimeError(value: .string("\(name): invalid size '\(s)'"))
+        default:
+            throw LuauRuntimeError(value: .string("\(name) must be a number or size string, got \(v.typeName)"))
+        }
+    }
+
+    private static func mapRole(_ s: String) -> ElementRole? {
+        switch s {
+        case "none", "group", "region", "list": return .group
+        case "button", "link": return .button
+        case "switch": return .switchControl
+        case "checkbox": return .checkbox
+        case "radio": return .radio
+        case "tab": return .tab
+        case "textbox": return .textInput
+        case "slider": return .slider
+        case "progress", "progressbar": return .progress
+        case "listitem": return .listItem
+        case "heading": return .heading
+        case "dialog", "alert": return .dialog
+        case "menu": return .menu
+        case "menuitem": return .menuItem
+        case "img": return .image
+        case "icon": return .icon
+        case "separator": return .separator
+        case "status", "text": return .text
+        default: return nil
+        }
+    }
+
+    @inline(never)
+    private static func applySizeProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>) throws -> Bool {
+        switch k {
+        case "w":
+            switch try propSize(v, "w") {
+            case .px(let px): el = el.w(px)
+            case .frac(let f): el = el.wFrac(f)
+            case .full: el = el.wFull()
+            }
+        case "h":
+            switch try propSize(v, "h") {
+            case .px(let px): el = el.h(px)
+            case .frac(let f): el = el.hFrac(f)
+            case .full: el = el.hFull()
+            }
+        case "minW": el = el.minW(try propNum(v, k))
+        case "maxW": el = el.maxW(try propNum(v, k))
+        case "minH": el = el.minH(try propNum(v, k))
+        case "maxH": el = el.maxH(try propNum(v, k))
+        case "grow": el = el.grow(try propNum(v, k))
+        case "shrink":
+            if try propFlag(v, k) { el = el.shrink(1) }
+        default:
+            return false
+        }
+        return true
+    }
+
+    @inline(never)
+    private static func applySpacingLayoutProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>, state: inout ApplyPropState, isText: Bool) throws -> Bool {
+        switch k {
+        case "pad": state.padAll = try propNum(v, k)
+        case "px": el = el.px(try propNum(v, k)); state.padSides |= 0b1010
+        case "py": el = el.py(try propNum(v, k)); state.padSides |= 0b0101
+        case "pt": el = el.pt(try propNum(v, k)); state.padSides |= 0b0001
+        case "pr": el = el.pr(try propNum(v, k)); state.padSides |= 0b0010
+        case "pb": el = el.pb(try propNum(v, k)); state.padSides |= 0b0100
+        case "pl": el = el.pl(try propNum(v, k)); state.padSides |= 0b1000
+        case "m": el = el.m(try propNum(v, k))
+        case "mx": el = el.mx(try propNum(v, k))
+        case "my": el = el.my(try propNum(v, k))
+        case "mt": el = el.mt(try propNum(v, k))
+        case "mr": el = el.mr(try propNum(v, k))
+        case "mb": el = el.mb(try propNum(v, k))
+        case "ml": el = el.ml(try propNum(v, k))
+        case "gap": el = el.gap(try propNum(v, k))
+        case "align":
+            switch v.asString {
+            case "start": el = el.itemsStart()
+            case "center": el = el.itemsCenter()
+            case "end": el = el.itemsEnd()
+            case "stretch": el = el.itemsStretch()
+            default: throw LuauRuntimeError(value: .string("align must be start, center, end or stretch, got \(v.typeName)"))
+            }
+        case "justify":
+            switch v.asString {
+            case "start": el = el.justifyStart()
+            case "center": el = el.justifyCenter()
+            case "end": el = el.justifyEnd()
+            case "between": el = el.justifyBetween()
+            default: throw LuauRuntimeError(value: .string("justify must be start, center, end or between, got \(v.typeName)"))
+            }
+        case "center":
+            if try propFlag(v, k) { el = el.center() }
+        case "wrap":
+            let b = try propFlag(v, k)
+            if isText {
+                state.textStyle.wrap = b ? .wrap : .noWrap
+            } else if b {
+                el = el.flexWrap(true)
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    @inline(never)
+    private static func applyVisualProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>, state: inout ApplyPropState, env: UIRenderEnv) throws -> Bool {
+        switch k {
+        case "key": state.keyStr = try propStr(v, k)
+        case "opacity": el = el.opacity(try propNum(v, k))
+        case "label": el = el.label(try propStr(v, k))
+        case "help": el = el.help(try propStr(v, k))
+        case "fill": el = el.bg(try env.resolveColor(try propStr(v, k)))
+        case "hover": el = el.hover(try env.resolveColor(try propStr(v, k)))
+        case "press": el = el.press(try env.resolveColor(try propStr(v, k)))
+        case "border": state.borderColor = try env.resolveColor(try propStr(v, k))
+        case "borderWidth": state.borderWidth = try propNum(v, k)
+        case "radius": el = el.rounded(try propNum(v, k))
+        case "corners":
+            guard case .table(let ct) = v else {
+                throw LuauRuntimeError(value: .string("corners must be a table, got \(v.typeName)"))
+            }
+            let c0 = Float(ct.rawGet(1).coercedNumber ?? 0)
+            let c1 = Float(ct.rawGet(2).coercedNumber ?? 0)
+            let c2 = Float(ct.rawGet(3).coercedNumber ?? 0)
+            let c3 = Float(ct.rawGet(4).coercedNumber ?? 0)
+            el = el.corners(c0, c1, c2, c3)
+        case "clip":
+            if try propFlag(v, k) { el = el.clip(true) }
+        case "scrollY": state.scrollY = try propFlag(v, k)
+        case "scrollX": state.scrollX = try propFlag(v, k)
+        case "stickBottom": state.stickBottom = try propFlag(v, k)
+        case "pin":
+            guard case .table(let pt) = v else {
+                throw LuauRuntimeError(value: .string("pin must be a table, got \(v.typeName)"))
+            }
+            el = el.pin(
+                top: pt.rawGet("top").coercedNumber.map { Float($0) },
+                right: pt.rawGet("right").coercedNumber.map { Float($0) },
+                bottom: pt.rawGet("bottom").coercedNumber.map { Float($0) },
+                left: pt.rawGet("left").coercedNumber.map { Float($0) }
+            )
+        case "shadow":
+            let s = try propStr(v, k)
+            if let list = env.shadows?(s, env.dark) {
+                el = el.shadows(list)
+            } else {
+                env.warnOnce("unknown shadow \(s)")
+            }
+        default:
+            return false
+        }
+        return true
+    }
+
+    @inline(never)
+    private static func applyTextAndBehaviorProp<State>(_ k: String, _ v: LuauValue, el: inout El<State>, state: inout ApplyPropState, env: UIRenderEnv) throws -> Bool {
+        switch k {
+        case "color": state.textColor = try env.resolveColor(try propStr(v, k))
+        case "size": state.textStyle.size = try propNum(v, k)
+        case "weight":
+            switch v {
+            case .string("regular"): state.textStyle.weight = env.weights[0]
+            case .string("medium"): state.textStyle.weight = env.weights[1]
+            case .string("semibold"): state.textStyle.weight = env.weights[2]
+            case .string("bold"): state.textStyle.weight = env.weights[3]
+            case .number(let n): state.textStyle.weight = Float(n)
+            default:
+                throw LuauRuntimeError(value: .string("weight must be regular, medium, semibold, bold or a number, got \(v.typeName)"))
+            }
+        case "lineHeight": state.textStyle.lineHeight = try propNum(v, k)
+        case "tracking": state.textStyle.letterSpacing = try propNum(v, k)
+        case "mono":
+            if try propFlag(v, k) { state.textStyle.family = .monospace }
+        case "tabular", "selectable":
+            _ = try propFlag(v, k)
+        case "noWrap":
+            if try propFlag(v, k) { state.textStyle.wrap = .noWrap }
+        case "truncate":
+            if try propFlag(v, k) { state.textStyle.wrap = .ellipsis }
+        case "textAlign":
+            switch v.asString {
+            case "start": state.textStyle.align = .leading
+            case "center": state.textStyle.align = .center
+            case "end": state.textStyle.align = .trailing
+            default:
+                throw LuauRuntimeError(value: .string("textAlign must be start, center or end, got \(v.typeName)"))
+            }
+        case "focusable":
+            if try propFlag(v, k) { el = el.focusable(true) }
+        case "disabled":
+            state.isDisabled = try propFlag(v, k)
+            if state.isDisabled { el = el.inert(true) }
+        case "selected":
+            let sel = try propFlag(v, k)
+            el = el.itemSelected(sel).selected(sel ? "true" : nil)
+        case "fadeOut":
+            _ = try propFlag(v, k)
+            env.warnOnce("fadeOut has no effect on Swift El yet")
+        case "dir":
+            switch try propStr(v, k) {
+            case "auto", "ltr", "rtl": break
+            case let other: throw LuauRuntimeError(value: .string("dir must be auto, ltr or rtl, got \(other)"))
+            }
+            env.warnOnce("dir has no effect on Swift El yet")
+        case "hoverTransition":
+            switch try propStr(v, k) {
+            case "default", "instant": break
+            case let other: throw LuauRuntimeError(value: .string("hoverTransition must be default or instant, got \(other)"))
+            }
+            env.warnOnce("hoverTransition has no effect on Swift El yet")
+        case "hoverGroup":
+            _ = try propFlag(v, k)
+            env.warnOnce("hoverGroup has no effect on Swift El yet")
+        case "hoverGroupColor":
+            _ = try env.resolveColor(try propStr(v, k))
+            env.warnOnce("hoverGroupColor has no effect on Swift El yet")
+        case "revealOnHover":
+            _ = try propFlag(v, k)
+            env.warnOnce("revealOnHover has no effect on Swift El yet")
+        case "helpSide":
+            switch try propStr(v, k) {
+            case "top", "right", "bottom", "left": break
+            case let other: throw LuauRuntimeError(value: .string("helpSide must be top, right, bottom or left, got \(other)"))
+            }
+            env.warnOnce("helpSide has no effect on Swift El yet")
+        case "onPress": state.onPressVal = v
+        case "onHover": state.onHoverVal = v
+        case "role":
+            let s = try propStr(v, k)
+            guard let r = mapRole(s) else {
+                throw LuauRuntimeError(value: .string("unknown role \(s)"))
+            }
+            el = el.role(r)
+        default:
+            return false
+        }
+        return true
+    }
+
+    @inline(never)
+    private static func finalizeAppliedProps<State>(_ el: inout El<State>, state: ApplyPropState, isText: Bool, env: UIRenderEnv) {
+        if let p = state.padAll {
+            if state.padSides == 0 {
                 el = el.p(p)
             } else {
-                if (padSides & 0b0001) == 0 { el = el.pt(p) }
-                if (padSides & 0b0010) == 0 { el = el.pr(p) }
-                if (padSides & 0b0100) == 0 { el = el.pb(p) }
-                if (padSides & 0b1000) == 0 { el = el.pl(p) }
+                if (state.padSides & 0b0001) == 0 { el = el.pt(p) }
+                if (state.padSides & 0b0010) == 0 { el = el.pr(p) }
+                if (state.padSides & 0b0100) == 0 { el = el.pb(p) }
+                if (state.padSides & 0b1000) == 0 { el = el.pl(p) }
             }
         }
-        if borderWidth != nil || borderColor != nil {
-            let c = borderColor ?? env.palette("separator", env.dark) ?? .transparent
-            el = el.border(borderWidth ?? 1.0, c)
+        if state.borderWidth != nil || state.borderColor != nil {
+            let c = state.borderColor ?? env.palette("separator", env.dark) ?? .transparent
+            el = el.border(state.borderWidth ?? 1.0, c)
         }
-        if scrollX && scrollY {
+        if state.scrollX && state.scrollY {
             el = el.scrollXY()
-        } else if scrollX {
+        } else if state.scrollX {
             el = el.scrollX()
-        } else if scrollY {
-            el = el.scrollY(stickBottom: stickBottom)
+        } else if state.scrollY {
+            el = el.scrollY(stickBottom: state.stickBottom)
         }
         if isText {
-            el = el.font(textStyle).color(textColor ?? env.defaultTextColor)
-        } else if let c = textColor {
+            el = el.font(state.textStyle).color(state.textColor ?? env.defaultTextColor)
+        } else if let c = state.textColor {
             el = el.color(c)
         }
-        if let k = keyStr {
+        if let k = state.keyStr {
             el = el.key(k)
         }
-        if let onPressVal, !isDisabled {
-            let capturedKey = keyStr
+        if let onPressVal = state.onPressVal, !state.isDisabled {
+            let capturedKey = state.keyStr
             let scriptRef = env.script
             let vmID = env.vmID
-            el = el.onClick { _, tx in
+            el = el.onPointerUp { _, press, _ in
+                scriptRef?.stashPressMods(press.mods)
+            }
+            el = el.onClick { st, tx in
                 guard let script = scriptRef else { return }
+                let mods = script.consumePressMods()
+                let m = script.pressEventMods(mods)
                 let ev = LuauTable()
                 ev.rawSet("kind", value: .string("press"))
                 if let capturedKey { ev.rawSet("key", value: .string(capturedKey)) }
-                ev.rawSet("shift", value: .bool(false))
-                ev.rawSet("alt", value: .bool(false))
-                ev.rawSet("mod", value: .bool(false))
-                script.handleCallback(fn: onPressVal, vmID: vmID, event: .table(ev), tx: &tx)
+                ev.rawSet("shift", value: .bool(m.shift))
+                ev.rawSet("alt", value: .bool(m.alt))
+                ev.rawSet("mod", value: .bool(m.mod))
+                script.aroundWrite(state: &st, tx: &tx) { innerTx in
+                    script.enter(tx: &innerTx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: onPressVal, arg: .table(ev))
+                    }
+                }
             }
         }
-        if let onHoverVal {
-            let capturedKey = keyStr
+        if let onHoverVal = state.onHoverVal, !state.isDisabled {
+            let capturedKey = state.keyStr
             let scriptRef = env.script
             let vmID = env.vmID
-            el = el.onHover { _, entered, tx in
+            el = el.onHover { st, entered, tx in
                 guard let script = scriptRef else { return }
                 let ev = LuauTable()
                 ev.rawSet("kind", value: .string("hover"))
                 if let capturedKey { ev.rawSet("key", value: .string(capturedKey)) }
                 ev.rawSet("entered", value: .bool(entered))
-                script.handleCallback(fn: onHoverVal, vmID: vmID, event: .table(ev), tx: &tx)
+                script.aroundWrite(state: &st, tx: &tx) { innerTx in
+                    script.enter(tx: &innerTx) {
+                        try script.callHandlerIfCurrent(vmID: vmID, fn: onHoverVal, arg: .table(ev))
+                    }
+                }
             }
         }
+    }
+
+    @inline(never)
+    fileprivate static func applyProps<State>(
+        _ tables: [LuauTable],
+        to element: El<State>,
+        isText: Bool,
+        env: UIRenderEnv,
+        skipKeys: Set<String> = []
+    ) throws -> El<State> {
+        var el = element
+        var state = ApplyPropState(textStyle: env.baseTextStyle)
+        for tbl in tables {
+            for hk in tbl.hashOrder {
+                guard case .string(let k) = hk, let v = tbl.hash[hk], !v.isNil else { continue }
+                if skipKeys.contains(k) { continue }
+                if try applySizeProp(k, v, el: &el) { continue }
+                if try applySpacingLayoutProp(k, v, el: &el, state: &state, isText: isText) { continue }
+                if try applyVisualProp(k, v, el: &el, state: &state, env: env) { continue }
+                if try applyTextAndBehaviorProp(k, v, el: &el, state: &state, env: env) { continue }
+                env.warnOnce("unknown prop \(k)")
+            }
+        }
+        finalizeAppliedProps(&el, state: state, isText: isText, env: env)
         return el
     }
 
-    private static func versionHash(_ val: LuauValue) -> UInt64 {
+    fileprivate static func versionHash(_ val: LuauValue) -> UInt64 {
         var h = Hasher()
         switch val {
         case .nil: h.combine(UInt8(0))
@@ -837,7 +1425,7 @@ internal enum LuauUIBridge {
         return UInt64(bitPattern: Int64(h.finalize()))
     }
 
-    private static func mixHash(_ a: UInt64, _ b: UInt64) -> UInt64 {
+    fileprivate static func mixHash(_ a: UInt64, _ b: UInt64) -> UInt64 {
         var h = Hasher()
         h.combine(a)
         h.combine(b)

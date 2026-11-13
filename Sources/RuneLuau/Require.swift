@@ -42,9 +42,13 @@ internal enum LuauRequire {
             loading.stack.append(resolvedPath)
             defer { loading.stack.removeLast() }
 
-            let cl = LuauClosure(proto: mod.proto, upvalues: [], env: vm.globals)
+            let env = vm.isSandboxed ? vm.makeIsolatedEnv() : vm.defaultEnv
+            let cl = LuauClosure(proto: mod.proto, upvalues: [], env: env)
             let results = try vm.call(closure: cl)
-            let exported = results.first ?? .nil
+            if results.count != 1 {
+                throw LuauRuntimeError(value: .string("module must return a single value"))
+            }
+            let exported = results[0]
             vm.moduleCache[resolvedPath] = exported
             return .values([exported])
         }))
@@ -54,7 +58,7 @@ internal enum LuauRequire {
         guard let mod = compiled.module(compiled.entry) else {
             throw ScriptError(kind: .missing, message: "no module \(compiled.entry)")
         }
-        let cl = LuauClosure(proto: mod.proto, upvalues: [], env: vm.globals)
+        let cl = LuauClosure(proto: mod.proto, upvalues: [], env: vm.defaultEnv)
         let results = try vm.call(closure: cl)
         return results.first ?? .nil
     }
@@ -195,11 +199,37 @@ internal enum LuauRequire {
     }
 
     private static func parseAlias(_ name: String, fromConfig text: String) -> String? {
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let aliases = json["aliases"] as? [String: Any] else {
-            return nil
+        if let data = text.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let aliases = json["aliases"] as? [String: Any],
+               let raw = aliases[name] as? String {
+                return raw
+            }
+            if let luau = json["luau"] as? [String: Any],
+               let aliases = luau["aliases"] as? [String: Any],
+               let raw = aliases[name] as? String {
+                return raw
+            }
         }
-        return aliases[name] as? String
+        // `.config.luau` returns `{ luau = { aliases = { ... } } }` or `{ aliases = { ... } }`.
+        let cfgVM = LuauVM()
+        cfgVM.sandbox()
+        let armed = cfgVM.watchdog.arm(timeLimit: .milliseconds(50))
+        defer { armed.disarm() }
+        if let results = try? cfgVM.eval(text, name: ".config.luau"),
+           case .table(let root) = results.first {
+            let aliasesVal: LuauValue = {
+                if case .table(let luauTbl) = root.rawGet("luau") {
+                    let a = luauTbl.rawGet("aliases")
+                    if !a.isNil { return a }
+                }
+                return root.rawGet("aliases")
+            }()
+            if case .table(let aliases) = aliasesVal,
+               case .string(let raw) = aliases.rawGet(name) {
+                return raw
+            }
+        }
+        return nil
     }
 }

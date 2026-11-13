@@ -7,6 +7,8 @@ enum RuneRefCLI {
     static let availableScenes: [(name: String, description: String)] = [
         ("seeded", "64x64 SplitMix64 corpus (roundedRect, dropShadow, glyph, insetShadow, linearGradient)"),
         ("dashed", "64x64 SplitMix64 corpus of dashed border rings (kind 10)"),
+        ("radial", "64x64 SplitMix64 corpus of radial / multi-stop gradients (kind 11)"),
+        ("text-run", "64x64 seeded corpus augmented with shaped TextSystem glyph quads"),
         ("showcase", "256x256 multi-primitive showcase (rects, shadows, gradients, segments, triangles, dashed rings)"),
         ("layers", "128x128 offscreen layer stack with opacity, clipping, and additive compositing"),
     ]
@@ -17,23 +19,24 @@ enum RuneRefCLI {
 
         USAGE:
           rune-ref <subcommand> [options]
-          rune-ref [--seed <n>] [--count <n>] [--scene <name>] [--out <file.png>] [--blame <x,y>] [--diff]
+          rune-ref [--seed <n>] [--count <n>] [--scene <name|file.json>] [--save <scene.json>] [--out <file.png>] [--blame <x,y>] [--diff]
 
         SUBCOMMANDS:
           list                         List built-in deterministic reference scenes
-          generate [options]           Render a scene to PNG and print its FNV-1a frame hash
-          check [options]              Run CPU RuneRef vs GPU MetalRenderer differential comparison
+          generate [options]           Render a scene (prints blake3=<hex> for oracle scenes, or fnv1a)
+          check [options]              Run CPU vs MetalRenderer differential comparison
 
         OPTIONS:
-          --scene <name>               Scene name (seeded, dashed, showcase, layers; or 'all' for check)
-          --seed <u64>                 Seed for 'seeded' / 'dashed' generators (default: 0)
+          --scene <name|path.json>     Built-in scene name, 'all' (for check), or OracleScene JSON path
+          --seed <u64>                 Seed for 'seeded' / 'dashed' / 'radial' / 'text-run' (default: 0)
           --count <int>                Primitive count for generated scenes (default: 8)
+          --save <path.json>           Serialize generated/loaded OracleScene to JSON
           --out, -o <path>             Write rendered PNG to <path>
-          --gpu                        Use MetalRenderer instead of CPU RuneRef for generate
+          --gpu                        Use MetalRenderer instead of CPU renderer
           --blame <x,y>                Inspect pixel (x, y) and print topmost covering primitive
-          --tolerance <int>            Per-channel tolerance for 'check' (default: 2)
-          --max-failing <int>          Allowed failing pixels for 'check' (default: 0)
-          --diff                       Alias for 'check' when used at top level
+          --tolerance <int>            Per-channel tolerance for 'check' / '--diff' (default: 2)
+          --max-failing <int>          Allowed failing pixels (default: 0)
+          --diff                       Run GPU vs CPU differential comparison
           --help, -h                   Show this help message
         """
         print(help)
@@ -45,6 +48,10 @@ enum RuneRefCLI {
             return RefGenerator.seeded(seed: seed, count: count)
         case "dashed":
             return RefGenerator.dashed(seed: seed, count: count)
+        case "radial":
+            return RefGenerator.radial(seed: seed, count: count)
+        case "text-run":
+            return try buildOracleScene(name: name, seed: seed, count: count).toRefScene()
         case "showcase":
             return showcaseScene()
         case "layers":
@@ -52,6 +59,79 @@ enum RuneRefCLI {
         default:
             throw CLIError.unknownScene(name)
         }
+    }
+
+    static func isOracleSceneName(_ name: String) -> Bool {
+        name == "seeded" || name == "dashed" || name == "radial" || name == "text-run"
+            || name.hasSuffix(".json") || FileManager.default.fileExists(atPath: name)
+    }
+
+    static func buildOracleScene(name: String, seed: UInt64, count: Int) throws -> OracleScene {
+        switch name {
+        case "seeded":
+            return OracleGenerator.seeded(seed: seed, count: count)
+        case "dashed":
+            return OracleGenerator.dashed(seed: seed, count: count)
+        case "radial":
+            return OracleGenerator.radial(seed: seed, count: count)
+        case "text-run":
+            var scene = OracleGenerator.seeded(seed: seed, count: count)
+            addTextRun(to: &scene, seed: seed)
+            return scene
+        default:
+            if name.hasSuffix(".json") || FileManager.default.fileExists(atPath: name) {
+                let data = try Data(contentsOf: URL(fileURLWithPath: name))
+                return try JSONDecoder().decode(OracleScene.self, from: data)
+            }
+            throw CLIError.unknownScene(name)
+        }
+    }
+
+    static func addTextRun(to scene: inout OracleScene, seed: UInt64) {
+        let strings = ["Rune ffi", "Ág jW", "012345", "a\u{301} test"]
+        let textSystem = TextSystem()
+        let style = TextStyle(size: Float(9 + seed % 15), weight: 400)
+        let shaped = textSystem.shape(
+            text: strings[Int(seed % UInt64(strings.count))],
+            style: style,
+            maxWidth: 60.0,
+            pixelScale: 1.0
+        )
+        for i in scene.primitives.indices where scene.primitives[i].params.count > 1 && scene.primitives[i].params[1] == 2.0 {
+            scene.primitives[i].uv[0] += 960.0
+            scene.primitives[i].uv[1] += 960.0
+        }
+        let atlas = textSystem.glyphAtlas.atlas
+        var atlasBytes = atlas.texels
+        let copyH = min(Int(scene.atlas.height), 32)
+        let copyW = min(Int(scene.atlas.width), 32)
+        if atlas.width >= 992 && atlas.height >= 992 {
+            for y in 0..<copyH {
+                let dstStart = (y + 960) * atlas.width + 960
+                let srcStart = y * Int(scene.atlas.width)
+                for x in 0..<copyW {
+                    atlasBytes[dstStart + x] = scene.atlas.data[srcStart + x]
+                }
+            }
+        }
+        let first = UInt32(scene.primitives.count + 1)
+        for (n, q) in shaped.glyphs.enumerated() {
+            let u0 = q.uv.x * Float(atlas.width)
+            let v0 = q.uv.y * Float(atlas.height)
+            scene.primitives.append(OraclePrimitive(
+                node: first + UInt32(n),
+                source: "text/\(seed)/glyph-\(n)",
+                rect: [q.rect.x + 2.0, q.rect.y + 2.0, q.rect.z, q.rect.w],
+                radii: [0, 0, 0, 0],
+                fill: [0.7, 0.6, 0.5, 0.8],
+                border: [0, 0, 0, 0],
+                params: [0.0, 2.0, 0.0, 0.85],
+                uv: [u0, v0, 0.0, 0.0],
+                clip: oracleNoClip,
+                fade: [0, 0, 0, 0]
+            ))
+        }
+        scene.atlas = OracleAtlas(width: UInt32(atlas.width), height: UInt32(atlas.height), data: atlasBytes)
     }
 
     static func showcaseScene() -> RefScene {
@@ -188,6 +268,7 @@ enum RuneRefCLI {
         var sceneExplicit: Bool = false
         var seed: UInt64 = 0
         var count: Int = 8
+        var savePath: String? = nil
         var outPath: String? = nil
         var useGPU: Bool = false
         var blame: (Int, Int)? = nil
@@ -221,6 +302,8 @@ enum RuneRefCLI {
                 let raw = try nextVal()
                 guard let v = Int(raw), v > 0 else { throw CLIError.invalidArgument("invalid --count '\(raw)'") }
                 opts.count = v
+            case "--save":
+                opts.savePath = try nextVal()
             case "--out", "-o":
                 opts.outPath = try nextVal()
             case "--gpu":
@@ -278,6 +361,65 @@ enum RuneRefCLI {
     }
 
     static func runGenerate(_ opts: Options) throws {
+        if isOracleSceneName(opts.scene) {
+            let oracleScene = try buildOracleScene(name: opts.scene, seed: opts.seed, count: opts.count)
+            try oracleScene.validate()
+            var frame = OracleFrame(width: oracleScene.width, height: oracleScene.height, provenance: true)
+            frame.render(oracleScene)
+
+            if opts.useGPU {
+                let renderer = try MetalRenderer()
+                let gpuFrame = try renderer.renderOffscreen(oracleScene.toRefScene())
+                print("blake3=\(Blake3.hashHex(gpuFrame.rgba))")
+                if let outPath = opts.outPath {
+                    try gpuFrame.writePNG(to: URL(fileURLWithPath: outPath))
+                    print("wrote \(outPath)")
+                }
+            } else {
+                print("blake3=\(frame.hash())")
+                if let outPath = opts.outPath {
+                    let pngFrame = Frame(width: Int(oracleScene.width), height: Int(oracleScene.height), rgba: frame.rgba)
+                    try pngFrame.writePNG(to: URL(fileURLWithPath: outPath))
+                    print("wrote \(outPath)")
+                }
+            }
+            if let savePath = opts.savePath {
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try enc.encode(oracleScene)
+                try data.write(to: URL(fileURLWithPath: savePath), options: .atomic)
+            }
+            if let (bx, by) = opts.blame {
+                guard bx >= 0, by >= 0, UInt32(bx) < oracleScene.width, UInt32(by) < oracleScene.height else {
+                    throw CLIError.invalidArgument("pixel (\(bx), \(by)) outside \(oracleScene.width)x\(oracleScene.height) viewport")
+                }
+                if let p = frame.blame(oracleScene, x: UInt32(bx), y: UInt32(by)) {
+                    print("node=\(p.node) source=\(p.source) kind=\(p.params.count > 1 ? p.params[1] : 0)")
+                } else {
+                    print("clear")
+                }
+            }
+            if opts.diffFlag {
+                let renderer = try MetalRenderer()
+                let gpuFrame = try renderer.renderOffscreen(oracleScene.toRefScene())
+                let report = Oracle.compare(
+                    scene: oracleScene,
+                    cpu: frame,
+                    gpu: gpuFrame.rgba,
+                    tolerance: UInt8(clamping: opts.tolerance)
+                )
+                let enc = JSONEncoder()
+                enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+                if let json = String(data: try enc.encode(report), encoding: .utf8) {
+                    print(json)
+                }
+                if report.outlierPixels > opts.maxFailing {
+                    throw CLIError.checkFailed("GPU differs from reference (\(report.outlierPixels) outlier pixels)")
+                }
+            }
+            return
+        }
+
         let scene = try buildScene(name: opts.scene, seed: opts.seed, count: opts.count)
         try scene.validate()
         let frame: Frame
@@ -287,7 +429,7 @@ enum RuneRefCLI {
         } else {
             frame = try RuneRef.render(scene)
         }
-        print("scene=\(opts.scene) size=\(frame.width)x\(frame.height) fnv1a=\(frame.fnv1aHash())")
+        print("scene=\(opts.scene) size=\(frame.width)x\(frame.height) blake3=\(frame.blake3Hash()) fnv1a=\(frame.fnv1aHash())")
         if let (bx, by) = opts.blame {
             try printBlame(scene: scene, frame: frame, x: bx, y: by)
         }
@@ -299,6 +441,13 @@ enum RuneRefCLI {
     }
 
     static func runCheck(_ opts: Options) throws {
+        if opts.sceneExplicit && isOracleSceneName(opts.scene) && opts.scene != "all" {
+            var diffOpts = opts
+            diffOpts.diffFlag = true
+            try runGenerate(diffOpts)
+            return
+        }
+
         let names: [String]
         if !opts.sceneExplicit || opts.scene == "all" {
             names = availableScenes.map(\.name)
@@ -357,11 +506,7 @@ enum RuneRefCLI {
                 try runCheck(opts)
             default:
                 let opts = try parseOptions(args[...])
-                if opts.diffFlag {
-                    try runCheck(opts)
-                } else {
-                    try runGenerate(opts)
-                }
+                try runGenerate(opts)
             }
         } catch {
             fputs("error: \(error)\n", stderr)

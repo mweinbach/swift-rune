@@ -24,7 +24,12 @@ public final class LuauVM: @unchecked Sendable {
     public var onWarn: ((String) -> Void)?
     /// Sandbox flag (globals frozen).
     public var isSandboxed: Bool = false
+    /// Per-VM isolated env inheriting `globals` when sandboxed.
+    public var sandboxEnv: LuauTable?
+    /// Optional memory budget in bytes (`nil` = unlimited).
+    public var memoryLimitBytes: Int?
 
+    private var pendingAllocationBytes: Int = 0
     private var markStack: [Int] = []
 
     public init() {
@@ -54,10 +59,10 @@ public final class LuauVM: @unchecked Sendable {
         return try compiler.compile(stmts: stmts)
     }
 
-    /// Loads source code into a `LuauClosure` bound to `globals`.
+    /// Loads source code into a `LuauClosure` bound to `env ?? defaultEnv`.
     public func load(source: String, name: String = "chunk", env: LuauTable? = nil) throws -> LuauClosure {
         let proto = try compile(source: source, name: name)
-        return LuauClosure(proto: proto, upvalues: [], env: env ?? globals)
+        return LuauClosure(proto: proto, upvalues: [], env: env ?? defaultEnv)
     }
 
     /// Convenience: compiles and executes a chunk on the main thread.
@@ -277,6 +282,7 @@ public final class LuauVM: @unchecked Sendable {
                     try tableSet(.table(frame.closure.env), key: .string(name), value: val)
 
                 case .newTable(let aHint, let hHint):
+                    try noteAllocation(64 + aHint * 16 + hHint * 32)
                     thread.stack.append(.table(LuauTable(arrayCapacity: aHint, hashCapacity: hHint)))
 
                 case .getTable:
@@ -290,6 +296,7 @@ public final class LuauVM: @unchecked Sendable {
                     let key = thread.stack.removeLast()
                     let tbl = thread.stack.removeLast()
                     try tableSet(tbl, key: key, value: val)
+                    try noteAllocation(48)
 
                 case .initTableField:
                     let val = thread.stack.removeLast()
@@ -298,6 +305,7 @@ public final class LuauVM: @unchecked Sendable {
                         throw LuauRuntimeError(value: .string("internal error: initTableField on non-table"))
                     }
                     try tbl.rawSet(key, value: val)
+                    try noteAllocation(48)
 
                 case .getField(let k):
                     let tbl = thread.stack.removeLast()
@@ -308,6 +316,7 @@ public final class LuauVM: @unchecked Sendable {
                     let val = thread.stack.removeLast()
                     let tbl = thread.stack.removeLast()
                     try tableSet(tbl, key: proto.constants[k], value: val)
+                    try noteAllocation(48)
 
                 case .setList(let startIndex, let count):
                     let startPos = thread.stack.count - count
@@ -315,6 +324,7 @@ public final class LuauVM: @unchecked Sendable {
                     guard case .table(let tbl) = tblVal else {
                         throw LuauRuntimeError(value: .string("internal error: setList on non-table"))
                     }
+                    try noteAllocation(count * 16)
                     for i in 0..<count {
                         try tbl.rawSet(.number(Double(startIndex + i)), value: thread.stack[startPos + i])
                     }
@@ -326,6 +336,7 @@ public final class LuauVM: @unchecked Sendable {
                     guard case .table(let tbl) = thread.stack[mark - 1] else {
                         throw LuauRuntimeError(value: .string("internal error: setListMulti on non-table"))
                     }
+                    try noteAllocation(count * 16)
                     for i in 0..<count {
                         try tbl.rawSet(.number(Double(startIndex + i)), value: thread.stack[mark + i])
                     }
@@ -563,13 +574,14 @@ public final class LuauVM: @unchecked Sendable {
                     for i in 0..<totalParts {
                         out += try valueToString(thread.stack[start + i])
                     }
+                    try noteAllocation(32 + out.utf8.count)
                     thread.stack.removeLast(totalParts)
                     thread.stack.append(.string(out))
                 }
             } catch let err as LuauRuntimeError {
                 let loc = "\(proto.sourceName):\(instr.line)"
                 let tb = err.traceback.isEmpty ? "stack traceback:\n\t\(loc): in function '\(proto.name)'" : "\(err.traceback)\n\t\(loc): in function '\(proto.name)'"
-                throw LuauRuntimeError(value: err.value, traceback: tb, isTimeout: err.isTimeout)
+                throw LuauRuntimeError(value: err.value, traceback: tb, isTimeout: err.isTimeout, isMemory: err.isMemory)
             }
         }
         return .returned([])
@@ -758,10 +770,21 @@ public final class LuauVM: @unchecked Sendable {
 
     private func evalConcat(_ a: LuauValue, _ b: LuauValue) throws -> LuauValue {
         switch (a, b) {
-        case (.string(let sa), .string(let sb)): return .string(sa + sb)
-        case (.string(let sa), .number(let nb)): return .string(sa + LuauValue.formatNumber(nb))
-        case (.number(let na), .string(let sb)): return .string(LuauValue.formatNumber(na) + sb)
-        case (.number(let na), .number(let nb)): return .string(LuauValue.formatNumber(na) + LuauValue.formatNumber(nb))
+        case (.string(let sa), .string(let sb)):
+            try noteAllocation(32 + sa.utf8.count + sb.utf8.count)
+            return .string(sa + sb)
+        case (.string(let sa), .number(let nb)):
+            let s = sa + LuauValue.formatNumber(nb)
+            try noteAllocation(32 + s.utf8.count)
+            return .string(s)
+        case (.number(let na), .string(let sb)):
+            let s = LuauValue.formatNumber(na) + sb
+            try noteAllocation(32 + s.utf8.count)
+            return .string(s)
+        case (.number(let na), .number(let nb)):
+            let s = LuauValue.formatNumber(na) + LuauValue.formatNumber(nb)
+            try noteAllocation(32 + s.utf8.count)
+            return .string(s)
         default:
             if let mm = getMetamethod(of: a, name: "__concat") ?? getMetamethod(of: b, name: "__concat") {
                 return try call(value: mm, args: [a, b]).first ?? .nil
@@ -831,6 +854,157 @@ public final class LuauVM: @unchecked Sendable {
             }
             throw LuauRuntimeError(value: .string("attempt to compare \(a.typeName) with \(b.typeName)"))
         }
+    }
+
+    // MARK: - Sandbox & Memory Accounting
+
+    /// Freezes globals and stdlib tables and establishes an isolated writable env inheriting `_G`.
+    public func sandbox() {
+        if !isSandboxed {
+            var visited = Set<ObjectIdentifier>()
+            freezeTableGraph(globals, visited: &visited)
+            if let stringMt = getAppData(StringMetatableBox.self)?.table {
+                freezeTableGraph(stringMt, visited: &visited)
+            }
+            let env = LuauTable()
+            let mt = LuauTable()
+            mt.rawSet("__index", value: .table(globals))
+            mt.rawSet("__metatable", value: .string("The metatable is locked"))
+            env.metatable = mt
+            sandboxEnv = env
+            isSandboxed = true
+        }
+    }
+
+    public var defaultEnv: LuauTable {
+        sandboxEnv ?? globals
+    }
+
+    /// Creates a child isolated environment inheriting from the VM's default environment.
+    public func makeIsolatedEnv() -> LuauTable {
+        let env = LuauTable()
+        let mt = LuauTable()
+        mt.rawSet("__index", value: .table(defaultEnv))
+        mt.rawSet("__metatable", value: .string("The metatable is locked"))
+        env.metatable = mt
+        return env
+    }
+
+    private func freezeTableGraph(_ table: LuauTable, visited: inout Set<ObjectIdentifier>) {
+        let id = ObjectIdentifier(table)
+        guard visited.insert(id).inserted else { return }
+        table.isFrozen = true
+        for v in table.array {
+            if case .table(let sub) = v { freezeTableGraph(sub, visited: &visited) }
+        }
+        for v in table.hash.values {
+            if case .table(let sub) = v { freezeTableGraph(sub, visited: &visited) }
+        }
+        if let mt = table.metatable {
+            freezeTableGraph(mt, visited: &visited)
+        }
+    }
+
+    /// Records an allocation delta and checks against `memoryLimitBytes` when threshold is reached.
+    public func noteAllocation(_ bytes: Int) throws {
+        guard bytes > 0 else { return }
+        guard let limit = memoryLimitBytes else { return }
+        if bytes >= 4096 {
+            let live = estimatedMemoryBytes()
+            if live.addingReportingOverflow(bytes).overflow || live + bytes > limit {
+                throw LuauRuntimeError(value: .string("not enough memory"), isMemory: true)
+            }
+            pendingAllocationBytes = 0
+            return
+        }
+        pendingAllocationBytes += bytes
+        if pendingAllocationBytes >= max(4096, limit / 16) {
+            pendingAllocationBytes = 0
+            if estimatedMemoryBytes() > limit {
+                throw LuauRuntimeError(value: .string("not enough memory"), isMemory: true)
+            }
+        }
+    }
+
+    /// Estimates live VM memory in bytes across reachable globals, env, modules, and active stacks.
+    public func estimatedMemoryBytes() -> Int {
+        var tables = Set<ObjectIdentifier>()
+        var closures = Set<ObjectIdentifier>()
+        var protos = Set<ObjectIdentifier>()
+        var threads = Set<ObjectIdentifier>()
+        var userdata = Set<ObjectIdentifier>()
+        var total = 64 * 1024 // base VM overhead
+
+        func measureValue(_ v: LuauValue) {
+            switch v {
+            case .string(let s):
+                total += 32 + s.utf8.count
+            case .table(let t):
+                measureTable(t)
+            case .closure(let c):
+                measureClosure(c)
+            case .userdata(let u):
+                let id = ObjectIdentifier(u)
+                if userdata.insert(id).inserted {
+                    total += 64
+                    if let mt = u.metatable { measureTable(mt) }
+                }
+            case .thread(let th):
+                measureThread(th)
+            default:
+                break
+            }
+        }
+
+        func measureProto(_ p: LuauProto) {
+            let id = ObjectIdentifier(p)
+            guard protos.insert(id).inserted else { return }
+            total += 64 + p.code.count * 16 + p.constants.count * 24
+            for c in p.constants {
+                if case .string(let s) = c { total += 32 + s.utf8.count }
+            }
+            for child in p.protos { measureProto(child) }
+        }
+
+        func measureClosure(_ c: LuauClosure) {
+            let id = ObjectIdentifier(c)
+            guard closures.insert(id).inserted else { return }
+            total += 64 + c.upvalues.count * 24
+            measureProto(c.proto)
+            measureTable(c.env)
+            for uv in c.upvalues { measureValue(uv.get()) }
+        }
+
+        func measureTable(_ t: LuauTable) {
+            let id = ObjectIdentifier(t)
+            guard tables.insert(id).inserted else { return }
+            total += 64 + max(t.array.capacity, t.array.count) * 16 + t.hash.count * 48
+            for v in t.array { measureValue(v) }
+            for (k, v) in t.hash {
+                if case .string(let ks) = k { total += 32 + ks.utf8.count }
+                measureValue(v)
+            }
+            if let mt = t.metatable { measureTable(mt) }
+        }
+
+        func measureThread(_ th: LuauThread) {
+            let id = ObjectIdentifier(th)
+            guard threads.insert(id).inserted else { return }
+            total += 256 + th.stack.count * 16
+            for v in th.stack { measureValue(v) }
+            for f in th.frames {
+                measureClosure(f.closure)
+                for va in f.varargs { measureValue(va) }
+            }
+        }
+
+        measureTable(globals)
+        if let sandboxEnv { measureTable(sandboxEnv) }
+        for v in registeredModules.values { measureValue(v) }
+        for v in moduleCache.values { measureValue(v) }
+        measureThread(mainThread)
+        if currentThread !== mainThread { measureThread(currentThread) }
+        return total
     }
 }
 

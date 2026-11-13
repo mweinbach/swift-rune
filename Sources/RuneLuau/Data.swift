@@ -144,8 +144,10 @@ public enum LuauData: Sendable, Equatable {
         case .map(let fields):
             guard depth < Self.maxDepth else { return .nil }
             let tbl = LuauTable(hashCapacity: fields.count)
-            for (k, v) in fields {
-                tbl.rawSet(k, value: v.toLuau(depth: depth + 1))
+            for k in fields.keys.sorted() {
+                if let v = fields[k] {
+                    tbl.rawSet(k, value: v.toLuau(depth: depth + 1))
+                }
             }
             return .table(tbl)
         }

@@ -102,7 +102,8 @@ public struct Sources: Sendable, Equatable {
         var modules: [String: CompiledModule] = [:]
         var configs: [String: String] = [:]
 
-        for (path, source) in files {
+        for path in files.keys.sorted() {
+            guard let source = files[path] else { continue }
             if !path.hasSuffix(".luau") || path.hasSuffix(".config.luau") {
                 configs[path] = source
                 continue

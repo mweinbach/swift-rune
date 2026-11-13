@@ -112,7 +112,7 @@ public struct Frame: Sendable, Equatable {
         #endif
     }
 
-    /// Deterministic 64-bit FNV-1a hex digest of `rgba` for golden frame regression tests.
+    /// Deterministic 64-bit FNV-1a hex digest of `rgba` for legacy Swift tests.
     public func fnv1aHash() -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in rgba {
@@ -121,6 +121,16 @@ public struct Frame: Sendable, Equatable {
         }
         let hex = String(hash, radix: 16, uppercase: false)
         return hex.count >= 16 ? hex : String(repeating: "0", count: 16 - hex.count) + hex
+    }
+
+    /// Deterministic BLAKE3 hex digest of `rgba` matching upstream `rune-ref`.
+    public func blake3Hash() -> String {
+        Blake3.hashHex(rgba)
+    }
+
+    /// Canonical frame hash (BLAKE3).
+    public func hash() -> String {
+        blake3Hash()
     }
 }
 
@@ -273,6 +283,9 @@ public enum RuneRef {
                         compositeBackdropBlur(&layerStack[top].buffer, blurred: blurred, prim: prim, width: w, height: h)
                     }
                 }
+
+            case .effectSlot:
+                continue
 
             default:
                 // Compute conservative bounding box in device pixels (accounting for rotation if any)

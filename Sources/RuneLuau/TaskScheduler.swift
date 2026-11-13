@@ -1,10 +1,16 @@
 import Foundation
 
 /// Token tags yielded by `task.wait`, `Signal:Wait`, and host async calls.
+internal final class TaskYieldTokenBox: @unchecked Sendable {
+    enum Kind { case wait, park, job }
+    let kind: Kind
+    init(_ kind: Kind) { self.kind = kind }
+}
+
 internal enum TaskYieldToken {
-    static let waitTag = "__rune_task_wait__"
-    static let parkTag = "__rune_task_park__"
-    static let jobTag = "__rune_task_job__"
+    static let waitToken = LuauUserdata(payload: TaskYieldTokenBox(.wait), typeTag: "TaskWaitToken")
+    static let parkToken = LuauUserdata(payload: TaskYieldTokenBox(.park), typeTag: "TaskParkToken")
+    static let jobToken = LuauUserdata(payload: TaskYieldTokenBox(.job), typeTag: "TaskJobToken")
 }
 
 internal final class LuauTaskScheduler: @unchecked Sendable {
@@ -54,7 +60,10 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
         let since = now
         byThread[ObjectIdentifier(thread)] = seq
         parked[seq] = ParkedTask(thread: thread, since: since, args: args)
-        timers.append(TimerEntry(at: at, seq: seq))
+        let entry = TimerEntry(at: at, seq: seq)
+        // Maintain ascending (at, seq) order matching BinaryHeap<Reverse<Due>>.
+        let idx = timers.firstIndex { $0.at > at || ($0.at == at && $0.seq > seq) } ?? timers.count
+        timers.insert(entry, at: idx)
         changed = true
     }
 
@@ -109,7 +118,7 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
 
         taskTable.rawSet("spawn", value: .nativeFunction(LuauNativeFunction(name: "task.spawn") { vm, _, args in
             guard let target = args.first else {
-                throw LuauRuntimeError(value: .string("task.spawn needs a function or thread"))
+                throw LuauRuntimeError(value: .string("task.spawn needs a function or a thread, got nil"))
             }
             let th = try threadOf(target, in: vm, name: "task.spawn")
             sched.forget(thread: th)
@@ -149,9 +158,9 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
         let preludeClosure = try vm.load(source: preludeLuauSource, name: "=rune-luau")
         let preludeResults = try vm.call(closure: preludeClosure, args: [
             .table(taskTable),
-            .string(TaskYieldToken.waitTag),
-            .string(TaskYieldToken.parkTag),
-            .string(TaskYieldToken.jobTag),
+            .userdata(TaskYieldToken.waitToken),
+            .userdata(TaskYieldToken.parkToken),
+            .userdata(TaskYieldToken.jobToken),
             .nativeFunction(forgetFn),
         ])
         guard case .table(let preludeTable) = preludeResults.first else {
@@ -182,18 +191,25 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
     }
 
     private func parkFromYield(thread: LuauThread, out: [LuauValue]) {
-        let tag = out.first?.asString ?? ""
+        let tokenKind: TaskYieldTokenBox.Kind? = {
+            guard case .userdata(let ud) = out.first,
+                  let box = ud.payload as? TaskYieldTokenBox else {
+                return nil
+            }
+            return box.kind
+        }()
         let arg = out.count > 1 ? out[1].coercedNumber : nil
 
-        if tag == TaskYieldToken.parkTag {
+        if tokenKind == .park {
             return
         }
-        if tag == TaskYieldToken.jobTag {
+        if tokenKind == .job {
             let id = UInt64(max(0.0, arg ?? 0.0))
             jobs[id] = thread
             return
         }
-        let wait = (tag == TaskYieldToken.waitTag) ? max(0.0, arg ?? 0.0) : 0.0
+        // `task.wait(seconds)` or a bare `coroutine.yield()` in a task resumes next frame.
+        let wait = (tokenKind == .wait) ? max(0.0, arg ?? 0.0) : 0.0
         park(thread: thread, at: now + wait, args: nil)
     }
 
@@ -207,8 +223,10 @@ internal final class LuauTaskScheduler: @unchecked Sendable {
             }
         }
 
+        // `timers` is sorted by ascending (at, seq).
         var due: [ParkedTask] = []
         var remaining: [TimerEntry] = []
+        remaining.reserveCapacity(timers.count)
         for entry in timers {
             if entry.at <= now {
                 if let p = parked.removeValue(forKey: entry.seq) {
