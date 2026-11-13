@@ -85,6 +85,8 @@ public enum RuneTextGpuApp {
         scale: Float = 1.0,
         cjk: Bool = false,
         smoothingName: String? = nil,
+        classic: Bool = false,
+        gpuPrewarm: Bool = false,
         scales: [Float] = [1.0, 1.06, 1.3, 1.6, powf(2.0, 0.25), sqrtf(2.0)]
     ) throws -> SnapSummary {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -101,7 +103,17 @@ public enum RuneTextGpuApp {
             let rt = Runtime(state: state, viewport: size, pixelScale: scale, systemDark: dark, textSystem: TextSystem(), view: view)
             if let smoothingName {
                 rt.fontSmoothing = smoothing(named: smoothingName)
+            } else if classic {
+                rt.fontSmoothing = .classic
             }
+            #if canImport(Metal)
+            if gpuPrewarm {
+                // `gpu` (`args[5]`): pre-warm renderer before frame 0, matching `text_gpu.rs:88-90`.
+                let w = max(1, Int(size.x * scale))
+                let h = max(1, Int(size.y * scale))
+                _ = try renderer.renderOffscreen(RenderFrame(width: w, height: h, clearColor: .zero, instances: []))
+            }
+            #endif
             let zoom = state.zoom
             let tag = dark ? "dark" : "light"
 
@@ -190,14 +202,17 @@ public enum RuneTextGpuApp {
                 now += dt
                 let t0 = ContinuousClock.now
                 let rf = rt.renderFrame(at: now)
+                var elapsed = ms(t0.duration(to: .now))
                 #if canImport(Metal)
                 if let cb = renderer.commandQueue.makeCommandBuffer() {
                     renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
                     cb.commit()
                     cb.waitUntilCompleted()
+                    if cb.gpuEndTime > cb.gpuStartTime {
+                        elapsed = (cb.gpuEndTime - cb.gpuStartTime) * 1000.0
+                    }
                 }
                 #endif
-                let elapsed = ms(t0.duration(to: .now))
                 lastOutlines = outlinedCount(rf)
                 if f >= warmup {
                     samples.append(elapsed)
@@ -235,7 +250,17 @@ public enum RuneTextGpuApp {
         case "snap":
             let dir = URL(fileURLWithPath: args.dropFirst().first ?? "/tmp/rune-text-gpu")
             let scale = args.dropFirst(2).first.flatMap(Float.init) ?? 1.0
-            let summary = try runSnap(directory: dir, scale: scale, cjk: args.contains("cjk"))
+            let smoothingArg = args.count > 3 ? args[3] : nil
+            let classicArg = args.count > 4 && args[4] == "classic"
+            let gpuArg = args.count > 5 && args[5] == "gpu"
+            let summary = try runSnap(
+                directory: dir,
+                scale: scale,
+                cjk: args.contains("cjk"),
+                smoothingName: smoothingArg,
+                classic: classicArg,
+                gpuPrewarm: gpuArg
+            )
             print("snap wrote \(summary.writtenFiles) files (rest glyphs=\(summary.totalGlyphs))")
         case "perf":
             let scale = args.dropFirst().first.flatMap(Float.init) ?? 1.5
@@ -243,7 +268,7 @@ public enum RuneTextGpuApp {
             let (_, _, out) = try runPerf(scale: scale, mode: mode)
             print(out)
         default:
-            print("usage: rune-text-gpu snap <dir> [scale] | perf [scale] [mode]")
+            print("usage: rune-text-gpu snap <dir> [scale] [mode] [classic] [gpu] | perf [scale] [mode]")
         }
     }
 }

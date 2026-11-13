@@ -576,7 +576,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RuneTreeSwap",
-            dependencies: ["Rune"],
+            dependencies: ["Rune", "RunePerf"],
             path: "Sources/Examples/RuneTreeSwap"
         ),
         .executableTarget(

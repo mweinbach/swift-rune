@@ -1,93 +1,108 @@
 import Foundation
 import Rune
 import RuneKit
-import RuneMotion
-import RuneRef
-
-#if canImport(Metal) && canImport(QuartzCore)
-import Metal
-import QuartzCore
-#endif
-
 #if canImport(Darwin)
 import Darwin
 #endif
+#if canImport(QuartzCore)
+import QuartzCore
+#endif
 
-/// Port of upstream `crates/rune/examples/embed_cost.rs`.
+/// Headless / live embed cost benchmark mirroring `crates/rune/examples/embed_cost.rs`.
 @main
 public enum RuneEmbedCostApp {
     public struct State: Sendable {
-        public var tick: Int = 0
-        public var paragraphs: [String]
-        public init(paragraphs: Int = 18) {
-            self.paragraphs = (0..<paragraphs).map { i in
-                "Paragraph \(i): Embedded LayerHost cost harness measuring first frame, layout reuse, glyph atlas, and resident footprint across scrollable blocks."
-            }
-        }
+        public var tick: UInt64 = 0
+        public var scrollPhase: Float = 0
+        public init() {}
     }
 
     public struct Report: Sendable {
-        public let hostMs: Double
-        public let firstFrameMs: Double
         public let frames: Int
         public let drew: Int
         public let fps: Double
-        public let mainCpuUsPerFrame: Double
-        public let footprintMB: Double
         public let output: String
     }
 
-    private static func residentMB() -> Double {
-        #if canImport(Darwin)
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride)
-        let kr = withUnsafeMutablePointer(to: &info) { ptr in
-            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
-            }
-        }
-        if kr == KERN_SUCCESS {
-            return Double(info.phys_footprint) / 1_048_576.0
-        }
-        #endif
-        return 0
-    }
-
-    public static func view(_ s: State, _ cx: inout Cx<State>) -> El<State> {
-        let style = MarkdownStyle.fromKit(Kit.neutral(dark: true))
-        let body = s.paragraphs.enumerated().map { idx, line in
-            col()
-                .key("p-\(idx)")
-                .wFull()
-                .p(10)
-                .rounded(8)
-                .bg(Color.white.alpha(idx % 2 == 0 ? 0.05 : 0.03))
-                .child(MarkdownView<State>("### Block \(idx)\n\n\(line)").render(style))
-        }
-        return col()
-            .wFull()
-            .hFull()
-            .bg(Color.rgba8(0x0b, 0x0b, 0x0c))
-            .child(
-                col()
-                    .key("embed-scroll")
+    public static func spec() -> AppSpec<State> {
+        App(
+            "Embed Cost",
+            size: Vec2(800, 600),
+            init: { State() },
+            view: { _, _ in
+                var sections: [El<State>] = []
+                sections.reserveCapacity(60)
+                for sec in 0..<60 {
+                    var rows: [El<State>] = [
+                        text("Section \(sec)")
+                            .font(Tok.Typography.title)
+                            .color(Color(r: 0.75, g: 0.78, b: 0.85, a: 1.0))
+                    ]
+                    rows.reserveCapacity(7)
+                    for r in 0..<6 {
+                        let hue = Float((sec * 23 + r * 37) % 360)
+                        rows.append(
+                            row()
+                                .wFull()
+                                .h(36.0)
+                                .centerY()
+                                .px(12.0)
+                                .gap(10.0)
+                                .bg(Color(r: 0.14, g: 0.16, b: 0.20, a: 1.0))
+                                .rounded(8.0)
+                                .border(1.0, Color(r: 0.24, g: 0.26, b: 0.32, a: 1.0))
+                                .children([
+                                    el()
+                                        .size(20.0, 20.0)
+                                        .rounded(10.0)
+                                        .bg(oklch(0.68, 0.14, hue)),
+                                    text("Row \(sec).\(r) — scrolling embed cost benchmark")
+                                        .font(Tok.Typography.body)
+                                        .color(Color(r: 0.92, g: 0.93, b: 0.96, a: 1.0)),
+                                    el().grow(1.0),
+                                ])
+                        )
+                    }
+                    sections.append(
+                        col()
+                            .key("sec-\(sec)")
+                            .wFull()
+                            .gap(6.0)
+                            .pb(12.0)
+                            .children(rows)
+                    )
+                }
+                return col()
                     .wFull()
-                    .grow(1)
-                    .minH(0)
-                    .scroll(stickBottom: false)
-                    .p(14)
-                    .gap(8)
-                    .children(body)
-            )
+                    .hFull()
+                    .bg(Color(r: 0.08, g: 0.09, b: 0.11, a: 1.0))
+                    .key("sections")
+                    .scroll(ScrollSpec.default)
+                    .children(sections)
+            }
+        )
+        .poll { s, dt, tx in
+            s.tick &+= 1
+            s.scrollPhase += Float(dt) * 0.5
+            let maxY: Float = 2400.0
+            let targetY = (sin(Float(s.tick) * 0.08) * 0.5 + 0.5) * maxY
+            tx.scrollToY("sections", targetY)
+            return true
+        }
+        .intoSpec()
     }
 
-    public static func makeSpec() -> AppSpec<State> {
-        AppSpec(
-            title: "embed_cost",
-            size: Vec2(430, 932),
-            state: State(),
-            view: view
-        )
+    @MainActor
+    public static func main() throws {
+        if CommandLine.arguments.count > 1 {
+            try RuneApp.run(spec())
+            return
+        }
+
+        let warmup = Int(ProcessInfo.processInfo.environment["EMBED_WARMUP"] ?? "") ?? 120
+        let frames = Int(ProcessInfo.processInfo.environment["EMBED_FRAMES"] ?? "") ?? 600
+        let report = try runReport(warmup: warmup, frames: frames, useLiveLayer: true)
+        print(report.output)
     }
 
     public static func runReport(
@@ -95,82 +110,116 @@ public enum RuneEmbedCostApp {
         frames: Int = 30,
         useLiveLayer: Bool = false
     ) throws -> Report {
-        let began = ContinuousClock.now
-        let config = EmbedHostConfig(transparentBackground: false, forwardScrollEvents: true, initialSize: Vec2(430, 932))
-        let spec = makeSpec()
-        #if canImport(Metal) && canImport(QuartzCore)
+        let appSpec = spec()
         let host: LayerHost<State>
+        #if os(macOS) && canImport(Metal) && canImport(QuartzCore)
         if useLiveLayer {
-            host = try LayerHost(layer: CAMetalLayer(), spec: spec, scale: 2.0, dark: true, config: config)
+            host = try LayerHost(layer: CAMetalLayer(), spec: appSpec, scale: 3.0, dark: true)
         } else {
-            host = try LayerHost(layer: nil, spec: spec, scale: 2.0, dark: true, config: config)
+            host = try LayerHost(spec: appSpec, scale: 3.0, dark: true)
         }
         #else
-        let host = LayerHost(spec: spec, scale: 2.0, dark: true, config: config)
+        host = try LayerHost(spec: appSpec, scale: 3.0, dark: true)
         #endif
-        let hostDur = began.duration(to: .now)
-        let hostMs = Double(hostDur.components.seconds) * 1e3 + Double(hostDur.components.attoseconds) / 1e15
 
-        var now = 0.0
-        _ = host.frame(at: now)
-        let firstDur = began.duration(to: .now)
-        let firstMs = Double(firstDur.components.seconds) * 1e3 + Double(firstDur.components.attoseconds) / 1e15
+        // LayerHost.init does not copy spec.poll onto runtime; wire it explicitly so oscillating scroll runs.
+        host.runtime.poll = appSpec.poll
 
-        for _ in 0..<warmup {
-            now += 1.0 / 120.0
-            _ = host.frame(at: now)
+        for _ in 0..<8 {
+            if host.frame(at: 0.0).drew {
+                break
+            }
+        }
+        let firstMB = Double(physFootprintBytes() ?? 0) / (1024.0 * 1024.0)
+
+        var elapsed = 0.0
+        for _ in 0..<max(0, warmup) {
+            elapsed += 1.0 / 120.0
+            _ = host.runtime.runPoll(at: elapsed)
+            _ = host.frame(at: elapsed)
         }
 
-        let cpu0 = threadCpuMs()
-        let wall0 = ContinuousClock.now
+        var peakBytes = physFootprintBytes() ?? 0
+        let t0 = ContinuousClock.now
+        let cpu0 = processCpuUs()
+        let instr0 = processKinstructions()
         var drew = 0
-        for i in 0..<frames {
-            now += 1.0 / 120.0
-            if i % 5 == 0 {
-                host.update { st, _ in st.tick += 1 }
-            }
-            if host.frame(at: now).drew {
-                drew += 1
+        let frameCount = max(1, frames)
+        for _ in 0..<frameCount {
+            elapsed += 1.0 / 120.0
+            _ = host.runtime.runPoll(at: elapsed)
+            let out = host.frame(at: elapsed)
+            if out.drew { drew += 1 }
+            if let cur = physFootprintBytes(), cur > peakBytes {
+                peakBytes = cur
             }
         }
-        let cpuMs = max(0, threadCpuMs() - cpu0)
-        let wallDur = wall0.duration(to: .now)
-        let wallSecs = max(1e-6, Double(wallDur.components.seconds) + Double(wallDur.components.attoseconds) / 1e18)
-        let n = Double(max(1, frames))
-        let fps = n / wallSecs
-        let mainUs = (cpuMs * 1e3) / n
-        let footprint = residentMB()
+        let wallMs = durationMs(t0.duration(to: .now))
+        let cpuUs = processCpuUs() &- cpu0
+        let kinstr = processKinstructions() &- instr0
+        let peakMB = Double(peakBytes) / (1024.0 * 1024.0)
+        let backend = ProcessInfo.processInfo.environment["RUNE_GPU_BACKEND"] ?? "default"
 
-        let out = [
-            String(format: "backend=%@ host_ms=%.1f first_frame_ms=%.1f frames=%d drew=%d fps=%.1f",
-                   useLiveLayer ? "metal" : "headless", hostMs, firstMs, frames, drew, fps),
-            String(format: "per_frame: main_cpu_us=%.1f", mainUs),
-            String(format: "footprint_mb: steady=%.1f", footprint),
-        ].joined(separator: "\n")
-
-        return Report(
-            hostMs: hostMs,
-            firstFrameMs: firstMs,
-            frames: frames,
-            drew: drew,
-            fps: fps,
-            mainCpuUsPerFrame: mainUs,
-            footprintMB: footprint,
-            output: out
+        let avgCpu = cpuUs / UInt64(frameCount)
+        let fps = wallMs > 0 ? (Double(frameCount) * 1000.0 / wallMs) : 0.0
+        let line = String(
+            format: "embed_cost: backend=%@ frames=%d wall=%.1fms avg_cpu=%lluµs kinstr=%llu first_frame_mb=%.1f peak_mb=%.1f",
+            backend,
+            frameCount,
+            wallMs,
+            avgCpu,
+            kinstr,
+            firstMB,
+            peakMB
         )
+        return Report(frames: frameCount, drew: drew, fps: fps, output: line)
     }
 
-    public static func main() {
-        let args = Array(CommandLine.arguments.dropFirst())
-        let frames = Int(ProcessInfo.processInfo.environment["EMBED_FRAMES"] ?? "") ?? (args.contains("--bench") ? 600 : 120)
-        let warmup = Int(ProcessInfo.processInfo.environment["EMBED_WARMUP"] ?? "") ?? 30
-        let useLayer = !args.contains("--no-layer")
-        do {
-            let report = try runReport(warmup: warmup, frames: frames, useLiveLayer: useLayer)
-            print(report.output)
-        } catch {
-            fputs("embed_cost error: \(error)\n", stderr)
-            exit(1)
+    private static func durationMs(_ d: Duration) -> Double {
+        let c = d.components
+        return Double(c.seconds) * 1000.0 + Double(c.attoseconds) / 1e15
+    }
+
+    private static func processCpuUs() -> UInt64 {
+        #if canImport(Darwin)
+        var ts = timespec()
+        if clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0 {
+            return UInt64(ts.tv_sec) * 1_000_000 &+ UInt64(ts.tv_nsec / 1000)
         }
+        #endif
+        return 0
+    }
+
+    private static func processKinstructions() -> UInt64 {
+        #if canImport(Darwin) && os(macOS)
+        var info = rusage_info_v4()
+        let rc: Int32 = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { rebound in
+                proc_pid_rusage(getpid(), RUSAGE_INFO_V4, rebound)
+            }
+        }
+        if rc == 0 {
+            return info.ri_instructions / 1000
+        }
+        #endif
+        return 0
+    }
+
+    private static func physFootprintBytes() -> UInt64? {
+        #if canImport(Darwin)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride
+        )
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        if kr == KERN_SUCCESS {
+            return UInt64(info.phys_footprint)
+        }
+        #endif
+        return nil
     }
 }

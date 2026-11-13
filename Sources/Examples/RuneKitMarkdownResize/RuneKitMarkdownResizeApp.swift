@@ -3,32 +3,87 @@ import Rune
 import RuneKit
 
 /// Parity port of `crates/rune-kit/examples/markdown_resize.rs`:
-/// Measures `MarkdownView` live-resize stepping (`900 -> 600 -> 900`), scroll frames,
-/// `Rune.memo` subtree caching, source-range highlight overlays, and font-family switching.
+/// Measures `MarkdownView` cold open, live resize (`900 -> 600 -> 900` by step),
+/// font-family switching, scroll frames (`w=760`), and 2000-range highlight marks,
+/// with optional `--memo` subtree caching.
 @main
 public enum RuneKitMarkdownResizeApp {
+    public static let width: Float = 900.0
+    public static let scrollWidth: Float = 760.0
     public static let height: Float = 900.0
     public static let bg = Color(r: 0.008, g: 0.008, b: 0.009, a: 1.0)
+
+    private static let words: [String] = [
+        "amber", "anchor", "apple", "apron", "atlas", "autumn", "badge", "bamboo", "beacon", "berry",
+        "birch", "bison", "bloom", "breeze", "bridge", "brook", "canyon", "cedar", "chalk", "cinder",
+        "cliff", "cloud", "clover", "cobalt", "copper", "coral", "crane", "creek", "crest", "crown",
+        "daisy", "delta", "drift", "dune", "eagle", "ember", "falcon", "fern", "field", "flint",
+        "flora", "forest", "frost", "garden", "glade", "grain", "granite", "grove", "harbor", "hazel",
+    ]
+
+    private struct Rng {
+        var state: UInt64
+
+        init(seed: UInt64 = 0x9e37_79b9_7f4a_7c15) {
+            self.state = seed == 0 ? 1 : seed
+        }
+
+        mutating func nextU64() -> UInt64 {
+            state ^= state << 13
+            state ^= state >> 7
+            state ^= state << 17
+            return state
+        }
+
+        mutating func next(_ upperBound: Int) -> Int {
+            guard upperBound > 0 else { return 0 }
+            return Int(nextU64() % UInt64(upperBound))
+        }
+    }
+
+    private struct MemoDeps: Equatable, Sendable {
+        let utf8Count: Int
+        let markRangesCount: Int
+        let styleKey: String
+    }
 
     public struct State: Sendable {
         public var src: String
         public var style: MarkdownStyle
         public var marks: [(ranges: [Range<Int>], style: MarkdownHighlight)]
         public var useMemo: Bool
+        public var fontTag: String
 
         public init(
             src: String,
             style: MarkdownStyle,
             marks: [(ranges: [Range<Int>], style: MarkdownHighlight)] = [],
-            useMemo: Bool = false
+            useMemo: Bool = false,
+            fontTag: String = "default"
         ) {
             self.src = src
             self.style = style
             self.marks = marks
             self.useMemo = useMemo
+            self.fontTag = fontTag
         }
     }
 
+    private struct FrameSample {
+        let cpuMs: Double
+        let viewMs: Double
+        let commitMs: Double
+        let layoutMs: Double
+        let textMs: Double
+        let paintMs: Double
+        let applyMs: Double
+        let shaped: Double
+        let rebroken: Double
+        let nodes: Double
+        let glyphs: Double
+    }
+
+    // Compatibility types retained for Tests/RuneExamplesTests/ContentExamplesParityTests.swift.
     public struct MetricRow: Sendable, Equatable {
         public let sizeKB: Int
         public let testCase: String
@@ -43,25 +98,18 @@ public enum RuneKitMarkdownResizeApp {
     }
 
     public static func generateNote(bytes: Int) -> String {
-        let wordsList = [
-            "amber", "lantern", "orchard", "quiet", "harbor", "copper", "meadow", "signal", "drift",
-            "pebble", "willow", "ember", "tide", "cinder", "fable", "glacier", "hollow", "juniper", "kestrel", "lumen",
-        ]
-        var seed: UInt64 = 0x9e37_79b9_7f4a_7c15
-        func next(_ n: Int) -> Int {
-            seed ^= seed << 13
-            seed ^= seed >> 7
-            seed ^= seed << 17
-            return Int(seed % UInt64(max(1, n)))
+        var rng = Rng()
+        func word() -> String {
+            words[rng.next(words.count)]
         }
         func makeWords(_ count: Int, styled: Bool) -> String {
             (0..<count).map { _ in
-                let w = wordsList[next(wordsList.count)]
+                let w = word()
                 guard styled else { return w }
-                switch next(24) {
-                case 0: return "**\(w) \(wordsList[next(wordsList.count)])**"
+                switch rng.next(24) {
+                case 0: return "**\(w) \(word())**"
                 case 1: return "*\(w)*"
-                case 2: return "`\(w)_\(next(100))`"
+                case 2: return "`\(w)_\(rng.next(100))`"
                 case 3: return "[\(w)](https://example.com/\(w))"
                 default: return w
                 }
@@ -76,18 +124,30 @@ public enum RuneKitMarkdownResizeApp {
             for sub in 0..<3 {
                 out += "## \(makeWords(2, styled: false)) \(sub)\n\n"
                 for _ in 0..<2 {
-                    out += "\(makeWords(25 + next(40), styled: true)).\n\n"
+                    out += "\(makeWords(25 + rng.next(40), styled: true)).\n\n"
                 }
-                for i in 0..<(4 + next(4)) {
-                    let line = makeWords(4 + next(8), styled: true)
-                    out += (sub % 2 == 0) ? "- \(line)\n" : "\(i + 1). \(line)\n"
+                for i in 0..<(4 + rng.next(4)) {
+                    let line = makeWords(4 + rng.next(8), styled: true)
+                    if sub % 2 == 0 {
+                        out += "- \(line)\n"
+                        if i == 0 {
+                            out += "  - \(makeWords(4 + rng.next(5), styled: true))\n"
+                        }
+                    } else {
+                        out += "\(i + 1). \(line)\n"
+                    }
                 }
-                out += "\n- [x] \(makeWords(4, styled: true))\n- [ ] \(makeWords(5, styled: true))\n\n"
-                if next(3) == 0 {
-                    out += "> \(makeWords(10 + next(14), styled: true)).\n\n"
-                }
-                if next(4) == 0 {
-                    out += "```swift\nlet value_\(section) = \"\(makeWords(2, styled: false))\"\n```\n\n"
+                out += "\n"
+                switch rng.next(3) {
+                case 0:
+                    out += "```rust\nlet \(word())_\(section) = \(rng.next(1000));\n```\n\n"
+                case 1:
+                    out += "> \(makeWords(10 + rng.next(14), styled: true)).\n\n"
+                default:
+                    for _ in 0..<3 {
+                        out += "- [ ] \(makeWords(5, styled: true))\n"
+                    }
+                    out += "\n"
                 }
             }
         }
@@ -102,17 +162,290 @@ public enum RuneKitMarkdownResizeApp {
             }
             return v.render(s.style)
         }
+        let markCount = s.marks.reduce(0) { $0 + $1.ranges.count }
         let noteEl: El<State> = s.useMemo
-            ? memo("note", "\(s.src.utf8.count)-\(s.marks.count)", build: buildNote)
+            ? memo(
+                "note",
+                MemoDeps(utf8Count: s.src.utf8.count, markRangesCount: markCount, styleKey: s.fontTag),
+                build: buildNote
+            )
             : buildNote()
 
-        return col().wFull().hFull().bg(bg).child(
-            col().key("viewport").wFull().grow(1).minH(0).scroll(stickBottom: false).child(
-                col().wFull().px(32).py(24).child(noteEl)
+        return col()
+            .wFull()
+            .hFull()
+            .bg(bg)
+            .child(
+                col()
+                    .key("viewport")
+                    .wFull()
+                    .grow(1)
+                    .minH(0)
+                    .scroll(stickBottom: false)
+                    .child(
+                        col()
+                            .wFull()
+                            .px(32)
+                            .py(24)
+                            .child(noteEl)
+                    )
             )
+    }
+
+    private static func sampleFrame(
+        rt: Runtime<State>,
+        at now: Double,
+        computeNodes: Bool = true
+    ) -> FrameSample {
+        _ = takeFramePhases()
+        let c0 = threadCpuMs()
+        let scene = rt.frame(at: now)
+        let cpuMs = max(0, threadCpuMs() - c0)
+        let phases = takeFramePhases()
+
+        func phase(_ idx: Int) -> Double {
+            phases.count > idx ? phases[idx] : 0.0
+        }
+
+        let glyphCount = scene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) }
+        let nodeCount = computeNodes ? rt.elements().count : 0
+
+        return FrameSample(
+            cpuMs: cpuMs,
+            viewMs: phase(6),
+            commitMs: phase(7),
+            layoutMs: phase(8),
+            textMs: phase(9),
+            paintMs: phase(10),
+            applyMs: phase(11),
+            shaped: 0.0,
+            rebroken: 0.0,
+            nodes: Double(nodeCount),
+            glyphs: Double(glyphCount)
         )
     }
 
+    private static func settledRuntime(
+        src: String,
+        style: MarkdownStyle,
+        viewportWidth: Float,
+        useMemo: Bool
+    ) -> (Runtime<State>, Double) {
+        let rt = Runtime(
+            state: State(src: src, style: style, useMemo: useMemo),
+            viewport: Vec2(viewportWidth, height),
+            pixelScale: 2.0,
+            systemDark: true,
+            view: view
+        )
+        var now = 0.0
+        _ = rt.frame(at: now)
+        for _ in 0..<2 {
+            now += 1.0 / 120.0
+            _ = rt.frame(at: now)
+        }
+        return (rt, now)
+    }
+
+    private static func firstWordRanges(in src: String, limit: Int) -> [Range<Int>] {
+        let bytes = Array(src.utf8)
+        var ranges: [Range<Int>] = []
+        var i = 0
+        func isAsciiAlpha(_ b: UInt8) -> Bool {
+            (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+        }
+        while i < bytes.count && ranges.count < limit {
+            while i < bytes.count && !isAsciiAlpha(bytes[i]) {
+                i += 1
+            }
+            let start = i
+            while i < bytes.count && isAsciiAlpha(bytes[i]) {
+                i += 1
+            }
+            if i > start {
+                ranges.append(start..<i)
+            }
+        }
+        return ranges
+    }
+
+    private static func stats(_ values: [Double]) -> (median: Double, p95: Double, mean: Double) {
+        guard !values.isEmpty else { return (0, 0, 0) }
+        let sorted = values.sorted()
+        let n = sorted.count
+        let median: Double = n % 2 == 1
+            ? sorted[n / 2]
+            : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        let p95Idx = min(n - 1, Int(Double(n - 1) * 0.95))
+        let mean = values.reduce(0, +) / Double(n)
+        return (median, sorted[p95Idx], mean)
+    }
+
+    private static func emitMetrics(
+        sizeKB: Int,
+        caseName: String,
+        samples: [FrameSample],
+        into lines: inout [String]
+    ) {
+        let metrics: [(String, (FrameSample) -> Double)] = [
+            ("cpu_ms", { $0.cpuMs }),
+            ("view_ms", { $0.viewMs }),
+            ("commit_ms", { $0.commitMs }),
+            ("layout_ms", { $0.layoutMs }),
+            ("text_ms", { $0.textMs }),
+            ("paint_ms", { $0.paintMs }),
+            ("apply_ms", { $0.applyMs }),
+            ("shaped", { $0.shaped }),
+            ("rebroken", { $0.rebroken }),
+            ("nodes", { $0.nodes }),
+            ("glyphs", { $0.glyphs }),
+        ]
+        for (metric, extract) in metrics {
+            let vals = samples.map(extract)
+            let s = stats(vals)
+            lines.append(String(
+                format: "METRIC size=%dk case=%@ metric=%@ median=%.4f p95=%.4f mean=%.4f n=%d",
+                sizeKB, caseName, metric, s.median, s.p95, s.mean, vals.count
+            ))
+        }
+    }
+
+    public static func runParity(
+        sizes: [Int],
+        step: Float,
+        only: Set<String>?,
+        useMemo: Bool
+    ) -> [String] {
+        let style = MarkdownStyle.neutral(dark: true)
+        var lines: [String] = []
+
+        // Warm font catalog once prior to `open` without inflating `open` runtime state.
+        let warmTs = TextSystem()
+        _ = warmTs.shape(
+            text: "Warm fonts",
+            style: TextStyle(size: 14, weight: 400),
+            maxWidth: 400,
+            pixelScale: 2.0,
+            emitGlyphs: true
+        )
+
+        func shouldRun(_ name: String) -> Bool {
+            only == nil || only!.contains(name)
+        }
+
+        for kb in sizes {
+            let src = generateNote(bytes: kb * 1024)
+            let wordCount = src.split(whereSeparator: { $0.isWhitespace }).count
+            let lineCount = src.split(separator: "\n", omittingEmptySubsequences: false).count
+            lines.append("NOTE size=\(kb)k bytes=\(src.utf8.count) words=\(wordCount) lines=\(lineCount)")
+
+            if shouldRun("marks") {
+                let (rt, baseNow) = settledRuntime(src: src, style: style, viewportWidth: width, useMemo: useMemo)
+                let wordRanges = firstWordRanges(in: src, limit: 2000)
+                let hl = [(ranges: wordRanges, style: MarkdownHighlight.match())]
+                let now = baseNow + 1.0 / 120.0
+                rt.update(at: now) { st, _ in
+                    st.marks = hl
+                }
+                let sample = sampleFrame(rt: rt, at: now, computeNodes: false)
+                let tElem0 = ContinuousClock.now
+                let elems = rt.elements()
+                let elemDur = tElem0.duration(to: .now)
+                let elementsMs = Double(elemDur.components.seconds) * 1e3 + Double(elemDur.components.attoseconds) / 1e15
+                // Rune's ElementRole has no `.mark` case and MarkdownView bakes highlights into rich text spans.
+                let reported = 0
+                lines.append(String(
+                    format: "MARKS requested=%d reported=%d nodes=%d elements=%d elements_ms=%.3f",
+                    wordRanges.count, reported, elems.count, elems.count, elementsMs
+                ))
+                let withNodes = FrameSample(
+                    cpuMs: sample.cpuMs,
+                    viewMs: sample.viewMs,
+                    commitMs: sample.commitMs,
+                    layoutMs: sample.layoutMs,
+                    textMs: sample.textMs,
+                    paintMs: sample.paintMs,
+                    applyMs: sample.applyMs,
+                    shaped: sample.shaped,
+                    rebroken: sample.rebroken,
+                    nodes: Double(elems.count),
+                    glyphs: sample.glyphs
+                )
+                emitMetrics(sizeKB: kb, caseName: "marks", samples: [withNodes], into: &lines)
+            }
+
+            if shouldRun("open") {
+                var openSamples: [FrameSample] = []
+                for _ in 0..<10 {
+                    let rt = Runtime(
+                        state: State(src: src, style: style, useMemo: useMemo),
+                        viewport: Vec2(width, height),
+                        pixelScale: 2.0,
+                        systemDark: true,
+                        view: view
+                    )
+                    openSamples.append(sampleFrame(rt: rt, at: 0.0))
+                }
+                emitMetrics(sizeKB: kb, caseName: "open", samples: openSamples, into: &lines)
+            }
+
+            if shouldRun("resize") {
+                let (rt, baseNow) = settledRuntime(src: src, style: style, viewportWidth: width, useMemo: useMemo)
+                var now = baseNow
+                var resizeSamples: [FrameSample] = []
+                let safeStep = max(1.0, step)
+                var w: Float = width - safeStep
+                while w >= 600.0 {
+                    now += 1.0 / 120.0
+                    rt.setViewport(Vec2(w, height))
+                    resizeSamples.append(sampleFrame(rt: rt, at: now))
+                    w -= safeStep
+                }
+                w = 600.0 + safeStep
+                while w <= width {
+                    now += 1.0 / 120.0
+                    rt.setViewport(Vec2(w, height))
+                    resizeSamples.append(sampleFrame(rt: rt, at: now))
+                    w += safeStep
+                }
+                emitMetrics(sizeKB: kb, caseName: "resize", samples: resizeSamples, into: &lines)
+            }
+
+            if shouldRun("fonts") {
+                let (rt, baseNow) = settledRuntime(src: src, style: style, viewportWidth: width, useMemo: useMemo)
+                let original = FontFamiliesRegistry.currentFamilies()
+                defer { FontFamiliesRegistry.setFamilies(sans: original.sans, mono: original.mono) }
+                var now = baseNow
+                var fontSamples: [FrameSample] = []
+                for i in 0..<40 {
+                    now += 1.0 / 120.0
+                    let (sans, mono) = (i % 2 == 0) ? ("Helvetica Neue", "Menlo") : ("Inter", "Inter")
+                    _ = rt.textSystem.setFamilies(sans: sans, mono: mono)
+                    rt.update(at: now) { st, _ in
+                        st.fontTag = "\(sans)/\(mono)"
+                    }
+                    fontSamples.append(sampleFrame(rt: rt, at: now))
+                }
+                emitMetrics(sizeKB: kb, caseName: "fonts", samples: fontSamples, into: &lines)
+            }
+
+            if shouldRun("scroll") {
+                let (rt, baseNow) = settledRuntime(src: src, style: style, viewportWidth: scrollWidth, useMemo: useMemo)
+                var now = baseNow
+                var scrollSamples: [FrameSample] = []
+                for _ in 0..<120 {
+                    now += 1.0 / 120.0
+                    rt.wheel(WheelEvent(dx: 0, dy: -120.0), at: Vec2(380, 450), now: now)
+                    scrollSamples.append(sampleFrame(rt: rt, at: now))
+                }
+                emitMetrics(sizeKB: kb, caseName: "scroll", samples: scrollSamples, into: &lines)
+            }
+        }
+
+        return lines
+    }
+
+    // Compatibility shim retained for Tests/RuneExamplesTests/ContentExamplesParityTests.swift.
     public static func runReport(
         sizes: [Int] = [5],
         step: Float = 20.0,
@@ -122,119 +455,196 @@ public enum RuneKitMarkdownResizeApp {
     ) -> Report {
         var rows: [MetricRow] = []
         var lines: [String] = []
-        let kit = Kit.neutral(dark: true)
-        let style = MarkdownStyle.fromKit(kit)
+        let style = MarkdownStyle.neutral(dark: true)
 
-        func glyphCount(_ rf: RenderFrame) -> Int {
-            rf.instances.reduce(0) { $0 + ($1.params.y == KIND_GLYPH ? 1 : 0) }
+        func glyphCount(_ scene: RefScene) -> Int {
+            scene.primitives.reduce(0) { $0 + ($1.kind == .glyph ? 1 : 0) }
         }
 
         for kb in sizes {
             let src = generateNote(bytes: kb * 1024)
-            let state = State(src: src, style: style, useMemo: useMemo)
             let rt = Runtime(
-                state: state,
-                viewport: Vec2(900, height),
+                state: State(src: src, style: style, useMemo: useMemo),
+                viewport: Vec2(width, height),
                 pixelScale: 2.0,
                 systemDark: true,
                 view: view
             )
 
-            // open
             _ = takeFramePhases()
             let cOpen0 = threadCpuMs()
-            let openFrame = rt.renderFrame(at: 0.0)
-            let openCpu = threadCpuMs() - cOpen0
-            rows.append(MetricRow(sizeKB: kb, testCase: "open", medianCpuMs: openCpu, glyphs: glyphCount(openFrame), instances: openFrame.instances.count))
-            lines.append(String(format: "METRIC size=%dk case=open metric=cpu_ms median=%.4f glyphs=%d", kb, openCpu, glyphCount(openFrame)))
+            let openScene = rt.frame(at: 0.0)
+            let openCpu = max(0, threadCpuMs() - cOpen0)
+            rows.append(MetricRow(
+                sizeKB: kb,
+                testCase: "open",
+                medianCpuMs: openCpu,
+                glyphs: glyphCount(openScene),
+                instances: openScene.primitives.count
+            ))
+            lines.append(String(
+                format: "METRIC size=%dk case=open metric=cpu_ms median=%.4f glyphs=%d",
+                kb, openCpu, glyphCount(openScene)
+            ))
 
-            // resize 900 -> 600 -> 900
             var resizeCpus: [Double] = []
-            var lastGlyphs = glyphCount(openFrame)
-            var lastInstances = openFrame.instances.count
+            var lastGlyphs = glyphCount(openScene)
+            var lastInstances = openScene.primitives.count
             var now = 0.0
-            var widths: [Float] = []
-            var w: Float = 900 - step
-            while w >= 600 { widths.append(w); w -= step }
-            w = 600 + step
-            while w <= 900 { widths.append(w); w += step }
-            for width in widths {
-                rt.setViewport(Vec2(width, height))
+            var w: Float = width - step
+            while w >= 600.0 {
+                rt.setViewport(Vec2(w, height))
                 now += 1.0 / 120.0
                 let c0 = threadCpuMs()
-                let rf = rt.renderFrame(at: now)
-                resizeCpus.append(threadCpuMs() - c0)
-                lastGlyphs = glyphCount(rf)
-                lastInstances = rf.instances.count
+                let sc = rt.frame(at: now)
+                resizeCpus.append(max(0, threadCpuMs() - c0))
+                lastGlyphs = glyphCount(sc)
+                lastInstances = sc.primitives.count
+                w -= step
             }
-            let sortedResize = resizeCpus.sorted()
-            let resizeMed = sortedResize.isEmpty ? 0 : sortedResize[sortedResize.count / 2]
-            rows.append(MetricRow(sizeKB: kb, testCase: "resize", medianCpuMs: resizeMed, glyphs: lastGlyphs, instances: lastInstances))
-            lines.append(String(format: "METRIC size=%dk case=resize metric=cpu_ms median=%.4f n=%d", kb, resizeMed, sortedResize.count))
+            w = 600.0 + step
+            while w <= width {
+                rt.setViewport(Vec2(w, height))
+                now += 1.0 / 120.0
+                let c0 = threadCpuMs()
+                let sc = rt.frame(at: now)
+                resizeCpus.append(max(0, threadCpuMs() - c0))
+                lastGlyphs = glyphCount(sc)
+                lastInstances = sc.primitives.count
+                w += step
+            }
+            let resizeMed = stats(resizeCpus).median
+            rows.append(MetricRow(
+                sizeKB: kb,
+                testCase: "resize",
+                medianCpuMs: resizeMed,
+                glyphs: lastGlyphs,
+                instances: lastInstances
+            ))
+            lines.append(String(
+                format: "METRIC size=%dk case=resize metric=cpu_ms median=%.4f n=%d",
+                kb, resizeMed, resizeCpus.count
+            ))
 
-            // scroll
             var scrollCpus: [Double] = []
             for _ in 0..<12 {
                 now += 1.0 / 120.0
+                rt.wheel(WheelEvent(dx: 0, dy: -60), at: Vec2(380, 450), now: now)
                 let c0 = threadCpuMs()
-                rt.wheel(WheelEvent(dx: 0, dy: -60), at: Vec2(450, 450), now: now)
-                let rf = rt.renderFrame(at: now)
-                scrollCpus.append(threadCpuMs() - c0)
-                lastGlyphs = glyphCount(rf)
-                lastInstances = rf.instances.count
+                let sc = rt.frame(at: now)
+                scrollCpus.append(max(0, threadCpuMs() - c0))
+                lastGlyphs = glyphCount(sc)
+                lastInstances = sc.primitives.count
             }
-            let sortedScroll = scrollCpus.sorted()
-            let scrollMed = sortedScroll.isEmpty ? 0 : sortedScroll[sortedScroll.count / 2]
-            rows.append(MetricRow(sizeKB: kb, testCase: "scroll", medianCpuMs: scrollMed, glyphs: lastGlyphs, instances: lastInstances))
-            lines.append(String(format: "METRIC size=%dk case=scroll metric=cpu_ms median=%.4f n=%d", kb, scrollMed, sortedScroll.count))
+            let scrollMed = stats(scrollCpus).median
+            rows.append(MetricRow(
+                sizeKB: kb,
+                testCase: "scroll",
+                medianCpuMs: scrollMed,
+                glyphs: lastGlyphs,
+                instances: lastInstances
+            ))
+            lines.append(String(
+                format: "METRIC size=%dk case=scroll metric=cpu_ms median=%.4f n=%d",
+                kb, scrollMed, scrollCpus.count
+            ))
 
-            // marks
             if highlightCount > 0 {
-                let bytes = Array(src.utf8)
-                var hlItems: [(ranges: [Range<Int>], style: MarkdownHighlight)] = []
-                var pos = 0
-                while hlItems.count < highlightCount && pos + 6 < bytes.count {
-                    if bytes[pos] >= 0x61 && bytes[pos] <= 0x7A {
-                        hlItems.append(([pos..<(pos + 5)], MarkdownHighlight.match().bg(Color.white.alpha(0.18))))
-                        pos += 29
-                    } else {
-                        pos += 1
-                    }
-                }
-                rt.update(at: now) { st, _ in
-                    st.marks = hlItems
-                }
+                let ranges = firstWordRanges(in: src, limit: highlightCount)
+                let hl = [(ranges: ranges, style: MarkdownHighlight.match())]
                 now += 1.0 / 120.0
+                rt.update(at: now) { st, _ in
+                    st.marks = hl
+                }
                 let c0 = threadCpuMs()
-                let rf = rt.renderFrame(at: now)
-                let marksCpu = threadCpuMs() - c0
-                rows.append(MetricRow(sizeKB: kb, testCase: "marks", medianCpuMs: marksCpu, glyphs: glyphCount(rf), instances: rf.instances.count))
-                lines.append(String(format: "METRIC size=%dk case=marks metric=cpu_ms median=%.4f marks=%d", kb, marksCpu, hlItems.count))
+                let sc = rt.frame(at: now)
+                let marksCpu = max(0, threadCpuMs() - c0)
+                rows.append(MetricRow(
+                    sizeKB: kb,
+                    testCase: "marks",
+                    medianCpuMs: marksCpu,
+                    glyphs: glyphCount(sc),
+                    instances: sc.primitives.count
+                ))
+                lines.append(String(
+                    format: "METRIC size=%dk case=marks metric=cpu_ms median=%.4f marks=%d",
+                    kb, marksCpu, ranges.count
+                ))
             }
 
-            // fonts
             if testFonts {
                 let original = FontFamiliesRegistry.currentFamilies()
                 defer { FontFamiliesRegistry.setFamilies(sans: original.sans, mono: original.mono) }
-                let c0 = threadCpuMs()
-                FontFamiliesRegistry.setFamilies(sans: "Helvetica Neue", mono: "Menlo")
-                rt.update(at: now) { _, _ in }
                 now += 1.0 / 120.0
-                let rf = rt.renderFrame(at: now)
-                let fontsCpu = threadCpuMs() - c0
-                rows.append(MetricRow(sizeKB: kb, testCase: "fonts", medianCpuMs: fontsCpu, glyphs: glyphCount(rf), instances: rf.instances.count))
-                lines.append(String(format: "METRIC size=%dk case=fonts metric=cpu_ms median=%.4f glyphs=%d", kb, fontsCpu, glyphCount(rf)))
+                _ = rt.textSystem.setFamilies(sans: "Helvetica Neue", mono: "Menlo")
+                rt.update(at: now) { st, _ in
+                    st.fontTag = "Helvetica Neue/Menlo"
+                }
+                let c0 = threadCpuMs()
+                let sc = rt.frame(at: now)
+                let fontsCpu = max(0, threadCpuMs() - c0)
+                rows.append(MetricRow(
+                    sizeKB: kb,
+                    testCase: "fonts",
+                    medianCpuMs: fontsCpu,
+                    glyphs: glyphCount(sc),
+                    instances: sc.primitives.count
+                ))
+                lines.append(String(
+                    format: "METRIC size=%dk case=fonts metric=cpu_ms median=%.4f glyphs=%d",
+                    kb, fontsCpu, glyphCount(sc)
+                ))
             }
         }
 
         return Report(metrics: rows, output: lines.joined(separator: "\n"))
     }
 
+    private struct CliArgs {
+        var sizes: [Int] = [5, 50]
+        var step: Float = 1.0
+        var only: Set<String>? = nil
+        var memo: Bool = false
+    }
+
+    private static func parseArgs(_ args: [String]) -> CliArgs {
+        var parsed = CliArgs()
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--sizes":
+                i += 1
+                if i < args.count {
+                    let vals = args[i].split(separator: ",").compactMap { Int($0) }
+                    if !vals.isEmpty { parsed.sizes = vals }
+                }
+            case "--step":
+                i += 1
+                if i < args.count, let v = Float(args[i]) {
+                    parsed.step = max(1.0, v)
+                }
+            case "--only":
+                i += 1
+                if i < args.count {
+                    let parts = Set(args[i].split(separator: ",").map(String.init))
+                    if !parts.isEmpty { parsed.only = parts }
+                }
+            case "--memo":
+                parsed.memo = true
+            default:
+                break
+            }
+            i += 1
+        }
+        return parsed
+    }
+
     public static func main() {
-        let args = Array(CommandLine.arguments.dropFirst())
-        let sizes = args.firstIndex(of: "--sizes").flatMap { i in i + 1 < args.count ? args[i + 1].split(separator: ",").compactMap { Int($0) } : nil } ?? [5, 50]
-        let memoFlag = args.contains("--memo")
-        let report = runReport(sizes: sizes, step: 4.0, useMemo: memoFlag)
-        print(report.output)
+        let cli = parseArgs(Array(CommandLine.arguments.dropFirst()))
+        FileHandle.standardError.write(Data(
+            "markdown_resize note: TextSystem.shaped/rebroken, Runtime.layoutNodes, Runtime.setFontFamilies (layout cache invalidation), and ElementRole.mark are not exposed by Rune; reporting 0 for shaped/rebroken/marks-reported and elements().count for nodes.\n".utf8
+        ))
+        let lines = runParity(sizes: cli.sizes, step: cli.step, only: cli.only, useMemo: cli.memo)
+        print(lines.joined(separator: "\n"))
     }
 }

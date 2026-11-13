@@ -1,14 +1,20 @@
 import Foundation
 import Rune
-import RuneMotion
-import RuneRef
+#if canImport(Darwin)
+import Darwin
+#endif
 
-/// Port of upstream `crates/rune/examples/shortcut_probe.rs`.
+/// Global shortcut registration, conflict probing, runtime register/unregister, and dispatch probe
+/// mirroring `crates/rune/examples/shortcut_probe.rs`.
+///
+/// NOTE: `Sources/Rune` does not yet expose `App.globalShortcut(...)` or
+/// `AppHandle.{takeShortcutErrors,registerShortcut,unregisterShortcut}`. This port drives
+/// `ShortcutRegistry` and `MacOSGlobalHotKeyBackend` directly under a windowless `.accessory()`
+/// `App` while honoring `--probe-conflict`, `--tree`, `READY`, `CONFLICT`, `FIRED`, and stdin EOF.
 @main
 public enum RuneShortcutProbeApp {
     public struct State: Sendable {
-        public var status: String = "Press registered shortcuts"
-        public var triggers: Int = 0
+        public var fired: UInt64 = 0
         public init() {}
     }
 
@@ -18,81 +24,170 @@ public enum RuneShortcutProbeApp {
         public let dispatchHandledId: String?
         public let triggerCount: Int
         public let unregisteredOK: Bool
-        public let output: String
+    }
+
+    private final class AtomicCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count: UInt64 = 0
+        func increment() -> UInt64 {
+            lock.withLock {
+                count &+= 1
+                return count
+            }
+        }
+        func value() -> UInt64 { lock.withLock { count } }
+    }
+
+    private static let primaryAccel = "cmd+ctrl+alt+shift+k"
+    private static let secondaryAccel = "ctrl+alt+shift+f11"
+
+    @MainActor
+    public static func main() throws {
+        QuitLifecycle.orderlyExit()
+
+        let rawArgs = Array(CommandLine.arguments.dropFirst())
+        let probeConflict = rawArgs.contains("--probe-conflict")
+        let forwardedArgs = rawArgs.filter { $0 != "--probe-conflict" }
+        let isHeadless = ToolingArgs.parse(forwardedArgs).isHeadlessRequested
+
+        let firedCounter = AtomicCounter()
+        let registry = ShortcutRegistry()
+
+        #if os(macOS)
+        let backend = isHeadless ? nil : (try? MacOSGlobalHotKeyBackend())
+        #endif
+
+        let app = App<State>(
+            "Shortcut Probe",
+            size: Vec2(240, 100),
+            init: { State() },
+            view: { s, _ in
+                col()
+                    .wFull()
+                    .hFull()
+                    .bg(Color(r: 0.08, g: 0.09, b: 0.12, a: 1.0))
+                    .center()
+                    .child(
+                        text("FIRED \(s.fired)")
+                            .font(Tok.Typography.title)
+                            .color(.white)
+                    )
+            }
+        )
+        .args(forwardedArgs)
+        .windowless(true)
+        .accessory(true)
+
+        let handle = app.handle()
+
+        if !isHeadless {
+            let primaryRes = registry.register(id: "primary", accelerator: primaryAccel, scope: .global) {
+                let n = firedCounter.increment()
+                handle.update { s, _ in s.fired = n }
+                print("FIRED \(n)")
+                fflush(stdout)
+            }
+            #if os(macOS)
+            if case .success = primaryRes, let chord = Chord(parsing: primaryAccel), let backend {
+                let osRes = backend.register(id: "primary", chord: chord) {
+                    let n = firedCounter.increment()
+                    handle.update { s, _ in s.fired = n }
+                    print("FIRED \(n)")
+                    fflush(stdout)
+                }
+                if case .failure = osRes, probeConflict {
+                    print("CONFLICT")
+                    fflush(stdout)
+                    return
+                }
+            }
+            #endif
+
+            if probeConflict {
+                let dupRes = registry.register(id: "conflict", accelerator: primaryAccel, scope: .global) {}
+                if case .failure(.conflict) = dupRes {
+                    print("CONFLICT")
+                    fflush(stdout)
+                    return
+                }
+            }
+
+            let extraRes = registry.register(id: "extra", accelerator: secondaryAccel, scope: .global) {
+                let n = firedCounter.increment()
+                handle.update { s, _ in s.fired = n }
+                print("FIRED \(n)")
+                fflush(stdout)
+            }
+            #if os(macOS)
+            if case .success = extraRes, let chord = Chord(parsing: secondaryAccel) {
+                _ = backend?.register(id: "extra", chord: chord) {
+                    let n = firedCounter.increment()
+                    handle.update { s, _ in s.fired = n }
+                    print("FIRED \(n)")
+                    fflush(stdout)
+                }
+            }
+            #endif
+
+            _ = registry.unregister(id: "extra")
+            #if os(macOS)
+            _ = backend?.unregister(id: "extra")
+            #endif
+
+            print("READY")
+            fflush(stdout)
+
+            Thread.detachNewThread {
+                while readLine() != nil {}
+                handle.quit()
+            }
+        }
+
+        try app.run(arguments: forwardedArgs)
+        if !isHeadless {
+            print("FIRED \(firedCounter.value())")
+            fflush(stdout)
+        }
     }
 
     public static func runHeadlessVerify() -> Report {
         let registry = ShortcutRegistry()
-        nonisolated(unsafe) var triggerCount = 0
-
-        let first = registry.register(
-            id: "probe.global",
-            accelerator: "cmd+shift+k",
-            scope: .global,
-            label: "Probe Global"
-        ) {
-            triggerCount += 1
+        let hits = AtomicCounter()
+        let reg1 = registry.register(id: "probe.global", accelerator: primaryAccel, scope: .global) {
+            _ = hits.increment()
         }
-        let conflict = registry.register(
-            id: "probe.conflict",
-            accelerator: "cmd+shift+k",
-            scope: .global,
-            label: "Probe Conflict"
-        ) {}
+        let reg2 = registry.register(id: "probe.conflict", accelerator: primaryAccel, scope: .global) {}
 
-        var conflictRejected = false
-        if case .failure(.conflict(existingId: "probe.global")) = conflict {
-            conflictRejected = true
-        }
+        let registeredPrimary: Bool = {
+            if case .success = reg1 { return true }
+            return false
+        }()
+        let conflictRejected: Bool = {
+            if case .failure(.conflict) = reg2 { return true }
+            return false
+        }()
 
-        let event = KeyEvent(key: .command("k"), mods: Mods(shift: true, cmd: true))
+        let event = KeyEvent(
+            key: .text("k"),
+            mods: Mods(shift: true, ctrl: true, alt: true, cmd: true)
+        )
         let dispatched = registry.dispatch(event, activeScopes: [.global])
-        var handledId: String? = nil
-        if case .handled(let id) = dispatched {
-            handledId = id
-        }
-
+        let handledId: String? = {
+            if case .handled(let id) = dispatched { return id }
+            return nil
+        }()
         let unreg = registry.unregister(id: "probe.global")
-        var unregisteredOK = false
-        if case .success = unreg {
-            unregisteredOK = true
-        }
+        let unregisteredOK: Bool = {
+            if case .success = unreg { return true }
+            return false
+        }()
 
-        let regOK: Bool
-        if case .success = first { regOK = true } else { regOK = false }
-
-        let out = "shortcut_probe registered=\(regOK) conflict=\(conflictRejected) handled=\(handledId ?? "none") count=\(triggerCount) unreg=\(unregisteredOK)"
         return Report(
-            registeredPrimary: regOK,
+            registeredPrimary: registeredPrimary,
             conflictRejected: conflictRejected,
             dispatchHandledId: handledId,
-            triggerCount: triggerCount,
-            unregisteredOK: unregisteredOK,
-            output: out
+            triggerCount: Int(hits.value()),
+            unregisteredOK: unregisteredOK
         )
-    }
-
-    @MainActor
-    public static func main() throws {
-        let args = Array(CommandLine.arguments.dropFirst())
-        if args.contains("--verify") || args.contains("--headless") {
-            print(runHeadlessVerify().output)
-            return
-        }
-        let report = runHeadlessVerify()
-        let app = App(title: "shortcut_probe", state: State()) { s, _ in
-            col()
-                .wFull()
-                .hFull()
-                .p(20)
-                .gap(8)
-                .itemsCenter()
-                .justifyCenter()
-                .bg(Color.rgba8(0x0f, 0x11, 0x17))
-                .child(text("Shortcut Probe").font(TextStyle(size: 16, weight: 600)).color(.white))
-                .child(text(report.output).font(TextStyle(size: 12, weight: 400)).color(Color.white.alpha(0.75)))
-        }
-        .size(440, 200)
-        try app.run()
     }
 }

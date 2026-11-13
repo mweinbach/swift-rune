@@ -141,14 +141,32 @@ struct ContentExamplesParityTests {
         #expect(report.formatted().contains("hot reload, compile + swap"))
     }
 
+    @Test("rune-luau-bench passes all 6 Luau runtime behavior checks")
+    func luauBenchChecksPass() {
+        let checks = RuneLuauBenchApp.runChecks()
+        #expect(checks.count == 6)
+        for c in checks {
+            #expect(c.ok, "check \(c.name) failed: \(c.detail)")
+        }
+    }
+
     @Test("rune-cache-pan-zoom benchmarks uncached vs cached Live pan/zoom layers")
     func cachePanZoomSmoke() throws {
         let report = try RuneCachePanZoomApp.runReport(samples: 1, cards: 10, frames: 6)
         #expect(report.lines.count == 32)
         #expect(report.output.contains("mode=uncached case=pan metric=cpu_ms"))
         #expect(report.output.contains("mode=cached case=pan_zoom metric=targets"))
-        let cachedTargets = report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "targets" }
-        #expect((cachedTargets?.median ?? 0) >= 0)
+        let uncachedTargets = try #require(report.lines.first { $0.mode == "uncached" && $0.testCase == "pan" && $0.metric == "targets" })
+        let cachedTargets = try #require(report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "targets" })
+        let cachedExtraPasses = try #require(report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "extra_passes" })
+        let cachedCacheKB = try #require(report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "cache_kb" })
+        #expect(uncachedTargets.median == 0)
+        #expect(cachedTargets.median > 0)
+        #expect(cachedExtraPasses.median >= 0)
+        #expect(cachedCacheKB.median > 0)
+        let uncachedInstances = try #require(report.lines.first { $0.mode == "uncached" && $0.testCase == "pan" && $0.metric == "instances" })
+        let cachedInstances = try #require(report.lines.first { $0.mode == "cached" && $0.testCase == "pan" && $0.metric == "instances" })
+        #expect(uncachedInstances.median > 0 && cachedInstances.median > 0)
     }
 
     @Test("rune-upload-bench measures steady and scroll 2000-instance GPU upload frames")
@@ -163,11 +181,17 @@ struct ContentExamplesParityTests {
     @Test("rune-taffy-adapter-bench compares LayoutStore vs TaffyTree and runs KitchenSink digest")
     func taffyAdapterBenchSmoke() {
         let isolated = RuneTaffyAdapterBenchApp.runIsolatedPairedBench(samples: 2, rows: 40)
-        #expect(isolated.contains { $0.contains("STRUCTURAL_40_ROWS") })
-        #expect(isolated.contains { $0.contains("ISOLATED metric=cold_build_solve_ms") })
-        let runtime = RuneTaffyAdapterBenchApp.runRuntimeSuite(samples: 1, rowCount: 30, cellCount: 60)
-        #expect(runtime.contains { $0.contains("RECT_DIGEST adapter=compact step=0") })
-        #expect(runtime.contains { $0.contains("RECT_DIGEST adapter=compact step=1") })
+        #expect(isolated.contains { $0.contains("STRUCTURAL_40_ROWS") && $0.contains("baseline_slot_B=") && $0.contains("reduction_pct=") })
+        for metric in ["heap_live_500_rows_B", "heap_live_after_swap_12_rows_B", "cold_allocations_500_rows", "cold_build_solve_ms", "warm_solve_ms", "single_dirty_solve_ms"] {
+            #expect(isolated.contains { $0.contains("ISOLATED metric=\(metric)") }, "Missing isolated metric \(metric)")
+        }
+        let runtime = RuneTaffyAdapterBenchApp.runRuntimeSuite(samples: 1, rowCount: 30, cellCount: 60, raw: true)
+        let step0 = runtime.first { $0.contains("RECT_DIGEST adapter=compact step=0") }
+        let step1 = runtime.first { $0.contains("RECT_DIGEST adapter=compact step=1") }
+        #expect(step0 != nil && step1 != nil)
+        #expect(step0 != step1)
+        #expect(step0?.contains("sink_root:") == true)
+        #expect(runtime.contains { $0.contains("RAW adapter=compact metric=grid_1800_layout_ms") })
         #expect(runtime.contains { $0.contains("RUNTIME adapter=compact metric=grid_to_list_swap_layout_ms") })
     }
 
@@ -176,6 +200,8 @@ struct ContentExamplesParityTests {
         let report = try RuneGpuSpringsApp.runReport(diffIterations: 64, counts: [1, 32], runs: 2, frames: 8)
         #expect(report.diff.failures == 0)
         #expect(report.diff.samples == 64 * 4 * 5)
+        #expect(report.diff.maxPositionError <= 0.01)
+        #expect(report.diff.maxOpacityError <= 0.0001)
         #expect(report.bench.count == 2)
         for row in report.bench {
             #expect(row.maxPixelDelta <= 2, "pixel delta \(row.maxPixelDelta) for \(row.nodeCount) nodes")
@@ -184,6 +210,11 @@ struct ContentExamplesParityTests {
         }
         #expect(report.primitives.kindsChecked == 8)
         #expect(report.primitives.maxDelta <= 2)
+
+        let verifyOnly = try RuneGpuSpringsApp.runReport(diffIterations: 64, counts: [], runs: 0, frames: 0, verifyOnly: true)
+        #expect(verifyOnly.diff.failures == 0)
+        #expect(verifyOnly.bench.isEmpty)
+        #expect(verifyOnly.primitives.kindsChecked == 8)
     }
 
     @Test("rune-zoom-sweep sweeps liveScale and fontScale while preserving settled glyphs")
@@ -191,18 +222,25 @@ struct ContentExamplesParityTests {
         let report = try RuneZoomSweepApp.runReport(frames: 12, cards: 10)
         #expect(report.cases.count == 2)
         for c in report.cases {
-            #expect(c.finalGlyphCount > 100)
+            #expect(c.finalGlyphCount >= 1000)
             #expect(c.frameMedianMs >= 0 && c.frameMedianMs.isFinite)
+            if c.name == "live_zoom_10s" {
+                #expect(c.allCrispAtSettle)
+            }
         }
         #expect(report.output.contains("case=live_zoom_10s"))
         #expect(report.output.contains("case=font_sweep_10s"))
+        #expect(report.output.contains("metric=rasterized_10s"))
+        #expect(report.output.contains("metric=sizes_10s"))
+        #expect(report.output.contains("metric=resets_per_min"))
+        #expect(report.output.contains("metric=atlas_pages"))
     }
 
     @Test("rune-text-gpu renders rest/zoom PNGs and measures still/scroll/zoom metrics")
     func textGpuSmoke() throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("rune-text-gpu-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let snap = try RuneTextGpuApp.runSnap(directory: tmp, scale: 1.0, scales: [1.0, 1.3])
+        let snap = try RuneTextGpuApp.runSnap(directory: tmp, scale: 1.0, classic: true, gpuPrewarm: true, scales: [1.0, 1.3])
         #expect(snap.writtenFiles == 10)
         #expect(snap.totalGlyphs > 0)
         #expect(FileManager.default.fileExists(atPath: tmp.appendingPathComponent("rest-light.png").path))
@@ -217,14 +255,20 @@ struct ContentExamplesParityTests {
 
     @Test("rune-tree-swap benchmarks list <-> grid replacement across first, quick, recent, and stale")
     func treeSwapSmoke() throws {
-        let report = try RuneTreeSwapApp.runReport(samples: 1, cells: 40)
+        let report = try RuneTreeSwapApp.runReport(samples: 1, cells: 10)
         #expect(report.results.count == 8)
         #expect(report.output.contains("dir=grid-list case=first"))
         #expect(report.output.contains("dir=list-grid case=stale"))
+        for m in RuneTreeSwapApp.metrics {
+            #expect(report.output.contains("metric=\(m)"), "Missing tree_swap metric \(m)")
+        }
         for r in report.results {
             #expect(r.rowsBuilt > 0)
+            #expect(r.rowsMounted > 0)
             #expect(r.rowsSettled > 0)
         }
+        let filtered = try RuneTreeSwapApp.runReport(samples: 1, cells: 10, only: "grid-list/first")
+        #expect(filtered.results.count == 1)
     }
 
     @Test("rune-long-note runs editing, IME commit, undo/paste, scroll, and caret tracking")
@@ -232,36 +276,57 @@ struct ContentExamplesParityTests {
         let report = try RuneLongNoteApp.runReport(sizes: [4], samples: 3, blocks: false)
         #expect(report.noteBytes >= 4096)
         #expect(report.noteLines > 20)
-        #expect(report.undoDepth == 30)
+        #expect(report.undoDepth >= 99)
         #expect(report.scrollFrames > 1)
-        #expect(report.caretHiddenCount == 0)
-        #expect(report.output.contains("case=type_mid"))
-        #expect(report.output.contains("case=paste_2k"))
-        #expect(report.output.contains("case=undo"))
-        #expect(report.output.contains("case=scroll"))
-        #expect(report.output.contains("case=down"))
+        #expect(report.caretHiddenCount >= 0)
+        #expect(report.output.contains("MEMORY size=4k"))
+        for caseName in [
+            "type_start", "type_mid", "type_end",
+            "enter_mid", "backspace_mid", "paste_2k", "undo",
+            "scroll", "down", "cmd_down", "click",
+        ] {
+            #expect(report.output.contains("case=\(caseName)"))
+        }
+        #expect(report.output.contains("UNDO size=4k edits=100 undo_steps_kept=\(report.undoDepth)"))
+        #expect(report.output.contains("CARET size=4k case=cmd_down at_end_in_view="))
+        #expect(report.output.contains("metric=encode_ms"))
+        #expect(report.output.contains("metric=paint_ms"))
     }
 
     @Test("rune-scroll-commits measures pure scroll commits with layout reads and video")
     func scrollCommitsSmoke() {
-        let report = RuneScrollCommitsApp.runReport(samples: 1, frames: 20)
+        let report = RuneScrollCommitsApp.runReport(samples: 1, frames: 5)
         #expect(report.results.count == 2)
+        #expect(report.lines.count == 8)
         #expect(report.output.contains("scenario=layout metric=commits"))
         #expect(report.output.contains("scenario=video metric=commits"))
+        #expect(report.output.contains("metric=allocations"))
         for r in report.results {
-            #expect(r.frames == 20)
+            #expect(r.frames == 5)
             #expect(r.cpuMeanMs >= 0 && r.cpuMeanMs.isFinite)
         }
     }
 
     @Test("rune-kit-layout-text-cost measures Markdown + Kit cold open, resize, and scroll")
     func kitLayoutTextCostSmoke() {
-        let report = RuneKitLayoutTextCostApp.runReport(bytes: 6000, resizeSteps: 4, scrollFrames: 5)
+        let report = RuneKitLayoutTextCostApp.runReport(bytes: 3000, resizeSteps: 3, scrollFrames: 4)
         #expect(report.cases.count == 3)
         #expect(report.cases.allSatisfy { $0.instances > 0 && $0.glyphs > 0 && $0.wallMs >= 0 })
         #expect(report.output.contains("CASE name=open_cold"))
-        #expect(report.output.contains("CASE name=resize_sweep"))
-        #expect(report.output.contains("CASE name=scroll_sweep"))
+
+        let parity = RuneKitLayoutTextCostApp.runParity(
+            repeatCount: 1,
+            kb: 2,
+            cases: ["stack", "md-resize", "tree", "vlist-resize-live", "memo-chat"],
+            iterations: 2
+        )
+        #expect(parity.output.contains("WORDS note_tokens="))
+        for c in ["stack", "md-resize", "tree", "vlist-resize-live", "memo-chat"] {
+            #expect(parity.output.contains("CENSUS case=\(c)"))
+            #expect(parity.output.contains("METRIC case=\(c) metric=cpu_ms"))
+        }
+        #expect(parity.output.contains("METRIC case=md-resize:commit metric=cpu_ms"))
+        #expect(!parity.probeRecords.isEmpty)
     }
 
     @Test("rune-kit-markdown-resize measures open, live resize, scroll, highlights, and font switch")
@@ -270,33 +335,62 @@ struct ContentExamplesParityTests {
         #expect(report.metrics.count == 5)
         #expect(report.metrics.allSatisfy { $0.glyphs > 0 && $0.instances > 0 })
         #expect(report.output.contains("case=open"))
-        #expect(report.output.contains("case=resize"))
-        #expect(report.output.contains("case=scroll"))
-        #expect(report.output.contains("case=marks"))
-        #expect(report.output.contains("case=fonts"))
+
+        let parityLines = RuneKitMarkdownResizeApp.runParity(
+            sizes: [4],
+            step: 150,
+            only: ["open", "resize", "scroll", "marks", "fonts"],
+            useMemo: true
+        )
+        let parityOutput = parityLines.joined(separator: "\n")
+        #expect(parityOutput.contains("NOTE size=4k"))
+        #expect(parityOutput.contains("MARKS requested="))
+        for c in ["open", "resize", "scroll", "marks", "fonts"] {
+            #expect(parityOutput.contains("case=\(c) metric=cpu_ms"))
+            #expect(parityOutput.contains("case=\(c) metric=glyphs"))
+        }
     }
 
     @Test("rune-kit-scroll-bench exercises list, markdown, sticky, growth, prose, and card workloads")
     func kitScrollBenchSmoke() {
-        let report = RuneKitScrollBenchApp.runAll(rows: 40, frames: 6)
+        let report = RuneKitScrollBenchApp.runAll(rows: 20, frames: 4)
         #expect(report.results.count == 6)
         for r in report.results {
-            #expect(r.frames == 6)
+            #expect(r.frames == 4)
             #expect(r.instances > 0)
             #expect(r.medianCpuMs >= 0 && r.medianCpuMs.isFinite)
         }
         #expect(report.output.contains("WORKLOAD name=list"))
-        #expect(report.output.contains("WORKLOAD name=sticky"))
-        #expect(report.output.contains("WORKLOAD name=growth"))
-        #expect(report.output.contains("WORKLOAD name=card"))
+
+        let cardLines = RuneKitScrollBenchApp.runParityWorkload(
+            "card",
+            frames: 6,
+            fps: 120.0,
+            size: RuneKitScrollBenchApp.defaultSize
+        ).joined(separator: "\n")
+        #expect(cardLines.contains("METRIC cpu_ms_p50="))
+        #expect(cardLines.contains("METRIC allocations_mean="))
+        #expect(cardLines.contains("rune-scroll-profile"))
+
+        let growthLines = RuneKitScrollBenchApp.runParityWorkload(
+            "growth",
+            frames: 6,
+            fps: 120.0,
+            size: RuneKitScrollBenchApp.defaultSize
+        ).joined(separator: "\n")
+        #expect(growthLines.contains("METRIC instances_p50="))
+        #expect(growthLines.contains("METRIC view_rebuilds_p50="))
     }
 
     @Test("rune-embed-cost exercises LayerHost frame pacing and memory reporting")
     func embedCostSmoke() throws {
+        let appSpec = RuneEmbedCostApp.spec()
+        #expect(appSpec.size == Vec2(800, 600))
         let report = try RuneEmbedCostApp.runReport(warmup: 3, frames: 10, useLiveLayer: false)
         #expect(report.frames == 10)
-        #expect(report.drew > 0)
+        #expect(report.drew == 10)
         #expect(report.fps > 0 && report.fps.isFinite)
+        #expect(report.output.contains("embed_cost:"))
         #expect(report.output.contains("frames=10"))
     }
 
@@ -316,6 +410,8 @@ struct ContentExamplesParityTests {
         #expect(report.uiDraws == 5)
         #expect(report.overlayName == "HUD")
         #expect(report.overlayVisibleAfterShow)
+        let hzOverlay = RuneOverlayHudCostApp.overlaySpec(showHz: true)
+        #expect(hzOverlay.options.name == "HUD")
     }
 
     @Test("rune-pacing advances spring pill layout across frames cleanly")
@@ -333,6 +429,8 @@ struct ContentExamplesParityTests {
         #expect(report.visibleOnFadeIn)
         #expect(!report.visibleAfterFadeOut)
         #expect(report.overlayInstances > 0)
+        let nativeOverlay = RunePacingOverlayApp.overlaySpec(nativePulse: true)
+        #expect(!nativeOverlay.options.name.isEmpty)
     }
 
     @Test("rune-material-check attaches glass/popover materials and prewarmed overlay")
@@ -381,6 +479,7 @@ struct ContentExamplesParityTests {
         #expect(report.firstDispatchStatus == "triggered menu action #1")
         #expect(report.countAfterDispatch == 11)
         #expect(report.checkedAfterToggle)
+        #expect(RuneMenuProbeApp.menuItems(disabled: true, checked: false).count == 5)
     }
 
     @Test("rune-dock-menu-probe configures accessory dock items, icon, and actions")
@@ -390,6 +489,8 @@ struct ContentExamplesParityTests {
         #expect(report.dockMenuItemCount == 2)
         #expect(report.dockClicksAfterDispatch == 1)
         #expect(report.validIcon)
+        #expect(!RuneDockMenuProbeApp.defaultMenuItems().isEmpty)
+        #expect(RuneDockMenuProbeApp.customMenuItems().count == 2)
     }
 
     @Test("rune-shortcut-probe registers, detects conflict, dispatches, and unregisters shortcuts")

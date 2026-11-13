@@ -323,7 +323,7 @@ public enum RuneLuauBenchApp {
         }
         let tookMs = us(t0.duration(to: .now)) / 1000.0
         let still = (try? script.query("ok"))?.asInt64
-        let ok = err?.kind == .timeout && tookMs < 400.0 && still == 1
+        let ok = err?.kind == .timeout && tookMs < 260.0 && still == 1
         return Check(
             name: "watchdog",
             ok: ok,
@@ -337,7 +337,7 @@ public enum RuneLuauBenchApp {
             sources: Sources.single("local ui = require('@rune/ui')\nreturn function() local t = nil; return ui.text(t.field) end")
         )
         _ = script.renderUncached(name: "render", dark: true, PanelState.self)
-        let logged = script.log.contains { $0.message.contains("nil") }
+        let logged = script.log.contains { $0.message.contains("attempt to index nil") }
         let firstLine = script.log.last?.message.split(separator: "\n").first.map(String.init) ?? ""
         return Check(name: "render error", ok: logged, detail: firstLine)
     }
@@ -365,7 +365,7 @@ public enum RuneLuauBenchApp {
             .with("b.luau", "return require('./a')")
         let script = Script(name: "cycle", sources: sources)
         let msg = script.error?.message ?? ""
-        let ok = msg.contains("require cycle") && msg.contains("a.luau") && msg.contains("b.luau")
+        let ok = msg.contains("require cycle: init.luau -> a.luau -> b.luau -> a.luau")
         let line = msg.split(separator: "\n").first.map(String.init) ?? ""
         return Check(name: "require cycle", ok: ok, detail: line)
     }

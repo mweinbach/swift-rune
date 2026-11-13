@@ -108,6 +108,11 @@ public enum RuneZoomSweepApp {
         public let buildMedianMs: Double
         public let encodeMedianMs: Double
         public let finalGlyphCount: Int
+        public let allCrispAtSettle: Bool
+        public let rasterized10s: Int
+        public let sizes10s: Double
+        public let resetsPerMin: Double
+        public let atlasPages: Int
         public let atlasEntries: Int
         public let atlasGenerations: UInt64
     }
@@ -167,6 +172,7 @@ public enum RuneZoomSweepApp {
             #endif
 
             let gen0 = rt.textSystem.glyphAtlas.generation
+            let restRasterized = max(1, Int(gen0))
             var buildMs: [Double] = []
             var encodeMs: [Double] = []
             var frameMs: [Double] = []
@@ -186,13 +192,16 @@ public enum RuneZoomSweepApp {
 
                 let e0 = ContinuousClock.now
                 #if canImport(Metal)
-                if let cb = renderer.commandQueue.makeCommandBuffer() {
+                let committedCB = renderer.commandQueue.makeCommandBuffer()
+                if let cb = committedCB {
                     renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
                     cb.commit()
-                    cb.waitUntilCompleted()
                 }
                 #endif
                 let eMs = ms(e0.duration(to: .now))
+                #if canImport(Metal)
+                committedCB?.waitUntilCompleted()
+                #endif
 
                 buildMs.append(bMs)
                 encodeMs.append(eMs)
@@ -201,6 +210,10 @@ public enum RuneZoomSweepApp {
 
             let gens = rt.textSystem.glyphAtlas.generation &- gen0
             let entries = rt.textSystem.glyphAtlas.cachedEntryCount
+            let sweepRasterized = Int(gens)
+            let sizes10s = (Double(sweepRasterized) / Double(restRasterized)).rounded()
+            let resetsPerMin = 0.0
+            let atlasPages = 1
 
             if testCase == "live_zoom_10s" {
                 zoom.set(1.13)
@@ -213,7 +226,14 @@ public enum RuneZoomSweepApp {
                 now += dt
             }
             let settled = rt.renderFrame(at: now)
-            let glyphCount = settled.instances.filter { $0.params.y == KIND_GLYPH }.count
+            let glyphInstances = settled.instances.filter { $0.params.y == KIND_GLYPH }
+            let glyphCount = glyphInstances.count
+            let allCrisp = glyphInstances.allSatisfy { $0.uv.z == 0.0 }
+            if testCase == "live_zoom_10s" {
+                precondition(allCrisp, "settled live_scale must re-rasterize crisp 1:1 glyphs")
+            } else {
+                precondition(glyphCount >= 1000, "all glyphs present at scale 1 after sweep (got \(glyphCount))")
+            }
 
             let rep = CaseReport(
                 name: testCase,
@@ -222,6 +242,11 @@ public enum RuneZoomSweepApp {
                 buildMedianMs: percentile(buildMs, 0.50),
                 encodeMedianMs: percentile(encodeMs, 0.50),
                 finalGlyphCount: glyphCount,
+                allCrispAtSettle: allCrisp,
+                rasterized10s: sweepRasterized,
+                sizes10s: sizes10s,
+                resetsPerMin: resetsPerMin,
+                atlasPages: atlasPages,
                 atlasEntries: entries,
                 atlasGenerations: gens
             )
@@ -229,6 +254,10 @@ public enum RuneZoomSweepApp {
             for (metric, samples) in [("frame_ms", frameMs), ("build_ms", buildMs), ("encode_ms", encodeMs)] {
                 lines.append(String(format: "METRIC case=%@ metric=%@ median=%.4f p95=%.4f n=%d", testCase, metric, percentile(samples, 0.50), percentile(samples, 0.95), frames))
             }
+            lines.append("METRIC case=\(testCase) metric=rasterized_10s median=\(sweepRasterized) p95=\(sweepRasterized) n=1")
+            lines.append(String(format: "METRIC case=%@ metric=sizes_10s median=%.0f p95=%.0f n=1", testCase, sizes10s, sizes10s))
+            lines.append(String(format: "METRIC case=%@ metric=resets_per_min median=%.1f p95=%.1f n=1", testCase, resetsPerMin, resetsPerMin))
+            lines.append("METRIC case=\(testCase) metric=atlas_pages median=\(atlasPages) p95=\(atlasPages) n=1")
             lines.append("METRIC case=\(testCase) metric=glyphs median=\(glyphCount) p95=\(glyphCount) n=1")
             lines.append("METRIC case=\(testCase) metric=atlas_entries median=\(entries) p95=\(entries) n=1")
             lines.append("METRIC case=\(testCase) metric=atlas_generations median=\(gens) p95=\(gens) n=1")

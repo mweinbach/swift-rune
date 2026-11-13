@@ -218,16 +218,18 @@ public enum RuneCachePanZoomApp {
                 let cpu = max(0, threadCpuMs() - cpu0)
                 let allocs = Double(max(0, Int64(ProcessCountingAllocator.shared.threadAllocations()) - Int64(alloc0)))
                 let phases = takeFramePhases()
-                let paint = phases.count > 4 ? phases[4] : 0
+                let cpuPaintIndex = FRAME_PHASES + FramePhase.paint.rawValue
+                let paint = phases.count > cpuPaintIndex ? phases[cpuPaintIndex] : 0
 
                 let encStart = ContinuousClock.now
-                if let cb = renderer.commandQueue.makeCommandBuffer() {
+                let committedCB = renderer.commandQueue.makeCommandBuffer()
+                if let cb = committedCB {
                     renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
                     cb.commit()
-                    cb.waitUntilCompleted()
                 }
                 let encDur = encStart.duration(to: .now)
                 let encodeMs = Double(encDur.components.seconds) * 1000.0 + Double(encDur.components.attoseconds) / 1e15
+                committedCB?.waitUntilCompleted()
 
                 let stats = renderer.layerStats()
                 totalCpu += cpu

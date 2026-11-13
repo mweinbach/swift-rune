@@ -104,22 +104,181 @@ public enum RuneGpuSpringsApp {
         var failures = 0
 
         #if canImport(Metal)
-        let renderer = try MetalRenderer()
-        // `evaluateSpringsOnGPU` dispatches one `timeSeconds` for all nodes in the batch, so we also
-        // compare CPU `GPUSpringTrack.sample` per exact timestamp and run GPU compute on grouped timestamps.
-        let gpuTestNodes = tracks.prefix(min(tracks.count, 512)).map { item in
-            GPUSpringNode(x: item.track, y: item.track, opacity: .constant(1.0))
+        struct GPUQuery {
+            var track: GPUSpringTrack
+            var time: SIMD4<Float>
         }
-        let gpuEval = renderer.evaluateSpringsOnGPU(gpuTestNodes, timeSeconds: 0.25)
-        for (idx, item) in tracks.prefix(gpuTestNodes.count).enumerated() {
-            let cpuAt025 = item.track.sample(at: 0.25).position
-            let gpuDelta = abs(cpuAt025 - gpuEval[idx].x)
-            if gpuDelta > 0.01 {
+
+        let queries: [GPUQuery] = tracks.map { item in
+            let split = splitSpringTime(item.now)
+            return GPUQuery(
+                track: item.track,
+                time: SIMD4<Float>(split.x, split.y, item.opacity ? 1.0 : 0.0, 0.0)
+            )
+        }
+        let width = 256
+        let height = max(1, (queries.count + width - 1) / width)
+
+        let renderer = try MetalRenderer()
+        let diffShaderSource = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        struct SpringTrack {
+            float4 abcd;
+            float2 rates;
+            float goal;
+            uint kind;
+            float2 start;
+            float duration;
+            float pad;
+        };
+
+        struct GPUQuery {
+            SpringTrack track;
+            float4 time;
+        };
+
+        inline float spring_exp(float x) {
+            if (x < -87.0) return 0.0;
+            float xc = clamp(x, -87.0, 88.0);
+            float k = round(xc * 1.4426950408889634);
+            float r = fma(-k, 0.0000014286068, fma(-k, 0.69314575, xc));
+            float r2 = r * r;
+            float a = 1.0 + r;
+            float b = fma(r, 1.0 / 6.0, 0.5);
+            float c = fma(r, 1.0 / 120.0, 1.0 / 24.0);
+            float p = fma(r2, fma(r2, fma(r2, 1.0 / 720.0, c), b), a);
+            return p * as_type<float>(uint(int(k) + 127) << 23u);
+        }
+
+        inline float2 spring_sample(SpringTrack s, float2 time) {
+            float whole = float(int(time.x) - int(s.start.x));
+            float t = max(whole + (time.y - s.start.y), 0.0);
+            if (s.kind == 0u || t >= s.duration) return float2(s.goal, 0.0);
+            float4 c = s.abcd;
+            if (s.kind == 1u) {
+                float e = exp(-s.rates.x * t);
+                float co = cos(s.rates.y * t);
+                float si = sin(s.rates.y * t);
+                return float2(s.goal + e * (c.x * co + c.y * si), e * (c.z * co + c.w * si));
+            }
+            if (s.kind == 2u) {
+                float e = exp(-s.rates.x * t);
+                return float2(s.goal + (c.x + c.y * t) * e, (c.z + c.w * t) * e);
+            }
+            float e1 = spring_exp(c.z * t);
+            float e2 = spring_exp(c.w * t);
+            return float2(s.goal + (c.x * e1 + c.y * e2), c.x * c.z * e1 + c.y * c.w * e2);
+        }
+
+        struct DiffOut {
+            float4 p [[position]];
+            float4 result [[flat]];
+        };
+
+        vertex DiffOut diff_vs(
+            device const GPUQuery *queries [[buffer(0)]],
+            constant uint &height [[buffer(1)]],
+            uint vi [[vertex_id]],
+            uint iid [[instance_id]]
+        ) {
+            GPUQuery q = queries[iid];
+            float2 val = spring_sample(q.track, q.time.xy);
+            float x = float(iid % 256u) + float(vi & 1u);
+            float y = float(iid / 256u) + float(vi >> 1u);
+            DiffOut o;
+            o.p = float4(x / 256.0 * 2.0 - 1.0, 1.0 - y / float(height) * 2.0, 0.0, 1.0);
+            o.result = float4(val.x, val.y, clamp(val.x, 0.0, 1.0), 1.0);
+            return o;
+        }
+
+        fragment float4 diff_fs(DiffOut in [[stage_in]]) {
+            return in.result;
+        }
+        """
+
+        let lib = try renderer.device.makeLibrary(source: diffShaderSource, options: nil)
+        guard let vsFn = lib.makeFunction(name: "diff_vs"),
+              let fsFn = lib.makeFunction(name: "diff_fs") else {
+            throw NSError(domain: "RuneGpuSprings", code: 2, userInfo: [NSLocalizedDescriptionKey: "Missing differential shader entry points"])
+        }
+        let pipeDesc = MTLRenderPipelineDescriptor()
+        pipeDesc.vertexFunction = vsFn
+        pipeDesc.fragmentFunction = fsFn
+        pipeDesc.colorAttachments[0].pixelFormat = .rgba32Float
+        let pipeline = try renderer.device.makeRenderPipelineState(descriptor: pipeDesc)
+
+        let queryBytes = queries.count * MemoryLayout<GPUQuery>.stride
+        guard let inputBuf = queries.withUnsafeBytes({ raw in
+            renderer.device.makeBuffer(bytes: raw.baseAddress!, length: queryBytes, options: .storageModeShared)
+        }) else {
+            throw NSError(domain: "RuneGpuSprings", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate GPU differential input buffer"])
+        }
+
+        let texDesc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba32Float,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        texDesc.usage = [.renderTarget]
+        texDesc.storageMode = .shared
+        guard let outTex = renderer.device.makeTexture(descriptor: texDesc),
+              let readBuf = renderer.device.makeBuffer(length: width * height * 16, options: .storageModeShared),
+              let cb = renderer.commandQueue.makeCommandBuffer() else {
+            throw NSError(domain: "RuneGpuSprings", code: 4, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate differential render resources"])
+        }
+
+        let rpDesc = MTLRenderPassDescriptor()
+        rpDesc.colorAttachments[0].texture = outTex
+        rpDesc.colorAttachments[0].loadAction = .clear
+        rpDesc.colorAttachments[0].storeAction = .store
+        rpDesc.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+        if let enc = cb.makeRenderCommandEncoder(descriptor: rpDesc) {
+            var hU32 = UInt32(height)
+            enc.setRenderPipelineState(pipeline)
+            enc.setVertexBuffer(inputBuf, offset: 0, index: 0)
+            enc.setVertexBytes(&hU32, length: MemoryLayout<UInt32>.stride, index: 1)
+            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: queries.count)
+            enc.endEncoding()
+        }
+        if let blit = cb.makeBlitCommandEncoder() {
+            blit.copy(
+                from: outTex,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                sourceSize: MTLSize(width: width, height: height, depth: 1),
+                to: readBuf,
+                destinationOffset: 0,
+                destinationBytesPerRow: width * 16,
+                destinationBytesPerImage: width * height * 16
+            )
+            blit.endEncoding()
+        }
+        cb.commit()
+        cb.waitUntilCompleted()
+
+        let gpuPtr = readBuf.contents().bindMemory(to: SIMD4<Float>.self, capacity: queries.count)
+        for (idx, item) in tracks.enumerated() {
+            let got = gpuPtr[idx]
+            let err = abs(item.expectedPos - got.x)
+            let limit: Float = item.opacity ? 0.0001 : 0.01
+            if !got.x.isFinite || !got.y.isFinite || !got.z.isFinite || err > limit {
                 failures += 1
             }
+            let velErr = abs(item.expectedVel - got.y) / max(abs(item.expectedVel), 1.0)
+            maxVelAbs = max(maxVelAbs, abs(item.expectedVel - got.y))
+            if item.opacity {
+                let clampedExp = min(max(item.expectedPos, 0), 1)
+                maxOpacity = max(maxOpacity, abs(clampedExp - got.z))
+            } else {
+                maxPosition = max(maxPosition, err)
+            }
+            maxVelRel = max(maxVelRel, velErr)
         }
-        #endif
-
+        #else
         for item in tracks {
             let sampled = item.track.sample(at: item.now)
             let err = abs(item.expectedPos - sampled.position)
@@ -138,6 +297,7 @@ public enum RuneGpuSpringsApp {
             }
             maxVelRel = max(maxVelRel, velErr)
         }
+        #endif
 
         return DifferentialSummary(
             samples: tracks.count,
@@ -251,9 +411,11 @@ public enum RuneGpuSpringsApp {
                         if let cb = activeRenderer.commandQueue.makeCommandBuffer() {
                             activeRenderer.drawRange(frame: frame, into: targetTex, commandBuffer: cb)
                             cb.commit()
+                            stepUs.append(us(t0.duration(to: .now)))
                             cb.waitUntilCompleted()
+                        } else {
+                            stepUs.append(us(t0.duration(to: .now)))
                         }
-                        stepUs.append(us(t0.duration(to: .now)))
                     }
                     if run > 0 || runs == 1 {
                         if path == 0 {
@@ -332,6 +494,12 @@ public enum RuneGpuSpringsApp {
         r8.texels[64] = 128
         r8.texels[65] = 255
 
+        let imageAtlas = RGBA8Atlas(
+            width: 2,
+            height: 2,
+            texels: [255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 192, 255, 255, 255, 255]
+        )
+
         let base: [RenderInstance] = (0..<8).map { kind in
             let x = 8.0 + Float(kind) * 60.0
             var inst = RenderInstance(
@@ -362,6 +530,8 @@ public enum RuneGpuSpringsApp {
                 inst.radii = SIMD4<Float>(x, 24.0, x + 40.0, 24.0)
                 inst.uv = SIMD4<Float>(x + 20.0, 54.0, 0.0, 0.0)
                 inst.params.x = 7.0
+            case 7:
+                inst.uv = SIMD4<Float>(0.0, 0.0, 2.0, 2.0)
             default:
                 break
             }
@@ -387,9 +557,19 @@ public enum RuneGpuSpringsApp {
                     expected[kind].uv.y += dy
                 }
             }
-            let cpuImg = try cpu.renderOffscreen(RenderFrame(width: 512, height: 96, clearColor: .zero, glyphs: r8, glyphGeneration: 1, instances: expected))
+            let cpuImg = try cpu.renderOffscreen(RenderFrame(width: 512, height: 96, clearColor: .zero, glyphs: r8, glyphGeneration: 1, images: imageAtlas, imageRevision: 1, instances: expected))
             fast.setSpringTime(now)
-            let gpuImg = try fast.renderOffscreen(RenderFrame(width: 512, height: 96, clearColor: .zero, glyphs: r8, glyphGeneration: 1, instances: base))
+            let gpuImg = try fast.renderOffscreen(RenderFrame(width: 512, height: 96, clearColor: .zero, glyphs: r8, glyphGeneration: 1, images: imageAtlas, imageRevision: 1, instances: base))
+            for kind in 0..<8 {
+                let x0 = kind * 60
+                let x1 = x0 + 60
+                let hasAlpha = (0..<96).contains { y in
+                    (x0..<x1).contains { x in
+                        cpuImg.rgba[(y * 512 + x) * 4 + 3] != 0
+                    }
+                }
+                precondition(hasAlpha, "blank primitive kind \(kind) at t=\(now)")
+            }
             for p in 0..<min(cpuImg.rgba.count, gpuImg.rgba.count) {
                 let d = cpuImg.rgba[p] >= gpuImg.rgba[p] ? cpuImg.rgba[p] - gpuImg.rgba[p] : gpuImg.rgba[p] - cpuImg.rgba[p]
                 if d > maxDelta { maxDelta = d }
@@ -405,10 +585,11 @@ public enum RuneGpuSpringsApp {
         diffIterations: Int = 4096,
         counts: [Int] = [1, 100, 1000, 10000],
         runs: Int = 8,
-        frames: Int = 120
+        frames: Int = 120,
+        verifyOnly: Bool = false
     ) throws -> (diff: DifferentialSummary, bench: [BenchSummary], primitives: (kindsChecked: Int, maxDelta: UInt8), output: String) {
         let diff = try runDifferential(iterations: diffIterations)
-        let bench = try runBench(counts: counts, runs: runs, frames: frames)
+        let bench = verifyOnly ? [] : try runBench(counts: counts, runs: runs, frames: frames)
         let prim = try runPrimitivePixels()
         var lines: [String] = []
         lines.append("DIFFERENTIAL samples=\(diff.samples) retargets=\(diff.retargets) max_position=\(diff.maxPositionError) max_opacity=\(diff.maxOpacityError) max_velocity_relative=\(diff.maxVelocityRelativeError) max_velocity_absolute=\(diff.maxVelocityAbsoluteError) failures=\(diff.failures)")
@@ -420,7 +601,8 @@ public enum RuneGpuSpringsApp {
     }
 
     public static func main() throws {
-        let (_, _, _, text) = try runReport()
+        let verifyOnly = CommandLine.arguments.contains("--verify-only")
+        let (_, _, _, text) = try runReport(verifyOnly: verifyOnly)
         print(text)
     }
 }

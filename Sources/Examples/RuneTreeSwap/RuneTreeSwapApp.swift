@@ -1,5 +1,6 @@
 import Foundation
 import Rune
+import RunePerf
 #if canImport(Metal)
 import Metal
 #endif
@@ -114,27 +115,17 @@ public enum RuneTreeSwapApp {
     }
 
     private static func listView(_ s: State, _ cx: inout Cx<State>) -> El<State> {
-        let rowsContainer: El<State>
+        var rowsContainer = vstack().key("rows").wFull().px(8).py(6).growth(.default)
         if s.eager {
-            var r: El<State> = vstack().key("rows").wFull().px(8).py(6)
-            for i in 0..<s.titles.count {
-                r = r.child(listRow(s, i).key(s.keys[i]))
-            }
-            rowsContainer = r
+            rowsContainer = rowsContainer.virtualize(rowHeight)
+                .children((0..<s.titles.count).map { i in listRow(s, i).key(s.keys[i]) })
         } else {
-            rowsContainer = virtualRows(
-                key: "rows",
-                state: s.listVirtual,
-                count: s.titles.count,
-                estimatedHeight: rowHeight,
-                scrollY: cx.scrollOffset(of: "list").y,
-                viewportHeight: max(1, cx.viewport.y - 92),
-                rowKey: { s.keys[$0] },
-                buildRow: { i in listRow(s, i) }
+            rowsContainer = rowsContainer.virtualRows(
+                s.titles.count,
+                rowHeight,
+                key: { st, i in st.keys[i] },
+                build: { st, i in listRow(st, i) }
             )
-            .wFull()
-            .px(8)
-            .py(6)
         }
         return vstack()
             .key("list")
@@ -181,27 +172,17 @@ public enum RuneTreeSwapApp {
 
     private static func gridView(_ s: State, _ cx: inout Cx<State>) -> El<State> {
         let cell = (size.x - 16.0) / Float(columns)
-        let rowsContainer: El<State>
+        var rowsContainer = vstack().key("rows").wFull().px(8).py(6).growth(.default)
         if s.lazyGrid {
-            rowsContainer = virtualRows(
-                key: "rows",
-                state: s.gridVirtual,
-                count: s.rowKeys.count,
-                estimatedHeight: cell,
-                scrollY: cx.scrollOffset(of: "grid").y,
-                viewportHeight: max(1, cx.viewport.y - 92),
-                rowKey: { s.rowKeys[$0] },
-                buildRow: { r in gridRow(s, r) }
+            rowsContainer = rowsContainer.virtualRows(
+                s.rowKeys.count,
+                cell,
+                key: { st, r in st.rowKeys[r] },
+                build: { st, r in gridRow(st, r) }
             )
-            .wFull()
-            .px(8)
-            .py(6)
         } else {
-            var g: El<State> = vstack().key("rows").wFull().px(8).py(6)
-            for r in 0..<s.rowKeys.count {
-                g = g.child(gridRow(s, r).key(s.rowKeys[r]))
-            }
-            rowsContainer = g
+            rowsContainer = rowsContainer.virtualize(cell)
+                .children((0..<s.rowKeys.count).map { r in gridRow(s, r).key(s.rowKeys[r]) })
         }
         return vstack()
             .key("grid")
@@ -265,12 +246,28 @@ public enum RuneTreeSwapApp {
         }
     }
 
+    public static let metrics: [String] = [
+        "cpu_ms", "frame_ms", "encode_ms", "view_ms", "commit_ms", "layout_ms", "text_ms", "paint_ms",
+        "apply_ms", "shaped", "layout_nodes", "allocations", "tail_ms", "tail_frames",
+        "rows_built", "rows_mounted", "rows_settled",
+    ]
+
     public struct SampleResult: Sendable, Equatable {
         public let direction: String
         public let testCase: String
         public let cpuMs: Double
         public let frameMs: Double
         public let encodeMs: Double
+        public let viewMs: Double
+        public let commitMs: Double
+        public let layoutMs: Double
+        public let textMs: Double
+        public let paintMs: Double
+        public let applyMs: Double
+        public let shaped: Int
+        public let layoutNodes: Int
+        public let allocations: Double
+        public let tailMs: Double
         public let tailFrames: Int
         public let rowsBuilt: Int
         public let rowsMounted: Int
@@ -280,10 +277,7 @@ public enum RuneTreeSwapApp {
     private static func mountedCount(_ rt: Runtime<State>) -> Int {
         let listKey = (rt.state.mode == .list) ? "list" : "grid"
         let prefix = rt.state.mode == .list ? rt.state.keys : rt.state.rowKeys
-        let containerExists = rt.element(byKey: listKey) != nil
-        guard containerExists else { return 0 }
-        let matched = prefix.filter { k in rt.element(byKey: k) != nil }.count
-        return matched > 0 ? matched : rt.elements().count
+        return prefix.filter { k in rt.find("\(listKey)/rows/\(k)") != nil }.count
     }
 
     private static func ms(_ d: Duration) -> Double {
@@ -294,7 +288,8 @@ public enum RuneTreeSwapApp {
         samples: Int = 15,
         cells: Int = 1800,
         lazyGrid: Bool = false,
-        eagerList: Bool = false
+        eagerList: Bool = false,
+        only: String? = nil
     ) throws -> (results: [SampleResult], output: String) {
         #if canImport(Metal)
         let renderer = try MetalRenderer()
@@ -310,20 +305,27 @@ public enum RuneTreeSwapApp {
         }
         #endif
 
-        func drawAndWait(_ rt: Runtime<State>, at now: Double) {
+        @discardableResult
+        func drawSubmit(_ rt: Runtime<State>, at now: Double) -> (rf: RenderFrame, wait: () -> Void) {
             let rf = rt.renderFrame(at: now)
             #if canImport(Metal)
-            if let cb = renderer.commandQueue.makeCommandBuffer() {
+            let cb = renderer.commandQueue.makeCommandBuffer()
+            if let cb {
                 renderer.drawRange(frame: rf, into: targetTex, commandBuffer: cb)
                 cb.commit()
-                cb.waitUntilCompleted()
             }
+            return (rf, { cb?.waitUntilCompleted() })
             #else
-            _ = rf
+            return (rf, {})
             #endif
         }
 
-        func settle(_ rt: Runtime<State>, now: inout Double) -> Int {
+        func drawAndWait(_ rt: Runtime<State>, at now: Double) {
+            drawSubmit(rt, at: now).wait()
+        }
+
+        func settle(_ rt: Runtime<State>, now: inout Double) -> (cpu: Double, frames: Int) {
+            let start = threadCpuMs()
             let dt = 1.0 / 120.0
             var frames = 0
             while frames < 240 {
@@ -332,11 +334,12 @@ public enum RuneTreeSwapApp {
                 frames += 1
                 if !rt.isAnimating { break }
             }
+            let cpu = max(0, threadCpuMs() - start)
             drawAndWait(rt, at: now)
-            return frames
+            return (cpu, frames)
         }
 
-        func runSample(direction: String, from: Mode, testCase: String) -> SampleResult {
+        func runSample(direction: String, from: Mode, testCase: String) -> [Double] {
             let to: Mode = (from == .grid) ? .list : .grid
             let keyFor: (Mode) -> Key = { $0 == .list ? .escape : .tab }
             let ts = TextSystem()
@@ -376,59 +379,112 @@ public enum RuneTreeSwapApp {
 
             _ = takeFramePhases()
             rt.state.counter.built = 0
+            let entriesBefore = rt.textSystem.glyphAtlas.cachedEntryCount
+            let alloc0 = ProcessCountingAllocator.shared.threadAllocations()
             let cpu0 = threadCpuMs()
             let t0 = ContinuousClock.now
             rt.keyDown(KeyEvent(key: keyFor(to), mods: .none), at: now)
             now += dt
             _ = rt.frame(at: now)
-            let cpu = threadCpuMs() - cpu0
+            let cpu = max(0, threadCpuMs() - cpu0)
             let frameMs = ms(t0.duration(to: .now))
+            let allocations = Double(ProcessCountingAllocator.shared.threadAllocations() &- alloc0)
+            let phases = takeFramePhases()
+
             let enc0 = ContinuousClock.now
-            drawAndWait(rt, at: now)
+            let sub = drawSubmit(rt, at: now)
             let encodeMs = ms(enc0.duration(to: .now))
+            sub.wait()
 
-            let built = rt.state.counter.built
-            let mountedNow = mountedCount(rt)
-            let tailFrames = settle(rt, now: &now)
-            let settledCount = mountedCount(rt)
+            let shaped = Double(max(0, rt.textSystem.glyphAtlas.cachedEntryCount - entriesBefore))
+            let layoutNodes = Double(rt.elements().count)
+            let built = Double(rt.state.counter.built)
+            let mountedNow = Double(mountedCount(rt))
+            let (tailCpu, tailFrames) = settle(rt, now: &now)
+            let settledCount = Double(mountedCount(rt))
 
-            return SampleResult(
-                direction: direction,
-                testCase: testCase,
-                cpuMs: cpu,
-                frameMs: frameMs,
-                encodeMs: encodeMs,
-                tailFrames: tailFrames,
-                rowsBuilt: built,
-                rowsMounted: mountedNow,
-                rowsSettled: settledCount
-            )
+            let p = FRAME_PHASES
+            func phase(_ ph: FramePhase) -> Double {
+                let idx = p + ph.rawValue
+                return phases.count > idx ? phases[idx] : 0
+            }
+            return [
+                cpu, frameMs, encodeMs,
+                phase(.view), phase(.commit), phase(.layout), phase(.text), phase(.paint), phase(.apply),
+                shaped, layoutNodes, allocations, tailCpu, Double(tailFrames),
+                built, mountedNow, settledCount,
+            ]
         }
 
         var results: [SampleResult] = []
         var lines: [String] = []
         for (dir, from) in [("grid-list", Mode.grid), ("list-grid", Mode.list)] {
+            if let only, !dir.hasPrefix(only) && !only.contains("\(dir)/") { continue }
             for testCase in ["first", "quick", "recent", "stale"] {
-                var batch: [SampleResult] = []
-                for _ in 0..<max(1, samples) {
-                    batch.append(runSample(direction: dir, from: from, testCase: testCase))
+                if let only, only.contains("/"), only != "\(dir)/\(testCase)" { continue }
+                var batch: [[Double]] = []
+                for s in 0...max(1, samples) {
+                    let row = runSample(direction: dir, from: from, testCase: testCase)
+                    if s > 0 { batch.append(row) }
                 }
-                let sortedCpu = batch.map(\.cpuMs).sorted()
-                let sortedFrame = batch.map(\.frameMs).sorted()
-                let sortedEncode = batch.map(\.encodeMs).sorted()
-                let medCpu = sortedCpu[sortedCpu.count / 2]
-                let medFrame = sortedFrame[sortedFrame.count / 2]
-                let medEncode = sortedEncode[sortedEncode.count / 2]
-                let last = batch[batch.count - 1]
-                results.append(last)
-                lines.append(String(format: "METRIC dir=%@ case=%@ cpu_ms=%.4f frame_ms=%.4f encode_ms=%.4f rows_built=%d rows_mounted=%d tail_frames=%d", dir, testCase, medCpu, medFrame, medEncode, last.rowsBuilt, last.rowsMounted, last.tailFrames))
+                func stat(_ idx: Int) -> (median: Double, p95: Double) {
+                    let sorted = batch.map { $0[idx] }.sorted()
+                    let med = sorted[sorted.count / 2]
+                    let p95 = sorted[Int((Double(sorted.count - 1) * 0.95).rounded())]
+                    return (med, p95)
+                }
+                for (m, name) in metrics.enumerated() {
+                    let st = stat(m)
+                    lines.append(String(format: "METRIC dir=%@ case=%@ metric=%@ median=%.4f p95=%.4f n=%d", dir, testCase, name, st.median, st.p95, batch.count))
+                }
+                results.append(SampleResult(
+                    direction: dir,
+                    testCase: testCase,
+                    cpuMs: stat(0).median,
+                    frameMs: stat(1).median,
+                    encodeMs: stat(2).median,
+                    viewMs: stat(3).median,
+                    commitMs: stat(4).median,
+                    layoutMs: stat(5).median,
+                    textMs: stat(6).median,
+                    paintMs: stat(7).median,
+                    applyMs: stat(8).median,
+                    shaped: Int(stat(9).median.rounded()),
+                    layoutNodes: Int(stat(10).median.rounded()),
+                    allocations: stat(11).median,
+                    tailMs: stat(12).median,
+                    tailFrames: Int(stat(13).median.rounded()),
+                    rowsBuilt: Int(stat(14).median.rounded()),
+                    rowsMounted: Int(stat(15).median.rounded()),
+                    rowsSettled: Int(stat(16).median.rounded())
+                ))
             }
         }
         return (results, lines.joined(separator: "\n"))
     }
 
     public static func main() throws {
-        let (_, text) = try runReport()
+        let args = Array(CommandLine.arguments.dropFirst())
+        func strArg(_ flag: String) -> String? {
+            if let i = args.firstIndex(of: flag), i + 1 < args.count { return args[i + 1] }
+            return nil
+        }
+        func intArg(_ flag: String, default def: Int) -> Int {
+            if let v = strArg(flag).flatMap(Int.init), v > 0 { return v }
+            return def
+        }
+        let samples = intArg("--samples", default: 15)
+        let only = strArg("--only")
+        let lazyGrid = args.contains("--lazy-grid")
+        let eagerList = args.contains("--eager-list")
+        let cells = intArg("--cells", default: 1800)
+        let (_, text) = try runReport(
+            samples: samples,
+            cells: cells,
+            lazyGrid: lazyGrid,
+            eagerList: eagerList,
+            only: only
+        )
         print(text)
     }
 }

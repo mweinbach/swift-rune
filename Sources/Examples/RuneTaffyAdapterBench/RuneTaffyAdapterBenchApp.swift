@@ -162,6 +162,12 @@ public enum RuneTaffyAdapterBenchApp {
 
     public static func runIsolatedPairedBench(samples: Int = 25, rows: Int = 500) -> [String] {
         let room = Size<AvailableSpace>(width: .definite(size.x), height: .definite(size.y))
+        var baseMem500: [Double] = []
+        var compMem500: [Double] = []
+        var baseMemSwap: [Double] = []
+        var compMemSwap: [Double] = []
+        var baseAllocs: [Double] = []
+        var compAllocs: [Double] = []
         var baseCold: [Double] = []
         var compCold: [Double] = []
         var baseWarm: [Double] = []
@@ -173,10 +179,14 @@ public enum RuneTaffyAdapterBenchApp {
             for which in 0..<2 {
                 let runCompact = (iter + which) % 2 == 1
                 if !runCompact {
+                    let h0 = liveHeapBytes()
+                    let a0 = ProcessCountingAllocator.shared.threadAllocations()
                     let t0 = ContinuousClock.now
                     var (tree, root, handles) = buildBaselineList(rows: rows)
                     try! tree.computeLayout(root, availableSpace: room)
                     let cold = ms(t0.duration(to: .now))
+                    let allocs = Double(ProcessCountingAllocator.shared.threadAllocations() &- a0)
+                    let mem500 = Double(max(0, liveHeapBytes() - h0))
 
                     let tw = ContinuousClock.now
                     try! tree.computeLayout(root, availableSpace: room)
@@ -201,18 +211,26 @@ public enum RuneTaffyAdapterBenchApp {
                         }
                     }
                     try! tree.computeLayout(root, availableSpace: room)
+                    let memSwap = Double(max(0, liveHeapBytes() - h0))
 
                     if iter > 0 {
+                        baseMem500.append(mem500)
+                        baseMemSwap.append(memSwap)
+                        baseAllocs.append(allocs)
                         baseCold.append(cold)
                         baseWarm.append(warm)
                         baseDirty.append(dirty)
                     }
                 } else {
+                    let h0 = liveHeapBytes()
+                    let a0 = ProcessCountingAllocator.shared.threadAllocations()
                     let t0 = ContinuousClock.now
                     var store = LayoutStore()
                     var root = syncStoreList(&store, rows: rows, keyBase: 100, dirtyRow: nil)
                     solveStore(&store, root: root, room: room)
                     let cold = ms(t0.duration(to: .now))
+                    let allocs = Double(ProcessCountingAllocator.shared.threadAllocations() &- a0)
+                    let mem500 = Double(max(0, liveHeapBytes() - h0))
 
                     let tw = ContinuousClock.now
                     solveStore(&store, root: root, room: room)
@@ -225,8 +243,12 @@ public enum RuneTaffyAdapterBenchApp {
 
                     root = syncStoreList(&store, rows: min(12, rows), keyBase: 100_000, dirtyRow: nil)
                     solveStore(&store, root: root, room: room)
+                    let memSwap = Double(max(0, liveHeapBytes() - h0))
 
                     if iter > 0 {
+                        compMem500.append(mem500)
+                        compMemSwap.append(memSwap)
+                        compAllocs.append(allocs)
                         compCold.append(cold)
                         compWarm.append(warm)
                         compDirty.append(dirty)
@@ -235,13 +257,24 @@ public enum RuneTaffyAdapterBenchApp {
             }
         }
 
+        let (bTree, _, _) = buildBaselineList(rows: rows)
         var cStore = LayoutStore()
         _ = syncStoreList(&cStore, rows: rows, keyBase: 100, dirtyRow: nil)
         let cStats = cStore.storageStats()
+        let baselineNodeCount = max(1, bTree.totalNodeCount)
+        let baselineSlotB = MemoryLayout<TaffyStyle>.stride + MemoryLayout<Layout>.stride * 2 + 128
+        let baselineRetainedB = baselineNodeCount * baselineSlotB
+        let reductionPct = (1.0 - Double(cStats.totalRetainedBytes) / Double(max(1, baselineRetainedB))) * 100.0
         var out = [
-            "STRUCTURAL_\(rows)_ROWS compact_slot_B=\(cStats.bytesPerSlot) compact_retained_B=\(cStats.totalRetainedBytes)",
+            String(
+                format: "STRUCTURAL_%d_ROWS baseline_slot_B=%d compact_slot_B=%d baseline_retained_B=%d compact_retained_B=%d reduction_pct=%.2f",
+                rows, baselineSlotB, cStats.bytesPerSlot, baselineRetainedB, cStats.totalRetainedBytes, reductionPct
+            ),
         ]
         for (name, bVec, cVec) in [
+            ("heap_live_500_rows_B", baseMem500, compMem500),
+            ("heap_live_after_swap_12_rows_B", baseMemSwap, compMemSwap),
+            ("cold_allocations_500_rows", baseAllocs, compAllocs),
             ("cold_build_solve_ms", baseCold, compCold),
             ("warm_solve_ms", baseWarm, compWarm),
             ("single_dirty_solve_ms", baseDirty, compDirty),
@@ -396,41 +429,37 @@ public enum RuneTaffyAdapterBenchApp {
     public static func appView(_ s: AppState, _ cx: inout Cx<AppState>) -> El<AppState> {
         switch s.mode {
         case .list:
+            var rows: El<AppState> = col().key("rows").wFull().px(8).py(6).growth(.default)
             if s.eagerList {
-                var rowsEl: El<AppState> = col().key("rows").wFull().px(8).py(6)
-                for i in 0..<s.titles.count {
-                    rowsEl = rowsEl.child(listRow(s, i).key(s.keys[i]))
-                }
-                return col().key("root").wFull().hFull().child(
-                    col().key("list").wFull().grow(1).minH(0).scroll(stickBottom: false).child(rowsEl)
-                )
+                rows = rows.virtualize(rowHeight)
+                    .children((0..<s.titles.count).map { i in listRow(s, i).key(s.keys[i]) })
             } else {
-                let listEl = virtualRows(
-                    key: "list",
-                    state: s.listVirtual,
-                    count: s.titles.count,
-                    estimatedHeight: rowHeight,
-                    scrollY: cx.scrollOffset(of: "list").y,
-                    viewportHeight: max(1, cx.viewport.y),
-                    rowKey: { s.keys[$0] },
-                    buildRow: { listRow(s, $0) }
-                ).wFull().grow(1).minH(0)
-                return col().key("root").wFull().hFull().child(listEl)
+                rows = rows.virtualRows(
+                    s.titles.count,
+                    rowHeight,
+                    key: { st, i in st.keys[i] },
+                    build: { st, i in listRow(st, i) }
+                )
             }
+            return col().key("root").wFull().hFull().child(
+                col().key("list").wFull().grow(1).minH(0).scroll(stickBottom: false).child(rows)
+            )
         case .grid:
             let cell = (size.x - 16) / Float(columns)
             let glyph = min(cell * 0.5, 34)
-            let gridEl = virtualRows(
-                key: "grid",
-                state: s.gridVirtual,
-                count: s.rowKeys.count,
-                estimatedHeight: cell,
-                scrollY: cx.scrollOffset(of: "grid").y,
-                viewportHeight: max(1, cx.viewport.y),
-                rowKey: { s.rowKeys[$0] },
-                buildRow: { gridRow(s, $0, cell: cell, glyph: glyph) }
-            ).wFull().grow(1).shrink(1)
-            return col().key("root").wFull().hFull().child(gridEl)
+            let rows = col()
+                .key("rows")
+                .wFull()
+                .px(8)
+                .py(6)
+                .growth(.default)
+                .virtualize(cell)
+                .children((0..<s.rowKeys.count).map { r in
+                    gridRow(s, r, cell: cell, glyph: glyph).key(s.rowKeys[r])
+                })
+            return col().key("root").wFull().hFull().child(
+                col().key("grid").wFull().grow(1).shrink(1).scroll(stickBottom: false).child(rows)
+            )
         case .kitchenSink:
             return kitchenSinkView(s)
         }
@@ -454,7 +483,7 @@ public enum RuneTaffyAdapterBenchApp {
         }
     }
 
-    public static func runRuntimeSuite(samples: Int = 25, rowCount: Int = 200, cellCount: Int = 1800) -> [String] {
+    public static func runRuntimeSuite(samples: Int = 25, rowCount: Int = 200, cellCount: Int = 1800, raw: Bool = false) -> [String] {
         var lines: [String] = []
         let ts = TextSystem()
         let sinkRt = Runtime(
@@ -558,12 +587,15 @@ public enum RuneTaffyAdapterBenchApp {
                 }
                 let liveSwap = Double(max(0, liveHeapBytes() - h0))
                 if i > 0 {
+                    let p = FRAME_PHASES
+                    let cIdx = p + FramePhase.commit.rawValue
+                    let lIdx = p + FramePhase.layout.rawValue
                     memGrid.append(liveGrid)
                     memSwap.append(liveSwap)
-                    gridCommit.append(phasesGrid.count > 1 ? phasesGrid[1] : 0)
-                    gridLayout.append(phasesGrid.count > 2 ? phasesGrid[2] : 0)
-                    swapCommit.append(phasesSwap.count > 1 ? phasesSwap[1] : 0)
-                    swapLayout.append(phasesSwap.count > 2 ? phasesSwap[2] : 0)
+                    gridCommit.append(phasesGrid.count > cIdx ? phasesGrid[cIdx] : 0)
+                    gridLayout.append(phasesGrid.count > lIdx ? phasesGrid[lIdx] : 0)
+                    swapCommit.append(phasesSwap.count > cIdx ? phasesSwap[cIdx] : 0)
+                    swapLayout.append(phasesSwap.count > lIdx ? phasesSwap[lIdx] : 0)
                 }
             }
         }
@@ -577,6 +609,11 @@ public enum RuneTaffyAdapterBenchApp {
             ("grid_to_list_swap_commit_ms", swapCommit),
             ("grid_to_list_swap_layout_ms", swapLayout),
         ] {
+            if raw {
+                for v in vec {
+                    lines.append(String(format: "RAW adapter=compact metric=%@ val=%.6f", name, v))
+                }
+            }
             let (p50, p95) = stats(vec)
             lines.append(String(
                 format: "RUNTIME adapter=compact metric=%@ n=%d p50=%.4f p95=%.4f",
@@ -594,11 +631,12 @@ public enum RuneTaffyAdapterBenchApp {
         } else {
             samples = 25
         }
+        let raw = args.contains("--raw")
         var lines: [String] = []
         if !args.contains("--runtime-only") {
             lines.append(contentsOf: runIsolatedPairedBench(samples: samples))
         }
-        lines.append(contentsOf: runRuntimeSuite(samples: samples))
+        lines.append(contentsOf: runRuntimeSuite(samples: samples, raw: raw))
         print(lines.joined(separator: "\n"))
     }
 }
