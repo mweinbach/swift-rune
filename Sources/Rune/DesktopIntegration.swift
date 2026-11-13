@@ -2498,9 +2498,49 @@ public struct JumpList: Sendable, Equatable, Hashable {
     }
 }
 
+/// Queued playground navigation/trigger actions recorded on `Tx` (`playground/open.rs`).
+public enum PlaygroundTxRequest: Sendable, Equatable {
+    case open
+    case openAt(story: String, variant: String?)
+    case close
+    case replay
+    case trigger(Character)
+}
+
 // MARK: - 10. Tx & El Extensions
 
 extension Tx {
+    /// Opens the built-in Playground UI.
+    public mutating func openPlayground() {
+        enqueuePlaygroundRequest(.open)
+    }
+
+    /// Opens the built-in Playground UI on `story` (path, name, or slug) and optional `variant` (`Tx::open_playground_at`).
+    public mutating func openPlaygroundAt(_ story: String, variant: String? = nil) {
+        enqueuePlaygroundRequest(.openAt(story: story, variant: variant))
+    }
+
+    /// Closes the built-in Playground UI.
+    public mutating func closePlayground() {
+        enqueuePlaygroundRequest(.close)
+    }
+
+    /// Replays the open Playground story and runs its `'r'` trigger (`Tx::replay_playground`).
+    public mutating func replayPlayground() {
+        enqueuePlaygroundRequest(.replay)
+    }
+
+    /// Fires a Playground trigger by key on the open story (`Tx::playground_trigger`).
+    public mutating func playgroundTrigger(_ key: Character) {
+        let lower = Character(key.lowercased())
+        enqueuePlaygroundRequest(lower == "r" ? .replay : .trigger(lower))
+    }
+
+    private mutating func enqueuePlaygroundRequest(_ req: PlaygroundTxRequest) {
+        var list = (runtimeActions["playgroundRequests"] as? [PlaygroundTxRequest]) ?? []
+        list.append(req)
+        runtimeActions["playgroundRequests"] = list
+    }
     /// Copies a rich clipboard payload (text, HTML, RTF, image, files, concealed).
     public mutating func copyRich(_ payload: RichClipboardPayload) {
         clipboardWrite = payload.content

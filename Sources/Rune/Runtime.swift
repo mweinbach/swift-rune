@@ -295,6 +295,8 @@ public final class Runtime<State> {
     public var rewindRecorder: RewindRecorder? = nil
     public let memo = MemoCache()
     internal var cxSettings = RuntimeShellSettings()
+    public var playgroundHost: PlaygroundHost<State>? = nil
+    public private(set) var playgroundRequests: [PlaygroundTxRequest] = []
 
     internal var popupQueue: PopupQueueState = .closed
     internal var popupNeedsLayout: Bool = false
@@ -3633,6 +3635,13 @@ public final class Runtime<State> {
         urlOpener.takeRequests()
     }
 
+    /// Returns and clears queued playground requests recorded via `Tx`.
+    public func takePlaygroundRequests() -> [PlaygroundTxRequest] {
+        let out = playgroundRequests
+        playgroundRequests.removeAll()
+        return out
+    }
+
     /// Records the current keyed elements into `rewindRecorder` if attached.
     public func captureRewindFrame(at now: Double) {
         guard let rewind = rewindRecorder else { return }
@@ -3707,6 +3716,34 @@ public final class Runtime<State> {
             rewind.setViewport(viewport)
         } else if (tx.runtimeActions["detachRewind"] as? Bool) == true {
             rewindRecorder = nil
+        }
+        if let pgReqs = tx.runtimeActions["playgroundRequests"] as? [PlaygroundTxRequest] {
+            playgroundRequests.append(contentsOf: pgReqs)
+            if let pg = playgroundHost, pg.isEnabled {
+                for req in pgReqs {
+                    switch req {
+                    case .open:
+                        pg.open()
+                    case let .openAt(story, variant):
+                        do {
+                            try pg.openAt(story: story, variant: variant)
+                        } catch {
+                            pg.open()
+                        }
+                    case .close:
+                        pg.close()
+                    case .replay:
+                        var followTx = Tx()
+                        pg.replay(on: &state, tx: &followTx)
+                        applyTx(followTx, at: now, markDirtyIfNotLiveOnly: markDirtyIfNotLiveOnly)
+                    case .trigger(let ch):
+                        var followTx = Tx()
+                        if pg.fireTrigger(ch, on: &state, tx: &followTx) {
+                            applyTx(followTx, at: now, markDirtyIfNotLiveOnly: markDirtyIfNotLiveOnly)
+                        }
+                    }
+                }
+            }
         }
         if let title = tx.windowTitle {
             windowTitle = title
