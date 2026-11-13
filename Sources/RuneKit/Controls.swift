@@ -663,6 +663,15 @@ public enum ButtonVariant: Sendable, Hashable {
     case danger
 }
 
+/// Visual interaction state for kit controls (`rune_kit::State`).
+public enum ControlVisualState: String, Sendable, Hashable {
+    case rest
+    case hover
+    case pressed
+    case focus
+    case disabled
+}
+
 extension Kit {
     /// Interactive button (`Kit::button`).
     public func button<State>(

@@ -514,4 +514,14 @@ struct TreeAndSearchTests {
         #expect(style.chevronNudge == 1)
         #expect(style.guidesHover == 0.5)
     }
+
+    @Test("PageDown with no cursor jumps to first row")
+    func pageDownNoCursorStartsAtZero() {
+        var m = buildRepoModel()
+        var tx = Tx()
+        #expect(m.cursorID == nil)
+        let outcome = m.handleKey(KeyEvent(key: .pageDown), label: { $0.name }, tx: &tx)
+        #expect(outcome == .handled)
+        #expect(m.cursorID == m.visibleID(at: 0))
+    }
 }

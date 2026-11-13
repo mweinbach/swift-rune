@@ -657,7 +657,7 @@ public struct TreeModel<T: Sendable>: Sendable {
         case .pageUp:
             target = at.map { max(0, $0 - page) } ?? 0
         case .pageDown:
-            target = at.map { min(len - 1, $0 + page) } ?? min(len - 1, page)
+            target = at.map { min(len - 1, $0 + page) } ?? 0
         case .arrowRight where m.shift, .arrowLeft where m.shift:
             target = nil
         case .arrowRight:
