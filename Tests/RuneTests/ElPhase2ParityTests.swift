@@ -498,9 +498,9 @@ struct ElPhase2ParityTests {
     @Test("Memo/region holding virtualRows reuses row cache when window holds and rebuilds on Tracked change (#845)")
     func memoHoldingVirtualRowsReusesCacheAndInvalidatesOnTrackedChange() {
         let row0Tag = Tracked("A")
-        let unrelatedTick = Tracked(0)
         var listMemoBuilds = 0
         var rowBuilds = [Int: Int]()
+        var rowCardMemoBuilds = [Int: Int]()
 
         struct S { var dummy = 0 }
         let rt = Runtime<S>(
@@ -508,41 +508,116 @@ struct ElPhase2ParityTests {
             viewport: Vec2(200, 80),
             pixelScale: 1.0,
             systemDark: true
-        ) { _, _ in
-            _ = unrelatedTick.value
+        ) { s, _ in
             let listMemo: El<S> = region("vlist-region") {
                 listMemoBuilds += 1
                 return col().key("scroll").size(200, 80).scrollY()
                     .virtualRows(
                         count: 40,
-                        estimatedRowHeight: 20,
+                        estimatedRowHeight: 40,
                         key: { _, i in "row-\(i)" }
                     ) { _, i in
                         rowBuilds[i, default: 0] += 1
                         let suffix = (i == 0) ? row0Tag.value : "B"
-                        return text("row \(i) \(suffix)").key("row-\(i)").size(200, 20)
+                        return memo("row-\(i)-card", deps: suffix) {
+                            rowCardMemoBuilds[i, default: 0] += 1
+                            return text("row \(i) \(suffix)").size(200, 40)
+                        }.key("row-\(i)")
                     }
             }
-            return col().size(200, 80).child(listMemo)
+            return col().size(200, 80)
+                .child(text("dummy \(s.dummy)").key("hdr").size(200, 0))
+                .child(listMemo)
+        }
+
+        // Settle initial incremental virtual overscan fill passes before checking steady-state reuse.
+        var t = 0.0
+        for _ in 0..<24 {
+            _ = rt.frame(at: t)
+            if !rt.lastVirtualFillWanted && !rt.virtualFillNeedsCommit { break }
+            t += 0.05
+        }
+        #expect(!rt.lastVirtualFillWanted)
+        let memoBuildsAfterSettle = rt.memo.builds
+        let r0BuildsBefore = rowBuilds[0] ?? 0
+        let r1BuildsBefore = rowBuilds[1] ?? 0
+        let r0CardBefore = rowCardMemoBuilds[0] ?? 0
+        #expect(r0BuildsBefore >= 1)
+        #expect(r0CardBefore == 1)
+
+        // Real `.rebuild` commit mutating outer State (`dummy += 1`) while `region` hits cache:
+        // list + mounted rows + nested row memos all stay cached across multiple rebuilds.
+        let viewCalls0 = rt.viewCallCount
+        t += 0.05
+        rt.update(at: t) { s, _ in s.dummy += 1 }
+        _ = rt.frame(at: t)
+        #expect(rt.viewCallCount > viewCalls0, "outer state mutation must trigger a real .rebuild view pass")
+        #expect(rt.memo.builds == memoBuildsAfterSettle, "region holding virtualRows and nested row memos stay cached on .rebuild")
+        #expect(rowBuilds[0] == r0BuildsBefore, "rows stay cached on .rebuild when inside a reused region")
+        #expect(rowBuilds[1] == r1BuildsBefore)
+        #expect(rowCardMemoBuilds[0] == r0CardBefore, "nested row memo survives .rebuild without eviction")
+
+        // Second consecutive `.rebuild` verifies `touchEntries` kept the nested row memo alive past `keepSince`.
+        t += 0.05
+        rt.update(at: t) { s, _ in s.dummy += 1 }
+        _ = rt.frame(at: t)
+        #expect(rt.memo.builds == memoBuildsAfterSettle)
+        #expect(rowBuilds[0] == r0BuildsBefore)
+        #expect(rowCardMemoBuilds[0] == r0CardBefore)
+
+        // Mutating row0Tag (Tracked read inside row 0 during CachedVirtualRow build) invalidates only row 0 on `.rebuild`.
+        row0Tag.value = "A2"
+        t += 0.05
+        rt.update(at: t) { s, _ in s.dummy += 1 }
+        _ = rt.frame(at: t)
+        #expect(rt.memo.builds == memoBuildsAfterSettle + 1, "only row 0 nested memo misses; listMemo stays cached")
+        #expect((rowBuilds[0] ?? 0) == r0BuildsBefore + 1, "row 0 Tracked write invalidates row 0 cache")
+        #expect(rowBuilds[1] == r1BuildsBefore, "sibling row 1 stays cached when only row 0 Tracked changed")
+        #expect((rowCardMemoBuilds[0] ?? 0) == r0CardBefore + 1, "row 0 nested memo updates for A2")
+        #expect(rt.element(byKey: "row-0")?.text == "row 0 A2")
+
+        // Changing the mounted window (`scrollToBottomInstant`) disables whole-window reuse and builds newly entering rows.
+        t += 0.05
+        rt.update(at: t) { s, tx in
+            s.dummy += 1
+            tx.scrollToBottomInstant("scroll")
+        }
+        _ = rt.frame(at: t)
+        #expect((rowBuilds[39] ?? 0) >= 1, "scrolling window mounts new offscreen rows")
+        _ = listMemoBuilds
+    }
+
+    @Test("Rebuild commit without a reused region rebuilds virtual rows instead of reusing stale row closures (#845)")
+    func rebuildWithoutReusableRegionRebuildsMountedVirtualRows() {
+        struct S { var label = "v1" }
+        var row0Builds = 0
+        let rt = Runtime<S>(
+            state: S(),
+            viewport: Vec2(200, 80),
+            pixelScale: 1.0,
+            systemDark: true
+        ) { state, _ in
+            col().key("scroll").size(200, 80).scrollY()
+                .virtualRows(
+                    count: 20,
+                    estimatedRowHeight: 20,
+                    key: { _, i in "row-\(i)" }
+                ) { s, i in
+                    if i == 0 { row0Builds += 1 }
+                    return text("\(s.label)-\(i)").key("row-\(i)").size(200, 20)
+                }
         }
 
         _ = rt.frame(at: 0.0)
-        #expect(listMemoBuilds == 1)
-        let r0BuildsBefore = rowBuilds[0] ?? 0
-        #expect(r0BuildsBefore >= 1)
+        _ = rt.frame(at: 0.01)
+        let buildsBefore = row0Builds
+        #expect(buildsBefore >= 1)
+        #expect(rt.element(byKey: "row-0")?.text == "v1-0")
 
-        // Commit where root reads unrelatedTick, so region holding virtualRows misses or re-evaluates only when needed:
-        // Actually `region("vlist-region")` didn't read unrelatedTick, so on unrelated rebuild `region` reuses its nodes + rows!
-        unrelatedTick.value = 1
+        rt.update(at: 0.02) { s, _ in s.label = "v2" }
         _ = rt.frame(at: 0.02)
-        #expect(listMemoBuilds == 1, "region holding virtualRows stays cached when mounted window is unchanged")
-        #expect(rowBuilds[0] == r0BuildsBefore, "rows stay kept in memo cache while whole list is reused")
-
-        // Mutating row0Tag (Tracked read inside row 0 during CachedVirtualRow build) invalidates the cached row cleanly.
-        row0Tag.value = "A2"
-        _ = rt.frame(at: 0.04)
-        #expect((rowBuilds[0] ?? 0) > r0BuildsBefore, "row 0 Tracked write invalidates cached virtual row")
-        #expect(rt.element(byKey: "row-0")?.text == "row 0 A2")
+        #expect(row0Builds > buildsBefore, "virtualRows outside a reused region must rebuild on .rebuild")
+        #expect(rt.element(byKey: "row-0")?.text == "v2-0")
     }
 
     // MARK: - P2-54 & P2-55: VirtualListState.unfilled Overlap + pinnedRows = 32

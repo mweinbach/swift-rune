@@ -4,14 +4,23 @@ import RuneMotion
 // MARK: - Increment 4 Runtime Support (TxCommit, ScrollRequests, Sticky, VirtualRows/VirtualFill, Growth)
 
 extension Runtime {
+    internal enum VirtualRowReuseMode: Equatable, Sendable {
+        case none
+        case remount
+        case rebuildRegion
+    }
+
     internal struct CachedVirtualRow {
         var el: El<State>
         var memoIds: Set<String>
         var reads: [MemoRead] = []
         var trackedReads: TrackedReads = TrackedReads()
+        var envHash: UInt64 = 0
 
-        func holds(against geometry: [String: MemoElementGeometry]) -> Bool {
-            !trackedReads.changed() && reads.allSatisfy { $0.matches(geometry) }
+        func holds(against geometry: [String: MemoElementGeometry], envHash: UInt64) -> Bool {
+            self.envHash == envHash
+                && !trackedReads.changed()
+                && reads.allSatisfy { $0.matches(geometry) }
         }
     }
 
@@ -106,6 +115,7 @@ extension Runtime {
     internal func expandVirtualSubtrees(
         in rootEl: El<State>,
         remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
+        rowReuseMode: VirtualRowReuseMode = .none,
         memoGeometry: [String: MemoElementGeometry] = [:],
         memoEnvHash: UInt64 = MemoScope.activeEnvHash,
         memoPass: UInt64 = 0
@@ -125,6 +135,9 @@ extension Runtime {
             scrollPath: nil,
             scrollStickBottom: false,
             remountRowCache: remountRowCache,
+            rowReuseMode: rowReuseMode,
+            inReusableRegion: false,
+            regionEnvHash: 0,
             memoGeometry: memoGeometry,
             memoEnvHash: memoEnvHash,
             memoPass: memoPass,
@@ -141,6 +154,9 @@ extension Runtime {
         scrollPath: String?,
         scrollStickBottom: Bool,
         remountRowCache: [String: [String: CachedVirtualRow]]?,
+        rowReuseMode: VirtualRowReuseMode,
+        inReusableRegion: Bool,
+        regionEnvHash: UInt64,
         memoGeometry: [String: MemoElementGeometry],
         memoEnvHash: UInt64,
         memoPass: UInt64,
@@ -152,6 +168,9 @@ extension Runtime {
             siblingKeysSeen: &siblingKeysSeen
         )
         let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(segment)"
+
+        let nodeInReusableRegion = el.memoRegionReused ? true : inReusableRegion
+        let nodeRegionEnvHash = el.memoRegionReused ? el.memoRegionEnvHash : regionEnvHash
 
         var nextScrollPath = scrollPath
         var nextStickBottom = scrollStickBottom
@@ -167,6 +186,9 @@ extension Runtime {
                 nextScrollPath: nextScrollPath,
                 nextStickBottom: nextStickBottom,
                 remountRowCache: remountRowCache,
+                rowReuseMode: rowReuseMode,
+                inReusableRegion: nodeInReusableRegion,
+                regionEnvHash: nodeRegionEnvHash,
                 memoGeometry: memoGeometry,
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
@@ -186,6 +208,9 @@ extension Runtime {
                 scrollPath: nextScrollPath,
                 scrollStickBottom: nextStickBottom,
                 remountRowCache: remountRowCache,
+                rowReuseMode: rowReuseMode,
+                inReusableRegion: nodeInReusableRegion,
+                regionEnvHash: nodeRegionEnvHash,
                 memoGeometry: memoGeometry,
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
@@ -201,6 +226,9 @@ extension Runtime {
         nextScrollPath: String?,
         nextStickBottom: Bool,
         remountRowCache: [String: [String: CachedVirtualRow]]?,
+        rowReuseMode: VirtualRowReuseMode,
+        inReusableRegion: Bool,
+        regionEnvHash: UInt64,
         memoGeometry: [String: MemoElementGeometry],
         memoEnvHash: UInt64,
         memoPass: UInt64,
@@ -331,6 +359,36 @@ extension Runtime {
             built.append(El<State>().key("__v_top_spacer").wFull().h(topSpacerH))
         }
 
+        let mountedKeys = mounted.map { keys[$0] }
+        let currentMountedSnapshot = RuntimeVirtualListState.VirtualMountedSnapshot(
+            mountedKeys: mountedKeys,
+            range: mounted,
+            topSpacerH: topSpacerH,
+            botSpacerH: botSpacerH,
+            padTop: el.layout.padding.top,
+            padBottom: el.layout.padding.bottom
+        )
+        let priorSnapshotMatches = (vState.lastMountedSnapshot == currentMountedSnapshot)
+        vState.lastMountedSnapshot = currentMountedSnapshot
+        virtualLists[path]?.lastMountedSnapshot = currentMountedSnapshot
+
+        let hasFocusedRow = !pinned.isEmpty || (focusedPath?.hasPrefix(path + "/") == true)
+        let hasSelectionPin = hasUnmountedVirtualSelectionPin(listPath: path, keys: keys, mounted: mounted)
+        let canReuseRows: Bool
+        switch rowReuseMode {
+        case .none:
+            canReuseRows = false
+        case .remount:
+            canReuseRows = (remountRowCache != nil)
+        case .rebuildRegion:
+            canReuseRows = (remountRowCache != nil)
+                && inReusableRegion
+                && regionEnvHash == memoEnvHash
+                && priorSnapshotMatches
+                && !hasFocusedRow
+                && !hasSelectionPin
+        }
+
         ctx.selectionSources[path] = VirtualSelectionSource(
             listPath: path,
             keys: keys,
@@ -344,11 +402,17 @@ extension Runtime {
         for i in mounted {
             let rowKey = keys[i]
             var rowEl: El<State>
+            var didReuseRow = false
             if isIndexed {
-                if let reused = remountRowCache?[path]?[rowKey],
-                   reused.holds(against: memoGeometry) {
+                if canReuseRows,
+                   let reused = remountRowCache?[path]?[rowKey],
+                   Self.isTreeReusableForRelayout(reused.el),
+                   reused.holds(against: memoGeometry, envHash: memoEnvHash) {
                     self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
+                    self.memo.appendViewReads(reused.reads + reused.trackedReads.memoReads, pass: memoPass)
+                    reused.trackedReads.read()
                     rowEl = reused.el
+                    didReuseRow = true
                     ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
                 } else {
                     let rowTouchedBox = MemoScope.TouchedIdsBox()
@@ -361,7 +425,8 @@ extension Runtime {
                     ) {
                         el.virtualRowsSource!.build(state, i)
                     }
-                    if remountRowCache != nil && treeContainsVirtual(builtEl) {
+                    self.memo.appendViewReads(rowTouchedBox.reads + rowTouchedBox.trackedReads.memoReads, pass: memoPass)
+                    if rowReuseMode == .remount && treeContainsVirtual(builtEl) {
                         ctx.remountHitNestedVirtual = true
                     }
                     builtEl = builtEl.key(rowKey)
@@ -370,7 +435,8 @@ extension Runtime {
                         el: rowEl,
                         memoIds: rowTouchedBox.ids,
                         reads: rowTouchedBox.reads,
-                        trackedReads: rowTouchedBox.trackedReads
+                        trackedReads: rowTouchedBox.trackedReads,
+                        envHash: memoEnvHash
                     )
                 }
             } else {
@@ -395,6 +461,9 @@ extension Runtime {
                 scrollPath: nextScrollPath,
                 scrollStickBottom: nextStickBottom,
                 remountRowCache: remountRowCache,
+                rowReuseMode: rowReuseMode,
+                inReusableRegion: didReuseRow ? inReusableRegion : false,
+                regionEnvHash: didReuseRow ? regionEnvHash : 0,
                 memoGeometry: memoGeometry,
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,

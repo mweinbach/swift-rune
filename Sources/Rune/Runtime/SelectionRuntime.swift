@@ -500,6 +500,32 @@ internal extension Runtime {
         return resolveVirtualEndpointInfo(forPath: path)?.listIdx
     }
 
+    func hasUnmountedVirtualSelectionPin(
+        listPath: String,
+        keys: [String],
+        mounted: Range<Int>
+    ) -> Bool {
+        guard let activeSel = selectionState.coordinator.phase.selection else { return false }
+        let src = VirtualSelectionSource(
+            listPath: listPath,
+            keys: keys,
+            mounted: mounted,
+            isIndexed: true,
+            source: nil,
+            storedChildren: [],
+            scrollAxes: []
+        )
+        if let r = virtualRowIndex(forPath: activeSel.path, in: src), !mounted.contains(r.rowIndex) {
+            return true
+        }
+        if let far = activeSel.far,
+           let r = virtualRowIndex(forPath: far.path, in: src),
+           !mounted.contains(r.rowIndex) {
+            return true
+        }
+        return false
+    }
+
     func selectableSnapshotsWithVirtuals() -> [SelectableNodeSnapshot] {
         let base = selectableSnapshots()
         guard let activeSel = selectionState.coordinator.phase.selection,

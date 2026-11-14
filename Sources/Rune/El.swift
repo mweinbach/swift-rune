@@ -1200,6 +1200,8 @@ public struct El<State> {
 
     public var keyId: String? = nil
     public var role: ElementRole = .group
+    internal var memoRegionReused: Bool = false
+    internal var memoRegionEnvHash: UInt64 = 0
     public var layout: LayoutStyle
     public var children: [El<State>] = []
 

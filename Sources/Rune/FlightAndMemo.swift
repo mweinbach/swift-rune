@@ -488,7 +488,10 @@ public final class MemoCache: @unchecked Sendable {
                 scope?.isVerificationDryRun = prevDry
                 TrackedRecorder.resume(savedTracked)
             }
-            return (cached, true)
+            var reused = cached
+            reused.memoRegionReused = true
+            reused.memoRegionEnvHash = env
+            return (reused, true)
         }
         lock.unlock()
 
@@ -547,6 +550,18 @@ public final class MemoCache: @unchecked Sendable {
         lock.lock()
         viewReads = reads
         viewReadsPass = pass
+        lock.unlock()
+    }
+
+    func appendViewReads(_ reads: [MemoRead], pass: UInt64) {
+        guard !reads.isEmpty else { return }
+        lock.lock()
+        if viewReadsPass != pass {
+            viewReads = reads
+            viewReadsPass = pass
+        } else {
+            viewReads.append(contentsOf: reads)
+        }
         lock.unlock()
     }
 
@@ -681,7 +696,7 @@ public func memoWithHash<State>(
 
 // MARK: - Tracked State & Region Memoization (`rune::tracked`)
 
-private enum TrackedRecorder {
+internal enum TrackedRecorder {
     private static let threadKey = "rune.trackedRecorderStack"
 
     private final class Box: @unchecked Sendable {
@@ -703,6 +718,7 @@ private enum TrackedRecorder {
     }
 
     static func pushEmpty() {
+        MemoTrackedBridge.versionProvider = { TrackedIDGenerator.version(for: $0) }
         box.stack.append([:])
     }
 
@@ -844,6 +860,10 @@ public struct TrackedReads: Sendable {
         for (id, _) in entries {
             TrackedRecorder.record(id: id, version: TrackedIDGenerator.version(for: id))
         }
+    }
+
+    internal var memoReads: [MemoRead] {
+        entries.map { .tracked(cellId: $0.id, version: $0.version) }
     }
 }
 

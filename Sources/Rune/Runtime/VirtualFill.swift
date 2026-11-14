@@ -129,6 +129,15 @@ internal struct RuntimeVirtualListState: Sendable {
     static let pinnedRows: Int = 32
     static let maxCachedKeys: Int = 250_000
 
+    struct VirtualMountedSnapshot: Equatable, Sendable {
+        var mountedKeys: [String]
+        var range: Range<Int>
+        var topSpacerH: Float
+        var botSpacerH: Float
+        var padTop: Float
+        var padBottom: Float
+    }
+
     var measuredByKey: [String: Float] = [:]
     var lastKeys: [String] = []
     var lastKeysVersion: UInt64? = nil
@@ -141,6 +150,7 @@ internal struct RuntimeVirtualListState: Sendable {
     var wantsMoreFrames: Bool = false
     var missingOverscanRows: Int = 0
     var isIndexed: Bool = false
+    var lastMountedSnapshot: VirtualMountedSnapshot? = nil
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
         measuredByKey[key] ?? max(1, estimated)

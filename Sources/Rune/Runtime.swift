@@ -2286,7 +2286,8 @@ public final class Runtime<State> {
         prevMountedIds: Set<NodeId>,
         focusedCaret: (keyPath: String, rect: [Float])?,
         allowZoomSettle: Bool,
-        memoNodes: [FlatNode]? = nil
+        memoNodes: [FlatNode]? = nil,
+        allowRebuildRegionRowReuse: Bool = true
     ) -> MeasurePassResult? {
         let collector = LayoutReadCollector(rects: layoutSeen.rects)
         guard let viewPass = runViewPass(
@@ -2309,6 +2310,8 @@ public final class Runtime<State> {
         let savedGrowthStacks = growthStacks
         var result = buildMeasureResult(
             rootEl: viewPass.rootEl,
+            remountRowCache: allowRebuildRegionRowReuse ? cachedResizeBuild?.virtualRowCache : nil,
+            rowReuseMode: allowRebuildRegionRowReuse ? .rebuildRegion : .none,
             passHelpLook: viewPass.helpLook,
             collector: collector,
             at: now,
@@ -2359,6 +2362,7 @@ public final class Runtime<State> {
         rootEl: El<State>,
         expandedContextOverride: VirtualExpansionContext? = nil,
         remountRowCache: [String: [String: CachedVirtualRow]]? = nil,
+        rowReuseMode: VirtualRowReuseMode = .none,
         memoGeometryOverride: [String: MemoElementGeometry]? = nil,
         passHelpLook: HelpLook?,
         collector: LayoutReadCollector,
@@ -2382,6 +2386,7 @@ public final class Runtime<State> {
             (expandedRoot, virtualExpansion) = expandVirtualSubtrees(
                 in: rootEl,
                 remountRowCache: remountRowCache,
+                rowReuseMode: rowReuseMode,
                 memoGeometry: memoGeometryOverride ?? currentMemoGeometry(),
                 memoEnvHash: lastViewMemoEnvHash,
                 memoPass: memo.currentPass
@@ -3261,7 +3266,8 @@ public final class Runtime<State> {
             commitCut: commitCut,
             prevMountedIds: prevMountedIds,
             focusedCaret: focusedCaret,
-            allowZoomSettle: settlePass == 0
+            allowZoomSettle: settlePass == 0,
+            allowRebuildRegionRowReuse: settlePass == 0
         ) else {
             commitTreePass(
                 at: now,
@@ -3294,7 +3300,8 @@ public final class Runtime<State> {
                     prevMountedIds: prevMountedIds,
                     focusedCaret: retryCaret,
                     allowZoomSettle: false,
-                    memoNodes: pass.nodes
+                    memoNodes: pass.nodes,
+                    allowRebuildRegionRowReuse: false
                 ) {
                     pass = nextPass
                 }
