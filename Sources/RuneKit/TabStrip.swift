@@ -94,6 +94,31 @@ public enum TabItemStatus: Sendable, Equatable {
     case spinner
 }
 
+/// Assistive technology words for a tab strip's close button and tab status (`rune_kit::shell::TabWords`).
+public struct TabWords: Sendable, Equatable {
+    public var close: String
+    public var busy: String
+    public var attention: String
+    public var unread: String
+    public var failed: String
+
+    public static let `default` = TabWords()
+
+    public init(
+        close: String = "Close tab",
+        busy: String = "Working",
+        attention: String = "Needs attention",
+        unread: String = "Unread",
+        failed: String = "Failed"
+    ) {
+        self.close = close
+        self.busy = busy
+        self.attention = attention
+        self.unread = unread
+        self.failed = failed
+    }
+}
+
 public struct TabReorder: Sendable, Equatable {
     public var from: Int
     public var to: Int
@@ -570,6 +595,8 @@ public struct TabStrip<State> {
     private var fillColor: Color? = nil
     private var closeIconSvg: SVGIcon? = nil
     private var closeTabStopValue: Bool = false
+    private var wordsValue: TabWords = .default
+    private var hoverNoneValue: Bool = false
     private var busyIndicatorFn: ((Kit) -> El<State>)? = nil
     private var onSelectFn: ((inout State, String, inout Tx) -> Void)? = nil
     private var onCloseFn: ((inout State, String, inout Tx) -> Void)? = nil
@@ -611,6 +638,10 @@ public struct TabStrip<State> {
     public func fill(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
     public func closeIcon(_ svg: SVGIcon?) -> Self { var c = self; c.closeIconSvg = svg; return c }
     public func closeTabStop(_ on: Bool = true) -> Self { var c = self; c.closeTabStopValue = on; return c }
+    /// Assistive-technology words for close buttons and tab status marks (`TabStrip::words`).
+    public func words(_ words: TabWords) -> Self { var c = self; c.wordsValue = words; return c }
+    /// Shows every closable non-icon-only tab's close button at rest for touch / hoverless screens (`TabStrip::hover_none`).
+    public func hoverNone(_ on: Bool = true) -> Self { var c = self; c.hoverNoneValue = on; return c }
     public func busyIndicator(_ f: @escaping (Kit) -> El<State>) -> Self { var c = self; c.busyIndicatorFn = f; return c }
     public func dragState(_ keyPath: WritableKeyPath<State, TabDragState>, current: TabDragState) -> Self {
         var c = self
@@ -813,6 +844,7 @@ public struct TabStrip<State> {
         tab = appendTabContent(
             to: tab,
             item: item,
+            dens: dens,
             tabH: tabH,
             isSelected: isSelected,
             isEditing: isEditing,
@@ -842,6 +874,21 @@ public struct TabStrip<State> {
         )
     }
 
+    private static func statusWords(_ words: TabWords, _ status: TabItemStatus) -> String {
+        switch status {
+        case .none: return ""
+        case .spinner: return words.busy
+        case .dirty: return words.attention
+        case .dot: return words.unread
+        case .badge(_, let tone):
+            switch tone {
+            case .danger: return words.failed
+            case .warning: return words.attention
+            case .info, .neutral, .success, .accent: return words.unread
+            }
+        }
+    }
+
     @inline(never)
     private func buildTabShell(
         item: StripTabItem<State>,
@@ -855,10 +902,12 @@ public struct TabStrip<State> {
         kit k: Kit
     ) -> El<State> {
         let bg: Color = (isSelected || isEditing) ? k.c.surfaceRaised : (isHovered ? k.c.surfaceHover : .transparent)
+        let statusDesc = Self.statusWords(wordsValue, item.status)
         var tab: El<State> = row()
             .key("\(keyId)-tab-\(item.id)")
             .role(.tab)
             .label(item.title)
+            .hoverGroup()
             .selected(isSelected ? "true" : "false")
             .itemSelected(isSelected)
             .disabled(item.isDisabled)
@@ -870,6 +919,10 @@ public struct TabStrip<State> {
             .rounded(StripTabItem<State>.cornerRadius)
             .bg(bg)
             .clip(true)
+
+        if !statusDesc.isEmpty {
+            tab = tab.description(statusDesc)
+        }
 
         if orientation == .horizontal {
             if item.isPinned {
@@ -892,9 +945,76 @@ public struct TabStrip<State> {
     }
 
     @inline(never)
+    private func buildTabLeadingAccessory(
+        item: StripTabItem<State>,
+        tabH: Float,
+        isSelected: Bool,
+        kit k: Kit
+    ) -> El<State>? {
+        if let avatar = item.avatarEl {
+            return row().key("\(keyId)-avatar-\(item.id)")
+                .size(16, 16)
+                .center()
+                .a11yHidden()
+                .child(avatar)
+        }
+        if let svg = item.iconSvg {
+            return el().w(StripTabItem<State>.iconSlot).h(tabH).center().a11yHidden()
+                .child(Rune.icon(svg, size: 14).color(isSelected ? k.c.iconBase : k.c.iconMuted))
+        }
+        return nil
+    }
+
+    @inline(never)
+    private func buildTabTitleOrEditor(
+        item: StripTabItem<State>,
+        iconOnly: Bool,
+        fg: Color,
+        kit k: Kit
+    ) -> El<State>? {
+        if let editor = item.editorEl {
+            return row().key("\(keyId)-editor-\(item.id)")
+                .grow(1)
+                .minW(0)
+                .child(editor)
+        }
+        guard !iconOnly else { return nil }
+        // `text-[13px] font-medium` with zero tracking so long titles match OpenCode (`tab-nav.tsx`).
+        var titleFont = k.ty.uiCompact
+        titleFont.weight = k.ty.uiMedium.weight
+        titleFont.letterSpacing = 0.0
+        var textStack: El<State> = col().grow(1).minW(0).a11yHidden()
+            .child(text(item.title).key("\(keyId)-title-\(item.id)").font(titleFont).color(fg).ellipsis())
+        if let sub = item.subtitle, !sub.isEmpty {
+            textStack = textStack.child(text(sub).font(k.ty.small).color(k.c.textFaint).ellipsis())
+        }
+        return textStack
+    }
+
+    @inline(never)
+    private func buildTabStatusMark(item: StripTabItem<State>, kit k: Kit) -> El<State>? {
+        switch item.status {
+        case .none:
+            if let badgeText = item.badgeText, !badgeText.isEmpty {
+                return k.badge(badgeText, tone: .neutral).key("\(keyId)-status-\(item.id)").a11yHidden()
+            }
+            return nil
+        case .dirty:
+            return el().key("\(keyId)-status-\(item.id)").w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent).a11yHidden()
+        case .dot(let col):
+            return el().key("\(keyId)-status-\(item.id)").w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col).a11yHidden()
+        case .badge(let label, let tone):
+            return k.badge(label, tone: tone).key("\(keyId)-status-\(item.id)").a11yHidden()
+        case .spinner:
+            return (busyIndicatorFn?(k) ?? k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12)).a11yHidden()
+        }
+    }
+
+    @inline(never)
     private func appendTabContent(
         to initialTab: El<State>,
         item: StripTabItem<State>,
+        dens: TabDensity,
         tabH: Float,
         isSelected: Bool,
         isEditing: Bool,
@@ -902,58 +1022,21 @@ public struct TabStrip<State> {
     ) -> El<State> {
         var tab = initialTab
         let fg: Color = item.isDisabled ? k.c.textFaint : (isSelected ? k.c.textBase : k.c.textMuted)
+        let iconOnly = item.isPinned || (dens == .iconOnly)
+        let closable = item.isClosable && !iconOnly && !item.isDisabled && !isEditing && onCloseFn != nil
+        let touch = hoverNoneValue && closable
 
-        if let avatar = item.avatarEl {
-            tab = tab.child(
-                row().key("\(keyId)-avatar-\(item.id)")
-                    .size(16, 16)
-                    .center()
-                    .a11yHidden()
-                    .child(avatar)
-            )
-        } else if let svg = item.iconSvg {
-            tab = tab.child(
-                el().w(StripTabItem<State>.iconSlot).h(tabH).center().a11yHidden()
-                    .child(Rune.icon(svg, size: 14).color(isSelected ? k.c.iconBase : k.c.iconMuted))
-            )
+        if let leading = buildTabLeadingAccessory(item: item, tabH: tabH, isSelected: isSelected, kit: k) {
+            tab = tab.child(leading)
         }
-
-        if let editor = item.editorEl {
-            tab = tab.child(
-                row().key("\(keyId)-editor-\(item.id)")
-                    .grow(1)
-                    .minW(0)
-                    .child(editor)
-            )
-        } else if !item.isPinned {
-            var textStack: El<State> = col().grow(1).minW(0).a11yHidden()
-                .child(text(item.title).font(isSelected ? k.ty.uiMedium : k.ty.ui).color(fg).ellipsis())
-            if let sub = item.subtitle, !sub.isEmpty {
-                textStack = textStack.child(text(sub).font(k.ty.small).color(k.c.textFaint).ellipsis())
-            }
-            tab = tab.child(textStack)
+        if let mid = buildTabTitleOrEditor(item: item, iconOnly: iconOnly, fg: fg, kit: k) {
+            tab = tab.child(mid)
         }
-
-        switch item.status {
-        case .none:
-            break
-        case .dirty:
-            tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(k.c.textAccent).a11yHidden())
-        case .dot(let col):
-            tab = tab.child(el().w(StripTabItem<State>.dotSize).h(StripTabItem<State>.dotSize).rounded(3.5).bg(col).a11yHidden())
-        case .badge(let label, let tone):
-            tab = tab.child(k.badge(label, tone: tone).a11yHidden())
-        case .spinner:
-            let busyEl = busyIndicatorFn?(k) ?? k.radarSpinner(key: "\(keyId)-spin-\(item.id)", size: 12)
-            tab = tab.child(busyEl.a11yHidden())
+        if let statusMark = buildTabStatusMark(item: item, kit: k) {
+            tab = tab.child(statusMark)
         }
-
-        if let badgeText = item.badgeText, !badgeText.isEmpty, case .none = item.status {
-            tab = tab.child(k.badge(badgeText, tone: .neutral).a11yHidden())
-        }
-
-        if item.isClosable && !item.isPinned && !item.isDisabled && !isEditing, let onCloseFn {
-            tab = tab.child(buildTabCloseButton(item: item, onCloseFn: onCloseFn, kit: k))
+        if closable, let onCloseFn {
+            tab = tab.child(buildTabCloseButton(item: item, touch: touch, onCloseFn: onCloseFn, kit: k))
         }
         return tab
     }
@@ -961,6 +1044,7 @@ public struct TabStrip<State> {
     @inline(never)
     private func buildTabCloseButton(
         item: StripTabItem<State>,
+        touch: Bool,
         onCloseFn: @escaping (inout State, String, inout Tx) -> Void,
         kit k: Kit
     ) -> El<State> {
@@ -968,7 +1052,7 @@ public struct TabStrip<State> {
         var closeBtn = k.iconButton(
             key: "\(keyId)-close-\(item.id)",
             svg: closeIconSvg ?? k.glyph.close,
-            label: "Close \(item.title)",
+            label: wordsValue.close,
             size: .sm,
             variant: .ghost
         ) { s, tx in
@@ -976,6 +1060,9 @@ public struct TabStrip<State> {
         }
         if !closeTabStopValue {
             closeBtn = closeBtn.focusable(false)
+        }
+        if !touch {
+            closeBtn = closeBtn.groupOpacity(0.0, 1.0)
         }
         return closeBtn
     }
