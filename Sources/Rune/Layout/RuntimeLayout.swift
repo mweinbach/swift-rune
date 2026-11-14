@@ -132,6 +132,7 @@ final class RetainedLayoutCoordinator {
                 }
                 hasher.combine(el.isRevealed)
                 hasher.combine(resolved.truncateFade)
+                hasher.combine(resolved.pretty)
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))

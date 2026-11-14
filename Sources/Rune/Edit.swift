@@ -1152,6 +1152,276 @@ public struct TextEdit: Sendable, Equatable {
         recordUndoChange(before: before, kind: kind)
     }
 
+    // MARK: - Persistent Undo/Redo JSON History (crates/rune/src/edit/history.rs, #880)
+
+    private static let historyFormatVersion = 1
+
+    /// Number of recorded undo and redo steps (`edit.history_len()`, `#880`).
+    public func historyLen() -> (undo: Int, redo: Int) {
+        (undoStack.count, redoStack.count)
+    }
+
+    /// Serializes the newest undo and redo steps as versioned JSON bounded by `maxSteps` and `maxBytes`.
+    /// Returns `nil` for secure fields (which record nothing) and empty histories.
+    public func historyJson(maxSteps: Int, maxBytes: Int) -> Data? {
+        guard !isSecure, (!undoStack.isEmpty || !redoStack.isEmpty) else {
+            return nil
+        }
+        var steps = 0
+        var bytes = 0
+        func fits(_ c: UndoChange) -> Bool {
+            steps += 1
+            bytes += c.byteCost
+            return steps <= maxSteps && bytes <= maxBytes
+        }
+
+        // Redo first: the steps closest to the current document state.
+        var redoReversed: [Any] = []
+        for c in redoStack.reversed() {
+            guard fits(c) else { break }
+            redoReversed.append(Self.changeJSONObject(c))
+        }
+        var undoReversed: [Any] = []
+        for c in undoStack.reversed() {
+            guard fits(c) else { break }
+            undoReversed.append(Self.changeJSONObject(c))
+        }
+
+        let payload: [String: Any] = [
+            "v": Self.historyFormatVersion,
+            "undo": Array(undoReversed.reversed()),
+            "redo": Array(redoReversed.reversed()),
+        ]
+        return try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+    }
+
+    /// String convenience for `historyJson(maxSteps:maxBytes:)`.
+    public func historyJsonString(maxSteps: Int, maxBytes: Int) -> String? {
+        guard let data = historyJson(maxSteps: maxSteps, maxBytes: maxBytes) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    /// Restores undo/redo history JSON previously produced by `historyJson` when it leads to this document.
+    /// Rejects secure fields, open undo groups, mismatched versions, invalid UTF-8 boundaries, or unrelated drafts.
+    @discardableResult
+    public mutating func restoreHistoryJson(_ data: Data) -> Bool {
+        guard !isSecure, !undoGroupState.isOpen else { return false }
+        guard let obj = try? JSONSerialization.jsonObject(with: data, options: []),
+              let dict = obj as? [String: Any],
+              let version = Self.exactInt(dict["v"]),
+              version == Self.historyFormatVersion,
+              let undoArr = dict["undo"] as? [Any],
+              let redoArr = dict["redo"] as? [Any] else {
+            return false
+        }
+        var parsedUndo: [UndoChange] = []
+        parsedUndo.reserveCapacity(undoArr.count)
+        for item in undoArr {
+            guard let c = Self.parseChangeJSON(item) else { return false }
+            parsedUndo.append(c)
+        }
+        var parsedRedo: [UndoChange] = []
+        parsedRedo.reserveCapacity(redoArr.count)
+        for item in redoArr {
+            guard let c = Self.parseChangeJSON(item) else { return false }
+            parsedRedo.append(c)
+        }
+
+        syncRichInvariants()
+        let now = makeSnapshot()
+        let endpoint = parsedUndo.last?.after ?? parsedRedo.last?.before
+        let leadsHere = endpoint?.sameDocument(as: now) ?? false
+        if !leadsHere {
+            guard let last = parsedUndo.last?.after else { return false }
+            if last.text == now.text {
+                return false
+            }
+            parsedRedo.removeAll()
+            parsedUndo.append(UndoChange(before: last, after: now))
+        }
+
+        var totalBytes = parsedUndo.reduce(0) { $0 + $1.byteCost } + parsedRedo.reduce(0) { $0 + $1.byteCost }
+        while parsedUndo.count > Self.maxHistorySteps || totalBytes > Self.maxHistoryBytes {
+            guard !parsedUndo.isEmpty else { break }
+            let dropped = parsedUndo.removeFirst()
+            totalBytes = max(0, totalBytes - dropped.byteCost)
+        }
+
+        undoStack = parsedUndo
+        redoStack = parsedRedo
+        historyBytes = totalBytes
+        historyRun = .closed
+        return true
+    }
+
+    /// String convenience for `restoreHistoryJson(_ data:)`.
+    @discardableResult
+    public mutating func restoreHistoryJson(_ json: String) -> Bool {
+        guard let data = json.data(using: .utf8) else { return false }
+        return restoreHistoryJson(data)
+    }
+
+    private static func exactInt(_ value: Any?) -> Int? {
+        guard let num = value as? NSNumber else { return nil }
+        if CFGetTypeID(num) == CFBooleanGetTypeID() { return nil }
+        let d = num.doubleValue
+        guard d >= 0, d.rounded(.towardZero) == d, d <= Double(Int.max) else { return nil }
+        return Int(d)
+    }
+
+    private static func isUTF8CharBoundary(_ offset: Int, in utf8Bytes: [UInt8]) -> Bool {
+        guard offset >= 0 && offset <= utf8Bytes.count else { return false }
+        if offset == utf8Bytes.count { return true }
+        return (utf8Bytes[offset] & 0xC0) != 0x80
+    }
+
+    private static func changeJSONObject(_ c: UndoChange) -> [String: Any] {
+        [
+            "b": snapshotJSONObject(c.before),
+            "a": snapshotJSONObject(c.after),
+        ]
+    }
+
+    private static func snapshotJSONObject(_ s: Snapshot) -> [String: Any] {
+        let marksJSON: [Any] = s.richMarks.map { m in
+            let kind: Any
+            switch m.mark {
+            case .bold: kind = "b"
+            case .italic: kind = "i"
+            case .underline: kind = "u"
+            case .strike: kind = "s"
+            case .code: kind = "c"
+            case .link(let url): kind = ["l", url]
+            case .pill(let id): kind = ["p", id]
+            }
+            return [m.start, m.end, kind]
+        }
+        let blocksJSON: [Any] = s.blocks.map { b in
+            switch b {
+            case .paragraph: return "p"
+            case .quote: return "q"
+            case .code: return "c"
+            case .bullet(let l): return ["b", Int(l)]
+            case .numbered(let l): return ["n", Int(l)]
+            }
+        }
+        return [
+            "t": s.text,
+            "a": s.anchor,
+            "f": s.cursor,
+            "m": marksJSON,
+            "k": blocksJSON,
+            "s": s.softBreaks,
+        ]
+    }
+
+    private static func parseChangeJSON(_ obj: Any) -> UndoChange? {
+        guard let dict = obj as? [String: Any],
+              let before = parseSnapshotJSON(dict["b"]),
+              let after = parseSnapshotJSON(dict["a"]) else {
+            return nil
+        }
+        return UndoChange(before: before, after: after)
+    }
+
+    private static func parseSnapshotJSON(_ obj: Any?) -> Snapshot? {
+        guard let dict = obj as? [String: Any],
+              let text = dict["t"] as? String,
+              let anchor = exactInt(dict["a"]),
+              let focus = exactInt(dict["f"]),
+              let rawMarks = dict["m"] as? [Any],
+              let rawBlocks = dict["k"] as? [Any],
+              let rawSoft = dict["s"] as? [Any] else {
+            return nil
+        }
+        let utf8Bytes = Array(text.utf8)
+        guard isUTF8CharBoundary(anchor, in: utf8Bytes),
+              isUTF8CharBoundary(focus, in: utf8Bytes) else {
+            return nil
+        }
+
+        var richMarks: [RichMarkRange] = []
+        richMarks.reserveCapacity(rawMarks.count)
+        for item in rawMarks {
+            guard let arr = item as? [Any], arr.count >= 3,
+                  let start = exactInt(arr[0]),
+                  let end = exactInt(arr[1]),
+                  isUTF8CharBoundary(start, in: utf8Bytes),
+                  isUTF8CharBoundary(end, in: utf8Bytes) else {
+                return nil
+            }
+            let mark: RichMark
+            if let k = arr[2] as? String {
+                switch k {
+                case "b": mark = .bold
+                case "i": mark = .italic
+                case "u": mark = .underline
+                case "s": mark = .strike
+                case "c": mark = .code
+                default: return nil
+                }
+            } else if let pair = arr[2] as? [Any], pair.count >= 2,
+                      let tag = pair[0] as? String, let payload = pair[1] as? String {
+                switch tag {
+                case "l": mark = .link(payload)
+                case "p": mark = .pill(payload)
+                default: return nil
+                }
+            } else {
+                return nil
+            }
+            if start < end {
+                richMarks.append(RichMarkRange(start: start, end: end, mark: mark))
+            }
+        }
+
+        let lineCount = text.split(separator: "\n", omittingEmptySubsequences: false).count
+        var blocks: [Block] = []
+        blocks.reserveCapacity(rawBlocks.count)
+        for item in rawBlocks {
+            if let b = item as? String {
+                switch b {
+                case "p": blocks.append(.paragraph)
+                case "q": blocks.append(.quote)
+                case "c": blocks.append(.code)
+                default: return nil
+                }
+            } else if let pair = item as? [Any], pair.count >= 2,
+                      let tag = pair[0] as? String, let lvl = exactInt(pair[1]) {
+                let clamped = UInt8(min(lvl, Int(Block.maxListLevel)))
+                switch tag {
+                case "b": blocks.append(.bullet(clamped))
+                case "n": blocks.append(.numbered(clamped))
+                default: return nil
+                }
+            } else {
+                return nil
+            }
+        }
+        guard blocks.isEmpty || blocks.count == lineCount else {
+            return nil
+        }
+
+        var softBreaks: [Int] = []
+        softBreaks.reserveCapacity(rawSoft.count)
+        for item in rawSoft {
+            guard let idx = exactInt(item), idx > 0, idx < lineCount else {
+                return nil
+            }
+            softBreaks.append(idx)
+        }
+
+        return Snapshot(
+            text: text,
+            cursor: focus,
+            anchor: anchor,
+            marks: [],
+            richMarks: richMarks,
+            blocks: blocks,
+            softBreaks: softBreaks
+        )
+    }
+
     // MARK: - IME Preedit
 
     public mutating func setPreedit(

@@ -49,6 +49,8 @@ extension El {
         if let liveText { out.liveText = liveText }
         if let placeholder { out.placeholder = placeholder }
         if let placeholderColor { out.placeholderColor = placeholderColor }
+        if let placeholderFont { out.placeholderFont = placeholderFont }
+        if isWrapGreedy { out.isWrapGreedy = true }
         if let caretColor { out.caretColor = caretColor }
         if let selectionColor { out.selectionColor = selectionColor }
         if let iconPayload { out.iconPayload = iconPayload }
