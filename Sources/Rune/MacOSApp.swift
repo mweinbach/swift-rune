@@ -52,6 +52,9 @@ public enum MacOSApp {
         }
 
         let vp = parsed.viewportOverride ?? appBuilder.size
+        // `RUNE_OPEN_INACTIVE`: a tool's launch (an accessibility probe, a capture) leaves the
+        // user's focus and keyboard where they are, as `App::open_inactive` does (#962).
+        let openInactive = OpenInactiveLaunch.openInactive(app: appBuilder.isOpenInactive)
         let app = NSApplication.shared
         app.setActivationPolicy(appBuilder.isAccessory ? .accessory : .regular)
         if !appBuilder.isAccessory {
@@ -98,7 +101,7 @@ public enum MacOSApp {
         runtime.tabVisitsControls = appBuilder.tabVisitsControlsEnabled
         runtime.nativeHelp = true
         runtime.fitHeight = appBuilder.isFitContentHeight
-        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.readSystemContrastSettings()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         if let pg = appBuilder.playgroundHost {
             runtime.playgroundHost = pg
@@ -242,7 +245,7 @@ public enum MacOSApp {
             shortcutGuard: shortcutGuard,
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
-                if appBuilder.isOpenInactive {
+                if openInactive {
                     window.orderFront(nil)
                 } else {
                     window.makeKeyAndOrderFront(nil)
@@ -265,7 +268,10 @@ public enum MacOSApp {
         }
         let systemObserver = MacOSSystemObserver { [weak runtime, weak hostView] in
             guard let runtime else { return }
-            runtime.setSystemContrast(SystemPreferences.current().contrast)
+            // Scroller style, system colours, or the workspace's accessibility display options
+            // (`NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`): reduced motion,
+            // the contrast theme and Increase Contrast are read again at once (#980).
+            runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
             runtime.markNeedsCommit()
             hostView?.requestRender()
         }
@@ -274,7 +280,7 @@ public enum MacOSApp {
             keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
                 if focused {
-                    runtime.setSystemContrast(SystemPreferences.current().contrast)
+                    runtime.readSystemContrastSettings()
                 }
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
                 if focused {
@@ -353,12 +359,12 @@ public enum MacOSApp {
             ReadySignal.ready()
             windowlessDriver.start()
         } else {
-            if appBuilder.isOpenInactive {
+            if openInactive {
                 window.orderFront(nil)
             } else {
                 window.makeKeyAndOrderFront(nil)
                 window.makeFirstResponder(hostView)
-                if !appBuilder.isAccessory {
+                if OpenInactiveLaunch.activatesAtLaunch(accessory: appBuilder.isAccessory) {
                     app.activate(ignoringOtherApps: true)
                 }
             }

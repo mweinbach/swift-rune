@@ -820,6 +820,16 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         requestRender()
     }
 
+    /// The window's accessibility adapter watches the workspace's display options and reads
+    /// reduced motion, the contrast theme and Increase Contrast again when they change (#980).
+    func watchSystemDisplayOptions(forceReducedMotion: Bool) {
+        accessibilityHost.watchDisplayOptions { [weak self] in
+            guard let self else { return }
+            self.entry.readSystemAccessibilitySettings(runtimeObj: self.runtime, forceReducedMotion: forceReducedMotion)
+            self.requestRender()
+        }
+    }
+
     func requestRender() {
         guard bounds.width > 0 && bounds.height > 0 else { return }
         let t = nowSeconds()
@@ -1250,10 +1260,12 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         MacOSQuitHook.install()
 
         for spec in windows {
-            try host.openEntry(spec.makeHostEntry())
+            try host.openEntry(spec.makeHostEntry(), launch: true)
         }
 
-        if !options.accessory {
+        // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch
+        // either; the activation policy stays the app's own (#962).
+        if OpenInactiveLaunch.activatesAtLaunch(accessory: options.accessory) {
             app.activate(ignoringOtherApps: true)
         }
         defer {
@@ -1268,7 +1280,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         QuitLifecycle.finishOrderlyExit()
     }
 
-    private func openEntry(_ specEntry: HostedWindowEntry) throws {
+    private func openEntry(_ specEntry: HostedWindowEntry, launch: Bool = false) throws {
         // Never duplicate an already-open non-torn-down key.
         if slots.contains(where: { !$0.isTornDown && $0.entry.key == specEntry.key }) {
             return
@@ -1318,6 +1330,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         slot.host = self
         view.slot = slot
+        view.watchSystemDisplayOptions(forceReducedMotion: parsed.reducedMotion)
         window.delegate = slot
         window.contentView = view
 
@@ -1385,7 +1398,8 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             if specEntry.options.position == nil {
                 window.center()
             }
-            if specEntry.inactive || specEntry.macosWindow.nonactivatingPanel {
+            let inactive = launch ? OpenInactiveLaunch.openInactive(app: specEntry.inactive) : specEntry.inactive
+            if inactive || specEntry.macosWindow.nonactivatingPanel {
                 window.orderFrontRegardless()
             } else {
                 window.makeKeyAndOrderFront(nil)

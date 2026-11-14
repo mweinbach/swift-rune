@@ -448,8 +448,19 @@ public final class MacOSAccessibilityHost {
     private var lastFocusedId: String?
     private var rootElements: [RuneNSAccessibilityElement] = []
     private var elementById: [String: RuneNSAccessibilityElement] = [:]
+    /// The workspace's display options observer (`a11y/macos.rs` `Adapter(_, DisplayOptions)`),
+    /// removed with the adapter.
+    private var displayOptions: MacOSDisplayOptionsWatcher?
 
     public init() {}
+
+    /// Watches `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification` for as long as
+    /// this adapter lives, calling `onChange` on the main thread (#980).
+    public func watchDisplayOptions(_ onChange: @escaping @MainActor () -> Void) {
+        displayOptions = MacOSDisplayOptionsWatcher(onChange: onChange)
+    }
+
+    public var watchesDisplayOptions: Bool { displayOptions?.isWatching ?? false }
 
     /// Rebuilds cached `NSAccessibilityElement` wrappers for `tree` and emits focus / VoiceOver announcements.
     public func update(

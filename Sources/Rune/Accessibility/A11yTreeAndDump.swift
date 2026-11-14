@@ -31,9 +31,13 @@ public final class AccessibilityLink: @unchecked Sendable {
     }
 
     /// Services queued activation/actions against `rootNode` and returns an incremental `AccessibilityTreeUpdate` if changed.
+    /// `announcement`: `Tx::announce`'s window live region (the root's announcer child), held back
+    /// from a whole tree when said in the last moments (#980); see `needsFollowUp`.
     public func service(
         rootNode: AccessibilityNode?,
         windowTitle: String,
+        announcement: AccessibilityAnnouncement? = nil,
+        now: Double = AccessibilityAnnouncement.clock(),
         actionHandler: ((String, AccessibilityAction, String?) -> Bool)? = nil
     ) -> AccessibilityTreeUpdate? {
         lock.lock()
@@ -59,8 +63,12 @@ public final class AccessibilityLink: @unchecked Sendable {
         }
 
         guard isActive, let rootNode else { return nil }
-        return treeState.diff(root: rootNode, windowTitle: windowTitle)
+        return treeState.diff(root: rootNode, windowTitle: windowTitle, announcement: announcement, now: now)
     }
+
+    /// The last whole tree held the announcer's words back: the host must update again (the
+    /// runtime stays dirty) so they go out as a change (`a11y_update`'s `self.dirty = true`).
+    public var needsFollowUp: Bool { treeState.held }
 }
 
 // MARK: - 2. Incremental Tree Diffing (`rune::a11y::tree`)
@@ -101,9 +109,16 @@ public struct AccessibilityTreeUpdate: Equatable, Sendable {
 
 /// Tracks previously emitted accessibility fingerprints so idle frames cost zero allocations (`A11yTree`).
 public final class AccessibilityTreeState {
+    /// `Tx::announce`'s live region, the root's last child (`a11y/tree.rs` `ANNOUNCER`).
+    public static let announcerID = "__rune_announcer"
+
     private var previousFingerprints: [String: UInt64] = [:]
     private var previousFrames: [String: MotionRect] = [:]
     private var needsFullTree: Bool = true
+    /// The last whole tree held back the announcer's words: an adapter raises no events for the
+    /// tree it starts from, so words said as a reader attached (a request arriving as it starts)
+    /// would never be spoken. The next update sends them as a change (#980).
+    public private(set) var held: Bool = false
     public private(set) var lastChanges = AccessibilityChanges()
 
     public init() {}
@@ -116,10 +131,40 @@ public final class AccessibilityTreeState {
         previousFingerprints.removeAll()
         previousFrames.removeAll()
         needsFullTree = true
+        held = false
         lastChanges = AccessibilityChanges()
     }
 
-    public func diff(root: AccessibilityNode, windowTitle: String) -> AccessibilityTreeUpdate? {
+    /// The announcer node: always there, so its first words are a change a reader announces,
+    /// not a node that appeared. `holdWords`: it goes without its words for now.
+    public static func announcerNode(_ announcement: AccessibilityAnnouncement, holdWords: Bool) -> AccessibilityNode {
+        var label: String? = nil
+        if let words = announcement.words, !words.text.isEmpty, !holdWords { label = words.text }
+        return AccessibilityNode(
+            id: announcerID,
+            role: .status,
+            label: label,
+            frame: MotionRect.fromXYWH(0, 0, 1, 1),
+            liveRegion: announcement.politeness == .assertive ? .assertive : .polite
+        )
+    }
+
+    public func diff(
+        root: AccessibilityNode,
+        windowTitle: String,
+        announcement: AccessibilityAnnouncement? = nil,
+        now: Double = AccessibilityAnnouncement.clock()
+    ) -> AccessibilityTreeUpdate? {
+        let full = needsFullTree
+        // A whole tree with words said in the last moments: they go out without them now.
+        let hold = full && (announcement?.recent(now: now) ?? false)
+        // Held words go out with the root, whose node carries the announcer.
+        let wasHeld = held
+        var root = root
+        if let announcement {
+            root.children.append(Self.announcerNode(announcement, holdWords: hold))
+        }
+
         var flat: [AccessibilityNode] = []
         flatten(root, into: &flat)
 
@@ -133,8 +178,12 @@ public final class AccessibilityTreeState {
             let fp = fingerprint(node)
             nextFP[node.id] = fp
             nextFrames[node.id] = node.frame
-            if needsFullTree {
+            let carriesHeldWords = wasHeld && (node.id == root.id || node.id == Self.announcerID)
+            if full || carriesHeldWords {
                 updated.append(node)
+                if !full, let pb = previousFrames[node.id], pb != node.frame {
+                    moved = true
+                }
             } else if let prev = previousFingerprints[node.id] {
                 if prev != fp {
                     updated.append(node)
@@ -152,7 +201,6 @@ public final class AccessibilityTreeState {
         if !removed.isEmpty {
             structureChanged = true
         }
-        let full = needsFullTree
         if full && !flat.isEmpty {
             structureChanged = true
         }
@@ -160,6 +208,7 @@ public final class AccessibilityTreeState {
         previousFingerprints = nextFP
         previousFrames = nextFrames
         needsFullTree = false
+        held = hold
         lastChanges = AccessibilityChanges(structure: structureChanged, moved: moved)
 
         if !full && updated.isEmpty && removed.isEmpty {

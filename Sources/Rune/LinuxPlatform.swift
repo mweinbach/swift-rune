@@ -310,7 +310,7 @@ public enum LinuxApp {
         runtime.poll = spec.poll
         runtime.onAppFileDrop = spec.onFileDrop
         runtime.onFileDrop = spec.onFileDropPhase
-        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.readSystemContrastSettings()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         // Create POSIX shm framebuffer for compositor/display bridge and render initial frame.

@@ -27,17 +27,38 @@ public struct AccessibilityAnnouncement: Sendable, Equatable {
     public var text: String
     public var politeness: LiveRegionPoliteness
     public private(set) var count: UInt32 = 0
+    /// When it was last said (monotonic seconds, `a11y/mod.rs` `Announcement::at`, #980).
+    public private(set) var at: Double? = nil
+
+    /// How long words stay "recent" for a reader that attached as they were said (1500 ms).
+    public static let recentWindow: Double = 1.5
 
     public init(text: String = "", politeness: LiveRegionPoliteness = .polite) {
         self.text = text
         self.politeness = politeness
     }
 
-    public mutating func say(_ text: String, politeness: LiveRegionPoliteness = .polite) {
+    public mutating func say(_ text: String, politeness: LiveRegionPoliteness = .polite, at now: Double = AccessibilityAnnouncement.clock()) {
         self.text = text
         self.politeness = politeness
         self.count &+= 1
+        self.at = now
     }
+
+    /// Said in the last moments: a reader that attached as it was said should still hear it
+    /// (`Announcement::recent`, < 1.5 s).
+    public func recent(now: Double = AccessibilityAnnouncement.clock()) -> Bool {
+        guard let at else { return false }
+        return now - at < Self.recentWindow
+    }
+
+    /// The live region's name and politeness, if anything was said (`Announcement::words`).
+    public var words: (text: String, politeness: LiveRegionPoliteness)? {
+        spokenText.map { ($0, politeness) }
+    }
+
+    /// The monotonic clock `say` and `recent` read by default.
+    public static func clock() -> Double { ProcessInfo.processInfo.systemUptime }
 
     /// Alternating zero-width space suffix ensures screen readers speak repeated identical messages.
     public var spokenText: String? {
@@ -430,7 +451,7 @@ public enum AppKitAccessibilityMapper {
         case .slider: return .slider
         case .progress: return .progressIndicator
         case .listItem: return .row
-        case .heading: return .staticText
+        case .heading: return NSAccessibility.Role(rawValue: AccessibilityHeading.macRoleName)
         case .dialog: return .sheet
         case .menu: return .menu
         case .menuItem: return .menuItem
@@ -501,7 +522,11 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         if let label = node.label {
             setAccessibilityLabel(label)
         }
-        if !node.isSecure, let value = node.value {
+        if node.role == .heading {
+            // A heading's value is its level, as WebKit and Chromium give VoiceOver
+            // (`vendor/accesskit_macos.patch`, #975), checked before the text value.
+            setAccessibilityValue(NSNumber(value: AccessibilityHeading.macLevelValue(level: node.level)))
+        } else if !node.isSecure, let value = node.value {
             setAccessibilityValue(value)
         }
         if let help = node.help {

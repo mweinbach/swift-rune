@@ -915,6 +915,8 @@ public final class Runtime<State> {
         }
     }
     public internal(set) var lastAnnouncement: (text: String, politeness: LiveRegionPoliteness)? = nil
+    /// `Tx::announce`'s window live region (`Runtime::announcement`): words, politeness, count, when.
+    public internal(set) var a11yAnnouncement = AccessibilityAnnouncement()
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
     public internal(set) var imeCursorArea: [Float]? = nil
@@ -2455,6 +2457,7 @@ public final class Runtime<State> {
         cx.envState.chrome = chromeInsets()
         cx.envState.systemAccent = cxSettings.systemAccent
         cx.envState.systemContrast = cxSettings.systemContrast
+        cx.envState.systemIncreasedContrast = cxSettings.systemIncreasedContrast
         cx.envState.systemScrollBars = cxSettings.scrollBarsState
         cx.envState.systemReducedMotion = cxSettings.hostReducedMotion
         cx.envState.primaryPointer = cxSettings.primaryPointer
@@ -11517,6 +11520,7 @@ public final class Runtime<State> {
         }
         if let ann = tx.announcement {
             lastAnnouncement = ann
+            a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
         let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
         if tx.liveOnlyRequested {

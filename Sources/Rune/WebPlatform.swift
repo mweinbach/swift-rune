@@ -194,7 +194,7 @@ public final class WebAppHost<State> {
         self.runtime.poll = spec.poll
         self.runtime.onAppFileDrop = spec.onFileDrop
         self.runtime.onFileDrop = spec.onFileDropPhase
-        self.runtime.setSystemContrast(SystemPreferences.current().contrast)
+        self.runtime.readSystemContrastSettings()
     }
 
     @discardableResult

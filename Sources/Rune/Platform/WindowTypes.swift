@@ -336,6 +336,8 @@ public protocol HostedWindowEntry: AnyObject {
     )
     func helpRegionsList(runtimeObj: AnyObject) -> [(MotionRect, String)]
     func setFocused(runtimeObj: AnyObject, focused: Bool)
+    /// The system's accessibility display options changed: re-read reduced motion, contrast and Increase Contrast.
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool)
     func setSystemDark(runtimeObj: AnyObject, dark: Bool)
     func windowTitle(runtimeObj: AnyObject) -> String?
     func quitRequested(runtimeObj: AnyObject) -> Bool
@@ -432,7 +434,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt.onFileDrop = spec.appSpec.onFileDropPhase
         rt.nativeHelp = true
         rt.fitHeight = spec.fitContentHeight
-        rt.setSystemContrast(SystemPreferences.current().contrast)
+        rt.readSystemContrastSettings()
         spec.configureRuntime?(rt)
         spec.appShared?.setWaker(waker)
         if rt.fitHeight {
@@ -578,8 +580,12 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         let r = rt(runtimeObj)
         r.dispatchFocus(focused)
         if focused {
-            r.setSystemContrast(SystemPreferences.current().contrast)
+            r.readSystemContrastSettings()
         }
+    }
+
+    func readSystemAccessibilitySettings(runtimeObj: AnyObject, forceReducedMotion: Bool) {
+        rt(runtimeObj).readSystemAccessibilitySettings(forceReducedMotion: forceReducedMotion)
     }
 
     func setSystemDark(runtimeObj: AnyObject, dark: Bool) {
