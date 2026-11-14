@@ -642,7 +642,7 @@ public final class Runtime<State> {
     public var onReopen: ((inout State, Bool, inout Tx) -> Bool)? = nil
     public var onOpenUrl: ((inout State, String, inout Tx) -> Void)? = nil
     public private(set) var closeWindowRequested: Bool = false
-    public private(set) var minimizeRequested: Bool = false
+    public internal(set) var minimizeRequested: Bool = false
     public private(set) var relaunchRequested: Bool = false
     public internal(set) var wakeDeadlines: [Double] = []
     internal var pendingUpdateWakes: [(scheduledAt: Double, delay: Double)] = []
@@ -2424,6 +2424,7 @@ public final class Runtime<State> {
         cx.envState.systemContrast = cxSettings.systemContrast
         cx.envState.systemScrollBars = cxSettings.scrollBarsState
         cx.envState.systemReducedMotion = cxSettings.hostReducedMotion
+        cx.envState.primaryPointer = cxSettings.primaryPointer
         cx.envState.zoom = 1.0
         cx.envState.caret = focusedCaret
         cx.envState.selectionRects = computeSelectionBoxes(in: memoNodes)
@@ -2435,7 +2436,9 @@ public final class Runtime<State> {
             accent: cx.accent(),
             focusColor: cx.focusColor(),
             chromeInsets: [cx.envState.chrome.leading, cx.envState.chrome.trailing, cx.envState.chrome.top, cxSettings.scrollBarsState.bars.hashValue.signum() == 0 ? 0 : Float(cxSettings.scrollBarsState.isOverlay ? 1 : 2)],
-            scrollerOverlay: cxSettings.scrollBarsState.isOverlay
+            scrollerOverlay: cxSettings.scrollBarsState.isOverlay,
+            hoverNone: cx.hoverNone(),
+            touchControls: cx.touchControls()
         )
         lastViewMemoEnvHash = envHash
         let viewTouchedBox = MemoScope.TouchedIdsBox()
@@ -10939,7 +10942,44 @@ public final class Runtime<State> {
 
     // MARK: - Private Helpers
 
+    internal func runPickReads(_ tx: inout Tx) {
+        while !tx.pickReads.isEmpty {
+            let batch = tx.pickReads
+            tx.pickReads.removeAll(keepingCapacity: true)
+            for read in batch {
+                let picked = elementAtWithin(read.within, x: read.x, y: read.y, pick: read.pick)
+                var stateBox: Any = state
+                if read.invoke(&stateBox, picked, &tx), let updated = stateBox as? State {
+                    state = updated
+                }
+            }
+        }
+    }
+
     internal func applyTx(
+        _ tx: Tx,
+        at now: Double,
+        markDirtyIfNotLiveOnly: Bool = true,
+        external: Bool = true,
+        liveOnlyLabel: String = "handler",
+        why: UInt16 = CommitWhy.input,
+        runPicks: Bool = true
+    ) {
+        var resolvedTx = tx
+        if runPicks {
+            runPickReads(&resolvedTx)
+        }
+        applyTxResolved(
+            resolvedTx,
+            at: now,
+            markDirtyIfNotLiveOnly: markDirtyIfNotLiveOnly,
+            external: external,
+            liveOnlyLabel: liveOnlyLabel,
+            why: why
+        )
+    }
+
+    private func applyTxResolved(
         _ tx: Tx,
         at now: Double,
         markDirtyIfNotLiveOnly: Bool = true,
@@ -11394,6 +11434,25 @@ public final class Runtime<State> {
     /// etc.) still apply without forcing a rebuild (`app.rs:1240-1251`).
     @discardableResult
     public func updateIf(at now: Double? = nil, _ body: (_ state: inout State, _ tx: inout Tx) -> Bool) -> Bool {
+        updateIfInner(at: now, ordered: false, body).stale
+    }
+
+    /// `updateIf` for a window drain (`Runtime::update_if_ordered`): a minimize it asked for comes
+    /// back as its order instead of immediately latching `minimizeStep(.asked)`, unless a pick
+    /// callback put back or replaced `tx` (which discards it). A minimize asked inside a pick
+    /// callback itself still latches normally.
+    internal func updateIfOrdered(
+        at now: Double? = nil,
+        _ body: (_ state: inout State, _ tx: inout Tx) -> Bool
+    ) -> (stale: Bool, minimizeOrder: UInt64?) {
+        updateIfInner(at: now, ordered: true, body)
+    }
+
+    private func updateIfInner(
+        at now: Double? = nil,
+        ordered: Bool,
+        _ body: (_ state: inout State, _ tx: inout Tx) -> Bool
+    ) -> (stale: Bool, minimizeOrder: UInt64?) {
         RuntimeIdScope.$current.withValue(runtimeId) {
             suppressRevealFromHoverCommit = false
             let t = now ?? currentTime
@@ -11408,8 +11467,28 @@ public final class Runtime<State> {
             }
             let hadFocusBeforeUpdate = (focusedPath != nil || focusedKey != nil)
             let prevNeedsCommit = needsCommit
+            let survivedMinimize: UInt64?
+            if ordered {
+                let asked = tx.minimizeOrder
+                runPickReads(&tx)
+                if let asked, tx.minimizeOrder == asked {
+                    survivedMinimize = asked
+                    tx.minimizeOrder = nil
+                } else {
+                    survivedMinimize = nil
+                }
+            } else {
+                runPickReads(&tx)
+                survivedMinimize = nil
+            }
             let shouldDirty = changed || tx.isForceCommitRequested
-            applyTx(tx, at: t, markDirtyIfNotLiveOnly: shouldDirty, why: shouldDirty ? CommitWhy.dirty : 0)
+            applyTx(
+                tx,
+                at: t,
+                markDirtyIfNotLiveOnly: shouldDirty,
+                why: shouldDirty ? CommitWhy.dirty : 0,
+                runPicks: false
+            )
             let txHasFrameWork = !tx.scrollRevealRequests.isEmpty
                 || !tx.scrollBottomRequests.isEmpty
                 || !tx.scrollPageRequests.isEmpty
@@ -11426,7 +11505,8 @@ public final class Runtime<State> {
                 || tx.srgbBlendRequest.map { $0 != srgbBlend } == true
                 || tx.fontSmoothingRequest.map { $0 != fontSmoothing } == true
                 || (needsCommit && !prevNeedsCommit)
-            return changed || txHasFrameWork || (tx.blurFocusRequested && hadFocusBeforeUpdate)
+            let stale = changed || txHasFrameWork || (tx.blurFocusRequested && hadFocusBeforeUpdate)
+            return (stale, survivedMinimize)
         }
     }
 

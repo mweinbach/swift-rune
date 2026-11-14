@@ -242,6 +242,11 @@ public final class WebAppHost<State> {
     public func handlePointerUp(x: Float, y: Float, button: PointerButton = .primary, at now: Double) {
         runtime.pointerUp(at: Vec2(x, y), button: button, mods: .none, at: now)
     }
+
+    @discardableResult
+    public func handlePrimaryPointer(hover: Bool, coarse: Bool) -> Bool {
+        runtime.setWebPointerCapability(hover: hover, coarse: coarse)
+    }
 }
 
 #if os(WASI)

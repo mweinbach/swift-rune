@@ -221,6 +221,14 @@ public struct RotateEvent: Sendable, Equatable {
     }
 }
 
+internal struct TxPickRead {
+    let within: String?
+    let x: Float
+    let y: Float
+    let pick: Pick
+    let invoke: (_ stateBox: inout Any, _ picked: Picked?, _ tx: inout Tx) -> Bool
+}
+
 /// Transaction handle passed into every event handler (`rune::Tx`).
 public struct Tx {
     public internal(set) var liveOnlyRequested: Bool = false
@@ -282,6 +290,9 @@ public struct Tx {
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
     public internal(set) var announcement: (text: String, politeness: LiveRegionPoliteness)? = nil
+    public internal(set) var shortcutActivationToken: String? = nil
+    internal var minimizeOrder: UInt64? = nil
+    internal var pickReads: [TxPickRead] = []
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -542,6 +553,10 @@ public struct Tx {
         sentKeys.append(contentsOf: one.sentKeys)
         toggleMaximizedRequested = toggleMaximizedRequested || one.toggleMaximizedRequested
         toggleFullScreenRequested = toggleFullScreenRequested || one.toggleFullScreenRequested
+        if let otherMinimizeOrder = one.minimizeOrder {
+            minimizeOrder = max(minimizeOrder ?? 0, otherMinimizeOrder)
+        }
+        pickReads.append(contentsOf: one.pickReads)
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }
@@ -632,6 +647,66 @@ public struct Tx {
     /// Requests opening `url` in the same web tab (`Tx::open_url_same_tab` Swift-case alias).
     public mutating func openURLSameTab(_ url: String) throws {
         try openUrlSameTab(url)
+    }
+
+    /// Activation token provided by the desktop portal (e.g. Wayland) during a global shortcut callback (`Tx::activation_token`).
+    public func activationToken() -> String? {
+        shortcutActivationToken
+    }
+
+    /// Reads the topmost element at window point `(x, y)` after this handler completes (`Tx::element_at`).
+    public mutating func elementAt<S>(
+        _ x: Float,
+        _ y: Float,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        elementAtWith(x, y, pick: .default, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` with `Pick` options (`Tx::element_at_with`).
+    public mutating func elementAtWith<S>(
+        _ x: Float,
+        _ y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        enqueuePickRead(within: nil, x: x, y: y, pick: pick, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` restricted to `within` (`Tx::element_at_in`).
+    public mutating func elementAtIn<S>(
+        _ within: String,
+        x: Float,
+        y: Float,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        elementAtInWith(within, x: x, y: y, pick: .default, body)
+    }
+
+    /// Reads the topmost element at `(x, y)` restricted to `within` with `Pick` options (`Tx::element_at_in_with`).
+    public mutating func elementAtInWith<S>(
+        _ within: String,
+        x: Float,
+        y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        enqueuePickRead(within: within, x: x, y: y, pick: pick, body)
+    }
+
+    private mutating func enqueuePickRead<S>(
+        within: String?,
+        x: Float,
+        y: Float,
+        pick: Pick,
+        _ body: @escaping (_ state: inout S, _ picked: Picked?, _ tx: inout Tx) -> Void
+    ) {
+        pickReads.append(TxPickRead(within: within, x: x, y: y, pick: pick) { stateBox, picked, tx in
+            guard var typed = stateBox as? S else { return false }
+            body(&typed, picked, &tx)
+            stateBox = typed
+            return true
+        })
     }
 }
 

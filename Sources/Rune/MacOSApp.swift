@@ -210,6 +210,9 @@ public enum MacOSApp {
             }
         }
 
+        let shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: waker, headless: false)
+        defer { shortcutGuard.close() }
+
         let hostView = RuneMetalHostView(
             frame: NSRect(x: 0, y: 0, width: CGFloat(vp.x), height: CGFloat(vp.y)),
             runtime: runtime,
@@ -218,6 +221,7 @@ public enum MacOSApp {
             respectSystemAppearance: respectSystemAppearance,
             compositor: appBuilder.compositorValue,
             appShared: appShared,
+            shortcutGuard: shortcutGuard,
             reports: reports,
             surfaceMeter: meter,
             devStatsReceiver: appBuilder.devStatsReceiver,
@@ -233,6 +237,7 @@ public enum MacOSApp {
             timeScale: parsed.timeScale,
             shared: appBuilder.sharedHandle.shared,
             runtime: runtime,
+            shortcutGuard: shortcutGuard,
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
                 if appBuilder.isOpenInactive {
@@ -253,7 +258,9 @@ public enum MacOSApp {
         )
 
         let shortcutBridge = MacOSHostShortcutBridge()
-        shortcutBridge.sync(registry: runtime.shortcutRegistry)
+        if appBuilder.globalShortcuts.isEmpty {
+            shortcutBridge.sync(registry: runtime.shortcutRegistry)
+        }
         let systemObserver = MacOSSystemObserver { [weak runtime, weak hostView] in
             guard let runtime else { return }
             runtime.setSystemContrast(SystemPreferences.current().contrast)
@@ -291,6 +298,7 @@ public enum MacOSApp {
             },
             onTerminate: {
                 _ = systemObserver
+                shortcutGuard.close()
                 shortcutBridge.clear()
                 windowlessDriver.stop()
                 hostView.stopTimer()
@@ -445,6 +453,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let respectSystemAppearance: Bool
     private let compositor: AnyCompositor<State>?
     private let appShared: AppShared<State>?
+    private let shortcutGuard: ShortcutGuard?
     private let reports: FrameReports<State>?
     private let surfaceMeter: SurfaceMeter?
     private let devStatsReceiver: ((SurfaceStats) -> Void)?
@@ -486,6 +495,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         respectSystemAppearance: Bool,
         compositor: AnyCompositor<State>? = nil,
         appShared: AppShared<State>? = nil,
+        shortcutGuard: ShortcutGuard? = nil,
         reports: FrameReports<State>? = nil,
         surfaceMeter: SurfaceMeter? = nil,
         devStatsReceiver: ((SurfaceStats) -> Void)? = nil,
@@ -500,6 +510,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         self.respectSystemAppearance = respectSystemAppearance
         self.compositor = compositor
         self.appShared = appShared
+        self.shortcutGuard = shortcutGuard
         self.reports = reports
         self.surfaceMeter = surfaceMeter
         if let surfaceMeter {
@@ -617,7 +628,19 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
         runtime.windowResting = !(inLiveResize || windowFrameDriver.isMoving)
 
-        if let drained = appShared?.applyStateUpdates(to: runtime, at: t) {
+        shortcutGuard?.drain()
+        let drained: AppDrainedRequests<State>? = if let appShared {
+            if let shortcutGuard {
+                shortcutGuard.withReceiving {
+                    appShared.applyStateUpdates(to: runtime, at: t)
+                }
+            } else {
+                appShared.applyStateUpdates(to: runtime, at: t)
+            }
+        } else {
+            nil
+        }
+        if let drained {
             applyDrainedRequests(drained)
         }
         syncNativeMenus()
@@ -1297,6 +1320,7 @@ private final class MacOSWindowlessDriver<State> {
     private let timeScale: Double
     private let shared: AppShared<State>
     private let runtime: Runtime<State>
+    private let shortcutGuard: ShortcutGuard?
     private let onShowWindow: @MainActor () -> Void
     private var timer: Timer?
 
@@ -1306,6 +1330,7 @@ private final class MacOSWindowlessDriver<State> {
         timeScale: Double,
         shared: AppShared<State>,
         runtime: Runtime<State>,
+        shortcutGuard: ShortcutGuard? = nil,
         onShowWindow: @escaping @MainActor () -> Void
     ) {
         self.isWindowShown = !isWindowless
@@ -1313,6 +1338,7 @@ private final class MacOSWindowlessDriver<State> {
         self.timeScale = timeScale
         self.shared = shared
         self.runtime = runtime
+        self.shortcutGuard = shortcutGuard
         self.onShowWindow = onShowWindow
     }
 
@@ -1336,7 +1362,14 @@ private final class MacOSWindowlessDriver<State> {
         guard !isWindowShown else { return }
         _ = MainQueueDispatcher.shared.drain()
         let now = (CACurrentMediaTime() - startAt) * timeScale
-        let req = shared.applyStateUpdates(to: runtime, at: now)
+        shortcutGuard?.drain()
+        let req = if let shortcutGuard {
+            shortcutGuard.withReceiving {
+                shared.applyStateUpdates(to: runtime, at: now)
+            }
+        } else {
+            shared.applyStateUpdates(to: runtime, at: now)
+        }
         if req.quit {
             NSApplication.shared.terminate(nil)
             return

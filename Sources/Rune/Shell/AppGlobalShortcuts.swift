@@ -84,6 +84,11 @@ extension App {
         handler: @escaping @Sendable (inout State, inout Tx) -> Void
     ) -> App<State> {
         var copy = self
+        let parsed = Result { try ParsedShortcut.parseOn(accelerator) }
+            .mapError { err -> ShortcutError in
+                (err as? ShortcutError) ?? .invalidAccelerator(accelerator)
+            }
+        copy.sharedHandle.shared.shortcuts.enqueuePending(parsed, handler: handler)
         copy.globalShortcuts.append(AppGlobalShortcutEntry(
             accelerator: accelerator,
             label: label,
@@ -106,6 +111,7 @@ extension App {
     /// Allows unmodified single-key global accelerators when registering shortcuts (`App::allow_unmodified_shortcuts`).
     public func allowUnmodifiedShortcuts(_ allow: Bool = true) -> App<State> {
         var copy = self
+        copy.sharedHandle.shared.shortcuts.setAllowUnmodified(allow)
         copy.allowUnmodifiedShortcutsEnabled = allow
         return copy
     }

@@ -890,6 +890,7 @@ public final class DesktopWindow<State>: DesktopMember {
     private var lastScene: RefScene?
     private var pendingClose = false
     private let appShared: AppShared<State>?
+    private var shortcutGuard: ShortcutGuard?
     private let onCloseHook: ((inout State, inout Tx) -> Bool)?
     private let onReopenHook: ((inout State, Bool, inout Tx) -> Bool)?
     private let waker: Waker
@@ -955,6 +956,9 @@ public final class DesktopWindow<State>: DesktopMember {
         if let onFocus { rt.onFocus = onFocus }
         self.runtime = rt
         self.appShared = spec.appShared
+        if let appShared = spec.appShared {
+            self.shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: w, headless: true)
+        }
         self.onCloseHook = rt.onClose
         self.onReopenHook = rt.onReopen
         self.keepRunning = spec.keepRunning
@@ -1015,7 +1019,14 @@ public final class DesktopWindow<State>: DesktopMember {
         var changes = DesktopChanges()
         if let appShared {
             sharedWakeFlag.set(false)
-            let drained = appShared.applyStateUpdates(to: runtime, at: t)
+            shortcutGuard?.drain()
+            let drained = if let shortcutGuard {
+                shortcutGuard.withReceiving {
+                    appShared.applyStateUpdates(to: runtime, at: t)
+                }
+            } else {
+                appShared.applyStateUpdates(to: runtime, at: t)
+            }
             if let placeReq = drained.place {
                 let (_, placedFrame) = desktop.place(request: placeReq, size: (frame[2], frame[3]))
                 frame = placedFrame
@@ -1078,6 +1089,8 @@ public final class DesktopWindow<State>: DesktopMember {
         hide()
         if !keepRunning {
             life.finish()
+            shortcutGuard?.close()
+            shortcutGuard = nil
         }
         runtime.clearShellRequests()
     }

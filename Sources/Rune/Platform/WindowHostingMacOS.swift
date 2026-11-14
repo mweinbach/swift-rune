@@ -584,6 +584,7 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     var restTimer: Timer?
     var fullScreenWatch: FullScreenWatch?
     var trafficLightSpot: RuneTrafficLights.Spot?
+    var shortcutGuard: ShortcutGuard?
     var shortcutBridge: MacOSHostShortcutBridge?
     var isHiddenOrClosed = false
     var isTornDown = false
@@ -648,6 +649,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         restTimer?.invalidate()
         restTimer = nil
         isTornDown = true
+        shortcutGuard?.close()
+        shortcutGuard = nil
         shortcutBridge?.clear()
         shortcutBridge = nil
         entry.markMenusRunning(false)
@@ -821,7 +824,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
         isWindowResting = !(inLiveResize || windowFrameDriver.isMoving)
         entry.setWindowResting(runtimeObj: runtime, resting: isWindowResting)
-        entry.applyAppStateUpdates(runtimeObj: runtime, at: t)
+        entry.applyAppStateUpdates(runtimeObj: runtime, at: t, shortcutGuard: slot?.shortcutGuard)
         entry.syncNativeMenus(
             runtimeObj: runtime,
             appliedRevision: &appliedMenuRevision,
@@ -1304,9 +1307,13 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         RuneDragRegions.ownWindowDragging(window: window, chrome: specEntry.chrome)
         slot.trafficLightSpot = RuneTrafficLights.Spot(window: window)
-        let shortcutBridge = MacOSHostShortcutBridge()
-        shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
-        slot.shortcutBridge = shortcutBridge
+        let skipHostShortcutBridge = specEntry.hasAppGlobalShortcuts
+        slot.shortcutGuard = specEntry.attachShortcuts(wake: waker, headless: false)
+        if !skipHostShortcutBridge {
+            let shortcutBridge = MacOSHostShortcutBridge()
+            shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
+            slot.shortcutBridge = shortcutBridge
+        }
         _ = RuneMacWindowConfig.syncChrome(
             window: window,
             chrome: specEntry.chrome,
