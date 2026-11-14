@@ -345,17 +345,24 @@ struct Slice4EdgeParityWave3BTests {
                 var open = false
                 var enters: [Int] = []
                 var changes: [(Int, Bool)] = []
+                var withinChanges: [(Int, Bool)] = []
             }
             let sRt = Runtime(state: Slide(), viewport: Vec2(200, 400), pixelScale: 1.0) { s, _ in
                 var list: El<Slide> = col().key("rows").wFull()
                 if useGrowth { list = list.growth(GrowthSpec()) }
                 for k in 0..<12 {
-                    let r: El<Slide> = row().key("r\(k)").wFull().h(k == 0 && s.open ? 220 : 20)
+                    var r: El<Slide> = row().key("r\(k)").wFull().h(k == 0 && s.open ? 220 : 20)
                         .hoverGroup().hover(Color.white)
-                        .onHoverChange { st, inside, _ in
+                        .onHover { st, inside, _ in
                             st.changes.append((k, inside))
                             if inside { st.enters.append(k) }
                         }
+                        .onHoverChange { st, inside, _ in
+                            st.withinChanges.append((k, inside))
+                        }
+                    if !useGrowth {
+                        r = r.animate(MotionTokens.SETTLE).animateLayout()
+                    }
                     list = list.child(r)
                 }
                 return col().size(200, 400).child(list)
@@ -371,6 +378,8 @@ struct Slice4EdgeParityWave3BTests {
             #expect(sRt.state.enters == [5, 0])
             #expect(sRt.state.changes.map { $0.0 } == [5, 5, 0])
             #expect(sRt.state.changes.map { $0.1 } == [true, false, true])
+            #expect(sRt.state.withinChanges.map { $0.0 } == [5, 5, 0])
+            #expect(sRt.state.withinChanges.map { $0.1 } == [true, false, true])
         }
 
         // 3. Virtual edge walk: drag below edge extends monotonically; Escape cancels drag keeping selection.

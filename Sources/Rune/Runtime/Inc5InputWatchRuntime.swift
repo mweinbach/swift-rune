@@ -590,12 +590,19 @@ extension Runtime {
         return false
     }
 
+    internal enum HoverDispatchPolicy {
+        case always
+        case onHoldRelease
+        case never
+    }
+
     internal func refreshHoverAndSyncTracks(
         at now: Double,
         wallNow: Double? = nil,
         cut: Bool,
-        dispatchHover: Bool = true
+        dispatchPolicy: HoverDispatchPolicy = .always
     ) {
+        let wasHeld = (hoverHoldState == .held)
         if cut {
             hoverHoldState = .free
             hoverWithinPaths.removeAll()
@@ -640,6 +647,12 @@ extension Runtime {
 
         if let within {
             applyHoverWithin(within.inside, held: shouldHold, at: wallNow ?? currentTime)
+        }
+
+        let dispatchHover: Bool = switch dispatchPolicy {
+        case .always: true
+        case .onHoldRelease: wasHeld
+        case .never: false
         }
 
         if shouldHold {

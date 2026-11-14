@@ -7675,7 +7675,7 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
-        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted {
+        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted || hoverHoldState == .held || layoutMoving() {
             lastHoverScrollOffsets = scrollOffsets
             if activeDrag == nil,
                pointerPosition.x >= 0,
@@ -7688,7 +7688,7 @@ public final class Runtime<State> {
                     at: cxSettings.scaledTime(at: currentTime),
                     wallNow: currentTime,
                     cut: false,
-                    dispatchHover: false
+                    dispatchPolicy: .onHoldRelease
                 )
                 if hoverHoldState != .held && pressedPath == nil {
                     let newPath = hoveredPath
@@ -9358,14 +9358,6 @@ public final class Runtime<State> {
                     applyTx(tx, at: now)
                     return true
                 }
-            }
-            if handleFocusedStepKey(ev, node: fNode, at: now) {
-                return true
-            }
-
-            // Arrow / Home / End / type-select roving inside `.focusGroup()` ancestor!
-            if handleFocusGroupKey(ev, focusedIndex: fIdx, at: now) {
-                return true
             }
         } else if handleUnfocusedMenuNavigation(ev, isRepeat: isRepeat, at: now) {
             return true
@@ -11229,10 +11221,10 @@ public final class Runtime<State> {
         } else {
             return false
         }
-    private func focusGroupMembers(groupIndex: Int, excludeEditable: Bool = false) -> [Int] {
+        activateFocusGroupMember(groupIndex: groupIndex, members: members, curIdx: curIdx, targetPos: nextPos, at: now)
+        return true
+    }
 
-=======
->>>>>>> a075b9f (fix(text): remove superseded focusGroup duplicate after main d3ff7f9 rebase and keep listbox clamped)
     internal func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
         var resolvedEdit = edit
         if node.el.isSecure {
