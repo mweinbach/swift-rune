@@ -678,4 +678,92 @@ struct RuneLuauVMParityTests {
         """#)
         #expect(out == [.bool(true)])
     }
+
+    @Test("Sources.withEmbedded loads bytecode by path without retaining source, preserves stack trace paths/lines, and recompiles on text replacement (#886)")
+    func sourcesWithEmbeddedLoadsWithoutRetainingSource() throws {
+        let helperSource = """
+        --!native
+        local M = {}
+        function M.greet(who)
+            return "hi " .. who
+        end
+        function M.fail()
+            error("boom")
+        end
+        return M
+        """
+        let initSource = """
+        local helper = require("@self/views/helper")
+        return {
+            run = function()
+                return { msg = helper.greet("rune") }
+            end,
+            crash = function()
+                return helper.fail()
+            end,
+        }
+        """
+
+        let helperBC = try Sources.compileBytecode(helperSource, name: "views/helper.luau")
+        let initBC = try Sources.compileBytecode(initSource, name: "init.luau")
+
+        let embeddedSources = Sources()
+            .withEmbedded("./views/helper.luau", helperBC, native: true)
+            .withEmbedded("init.luau", initBC)
+
+        #expect(embeddedSources.paths == ["init.luau", "views/helper.luau"])
+        #expect(embeddedSources.get("views/helper.luau") == nil)
+        #expect(embeddedSources.get("init.luau") == nil)
+        #expect(embeddedSources.files.isEmpty)
+
+        let compiled = try embeddedSources.compile()
+        #expect(compiled.isDir("views"))
+        let helperMod = try #require(compiled.module("views/helper.luau"))
+        #expect(helperMod.native == true)
+        #expect(helperMod.source == nil)
+        let initMod = try #require(compiled.module("init.luau"))
+        #expect(initMod.native == false)
+        #expect(initMod.source == nil)
+
+        let script = Script(name: "embedded_demo", sources: embeddedSources)
+        let ok = try script.query("run")
+        #expect(ok.get("msg") == .string("hi rune"))
+
+        // Embedded module errors keep original module path and line numbers.
+        do {
+            _ = try script.query("crash")
+            Issue.record("expected crash() to throw")
+        } catch let err as ScriptError {
+            #expect(err.message.contains("views/helper.luau:7"), "unexpected error: \(err.message)")
+        }
+
+        // Replacing an embedded module with source recompiles instead of falsely reusing nil source.
+        var replaced = embeddedSources
+        replaced.insert("views/helper.luau", """
+        --!native
+        local M = {}
+        function M.greet(who)
+            return "reloaded " .. who
+        end
+        return M
+        """)
+        #expect(replaced.get("views/helper.luau") != nil)
+        let recompiled = try replaced.compileFrom(compiled)
+        let reloadedHelper = try #require(recompiled.module("views/helper.luau"))
+        #expect(reloadedHelper !== helperMod)
+        #expect(reloadedHelper.native == true)
+        #expect(reloadedHelper.source != nil)
+        let reloadedScript = Script(name: "embedded_reloaded", sources: replaced)
+        #expect(try reloadedScript.query("run").get("msg") == .string("reloaded rune"))
+
+        // Invalid embedded bytecode fails with syntax error naming the path.
+        let badEmbedded = Sources().withEmbedded("init.luau", Data([0x00, 0x01, 0x02]))
+        do {
+            _ = try badEmbedded.compile()
+            Issue.record("expected invalid embedded bytecode to throw")
+        } catch let err as ScriptError {
+            #expect(err.kind == .syntax)
+            #expect(err.message.contains("init.luau:"))
+        }
+    }
 }
