@@ -602,12 +602,16 @@ struct TextAuditCloseoutTests {
 
     @Test("image.rs:760 drawn_pixels_keep_their_image_cached_after_the_handle_drops")
     func drawnPixelsKeepImageCachedAfterHandleDrops() {
-        let cache = ImageCache()
+        let rx = ImageWakeChannel<Void>()
+        let cache = ImageCache(wake: { rx.send(()) })
         weak var weakState: CachedImageState?
         var drawn: Pixels?
 
         do {
             let image = cache.rgba(width: 1, height: 1, data: [20, 40, 60, 255])
+            #expect(image.size?.width == 1 && image.size?.height == 1)
+            #expect(rx.tryRecv() != nil, "a fresh inline decode wakes before returning")
+            #expect(rx.tryRecv() == nil)
             weakState = image.state
             drawn = image.pixels
             #expect(cache.liveEntryCount == 1)
@@ -621,12 +625,13 @@ struct TextAuditCloseoutTests {
             let again = cache.rgba(width: 1, height: 1, data: [20, 40, 60, 255])
             #expect(again.state === weakState, "same cached entry, not a new request")
             #expect(again.isReady)
+            #expect(rx.tryRecv() == nil, "a cache hit does not wake")
             #expect(cache.liveEntryCount == 1)
         }
 
-        // Now drop the last drawn Pixels as well -> weak cache entry releases.
+        // Now drop the last drawn Pixels as well -> released synchronously, without polling.
         drawn = nil
-        #expect(weakState == nil)
+        #expect(weakState == nil, "nothing left draws it, so it's released")
         #expect(cache.liveEntryCount == 0)
     }
 
