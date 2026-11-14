@@ -501,6 +501,8 @@ extension Runtime {
     internal func cancelPointerForFocusLoss(at now: Double) -> Bool {
         var didMarkDirty = false
         kitHooks.titlebar.clear()
+        primaryPointerHeld = false
+        secondaryPointerHeld = false
         armedDragOut = nil
         endKitPressRepeat()
 

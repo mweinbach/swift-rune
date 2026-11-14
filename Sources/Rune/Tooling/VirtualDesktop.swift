@@ -330,6 +330,55 @@ public enum DesktopComposite {
         #endif
     }
 
+    /// Loads a `--desktop` backdrop PNG at its native pixel dimensions and creates a matching 1-display `VirtualDesktop`.
+    public static func loadBackdrop(
+        imagePath: String,
+        scale: Float
+    ) throws -> (pixelWidth: Int, pixelHeight: Int, rgba: [UInt8], desktop: VirtualDesktop) {
+        let validScale = max(0.5, scale)
+        #if canImport(ImageIO) && canImport(CoreGraphics)
+        let url = URL(fileURLWithPath: imagePath)
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw VirtualDesktopError.invalidBackdrop("\(imagePath): cannot open image")
+        }
+        guard let cgImage = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw VirtualDesktopError.invalidBackdrop("\(imagePath): failed to decode image")
+        }
+        let iw = cgImage.width
+        let ih = cgImage.height
+        guard iw > 0, ih > 0, max(iw, ih) <= maxBackdropSide else {
+            throw VirtualDesktopError.invalidBackdrop("\(imagePath): invalid backdrop size \(iw)x\(ih)")
+        }
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        var srcRGBA = [UInt8](repeating: 0, count: iw * ih * 4)
+        let srcCtx = srcRGBA.withUnsafeMutableBytes { raw -> CGContext? in
+            CGContext(
+                data: raw.baseAddress,
+                width: iw,
+                height: ih,
+                bitsPerComponent: 8,
+                bytesPerRow: iw * 4,
+                space: cs,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
+        }
+        guard let srcCtx else {
+            throw VirtualDesktopError.invalidBackdrop("\(imagePath): failed to allocate image buffer")
+        }
+        srcCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: iw, height: ih))
+        let rgba = fitBackdrop(rgba: srcRGBA, width: iw, height: ih, targetSize: (iw, ih), alreadyPremultiplied: true)
+        let display = VirtualDisplay(
+            id: 1,
+            frame: [0.0, 0.0, Double(iw) / Double(validScale), Double(ih) / Double(validScale)],
+            scale: Double(validScale),
+            primary: true
+        )
+        return (iw, ih, rgba, VirtualDesktop(displays: [display]))
+        #else
+        throw VirtualDesktopError.invalidBackdrop("\(imagePath): image decoding unavailable on this platform")
+        #endif
+    }
+
     /// Crops `rgba` (`width x height`) to `targetSize`'s aspect ratio, scales, and returns opaque RGBA8.
     public static func fitBackdrop(
         rgba: [UInt8],
@@ -391,7 +440,8 @@ public enum DesktopComposite {
         return out
     }
 
-    /// Software-composites visible rounded windows (and soft drop shadows) over `backdropRGBA`.
+    /// Software-composites visible rounded windows (and soft drop shadows) over `backdropRGBA`
+    /// matching `virtual_desktop/composite.rs` (`DOWN = 4` separable mask blur in linear light).
     public static func compositeFrame(
         backdropRGBA: [UInt8],
         width: Int,
@@ -399,9 +449,28 @@ public enum DesktopComposite {
         scale: Float,
         windows: [(rgba: [UInt8], width: Int, height: Int, originPx: (Float, Float), cornerRadiusPx: Float, hasShadow: Bool, isKey: Bool)]
     ) -> Frame {
-        var out = backdropRGBA.count >= width * height * 4
-            ? Array(backdropRGBA.prefix(width * height * 4))
-            : [UInt8](repeating: 0, count: width * height * 4)
+        @inline(__always)
+        func srgbByteToLinear(_ u: UInt8) -> Float {
+            let c = Float(u) / 255.0
+            return c <= 0.04045 ? (c / 12.92) : powf((c + 0.055) / 1.055, 2.4)
+        }
+        @inline(__always)
+        func linearToSrgbByte(_ l: Float) -> UInt8 {
+            let c = max(0.0, min(1.0, l))
+            let s = c <= 0.0031308 ? (c * 12.92) : (1.055 * powf(c, 1.0 / 2.4) - 0.055)
+            return UInt8(max(0, min(255, Int((s * 255.0).rounded()))))
+        }
+
+        let srgbToLin: [Float] = (0..<256).map { srgbByteToLinear(UInt8($0)) }
+
+        var outLin = [Float](repeating: 0, count: width * height * 4)
+        let copyCount = min(backdropRGBA.count, width * height * 4)
+        for i in stride(from: 0, to: copyCount - 3, by: 4) {
+            outLin[i + 0] = srgbToLin[Int(backdropRGBA[i + 0])]
+            outLin[i + 1] = srgbToLin[Int(backdropRGBA[i + 1])]
+            outLin[i + 2] = srgbToLin[Int(backdropRGBA[i + 2])]
+            outLin[i + 3] = Float(backdropRGBA[i + 3]) / 255.0
+        }
 
         func roundedSDF(_ px: Float, _ py: Float, _ w: Float, _ h: Float, _ radius: Float) -> Float {
             let hx = w * 0.5
@@ -414,6 +483,9 @@ public enum DesktopComposite {
             return outside + inside - r
         }
 
+        let down = 4
+        let downF = Float(down)
+
         for win in windows {
             let ww = Float(win.width)
             let wh = Float(win.height)
@@ -422,27 +494,100 @@ public enum DesktopComposite {
 
             if win.hasShadow {
                 let (sigmaPt, offsetPt, opacity) = win.isKey ? keyShadow : normalShadow
-                let sigmaPx = max(1.0, sigmaPt * scale)
-                let padPx = Int(ceil(sigmaPx * 2.5))
+                let pad = Int(ceil((keyShadow.sigma * scale * 3.0) / downF)) * down
+                let maskW = max(1, (win.width + 2 * pad + down - 1) / down)
+                let maskH = max(1, (win.height + 2 * pad + down - 1) / down)
+                var mask0 = [Float](repeating: 0, count: maskW * maskH)
+                for my in 0..<maskH {
+                    for mx in 0..<maskW {
+                        let baseX = mx * down - pad
+                        let baseY = my * down - pad
+                        var sum: Float = 0.0
+                        for yy in 0..<down {
+                            let qy = baseY + yy
+                            guard qy >= 0 && qy < win.height else { continue }
+                            let cy = Float(qy) + 0.5
+                            for xx in 0..<down {
+                                let qx = baseX + xx
+                                guard qx >= 0 && qx < win.width else { continue }
+                                let srcA = Float(win.rgba[(qy * win.width + qx) * 4 + 3]) / 255.0
+                                let cov = max(0, min(1, 0.5 - roundedSDF(Float(qx) + 0.5, cy, ww, wh, win.cornerRadiusPx)))
+                                sum += srcA * cov
+                            }
+                        }
+                        mask0[my * maskW + mx] = sum / 16.0
+                    }
+                }
+
+                let sigmaMask = max(sigmaPt * scale / downF, 0.5)
+                let rad = Int(ceil(sigmaMask * 3.0))
+                var weights = [Float](repeating: 0, count: 2 * rad + 1)
+                var weightTotal: Float = 0.0
+                for k in -rad...rad {
+                    let wt = expf(-Float(k * k) / (2.0 * sigmaMask * sigmaMask))
+                    weights[k + rad] = wt
+                    weightTotal += wt
+                }
+
+                var mask1 = [Float](repeating: 0, count: maskW * maskH)
+                for y in 0..<maskH {
+                    let row = y * maskW
+                    for x in 0..<maskW {
+                        var sum: Float = 0.0
+                        for k in -rad...rad {
+                            let qx = x + k
+                            if qx >= 0 && qx < maskW {
+                                sum += weights[k + rad] * mask0[row + qx]
+                            }
+                        }
+                        mask1[row + x] = sum / weightTotal
+                    }
+                }
+                for y in 0..<maskH {
+                    let row = y * maskW
+                    for x in 0..<maskW {
+                        var sum: Float = 0.0
+                        for k in -rad...rad {
+                            let qy = y + k
+                            if qy >= 0 && qy < maskH {
+                                sum += weights[k + rad] * mask1[qy * maskW + x]
+                            }
+                        }
+                        mask0[row + x] = sum / weightTotal
+                    }
+                }
+
                 let offY = offsetPt * scale
-                let minX = max(0, Int(floor(ox)) - padPx)
-                let minY = max(0, Int(floor(oy + offY)) - padPx)
-                let maxX = min(width - 1, Int(ceil(ox + ww)) + padPx)
-                let maxY = min(height - 1, Int(ceil(oy + offY + wh)) + padPx)
+                let padF = Float(pad)
+                let minX = max(0, Int(floor(ox - padF)))
+                let minY = max(0, Int(floor(oy + offY - padF)))
+                let maxX = min(width - 1, Int(ceil(ox + ww + padF)) - 1)
+                let maxY = min(height - 1, Int(ceil(oy + offY + wh + padF)) - 1)
                 if minX <= maxX && minY <= maxY {
+                    @inline(__always)
+                    func sampleMask(_ mx: Int, _ my: Int) -> Float {
+                        (mx >= 0 && mx < maskW && my >= 0 && my < maskH) ? mask0[my * maskW + mx] : 0.0
+                    }
                     for y in minY...maxY {
-                        let ly = Float(y) + 0.5 - (oy + offY)
+                        let myF = (Float(y) + 0.5 - (oy + offY) + padF) / downF - 0.5
+                        let y0 = Int(floor(myF))
+                        let fy = myF - Float(y0)
                         for x in minX...maxX {
-                            let lx = Float(x) + 0.5 - ox
-                            let d = roundedSDF(lx, ly, ww, wh, win.cornerRadiusPx)
-                            let falloff = d <= 0 ? 1.0 : expf(-(d * d) / (2.0 * sigmaPx * sigmaPx))
-                            let sa = max(0, min(1, falloff * opacity))
-                            if sa > 0.002 {
+                            let mxF = (Float(x) + 0.5 - ox + padF) / downF - 0.5
+                            let x0 = Int(floor(mxF))
+                            let fx = mxF - Float(x0)
+                            let m00 = sampleMask(x0, y0)
+                            let m10 = sampleMask(x0 + 1, y0)
+                            let m01 = sampleMask(x0, y0 + 1)
+                            let m11 = sampleMask(x0 + 1, y0 + 1)
+                            let mVal = (m00 * (1 - fx) + m10 * fx) * (1 - fy) + (m01 * (1 - fx) + m11 * fx) * fy
+                            let sa = max(0.0, min(1.0, mVal * opacity))
+                            if sa > 0.0 {
                                 let dst = (y * width + x) * 4
                                 let inv = 1.0 - sa
-                                out[dst + 0] = UInt8(max(0, min(255, Int((Float(out[dst + 0]) * inv).rounded()))))
-                                out[dst + 1] = UInt8(max(0, min(255, Int((Float(out[dst + 1]) * inv).rounded()))))
-                                out[dst + 2] = UInt8(max(0, min(255, Int((Float(out[dst + 2]) * inv).rounded()))))
+                                outLin[dst + 0] *= inv
+                                outLin[dst + 1] *= inv
+                                outLin[dst + 2] *= inv
                             }
                         }
                     }
@@ -464,23 +609,30 @@ public enum DesktopComposite {
                     guard wx >= 0 && wx < win.width else { continue }
                     let lx = Float(x) + 0.5 - ox
                     let cov = max(0, min(1, 0.5 - roundedSDF(lx, ly, ww, wh, win.cornerRadiusPx)))
-                    if cov <= 0.001 { continue }
+                    if cov <= 0.0 { continue }
 
                     let srcIdx = (wy * win.width + wx) * 4
-                    let sr = Float(win.rgba[srcIdx + 0]) * cov
-                    let sg = Float(win.rgba[srcIdx + 1]) * cov
-                    let sb = Float(win.rgba[srcIdx + 2]) * cov
+                    let sr = srgbToLin[Int(win.rgba[srcIdx + 0])] * cov
+                    let sg = srgbToLin[Int(win.rgba[srcIdx + 1])] * cov
+                    let sb = srgbToLin[Int(win.rgba[srcIdx + 2])] * cov
                     let sa = (Float(win.rgba[srcIdx + 3]) / 255.0) * cov
                     let dstIdx = (y * width + x) * 4
                     let inv = 1.0 - sa
-                    out[dstIdx + 0] = UInt8(max(0, min(255, Int((sr + Float(out[dstIdx + 0]) * inv).rounded()))))
-                    out[dstIdx + 1] = UInt8(max(0, min(255, Int((sg + Float(out[dstIdx + 1]) * inv).rounded()))))
-                    out[dstIdx + 2] = UInt8(max(0, min(255, Int((sb + Float(out[dstIdx + 2]) * inv).rounded()))))
-                    out[dstIdx + 3] = 255
+                    outLin[dstIdx + 0] = sr + outLin[dstIdx + 0] * inv
+                    outLin[dstIdx + 1] = sg + outLin[dstIdx + 1] * inv
+                    outLin[dstIdx + 2] = sb + outLin[dstIdx + 2] * inv
+                    outLin[dstIdx + 3] = 1.0
                 }
             }
         }
 
+        var out = [UInt8](repeating: 255, count: width * height * 4)
+        for i in stride(from: 0, to: width * height * 4, by: 4) {
+            out[i + 0] = linearToSrgbByte(outLin[i + 0])
+            out[i + 1] = linearToSrgbByte(outLin[i + 1])
+            out[i + 2] = linearToSrgbByte(outLin[i + 2])
+            out[i + 3] = 255
+        }
         return Frame(width: width, height: height, rgba: out)
     }
 }
@@ -701,6 +853,24 @@ public protocol DesktopMember: AnyObject {
     func renderFrame(scale: Float) -> Frame?
 }
 
+private final class DesktopWakeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        flag = value
+        lock.unlock()
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        let v = flag
+        lock.unlock()
+        return v
+    }
+}
+
 /// Real `Runtime<State>` window member for `VirtualDesk` (`tooling::virtual_desktop::Window`).
 public final class DesktopWindow<State>: DesktopMember {
     public let key: String
@@ -723,6 +893,7 @@ public final class DesktopWindow<State>: DesktopMember {
     private let onCloseHook: ((inout State, inout Tx) -> Bool)?
     private let onReopenHook: ((inout State, Bool, inout Tx) -> Bool)?
     private let waker: Waker
+    private let sharedWakeFlag: DesktopWakeFlag
 
     public init(
         key: String = "main",
@@ -735,42 +906,67 @@ public final class DesktopWindow<State>: DesktopMember {
         tabVisitsControls: Bool = false
     ) {
         self.key = key
-        let w = Waker()
+        let wakeFlag = DesktopWakeFlag()
+        self.sharedWakeFlag = wakeFlag
+        let w = Waker { wakeFlag.set(true) }
         self.waker = w
+        let validScale = max(0.5, scale)
+        let logicalSize: Vec2
+        if let phys = spec.options.physicalSize {
+            logicalSize = Vec2(
+                max(1.0, Float(phys.0) / validScale),
+                max(1.0, Float(phys.1) / validScale)
+            )
+        } else {
+            logicalSize = spec.appSpec.size
+        }
         let rt = Runtime<State>(
             state: spec.appSpec.makeState(),
-            viewport: spec.appSpec.size,
-            pixelScale: max(0.5, scale),
+            viewport: logicalSize,
+            pixelScale: validScale,
             systemDark: spec.appSpec.dark ?? dark,
             waker: w,
             onKey: spec.appSpec.onKey,
             view: spec.appSpec.view
         )
         rt.windowTitle = spec.appSpec.title
+        rt.srgbBlend = spec.appSpec.srgbBlend
+        rt.poll = spec.appSpec.poll
+        rt.onAppFileDrop = spec.appSpec.onFileDrop
+        rt.onFileDrop = spec.appSpec.onFileDropPhase
+        rt.fitHeight = spec.fitContentHeight
         rt.tabVisitsControls = tabVisitsControls
+        spec.configureRuntime?(rt)
+        spec.appShared?.setWaker(w)
+        if spec.appSpec.dark != nil {
+            rt.setSystemDark(spec.appSpec.dark!)
+        } else {
+            rt.setSystemDark(dark)
+        }
+        rt.setViewport(logicalSize, pixelScale: validScale)
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
         if resolvedChrome.fullSizeContent && !(spec.options.borderless || spec.chrome.borderless) {
             rt.cxSettings.titlebarInset = resolvedChrome.titlebarInset()
         } else {
             rt.cxSettings.titlebarInset = 0.0
         }
-        rt.onClose = onClose
-        rt.onReopen = spec.onReopen
-        rt.onFocus = onFocus
+        if let onClose { rt.onClose = onClose }
+        if let specReopen = spec.onReopen { rt.onReopen = specReopen }
+        if let onFocus { rt.onFocus = onFocus }
         self.runtime = rt
         self.appShared = spec.appShared
-        self.onCloseHook = onClose
-        self.onReopenHook = spec.onReopen
+        self.onCloseHook = rt.onClose
+        self.onReopenHook = rt.onReopen
         self.keepRunning = spec.keepRunning
-        self.isPanel = spec.macosWindow.nonactivatingPanel
+        self.isPanel = spec.macosWindow.nonactivatingPanel || spec.macosWindow.launcher
         self.isMain = isMain
         self.clickThrough = spec.options.clickThrough
         self.onTop = spec.options.alwaysOnTop
-        self.hasShadow = spec.options.hasShadow
+        self.hasShadow = spec.macosWindow.shadow ?? spec.options.hasShadow
         let decorated = !spec.options.borderless && !spec.options.transparent
-        self.cornerRadius = decorated ? 10.0 : 0.0
+        self.cornerRadius = spec.macosWindow.cornerRadius ?? (decorated ? 10.0 : 0.0)
         self.position = spec.options.position
-        self.frame = [0, 0, spec.appSpec.size.x, spec.appSpec.size.y]
+        self.frame = [0, 0, logicalSize.x, logicalSize.y]
         let vis = spec.options.visible
         self.life = vis ? .shown : .unopened
     }
@@ -800,6 +996,7 @@ public final class DesktopWindow<State>: DesktopMember {
         runtime.closeWindowRequested
             || runtime.hasPendingCommit
             || runtime.hasPendingActions
+            || sharedWakeFlag.get()
     }
 
     public var isStale: Bool {
@@ -817,6 +1014,7 @@ public final class DesktopWindow<State>: DesktopMember {
         currentTime = t
         var changes = DesktopChanges()
         if let appShared {
+            sharedWakeFlag.set(false)
             let drained = appShared.applyStateUpdates(to: runtime, at: t)
             if let placeReq = drained.place {
                 let (_, placedFrame) = desktop.place(request: placeReq, size: (frame[2], frame[3]))
@@ -831,6 +1029,32 @@ public final class DesktopWindow<State>: DesktopMember {
                 frame = [pos.x, pos.y, frame[2], frame[3]]
                 _ = runtime.setWindowOrigin(pos)
             }
+            switch drained.window {
+            case .open:
+                if show() {
+                    changes.front = true
+                    changes.keys = true
+                }
+            case .show:
+                if show() {
+                    changes.front = true
+                }
+            case .hide:
+                hide()
+            case .close:
+                close()
+            case .none:
+                break
+            }
+            switch drained.activation {
+            case .activate, .focus:
+                if visible {
+                    changes.front = true
+                    changes.keys = true
+                }
+            case .minimize, .none:
+                break
+            }
         }
         if runtime.closeWindowRequested && !pendingClose {
             pendingClose = true
@@ -844,7 +1068,12 @@ public final class DesktopWindow<State>: DesktopMember {
         guard life.closes(keepRunning: keepRunning, headless: true) else { return }
         if let hook = onCloseHook {
             var tx = Tx()
-            _ = hook(&runtime.state, &tx)
+            let allow = hook(&runtime.state, &tx)
+            runtime.applyHookTx(tx, at: currentTime)
+            guard allow else {
+                runtime.clearShellRequests()
+                return
+            }
         }
         hide()
         if !keepRunning {
@@ -859,9 +1088,11 @@ public final class DesktopWindow<State>: DesktopMember {
         runtime.pointerExit(at: currentTime)
     }
 
-    public func show() {
-        guard life.show() else { return }
+    @discardableResult
+    public func show() -> Bool {
+        guard life.show() else { return false }
         runtime.markNeedsCommit(settle: true)
+        return true
     }
 
     public func advance(dt: Double) {
@@ -874,7 +1105,7 @@ public final class DesktopWindow<State>: DesktopMember {
         if let onFocus = runtime.onFocus {
             var tx = Tx()
             onFocus(&runtime.state, focused, &tx)
-            runtime.markNeedsCommit()
+            runtime.applyHookTx(tx, at: currentTime)
         }
     }
 
@@ -923,9 +1154,11 @@ public final class DesktopWindow<State>: DesktopMember {
     }
 
     public func runReopenHook(hasVisibleWindows: Bool) -> Bool {
-        guard let hook = onReopenHook else { return false }
+        guard !life.isFinished, let hook = onReopenHook else { return false }
         var tx = Tx()
-        return hook(&runtime.state, hasVisibleWindows, &tx)
+        let handled = hook(&runtime.state, hasVisibleWindows, &tx)
+        runtime.applyHookTx(tx, at: currentTime)
+        return handled
     }
 
     public func reopen() -> DesktopChanges {
@@ -1208,6 +1441,207 @@ public final class VirtualDesk {
             height: height,
             scale: scale,
             windows: layers
+        )
+    }
+
+    /// Runs a multi-window `--desktop` simulation across script events, focus/close/reopen drains,
+    /// PNG compositing, `--tree` JSON export, and `HeadlessRun.publish`.
+    public static func runHeadlessDesktop(
+        members: [any DesktopMember],
+        args: ToolingArgs,
+        options: RunOptions,
+        desktop: VirtualDesktop,
+        backdropRGBA: [UInt8],
+        width: Int,
+        height: Int
+    ) throws -> HeadlessRunner.Output {
+        let validScale = max(0.5, args.pixelScale)
+        let fps = max(1.0, args.fps)
+        for m in members {
+            m.start(desktop: desktop)
+        }
+        let originPt = (Float(desktop.primaryDisplay.frame[0]), Float(desktop.primaryDisplay.frame[1]))
+        let desk = VirtualDesk(members: members, origin: originPt, scale: validScale)
+
+        let steps: [ScriptStep]
+        if let scriptArg = args.scriptArg {
+            let trimmed = scriptArg.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("[") || trimmed.hasPrefix("{") {
+                steps = try HeadlessRunner.parseScript(jsonData: Data(trimmed.utf8))
+            } else {
+                let raw = try Data(contentsOf: URL(fileURLWithPath: scriptArg))
+                steps = try HeadlessRunner.parseScript(jsonData: raw)
+            }
+        } else {
+            steps = []
+        }
+        let sortedSteps = steps.sorted { $0.t < $1.t }
+        let headlessEvents = HeadlessRunner.headlessEvents(from: sortedSteps)
+        var markTimes: [String: Double] = [:]
+        for step in sortedSteps {
+            if case .mark(let name) = step.action, markTimes[name] == nil {
+                markTimes[name] = step.t
+            }
+        }
+
+        let endTime: Double
+        if let expr = args.atMarkExpr {
+            endTime = try ToolingArgs.resolveMarkTime(expr, marks: markTimes)
+        } else if let atMark = args.atMark {
+            endTime = max(0.0, (markTimes[atMark.name] ?? 0.0) + atMark.offset)
+        } else if let at = args.atTime {
+            endTime = max(0.0, at)
+        } else {
+            endTime = max(0.0, sortedSteps.last?.t ?? 0.0)
+        }
+
+        // Initial t = 0.0 drain & render before any t > 0 script events.
+        desk.drain(desktop: desktop, t: 0.0)
+        desk.catchUp(desktop: desktop, t: 0.0)
+        for m in members where m.visible {
+            m.advance(dt: 0.0)
+        }
+        desk.drain(desktop: desktop, t: 0.0)
+        desk.catchUp(desktop: desktop, t: 0.0)
+
+        var stepIdx = 0
+        var lastPointerPt: (Float, Float) = (0, 0)
+        func resolvePoint(_ pos: ScriptStep.Position) -> (Float, Float) {
+            switch pos {
+            case .xy(let x, let y):
+                lastPointerPt = (x, y)
+                return lastPointerPt
+            case .key(let k):
+                if let pt = desk.find(key: k) {
+                    lastPointerPt = pt
+                    return pt
+                }
+                return lastPointerPt
+            case .relative(let dx, let dy):
+                return (lastPointerPt.0 + dx, lastPointerPt.1 + dy)
+            }
+        }
+
+        func applyStep(_ step: ScriptStep, at t: Double) {
+            desk.drain(desktop: desktop, t: t)
+            switch step.action {
+            case .move:
+                let pt = resolvePoint(step.position)
+                desk.pointerInput(kind: .move, at: pt)
+            case .down(let button, let mods):
+                let pt = resolvePoint(step.position)
+                desk.pointerInput(kind: .down(button, mods), at: pt)
+            case .up(let button, let mods):
+                let pt = resolvePoint(step.position)
+                desk.pointerInput(kind: .up(button, mods), at: pt)
+            case .wheel(let w):
+                let pt = resolvePoint(step.position)
+                desk.pointerInput(kind: .wheel(dx: w.dx, dy: w.dy, mods: w.mods), at: pt)
+            case .keyDown(let ev), .keyRepeat(let ev):
+                if let k = desk.focus.focusedIndex {
+                    desk.members[k].input(.keyDown(ev), at: (0, 0))
+                }
+            case .keyUp, .physical, .physicalKey, .shortcut, .paste, .ime, .magnify, .fling,
+                 .resize, .resizeDelta, .mark, .openUrl, .popupPick, .fileDialogAnswer:
+                break
+            case .windowFocus(let focused):
+                desk.setActive(focused)
+            case .reopen:
+                desk.reopen(accessory: options.accessory, desktop: desktop, t: t)
+            case .dragFiles(let urls):
+                let pt = resolvePoint(step.position)
+                desk.fileInput(phase: .entered(urls.map { DroppedFile(url: $0) }, at: Vec2(pt.0, pt.1)), at: pt)
+            case .dropFiles(let urls):
+                let pt = resolvePoint(step.position)
+                desk.fileInput(phase: .dropped(urls.map { DroppedFile(url: $0) }, at: Vec2(pt.0, pt.1)), at: pt)
+            case .dragFilesLeave:
+                let pt = resolvePoint(step.position)
+                desk.fileInput(phase: .exited, at: pt)
+            }
+            desk.drain(desktop: desktop, t: t)
+            desk.catchUp(desktop: desktop, t: t)
+        }
+
+        var windowFrames: [HeadlessWindowFrame] = []
+        let stepCount = endTime > 0 ? max(1, Int(ceil(endTime * fps - 1e-9))) : 0
+        for k in 0...stepCount {
+            let rawT = Double(k) / fps
+            let t = (k == stepCount) ? endTime : min(endTime, rawT)
+            if k == 0 {
+                // Record initial t = 0 state before firing any t = 0 script steps.
+                if sortedSteps.contains(where: { $0.t <= 1e-9 }) {
+                    for i in members.indices {
+                        windowFrames.append(desk.snapshot(for: i, t: 0.0))
+                    }
+                }
+            }
+            desk.drain(desktop: desktop, t: t)
+            while stepIdx < sortedSteps.count && sortedSteps[stepIdx].t <= t + 1e-9 {
+                applyStep(sortedSteps[stepIdx], at: t)
+                stepIdx += 1
+            }
+            for m in members where m.visible {
+                m.advance(dt: 0.0)
+            }
+            desk.drain(desktop: desktop, t: t)
+            desk.catchUp(desktop: desktop, t: t)
+            for i in members.indices {
+                windowFrames.append(desk.snapshot(for: i, t: t))
+            }
+        }
+
+        let finalComposite = desk.renderCompositeFrame(
+            backdropRGBA: backdropRGBA,
+            width: width,
+            height: height
+        )
+        if let snapPath = args.snapPath {
+            let snapURL = URL(fileURLWithPath: snapPath)
+            try FileManager.default.createDirectory(at: snapURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try finalComposite.writePNG(to: snapURL)
+        }
+
+        let windowsTree: [[String: Any]] = members.indices.map { i in
+            let st = desk.stateSnapshot(for: i)
+            return [
+                "key": desk.members[i].key,
+                "frame": st.frame,
+                "visible": st.visible,
+                "focused": st.focused,
+            ]
+        }
+        let treeObj: [String: Any] = [
+            "t": endTime,
+            "scale": validScale,
+            "windows": windowsTree,
+        ]
+        let treeData = (try? JSONSerialization.data(withJSONObject: treeObj, options: [.sortedKeys, .prettyPrinted])) ?? Data("{}".utf8)
+        if let treePath = args.treePath {
+            let treeURL = URL(fileURLWithPath: treePath)
+            try FileManager.default.createDirectory(at: treeURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try treeData.write(to: treeURL, options: .atomic)
+        }
+
+        let run = HeadlessRun(
+            scriptPath: args.scriptArg,
+            events: headlessEvents,
+            scale: validScale,
+            fps: Float(fps),
+            size: Vec2(Float(width) / validScale, Float(height) / validScale),
+            start: 0.0,
+            frames: stepCount + 1,
+            end: endTime,
+            desktopPath: args.desktopPath,
+            windows: windowFrames
+        )
+        HeadlessRun.publish(run)
+
+        return HeadlessRunner.Output(
+            finalFrame: finalComposite,
+            treeJSON: treeData,
+            frameCount: stepCount + 1,
+            marks: markTimes,
+            windowKeys: members.map(\.key)
         )
     }
 }

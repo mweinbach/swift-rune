@@ -173,6 +173,7 @@ extension Runtime {
             guard selectionState.isDraggingSelection || selectionState.edgeScroll.isRunning else {
                 return false
             }
+            primaryPointerHeld = false
             pressedPath = nil
             pressedKey = nil
             pressedLink = nil
@@ -182,6 +183,11 @@ extension Runtime {
             return true
         }
         activeDrag = nil
+        // gap/platform (#963): a cancelled drag releases the held pointer buttons it was tracking.
+        primaryPointerHeld = false
+        if drag.button == .secondary {
+            secondaryPointerHeld = false
+        }
         endKitPressRepeat()
         armedDragOut = nil
         pressedPath = nil

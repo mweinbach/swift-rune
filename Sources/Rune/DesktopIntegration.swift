@@ -3043,6 +3043,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
     public private(set) var systemContrast: Bool = false
     public private(set) var systemScrollBars = SystemScrollBars.current()
     public private(set) var wakeDeadline: Double? = nil
+    public private(set) var pendingInput: OverlayInput? = nil
     private var cachedWindowNumber: UInt32? = nil
     private var cachedCapabilities = OverlayCapabilities()
 
@@ -3110,6 +3111,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         rt.srgbBlend = opts.srgbBlend
         rt.clearColor = Color.transparent
         rt.setSystemContrast(prefs.contrast)
+        rt.setLiveVisible(false)
         self.runtime = rt
 
         if let setupHandler {
@@ -3254,10 +3256,12 @@ public final class OverlayHandle<State>: @unchecked Sendable {
             }
             view.onPointerUp = { [weak self] pt, btn, mods, now in
                 self?.withLockedRuntime { rt in rt.pointerUp(at: pt, button: btn, mods: mods, at: now) }
+                self?.applyInput()
                 view.renderFrame(settle: false, visible: true, drawing: true)
             }
             view.onPointerReleaseLost = { [weak self] pt, now in
                 self?.withLockedRuntime { rt in rt.pointerReleaseLost(at: pt, at: now) }
+                self?.applyInput()
                 view.renderFrame(settle: false, visible: true, drawing: true)
             }
             view.onWheel = { [weak self] wev, pt, now in
@@ -3352,6 +3356,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         if settle {
             runtime.markNeedsCommit(settle: true)
         }
+        resumeLiveLocked()
         isDirty = true
         isIdle = false
         lock.unlock()
@@ -3380,6 +3385,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         for effect in effects {
             switch effect {
             case .stopDrawing:
+                runtime.setLiveVisible(false)
                 isFrameless = true
                 isIdle = true
                 wakeDeadline = nil
@@ -3406,6 +3412,7 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         for effect in effects {
             switch effect {
             case .stopDrawing:
+                runtime.setLiveVisible(false)
                 isFrameless = true
                 isIdle = true
                 wakeDeadline = nil
@@ -3441,17 +3448,69 @@ public final class OverlayHandle<State>: @unchecked Sendable {
         #endif
     }
 
+    /// Resumes `Live`/`Pixels` wake sampling and marks dirty when pending publications exist (`overlay/lifetime.rs::resume_live`).
+    public func resumeLive() {
+        lock.lock()
+        resumeLiveLocked()
+        lock.unlock()
+    }
+
+    private func resumeLiveLocked() {
+        runtime.setLiveVisible(true)
+        if runtime.livePending {
+            isDirty = true
+        }
+    }
+
+    /// Defers input-mode changes while a pointer drag/press is captured, applying on release (`overlay/input.rs::apply_input`).
     public func setInput(_ input: OverlayInput) {
         lock.lock()
-        options.input = input
-        let currentPlacement = placementSpec
-        let opts = options
+        pendingInput = input
+        let applied = applyInputLocked()
         lock.unlock()
         #if os(macOS)
-        runOnMainActor {
-            self.macHost?.updatePlacement(currentPlacement, options: opts)
+        if let (currentPlacement, opts) = applied {
+            runOnMainActor {
+                self.macHost?.updatePlacement(currentPlacement, options: opts)
+            }
         }
         #endif
+    }
+
+    /// Applies any queued input-mode change once the runtime pointer is no longer captured (`overlay/input.rs::apply_input`).
+    @discardableResult
+    public func applyInput() -> Bool {
+        lock.lock()
+        let applied = applyInputLocked()
+        lock.unlock()
+        #if os(macOS)
+        if let (currentPlacement, opts) = applied {
+            runOnMainActor {
+                self.macHost?.updatePlacement(currentPlacement, options: opts)
+            }
+        }
+        #endif
+        return applied != nil
+    }
+
+    private func applyInputLocked() -> (OverlayGeometry.Placement, OverlayOptions)? {
+        if runtime.pointerCaptured {
+            return nil
+        }
+        #if os(macOS)
+        if Thread.isMainThread {
+            let captured = MainActor.assumeIsolated { self.macHost?.pointerState.isCaptured ?? false }
+            if captured {
+                return nil
+            }
+        }
+        #endif
+        guard let next = pendingInput else {
+            return nil
+        }
+        pendingInput = nil
+        options.input = next
+        return (placementSpec, options)
     }
 
     public func setFollowPointer(_ follow: Bool) {

@@ -332,8 +332,30 @@ struct ToolingHTMLAndHeadlessTests {
             #expect(got.items == ["rune://live"])
         }
 
-        // 3. a_second_listener_cannot_replace_an_active_one -> supports multi or explicit listen behavior
-        // Verify active listeners receive updates and cancelling removes slot + stops delivery
+        // 3. simultaneous listeners: live URLs go to the first; only after sub1 cancels do URLs route to sub2
+        do {
+            let inbox = IncomingURLInbox()
+            let glue = ScriptedIncomingGlue()
+            inbox.prepare(glue: glue)
+            inbox.launched([])
+            let got1 = Bag()
+            let got2 = Bag()
+            let sub1 = inbox.listen(glue: glue) { got1.append($0) }
+            let sub2 = inbox.listen(glue: glue) { got2.append($0) }
+            #expect(sub1 != nil)
+            #expect(sub2 != nil)
+            #expect(glue.installs == 1)
+            inbox.receive("rune://before-cancel")
+            #expect(got1.items == ["rune://before-cancel"])
+            #expect(got2.items.isEmpty)
+            sub1?.cancel()
+            inbox.receive("rune://after-cancel")
+            #expect(got1.items == ["rune://before-cancel"])
+            #expect(got2.items == ["rune://after-cancel"])
+            sub2?.cancel()
+        }
+
+        // 4. dropping/cancelling the listener frees the slot for a replacement window
         do {
             let inbox = IncomingURLInbox()
             let glue = ScriptedIncomingGlue()
@@ -342,17 +364,13 @@ struct ToolingHTMLAndHeadlessTests {
             let got1 = Bag()
             let sub1 = inbox.listen(glue: glue) { got1.append($0) }
             #expect(sub1 != nil)
-            inbox.receive("rune://before-cancel")
             sub1?.cancel()
-            inbox.receive("rune://after-cancel")
-            #expect(got1.items == ["rune://before-cancel"])
-
-            // 4. dropping/cancelling the listener frees the slot for a replacement window
             let got2 = Bag()
             let sub2 = inbox.listen(glue: glue) { got2.append($0) }
             #expect(sub2 != nil)
             inbox.receive("rune://second-window")
             #expect(got2.items == ["rune://second-window"])
+            sub2?.cancel()
         }
 
         // 5. settle_clears_unhandled_launches
@@ -396,6 +414,51 @@ struct ToolingHTMLAndHeadlessTests {
             #expect(glue.removes == 1)
             inbox.receive("rune://after-settle")
             #expect(got.items.isEmpty)
+        }
+
+        // 8. open_url/incoming_tests.rs:50 - without a listener, settle drops launch links and removes handler
+        do {
+            let inbox = IncomingURLInbox()
+            let glue = ScriptedIncomingGlue()
+            inbox.prepare(glue: glue)
+            inbox.receive("rune://kept")
+            inbox.settle(glue: glue)
+            #expect(glue.installs == 1 && glue.removes == 1)
+            inbox.receive("rune://dropped")
+            let late = Bag()
+            let sub = inbox.listen(glue: glue) { late.append($0) }
+            #expect(sub != nil)
+            #expect(late.items.isEmpty)
+            sub?.cancel()
+        }
+
+        // 9. open_url/incoming_tests.rs:121 - app's own handler stays unless a window installs the hook
+        do {
+            let inbox = IncomingURLInbox()
+            let glue = ScriptedIncomingGlue(elsewhere: true)
+            inbox.prepare(glue: glue)
+            inbox.receive("rune://theirs")
+            inbox.settle(glue: glue)
+            #expect(glue.installs == 0 && glue.removes == 0)
+            let got = Bag()
+            let sub = inbox.listen(glue: glue) { got.append($0) }
+            #expect(sub != nil)
+            #expect(glue.installs == 1)
+            #expect(got.items.isEmpty)
+            sub?.cancel()
+        }
+
+        // 10. open_url/incoming_tests.rs:134 - a handler that cannot install listens to nothing
+        do {
+            let inbox = IncomingURLInbox()
+            let refuse = ScriptedIncomingGlue(installResult: false)
+            let got = Bag()
+            #expect(inbox.listen(glue: refuse) { got.append($0) } == nil)
+            inbox.receive("rune://dropped")
+            #expect(got.items.isEmpty)
+            let sub = inbox.listen(glue: ScriptedIncomingGlue()) { got.append($0) }
+            #expect(sub != nil)
+            sub?.cancel()
         }
     }
 

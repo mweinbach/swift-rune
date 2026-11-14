@@ -792,7 +792,13 @@ public final class Runtime<State> {
     private var lastClickPos: Vec2 = Vec2(-10000, -10000)
     internal var clickCount: Int = 0
     internal var activeDrag: DragSession? = nil
+    internal var primaryPointerHeld: Bool = false
+    internal var secondaryPointerHeld: Bool = false
     internal var hasActivePointerDrag: Bool { activeDrag != nil || armedDragOut != nil }
+    /// Whether either the primary or secondary pointer button is currently held (`Runtime::pointer_captured`).
+    public var pointerCaptured: Bool {
+        primaryPointerHeld || secondaryPointerHeld || activeDrag != nil || armedDragOut != nil || activeDragOut != nil
+    }
 
     // Scroll state keyed by element path
     internal var scrollOffsets: [String: Vec2] = [:]
@@ -8796,6 +8802,8 @@ public final class Runtime<State> {
     }
 
     internal func releasePointerForPopup(at now: Double) {
+        primaryPointerHeld = false
+        secondaryPointerHeld = false
         armedDragOut = nil
         activeDrag = nil
         pressedPath = nil
@@ -8806,6 +8814,8 @@ public final class Runtime<State> {
     }
 
     internal func releasePointerForDragOut(at now: Double) {
+        primaryPointerHeld = false
+        secondaryPointerHeld = false
         activeDrag = nil
         pressedPath = nil
         pressedKey = nil
@@ -9195,6 +9205,7 @@ public final class Runtime<State> {
         frameHadInputSinceLastFrame = true
         releaseHoverHold()
         if button != .secondary {
+            primaryPointerHeld = true
             kitHooks.titlebar.action = nil
             cancelKitHoverAndRepeatOnPress()
             endKitPressRepeat()
@@ -9236,6 +9247,7 @@ public final class Runtime<State> {
         }
 
         if button == .secondary {
+            secondaryPointerHeld = true
             if let (node, rect, local) = hitTestDetailed(at: pos, predicate: {
                 $0.el.handlers.onSecondaryClick != nil ||
                 $0.el.handlers.editLens != nil ||
@@ -9576,8 +9588,10 @@ public final class Runtime<State> {
         let pointerMovedAtUp = (pos != pointerPosition)
         pointerPosition = pos
         if button == .secondary {
+            secondaryPointerHeld = false
             recordSecondaryTitlebarUp(at: pos)
         } else {
+            primaryPointerHeld = false
             armedDragOut = nil
             endKitPressRepeat()
         }
@@ -11230,6 +11244,10 @@ public final class Runtime<State> {
                 || (needsCommit && !prevNeedsCommit)
             return changed || txHasFrameWork || (tx.blurFocusRequested && hadFocusBeforeUpdate)
         }
+    }
+
+    internal func applyHookTx(_ tx: Tx, at now: Double) {
+        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
     }
 
     /// Sets `srgbBlend` and dirties the tree if changed.
