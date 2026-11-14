@@ -326,6 +326,7 @@ public protocol HostedWindowEntry: AnyObject {
     func runtimeViewport(runtimeObj: AnyObject) -> Vec2
     func setWindowResting(runtimeObj: AnyObject, resting: Bool)
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double)
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?)
     func markMenusRunning(_ running: Bool)
     @MainActor func syncNativeMenus(
         runtimeObj: AnyObject,
@@ -376,6 +377,8 @@ public protocol HostedWindowEntry: AnyObject {
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
+    var hasAppGlobalShortcuts: Bool { get }
+    func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard?
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output
 }
 
@@ -479,7 +482,19 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double) {
-        guard let req = spec.appShared?.applyStateUpdates(to: rt(runtimeObj), at: now) else { return }
+        applyAppStateUpdates(runtimeObj: runtimeObj, at: now, shortcutGuard: nil)
+    }
+
+    func applyAppStateUpdates(runtimeObj: AnyObject, at now: Double, shortcutGuard: ShortcutGuard?) {
+        guard let appShared = spec.appShared else { return }
+        shortcutGuard?.drain()
+        let req = if let shortcutGuard {
+            shortcutGuard.withReceiving {
+                appShared.applyStateUpdates(to: rt(runtimeObj), at: now)
+            }
+        } else {
+            appShared.applyStateUpdates(to: rt(runtimeObj), at: now)
+        }
         if let pos = req.position {
             handle.setPosition((Int32(pos.x.rounded()), Int32(pos.y.rounded())))
         }
@@ -758,6 +773,15 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).shortcutRegistry
     }
 
+    var hasAppGlobalShortcuts: Bool {
+        spec.appShared?.shortcuts.hasPendingEntries ?? false
+    }
+
+    func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard? {
+        guard let appShared = spec.appShared else { return nil }
+        return ShortcutGuard.attach(shared: appShared, wake: wake, headless: headless)
+    }
+
     func runHeadless(args: ToolingArgs) throws -> HeadlessRunner.Output {
         let resolvedChrome = spec.titlebar?.macChrome(spec.chrome) ?? spec.chrome
         let configure = spec.configureRuntime
@@ -938,4 +962,26 @@ public func runWindowsWithArgs(
     _ factory: (ToolingArgs) -> [AnyWindowSpec]
 ) throws {
     try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Top-level throwing alias mirroring `rune::try_run_windows_with_args`.
+@MainActor
+public func tryRunWindowsWithArgs(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) throws {
+    try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+}
+
+/// Non-throwing multi-window helper printing startup errors to stderr and exiting `1` on native targets (`rune::run_windows_with_args`).
+@MainActor
+public func runWindowsWithArgsOrExit(
+    options: RunOptions = RunOptions(),
+    arguments: [String],
+    _ factory: (ToolingArgs) -> [AnyWindowSpec]
+) {
+    RuneStartup.started {
+        try RuneMultiWindow.runWindowsWithArgs(options: options, arguments: arguments, factory)
+    }
 }

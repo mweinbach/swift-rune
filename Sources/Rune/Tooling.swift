@@ -1344,8 +1344,10 @@ public enum HeadlessRunner {
         }
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
         extraConfigure?(runtime, waker)
+        var shortcutGuard: ShortcutGuard?
         if let appShared {
             AppMenuBridge.markRunning(appShared, running: true, headless: true)
+            shortcutGuard = ShortcutGuard.attach(shared: appShared, wake: waker, headless: true)
             if !menuItems.isEmpty {
                 do {
                     try AppMenuBridge.setMenu(menuItems, for: appShared)
@@ -1357,6 +1359,7 @@ public enum HeadlessRunner {
             }
         }
         defer {
+            shortcutGuard?.close()
             if let appShared {
                 AppMenuBridge.markRunning(appShared, running: false, headless: false)
             }
@@ -1365,7 +1368,16 @@ public enum HeadlessRunner {
         withSceneClock(SceneClock(now: 0.0, dt: 0.0)) {
             spec.setup?(waker)
         }
-        _ = appShared?.applyStateUpdates(to: runtime, at: 0.0)
+        shortcutGuard?.drain()
+        if let appShared {
+            _ = if let shortcutGuard {
+                shortcutGuard.withReceiving {
+                    appShared.applyStateUpdates(to: runtime, at: 0.0)
+                }
+            } else {
+                appShared.applyStateUpdates(to: runtime, at: 0.0)
+            }
+        }
         let minSizeLimit = windowOptions?.minSize ?? spec.minSize ?? .zero
         let limits: ((Float, Float), (Float, Float)?) = (
             (minSizeLimit.x, minSizeLimit.y),
@@ -1799,7 +1811,16 @@ public enum HeadlessRunner {
                 }
 
                 let animNow = simTime * args.timeScale
-                _ = appShared?.applyStateUpdates(to: runtime, at: animNow)
+                shortcutGuard?.drain()
+                if let appShared {
+                    _ = if let shortcutGuard {
+                        shortcutGuard.withReceiving {
+                            appShared.applyStateUpdates(to: runtime, at: animNow)
+                        }
+                    } else {
+                        appShared.applyStateUpdates(to: runtime, at: animNow)
+                    }
+                }
                 stepWindowFrame(at: animNow)
                 runtime.windowResting = (windowFrameMove == nil && !runtime.hasPendingWindowFrame)
                 let frameClockStart = Date()

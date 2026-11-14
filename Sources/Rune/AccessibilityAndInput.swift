@@ -1021,6 +1021,9 @@ public enum ShortcutError: Error, Sendable, Equatable {
     case unmodifiedDisallowed
     case alreadyInUse(owner: String?)
     case rejectedByOS(String)
+    case unsupported
+    case permissionDenied
+    case notRunning
 }
 
 /// Outcome of dispatching a `KeyEvent` through `ShortcutRegistry`.

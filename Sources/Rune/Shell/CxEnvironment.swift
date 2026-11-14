@@ -138,6 +138,25 @@ final class CxReadsLog: @unchecked Sendable {
     }
 }
 
+/// Primary pointer capability reported by browser `(hover: none)` / `(pointer: coarse)` (`platform/web.rs::PrimaryPointer`).
+/// Natively `.hover` so `hoverNone` and `touchControls` both return `false`.
+public enum PrimaryPointer: Sendable, Equatable, Hashable {
+    case hover
+    case noHover
+    case touch
+
+    public var hoverNone: Bool { self != .hover }
+    public var touchControls: Bool { self == .touch }
+
+    public static func from(hover: Bool, coarse: Bool) -> PrimaryPointer {
+        switch (hover, coarse) {
+        case (false, true): return .touch
+        case (false, _): return .noHover
+        default: return .hover
+        }
+    }
+}
+
 struct CxEnvironmentState {
     var titlebarInset: Float = 0.0
     var chrome: ChromeInsets = .zero
@@ -148,6 +167,7 @@ struct CxEnvironmentState {
     var systemContrast: SystemContrast? = nil
     var systemScrollBars: SystemScrollBars = .default
     var systemReducedMotion: Bool = false
+    var primaryPointer: PrimaryPointer = .hover
     var reducedMotionOverride: Bool? = nil
     var timeScale: Float = 1.0
     var zoom: Float = 1.0
@@ -173,6 +193,7 @@ struct RuntimeShellSettings {
     var systemAccent: SystemAccent = .default
     var systemContrast: SystemContrast? = nil
     var scrollBarsState: SystemScrollBars = .default
+    var primaryPointer: PrimaryPointer = .hover
     var fullKeyboardAccess: Bool = true
     var caretReadByView: Bool = false
     var lastCommittedCaret: (keyPath: String, rect: [Float])? = nil
@@ -354,6 +375,20 @@ extension Cx {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    /// The primary pointer can't hover: a browser's `(hover: none)`, a phone's or tablet's touch
+    /// screen. What a mouse would reveal on hover (a code block's Copy, a row's actions) should
+    /// show without it. False natively. A change re-runs the view (`Cx::hover_none`).
+    public func hoverNone() -> Bool {
+        envState.primaryPointer.hoverNone
+    }
+
+    /// A page's primary pointer is coarse and can't hover. Use this for a phone or tablet's
+    /// controls rather than the viewport width: a narrow window can still have a mouse.
+    /// False natively. A change re-runs the view (`Cx::touch_controls`).
+    public func touchControls() -> Bool {
+        envState.primaryPointer.touchControls
+    }
+
     /// System high-contrast forced-colors theme, if active (`Cx::system_contrast`).
     public func systemContrast() -> SystemContrast? {
         envState.systemContrast
@@ -473,6 +508,31 @@ extension Runtime {
     /// Host accessibility reduced-motion preference (`Runtime::system_reduced_motion`).
     public func systemReducedMotion() -> Bool {
         cxSettings.hostReducedMotion
+    }
+
+    /// Updates the host's primary pointer capability (re-runs the view when changed).
+    @discardableResult
+    public func setPrimaryPointer(_ pointer: PrimaryPointer) -> Bool {
+        guard cxSettings.primaryPointer != pointer else { return false }
+        cxSettings.primaryPointer = pointer
+        markNeedsCommit()
+        return true
+    }
+
+    /// Applies browser `(hover, coarse)` pointer capability flags and invalidates on change.
+    @discardableResult
+    public func setWebPointerCapability(hover: Bool, coarse: Bool) -> Bool {
+        setPrimaryPointer(.from(hover: hover, coarse: coarse))
+    }
+
+    /// Primary pointer cannot hover (`Cx::hover_none` runtime value, `false` natively).
+    public func hoverNone() -> Bool {
+        cxSettings.primaryPointer.hoverNone
+    }
+
+    /// Primary pointer is coarse and cannot hover (`Cx::touch_controls` runtime value, `false` natively).
+    public func touchControls() -> Bool {
+        cxSettings.primaryPointer.touchControls
     }
 
     /// Tab visits every control when on (`Runtime::set_full_keyboard_access`).

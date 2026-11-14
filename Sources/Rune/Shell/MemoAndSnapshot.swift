@@ -267,7 +267,9 @@ public enum MemoScope {
         accent: Color? = nil,
         focusColor: Color? = nil,
         chromeInsets: [Float] = [0, 0, 0, 0],
-        scrollerOverlay: Bool = true
+        scrollerOverlay: Bool = true,
+        hoverNone: Bool = false,
+        touchControls: Bool = false
     ) -> UInt64 {
         var h = Hasher()
         h.combine(systemDark)
@@ -278,6 +280,8 @@ public enum MemoScope {
         h.combine(focusColor)
         for v in chromeInsets { h.combine(v.bitPattern) }
         h.combine(scrollerOverlay)
+        h.combine(hoverNone)
+        h.combine(touchControls)
         return UInt64(bitPattern: Int64(h.finalize()))
     }
 

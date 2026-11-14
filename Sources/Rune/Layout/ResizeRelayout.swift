@@ -22,6 +22,7 @@ internal struct ResizeBuildEnv: Equatable, Sendable {
     var playgroundAttached: Bool
     var titlebarInset: Float
     var scrollBarOverlay: Bool
+    var primaryPointer: PrimaryPointer = .hover
 }
 
 /// Snapshot of the last full `runViewPass` output retained for resize-only `.relayout`.
@@ -131,7 +132,8 @@ extension Runtime {
             windowFocused: windowFocused,
             playgroundAttached: playgroundHost != nil,
             titlebarInset: cxSettings.titlebarInset,
-            scrollBarOverlay: cxSettings.scrollBarsState.isOverlay
+            scrollBarOverlay: cxSettings.scrollBarsState.isOverlay,
+            primaryPointer: cxSettings.primaryPointer
         )
     }
 
