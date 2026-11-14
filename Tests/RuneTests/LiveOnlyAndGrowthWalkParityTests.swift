@@ -456,6 +456,7 @@ struct GrowthWalkParityTests {
         var limit: Float = .infinity
         var stage: Float? = nil
         var slide: (Float, Float)? = nil
+        var riding: Bool = false
         var restore: Float = 0
         var give: Float? = nil
         var paced: Bool = false
@@ -505,6 +506,7 @@ struct GrowthWalkParityTests {
             }
             let d = newTarget - h
             slide = (l > 1.0 / 64.0 && abs(d) > 1.0 / 64.0) ? (l * newTarget / d, -l / d) : nil
+            riding = false
         }
 
         mutating func hideAbove(_ above: Float) -> Float {
@@ -513,6 +515,7 @@ struct GrowthWalkParityTests {
             h -= cut
             span = abs(target - h)
             slide = (pinned, -1.0)
+            riding = true
             return cut
         }
 
@@ -524,6 +527,7 @@ struct GrowthWalkParityTests {
             let end = target - s
             let b: Float = d > 1.0 / 64.0 ? (end - from) / d : 0.0
             slide = (d > 1.0 / 64.0 ? from - b * curH : end, b)
+            riding = false
             stage = s
             span = d
         }
@@ -614,7 +618,7 @@ struct GrowthWalkParityTests {
             let mAim: Float = left > 0.25 ? min(edge.maskMax, max(edge.floor, 1.5 * left)) : 0
             if glide != nil && !streaming {
                 let leftAbs = abs(target - h)
-                let riding = slide.map { $0.1 == -1.0 } ?? false
+                let riding = self.riding
                 let fAim: Float = (leftAbs > 0.25 && !riding) ? min(feather ?? edge.maskMax, 1.5 * leftAbs) : 0
                 mask = fAim > mask ? min(mAim == mAim ? fAim : fAim, mask + 600.0 * dt) : fAim
             } else if mAim > mask {
@@ -624,7 +628,10 @@ struct GrowthWalkParityTests {
             }
             rate *= expf(-dt / 0.5)
             if !moving {
-                if !shut { slide = nil }
+                if !shut {
+                    slide = nil
+                    riding = false
+                }
                 if !streaming {
                     paced = false
                     rate = 0
@@ -661,6 +668,8 @@ struct GrowthWalkParityTests {
         if t.whole != d.whole { return "whole" }
         if t.isStaged != (d.stage != nil) { return "staged" }
         if t.isPaced != d.paced { return "paced" }
+        if t.isRiding != d.riding { return "riding" }
+        if t.isLiftedAtAll != (d.slide != nil) { return "liftedAtAll" }
         return nil
     }
 
@@ -723,5 +732,31 @@ struct GrowthWalkParityTests {
         }
         #expect(visited > 0)
         #expect(firstFailure == nil, "first divergence: \(firstFailure ?? "")")
+    }
+
+    @Test("growth.rs:818 - fold reopened by what it was cut by still feathers (r266)")
+    func foldReopenedByWhatItWasCutByStillFeathers() {
+        let foldSpring = Spring(duration: 0.18, bounce: 0.0)
+        func cut() -> GrowTrack {
+            var t = GrowTrack.settled(640.0)
+            t.setKind(streaming: false, whole: false, glide: (FoldGlide(spring: foldSpring, feather: nil), 900.0))
+            t.retarget(120.0)
+            _ = t.hideAbove(12.0)
+            return t
+        }
+
+        // Riding: contents aren't cut by the edge, so nothing to soften.
+        var riding = cut()
+        #expect(riding.isRiding)
+        riding.step(spring: Growth.spring, edge: .feather, carryingTail: false)
+        #expect(riding.mask == 0.0)
+
+        // Reopened by exactly what it was cut by: the same 12 pt, on its edge by arithmetic.
+        var t = cut()
+        t.retarget(640.0)
+        #expect(t.lift == .easing(a: 640.0, b: -1.0))
+        #expect(t.currentLift() == 12.0)
+        t.step(spring: Growth.spring, edge: .feather, carryingTail: false)
+        #expect(t.mask > 2.4)
     }
 }
