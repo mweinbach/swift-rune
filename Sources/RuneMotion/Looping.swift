@@ -33,7 +33,7 @@ public enum LoopMode: Sendable, Hashable {
 /// What a `LoopTrack` drives (`looping.rs`).
 public enum LoopKind: Sendable, Equatable {
     case opacity(low: Float, high: Float)
-    /// Piecewise-linear, wall-clock opacity with a bounded frame rate.
+    /// Piecewise-linear, wall-clock opacity sampled at display rate or a fixed cadence.
     case opacityCycle(Cycle)
     /// Finite opacity/scale choreography; holds its last pose at rest.
     case sequence(MotionSequence)
@@ -214,10 +214,10 @@ public struct LoopTrack: Sendable {
         return nil
     }
 
-    /// Wall-clock cycles retain their cadence even when animation time is paused.
+    /// A stepped cycle's timer interval. Continuous tracks use the host's frame request.
     public func frameInterval() -> Double? {
         if case let .opacityCycle(c) = spec.kind {
-            return 1.0 / Double(max(c.fps, 1.0))
+            return c.frameInterval()
         }
         return nil
     }
