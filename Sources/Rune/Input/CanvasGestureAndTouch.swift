@@ -250,7 +250,8 @@ extension Runtime {
     /// An `onWheel` handler under the pointer hears it first.
     public func wheelXY(_ x: Float, _ y: Float, _ dx: Float, _ dy: Float, now: Double) {
         if dx == 0 && dy == 0 { return }
-        wheelEvent(WheelEvent(dx: dx, dy: dy, x: x, y: y), now: now)
+        // `WheelEvent::new(dx, dy).at(x, y)`: the derived default leaves `precise` false.
+        wheelEvent(WheelEvent(dx: dx, dy: dy, precise: false, x: x, y: y), now: now)
     }
 
     /// The platform began a trackpad gesture (`Runtime::wheel_began`): its first delta picks the
@@ -279,9 +280,9 @@ extension Runtime {
         }
         if moved || event.phase != .changed {
             var ev = event
-            if inputMachines.wheelLock.phase.isMomentum {
-                ev.momentum = true
-            }
+            // `WheelEvent { momentum: self.wheel_lock.momentum(), ..ev }`: the lock alone says
+            // whether a delta is momentum, whatever the caller passed.
+            ev.momentum = inputMachines.wheelLock.phase.isMomentum
             var handled = false
             switch inputMachines.wheelLock.owner {
             case .handler(let ownerPath):

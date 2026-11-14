@@ -89,6 +89,8 @@ struct CanvasWheelParityTests {
         app.frame(1.0 / 60.0)
         #expect(app.yOf("canvas") == 20, "the canvas declined it, so the page scrolled")
         #expect(app.rt.state.wheels.count == 1)
+        // `wheel_xy` sends `WheelEvent::new(dx, dy).at(x, y)`: line steps, not precise, no momentum.
+        #expect(app.rt.state.wheels[0].precise == false && app.rt.state.wheels[0].momentum == false)
         // The page has the gesture now: the canvas, taking deltas again, doesn't hear the rest.
         app.rt.state.takes = true
         app.wheelXY(150, 150, 0, -10)
