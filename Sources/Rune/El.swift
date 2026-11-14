@@ -928,7 +928,7 @@ final class ElColdData<State> {
     var focusWithinFlat: Bool = false
     var focusFollows: Bool = false
 
-    var a11yLabel: String? = nil
+    var a11yLabelStorage: CowText? = nil
     var a11yHelp: String? = nil
     var helpWhenTruncated: Bool = false
     var helpSide: Side? = nil
@@ -936,15 +936,15 @@ final class ElColdData<State> {
     var a11yExpanded: Bool? = nil
     var a11yLevel: Int? = nil
     var itemSelected: Bool = false
-    var a11yDescription: String? = nil
+    var a11yDescriptionStorage: CowText? = nil
     var a11yValue: String? = nil
     var a11yRange: A11yRange? = nil
     var a11yChecked: A11yChecked? = nil
     var a11yDisabled: Bool = false
     var isA11yHidden: Bool = false
     var a11yActiveDescendant: String? = nil
-    var a11yLabelledBy: String? = nil
-    var a11yDescribedBy: String? = nil
+    var a11yLabelledByStorage: CowText? = nil
+    var a11yDescribedByStorage: CowText? = nil
     var a11yBusy: Bool = false
     var a11yInvalid: Bool = false
     var a11yReadOnly: Bool = false
@@ -992,6 +992,7 @@ final class ElColdData<State> {
     var pressFocusesBelow: Bool = false
     var noWindowDrag: Bool = false
     var isImeCursor: Bool = false
+    var optionAsAlt: Bool = false
     var spellcheck: Bool = false
     var richStyle: RichStyle? = nil
     var pillColors: (bg: Color, fg: Color?)? = nil
@@ -1074,7 +1075,7 @@ final class ElColdData<State> {
         c.focusWithinRing = focusWithinRing
         c.focusWithinFlat = focusWithinFlat
         c.focusFollows = focusFollows
-        c.a11yLabel = a11yLabel
+        c.a11yLabelStorage = a11yLabelStorage
         c.a11yHelp = a11yHelp
         c.helpWhenTruncated = helpWhenTruncated
         c.helpSide = helpSide
@@ -1082,15 +1083,15 @@ final class ElColdData<State> {
         c.a11yExpanded = a11yExpanded
         c.a11yLevel = a11yLevel
         c.itemSelected = itemSelected
-        c.a11yDescription = a11yDescription
+        c.a11yDescriptionStorage = a11yDescriptionStorage
         c.a11yValue = a11yValue
         c.a11yRange = a11yRange
         c.a11yChecked = a11yChecked
         c.a11yDisabled = a11yDisabled
         c.isA11yHidden = isA11yHidden
         c.a11yActiveDescendant = a11yActiveDescendant
-        c.a11yLabelledBy = a11yLabelledBy
-        c.a11yDescribedBy = a11yDescribedBy
+        c.a11yLabelledByStorage = a11yLabelledByStorage
+        c.a11yDescribedByStorage = a11yDescribedByStorage
         c.a11yBusy = a11yBusy
         c.a11yInvalid = a11yInvalid
         c.a11yReadOnly = a11yReadOnly
@@ -1136,6 +1137,7 @@ final class ElColdData<State> {
         c.pressFocusesBelow = pressFocusesBelow
         c.noWindowDrag = noWindowDrag
         c.isImeCursor = isImeCursor
+        c.optionAsAlt = optionAsAlt
         c.spellcheck = spellcheck
         c.richStyle = richStyle
         c.pillColors = pillColors
@@ -1275,6 +1277,7 @@ public struct El<State> {
     public var pressFocusesBelow: Bool { get { _cold?.data.pressFocusesBelow ?? false } set { ensureCold().data.pressFocusesBelow = newValue } }
     public var noWindowDrag: Bool { get { _cold?.data.noWindowDrag ?? false } set { ensureCold().data.noWindowDrag = newValue } }
     public var isImeCursor: Bool { get { _cold?.data.isImeCursor ?? false } set { ensureCold().data.isImeCursor = newValue } }
+    public var isImeOptionAsAlt: Bool { get { _cold?.data.optionAsAlt ?? false } set { ensureCold().data.optionAsAlt = newValue } }
     public var isSpellcheck: Bool { get { _cold?.data.spellcheck ?? false } set { ensureCold().data.spellcheck = newValue } }
     public var foldGlideSpec: FoldGlide? { get { _cold?.data.foldGlideSpec } set { ensureCold().data.foldGlideSpec = newValue } }
     public var virtualEstimate: Float? { get { _cold?.data.virtualEstimate } set { ensureCold().data.virtualEstimate = newValue } }
@@ -1323,7 +1326,14 @@ public struct El<State> {
     public var focusWithinFlat: Bool { get { _cold?.data.focusWithinFlat ?? false } set { ensureCold().data.focusWithinFlat = newValue } }
     public var isFocusFollowsSelection: Bool { get { _cold?.data.focusFollows ?? false } set { ensureCold().data.focusFollows = newValue } }
 
-    public var a11yLabel: String? { get { _cold?.data.a11yLabel } set { ensureCold().data.a11yLabel = newValue } }
+    public var a11yLabel: String? {
+        get { _cold?.data.a11yLabelStorage?.stringValue }
+        set { ensureCold().data.a11yLabelStorage = newValue.map(CowText.owned) }
+    }
+    internal var a11yLabelCow: CowText? {
+        get { _cold?.data.a11yLabelStorage }
+        set { ensureCold().data.a11yLabelStorage = newValue }
+    }
     public var a11yHelp: String? { get { _cold?.data.a11yHelp } set { ensureCold().data.a11yHelp = newValue } }
     public var isHelpWhenTruncated: Bool { get { _cold?.data.helpWhenTruncated ?? false } set { ensureCold().data.helpWhenTruncated = newValue } }
     public var helpSide: Side? { get { _cold?.data.helpSide } set { ensureCold().data.helpSide = newValue } }
@@ -1331,15 +1341,28 @@ public struct El<State> {
     public var a11yExpanded: Bool? { get { _cold?.data.a11yExpanded } set { ensureCold().data.a11yExpanded = newValue } }
     public var a11yLevel: Int? { get { _cold?.data.a11yLevel } set { ensureCold().data.a11yLevel = newValue } }
     public var itemSelected: Bool { get { _cold?.data.itemSelected ?? false } set { ensureCold().data.itemSelected = newValue } }
-    public var a11yDescription: String? { get { _cold?.data.a11yDescription } set { ensureCold().data.a11yDescription = newValue } }
+    public var a11yDescription: String? {
+        get { _cold?.data.a11yDescriptionStorage?.stringValue }
+        set { ensureCold().data.a11yDescriptionStorage = newValue.map(CowText.owned) }
+    }
+    internal var a11yDescriptionCow: CowText? {
+        get { _cold?.data.a11yDescriptionStorage }
+        set { ensureCold().data.a11yDescriptionStorage = newValue }
+    }
     public var a11yValue: String? { get { _cold?.data.a11yValue } set { ensureCold().data.a11yValue = newValue } }
     public var a11yRange: A11yRange? { get { _cold?.data.a11yRange } set { ensureCold().data.a11yRange = newValue } }
     public var a11yChecked: A11yChecked? { get { _cold?.data.a11yChecked } set { ensureCold().data.a11yChecked = newValue } }
     public var a11yDisabled: Bool { get { _cold?.data.a11yDisabled ?? false } set { ensureCold().data.a11yDisabled = newValue } }
     public var isA11yHidden: Bool { get { _cold?.data.isA11yHidden ?? false } set { ensureCold().data.isA11yHidden = newValue } }
     public var a11yActiveDescendant: String? { get { _cold?.data.a11yActiveDescendant } set { ensureCold().data.a11yActiveDescendant = newValue } }
-    public var a11yLabelledBy: String? { get { _cold?.data.a11yLabelledBy } set { ensureCold().data.a11yLabelledBy = newValue } }
-    public var a11yDescribedBy: String? { get { _cold?.data.a11yDescribedBy } set { ensureCold().data.a11yDescribedBy = newValue } }
+    public var a11yLabelledBy: String? {
+        get { _cold?.data.a11yLabelledByStorage?.stringValue }
+        set { ensureCold().data.a11yLabelledByStorage = newValue.map(CowText.owned) }
+    }
+    public var a11yDescribedBy: String? {
+        get { _cold?.data.a11yDescribedByStorage?.stringValue }
+        set { ensureCold().data.a11yDescribedByStorage = newValue.map(CowText.owned) }
+    }
     public var a11yBusy: Bool { get { _cold?.data.a11yBusy ?? false } set { ensureCold().data.a11yBusy = newValue } }
     public var a11yInvalid: Bool { get { _cold?.data.a11yInvalid ?? false } set { ensureCold().data.a11yInvalid = newValue } }
     public var a11yReadOnly: Bool { get { _cold?.data.a11yReadOnly ?? false } set { ensureCold().data.a11yReadOnly = newValue } }
@@ -2716,6 +2739,8 @@ public struct El<State> {
 
     public func role(_ r: ElementRole) -> Self { var c = self; c.role = r; return c }
     public func label(_ l: String) -> Self { var c = self; c.a11yLabel = l; return c }
+    /// Zero-copy `label` from a compile-time `StaticString` literal (`El::label_static`).
+    public func labelStatic(_ label: StaticString) -> Self { var c = self; c.a11yLabelCow = .staticString(label); return c }
     public func help(_ h: String) -> Self {
         var c = self
         if !h.isEmpty || c._cold != nil {
@@ -2768,6 +2793,8 @@ public struct El<State> {
     public func focusReturn(_ trigger: String) -> Self { var c = self; c.focusReturnKey = trigger; return c }
 
     public func description(_ text: String) -> Self { var c = self; c.a11yDescription = text; return c }
+    /// Zero-copy `description` from a compile-time `StaticString` literal (`El::description_static`).
+    public func descriptionStatic(_ text: StaticString) -> Self { var c = self; c.a11yDescriptionCow = .staticString(text); return c }
     public func activeDescendant(_ key: String) -> Self { var c = self; c.a11yActiveDescendant = key; return c }
     public func a11yValue(_ text: String) -> Self { var c = self; c.a11yValue = text; return c }
 
@@ -2893,6 +2920,15 @@ public struct El<State> {
     public func imeCursor(_ enabled: Bool = true) -> Self {
         var copy = self
         copy.isImeCursor = enabled
+        return copy
+    }
+
+    /// With `imeCursor`: on macOS, while this caret holds the input method, Option is treated as Alt (`El::ime_option_as_alt`).
+    public func imeOptionAsAlt(_ on: Bool = true) -> Self {
+        var copy = self
+        if on || copy._cold != nil {
+            copy.isImeOptionAsAlt = on
+        }
         return copy
     }
 
@@ -3592,6 +3628,59 @@ public func terminalGrid<State>(
         rows: rows
     )
     return node
+}
+
+extension El {
+    /// Sets the terminal grid cursor cell (`column`, `row`) exposed as the grid's accessibility caret (`El::grid_caret`).
+    public func gridCaret(_ column: Int, _ row: Int) -> Self {
+        var copy = self
+        guard var grid = copy.terminalGridPayload else { return copy }
+        grid.caret = (column: column, row: row)
+        copy.terminalGridPayload = grid
+        return copy
+    }
+}
+
+/// Zero-copy accessibility text storage distinguishing compile-time literals from owned `String` values (`#860`).
+internal enum CowText: @unchecked Sendable, Equatable {
+    case staticString(StaticString)
+    case owned(String)
+
+    var stringValue: String {
+        switch self {
+        case .staticString(let s):
+            if s.hasPointerRepresentation {
+                return s.withUTF8Buffer { String(decoding: $0, as: UTF8.self) }
+            }
+            return String(s.unicodeScalar)
+        case .owned(let s):
+            return s
+        }
+    }
+
+    var isEmpty: Bool {
+        switch self {
+        case .staticString(let s):
+            return s.hasPointerRepresentation ? (s.utf8CodeUnitCount == 0) : false
+        case .owned(let s):
+            return s.isEmpty
+        }
+    }
+
+    static func == (lhs: CowText, rhs: CowText) -> Bool {
+        switch (lhs, rhs) {
+        case (.staticString(let a), .staticString(let b)):
+            if a.hasPointerRepresentation && b.hasPointerRepresentation &&
+                a.utf8Start == b.utf8Start && a.utf8CodeUnitCount == b.utf8CodeUnitCount {
+                return true
+            }
+            return lhs.stringValue == rhs.stringValue
+        case (.owned(let a), .owned(let b)):
+            return a == b
+        default:
+            return lhs.stringValue == rhs.stringValue
+        }
+    }
 }
 
 @inlinable

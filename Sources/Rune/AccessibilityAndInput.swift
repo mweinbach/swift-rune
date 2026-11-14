@@ -310,36 +310,11 @@ public enum AccessibilityTreeBuilder {
                 projectedChildren.append(childNode)
             }
         }
+        var projectedSelection: [Int]? = nil
         if let grid = element.terminalGridPayload {
-            let cw = grid.cellSize.x
-            let ch = grid.cellSize.y
-            for (k, row) in grid.rows.enumerated() {
-                let y = absRect.y + Float(k) * ch
-                if y >= absRect.y + absRect.height { break }
-                let (rowText, places) = row.readingText()
-                let chars = Array(rowText)
-                let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
-                let positions: [Float] = places.map { Float($0.column) * cw }
-                let widths: [Float] = places.map { Float($0.width) * cw }
-                var starts: [UInt8] = []
-                for idx in 0..<chars.count {
-                    let curWs = chars[idx].isWhitespace
-                    let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
-                    if !curWs && prevWs {
-                        starts.append(UInt8(min(idx, 255)))
-                    }
-                }
-                projectedChildren.append(AccessibilityNode(
-                    id: "\(nodeId)/line:\(k)",
-                    role: .text,
-                    value: rowText,
-                    frame: MotionRect.fromXYWH(absRect.x, y, Float(grid.columns) * cw, ch),
-                    characterLengths: lengths,
-                    characterPositions: positions,
-                    characterWidths: widths,
-                    wordStarts: starts
-                ))
-            }
+            let projected = Self.projectTerminalGrid(grid, nodeId: nodeId, bounds: absRect)
+            projectedChildren.append(contentsOf: projected.children)
+            projectedSelection = projected.selection
         }
 
         return AccessibilityNode(
@@ -370,11 +345,72 @@ public enum AccessibilityTreeBuilder {
             toggled: element.a11yChecked,
             liveRegion: element.a11yLive,
             clipsChildren: element.layout.clipOverflow,
+            textSelection: projectedSelection,
             isModal: element.isModal,
             isSecure: isSecure,
             actions: actions,
             children: projectedChildren
         )
+    }
+
+    internal static func projectTerminalGrid(
+        _ grid: TerminalGrid,
+        nodeId: String,
+        bounds: MotionRect
+    ) -> (children: [AccessibilityNode], selection: [Int]?) {
+        let cw = grid.cellSize.x
+        let ch = grid.cellSize.y
+        let shown = min(grid.rows.count, max(0, Int(ceil(Double(bounds.height / max(ch, 1.0))))))
+        var children: [AccessibilityNode] = []
+        children.reserveCapacity(shown)
+        var selection: [Int]? = nil
+        for k in 0..<shown {
+            let row = grid.rows[k]
+            let y = bounds.y + Float(k) * ch
+            var (rowText, places) = row.readingText()
+            let readCount = places.count
+            let end = places.last.map { $0.column + max($0.width, 1) } ?? 0
+            if !row.wraps && k + 1 < shown {
+                rowText.append("\n")
+                places.append((column: end, width: 0))
+            }
+            if row.wraps && end < grid.columns {
+                rowText.append(String(repeating: " ", count: grid.columns - end))
+                for col in end..<grid.columns {
+                    places.append((column: col, width: 1))
+                }
+            }
+            if let caret = grid.caret, caret.row == k {
+                let charIdx = TerminalGridRow.charAt(
+                    columnPlaces: Array(places.prefix(readCount)),
+                    column: caret.column
+                )
+                selection = [k, charIdx, k, charIdx]
+            }
+            let chars = Array(rowText)
+            let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
+            let positions: [Float] = places.map { Float($0.column) * cw }
+            let widths: [Float] = places.map { Float($0.width) * cw }
+            var starts: [UInt8] = []
+            for idx in 0..<chars.count {
+                let curWs = chars[idx].isWhitespace
+                let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
+                if !curWs && prevWs {
+                    starts.append(UInt8(min(idx, 255)))
+                }
+            }
+            children.append(AccessibilityNode(
+                id: "\(nodeId)/line:\(k)",
+                role: .text,
+                value: rowText,
+                frame: MotionRect.fromXYWH(bounds.x, y, Float(grid.columns) * cw, ch),
+                characterLengths: lengths,
+                characterPositions: positions,
+                characterWidths: widths,
+                wordStarts: starts
+            ))
+        }
+        return (children, selection)
     }
 }
 

@@ -678,4 +678,28 @@ struct RuneLuauVMParityTests {
         """#)
         #expect(out == [.bool(true)])
     }
+
+    @Test("Script.collectGarbage runs Luau GC cleanly without disrupting live module (#905)")
+    func scriptCollectGarbageRunsCleanly() throws {
+        let src = Sources.single("""
+        local M = {}
+        function M.churn(n)
+            local sum = 0
+            for i = 1, n do
+                local tmp = { i, tostring(i) }
+                sum = sum + tmp[1]
+            end
+            return sum == 20100
+        end
+        return M
+        """)
+        let script = Script(name: "gc-rest", sources: src)
+        script.prewarm()
+        #expect(script.error == nil)
+        let r1 = try script.query("churn", args: [LuauData.number(200)])
+        #expect(r1 == .bool(true))
+        script.collectGarbage()
+        let r2 = try script.query("churn", args: [LuauData.number(200)])
+        #expect(r2 == .bool(true))
+    }
 }

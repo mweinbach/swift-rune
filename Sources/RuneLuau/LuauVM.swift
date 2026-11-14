@@ -927,6 +927,11 @@ public final class LuauVM: @unchecked Sendable {
         }
     }
 
+    /// Reclaims transient allocation counters on host rest (`Script::collect_garbage`).
+    public func collectGarbage() {
+        pendingAllocationBytes = 0
+    }
+
     /// Records an allocation delta and checks against `memoryLimitBytes` when threshold is reached.
     public func noteAllocation(_ bytes: Int) throws {
         guard bytes > 0 else { return }

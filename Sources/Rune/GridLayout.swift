@@ -1129,6 +1129,7 @@ public struct TerminalGridRow: Sendable {
     public var cells: [TerminalGridCell] = [] { didSet { cache = TerminalGridRowCacheBox() } }
     public var fills: [TerminalGridFill] = [] { didSet { cache = TerminalGridRowCacheBox() } }
     public var overlayShape: Shape? = nil { didSet { cache = TerminalGridRowCacheBox() } }
+    public var wraps: Bool = false
     internal var cache = TerminalGridRowCacheBox()
 
     public init(text: String, spans: [TextSpan] = [], style: TextStyle = TextStyle()) {
@@ -1154,6 +1155,18 @@ public struct TerminalGridRow: Sendable {
         var copy = self
         copy.overlayShape = shape.path.commands.isEmpty ? nil : shape
         return copy
+    }
+
+    /// Marks whether this row wraps cleanly into the next row without an intervening line break (`GridRow::wraps`).
+    public func wraps(_ wraps: Bool = true) -> Self {
+        var copy = self
+        copy.wraps = wraps
+        return copy
+    }
+
+    /// Character index in `readingText` for cell `column`, clamping wide cells to their start or past text to `end` (`GridRow::char_at`).
+    internal static func charAt(columnPlaces: [(column: Int, width: Int)], column: Int) -> Int {
+        columnPlaces.firstIndex { $0.column + max($0.width, 1) > column } ?? columnPlaces.count
     }
 
     /// Fingerprint of all row content and overlays so mutated or copied rows never alias stale cache entries.
@@ -1259,10 +1272,19 @@ public struct TerminalGrid: Sendable {
     public var columns: Int
     public var cellSize: Vec2
     public var rows: [TerminalGridRow]
+    /// Cursor cell `(column, row)` published as the grid's accessibility caret (`El::grid_caret`).
+    public var caret: (column: Int, row: Int)?
 
-    public init(columns: Int, cellWidth: Float, cellHeight: Float, rows: [TerminalGridRow]) {
+    public init(
+        columns: Int,
+        cellWidth: Float,
+        cellHeight: Float,
+        rows: [TerminalGridRow],
+        caret: (column: Int, row: Int)? = nil
+    ) {
         self.columns = max(1, columns)
         self.cellSize = Vec2(cellWidth, cellHeight)
         self.rows = rows
+        self.caret = caret
     }
 }

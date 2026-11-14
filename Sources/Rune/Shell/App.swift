@@ -685,6 +685,7 @@ public struct App<State> {
     public var onFocusHook: ((inout State, Bool, inout Tx) -> Void)? = nil
     public var onModifiersHook: ((inout State, Mods, inout Tx) -> Void)? = nil
     public var onVisibilityHook: ((inout State, Bool, inout Tx) -> Void)? = nil
+    public var onRestHook: ((inout State, inout Tx) -> Bool)? = nil
     public var onImeHook: ((inout State, Ime, inout Tx) -> Bool)? = nil
     public var onCloseHook: ((inout State, inout Tx) -> Bool)? = nil
     public var onQuitHook: ((inout State, inout Tx) -> Void)? = nil
@@ -984,6 +985,13 @@ public struct App<State> {
         return copy
     }
 
+    /// Runs when a window rests after drawing stops or it becomes hidden/minimized/occluded (`App::on_rest`).
+    public func onRest(_ hook: @escaping (inout State, inout Tx) -> Bool) -> App<State> {
+        var copy = self
+        copy.onRestHook = hook
+        return copy
+    }
+
     public func onIme(_ hook: @escaping (inout State, Ime, inout Tx) -> Bool) -> App<State> {
         var copy = self
         copy.onImeHook = hook
@@ -1174,6 +1182,7 @@ public struct App<State> {
         runtime.onFocus = onFocusHook
         runtime.onModifiers = onModifiersHook
         runtime.onVisibility = onVisibilityHook
+        runtime.onRest = onRestHook
         runtime.onIme = onImeHook
         runtime.onClose = onCloseHook
         runtime.onQuit = onQuitHook

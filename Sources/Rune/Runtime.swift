@@ -617,6 +617,7 @@ public final class Runtime<State> {
     public var onFocus: ((inout State, Bool, inout Tx) -> Void)? = nil
     public var onModifiers: ((inout State, Mods, inout Tx) -> Void)? = nil
     public var onVisibility: ((inout State, Bool, inout Tx) -> Void)? = nil
+    public var onRest: ((inout State, inout Tx) -> Bool)? = nil
     public var onIme: ((inout State, Ime, inout Tx) -> Bool)? = nil
     public var onClose: ((inout State, inout Tx) -> Bool)? = nil
     public var onQuit: ((inout State, inout Tx) -> Void)? = nil
@@ -764,6 +765,11 @@ public final class Runtime<State> {
     internal var hoveredLink: TextLinkTarget? = nil
     internal var pressedLink: TextLinkTarget? = nil
     private var webFocusTabStartPath: String? = nil
+    internal var focusKeyboard: Bool = false
+    internal var blurredFocusPath: String? = nil
+    internal var focusHandoff: Bool = false
+    private var prevFlatNodeIdsByPath: [String: NodeId] = [:]
+    internal var tabStartFocusPath: String? { webFocusTabStartPath }
     private var dirChord: DirChord = .idle
     private var lastPinnedGlyphMask: UInt32 = 0
     public private(set) var lastKeyDiagnostics: [DuplicateKeyWarning] = []
@@ -854,6 +860,8 @@ public final class Runtime<State> {
     public internal(set) var toggleMaximizedRequested: Bool = false
     public internal(set) var toggleFullScreenRequested: Bool = false
     public internal(set) var imeCursorArea: [Float]? = nil
+    /// Whether the active `El.imeCursor` caret asks for Option as Alt on macOS (`El::ime_option_as_alt`).
+    public internal(set) var imeOptionAsAlt: Bool = false
     public internal(set) var noWindowDragRects: [MotionRect] = []
     internal var activeByKeys: Bool = false
     internal var pendingSentKeys: [KeyEvent] = []
@@ -3496,6 +3504,7 @@ public final class Runtime<State> {
         nodeById = pass.byId
         lastCommittedSpecs = specs
         layoutCommitGen &+= 1
+        textSystem.endCommit()
         layoutKeyIndex.invalidate()
         if !pass.warnings.isEmpty {
             keyWarnings = pass.warnings
@@ -3560,12 +3569,14 @@ public final class Runtime<State> {
         virtualInputs = pass.virtualExpansion.virtualInputs
         reconcilePrunedHoverWithin(prevNodes: prevFlatNodesSnapshot, newByPath: pass.byPath, cut: cut, at: now)
 
-        // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn & autofocus.
+        // Reconcile focus: keep focused key/path if still focusable & non-inert; sync TextEdit.focused; handle modal/focusReturn, autofocus & fallback.
         reconcileFocusAfterCommit(
             prevFocusedPath: prevFocusedPath,
             prevFocusedKey: prevFocusedKey,
-            prevFocusVisible: prevFocusVisible
+            prevFocusVisible: prevFocusVisible,
+            prevNodes: prevFlatNodesSnapshot
         )
+        prevFlatNodeIdsByPath = Dictionary(pass.nodes.map { ($0.path, $0.nodeId) }, uniquingKeysWith: { first, _ in first })
         syncFollows()
         if let prevPath = prevFocusedPath, prevPath != focusedPath {
             let prevNode = prevFlatNodesSnapshot.first(where: { $0.path == prevPath })
@@ -4493,7 +4504,8 @@ public final class Runtime<State> {
     private func reconcileFocusAfterCommit(
         prevFocusedPath: String?,
         prevFocusedKey: String?,
-        prevFocusVisible: Bool
+        prevFocusVisible: Bool,
+        prevNodes: [FlatNode]
     ) {
         let txBlur = pendingTxBlurRequested
         let txFocusKey = pendingTxFocusKey
@@ -4614,6 +4626,13 @@ public final class Runtime<State> {
             nextIdx = tabOrderIndices().first
         }
 
+        if !txBlur && nextIdx == nil {
+            if let fallbackIdx = focusFallback(prevNodes: prevNodes, prevFocusedPath: prevFocusedPath) {
+                nextIdx = fallbackIdx
+                focusVisible = focusKeyboard
+            }
+        }
+
         if let pendingVis = kitHooks.pendingTxFocusVisible {
             kitHooks.pendingTxFocusVisible = nil
             if txFocusKey != nil {
@@ -4622,11 +4641,121 @@ public final class Runtime<State> {
         }
         focusedPath = nextIdx.map { flatNodes[$0].path }
         focusedKey = nextIdx.flatMap { flatNodes[$0].key }
+        blurredFocusPath = nil
+        if nextIdx != nil {
+            focusHandoff = false
+            webFocusTabStartPath = nil
+            if txFocusKey != nil, let vis = txFocusVisible {
+                focusKeyboard = vis
+            } else if requestedFocusIdx == nextIdx && requestedFocusIdx != nil && txFocusKey == nil {
+                focusKeyboard = false
+            }
+        }
         if prevFocusedPath != focusedPath {
             imeReset = true
             hoveredHighlightActive = false
         }
         syncFocusedLinkIndex()
+    }
+
+    /// Focus fallback when the control holding focus (or recently blurred by Escape) leaves the tree (`focus.rs::focus_fallback`).
+    private func focusFallback(prevNodes: [FlatNode], prevFocusedPath: String?) -> Int? {
+        let gone: String?
+        if let fp = prevFocusedPath {
+            gone = fp
+        } else if focusKeyboard {
+            gone = blurredFocusPath ?? webFocusTabStartPath
+        } else {
+            gone = nil
+        }
+        guard let gone else { return nil }
+        if prevFocusedPath == nil && !focusHandoff { return nil }
+        // The control that held focus is still in the tree (e.g. blurred/collapsed while staying): hand nothing on.
+        if nodeByPath[gone] != nil { return nil }
+
+        guard let at = prevNodes.firstIndex(where: { $0.path == gone }) else {
+            // Offscreen virtualized field had no layout node; only a pathless moved stub climbs the new tree (`r384`, `#842`).
+            guard let id = prevFlatNodeIdsByPath[gone],
+                  let oldNode = prevNodes.first(where: { $0.nodeId == id }),
+                  oldNode.path.isEmpty else {
+                return nil
+            }
+            return fallbackInNew(gone: gone)
+        }
+        let atNode = prevNodes[at]
+        if prevFocusedPath == nil && !(atNode.el.handlers.editLens != nil || atNode.el.role == .textInput) {
+            return nil
+        }
+        if let modalPrefix = activeModalPath,
+           (atNode.path == modalPrefix || atNode.path.hasPrefix(modalPrefix + "/")) {
+            return nil
+        }
+
+        let atNew: (Int) -> Int? = { i in
+            let n = prevNodes[i]
+            if !n.path.isEmpty {
+                return self.nodeByPath[n.path]
+            }
+            return self.nodeById[n.nodeId]?.index
+        }
+        let shown: (Int) -> Bool = { j in
+            let r = self.flatNodes[j].targetRect
+            return r.width > 0 && r.height > 0 && self.canFocusIndex(j)
+        }
+        let survivor: (Int) -> Int? = { i in
+            guard let j = atNew(i), shown(j) else { return nil }
+            return j
+        }
+        let within: (Int, Int) -> Bool = { j, s in
+            let p: String
+            let root: String
+            if let pj = atNew(j), let rs = atNew(s) {
+                p = self.flatNodes[pj].path
+                root = self.flatNodes[rs].path
+            } else {
+                p = prevNodes[j].path
+                root = prevNodes[s].path
+            }
+            return root.isEmpty || (p.count > root.count && p.hasPrefix(root + "/"))
+        }
+
+        var scope = prevNodes[at].parentIndex
+        while let s = scope {
+            if atNew(s) != nil {
+                let end = ((s + 1)..<prevNodes.count).first(where: { !within($0, s) }) ?? prevNodes.count
+                if let j = ((at + 1)..<end).lazy.compactMap(survivor).first
+                    ?? ((s + 1)..<at).reversed().lazy.compactMap(survivor).first
+                    ?? survivor(s) {
+                    return j
+                }
+            }
+            scope = prevNodes[s].parentIndex
+        }
+        return nil
+    }
+
+    /// Climbs `gone` in `flatNodes` when the old tree held only a pathless moved stub (`#842`).
+    internal func fallbackInNew(gone: String) -> Int? {
+        guard activeModalPath == nil, nodeByPath[gone] == nil else { return nil }
+        let can: (Int) -> Bool = { j in
+            let r = self.flatNodes[j].targetRect
+            return r.width > 0 && r.height > 0 && self.canFocusIndex(j)
+        }
+        var p = Substring(gone)
+        while let slash = p.lastIndex(of: "/") {
+            p = p[..<slash]
+            let prefix = String(p)
+            guard let j = nodeByPath[prefix] else { continue }
+            let childPrefix = prefix + "/"
+            if can(j) { return j }
+            var idx = j + 1
+            while idx < flatNodes.count && flatNodes[idx].path.hasPrefix(childPrefix) {
+                if can(idx) { return idx }
+                idx += 1
+            }
+            return nil
+        }
+        return nil
     }
 
     internal func isFocusWithin(_ path: String) -> Bool {
@@ -5172,6 +5301,7 @@ public final class Runtime<State> {
         newPaintOrder.reserveCapacity(frameOut.nodes.count)
         var newHelpHits: [HelpHitRecord] = []
         var nextImeCursorArea: [Float]? = nil
+        var nextImeOptionAsAlt: Bool = false
         var nextNoWindowDragRects: [MotionRect] = []
         var newInteractiveHits: [HelpInteractiveHitRecord] = []
         var newLinkBoxes: [String: [TextLinkBox]] = [:]
@@ -7015,6 +7145,7 @@ public final class Runtime<State> {
             if shouldEmit && !p.isExiting && !snap.effectiveInert {
                 if el.isImeCursor && !hasFocusedTextInput && nextImeCursorArea == nil {
                     nextImeCursorArea = rect.xywh
+                    nextImeOptionAsAlt = el.isImeOptionAsAlt
                 }
                 if el.noWindowDrag {
                     nextNoWindowDragRects.append(visibleRect)
@@ -7464,6 +7595,7 @@ public final class Runtime<State> {
         lastElements = infos
         landUnseenEntrances(frameNodes: frameOut.nodes, on: &scene)
         imeCursorArea = nextImeCursorArea
+        imeOptionAsAlt = nextImeOptionAsAlt
         noWindowDragRects = nextNoWindowDragRects
         presentedRectByPath = newRectByPath
         presentedScaleByPath = newScaleByPath
@@ -8162,6 +8294,9 @@ public final class Runtime<State> {
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
                 focusedPath = nil
                 focusedKey = nil
+                focusKeyboard = false
+                blurredFocusPath = nil
+                focusHandoff = false
                 imeReset = true
                 dirtyCommit(at: now)
             }
@@ -8198,11 +8333,18 @@ public final class Runtime<State> {
                 }
                 focusedPath = belowNode.path
                 focusedKey = belowNode.key
+                focusKeyboard = false
+                blurredFocusPath = nil
+                focusHandoff = false
+                webFocusTabStartPath = nil
             } else if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
                 focusedPath = nil
                 focusedKey = nil
+                focusKeyboard = false
+                blurredFocusPath = nil
+                focusHandoff = false
                 imeReset = true
                 downFocusChanged = true
             }
@@ -8218,12 +8360,19 @@ public final class Runtime<State> {
                 }
                 focusedPath = node.path
                 focusedKey = node.key
+                focusKeyboard = false
+                blurredFocusPath = nil
+                focusHandoff = false
+                webFocusTabStartPath = nil
             } else if !onLink && !inEditSubtree && !preservesFocus && !isTextBox {
                 if let prevFp = focusedPath {
                     let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                     handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
                     focusedPath = nil
                     focusedKey = nil
+                    focusKeyboard = false
+                    blurredFocusPath = nil
+                    focusHandoff = false
                     imeReset = true
                     downFocusChanged = true
                 }
@@ -8885,6 +9034,10 @@ public final class Runtime<State> {
                 case .ignored:
                     if edit.didRequestBlur && activeModalPath == nil {
                         if !isRepeat {
+                            let prevFp = focusedPath
+                            blurredFocusPath = prevFp
+                            webFocusTabStartPath = prevFp
+                            focusHandoff = true
                             focusedPath = nil
                             focusedKey = nil
                             syncedEditFocusedPaths.removeAll()
@@ -9642,7 +9795,10 @@ public final class Runtime<State> {
             if let prevFp = focusedPath {
                 let prevNode = nodeByPath[prevFp].map { flatNodes[$0] }
                 handleKitFocusTransition(prevNode: prevNode, newPath: nil, at: now)
+                webFocusTabStartPath = prevFp
+                blurredFocusPath = prevFp
             }
+            focusHandoff = false
             hoveredHighlightActive = false
             pendingTxBlurRequested = true
             pendingTxFocusKey = nil
@@ -9663,6 +9819,10 @@ public final class Runtime<State> {
             kitHooks.pendingTxFocusVisible = tx.requestedFocusVisible
             pendingTxFocusVisible = tx.focusAskedByReturn ? tx.requestedFocusVisible : nil
             focusVisible = tx.requestedFocusVisible
+            focusKeyboard = tx.requestedFocusVisible
+            blurredFocusPath = nil
+            focusHandoff = false
+            webFocusTabStartPath = nil
             focusedKey = fk
             if let match = matchedNode {
                 focusedPath = match.path
@@ -9982,6 +10142,13 @@ public final class Runtime<State> {
         }
     }
 
+    /// Trims idle text/glyph caches when a window goes to rest (`#905`) and invokes `onRest` if set.
+    public func rest(at now: Double? = nil) {
+        textSystem.rest()
+        guard let onRest else { return }
+        _ = updateIf(at: now, onRest)
+    }
+
     /// Sets `srgbBlend` and dirties the tree if changed.
     public func setSrgbBlend(_ enabled: Bool, at now: Double? = nil) {
         guard srgbBlend != enabled else { return }
@@ -10223,13 +10390,26 @@ public final class Runtime<State> {
         return edit.imeTextSnapshot(maxContextBytes: maxContextBytes)
     }
 
+    /// Whether either a non-secure focused `textInput` or an active `imeCursor` holds IME (`ime_allowed`).
+    public var hasImeTarget: Bool {
+        !hasSecureFocus && (hasFocusedTextInput || imeCursorArea != nil)
+    }
+
+    /// Effective Option-as-Alt flag while IME is held by an `imeCursor` (`Runtime.ime_option_as_alt`).
+    public var effectiveImeOptionAsAlt: Bool {
+        !hasSecureFocus && !hasFocusedTextInput && imeCursorArea != nil && imeOptionAsAlt
+    }
+
     /// Returns the focused input caret rect in window coordinates, if available.
     public func focusedCaretRect() -> MotionRect? {
-        guard let c = (currentFocusedCaret() ?? cxSettings.lastCommittedCaret)?.rect,
-              c.count >= 4 else {
-            return nil
+        if let c = (currentFocusedCaret() ?? cxSettings.lastCommittedCaret)?.rect,
+           c.count >= 4 {
+            return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
         }
-        return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+        if let c = imeCursorArea, c.count >= 4 {
+            return MotionRect.fromXYWH(c[0], c[1], c[2], c[3])
+        }
+        return nil
     }
 
     /// Commits any open preedit composition on focus loss or window deactivation (`Runtime::finish_composition`).
@@ -10611,6 +10791,10 @@ public final class Runtime<State> {
         }
         focusedPath = flatNodes[nextIdx].path
         focusedKey = flatNodes[nextIdx].key
+        focusKeyboard = true
+        blurredFocusPath = nil
+        focusHandoff = false
+        webFocusTabStartPath = nil
         if hasActiveTextLinks(flatNodes[nextIdx].el) {
             let links = flatNodes[nextIdx].el.textLinks
             let k = backward ? max(0, links.count - 1) : 0
@@ -10666,6 +10850,10 @@ public final class Runtime<State> {
         let nextNode = flatNodes[members[targetPos]]
         focusedPath = nextNode.path
         focusedKey = nextNode.key
+        focusKeyboard = true
+        blurredFocusPath = nil
+        focusHandoff = false
+        webFocusTabStartPath = nil
         focusedLinkIndex = nil
         hoveredHighlightActive = false
         focusVisible = true

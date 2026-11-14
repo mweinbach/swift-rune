@@ -661,8 +661,10 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
             switch effect {
             case .giveBackUnused:
                 entry.trimIdleCaches(runtimeObj: runtime, all: false)
+                view.giveBackRenderer(all: false)
             case .giveBackAll:
                 entry.trimIdleCaches(runtimeObj: runtime, all: true)
+                view.giveBackRenderer(all: true)
             }
         }
         scheduleRestTimerIfNeeded()
@@ -887,7 +889,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
     private func syncPlatformBridges(treeCommitted: Bool) {
         let focused = window?.isKeyWindow ?? true
-        let imeAllowed = entry.hasFocusedTextInput(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
+        let imeAllowed = entry.hasImeTarget(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
         let cancelIme = entry.consumeImeReset(runtimeObj: runtime)
         let caretRect = MacOSHostViewHelper.caretScreenRect(
             caret: entry.focusedCaretRect(runtimeObj: runtime),
@@ -992,14 +994,17 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func keyDown(with event: NSEvent) {
-        if entry.hasFocusedTextInput(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) {
-            let imeResult = textInputBridge.processKeyDown(event, in: self)
+        let focused = window?.isKeyWindow ?? true
+        let imeAllowed = entry.hasImeTarget(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
+        let optionAsAlt = imeAllowed && entry.imeOptionAsAlt(runtimeObj: runtime)
+        if imeAllowed {
+            let imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt)
             if imeResult == .handledByIME {
                 requestRender()
                 return
             }
         }
-        guard let kev = MacOSKeyMapper.makeKeyEvent(from: event) else { return }
+        guard let kev = MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt) else { return }
         _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds())
         requestRender()
     }
@@ -1112,6 +1117,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         fileDialogPresenter.cancel()
         entry.cancelPopups(runtimeObj: runtime)
         entry.cancelFileDialogs(runtimeObj: runtime, at: nowSeconds())
+    }
+
+    func giveBackRenderer(all: Bool) {
+        renderer.giveBack(all: all, residentCaches: all)
     }
 
     private func pumpPlatformActions() {
