@@ -79,6 +79,7 @@ extension El {
         if enabled {
             copy.textStyle.wrap = .wrap
         }
+        copy.textStyle.wrapAnywhere = enabled
         copy.runtimeExtras["htmlWrapAnywhere"] = enabled
         copy.runtimeExtras[ShellElExtrasKey.wrapAnywhere] = enabled
         return copy

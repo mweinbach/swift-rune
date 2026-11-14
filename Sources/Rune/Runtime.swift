@@ -826,11 +826,15 @@ public final class Runtime<State> {
     internal var virtualFillLastScrollOffsets: [String: Vec2] = [:]
     private var lastHoverScrollOffsets: [String: Vec2] = [:]
     internal typealias RuntimeGrowthEntry = Rune.RuntimeGrowthEntry
+    internal var nodeTextLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
+    internal var prevNodeTextLayoutsForCommit: [NodeId: (shapeKey: TextShapeKey, isInput: Bool)]? = nil
+    internal var exitingTextLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
     internal var growthRows: [String: RuntimeGrowthEntry] = [:]
     internal var growthStacks: [String: RuntimeGrowthStackState] = [:]
     internal var foldHeaders: [String: String] = [:]
     internal var growthSubstepAccumulator: Double = 0
     internal var lastGrowthStepTime: Double? = nil
+    internal var pendingGrowthStepNow: Double? = nil
     internal var atBottomStates: [String: Bool] = [:]
     internal var farFromBottomStates: [String: Bool] = [:]
     internal var lastScrollOffsetReports: [String: ScrollPos] = [:]
@@ -1006,6 +1010,45 @@ public final class Runtime<State> {
 
     /// Current animation time scale for the view (`Runtime::time_scale`).
     public var timeScale: Float { cxSettings.viewTimeScale }
+    private var prevRevealedSecureIds: Set<NodeId> = []
+    private var lastSecureMaskInfo: [NodeId: (count: Int, multiline: Bool)] = [:]
+
+    internal func recordEvent(_ entry: String) {
+        events.append(entry)
+        if events.count > 512 {
+            events.removeFirst(events.count - 512)
+        }
+    }
+
+    private func redactExitingSecureSnapshots(liveIds: Set<NodeId>) {
+        guard !exitingSnapshots.isEmpty else { return }
+        for nid in Array(exitingSnapshots.keys) where !liveIds.contains(nid) {
+            guard var snap = exitingSnapshots[nid] else { continue }
+            let prevInfo = lastSecureMaskInfo.removeValue(forKey: nid)
+            let edit = snap.el.handlers.editLens?.get(state)
+            let isSec = snap.el.isSecure || (edit?.isSecure == true) || prevInfo != nil
+            guard isSec else { continue }
+            exitingTextLayouts.removeValue(forKey: nid)
+            snap.el.isRevealed = false
+            snap.el.liveText = nil
+            snap.el.richSpans = nil
+            snap.el.handlers.editLens = nil
+            if let prevInfo {
+                snap.el.plainText = prevInfo.multiline
+                    ? TextEdit.multilineSecureMask
+                    : String(repeating: "•", count: prevInfo.count)
+            } else if let edit {
+                snap.el.plainText = edit.multiline
+                    ? TextEdit.multilineSecureMask
+                    : String(repeating: "•", count: edit.text.count)
+            } else if let raw = snap.el.plainText {
+                snap.el.plainText = raw.isEmpty ? "" : TextEdit.multilineSecureMask
+            } else {
+                snap.el.plainText = TextEdit.multilineSecureMask
+            }
+            exitingSnapshots[nid] = snap
+        }
+    }
 
     // Layout read, feedback circuit breaker, and layout/drawn/visible reporting state
     private enum LayoutQueueKind: Equatable {
@@ -1465,13 +1508,14 @@ public final class Runtime<State> {
             splitStep = nil
         }
 
+        let frameStartShapedCount = textSystem.shapedCallCount
         var (frameOut, animNow) = stepToFrameOutputScaled(
             at: now,
             splitStep: splitStep,
             skipFramePoll: timerAlreadyPolled
         )
         var sceneOut = measureFramePhase(.paint) {
-            buildRefScene(frameOut: frameOut, now: animNow)
+            buildRefScene(frameOut: frameOut, now: animNow, startShapedCount: frameStartShapedCount)
         }
         if cxSettings.caretReadByView,
            let nextCaret = currentFocusedCaret(),
@@ -1686,8 +1730,6 @@ public final class Runtime<State> {
         }
         stepKitDragRepeatOnFrame(at: now)
         stepKitHoverDelaysOnFrame(at: now)
-        let preCommitGrowthDt: Double = lastGrowthStepTime.map { max(0, min(0.1, now - $0)) } ?? 0
-        var growthMoving = advanceGrowthRows(at: now)
         fireHoverDelays(at: now)
         flushPendingSentKeys(at: now)
         insideFramePollOrInput = false
@@ -1724,6 +1766,7 @@ public final class Runtime<State> {
         }
 
         let didEdgeScroll = stepSelectableEdgeScroll(at: now)
+        var growthMoving = needsCommit ? false : advanceGrowthRows(at: now)
         let isInitiallyScrolling = scrollMovedSinceLastFrame || scrollStore.isAnimating
         if isInitiallyScrolling {
             layoutFeedback.step(.reopened)
@@ -1759,7 +1802,9 @@ public final class Runtime<State> {
                 scene: scene,
                 tracks: &loopRuntime.tracks
             )
-            kitHooks.frameGrowthStepDt = preCommitGrowthDt
+            kitHooks.frameGrowthStepDt = 0
+            pendingGrowthStepNow = now
+            defer { pendingGrowthStepNow = nil }
             commitTree(at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
@@ -1998,6 +2043,7 @@ public final class Runtime<State> {
         if exitingSnapshots.count != prevExitingCount {
             rebuildLiveSubscriptionsIncludingExiting()
         }
+        exitingTextLayouts = exitingTextLayouts.filter { activeIds.contains($0.key) }
         pruneScaleSettles()
         activeFlightIds = activeFlightIds.filter {
             activeIds.contains($0) && (scene.isEdgeAnimating($0) || scene.hasEnteringAncestor($0))
@@ -2182,6 +2228,7 @@ public final class Runtime<State> {
         var foldOpens: [PendingFoldOpen] = []
         var scrollCuts: [(viewport: String, cut: Float)] = []
         var foldHeaderUpdates: [(foldKey: String, headerPath: String)] = []
+        var textLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord]
 
         init(
             viewRootEl: El<State>,
@@ -2204,7 +2251,8 @@ public final class Runtime<State> {
             measuredGrowthStacks: [String: RuntimeGrowthStackState]? = nil,
             foldOpens: [PendingFoldOpen] = [],
             scrollCuts: [(viewport: String, cut: Float)] = [],
-            foldHeaderUpdates: [(foldKey: String, headerPath: String)] = []
+            foldHeaderUpdates: [(foldKey: String, headerPath: String)] = [],
+            textLayouts: [NodeId: RetainedLayoutCoordinator.TextLayoutRecord] = [:]
         ) {
             self.viewRootEl = viewRootEl
             self.expandedRootEl = expandedRootEl
@@ -2227,6 +2275,7 @@ public final class Runtime<State> {
             self.foldOpens = foldOpens
             self.scrollCuts = scrollCuts
             self.foldHeaderUpdates = foldHeaderUpdates
+            self.textLayouts = textLayouts
         }
     }
 
@@ -2476,6 +2525,23 @@ public final class Runtime<State> {
         return result
     }
 
+    private func releaseKeptLayoutsBeforeCommit(liveIds: Set<NodeId>) {
+        if prevNodeTextLayoutsForCommit == nil {
+            var prevKeys: [NodeId: (shapeKey: TextShapeKey, isInput: Bool)] = [:]
+            prevKeys.reserveCapacity(nodeTextLayouts.count)
+            for (nid, rec) in nodeTextLayouts {
+                prevKeys[nid] = (rec.box.shapeKey, rec.isInput)
+            }
+            prevNodeTextLayoutsForCommit = prevKeys
+        }
+        for (nid, rec) in nodeTextLayouts where !liveIds.contains(nid) {
+            if exitingTextLayouts[nid] == nil {
+                exitingTextLayouts[nid] = rec
+            }
+        }
+        nodeTextLayouts.removeAll(keepingCapacity: true)
+    }
+
     @inline(never)
     internal func buildMeasureResult(
         rootEl: El<State>,
@@ -2515,6 +2581,7 @@ public final class Runtime<State> {
             snaps: commitKind.snaps,
             lands: commitKind.lands
         )
+        let textLayoutCollector = RetainedLayoutCoordinator.TextLayoutCollector()
         var solvedRoot = measureFramePhase(.layout) {
             retainedLayout.compute(
                 root: layoutRoot,
@@ -2522,7 +2589,11 @@ public final class Runtime<State> {
                 viewport: viewport,
                 pixelScale: pixelScale,
                 textSystem: textSystem,
-                fitHeight: fitHeight
+                fitHeight: fitHeight,
+                textLayouts: textLayoutCollector,
+                onLiveIdsReady: { [weak self] liveIds in
+                    self?.releaseKeptLayoutsBeforeCommit(liveIds: liveIds)
+                }
             )
         }
         let growthCapture = updateGrowthRowsPostLayout(
@@ -2539,15 +2610,27 @@ public final class Runtime<State> {
         for upd in growthCapture.foldHeaderUpdates {
             effectiveFoldHeaders[upd.foldKey] = upd.headerPath
         }
-        if growthCapture.needsClampedRelayout {
+        let growthStepNow = pendingGrowthStepNow ?? now
+        let steppedAfterRetarget = (lastGrowthStepTime != growthStepNow && !cut && !commitKind.lands && !reducedMotion)
+            ? advanceGrowthRows(at: growthStepNow, markRelayoutDirty: false)
+            : false
+        let needsGrowthClamp = growthCapture.needsClampedRelayout || steppedAfterRetarget || growthRows.values.contains { entry in
+            let t = entry.track
+            return (t.moving && (abs(t.h - t.target) > 1e-4 || t.isShuttingFold))
+                || (t.streaming && (t.h < entry.naturalHeight - 0.1 || entry.withheld > 0.01))
+        }
+        if needsGrowthClamp {
             layoutRoot = applyGrowthConstraints(in: layoutRoot)
+            textLayoutCollector.map.removeAll(keepingCapacity: true)
+            textLayoutCollector.liveIds.removeAll(keepingCapacity: true)
             solvedRoot = measureFramePhase(.layout) {
                 retainedLayout.compute(
                     root: layoutRoot,
                     state: state,
                     viewport: viewport,
                     pixelScale: pixelScale,
-                    textSystem: textSystem
+                    textSystem: textSystem,
+                    textLayouts: textLayoutCollector
                 )
             }
         }
@@ -2823,19 +2906,25 @@ public final class Runtime<State> {
                 childClipFades.append(cfSpec)
             }
 
+            var flatEl = el
+            if !flatEl.isSecure, let edit = flatEl.handlers.editLens?.get(state), edit.isSecure {
+                flatEl.isSecure = true
+                flatEl.runtimeExtras[El<State>.selectableExtraKey] = false
+            }
+
             var nodeElided: TextElision? = nil
-            if el.children.isEmpty,
-               el.handlers.editLens == nil,
-               !el.isTruncateFadeEnabled,
-               el.advanceInRun == nil,
-               (el.textStyle.maxLines > 0 || el.textStyle.wrap == .ellipsis),
-               (el.richSpans != nil || el.liveText != nil || el.plainText != nil) {
+            if flatEl.children.isEmpty,
+               flatEl.handlers.editLens == nil,
+               !flatEl.isTruncateFadeEnabled,
+               flatEl.advanceInRun == nil,
+               (flatEl.textStyle.maxLines > 0 || flatEl.textStyle.wrap == .ellipsis),
+               (flatEl.richSpans != nil || flatEl.liveText != nil || flatEl.plainText != nil) {
                 let resolvedText = ElDisplayResolver.resolveText(
-                    el: el,
-                    rawText: el.liveText?.get() ?? el.plainText,
-                    isSecure: el.isSecure
+                    el: flatEl,
+                    rawText: flatEl.liveText?.get() ?? flatEl.plainText,
+                    isSecure: flatEl.isSecure
                 )
-                let innerW = max(0, localRect.width - el.layout.padding.left - el.layout.padding.right)
+                let innerW = max(0, localRect.width - flatEl.layout.padding.left - flatEl.layout.padding.right)
                 nodeElided = resolvedText.shape(
                     using: textSystem,
                     maxWidth: innerW,
@@ -2851,7 +2940,7 @@ public final class Runtime<State> {
                 path: path,
                 key: resolvedKey,
                 nodeId: nid,
-                el: el,
+                el: flatEl,
                 localRect: localRect,
                 unscrolledRect: unscrolledRect,
                 targetRect: targetRect,
@@ -3126,7 +3215,8 @@ public final class Runtime<State> {
             viewportRead: collector.viewportRead,
             foldOpens: growthCapture.foldOpens,
             scrollCuts: growthCapture.scrollCuts,
-            foldHeaderUpdates: growthCapture.foldHeaderUpdates
+            foldHeaderUpdates: growthCapture.foldHeaderUpdates,
+            textLayouts: textLayoutCollector.map
         )
     }
 
@@ -3652,7 +3742,28 @@ public final class Runtime<State> {
             s.isActive = false
         }
         liveSubscriptions.removeAll(keepingCapacity: true)
-        for node in pass.nodes {
+        redactExitingSecureSnapshots(liveIds: Set(pass.byId.keys))
+        var nowRevealedSecureIds: Set<NodeId> = []
+        var concealedSecureIndices: [Int] = []
+        for (i, node) in pass.nodes.enumerated() {
+            let edit = node.el.handlers.editLens?.get(state)
+            let isSec = node.el.isSecure || (edit?.isSecure == true)
+            let isRev = node.el.revealedOverride ?? (edit?.isRevealed ?? false)
+            if isSec {
+                if let edit {
+                    lastSecureMaskInfo[node.nodeId] = (edit.text.count, edit.multiline)
+                } else {
+                    let len = (node.el.liveText?.get() ?? node.el.plainText ?? node.el.richSpans?.map(\.text).joined())?.count ?? 0
+                    lastSecureMaskInfo[node.nodeId] = (len, len > 0)
+                }
+            } else {
+                lastSecureMaskInfo.removeValue(forKey: node.nodeId)
+            }
+            if isSec && isRev {
+                nowRevealedSecureIds.insert(node.nodeId)
+            } else if isSec && prevRevealedSecureIds.contains(node.nodeId) {
+                concealedSecureIndices.append(i)
+            }
             exitingSnapshots[node.nodeId] = node
         }
 
@@ -3664,6 +3775,26 @@ public final class Runtime<State> {
         lastCommittedSpecs = specs
         layoutCommitGen &+= 1
         layoutKeyIndex.invalidate()
+
+        let prevKeys = prevNodeTextLayoutsForCommit ?? [:]
+        prevNodeTextLayoutsForCommit = nil
+        for nid in pass.byId.keys {
+            exitingTextLayouts.removeValue(forKey: nid)
+        }
+        nodeTextLayouts = pass.textLayouts
+        var activeShapeKeys = Set(nodeTextLayouts.values.map { $0.box.shapeKey })
+        for rec in exitingTextLayouts.values {
+            activeShapeKeys.insert(rec.box.shapeKey)
+        }
+        for (nid, prev) in prevKeys {
+            guard let cur = nodeTextLayouts[nid], cur.box.shapeKey != prev.shapeKey else { continue }
+            guard !activeShapeKeys.contains(prev.shapeKey) else { continue }
+            let kind = TextLayoutRebreak.edited(was: prev.shapeKey.authText, now: cur.box.shapeKey.authText)
+            if cur.isInput || prev.isInput || kind.isEdit {
+                textSystem.supersede(prev.shapeKey)
+            }
+        }
+        textSystem.endCommit(activeKeys: activeShapeKeys)
         if !pass.warnings.isEmpty {
             keyWarnings = pass.warnings
         }
@@ -3701,7 +3832,9 @@ public final class Runtime<State> {
             commitColorSpring: commitColorSpring,
             commitFollowEdge: commitFollowEdge,
             commitCut: commitCut,
-            prevMountedIds: prevMountedIds
+            prevMountedIds: prevMountedIds,
+            nowRevealedSecureIds: nowRevealedSecureIds,
+            concealedSecureIndices: concealedSecureIndices
         )
     }
 
@@ -3721,7 +3854,9 @@ public final class Runtime<State> {
         commitColorSpring: Spring?,
         commitFollowEdge: Bool,
         commitCut: Bool,
-        prevMountedIds: Set<NodeId>
+        prevMountedIds: Set<NodeId>,
+        nowRevealedSecureIds: Set<NodeId>,
+        concealedSecureIndices: [Int]
     ) {
 
         virtualInputs = pass.virtualExpansion.virtualInputs
@@ -3885,6 +4020,14 @@ public final class Runtime<State> {
                             req.remainingAttempts -= 1
                             deferredFlights.append(req)
                         }
+                        continue
+                    }
+                    if dstNode.el.isSecure || (dstNode.el.handlers.editLens?.get(state).isSecure == true) {
+                        continue
+                    }
+                    if let srcId = req.sourceNodeId,
+                       let srcSnap = pass.byId[srcId] ?? exitingSnapshots[srcId],
+                       (srcSnap.el.isSecure || (srcSnap.el.handlers.editLens?.get(state).isSecure == true)) {
                         continue
                     }
                     let dstExtent = laidOutTextExtent(for: dstNode, rect: dstNode.targetRect, in: pass.nodes)
@@ -4056,6 +4199,37 @@ public final class Runtime<State> {
             seedVirtualRowLayoutOffsets(nodes: pass.nodes, specs: &specs)
         }
         let scaledCommitNow = cxSettings.scaledTime(at: now)
+        prevRevealedSecureIds = nowRevealedSecureIds
+        var concealSnapIndices: Set<Int> = []
+        if !concealedSecureIndices.isEmpty {
+            var scrollSnapRoots: Set<Int> = []
+            for cIdx in concealedSecureIndices {
+                var walk: Int? = cIdx
+                while let cur = walk {
+                    concealSnapIndices.insert(cur)
+                    if !pass.nodes[cur].el.layout.scrollAxes.isEmpty {
+                        scrollSnapRoots.insert(cur)
+                    }
+                    walk = pass.nodes[cur].parentIndex
+                }
+            }
+            for i in pass.nodes.indices {
+                if let p = pass.nodes[i].parentIndex, concealSnapIndices.contains(p) || scrollSnapRoots.contains(p) {
+                    concealSnapIndices.insert(i)
+                }
+            }
+            for j in concealSnapIndices {
+                if j < specs.count {
+                    specs[j].layoutAnim = nil
+                    specs[j].transition = nil
+                }
+                let node = pass.nodes[j]
+                if !node.el.layout.scrollAxes.isEmpty {
+                    let cur = scrollOffsets[node.path] ?? .zero
+                    scrollStore.snap(NodeId.hash("scroll:" + node.path), Props.SCROLL, to: cur)
+                }
+            }
+        }
         measureFramePhase(.apply) {
             scene.commit(
                 specs,
@@ -4087,6 +4261,11 @@ public final class Runtime<State> {
             prevMountedIds: prevMountedIds
         )
         rebuildLiveSubscriptionsIncludingExiting()
+        if !concealSnapIndices.isEmpty {
+            for j in concealSnapIndices where j < pass.nodes.count {
+                pixelSnapGlides.remove(id: pass.nodes[j].nodeId)
+            }
+        }
         if scene.isTracing {
             var resolvedNS = [(String, String)?](repeating: nil, count: pass.nodes.count)
             for i in pass.nodes.indices {
@@ -5285,9 +5464,110 @@ public final class Runtime<State> {
         return (now - tStart) < lin.duration
     }
 
-    private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
-        let startShapedCount = textSystem.shapedCallCount
+    private func resolvePaintTextLayout(
+        snapId: NodeId,
+        isInput: Bool,
+        isExiting: Bool,
+        text: String,
+        spans: [TextSpan]?,
+        pills: [PillChip],
+        style: TextStyle,
+        wrapWidth: Float?,
+        pxScale: Float,
+        glidePx: Vec2,
+        isSecure: Bool
+    ) -> TextLayoutBox {
+        let keep: TextKeep = isSecure ? .secret : (glidePx == .zero ? .cached : .owned)
+        if isSecure {
+            return textSystem.layoutKeyed(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: wrapWidth,
+                pixelScale: pxScale,
+                emitGlyphs: true,
+                glidePx: glidePx,
+                keep: .secret,
+                countAsRebreak: false
+            )
+        }
+        let targetAuth = spans.map { $0.map(\.text).joined() } ?? text
+        let targetScale = max(pxScale, 1.0)
+        if isExiting, let exiting = exitingTextLayouts[snapId]?.box {
+            if glidePx == .zero, exiting.hasGlyphs {
+                return exiting
+            }
+            let filled = textSystem.layoutKeyed(
+                text: text,
+                spans: spans,
+                pills: pills,
+                style: style,
+                maxWidth: exiting.maxWidth,
+                pixelScale: pxScale,
+                emitGlyphs: true,
+                glidePx: glidePx,
+                keep: glidePx == .zero ? .cached : .owned,
+                countAsRebreak: false
+            )
+            if glidePx == .zero {
+                exitingTextLayouts[snapId]?.box = filled
+            }
+            return filled
+        }
+        if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
+            let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01)
+            let matchesWidth: Bool = {
+                guard let ww = wrapWidth else {
+                    return live.maxWidth == nil
+                }
+                guard let mw = live.maxWidth else {
+                    return false
+                }
+                return abs(mw - ww) <= 0.75
+            }()
+            if matchesText && matchesWidth {
+                if live.hasGlyphs {
+                    return live
+                }
+                let filled = textSystem.layoutKeyed(
+                    text: text,
+                    spans: spans,
+                    pills: pills,
+                    style: style,
+                    maxWidth: live.maxWidth,
+                    pixelScale: pxScale,
+                    emitGlyphs: true,
+                    glidePx: .zero,
+                    keep: .cached,
+                    countAsRebreak: false
+                )
+                nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: filled, isInput: isInput)
+                return filled
+            }
+        }
+        let box = textSystem.layoutKeyed(
+            text: text,
+            spans: spans,
+            pills: pills,
+            style: style,
+            maxWidth: wrapWidth,
+            pixelScale: pxScale,
+            emitGlyphs: true,
+            glidePx: glidePx,
+            keep: keep,
+            countAsRebreak: false
+        )
+        if !isExiting && glidePx == .zero {
+            nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: isInput)
+        }
+        return box
+    }
+
+    private func buildRefScene(frameOut: FrameOutput, now: Double, startShapedCount: UInt64? = nil) -> RefScene {
+        let baselineShapedCount = startShapedCount ?? textSystem.shapedCallCount
         textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
+        textSystem.glyphCache.beginFrame()
         var glyphPageEntries: [(index: Int, page: UInt16)] = []
         var usedGlyphMask: UInt32 = 0
         let pxScale = pixelScale
@@ -6045,7 +6325,7 @@ public final class Runtime<State> {
             let elementTextValue: String? = nodeIsSecure ? nil : rawTextValue
             let paintedLabelValue: String? = {
                 guard let raw = el.liveText?.get() ?? el.plainText else { return nil }
-                if nodeIsSecure && !el.isRevealed && !raw.isEmpty {
+                if nodeIsSecure && !el.isRevealed && !raw.isEmpty && !(p.isExiting && el.role == .textInput) {
                     return "••••••••••••"
                 }
                 return raw
@@ -6829,16 +7109,20 @@ public final class Runtime<State> {
                         ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
                         : defaultTextColor
 
-                    let shaped = textSystem.shape(
+                    let inputBox = resolvePaintTextLayout(
+                        snapId: snap.nodeId,
+                        isInput: true,
+                        isExiting: p.isExiting,
                         text: renderedStr,
                         spans: resolvedInput.spans,
                         pills: resolvedInput.pills,
                         style: resolvedInput.style,
-                        maxWidth: resolvedInput.maxWidthForShape,
-                        pixelScale: pxScale,
-                        emitGlyphs: !renderedStr.isEmpty,
-                        glidePx: glidePx
+                        wrapWidth: resolvedInput.maxWidthForShape,
+                        pxScale: pxScale,
+                        glidePx: glidePx,
+                        isSecure: resolvedInput.isSecure
                     )
+                    let shaped = inputBox.shaped
                     let inputClip = intersectRects(visClip, rect)
                     let devInputClip = SIMD4<Float>(
                         inputClip.x * pxScale,
@@ -6981,7 +7265,21 @@ public final class Runtime<State> {
                     }
 
                     // Text glyphs
-                    for g in shaped.glyphs {
+                    let (inBandTop, inBandBot): (Float, Float) = (abs(effRotate) <= 1e-4 && abs(scaleVec.y) > 1e-4)
+                        ? (
+                            (devInputClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
+                            ((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
+                        )
+                        : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+                    let visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
+                        key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
+                        keep: resolvedInput.isSecure ? .secret : .cached,
+                        bandTopPt: inBandTop,
+                        bandBottomPt: inBandBot
+                    ) {
+                        (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
+                    }
+                    for g in visibleInputGlyphs {
                         let gc = (g.color ?? textCol).scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
                         let primIdx = primitives.count
                         primitives.append(.glyph(
@@ -7030,22 +7328,48 @@ public final class Runtime<State> {
                         }
                     }
                 } else if el.richSpans != nil || paintedLabelValue != nil || el.advanceInRun != nil {
-                    let resolvedText = ElDisplayResolver.resolveText(
+                    var resolvedText = ElDisplayResolver.resolveText(
                         el: el,
                         rawText: paintedLabelValue,
                         isSecure: nodeIsSecure
                     )
+                    if p.isExiting && el.role == .textInput, let paintedLabelValue {
+                        resolvedText.displayedText = paintedLabelValue
+                    }
                     let isClampedOrEllipsis = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
                     let wrapWidth = isClampedOrEllipsis
                         ? (innerW / max(1e-4, scaleVec.x))
                         : ((innerW / max(1e-4, scaleVec.x)) + 0.5)
-                    let shaped = resolvedText.shape(
-                        using: textSystem,
-                        maxWidth: wrapWidth,
-                        pixelScale: textRasterScale * pxScale,
-                        emitGlyphs: true,
-                        glidePx: glidePx
-                    )
+                    let labelBox: TextLayoutBox?
+                    let shaped: ShapedText
+                    if resolvedText.truncateFade || resolvedText.advanceRun != nil || isClampedOrEllipsis {
+                        labelBox = nil
+                        shaped = resolvedText.shape(
+                            using: textSystem,
+                            maxWidth: wrapWidth,
+                            pixelScale: textRasterScale * pxScale,
+                            emitGlyphs: true,
+                            glidePx: glidePx
+                        )
+                    } else {
+                        let hasSpans = (resolvedText.spans?.isEmpty == false)
+                        let shapeMaxW: Float? = (resolvedText.style.wrap == .noWrap && resolvedText.style.maxLines == 0) ? nil : wrapWidth
+                        let box = resolvePaintTextLayout(
+                            snapId: snap.nodeId,
+                            isInput: false,
+                            isExiting: p.isExiting,
+                            text: hasSpans ? "" : resolvedText.displayedText,
+                            spans: resolvedText.spans,
+                            pills: resolvedText.pills,
+                            style: resolvedText.style,
+                            wrapWidth: shapeMaxW,
+                            pxScale: textRasterScale * pxScale,
+                            glidePx: glidePx,
+                            isSecure: resolvedText.isSecure
+                        )
+                        labelBox = box
+                        shaped = box.shaped
+                    }
                     let elided = shaped.elided
                     let innerH = max(0, (snappedEdgesPx[3] - snappedEdgesPx[1]) / pxScale - (el.layout.padding.top + el.layout.padding.bottom) * scaleVec.y)
                     let fadeRes = resolvedText.truncateFade
@@ -7237,7 +7561,26 @@ public final class Runtime<State> {
                                 now: revealClock
                             )
                             : nil
-                        for g in shaped.glyphs {
+                        let glyphsToEmit: ArraySlice<PositionedGlyph>
+                        if let labelBox, !wrapTruncateLayer {
+                            let (lblBandTop, lblBandBot): (Float, Float) = (abs(effRotate) <= 1e-4 && abs(scaleVec.y) > 1e-4)
+                                ? (
+                                    (devClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
+                                    ((devClip.y + devClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
+                                )
+                                : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+                            glyphsToEmit = textSystem.glyphCache.glyphsInBandCached(
+                                key: GlyphReplayKey(shapeKey: labelBox.shapeKey, maxWidth: labelBox.maxWidth, glidePx: glidePx),
+                                keep: resolvedText.isSecure ? .secret : .cached,
+                                bandTopPt: lblBandTop,
+                                bandBottomPt: lblBandBot
+                            ) {
+                                (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
+                            }
+                        } else {
+                            glyphsToEmit = shaped.glyphs[...]
+                        }
+                        for g in glyphsToEmit {
                             let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
                             let effGlyphAlpha = glyphAlpha * wordAlpha
                             if effGlyphAlpha <= 0.0005 { continue }
@@ -8073,7 +8416,7 @@ public final class Runtime<State> {
         }
 
         let totalGlyphs = primitives.count(where: { $0.kind == .glyph })
-        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- startShapedCount))
+        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- baselineShapedCount))
         FrameStatsSidecar.set(self, glyphs: totalGlyphs, shaped: shapedDelta)
 
         return RefScene(
@@ -8507,21 +8850,32 @@ public final class Runtime<State> {
                 let node = flatNodes[idx]
                 if drag.isTextSelectionDrag, let editLens = node.el.handlers.editLens {
                     var edit = editLens.get(state)
-                    let isSecure = edit.isSecure || node.el.isSecure
-                    let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
-                    if !isSecure, drag.clicks == 2, let origin = drag.textSelectionOrigin {
-                        let unit = edit.wordUnitRange(atUTF8Offset: offset)
-                        let ext = SelectionMath.extendSelection(origin: origin, at: unit)
-                        edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
-                        edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
-                    } else if !isSecure, drag.clicks >= 3, edit.multiline, let origin = drag.textSelectionOrigin {
-                        let unit = edit.hardLineParagraphRange(atUTF8Offset: offset)
-                        let ext = SelectionMath.extendSelection(origin: origin, at: unit)
-                        edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
-                        edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
-                    } else {
-                        edit.setCursor(utf8Offset: offset, extendSelection: true)
+                    let stateRevealed = edit.isRevealed
+                    if node.el.isSecure {
+                        edit.isSecure = true
+                        if node.el.isRevealed { edit.isRevealed = true }
                     }
+                    if !edit.isHiddenMultiline {
+                        let isSecure = edit.isSecure || node.el.isSecure
+                        let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+                        if !isSecure, drag.clicks == 2, let origin = drag.textSelectionOrigin {
+                            let unit = edit.wordUnitRange(atUTF8Offset: offset)
+                            let ext = SelectionMath.extendSelection(origin: origin, at: unit)
+                            edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
+                            edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
+                        } else if !isSecure, drag.clicks >= 3, edit.multiline, let origin = drag.textSelectionOrigin {
+                            let unit = edit.hardLineParagraphRange(atUTF8Offset: offset)
+                            let ext = SelectionMath.extendSelection(origin: origin, at: unit)
+                            edit.setCursor(utf8Offset: ext.anchor, extendSelection: false)
+                            edit.setCursor(utf8Offset: ext.focus, extendSelection: true)
+                        } else {
+                            edit.setCursor(utf8Offset: offset, extendSelection: true)
+                        }
+                    } else {
+                        let end = edit.text.utf8.count
+                        edit.setCursor(utf8Offset: end, extendSelection: false)
+                    }
+                    edit.isRevealed = stateRevealed
                     editLens.set(&state, edit)
                     pendingCommitKind = pendingCommitKind.instant()
                     dirtyCommit(at: now)
@@ -8936,34 +9290,49 @@ public final class Runtime<State> {
         if let editLens = node.el.handlers.editLens {
             let snapshot = state
             var edit = editLens.get(state)
-            let isSecure = edit.isSecure || node.el.isSecure
-            let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+            let stateRevealed = edit.isRevealed
+            if node.el.isSecure {
+                edit.isSecure = true
+                if node.el.isRevealed { edit.isRevealed = true }
+            }
             let textSelOrigin: (Int, Int)?
-            if clickCount >= 3 {
-                if isSecure {
+            if edit.isHiddenMultiline {
+                textSelOrigin = nil
+                if clickCount >= 3 {
                     edit.selectAll()
-                    textSelOrigin = nil
-                } else if edit.multiline {
-                    let origin = edit.hardLineParagraphRange(atUTF8Offset: offset)
-                    edit.selectHardLine(atUTF8Offset: offset)
-                    textSelOrigin = origin
                 } else {
-                    edit.selectAll()
-                    textSelOrigin = nil
-                }
-            } else if clickCount == 2 {
-                if isSecure {
-                    edit.selectAll()
-                    textSelOrigin = nil
-                } else {
-                    let origin = edit.wordUnitRange(atUTF8Offset: offset)
-                    edit.selectWord(atUTF8Offset: offset)
-                    textSelOrigin = origin
+                    edit.setCursor(utf8Offset: edit.text.utf8.count, extendSelection: false)
                 }
             } else {
-                edit.setCursor(utf8Offset: offset, extendSelection: mods.shift)
-                textSelOrigin = nil
+                let isSecure = edit.isSecure || node.el.isSecure
+                let offset = textHitOffset(node: node, windowPos: pos, edit: edit)
+                if clickCount >= 3 {
+                    if isSecure {
+                        edit.selectAll()
+                        textSelOrigin = nil
+                    } else if edit.multiline {
+                        let origin = edit.hardLineParagraphRange(atUTF8Offset: offset)
+                        edit.selectHardLine(atUTF8Offset: offset)
+                        textSelOrigin = origin
+                    } else {
+                        edit.selectAll()
+                        textSelOrigin = nil
+                    }
+                } else if clickCount == 2 {
+                    if isSecure {
+                        edit.selectAll()
+                        textSelOrigin = nil
+                    } else {
+                        let origin = edit.wordUnitRange(atUTF8Offset: offset)
+                        edit.selectWord(atUTF8Offset: offset)
+                        textSelOrigin = origin
+                    }
+                } else {
+                    edit.setCursor(utf8Offset: offset, extendSelection: mods.shift)
+                    textSelOrigin = nil
+                }
             }
+            edit.isRevealed = stateRevealed
             editLens.set(&state, edit)
             activeDrag = DragSession(
                 path: node.path,
@@ -9410,6 +9779,7 @@ public final class Runtime<State> {
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
         frameHadInputSinceLastFrame = true
+        recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
         currentTime = now
         flushPendingCommitIfNeeded(at: now)
         let prevKitByKeys = kitHooks.isDispatchingByKeys
@@ -9531,6 +9901,7 @@ public final class Runtime<State> {
                     }
                 }
                 var edit = editLens.get(state)
+                let stateRevealed = edit.isRevealed
                 if fNode.el.isSecure {
                     edit.isSecure = true
                     if let rev = fNode.el.revealedOverride { edit.isRevealed = rev }
@@ -9567,6 +9938,7 @@ public final class Runtime<State> {
                 }
                 let prevEdit = edit
                 let outcome = edit.handleKey(ev, layout: editLayout)
+                edit.isRevealed = stateRevealed
                 switch outcome {
                 case .ignored:
                     if edit.didRequestBlur && activeModalPath == nil {
@@ -10438,10 +10810,22 @@ public final class Runtime<State> {
         }
         if !tx.textFlights.isEmpty {
             let springOverride = tx.motionSpringRequest
+            var scheduled = false
             for (src, dst) in tx.textFlights {
+                if let srcNode = findNodeForFlightSelector(src, in: flatNodes),
+                   (srcNode.el.isSecure || (srcNode.el.handlers.editLens?.get(state).isSecure == true)) {
+                    continue
+                }
+                if let dstNode = findNodeForFlightSelector(dst, in: flatNodes),
+                   (dstNode.el.isSecure || (dstNode.el.handlers.editLens?.get(state).isSecure == true)) {
+                    continue
+                }
                 pendingTextFlights.append(makePendingFlightRequest(source: src, destination: dst, motionSpring: springOverride))
+                scheduled = true
             }
-            dirtyCommit(at: now, external: external)
+            if scheduled {
+                dirtyCommit(at: now, external: external)
+            }
         }
         if !tx.launches.isEmpty {
             let springOverride = tx.motionSpringRequest
@@ -10763,6 +11147,7 @@ public final class Runtime<State> {
     internal func applyFocusedTextEditKey(_ ev: KeyEvent, el: El<State>, layout: ShapedText?, at now: Double) -> Bool {
         guard let editLens = el.handlers.editLens else { return false }
         var edit = editLens.get(state)
+        let stateRevealed = edit.isRevealed
         if el.isSecure {
             edit.isSecure = true
             if let rev = el.revealedOverride { edit.isRevealed = rev }
@@ -10777,6 +11162,7 @@ public final class Runtime<State> {
             }()
             : nil
         let outcome = edit.handleKey(ev, layout: layout)
+        edit.isRevealed = stateRevealed
         switch outcome {
         case .ignored:
             return false
@@ -11042,11 +11428,13 @@ public final class Runtime<State> {
            let editLens = el.handlers.editLens {
             let prevEdit = editLens.get(state)
             var edit = prevEdit
+            let stateRevealed = edit.isRevealed
             if el.isSecure {
                 edit.isSecure = true
                 if let rev = el.revealedOverride { edit.isRevealed = rev }
             }
             let outcome = edit.applyIme(event)
+            edit.isRevealed = stateRevealed
             switch outcome {
             case .ignored:
                 break

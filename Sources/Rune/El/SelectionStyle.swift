@@ -85,6 +85,7 @@ private final class SelectionCopyBox {
 public extension El {
     /// Marks this text element as user-selectable (`El::selectable`).
     func selectable(_ on: Bool = true) -> Self {
+        guard !isSecure else { return self }
         var copy = self
         copy.runtimeExtras[Self.selectableExtraKey] = on
         return copy
@@ -141,7 +142,7 @@ internal extension El {
     static var selectionCopyExtraKey: String { "rune.selectionCopy" }
 
     var isSelectable: Bool {
-        (runtimeExtras[Self.selectableExtraKey] as? Bool) ?? false
+        !isSecure && ((runtimeExtras[Self.selectableExtraKey] as? Bool) ?? false)
     }
 
     var isSelectionGroup: Bool {

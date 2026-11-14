@@ -42,6 +42,8 @@ internal struct RuntimeGrowthEntry: Sendable {
     var spring: Spring
     var foldLimit: Float
     var naturalHeight: Float = 0
+    var withheld: Float = 0
+    var lastWidth: Float = 0
     var lastFirstChildTop: Float? = nil
     var contentSlide: (was: Float, dy: Float)? = nil
 }

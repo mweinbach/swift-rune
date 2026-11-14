@@ -476,7 +476,7 @@ public struct EdgeScrollSeq: Sendable, Equatable {
 // MARK: - Text Shape Key (`text_keys.rs`)
 
 /// Deterministic content+style+scale shape key (`crates/rune/src/text/mod.rs` / `text_keys.rs`).
-public enum TextShapeKey {
+extension TextShapeKey {
     private static let fnvOffset: UInt64 = 14_695_981_039_346_656_037
     private static let fnvPrime: UInt64 = 1_099_511_628_211
 

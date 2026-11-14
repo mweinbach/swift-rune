@@ -607,6 +607,16 @@ public struct TextEdit: Sendable, Equatable {
     public var preeditClauses: [ImeClause] = []
     /// Set when the last key press in `handleKey` requested blurring focus (e.g. non-composing Escape).
     public private(set) var didRequestBlur: Bool = false
+    private var editedTag: Bool = false
+
+    /// Whether `text` is non-empty and still holds the value last set via `init` or `replaceText` (`TextEdit::is_pristine`).
+    public var isPristine: Bool { !text.isEmpty && !editedTag }
+
+    /// Marks the current `text` as user-edited (`!isPristine`, `TextEdit::mark_edited`).
+    public mutating func markEdited() { editedTag = true }
+
+    /// True when this is a masked multi-line secure field (`isSecure && multiline && !isRevealed`).
+    public var isHiddenMultiline: Bool { isSecure && multiline && !isRevealed }
 
     private var undoStack: [UndoChange] = []
     private var redoStack: [UndoChange] = []
@@ -678,10 +688,11 @@ public struct TextEdit: Sendable, Equatable {
         }
     }
 
-    /// Replaces the entire draft and discards undo/redo history while preserving secure mode (`edit.rs:470`).
+    /// Replaces the entire draft and discards undo/redo history while re-arming `isPristine` and preserving secure mode (`edit.rs:470`, `TextEdit::replace_text`).
     public mutating func replaceText(_ newText: String) {
         setText(newText, recordUndo: false)
         clearHistory()
+        editedTag = false
     }
 
     public mutating func clear() {
@@ -781,7 +792,9 @@ public struct TextEdit: Sendable, Equatable {
 
     internal mutating func insert(_ inserted: String, kind: EditKind) {
         let filtered = sanitizeInput(inserted)
-        let rawRange = selectedUTF8Range
+        let rawRange = (isHiddenMultiline && isPristine)
+            ? (0..<text.utf8.count)
+            : selectedUTF8Range
         let covered = coverPills(rawRange.lowerBound, rawRange.upperBound)
         let range = covered.0..<covered.1
         guard !filtered.isEmpty || !range.isEmpty else { return }
@@ -798,6 +811,7 @@ public struct TextEdit: Sendable, Equatable {
         caretAffinity = .downstream
         preedit = nil
         recordUndoChange(before: before, kind: kind)
+        markEdited()
     }
 
     /// Deletes backward (or the active selection, or previous word when `word == true`).
@@ -807,7 +821,7 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     internal mutating func backspace(word: Bool, line: Bool, kind: EditKind) {
-        if hasSelection {
+        if hasSelection || (isHiddenMultiline && isPristine) {
             insert("", kind: kind)
             return
         }
@@ -854,6 +868,7 @@ public struct TextEdit: Sendable, Equatable {
         caretColumn = .free
         caretAffinity = .downstream
         recordUndoChange(before: before, kind: kind)
+        markEdited()
     }
 
     /// Deletes one extended grapheme cluster forward (or the active selection, or next word when `word == true`).
@@ -862,7 +877,7 @@ public struct TextEdit: Sendable, Equatable {
     }
 
     internal mutating func deleteForward(word: Bool, kind: EditKind) {
-        if hasSelection {
+        if hasSelection || (isHiddenMultiline && isPristine) {
             insert("", kind: kind)
             return
         }
@@ -883,6 +898,7 @@ public struct TextEdit: Sendable, Equatable {
         caretColumn = .free
         caretAffinity = .downstream
         recordUndoChange(before: before, kind: kind)
+        markEdited()
     }
 
     public mutating func moveLeft(extend: Bool = false, word: Bool = false, toLineBoundary: Bool = false) {
@@ -1275,8 +1291,7 @@ public struct TextEdit: Sendable, Equatable {
             if isSecure {
                 preedit = nil
                 preeditClauses.removeAll()
-                insert(str)
-                return .modified
+                return .ignored
             }
             let prev = text
             commitPreedit(str)
@@ -1395,25 +1410,33 @@ public struct TextEdit: Sendable, Equatable {
         let shift = ev.mods.shift
         let alt = ev.mods.alt
 
+        if isHiddenMultiline {
+            switch ev.key {
+            case .arrowLeft, .arrowRight, .arrowUp, .arrowDown, .home, .end:
+                cursor = text.utf8.count
+                anchor = shift ? 0 : cursor
+                return .navigation
+            default:
+                break
+            }
+        }
+
         if let ctrlLetter = ev.controlBinding {
             switch ctrlLetter {
-            case "a":
-                moveLeft(extend: shift, toLineBoundary: true)
-                return .navigation
-            case "e":
-                moveRight(extend: shift, toLineBoundary: true)
-                return .navigation
-            case "b":
-                moveLeft(extend: shift)
-                return .navigation
-            case "f":
-                moveRight(extend: shift)
-                return .navigation
-            case "p":
-                moveUp(extend: shift)
-                return .navigation
-            case "n":
-                moveDown(extend: shift)
+            case "a", "e", "b", "f", "p", "n":
+                if isHiddenMultiline {
+                    cursor = text.utf8.count
+                    anchor = shift ? 0 : cursor
+                    return .navigation
+                }
+                switch ctrlLetter {
+                case "a": moveLeft(extend: shift, toLineBoundary: true)
+                case "e": moveRight(extend: shift, toLineBoundary: true)
+                case "b": moveLeft(extend: shift)
+                case "f": moveRight(extend: shift)
+                case "p": moveUp(extend: shift)
+                default: moveDown(extend: shift)
+                }
                 return .navigation
             case "d":
                 let before = text
@@ -1426,6 +1449,10 @@ public struct TextEdit: Sendable, Equatable {
                 return (text != beforeText || blocks != beforeBlocks) ? .modified : .navigation
             case "k":
                 breakHistoryGroup()
+                if isHiddenMultiline && isPristine {
+                    insert("", kind: .deleteRun)
+                    return .modified
+                }
                 let end = lineEnd(for: cursor)
                 if cursor < end || hasSelection {
                     if !hasSelection { anchor = end }
@@ -1501,6 +1528,7 @@ public struct TextEdit: Sendable, Equatable {
                     cursor = snapToGraphemeBoundary(range.lowerBound)
                     anchor = cursor
                     recordUndoChange(before: before, kind: .deleteRun)
+                    markEdited()
                     return .modified
                 }
                 return .ignored

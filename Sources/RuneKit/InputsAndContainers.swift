@@ -1252,6 +1252,10 @@ public struct TextArea<State> {
             .focusRing(0, offset: 0, .transparent)
         field = richModifiers.apply(to: field, kit: k)
 
+        if wrapsAnywhere {
+            field = field.wrapAnywhere()
+        }
+
         if let labelText {
             field = field.label(labelText)
         } else if !placeholderText.isEmpty {

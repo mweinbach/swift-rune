@@ -136,6 +136,11 @@ public enum PixelSnap {
 
         public var isEasing: Bool { easing }
 
+        public mutating func remove(id: NodeId) {
+            glides.removeValue(forKey: id)
+            layers.removeValue(forKey: id)
+        }
+
         public mutating func beginFrame(t: Double, size: SIMD2<Float>) {
             frame = frame &+ 1
             self.t = t

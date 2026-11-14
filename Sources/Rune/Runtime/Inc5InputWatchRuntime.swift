@@ -55,14 +55,17 @@ extension Runtime {
                 if !consumed && (!content.text.isEmpty || hasHTML) {
                     let prevEdit = editLens.get(state)
                     var edit = prevEdit
+                    let stateRevealed = edit.isRevealed
                     if fEl.isSecure {
                         edit.isSecure = true
+                        if fEl.isRevealed { edit.isRevealed = true }
                     }
                     if edit.isRichEnabled && !edit.isSecure, let html = content.html, !html.isEmpty {
                         edit.pasteHTML(html, plain: content.text)
                     } else if !content.text.isEmpty {
                         edit.paste(content.text)
                     }
+                    edit.isRevealed = stateRevealed
                     deliverInputEdit(el: fEl, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: now)
                 }
                 return true
@@ -154,8 +157,18 @@ extension Runtime {
             let taken = onUp(&state, ev, &tx)
             _ = Tx.took(taken, &tx)
             applyTx(tx, at: now, markDirtyIfNotLiveOnly: taken)
-            if taken { return true }
+            if taken {
+                let sec = hasSecureFocus || chain.contains(where: {
+                    flatNodes[$0].el.isSecure || (flatNodes[$0].el.handlers.editLens?.get(state).isSecure == true)
+                })
+                recordEvent(sec ? "key-up [redacted]" : "key-up \(ev.key)")
+                return true
+            }
         }
+        let sec = hasSecureFocus || chain.contains(where: {
+            flatNodes[$0].el.isSecure || (flatNodes[$0].el.handlers.editLens?.get(state).isSecure == true)
+        })
+        recordEvent(sec ? "key-up [redacted]" : "key-up \(ev.key)")
         return false
     }
 
