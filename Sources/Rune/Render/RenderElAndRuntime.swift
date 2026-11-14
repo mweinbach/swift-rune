@@ -858,11 +858,18 @@ extension Runtime {
             defaultTextColor: Color,
             clipEdges: SIMD4<Float>,
             fade: SIMD4<UInt32>,
-            forceScaled: Bool
+            forceScaled: Bool,
+            cullY: (Float, Float)? = nil
         ) {
             for (bgRect, bgColor) in shaped.backgrounds {
                 let c = premulSIMD4(bgColor, opacity: localOpacity, srgb: srgbBlend)
                 if c.w <= 0.0005 { continue }
+                // Window text culling (P2-21): skip span backgrounds outside the shown band unless rotated/cached.
+                if let (lo, hi) = cullY {
+                    let by = (textTop + bgRect.y * sc.y) * scale
+                    let bh = bgRect.w * sc.y * scale
+                    if by + bh < lo || by > hi { continue }
+                }
                 let r = min(max(0, spanRadius), bgRect.w * 0.5) * min(sc.x, sc.y) * scale
                 instances.append(RenderInstance(
                     rect: SIMD4<Float>(
@@ -938,7 +945,9 @@ extension Runtime {
             parentOpacity: Float,
             inheritedTransform: PresentedTransform,
             parentIsDissolve: Bool,
-            parentScaleMotion: PaintScaleMotion
+            parentScaleMotion: PaintScaleMotion,
+            parentInCache: Bool = false,
+            parentIsRotated: Bool = false
         ) -> (
             continueSubtree: Bool,
             subtreeDynamic: Bool,
@@ -2446,6 +2455,17 @@ extension Runtime {
                     }
                 }
                 let defaultTextColor = applyPressColor(pressTint.color, to: scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black), frac: pressTint.frac)
+                let isRotatedScope = parentIsRotated || abs(el.rotate) > 1e-4
+                let inCacheScope = parentInCache || cacheEligible
+                let shownMargin = effBlur * scale * 3.0 + (effectSpec.map { $0.bleed * max(sc.x, sc.y) * scale } ?? 0) + 2.0
+                let shownY0 = (!isRotatedScope && !inCacheScope) ? max(activeClip.y, -shownMargin) : activeClip.y
+                let shownY1 = (!isRotatedScope && !inCacheScope) ? min(activeClip.w, viewport.y * scale + shownMargin) : activeClip.w
+                let baseLinePt = resolvedText.style.lineHeight ?? resolvedText.style.size
+                let spanMaxPt = resolvedText.spans?.compactMap(\.size).max() ?? 0
+                let emPt = max(max(resolvedText.style.size, baseLinePt), spanMaxPt)
+                let bandPadPx = 2.0 * emPt * sc.y * scale + 2.0 / max(1e-4, rasterScale * scale)
+                let visibleMinY = shownY0 - bandPadPx
+                let visibleMaxY = shownY1 + bandPadPx
                 emitTextBackdropsAndPills(
                     shaped: shaped,
                     textLeft: textLeft,
@@ -2457,7 +2477,8 @@ extension Runtime {
                     defaultTextColor: defaultTextColor,
                     clipEdges: activeClip,
                     fade: activeFade,
-                    forceScaled: forceScaled
+                    forceScaled: forceScaled,
+                    cullY: isRotatedScope ? nil : (visibleMinY, visibleMaxY)
                 )
                 var combinedHighlights = el.textHighlights ?? []
                 let ringHls = ElDisplayResolver.spanRingHighlights(spanRings: resolvedText.spanRings, spans: resolvedText.spans)
@@ -2480,6 +2501,7 @@ extension Runtime {
                             q.rect.z,
                             q.rect.w
                         )
+                        if !isRotatedScope && (hlRect.y + hlRect.w < visibleMinY || hlRect.y > visibleMaxY) { continue }
                         let hlRadii = SIMD4<Float>(repeating: q.cornerRadius)
                         let bgColor = premulSIMD4(q.bg, opacity: localOpacity, srgb: srgbBlend)
                         if bgColor.w > 0.0005 {
@@ -2530,6 +2552,7 @@ extension Runtime {
                         srgbBlend: srgbBlend
                     )
                     for sq in strikeQuads {
+                        if !isRotatedScope && (sq.rect.y + sq.rect.w < visibleMinY || sq.rect.y > visibleMaxY) { continue }
                         instances.append(RenderInstance(
                             rect: sq.rect,
                             radii: .zero,
@@ -2555,6 +2578,7 @@ extension Runtime {
                     let gy = (textTop + gq.rect.y * sc.y) * scale
                     let gw = max(1.0, gq.rect.z * sc.x * scale)
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
+                    if !isRotatedScope && (gy + gh < visibleMinY || gy > visibleMaxY) { continue }
                     let glyphBaseColor = gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
                     let gcol = premulSIMD4(glyphBaseColor, opacity: gAlpha, srgb: srgbBlend)
                     let idx = instances.count
@@ -2789,7 +2813,9 @@ extension Runtime {
             inheritedTransform: PresentedTransform = .identity,
             parentIsDissolve: Bool = false,
             parentScaleMotion: PaintScaleMotion = .still,
-            allowRaised: Bool = false
+            allowRaised: Bool = false,
+            parentInCache: Bool = false,
+            parentIsRotated: Bool = false
         ) -> Bool {
             if !allowRaised && node.el.isRaised {
                 collectedRaisedNodes.append(node)
@@ -2806,12 +2832,16 @@ extension Runtime {
                 parentOpacity: parentOpacity,
                 inheritedTransform: inheritedTransform,
                 parentIsDissolve: parentIsDissolve,
-                parentScaleMotion: parentScaleMotion
+                parentScaleMotion: parentScaleMotion,
+                parentInCache: parentInCache,
+                parentIsRotated: parentIsRotated
             )
             if !h.continueSubtree { return h.subtreeDynamic }
 
             var subtreeDynamic = h.subtreeDynamic
             let childOpacity = (h.needsLayer ? 1.0 : h.effOpacity).clamped(to: 0...1)
+            let childInCache = parentInCache || h.cacheEligible
+            let childIsRotated = parentIsRotated || abs(node.el.rotate) > 1e-4
             for child in childrenByParent[node.index] ?? [] {
                 if paintSubtree(
                     child,
@@ -2821,7 +2851,9 @@ extension Runtime {
                     inheritedTransform: h.nextChildTransform,
                     parentIsDissolve: h.isDissolveScope,
                     parentScaleMotion: h.scaleMotion,
-                    allowRaised: allowRaised
+                    allowRaised: allowRaised,
+                    parentInCache: childInCache,
+                    parentIsRotated: childIsRotated
                 ) {
                     subtreeDynamic = true
                 }
