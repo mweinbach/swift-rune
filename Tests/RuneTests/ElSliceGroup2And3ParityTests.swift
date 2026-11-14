@@ -407,8 +407,7 @@ struct ElSliceGroup2And3ParityTests {
         if useMemo {
             return memo(id, deps: ver, build: build)
         }
-        let built = build()
-        return built.keyId == nil ? built.key(id) : built
+        return build().key(id)
     }
 
     private func cardBody(_ i: Int, _ ver: Int, _ useMemo: Bool) -> El<CardsState> {

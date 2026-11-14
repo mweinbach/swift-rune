@@ -1091,7 +1091,7 @@ struct LayoutReadParityTests {
         _ = rt.frame(at: t)
         stepFrames(rt, count: 10, t: &t)
         let labelText = { findInfo(rt, key: "label")?.text }
-        let withText = { findInfo(rt, key: "cxWithLabel")?.text }
+        let withText = { findInfo(rt, key: "cxWith")?.text }
         let r10Rect = { findInfo(rt, key: "r10")!.rect }
         #expect(labelText() == "[0.0, 300.0, 300.0, 30.0]")
         #expect(withText() == "h=30")
