@@ -581,6 +581,7 @@ extension Runtime {
         var radiusMap: [NodeId: Corners] = [:]
         var fillMap: [NodeId: Color] = [:]
         var borderMap: [NodeId: Color] = [:]
+        var drawMap: [NodeId: Float] = [:]
         var movingSet: Set<NodeId> = []
         var exitingIds: Set<NodeId> = []
 
@@ -590,6 +591,7 @@ extension Runtime {
             scaleMap[animNode.id] = animNode.scale
             blurMap[animNode.id] = animNode.blur
             radiusMap[animNode.id] = animNode.corners
+            drawMap[animNode.id] = animNode.draw
             if let mc = animNode.fill {
                 fillMap[animNode.id] = Color(mc)
             }
@@ -1688,8 +1690,16 @@ extension Runtime {
             }
 
             // 9. Vector shapes (`Shape` with `trimmed`/`drawn`, `strokeWidth`, `LineCap`)
+            let drawFrac = (drawMap[nid] ?? 1.0).clamped(to: 0...1)
             for shape in el.shapes {
-                let effective = shapeTrim.map { shape.trimmed(start: $0.x, end: $0.y) } ?? shape
+                let effective: Shape
+                if let t = shapeTrim {
+                    effective = shape.trimmed(start: t.x, end: t.x + (t.y - t.x) * drawFrac)
+                } else if drawFrac < 1.0 {
+                    effective = shape.drawn(drawFrac)
+                } else {
+                    effective = shape
+                }
                 let vb = effective.viewBox ?? Vec2(max(1, effRect.width), max(1, effRect.height))
                 let sx = (effRect.width * scale) / max(1e-4, vb.x)
                 let sy = (effRect.height * scale) / max(1e-4, vb.y)
@@ -2122,7 +2132,7 @@ extension Runtime {
                     }
                 }
                 let revealClock = scene.store.nodeTimeScale(nid) != 1.0 ? scene.store.nodeTime(nid) : lastScaledAnimNow
-                let wordFadeMask = (el.elRevealWordFade != nil)
+                let wordFadeMask = ((el.elRevealWordFade ?? -1) >= 0)
                     ? wordRevealStore.mask(for: nid, text: resolvedText.displayedText, shaped: shaped, textSystem: textSystem, pixelScale: scale, now: revealClock)
                     : nil
                 for gq in shaped.glyphs {

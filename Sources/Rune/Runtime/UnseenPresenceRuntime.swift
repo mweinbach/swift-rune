@@ -454,9 +454,9 @@ extension Runtime {
                     scene.enterNow(id)
                 }
 
-                // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame so offscreen
-                // reflow does not animate invisibly.
-                if unseenPresence.unseenIds.contains(id), spec.layoutAnim != nil {
+                // 3. `unseen_before_and_after`: rows staying unseen snap their layout frame and visuals
+                // so offscreen reflow/colour changes do not animate invisibly (`unseen_presence.rs`).
+                if unseenPresence.unseenIds.contains(id) {
                     let parentOrigin = spec.parent.flatMap { specById[$0]?.rect.origin } ?? .zero
                     let localFrame = MotionRect(
                         left: spec.rect.left - parentOrigin.x,
@@ -465,6 +465,14 @@ extension Runtime {
                         bottom: spec.rect.bottom - parentOrigin.y
                     )
                     scene.landFrame(id, localFrame)
+                    if let fill = spec.fill { scene.set(id, Props.FILL, fill) }
+                    if let border = spec.border { scene.set(id, Props.BORDER, border) }
+                    scene.set(id, Props.OPACITY, spec.opacity)
+                    scene.set(id, Props.BLUR, Blur(spec.blur))
+                    scene.set(id, Props.CORNERS, spec.corners)
+                    scene.set(id, Props.OFFSET, spec.offset)
+                    scene.set(id, Props.SCALE, spec.scale)
+                    scene.set(id, Props.ROTATE, spec.rotate)
                 }
             } else if !reducedMotion,
                       spec.transition != nil,
@@ -604,6 +612,21 @@ extension Runtime {
 
     func unmountOmittedUnseenNodes(_ ids: [NodeId], on scene: inout Scene) {
         for id in ids {
+            scene.unmount(id)
+        }
+    }
+
+    /// Immediately unmounts any exiting node that drew nothing on the just-finished frame
+    /// (`unseen_presence.rs:end_unseen_exits`), skipping active matched flights.
+    internal func endUnseenExits(on scene: inout Scene) {
+        for id in unseenPresence.currentPaintUnseenIds {
+            guard case .exiting = scene.phase(id),
+                  !unseenPresence.seenAncestorIds.contains(id),
+                  !activeFlightIds.contains(id),
+                  !launchedFlightIds.contains(id),
+                  !unclippedMatchedFlightIds.contains(id) else {
+                continue
+            }
             scene.unmount(id)
         }
     }

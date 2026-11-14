@@ -90,11 +90,12 @@ extension El {
     }
 
     /// Enables streaming word-by-word reveal over `wordFade` seconds per word (`El::reveal`).
+    /// Negative values disable word reveal, matching upstream `El::reveal(-1.0)`.
     public func reveal(wordFade: Float) -> Self {
         guard isTextElement else { return self }
-        let clamped = wordFade.isFinite ? max(0, wordFade) : 0
+        let value = wordFade.isFinite ? wordFade : 0
         var copy = self
-        copy.runtimeExtras[ShellElExtrasKey.revealWordFade] = clamped
+        copy.runtimeExtras[ShellElExtrasKey.revealWordFade] = value
         return copy
     }
 
