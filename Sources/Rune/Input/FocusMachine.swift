@@ -104,9 +104,9 @@ public struct FocusMachine: Sendable {
 
     public static func listKind(for role: ElementRole) -> MenuListKind? {
         switch role {
-        case .menu, .listbox:
+        case .menu:
             return .wrapMenu
-        case .list, .tree, .grid:
+        case .listbox, .list, .tree, .grid:
             return .clampedList
         default:
             return nil
@@ -496,7 +496,7 @@ extension Runtime {
         ensureNodeVisibleInScrollAncestors(index: memberIdx, at: now)
         dirtyCommit(at: now)
         if let g = findFocusGroupAncestor(of: memberIdx),
-           flatNodes[g].el.isFocusFollowsSelection,
+           (nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[g].el.isFocusFollowsSelection),
            moved {
             _ = invokeMenuElementClick(nextNode, at: now)
         }

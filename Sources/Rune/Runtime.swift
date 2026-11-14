@@ -11075,6 +11075,7 @@ public final class Runtime<State> {
     }
 
     private func focusGroupMembers(groupIndex: Int, excludeEditable: Bool = false) -> [Int] {
+
         let prefix = flatNodes[groupIndex].path + "/"
         return flatNodes.indices.filter { i in
             (flatNodes[i].path == flatNodes[groupIndex].path || flatNodes[i].path.hasPrefix(prefix)) &&
@@ -11211,10 +11212,10 @@ public final class Runtime<State> {
         } else {
             return false
         }
-        activateFocusGroupMember(groupIndex: groupIndex, members: members, curIdx: curIdx, targetPos: nextPos, at: now)
-        return true
-    }
+    private func focusGroupMembers(groupIndex: Int, excludeEditable: Bool = false) -> [Int] {
 
+=======
+>>>>>>> a075b9f (fix(text): remove superseded focusGroup duplicate after main d3ff7f9 rebase and keep listbox clamped)
     internal func textHitOffset(node: FlatNode, windowPos: Vec2, edit: TextEdit) -> Int {
         var resolvedEdit = edit
         if node.el.isSecure {
