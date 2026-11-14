@@ -421,7 +421,7 @@ extension Runtime {
         let topSpacerH = mounted.lowerBound > 0 ? prefix[mounted.lowerBound] : 0
         let botSpacerH = mounted.upperBound < count ? max(0, total - prefix[mounted.upperBound]) : 0
         if topSpacerH > 0 {
-            built.append(El<State>().key("__v_top_spacer").wFull().h(topSpacerH))
+            built.append(Self.virtualSpacer(key: "__v_top_spacer", height: topSpacerH))
         }
 
         let mountedKeys = mounted.map { keys[$0] }
@@ -538,50 +538,82 @@ extension Runtime {
         }
 
         if botSpacerH > 0 {
-            built.append(El<State>().key("__v_bot_spacer").wFull().h(botSpacerH))
+            built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))
         }
         if focusedPath != nil || focusedKey != nil {
-            var candidateIndices: [Int] = []
-            if let fp = focusedPath, fp.hasPrefix(path + "/") {
-                let rest = fp.dropFirst(path.count + 1)
-                let rowSeg = String(rest.prefix(while: { $0 != "/" }))
-                let rowKey = rowSeg.hasPrefix("@") ? String(rowSeg.dropFirst()) : rowSeg
-                let baseRowKey = rowKey.components(separatedBy: "#dup").first ?? rowKey
-                for i in 0..<count where !mounted.contains(i) {
-                    if keys[i] == rowKey || keys[i] == baseRowKey || keys[i] == vState.rowKeyBySegment[rowSeg] {
-                        candidateIndices.append(i)
-                    }
-                }
-            } else if let fp = focusedPath, let prev = virtualInputs[fp] {
-                for i in 0..<count where !mounted.contains(i) && keys[i] == prev.rowKey {
-                    candidateIndices.append(i)
-                }
-            }
-            if candidateIndices.isEmpty && !isIndexed {
-                for i in 0..<count where !mounted.contains(i) {
-                    candidateIndices.append(i)
-                }
-            }
-            for i in candidateIndices {
-                var offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
-                if isIndexed || offEl.keyId == nil {
-                    offEl = offEl.key(keys[i])
-                }
-                var seen: [String: Int] = [:]
-                collectVirtualInputs(
-                    in: offEl,
-                    parentPath: path,
-                    siblingIndex: i,
-                    siblingKeysSeen: &seen,
-                    rowKey: keys[i],
-                    targetPath: focusedPath,
-                    targetKey: focusedKey,
-                    out: &ctx.virtualInputs
-                )
-            }
+            collectOffscreenFocusedVirtualInputs(
+                el: el,
+                path: path,
+                keys: keys,
+                count: count,
+                mounted: mounted,
+                isIndexed: isIndexed,
+                rowKeyBySegment: vState.rowKeyBySegment,
+                ctx: &ctx
+            )
         }
         el.children = built
         el.virtualRowsSource = nil
+    }
+
+    /// Collects `editLens` inputs in rows of virtual list `path` scrolled out of the mounted window
+    /// so the focused field survives being unmounted. Split out of `expandSingleVirtualNode` so its
+    /// temporaries don't enlarge that frame on the row-build path (debug stack depth).
+    @inline(never)
+    private func collectOffscreenFocusedVirtualInputs(
+        el: El<State>,
+        path: String,
+        keys: [String],
+        count: Int,
+        mounted: Range<Int>,
+        isIndexed: Bool,
+        rowKeyBySegment: [String: String],
+        ctx: inout VirtualExpansionContext
+    ) {
+        var candidateIndices: [Int] = []
+        if let fp = focusedPath, fp.hasPrefix(path + "/") {
+            let rest = fp.dropFirst(path.count + 1)
+            let rowSeg = String(rest.prefix(while: { $0 != "/" }))
+            let rowKey = rowSeg.hasPrefix("@") ? String(rowSeg.dropFirst()) : rowSeg
+            let baseRowKey = rowKey.components(separatedBy: "#dup").first ?? rowKey
+            for i in 0..<count where !mounted.contains(i) {
+                if keys[i] == rowKey || keys[i] == baseRowKey || keys[i] == rowKeyBySegment[rowSeg] {
+                    candidateIndices.append(i)
+                }
+            }
+        } else if let fp = focusedPath, let prev = virtualInputs[fp] {
+            for i in 0..<count where !mounted.contains(i) && keys[i] == prev.rowKey {
+                candidateIndices.append(i)
+            }
+        }
+        if candidateIndices.isEmpty && !isIndexed {
+            for i in 0..<count where !mounted.contains(i) {
+                candidateIndices.append(i)
+            }
+        }
+        for i in candidateIndices {
+            var offEl = isIndexed ? el.virtualRowsSource!.build(state, i) : el.children[i]
+            if isIndexed || offEl.keyId == nil {
+                offEl = offEl.key(keys[i])
+            }
+            var seen: [String: Int] = [:]
+            collectVirtualInputs(
+                in: offEl,
+                parentPath: path,
+                siblingIndex: i,
+                siblingKeysSeen: &seen,
+                rowKey: keys[i],
+                targetPath: focusedPath,
+                targetKey: focusedKey,
+                out: &ctx.virtualInputs
+            )
+        }
+    }
+
+    /// Top/bottom spacer standing in for unmounted virtual rows (kept out of line, see above).
+    @inline(never)
+    private static func virtualSpacer(key: String, height: Float) -> El<State> {
+        El<State>().key(key).wFull().h(height)
     }
 
     private func collectVirtualInputs(

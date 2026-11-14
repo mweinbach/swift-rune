@@ -480,7 +480,8 @@ struct ElPhase2ParityTests {
         rt.update(at: 0.02) { s, _ in s.tick = 1 }
         _ = rt.frame(at: 0.03)
         #expect(memoBuilds == 1, "memo with liveFill reuses its cached subtree")
-        let midFill = try #require(rt.element(byKey: "live-box")).fill
+        // `memo` keys its subtree with the memo id, replacing the inner key (upstream `memo.rs::keyed`).
+        let midFill = try #require(rt.element(byKey: "live-card")).fill
         #expect(midFill.r > 0.01 && midFill.b < 0.99, "liveFill should still be transitioning midway")
 
         // tx.settle() clears liveSeenSeq on reused memo nodes so the live value snaps cleanly.
@@ -491,7 +492,7 @@ struct ElPhase2ParityTests {
         }
         _ = rt.frame(at: 0.06)
         #expect(memoBuilds == 1)
-        let settledFill = try #require(rt.element(byKey: "live-box")).fill
+        let settledFill = try #require(rt.element(byKey: "live-card")).fill
         #expect(settledFill.g > 0.95 && settledFill.r < 0.05 && settledFill.b < 0.05, "tx.settle() clears liveSeenSeq on reused memo node")
     }
 
