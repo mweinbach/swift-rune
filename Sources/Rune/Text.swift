@@ -2993,7 +2993,9 @@ public final class TextSystem: @unchecked Sendable {
                     maxWidth: effectiveMaxW,
                     pixelScale: scale,
                     emitGlyphs: emitGlyphs,
-                    glidePx: glidePx
+                    glidePx: glidePx,
+                    // Secure text never enters the shared shape cache (upstream `Keep::Secret`).
+                    bypassCache: keep == .secret
                 )
                 return TextLayoutBox(
                     shapeKey: shapeKey,
