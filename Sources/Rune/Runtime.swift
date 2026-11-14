@@ -9685,7 +9685,8 @@ public final class Runtime<State> {
         if button == .primary {
             let pendingPair = inputMachines.firstDoubleClick
             inputMachines.firstDoubleClick = nil
-            let clicks = inputMachines.pressClicks.press(path: node.path, at: now, point: pos, interval: doubleClickInterval)
+            // Shift+click extends a field's selection and never starts a multiclick (`selection/click.rs:154`).
+            let clicks = shiftClickCount(node: node, mods: mods) ?? inputMachines.pressClicks.press(path: node.path, at: now, point: pos, interval: doubleClickInterval)
             clickCount = Int(clicks)
             lastClickTime = now
             lastClickPos = pos
@@ -9860,7 +9861,7 @@ public final class Runtime<State> {
                         textSelOrigin = origin
                     }
                 } else {
-                    edit.setCursor(utf8Offset: offset, extendSelection: mods.shift)
+                    edit.setCursor(utf8Offset: offset, extendSelection: mods.shift || inputMachines.currentMods.shift)
                     textSelOrigin = nil
                 }
             }
