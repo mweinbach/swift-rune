@@ -6,6 +6,21 @@ import RuneTaffy
 /// Caches node styles, child lists, and Taffy 0.15 `LayoutCache` slots across view commits,
 /// compacting sparse arenas in `endCommit`, and supporting `aspect_fit` two-pass refits,
 /// `scroll_x` unwrapped widths, and `border_layout` snapped border insets.
+/// Per-node data `syncPrepare` hands back to the recursive `syncSubtree` (see there).
+fileprivate struct SyncPrepared {
+    var myIndex: Int
+    var path: String
+    var keyHash: UInt64
+    var areas: [String: RuneTaffy.GridTemplateArea]?
+    var childSX: TaffyBridge.ScrollXChild?
+    var nodeFlow: Flow
+    var nodeDirected: Bool
+    var isRow: Bool
+    var measureHash: UInt64?
+    var isRedacted: Bool
+    var hasRatio: Bool
+}
+
 final class RetainedLayoutCoordinator {
     struct TextLayoutRecord {
         var box: TextLayoutBox
@@ -258,7 +273,13 @@ final class RetainedLayoutCoordinator {
             return (nil, nil, false)
         }
 
-        func syncSubtree(
+        /// Per-node half of `syncSubtree`, kept out of the recursive frame (`@inline(never)`): its
+        /// style temporaries (`TaffyStyle` copies, `PreparedNode`, `makeMeasure`) would otherwise
+        /// stay live across every child's recursion and overflow the 512 KB test-thread stack on
+        /// deep trees in debug builds.
+
+        @inline(never)
+        func syncPrepare(
             _ el: El<State>,
             isRoot: Bool,
             parentIndex: Int?,
@@ -270,7 +291,7 @@ final class RetainedLayoutCoordinator {
             scrollXChild: TaffyBridge.ScrollXChild?,
             parentFlow: Flow,
             parentDirected: Bool
-        ) -> (idx: Int, slot: SlotId, dirty: Bool) {
+        ) -> SyncPrepared {
             let pin: DirPin = (el.isUnmirrored || el.anchor != nil) ? .physical : .flowing
             let effectiveParentFlow: Flow = el.isUnmirrored ? .ltr : parentFlow
             let (nodeFlow, _) = stepDirection(parent: effectiveParentFlow, event: DirEvent.of(el, state: state), state: state)
@@ -379,7 +400,66 @@ final class RetainedLayoutCoordinator {
             let (measureFn, measureHash, isRedacted) = makeMeasure(el: el, nodeId: runtimeNodeId, flatIndex: myIndex, forcedTextFlow: forcedTextFlow)
             flat[myIndex].measureFn = measureFn
 
-            let isRow = effectiveTaffy.flexDirection.isRow
+            return SyncPrepared(
+                myIndex: myIndex,
+                path: path,
+                keyHash: keyHash,
+                areas: areas,
+                childSX: childSX,
+                nodeFlow: nodeFlow,
+                nodeDirected: nodeDirected,
+                isRow: effectiveTaffy.flexDirection.isRow,
+                measureHash: measureHash,
+                isRedacted: isRedacted,
+                hasRatio: ratio != nil
+            )
+        }
+
+        @inline(never)
+        func syncFinish(_ p: SyncPrepared, childMark: Int, childrenDirty: Bool) -> (slot: SlotId, dirty: Bool) {
+            let (slot, dirty) = store.syncNode(
+                key: p.keyHash,
+                nodeIndex: UInt32(p.myIndex),
+                style: flat[p.myIndex].taffyStyle,
+                measure: p.measureHash,
+                forceMeasureDirty: p.isRedacted,
+                childMark: childMark,
+                childrenDirty: childrenDirty
+            )
+            flat[p.myIndex].slot = slot
+            if p.hasRatio {
+                aspectFitIndices.append(p.myIndex)
+            }
+            return (slot, dirty)
+        }
+
+        func syncSubtree(
+            _ el: El<State>,
+            isRoot: Bool,
+            parentIndex: Int?,
+            parentPath: String,
+            siblingIndex: Int,
+            siblingKeysSeen: inout [String: Int],
+            parentRow: Bool,
+            parentAreas: [String: RuneTaffy.GridTemplateArea]?,
+            scrollXChild: TaffyBridge.ScrollXChild?,
+            parentFlow: Flow,
+            parentDirected: Bool
+        ) -> (idx: Int, slot: SlotId, dirty: Bool) {
+            let p = syncPrepare(
+                el,
+                isRoot: isRoot,
+                parentIndex: parentIndex,
+                parentPath: parentPath,
+                siblingIndex: siblingIndex,
+                siblingKeysSeen: &siblingKeysSeen,
+                parentRow: parentRow,
+                parentAreas: parentAreas,
+                scrollXChild: scrollXChild,
+                parentFlow: parentFlow,
+                parentDirected: parentDirected
+            )
+            let myIndex = p.myIndex
             let childMark = store.beginChildren()
             var childrenDirty = false
             var childKeys: [String: Int] = [:]
@@ -391,14 +471,14 @@ final class RetainedLayoutCoordinator {
                     childEl,
                     isRoot: false,
                     parentIndex: myIndex,
-                    parentPath: path,
+                    parentPath: p.path,
                     siblingIndex: cIdx,
                     siblingKeysSeen: &childKeys,
-                    parentRow: isRow,
-                    parentAreas: areas,
-                    scrollXChild: childSX,
-                    parentFlow: nodeFlow,
-                    parentDirected: nodeDirected
+                    parentRow: p.isRow,
+                    parentAreas: p.areas,
+                    scrollXChild: p.childSX,
+                    parentFlow: p.nodeFlow,
+                    parentDirected: p.nodeDirected
                 )
                 childIndices.append(childRes.idx)
                 store.pushChild(childRes.slot)
@@ -406,19 +486,7 @@ final class RetainedLayoutCoordinator {
             }
             flat[myIndex].childIndices = childIndices
 
-            let (slot, dirty) = store.syncNode(
-                key: keyHash,
-                nodeIndex: UInt32(myIndex),
-                style: effectiveTaffy,
-                measure: measureHash,
-                forceMeasureDirty: isRedacted,
-                childMark: childMark,
-                childrenDirty: childrenDirty
-            )
-            flat[myIndex].slot = slot
-            if ratio != nil {
-                aspectFitIndices.append(myIndex)
-            }
+            let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: childrenDirty)
             if el.anchor?.fit == true {
                 hasAnchoredFit = true
             }
