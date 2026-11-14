@@ -1012,4 +1012,523 @@ struct Phase2ShellParityTests {
         }
         #expect(rt.state == 12)
     }
+
+    @Test("Call that finishes after its host closed wakes nothing (`closed_wake_tests.rs:21`)")
+    func callThatFinishesAfterHostClosedWakesNothing() {
+        let app = makeTestApp("ClosedBeforeWake")
+        let wakes = AtomicIntBox()
+        let guardObj = ShortcutGuard.attach(
+            shared: app.sharedHandle.shared,
+            wake: Waker { wakes.add(1) },
+            headless: true
+        )
+        let paused = SignalChannel<Void>()
+        let resumed = SignalChannel<Void>()
+        let answer = SignalChannel<String?>()
+        let handle = app.handle()
+        let sc = chord("ctrl+alt+f19")
+
+        Thread {
+            ShortcutTestHooks.setBeforeWake {
+                paused.send(())
+                _ = resumed.receive()
+            }
+            answer.send(handle.shortcutOwner(sc))
+        }.start()
+
+        #expect(paused.receive() != nil)
+        guardObj.close()
+        let atClose = wakes.get()
+        resumed.send(())
+        let ownerResult = answer.receive()
+        #expect(ownerResult == .some(nil))
+        #expect(wakes.get() == atClose)
+    }
+
+    @Test("Press wakes its own host and never a closed window (`closed_wake_tests.rs:115`)")
+    func pressWakesItsOwnHostAndNeverClosedWindow() {
+        final class SinkBox: @unchecked Sendable {
+            var sink: ShortcutSink?
+        }
+        let sinkBox = SinkBox()
+        let capture: ShortcutConnectFn = { _, sink in
+            sinkBox.sink = sink
+            return .success(MockBackendDriver())
+        }
+
+        let app = makeTestApp("Pressed")
+        let shared = app.sharedHandle.shared
+        let firstWakes = AtomicIntBox()
+        let firstWake = Waker { firstWakes.add(1) }
+        shared.setWaker(firstWake)
+        let first = ShortcutGuard.attachWith(shared: shared, wake: firstWake, headless: false, connect: capture)
+        _ = try! app.handle().registerShortcut(chord("ctrl+alt+f8")) { _, _ in }.get()
+        let press = sinkBox.sink
+        #expect(press != nil)
+
+        let secondWakes = AtomicIntBox()
+        let secondWake = Waker { secondWakes.add(1) }
+        shared.setWaker(secondWake)
+        let second = ShortcutGuard.attachWith(shared: shared, wake: secondWake, headless: false, connect: capture)
+        second.close()
+
+        let firstBefore = firstWakes.get()
+        let secondBefore = secondWakes.get()
+        press?(1, nil)
+        #expect(secondWakes.get() == secondBefore)
+        #expect(firstWakes.get() == firstBefore + 1)
+        #expect(shared.drain().orderedUpdates.count == 1)
+
+        first.close()
+        press?(1, nil)
+        #expect(firstWakes.get() == firstBefore + 1)
+        #expect(shared.drain().orderedUpdates.isEmpty)
+    }
+
+    @Test("Replaced engine presses are discarded not kept (`generation_tests.rs:337`)")
+    func replacedEnginesPressesAreDiscardedNotKept() {
+        final class AwayState: @unchecked Sendable {
+            var guardObj: ShortcutGuard?
+            var rt: Runtime<Int>?
+        }
+        final class AwayRunner: @unchecked Sendable {
+            private let lock = NSLock()
+            private let cond = NSCondition()
+            private var queue: [@Sendable (AwayState) -> Void] = []
+            private var closed = false
+            private let doneSem = DispatchSemaphore(value: 0)
+
+            init() {
+                Thread {
+                    let state = AwayState()
+                    while true {
+                        self.cond.lock()
+                        while self.queue.isEmpty && !self.closed {
+                            self.cond.wait()
+                        }
+                        if self.queue.isEmpty && self.closed {
+                            self.cond.unlock()
+                            break
+                        }
+                        let step = self.queue.removeFirst()
+                        self.cond.unlock()
+                        step(state)
+                    }
+                    state.guardObj?.close()
+                    state.guardObj = nil
+                    state.rt = nil
+                    self.doneSem.signal()
+                }.start()
+            }
+
+            func run<T: Sendable>(_ body: @escaping @Sendable (AwayState) -> T) -> T {
+                let ch = SignalChannel<T>()
+                cond.lock()
+                queue.append { state in
+                    ch.send(body(state))
+                }
+                cond.signal()
+                cond.unlock()
+                return ch.receive()!
+            }
+
+            func finish() {
+                cond.lock()
+                closed = true
+                cond.signal()
+                cond.unlock()
+                _ = doneSem.wait(timeout: .now() + 10.0)
+            }
+        }
+
+        let app = makeTestApp("Replaced")
+        let shared = app.sharedHandle.shared
+        let a = AwayRunner()
+        let (genA, liveA) = a.run { st -> (UInt64, ShortcutLiveToken?) in
+            let g = ShortcutGuard.attach(shared: shared, wake: Waker {}, headless: true)
+            st.guardObj = g
+            st.rt = App<Int>(title: "Replaced", size: Vec2(40, 40), state: 0) { _, _ in el() }.makeRuntime()
+            return (g.generation, g.liveToken)
+        }
+        #expect(liveA != nil)
+        let delivery = ShortcutDelivery<Int>(shared: shared, generation: genA, wake: Waker {}, live: liveA!)
+        let press = makeShortcutSink(delivery: delivery)
+
+        let b = ShortcutGuard.attach(shared: shared, wake: Waker {}, headless: true)
+        let rtB = app.makeRuntime()
+        for n in 0..<50 {
+            press(UInt32.max - 3, nil)
+            if n % 2 == 0 {
+                b.withReceiving {
+                    _ = shared.applyStateUpdates(to: rtB, at: Double(n) * 0.016)
+                }
+            } else {
+                a.run { st in
+                    if let g = st.guardObj, let rtA = st.rt {
+                        g.withReceiving {
+                            _ = shared.applyStateUpdates(to: rtA, at: Double(n) * 0.016)
+                        }
+                    }
+                }
+            }
+            #expect(delivery.pressedCount == 0)
+            #expect(shared.drain().orderedUpdates.isEmpty)
+        }
+        let aState = a.run { $0.rt?.state ?? -1 }
+        #expect(aState == 0)
+        #expect(rtB.state == 0)
+        b.close()
+        a.finish()
+    }
+
+    @Test("Outgoing close leaves newer host engine and handlers alone (`generation_tests.rs:197`)")
+    func outgoingCloseLeavesNewerHostEngineAndHandlersAlone() {
+        enum CloseStep: CaseIterable {
+            case aClosesRouting, aReleasesEngine, aEnds
+            case bInstalls, bRoutes, bRegisters
+        }
+        func interleavings(_ left: [CloseStep], _ right: [CloseStep]) -> [[CloseStep]] {
+            if left.isEmpty { return [right] }
+            if right.isEmpty { return [left] }
+            var out: [[CloseStep]] = []
+            for tail in interleavings(Array(left.dropFirst()), right) {
+                out.append([left[0]] + tail)
+            }
+            for tail in interleavings(left, Array(right.dropFirst())) {
+                out.append([right[0]] + tail)
+            }
+            return out
+        }
+
+        final class HostSlot: @unchecked Sendable {
+            var guardObj: ShortcutGuard?
+            var attaching: ShortcutAttaching?
+            var closing: ShortcutClosing?
+        }
+        final class PlaceRunner: @unchecked Sendable {
+            private let away: Bool
+            private let local = HostSlot()
+            private let cond = NSCondition()
+            private var queue: [@Sendable (HostSlot) -> Void] = []
+            private var stopped = false
+            private let doneSem = DispatchSemaphore(value: 0)
+
+            init(away: Bool) {
+                self.away = away
+                if away {
+                    Thread {
+                        let slot = HostSlot()
+                        while true {
+                            self.cond.lock()
+                            while self.queue.isEmpty && !self.stopped {
+                                self.cond.wait()
+                            }
+                            if self.queue.isEmpty && self.stopped {
+                                self.cond.unlock()
+                                break
+                            }
+                            let step = self.queue.removeFirst()
+                            self.cond.unlock()
+                            step(slot)
+                        }
+                        slot.attaching = nil
+                        slot.closing = nil
+                        slot.guardObj?.close()
+                        slot.guardObj = nil
+                        self.doneSem.signal()
+                    }.start()
+                }
+            }
+
+            @discardableResult
+            func run<T: Sendable>(_ body: @escaping @Sendable (HostSlot) -> T) -> T {
+                if !away {
+                    return body(local)
+                }
+                let ch = SignalChannel<T>()
+                cond.lock()
+                queue.append { ch.send(body($0)) }
+                cond.signal()
+                cond.unlock()
+                return ch.receive()!
+            }
+
+            func finish() {
+                if !away {
+                    local.attaching = nil
+                    local.closing = nil
+                    local.guardObj?.close()
+                    local.guardObj = nil
+                    return
+                }
+                cond.lock()
+                stopped = true
+                cond.signal()
+                cond.unlock()
+                _ = doneSem.wait(timeout: .now() + 10.0)
+            }
+        }
+
+        let live0 = AtomicIntBox()
+        let live1 = AtomicIntBox()
+        let connect0: ShortcutConnectFn = { _, _ in
+            live0.add(1)
+            return .success(MockBackendDriver(onDrop: { live0.add(-1) }))
+        }
+        let connect1: ShortcutConnectFn = { _, _ in
+            live1.add(1)
+            return .success(MockBackendDriver(onDrop: { live1.add(-1) }))
+        }
+
+        let aChord = chord("ctrl+alt+f1")
+        let bChord = chord("ctrl+alt+f2")
+        let dChord = chord("ctrl+alt+f4")
+        let walks = interleavings([.aClosesRouting, .aReleasesEngine, .aEnds], [.bInstalls, .bRoutes, .bRegisters])
+
+        var sawStale = false
+        var sawCurrent = false
+        for away in [false, true] {
+            let replaces = !away
+            for order in walks {
+                #expect(live0.get() == 0 && live1.get() == 0)
+                let app = makeTestApp("Successor")
+                let handle = app.handle()
+                let shared = app.sharedHandle.shared
+                let place = PlaceRunner(away: away)
+
+                let aID = place.run { slot -> UInt32 in
+                    slot.guardObj = ShortcutGuard.attachWith(shared: shared, wake: Waker {}, headless: false, connect: connect0)
+                    return try! handle.registerShortcut(aChord) { s, _ in s += 1 }.get()
+                }
+                var routed: Character? = "A"
+                var aCurrent: Bool? = nil
+                var aReleased = false
+                var aEnded = false
+                var bInstalled = false
+                var bRouted = false
+                var bRegistered = false
+                var bID: UInt32? = nil
+                var attachingB: ShortcutAttaching? = nil
+                var guardB: ShortcutGuard? = nil
+
+                func checkStep() {
+                    let aAlive = !(bInstalled && replaces) && !aReleased
+                    #expect(live0.get() == (aAlive ? 1 : 0))
+                    #expect(live1.get() == (bRegistered ? 1 : 0))
+                    let aCleared = aEnded && aCurrent == true
+                    var want: [UInt32] = []
+                    if !aCleared { want.append(aID) }
+                    if let bID { want.append(bID) }
+                    want.sort()
+                    #expect(shared.shortcuts.handlers.sortedKeys == want)
+                }
+
+                checkStep()
+                for step in order {
+                    switch step {
+                    case .aClosesRouting:
+                        place.run { slot in
+                            slot.closing = slot.guardObj?.closeRouting()
+                        }
+                        routed = nil
+                        aCurrent = !bRouted
+                    case .aReleasesEngine:
+                        place.run { slot in
+                            if var c = slot.closing {
+                                slot.guardObj?.releaseEngine(&c)
+                                slot.closing = c
+                            }
+                        }
+                        aReleased = true
+                    case .aEnds:
+                        place.run { slot in
+                            if let c = slot.closing {
+                                slot.guardObj?.end(c)
+                            }
+                            slot.guardObj = nil
+                        }
+                        aEnded = true
+                    case .bInstalls:
+                        attachingB = ShortcutGuard.install(shared: shared, wake: Waker {}, headless: false, connect: connect1)
+                        bInstalled = true
+                    case .bRoutes:
+                        guardB = attachingB?.route(shared: shared)
+                        attachingB = nil
+                        routed = "B"
+                        bRouted = true
+                    case .bRegisters:
+                        let ans = handle.registerShortcut(bChord) { s, _ in s += 10 }
+                        bRegistered = (routed == "B")
+                        #expect(((try? ans.get()) != nil) == bRegistered)
+                        bID = try? ans.get()
+                    }
+                    checkStep()
+                }
+
+                let fresh = handle.registerShortcut(dChord) { _, _ in }
+                #expect(((try? fresh.get()) != nil) == (routed == "B"))
+                if case .success = fresh {
+                    #expect(handle.shortcutOwner(dChord) == "Successor")
+                }
+                if aCurrent == false { sawStale = true }
+                if aCurrent == true { sawCurrent = true }
+                guardB?.close()
+                guardB = nil
+                place.finish()
+                #expect(shared.shortcuts.handlers.isEmpty)
+                #expect(live0.get() == 0 && live1.get() == 0)
+            }
+        }
+        #expect(sawStale && sawCurrent)
+    }
+
+    @Test("Host installed first but routed last runs its calls and activations (`generation_tests.rs:408`)")
+    func hostInstalledFirstButRoutedLastRunsCallsAndActivations() {
+        final class HostBox: @unchecked Sendable {
+            var attaching: ShortcutAttaching?
+            var guardObj: ShortcutGuard?
+            var rt: Runtime<Int>?
+        }
+        final class ThreadHost: @unchecked Sendable {
+            private let cond = NSCondition()
+            private var queue: [@Sendable (HostBox) -> Void] = []
+            private var stopped = false
+            private let doneSem = DispatchSemaphore(value: 0)
+
+            init() {
+                Thread {
+                    let box = HostBox()
+                    while true {
+                        self.cond.lock()
+                        while self.queue.isEmpty && !self.stopped {
+                            self.cond.wait()
+                        }
+                        if self.queue.isEmpty && self.stopped {
+                            self.cond.unlock()
+                            break
+                        }
+                        let work = self.queue.removeFirst()
+                        self.cond.unlock()
+                        work(box)
+                    }
+                    box.attaching = nil
+                    box.guardObj?.close()
+                    box.guardObj = nil
+                    box.rt = nil
+                    self.doneSem.signal()
+                }.start()
+            }
+
+            func post(_ body: @escaping @Sendable (HostBox) -> Void) {
+                cond.lock()
+                queue.append(body)
+                cond.signal()
+                cond.unlock()
+            }
+
+            func run<T: Sendable>(_ body: @escaping @Sendable (HostBox) -> T) -> T {
+                let ch = SignalChannel<T>()
+                post { ch.send(body($0)) }
+                return ch.receive()!
+            }
+
+            func finish() {
+                cond.lock()
+                stopped = true
+                cond.signal()
+                cond.unlock()
+                _ = doneSem.wait(timeout: .now() + 10.0)
+            }
+        }
+
+        let liveA = AtomicIntBox()
+        let liveB = AtomicIntBox()
+        final class SinkSlot: @unchecked Sendable {
+            var sinkA: ShortcutSink?
+        }
+        let sinkSlot = SinkSlot()
+        let connectA: ShortcutConnectFn = { _, sink in
+            liveA.add(1)
+            sinkSlot.sinkA = sink
+            return .success(MockBackendDriver(onDrop: { liveA.add(-1) }))
+        }
+        let connectB: ShortcutConnectFn = { _, _ in
+            liveB.add(1)
+            return .success(MockBackendDriver(onDrop: { liveB.add(-1) }))
+        }
+
+        let app = makeTestApp("Reversed")
+        let shared = app.sharedHandle.shared
+        let handle = app.handle()
+        let key = shared.shortcuts.control.key
+        let hostA = ThreadHost()
+        let hostB = ThreadHost()
+
+        hostA.run { box in
+            box.rt = App<Int>(title: "Reversed", size: Vec2(40, 40), state: 0) { _, _ in el() }.makeRuntime()
+            let wake = Waker {
+                hostA.post { $0.guardObj?.drain() }
+            }
+            box.attaching = ShortcutGuard.install(shared: shared, wake: wake, headless: false, connect: connectA)
+        }
+        hostB.run { box in
+            box.rt = App<Int>(title: "Reversed", size: Vec2(40, 40), state: 0) { _, _ in el() }.makeRuntime()
+            let wake = Waker {
+                hostB.post { $0.guardObj?.drain() }
+            }
+            box.attaching = ShortcutGuard.install(shared: shared, wake: wake, headless: false, connect: connectB)
+        }
+
+        // B routes first, then A routes last — routing must belong to A.
+        hostB.run { box in
+            box.guardObj = box.attaching?.route(shared: shared)
+            box.attaching = nil
+        }
+        hostA.run { box in
+            box.guardObj = box.attaching?.route(shared: shared)
+            box.attaching = nil
+        }
+
+        let sc = chord("ctrl+alt+f8")
+        let answer = SignalChannel<Result<UInt32, ShortcutError>>()
+        Thread {
+            answer.send(handle.registerShortcut(sc) { s, _ in s += 1 })
+        }.start()
+
+        let id = try! answer.receive()!.get()
+        let heldOnA = hostA.run { _ in ThreadLocalEngines.holds(key: key, shortcut: sc) }
+        let heldOnB = hostB.run { _ in ThreadLocalEngines.holds(key: key, shortcut: sc) }
+        #expect(heldOnA)
+        #expect(!heldOnB)
+
+        sinkSlot.sinkA?(id, nil)
+        let deliveredState = hostA.run { box -> Int in
+            guard let g = box.guardObj, let rt = box.rt else { return -1 }
+            g.withReceiving {
+                _ = shared.applyStateUpdates(to: rt, at: 0.0)
+            }
+            return rt.state
+        }
+        #expect(deliveredState == 1)
+
+        sinkSlot.sinkA = nil
+        hostA.finish()
+        hostB.finish()
+        #expect(liveA.get() == 0 && liveB.get() == 0)
+    }
+
+    @Test("ShortcutHub.hasAppShortcuts stays true after ShortcutGuard.attach drains pending entries")
+    func hasAppShortcutsStaysTrueAfterAttach() {
+        let app = makeTestApp("WindowSpecShortcuts")
+            .globalShortcut("ctrl+alt+w") { s, _ in s += 1 }
+        let shared = app.sharedHandle.shared
+        #expect(shared.shortcuts.hasPendingEntries)
+        #expect(shared.shortcuts.hasAppShortcuts)
+
+        let g1 = ShortcutGuard.attach(shared: shared, wake: Waker {}, headless: true)
+        #expect(!shared.shortcuts.hasPendingEntries)
+        #expect(shared.shortcuts.hasAppShortcuts)
+        g1.close()
+        #expect(shared.shortcuts.hasAppShortcuts)
+    }
 }

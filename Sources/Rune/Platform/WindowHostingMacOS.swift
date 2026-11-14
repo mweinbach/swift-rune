@@ -1307,8 +1307,9 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         RuneDragRegions.ownWindowDragging(window: window, chrome: specEntry.chrome)
         slot.trafficLightSpot = RuneTrafficLights.Spot(window: window)
+        let skipHostShortcutBridge = specEntry.hasAppGlobalShortcuts
         slot.shortcutGuard = specEntry.attachShortcuts(wake: waker, headless: false)
-        if !specEntry.hasAppGlobalShortcuts {
+        if !skipHostShortcutBridge {
             let shortcutBridge = MacOSHostShortcutBridge()
             shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
             slot.shortcutBridge = shortcutBridge

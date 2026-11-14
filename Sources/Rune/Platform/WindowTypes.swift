@@ -774,7 +774,7 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     var hasAppGlobalShortcuts: Bool {
-        spec.appShared?.shortcuts.hasPendingEntries ?? false
+        spec.appShared?.shortcuts.hasAppShortcuts ?? false
     }
 
     func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard? {

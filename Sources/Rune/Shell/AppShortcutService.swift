@@ -388,11 +388,11 @@ internal final class ShortcutServiceEngine {
     }
 }
 
-private final class ThreadLocalEnginesBox: NSObject {
+internal final class ThreadLocalEnginesBox: NSObject {
     var entries: [UInt64: (generation: UInt64, engine: ShortcutServiceEngine)] = [:]
 }
 
-private enum ThreadLocalEngines {
+internal enum ThreadLocalEngines {
     private static let key = "rune.shortcut.engines"
 
     static func table() -> ThreadLocalEnginesBox {
@@ -403,6 +403,10 @@ private enum ThreadLocalEngines {
         let created = ThreadLocalEnginesBox()
         dict[key] = created
         return created
+    }
+
+    static func holds(key: UInt64, shortcut: ParsedShortcut) -> Bool {
+        table().entries[key]?.engine.bindings.find(shortcut) != nil
     }
 }
 
@@ -664,6 +668,12 @@ internal final class ShortcutHandlersBox<State>: @unchecked Sendable {
     }
 
     var isEmpty: Bool { count == 0 }
+
+    var sortedKeys: [UInt32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.keys.sorted()
+    }
 }
 
 /// Per-`AppShared` shortcut service hub (`service.rs::Hub<S>`).
@@ -672,6 +682,7 @@ public final class ShortcutHub<State>: @unchecked Sendable {
     internal let handlers = ShortcutHandlersBox<State>()
     private let lock = NSLock()
     private var pendingEntries: [(Result<ParsedShortcut, ShortcutError>, @Sendable (inout State, inout Tx) -> Void)] = []
+    private var configuredEntries: Bool = false
     private var errorsList: [ShortcutError] = []
     private var titleValue: String = ""
     private var unmodifiedAllowed: Bool = false
@@ -708,6 +719,13 @@ public final class ShortcutHub<State>: @unchecked Sendable {
         return !pendingEntries.isEmpty
     }
 
+    internal var hasAppShortcuts: Bool {
+        lock.lock()
+        let hasPendingOrConfigured = configuredEntries || !pendingEntries.isEmpty
+        lock.unlock()
+        return hasPendingOrConfigured || !handlers.isEmpty
+    }
+
     public var isUnmodifiedAllowed: Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -719,6 +737,7 @@ public final class ShortcutHub<State>: @unchecked Sendable {
         handler: @escaping @Sendable (inout State, inout Tx) -> Void
     ) {
         lock.lock()
+        configuredEntries = true
         pendingEntries.append((shortcut, handler))
         lock.unlock()
     }
@@ -815,13 +834,19 @@ public final class ShortcutHub<State>: @unchecked Sendable {
 
 // MARK: - Delivery & Activation Routing
 
-private final class ShortcutDelivery<State>: @unchecked Sendable {
+internal final class ShortcutDelivery<State>: @unchecked Sendable {
     weak var shared: AppShared<State>?
     let generation: UInt64
     let wake: Waker
     weak var live: ShortcutLiveToken?
     private let pressedLock = NSLock()
     private var pressed: [(id: UInt32, token: String?)] = []
+
+    var pressedCount: Int {
+        pressedLock.lock()
+        defer { pressedLock.unlock() }
+        return pressed.count
+    }
 
     init(shared: AppShared<State>, generation: UInt64, wake: Waker, live: ShortcutLiveToken) {
         self.shared = shared
@@ -844,7 +869,7 @@ private final class ShortcutDelivery<State>: @unchecked Sendable {
     }
 }
 
-private func makeShortcutSink<State>(delivery: ShortcutDelivery<State>) -> ShortcutSink {
+internal func makeShortcutSink<State>(delivery: ShortcutDelivery<State>) -> ShortcutSink {
     return { id, token in
         guard delivery.live != nil, let shared = delivery.shared else { return }
         delivery.push(id: id, token: token)
@@ -969,8 +994,12 @@ public final class ShortcutGuard {
     internal let generation: UInt64
     internal var cleanup: ((UInt64) -> Void)?
     private var live: ShortcutLiveToken?
+    internal var liveToken: ShortcutLiveToken? { live }
     private weak var closesWake: ShortcutHostWake?
-    private var didClose = false
+    private var didCloseRouting = false
+    private var didReleaseEngine = false
+    private var didEnd = false
+    private var stagedClosing: ShortcutClosing?
 
     fileprivate init(
         control: ShortcutControl,
@@ -1067,6 +1096,10 @@ public final class ShortcutGuard {
     }
 
     internal func closeRouting() -> ShortcutClosing {
+        if let staged = stagedClosing, didCloseRouting {
+            return staged
+        }
+        didCloseRouting = true
         closesWake?.close()
         live = nil
         control.lock.lock()
@@ -1076,10 +1109,14 @@ public final class ShortcutGuard {
         control.lock.unlock()
         // Drop queued jobs outside lock.
         _ = closed
-        return ShortcutClosing(ended: ended, current: current)
+        let closing = ShortcutClosing(ended: ended, current: current)
+        stagedClosing = closing
+        return closing
     }
 
     internal func releaseEngine(_ closing: inout ShortcutClosing) {
+        guard !didReleaseEngine else { return }
+        didReleaseEngine = true
         _ = closing
         let table = ThreadLocalEngines.table()
         if let existing = table.entries[control.key], existing.generation == generation {
@@ -1088,6 +1125,8 @@ public final class ShortcutGuard {
     }
 
     internal func end(_ closing: ShortcutClosing) {
+        guard !didEnd else { return }
+        didEnd = true
         guard closing.current else { return }
         if let fn = cleanup {
             cleanup = nil
@@ -1096,10 +1135,6 @@ public final class ShortcutGuard {
     }
 
     public func close() {
-        guard !didClose else { return }
-        didClose = true
-        closesWake?.close()
-        live = nil
         var closing = closeRouting()
         releaseEngine(&closing)
         end(closing)
