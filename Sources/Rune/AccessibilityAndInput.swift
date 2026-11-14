@@ -302,7 +302,9 @@ public enum AccessibilityTreeBuilder {
             value = isSecure ? nil : edit.text
         }
 
-        let resolvedRole: ElementRole = (isSecure && element.role == .textInput) ? .passwordInput : element.role
+        let resolvedRole: ElementRole = (isSecure && element.role == .textInput)
+            ? .passwordInput
+            : AccessibilityRoleRules.role(for: element, focusable: enabled && element.focusable)
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
         let label = isSecure

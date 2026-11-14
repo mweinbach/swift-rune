@@ -280,7 +280,9 @@ public enum MacOSApp {
             keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
                 if focused {
-                    runtime.readSystemContrastSettings()
+                    // `WindowEvent::Focused`: reduced motion, the contrast theme and Increase
+                    // Contrast are read again (`window/events.rs`).
+                    runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
                 }
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
                 if focused {
@@ -490,6 +492,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    /// The accessibility tree must go out again although no commit changed it: held announcer
+    /// words, or a client that just attached (`A11yTree::held` / `full`, #980).
+    private var a11yFollowUp = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
     private let minWindowSize: (Float, Float)
@@ -842,7 +847,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             devStatsReceiver?(stats)
         }
         pumpPlatformActions()
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || runtime.viewCommitCount != commitsBefore)
+        syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore)
 
         if isAnim {
             if displayLinkDriver == nil {
@@ -875,9 +880,13 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
         if treeCommitted {
             didInitialA11ySync = true
+            a11yFollowUp = false
+            if accessibilityHost.onActivate == nil {
+                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
+            }
             toolTipOwner.sync(regions: runtime.helpRegionsList(), on: self)
             let snapshot = runtime.accessibilitySnapshot()
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            let held = accessibilityHost.update(tree: snapshot, announcement: runtime.a11yAnnouncement, parentView: self) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.runtime.performAccessibilityAction(id, action: action, at: self.nowSeconds()) {
@@ -885,7 +894,16 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
                     }
                 }
             }
+            if held { scheduleAccessibilityFollowUp() }
         }
+    }
+
+    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
+    private func scheduleAccessibilityFollowUp() {
+        a11yFollowUp = true
+        runtime.markNeedsCommit()
+        DispatchQueue.main.async { [weak self] in self?.requestRender() }
     }
 
     private func syncNativeMenus() {

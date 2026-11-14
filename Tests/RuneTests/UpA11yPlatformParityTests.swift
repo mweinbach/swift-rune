@@ -206,11 +206,14 @@ struct UpA11yPlatformParityTests {
         #expect(!link.needsFollowUp, "only a whole tree holds words back")
     }
 
-    @Test func runtimeAnnouncementIsHeldAcrossTheFirstTree() throws {
+    #if os(macOS) && canImport(AppKit)
+    /// The live macOS host (`MacOSAccessibilityHost`, which `MacOSApp` and the multi-window host
+    /// update every committed tree) holds recent words across a whole tree and says them next.
+    @MainActor
+    @Test func liveMacHostHoldsRecentWordsAcrossTheTreeAReaderStartsFrom() throws {
         let rt = Runtime(state: 0, viewport: Vec2(300, 200), pixelScale: 1.0) { (_: Int, _: inout Cx<Int>) in
             col().children([el().key("ok").role(.button).focusable().size(80, 30)])
         }
-        rt.windowTitle = "Probe"
         _ = rt.frame(at: 0.0)
         rt.update(at: 0.01) { _, tx in tx.announce("Saved", .assertive) }
         _ = rt.frame(at: 0.02)
@@ -218,19 +221,73 @@ struct UpA11yPlatformParityTests {
         #expect(rt.a11yAnnouncement.politeness == .assertive)
         let said = try #require(rt.a11yAnnouncement.at)
 
-        let link = AccessibilityLink()
-        link.activate()
-        rt.needsCommit = false
-        let first = try #require(rt.accessibilityUpdate(link: link, now: said + 0.2))
-        #expect(first.isFullTree)
-        #expect(first.updatedNodes.first { $0.id == AccessibilityTreeState.announcerID }?.label == nil)
-        #expect(rt.needsCommit, "held words keep the runtime dirty")
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let host = MacOSAccessibilityHost()
+        func update(_ dt: Double) -> Bool {
+            host.update(tree: rt.accessibilitySnapshot(), announcement: rt.a11yAnnouncement, now: said + dt, parentView: view) { _, _ in }
+        }
+        // The whole tree the adapter starts from: no words, and the host must update again.
+        #expect(update(0.2), "held: the runtime stays dirty")
+        #expect(host.lastSpoken.isEmpty)
+        // The next update says them.
+        #expect(!update(0.3))
+        #expect(host.lastSpoken.map(\.text) == ["Saved"])
+        #expect(host.lastSpoken.map(\.politeness) == [.assertive])
+        #expect(!update(0.4))
+        #expect(host.lastSpoken.isEmpty, "said once")
 
-        let second = try #require(rt.accessibilityUpdate(link: link, now: said + 0.3))
-        let words = try #require(second.updatedNodes.first { $0.id == AccessibilityTreeState.announcerID })
-        #expect(words.label == "Saved")
-        #expect(words.liveRegion == .assertive)
+        // VoiceOver attaches: its first request activates the adapter, whose next update is the
+        // whole tree that reader starts from.
+        final class Count { var n = 0 }
+        let activations = Count()
+        host.onActivate = { activations.n += 1 }
+        #expect(!host.isActivated)
+        let kids = host.accessibilityChildren()
+        #expect(host.isActivated)
+        #expect(activations.n == 1)
+        let announcer = try #require(kids.last as? RuneNSAccessibilityElement)
+        #expect(announcer.nodeId == AccessibilityTreeState.announcerID)
+        #expect(announcer.accessibilityLabel() == "Saved")
+        _ = host.accessibilityChildren()
+        #expect(activations.n == 1, "activated once")
+
+        // Words said 0.5 s ago are still recent: held from that tree, then said to the new reader.
+        #expect(update(0.5))
+        #expect(host.lastSpoken.isEmpty)
+        let quiet = try #require(host.accessibilityChildren().last as? RuneNSAccessibilityElement)
+        #expect(quiet.accessibilityLabel() == nil)
+        #expect(!update(0.6))
+        #expect(host.lastSpoken.map(\.text) == ["Saved"])
     }
+
+    @MainActor
+    @Test func liveMacHostSaysNothingOfOldWordsInAWholeTree() throws {
+        let rt = Runtime(state: 0, viewport: Vec2(300, 200), pixelScale: 1.0) { (_: Int, _: inout Cx<Int>) in
+            col().children([el().key("ok").role(.button).focusable().size(80, 30)])
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 0.01) { _, tx in tx.announce("Done") }
+        _ = rt.frame(at: 0.02)
+        let said = try #require(rt.a11yAnnouncement.at)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let host = MacOSAccessibilityHost()
+        // A reader already asking before the first tree: that first tree is the one it starts from.
+        host.activate()
+        #expect(host.isActivated)
+        #expect(!host.update(tree: rt.accessibilitySnapshot(), announcement: rt.a11yAnnouncement, now: said + 5, parentView: view) { _, _ in })
+        #expect(host.lastSpoken.isEmpty, "a whole tree raises no events")
+        let announcer = try #require(host.accessibilityChildren().last as? RuneNSAccessibilityElement)
+        #expect(announcer.accessibilityLabel() == "Done")
+
+        // Words said later are a change, spoken at once.
+        rt.update(at: 0.03) { _, tx in tx.announce("Copied") }
+        _ = rt.frame(at: 0.04)
+        let later = try #require(rt.a11yAnnouncement.at)
+        #expect(!host.update(tree: rt.accessibilitySnapshot(), announcement: rt.a11yAnnouncement, now: later, parentView: view) { _, _ in })
+        #expect(host.lastSpoken.map(\.text) == ["Copied\u{200B}"])
+        #expect(host.lastSpoken.map(\.politeness) == [.polite])
+    }
+    #endif
 
     // MARK: - #980 (c) a key-owning group stays a group
 
@@ -263,6 +320,8 @@ struct UpA11yPlatformParityTests {
                 el().key("game").label("Brick Breaker").focusable().size(200, 100)
                     .onKey { _, _, _ in true }
                     .onDrag { _, _, _ in },
+                el().key("steer").focusable().size(50, 20).onDrag { _, _, _ in },
+                el().key("hover").size(50, 20).onHover { _, _, _ in },
             ])
         }
         _ = rt.frame(at: 0.0)
@@ -271,10 +330,15 @@ struct UpA11yPlatformParityTests {
             for c in n.children { if let f = find(id, in: c) { return f } }
             return nil
         }
-        let node = find("game", in: rt.accessibilitySnapshot())
-        #expect(node?.role == .group)
+        let tree = rt.accessibilitySnapshot()
+        let node = find("game", in: tree)
+        #expect(node?.role == .group, "owns its keys: no button though it steers by drag")
         #expect(node?.actions.contains(.press) == false)
         #expect(node?.actions.contains(.focus) == true)
+        // The same focusable group without its keys is pressable by drag: a button (`roles::group`).
+        #expect(find("steer", in: tree)?.role == .button)
+        // One the keyboard can't reach stays a group.
+        #expect(find("hover", in: tree)?.role == .group)
     }
 
     // MARK: - #981 headless runs start with the contrast presets only

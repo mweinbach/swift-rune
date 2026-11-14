@@ -2,8 +2,6 @@ import Foundation
 
 #if os(macOS) && canImport(AppKit)
 import AppKit
-#elseif canImport(UIKit) && !os(watchOS)
-import UIKit
 #endif
 
 // MARK: - Headings on macOS (`vendor/accesskit_macos.patch`, upstream #975)
@@ -37,6 +35,14 @@ public enum AccessibilityRoleRules {
     /// hover, drag, drag out) and not a key-owning group.
     public static func pressable(hasPrimary: Bool, ownsKeys: Bool) -> Bool {
         hasPrimary && !ownsKeys
+    }
+
+    /// `roles::group`: a plain box (`.group`) that is not modal is a button when the keyboard can
+    /// press it (`cx.pressable && cx.focusable`, `roles.rs`); any other declared role stands.
+    /// A key-owning group is not pressable, so it stays a group even when it steers by drag.
+    public static func role<State>(for el: El<State>, focusable: Bool) -> ElementRole {
+        if el.role == .group && !el.isModal && el.a11yPressable && focusable { return .button }
+        return el.role
     }
 }
 
@@ -76,15 +82,13 @@ public extension SystemPreferences {
     }
 
     /// Whether the system asks apps for more contrast: macOS's Increase Contrast (Accessibility >
-    /// Display), iOS's Increase Contrast, or a Windows contrast theme. `RUNE_INCREASE_CONTRAST=1`
-    /// reports it on without turning it on for the whole machine (`increased_contrast`).
+    /// Display), or a Windows contrast theme. `RUNE_INCREASE_CONTRAST=1` reports it on without
+    /// turning it on for the whole machine (`increased_contrast`). Elsewhere (iOS included, as
+    /// upstream's `#[cfg(not(any(macos, windows)))]`) it is the preset alone.
     static func increasedContrast(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         if increasedContrastPreset(env) { return true }
         #if os(macOS) && canImport(AppKit)
         return NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
-        #elseif canImport(UIKit) && !os(watchOS)
-        guard Thread.isMainThread else { return false }
-        return MainActor.assumeIsolated { UIAccessibility.isDarkerSystemColorsEnabled }
         #elseif os(Windows)
         return SystemPreferences.current().contrast != nil
         #else
@@ -102,8 +106,8 @@ public extension Runtime {
         setSystemIncreasedContrast(SystemPreferences.increasedContrastPreset(env))
     }
 
-    /// What a native window reads of the system as it opens and gains focus: the contrast theme
-    /// and Increase Contrast (`window.rs`, `window/events.rs`).
+    /// What a native window reads of the system as it opens (reduced motion is read into the
+    /// runtime as it is made): the contrast theme and Increase Contrast (`window.rs`).
     func readSystemContrastSettings() {
         setSystemContrast(SystemPreferences.current().contrast)
         setSystemIncreasedContrast(SystemPreferences.increasedContrast())
@@ -118,26 +122,6 @@ public extension Runtime {
         setSystemReducedMotion(forceReducedMotion || prefs.reducedMotion)
         setSystemContrast(prefs.contrast)
         setSystemIncreasedContrast(SystemPreferences.increasedContrast())
-    }
-
-    /// The update to send an accessibility adapter (`a11y_update`): this runtime's tree with
-    /// `Tx::announce`'s live region as the root's last child. A whole tree with words said in
-    /// the last 1.5 s goes out without them and the runtime stays dirty, so the next update
-    /// carries them as a change a reader that just attached hears (#980).
-    func accessibilityUpdate(
-        link: AccessibilityLink,
-        now: Double = AccessibilityAnnouncement.clock(),
-        actionHandler: ((String, AccessibilityAction, String?) -> Bool)? = nil
-    ) -> AccessibilityTreeUpdate? {
-        let update = link.service(
-            rootNode: accessibilitySnapshot(),
-            windowTitle: windowTitle ?? "",
-            announcement: a11yAnnouncement,
-            now: now,
-            actionHandler: actionHandler
-        )
-        if link.needsFollowUp { markNeedsCommit() }
-        return update
     }
 }
 

@@ -276,7 +276,9 @@ public extension Runtime {
             let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
-            let resolvedRole: ElementRole = (isSecure && el.role == .textInput) ? .passwordInput : el.role
+            let resolvedRole: ElementRole = (isSecure && el.role == .textInput)
+                ? .passwordInput
+                : AccessibilityRoleRules.role(for: el, focusable: nodeTakesFocus(el) && !node.effectiveInert)
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
             if let grid = el.terminalGridPayload {
@@ -451,6 +453,19 @@ public final class MacOSAccessibilityHost {
     /// The workspace's display options observer (`a11y/macos.rs` `Adapter(_, DisplayOptions)`),
     /// removed with the adapter.
     private var displayOptions: MacOSDisplayOptionsWatcher?
+    /// The tree this adapter last sent (`A11yTree`): whole on its first update and again when an
+    /// assistive client first asks for it, and whether that whole tree held the announcer's words.
+    private let treeState = AccessibilityTreeState()
+    /// `Tx::announce`'s live region as the reader was last told it (nil: no words).
+    private var announcerLabel: String?
+    private var announcerElement: RuneNSAccessibilityElement?
+    /// An assistive client has asked for this view's tree (AccessKit's activation).
+    public private(set) var isActivated = false
+    /// Called when a client first asks for the tree: the host must update again (and keep the
+    /// runtime dirty) so the whole tree that reader starts from goes out.
+    public var onActivate: (@MainActor () -> Void)?
+    /// What the last update asked VoiceOver to say (`announcementRequested`), in order.
+    public private(set) var lastSpoken: [(text: String, politeness: LiveRegionPoliteness)] = []
 
     public init() {}
 
@@ -463,13 +478,37 @@ public final class MacOSAccessibilityHost {
     public var watchesDisplayOptions: Bool { displayOptions?.isWatching ?? false }
 
     /// Rebuilds cached `NSAccessibilityElement` wrappers for `tree` and emits focus / VoiceOver announcements.
+    ///
+    /// `announcement`: `Tx::announce`'s window live region (`Runtime.a11yAnnouncement`), the
+    /// root's announcer (`a11y/tree.rs` `ANNOUNCER`). A whole tree raises no events, as AccessKit
+    /// diffs against the tree it starts from; words said in the last 1.5 s go out without them in
+    /// that tree and as a change in the next update, so a reader that just attached hears them
+    /// (#980). Returns `true` while words are held: the host keeps the runtime dirty and updates
+    /// again (`a11y_update`'s `self.dirty = true`).
+    @discardableResult
     public func update(
         tree: AccessibilityNode,
+        announcement: AccessibilityAnnouncement? = nil,
+        now: Double = AccessibilityAnnouncement.clock(),
         parentView: NSView,
         onAction: @escaping @Sendable (String, AccessibilityAction) -> Void
-    ) {
-        let announcements = AccessibilityTreeBuilder.liveAnnouncements(previous: previousTree, current: tree)
+    ) -> Bool {
+        var spoken: [(text: String, politeness: LiveRegionPoliteness)] = AccessibilityTreeBuilder
+            .liveAnnouncements(previous: previousTree, current: tree)
+            .compactMap { a in a.spokenText.map { ($0, a.politeness) } }
         previousTree = tree
+        var announcer: AccessibilityNode? = nil
+        if let announcement {
+            let full = treeState.diff(root: tree, windowTitle: "", announcement: announcement, now: now)?.isFullTree ?? false
+            let node = AccessibilityTreeState.announcerNode(announcement, holdWords: treeState.held)
+            // Its words are a change a reader announces; a whole tree's are not.
+            if !full, let label = node.label, label != announcerLabel {
+                spoken.append((label, node.liveRegion ?? .polite))
+            }
+            announcerLabel = node.label
+            announcer = node
+        }
+        lastSpoken = spoken
 
         var map: [String: RuneNSAccessibilityElement] = [:]
         func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
@@ -501,6 +540,9 @@ public final class MacOSAccessibilityHost {
         } else {
             rootElements = [convertNode(tree, parent: parentView)]
         }
+        // The window's own live region, which draws nothing: the root's last child.
+        announcerElement = announcer.map { convertNode($0, parent: parentView) }
+        if let announcerElement { rootElements.append(announcerElement) }
         elementById = map
 
         let focusedNodeId = Self.findFocusedId(in: tree)
@@ -513,23 +555,34 @@ public final class MacOSAccessibilityHost {
             }
         }
 
-        for announcement in announcements {
-            guard let spoken = announcement.spokenText else { continue }
-            let priority: NSAccessibilityPriorityLevel =
-                announcement.politeness == .assertive ? .high : .medium
+        for (words, politeness) in spoken {
+            let priority: NSAccessibilityPriorityLevel = politeness == .assertive ? .high : .medium
             NSAccessibility.post(
                 element: parentView,
                 notification: .announcementRequested,
                 userInfo: [
-                    .announcement: spoken,
+                    .announcement: words,
                     .priority: priority.rawValue,
                 ]
             )
         }
+        return treeState.held
+    }
+
+    /// An assistive client asked for the tree. The first time (AccessKit's activation), the next
+    /// update holds the whole tree that client starts from.
+    public func activate() {
+        guard !isActivated else { return }
+        isActivated = true
+        if previousTree != nil {
+            treeState.forceFullUpdate()
+            onActivate?()
+        }
     }
 
     public func accessibilityChildren() -> [Any] {
-        rootElements
+        activate()
+        return rootElements
     }
 
     public func accessibilityFocusedUIElement() -> Any? {

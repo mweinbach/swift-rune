@@ -937,6 +937,8 @@ public final class DesktopWindow<State>: DesktopMember {
         rt.onFileDrop = spec.appSpec.onFileDropPhase
         rt.fitHeight = spec.fitContentHeight
         rt.tabVisitsControls = tabVisitsControls
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+        rt.applyCapturePresets()
         spec.configureRuntime?(rt)
         spec.appShared?.setWaker(w)
         if spec.appSpec.dark != nil {

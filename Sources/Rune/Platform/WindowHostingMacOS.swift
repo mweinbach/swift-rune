@@ -610,6 +610,9 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        // `WindowEvent::Focused`: reduced motion, the contrast theme and Increase Contrast are
+        // read again (`window/events.rs`).
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: true)
         view.requestRender()
     }
@@ -717,6 +720,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    /// The accessibility tree must go out again although no commit changed it (#980).
+    private var a11yFollowUp = false
+    /// The launch's `--reduced-motion`: the system's setting can't turn it off.
+    private var forceReducedMotion = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
     private var appliedMenuRevision: UInt64 = 0
@@ -823,11 +830,18 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     /// The window's accessibility adapter watches the workspace's display options and reads
     /// reduced motion, the contrast theme and Increase Contrast again when they change (#980).
     func watchSystemDisplayOptions(forceReducedMotion: Bool) {
+        self.forceReducedMotion = forceReducedMotion
         accessibilityHost.watchDisplayOptions { [weak self] in
             guard let self else { return }
-            self.entry.readSystemAccessibilitySettings(runtimeObj: self.runtime, forceReducedMotion: forceReducedMotion)
+            self.rereadSystemAccessibilitySettings()
             self.requestRender()
         }
+    }
+
+    /// Reduced motion (kept on under the launch's `--reduced-motion`), the contrast theme and
+    /// Increase Contrast, read again from the system.
+    func rereadSystemAccessibilitySettings() {
+        entry.readSystemAccessibilitySettings(runtimeObj: runtime, forceReducedMotion: forceReducedMotion)
     }
 
     func requestRender() {
@@ -898,7 +912,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
             }
         }
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
+        syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
 
         if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
             if displayLinkDriver == nil {
@@ -935,9 +949,17 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
         if treeCommitted {
             didInitialA11ySync = true
+            a11yFollowUp = false
+            if accessibilityHost.onActivate == nil {
+                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
+            }
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            let held = accessibilityHost.update(
+                tree: snapshot,
+                announcement: entry.accessibilityAnnouncement(runtimeObj: runtime),
+                parentView: self
+            ) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.entry.performAccessibilityAction(
@@ -950,7 +972,16 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                     }
                 }
             }
+            if held { scheduleAccessibilityFollowUp() }
         }
+    }
+
+    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
+    private func scheduleAccessibilityFollowUp() {
+        a11yFollowUp = true
+        entry.markAccessibilityDirty(runtimeObj: runtime)
+        DispatchQueue.main.async { [weak self] in self?.requestRender() }
     }
 
     private func localPoint(for event: NSEvent) -> Vec2 {
