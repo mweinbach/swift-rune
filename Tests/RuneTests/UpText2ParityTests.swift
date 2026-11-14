@@ -134,15 +134,39 @@ struct UpText2ParityTests {
         // Inter (ascender 0.96875, descender 0.2412 em) and IBM Plex Mono (1.025, 0.275 em) at 13 px.
         #expect(InlineCodeBox.quantizedBox(ascentPx: 13 * 0.96875, descentPx: 13 * 0.2412, lineHeightPx: 16) == (13, 3))
         #expect(InlineCodeBox.quantizedBox(ascentPx: 13 * 1.025, descentPx: 13 * 0.275, lineHeightPx: 16) == (12, 4))
-        let g1 = InlineCodeBox.lineGrowth(strut: (13 * 0.96875, 13 * 0.2412), code: [(13 * 1.025, 13 * 0.275)], lineHeightPx: 16)
+        let g1 = InlineCodeBox.lineGrowth(strut: (13 * 0.96875, 13 * 0.2412), code: [(13 * 1.025, 13 * 0.275, 16)], lineHeightPx: 16)
         #expect(g1 == (0, 1), "a 13/16 line with code is 17 tall at 1x")
-        let g2 = InlineCodeBox.lineGrowth(strut: (26 * 0.96875, 26 * 0.2412), code: [(26 * 1.025, 26 * 0.275)], lineHeightPx: 32)
+        let g2 = InlineCodeBox.lineGrowth(strut: (26 * 0.96875, 26 * 0.2412), code: [(26 * 1.025, 26 * 0.275, 32)], lineHeightPx: 32)
         #expect(g2.over + g2.under == 1, "33 device px at 2x")
         for s: Float in [1.25, 1.5, 1.875] {
-            let g = InlineCodeBox.lineGrowth(strut: (13 * s * 0.96875, 13 * s * 0.2412), code: [(13 * s * 1.025, 13 * s * 0.275)], lineHeightPx: 16 * s)
+            let g = InlineCodeBox.lineGrowth(strut: (13 * s * 0.96875, 13 * s * 0.2412), code: [(13 * s * 1.025, 13 * s * 0.275, 16 * s)], lineHeightPx: 16 * s)
             #expect(g.over + g.under == 0, "16 tall at \(s)x")
         }
         #expect(InlineCodeBox.lineGrowth(strut: (12.6, 3.1), code: [], lineHeightPx: 16) == (0, 0))
+
+        // Sized code (markdown's 0.9): `LineHeight::FontSizeRelative(16 / 13)` at 11.7 px is a 14.4 px
+        // line, whose box Parley gives over 11 and under 3.4 (`parley` probe at 1x).
+        let own: Float = 16.0 / 13.0 * 11.7
+        let sized = InlineCodeBox.quantizedBox(ascentPx: 11.7 * 1.025, descentPx: 11.7 * 0.275, lineHeightPx: own)
+        #expect(sized.over == 11)
+        #expect(abs(sized.under - 3.4) < 1e-4)
+        let gs = InlineCodeBox.lineGrowth(strut: (13 * 0.96875, 13 * 0.2412), code: [(11.7 * 1.025, 11.7 * 0.275, own)], lineHeightPx: 16)
+        #expect(gs.over == 0 && abs(gs.under - 0.4) < 1e-4, "only 0.4 px under the strut, not a whole pixel")
+    }
+
+    @Test("#983: Parley's quantized line boxes: tops at line_y rounded, bottoms (baseline + under).round(), height unrounded")
+    func parleyLineBoxes() {
+        // Parley 0.12 with the bundled Inter/Plex Mono at 1x: 13/16 text, 11.7 px code on line 1 then a
+        // plain line: height 32.4, line 1 [0, 16], line 2 [16, 32].
+        let sized = InlineCodeBox.lineBoxes(growth: [(0, 0.4), (0, 0)], lineHeightPx: 16)
+        #expect(sized.lines.map(\.topPx) == [0, 16])
+        #expect(sized.lines.map(\.bottomPx) == [16, 32])
+        #expect(abs(sized.heightPx - 32.4) < 1e-4)
+        // Unsized 13 px code: height 33, line 1 [0, 17], line 2 [17, 33].
+        let unsized = InlineCodeBox.lineBoxes(growth: [(0, 1), (0, 0)], lineHeightPx: 16)
+        #expect(unsized.lines.map(\.topPx) == [0, 17])
+        #expect(unsized.lines.map(\.bottomPx) == [17, 33])
+        #expect(unsized.heightPx == 33)
     }
 
     private static func codeSpans(_ size: Float? = nil) -> [TextSpan] {
@@ -184,6 +208,63 @@ struct UpText2ParityTests {
         let hit2 = ts.hitTestUTF8Offset(in: shaped, localX: 0.5, localY: 17.5, pixelScale: 1)
         #expect(hit2 >= text.utf8.count + 1, "17.5 pt is the second line")
         #expect(shaped.bandLineHeight == 0, "no uniform-band glyph culling once lines grew")
+        // Carets and selections take the grown line's box.
+        #expect(ts.caretRect(in: shaped, utf8Offset: 2, pixelScale: 1).w == 17)
+        #expect(ts.caretRect(in: shaped, utf8Offset: text.utf8.count + 3, pixelScale: 1).w == 16)
+        let sel = ts.selectionRects(in: shaped, utf8Range: 0..<twoLines.utf8.count, pixelScale: 1)
+        #expect(sel.map(\.w) == [17, 16])
+    }
+
+    @Test("#983: markdown's 0.9-sized code keeps a 13/16 line at 16 at 1x (Parley: 16.4 layout, line box 0..16)")
+    func sizedInlineCodeKeepsItsLine() throws {
+        #expect(DefaultFonts.registerIfNeeded())
+        let ts = TextSystem()
+        let style = TextStyle(size: 13, weight: 400, lineHeight: 16)
+        let spans = Self.codeSpans(13 * 0.9)
+        let text = spans.map(\.text).joined()
+        // `parley` probe (vendor/parley_engine, quantize on): layout height per scale, in device px.
+        let want: [(scale: Float, heightPx: Float)] = [(1, 16.4), (2, 32), (1.25, 20), (1.5, 24), (1.875, 30)]
+        for (scale, heightPx) in want {
+            let shaped = ts.shape(text: text, spans: spans, style: style, maxWidth: nil, pixelScale: scale, emitGlyphs: true)
+            // `spec_height` with exact lines: the layout height to 1/64 px.
+            let spec = (heightPx * 64).rounded() / 64
+            #expect(abs(shaped.size.y * scale - spec) < 1e-3, "\(scale)x: \(shaped.size.y * scale) px, want \(spec)")
+            if scale == 1 {
+                #expect(shaped.grownLineTopsPt == [0])
+                #expect(shaped.lineBoxHeightPt(0) == 16, "the line box ends at round(13 + 3.4) = 16")
+                #expect(ts.caretRect(in: shaped, utf8Offset: 0, pixelScale: 1).w == 16)
+            } else {
+                #expect(shaped.grownLineTopsPt.isEmpty, "no growth at \(scale)x")
+            }
+        }
+        // Two lines: the second starts at round(16.4) = 16 and sits on baseline 29, as Parley's.
+        let two = spans + [TextSpan("\nsecond line")]
+        let twoText = two.map(\.text).joined()
+        let shaped = ts.shape(text: twoText, spans: two, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        #expect(shaped.grownLineTopsPt == [0, 16])
+        #expect(shaped.lineStrings[1].originY == 16)
+        #expect(abs(shaped.size.y - 32.40625) < 1e-4)
+        let plain = ts.shape(text: twoText, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        let secondGlyphs = shaped.glyphs[shaped.lineGlyphRanges[1]]
+        let plainSecond = plain.glyphs[plain.lineGlyphRanges[1]]
+        #expect(secondGlyphs.map(\.rect.y) == plainSecond.map(\.rect.y), "line 2 keeps its baseline (29)")
+    }
+
+    @Test("#983: a span's background pad widens its chip on each side (Span::bg_pad), carried through RichSpan")
+    func backgroundPad() throws {
+        #expect(DefaultFonts.registerIfNeeded())
+        let ts = TextSystem()
+        let bg = Color.black.alpha(0.08)
+        let style = TextStyle(size: 13, weight: 400)
+        let bare = ts.shape(text: "say code now", spans: [TextSpan("say "), TextSpan("code", background: bg), TextSpan(" now")], style: style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
+        let padded = ts.shape(text: "say code now", spans: [TextSpan("say "), TextSpan("code", background: bg, pad: 2), TextSpan(" now")], style: style, maxWidth: nil, pixelScale: 2, emitGlyphs: true)
+        let a = try #require(bare.backgrounds.first?.0)
+        let b = try #require(padded.backgrounds.first?.0)
+        #expect(abs((a.x - b.x) - 2) <= 0.5)
+        #expect(abs((b.z - a.z) - 4) <= 0.5)
+        #expect(a.y == b.y && a.w == b.w)
+        let flat = RichSpanFlattener.flatten([RichSpan(4..<8).bg(bg).pad(3)], in: "say code now", base: style)
+        #expect(flat.map(\.pad) == [0, 3, 0])
     }
 
     @Test("#983: inline code's chip is its font's content area; padding spaces share one chip at the code's height")
@@ -248,6 +329,14 @@ struct UpText2ParityTests {
         #expect(AppleFontSmoothingPreference.allows(value: NSNumber(value: 1)))
         #expect(AppleFontSmoothingPreference.allows(value: "x"))
         #expect(AppleFontSmoothingPreference.allows(value: nil))
+        #if canImport(Darwin)
+        // `defaults write -g AppleFontSmoothing -bool false`: a CFBoolean is neither CFNumber nor
+        // CFString, so upstream's downcasts fail and smoothing stays on.
+        #expect(AppleFontSmoothingPreference.level(from: kCFBooleanFalse) == nil)
+        #expect(AppleFontSmoothingPreference.level(from: false) == nil)
+        #expect(AppleFontSmoothingPreference.allows(value: kCFBooleanFalse))
+        #expect(AppleFontSmoothingPreference.level(from: 0) == 0)
+        #endif
         #if os(macOS)
         let raw = CFPreferencesCopyAppValue("AppleFontSmoothing" as CFString, kCFPreferencesCurrentApplication)
         #expect(AppleFontSmoothingPreference.smoothingAllowedByUser == AppleFontSmoothingPreference.allows(value: raw))

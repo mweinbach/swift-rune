@@ -49,11 +49,16 @@ public enum InlineCodeBox {
     }
 
     /// How far (device px) the code boxes on one line reach past the strut's box, above and below
-    /// the baseline: the line box is the largest reach above plus the largest below, so a line
-    /// holding code is `lineHeightPx + over + under` tall and its baseline `over` lower.
+    /// the baseline: the line box is the largest reach above plus the largest below (Parley's
+    /// `Extents::add` over the root subtree), so a line holding code is `lineHeightPx + over + under`
+    /// tall and its baseline `over` lower. Each code box is quantized at its own line height
+    /// (`lineHeightPx` of the box): the paragraph's for a span without a size, and
+    /// `LineHeight::FontSizeRelative(line / style.size)` at the span's size otherwise
+    /// (`text.rs`, `inline_fit.rs`'s `own`), so 11.7 px code in 13/16 text has a 14.4 px line.
+    /// `under` may be fractional (`0.4` there); `lineBoxes` rounds the line's edges as Parley does.
     public static func lineGrowth(
         strut: (ascentPx: Float, descentPx: Float),
-        code: [(ascentPx: Float, descentPx: Float)],
+        code: [(ascentPx: Float, descentPx: Float, lineHeightPx: Float)],
         lineHeightPx: Float
     ) -> (over: Float, under: Float) {
         guard !code.isEmpty, lineHeightPx > 0 else { return (0, 0) }
@@ -61,11 +66,45 @@ public enum InlineCodeBox {
         var over = s.over
         var under = s.under
         for c in code {
-            let b = quantizedBox(ascentPx: c.ascentPx, descentPx: c.descentPx, lineHeightPx: lineHeightPx)
+            let b = quantizedBox(ascentPx: c.ascentPx, descentPx: c.descentPx, lineHeightPx: c.lineHeightPx)
             over = max(over, b.over)
             under = max(under, b.under)
         }
         return (max(0, over - s.over), max(0, under - s.under))
+    }
+
+    /// One line's box as Parley lays it out with quantizing (`BreakLines::finish_line`, `line_break.rs`).
+    public struct LineBox: Equatable, Sendable {
+        /// `block_min_coord`: the running `line_y` rounded.
+        public var topPx: Float
+        /// `block_max_coord`: `(baseline + under).round()`.
+        public var bottomPx: Float
+        /// `line_height`: the line box's `over + under`, unrounded; `line_y` advances by it.
+        public var heightPx: Float
+
+        public init(topPx: Float, bottomPx: Float, heightPx: Float) {
+            self.topPx = topPx
+            self.bottomPx = bottomPx
+            self.heightPx = heightPx
+        }
+    }
+
+    /// The lines' boxes for each line's `growth` past a strut of `lineHeightPx`, and the layout's
+    /// height (`Layout::height`, the sum of the unrounded line heights, which `spec_height` keeps
+    /// to 1/64 px). Each line's top is the running `line_y` rounded and its bottom
+    /// `top + over + under` rounded, so 13/16 text with 11.7 px code at 1x is a 16.4 px layout whose
+    /// first line ends at 16 and whose second starts at 16.
+    public static func lineBoxes(growth: [(over: Float, under: Float)], lineHeightPx: Float) -> (lines: [LineBox], heightPx: Float) {
+        var lineY: Double = 0
+        var out: [LineBox] = []
+        out.reserveCapacity(growth.count)
+        for g in growth {
+            let height = lineHeightPx + g.over + g.under
+            let top = Float(lineY.rounded())
+            out.append(LineBox(topPx: top, bottomPx: (top + height).rounded(), heightPx: height))
+            lineY += Double(height)
+        }
+        return (out, Float(lineY))
     }
 
     /// One run's background rect `[l, t, w, h]` (device px) and colour, for `appendMerging`.

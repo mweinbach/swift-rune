@@ -14,18 +14,29 @@ import CoreFoundation
 public enum AppleFontSmoothingPreference {
     /// The integer level a preference value holds: a number as is, a string parsed (trimmed) as an
     /// integer, anything else `nil` (`value.downcast::<CFNumber>()` / `CFString` → `parse::<i64>`).
+    /// A `CFBoolean` (`defaults write … -bool false`) is neither a `CFNumber` nor a `CFString`, so
+    /// it reads as `nil` and smoothing stays on, as upstream's downcasts fail for it.
     public static func level(from value: Any?) -> Int64? {
         guard let value else { return nil }
-        if let number = value as? NSNumber, !(value is NSString) {
-            return number.int64Value
+        #if canImport(Darwin)
+        let cf = value as CFTypeRef
+        let type = CFGetTypeID(cf)
+        if type == CFNumberGetTypeID() {
+            return (cf as! NSNumber).int64Value
         }
+        if type == CFStringGetTypeID() {
+            return Int64((cf as! String).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+        #else
         if let string = value as? String {
             return Int64(string.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        if let string = value as? NSString {
-            return Int64((string as String).trimmingCharacters(in: .whitespacesAndNewlines))
+        if let number = value as? NSNumber, !(value is Bool) {
+            return number.int64Value
         }
         return nil
+        #endif
     }
 
     /// Whether a preference value lets text smooth: false only when it reads 0 (`level != Some(0)`).

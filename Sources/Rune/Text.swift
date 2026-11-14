@@ -278,6 +278,8 @@ public struct TextSpan: Sendable, Hashable {
     public var underline: Bool
     public var strikethrough: Bool
     public var size: Float?
+    /// Room (points) its background takes past the text on each side (`Span::bg_pad`).
+    public var pad: Float
 
     public init(
         _ text: String,
@@ -288,8 +290,10 @@ public struct TextSpan: Sendable, Hashable {
         monospace: Bool = false,
         underline: Bool = false,
         strikethrough: Bool = false,
-        size: Float? = nil
+        size: Float? = nil,
+        pad: Float = 0
     ) {
+        self.pad = max(0, pad)
         self.text = text
         self.color = color
         self.background = background
@@ -506,6 +510,14 @@ public struct ShapedText: @unchecked Sendable {
     /// Each line's top (points) when inline code grew some lines (`#983`); empty while every
     /// line is `lineHeight` tall.
     internal var grownLineTopsPt: [Float] = []
+    /// Each grown layout line's box height in points (`block_max_coord - block_min_coord`).
+    internal var grownLineHeightsPt: [Float] = []
+
+    /// Line `i`'s box height in points, for carets and selections: its grown box's when inline
+    /// code grew lines (`#983`), else `lineHeight`.
+    internal func lineBoxHeightPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineHeightsPt.count) ? grownLineHeightsPt[i] : lineHeight
+    }
 
     /// The line at `localY` (points): by `grownLineTopsPt` when lines grew, else by `lineHeight`.
     internal func lineIndex(atLocalY localY: Float, lineCount n: Int) -> Int {
@@ -2038,6 +2050,8 @@ public final class TextSystem: @unchecked Sendable {
         var background: Color?
         /// Inline code (`Span::mono`): its background is its font's content area (`#983`).
         var monospace: Bool = false
+        /// `Span::bg_pad` in points.
+        var pad: Float = 0
     }
 
     /// A monospace span over proportional text (inline code) whose quantized box may grow the
@@ -2047,6 +2061,9 @@ public final class TextSystem: @unchecked Sendable {
         var u16Range: Range<Int>
         var ascentPx: Float
         var descentPx: Float
+        /// The box's own line height (device px): the paragraph's, or for a span with its own
+        /// size `LineHeight::FontSizeRelative(line / style.size)` at that size (`text.rs`).
+        var lineHeightPx: Float
     }
 
     private struct MeasureKey: Hashable {
@@ -4002,7 +4019,8 @@ public final class TextSystem: @unchecked Sendable {
                             monoCodeBoxes.append(MonoCodeBox(
                                 u16Range: sLo..<sHi,
                                 ascentPx: Float(CTFontGetAscent(subFont)),
-                                descentPx: Float(CTFontGetDescent(subFont))
+                                descentPx: Float(CTFontGetDescent(subFont)),
+                                lineHeightPx: span.size.map { lhPx / style.size * $0 } ?? lhPx
                             ))
                         }
                         spanTabInfo.append((
@@ -4022,7 +4040,8 @@ public final class TextSystem: @unchecked Sendable {
                             underline: span.underline,
                             strikethrough: span.strikethrough,
                             background: span.background,
-                            monospace: span.monospace
+                            monospace: span.monospace,
+                            pad: span.pad
                         ))
                     }
                 }
@@ -4434,31 +4453,30 @@ public final class TextSystem: @unchecked Sendable {
         // boxes past the strut's push its baseline down and the next lines with it.
         let monoCodeBoxes = prepared.monoCodeBoxes
         var lineGrowthPx: [(over: Float, under: Float)] = []
-        var lineTopsPx: [Float] = []
+        var grownBoxes: [InlineCodeBox.LineBox] = []
+        var grownExtraPx: Float = 0
         if !monoCodeBoxes.isEmpty {
             var anyGrown = false
             lineGrowthPx.reserveCapacity(visualLines.count)
             for item in visualLines {
-                let code = monoCodeBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float)? in
+                let code = monoCodeBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float, lineHeightPx: Float)? in
                     (b.u16Range.lowerBound < item.u16End && item.u16Start < b.u16Range.upperBound)
-                        ? (b.ascentPx, b.descentPx) : nil
+                        ? (b.ascentPx, b.descentPx, b.lineHeightPx) : nil
                 }
                 let g = InlineCodeBox.lineGrowth(strut: (ascentPx, descentPx), code: code, lineHeightPx: lhPx)
                 if g.over > 0 || g.under > 0 { anyGrown = true }
                 lineGrowthPx.append(g)
             }
             if anyGrown {
-                var top: Float = 0
-                lineTopsPx.reserveCapacity(visualLines.count)
-                for g in lineGrowthPx {
-                    lineTopsPx.append(top)
-                    top += lhPx + g.over + g.under
-                }
+                // Parley's quantized line boxes: tops at the running `line_y` rounded, bottoms
+                // `(baseline + under).round()`, the layout as tall as the unrounded line heights.
+                let boxes = InlineCodeBox.lineBoxes(growth: lineGrowthPx, lineHeightPx: lhPx)
+                grownBoxes = boxes.lines
+                grownExtraPx = boxes.heightPx - Float(visualLines.count) * lhPx
             } else {
                 lineGrowthPx = []
             }
         }
-        let grownExtraPx: Float = lineGrowthPx.reduce(0) { $0 + $1.over + $1.under }
 
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
@@ -4480,7 +4498,7 @@ public final class TextSystem: @unchecked Sendable {
 
         for (lineIdx, item) in visualLines.enumerated() {
             let lineStartGlyphIdx = glyphsOut.count
-            let lineTopPx = lineIdx < lineTopsPx.count ? lineTopsPx[lineIdx] : Float(lineIdx) * lhPx
+            let lineTopPx = lineIdx < grownBoxes.count ? grownBoxes[lineIdx].topPx : Float(lineIdx) * lhPx
             let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
             let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx + growOverPx).rounded()
             let alignOffsetPx: Float
@@ -4531,7 +4549,7 @@ public final class TextSystem: @unchecked Sendable {
                 // font's content area, other spans balance on the cap height, whole device px;
                 // touching runs with one background merge into a rect as tall as the widest run.
                 if decoratedRanges.contains(where: { $0.background != nil }) {
-                    var pieces: [(x0: Float, x1: Float, run: InlineCodeBox.RunBackground)] = []
+                    var pieces: [(x0: Float, padPx: Float, run: InlineCodeBox.RunBackground)] = []
                     let lineRuns = CTLineGetGlyphRuns(item.ctLine) as? [CTRun] ?? []
                     for dec in decoratedRanges {
                         guard let bg = dec.background else { continue }
@@ -4560,9 +4578,10 @@ public final class TextSystem: @unchecked Sendable {
                                 capHeightPx: capPx > 0 ? capPx : nil,
                                 fontSizePx: Float(CTFontGetSize(runFont))
                             )
-                            let l = x0.rounded()
-                            let rr = (x0 + w).rounded()
-                            pieces.append((x0, x0 + w, InlineCodeBox.RunBackground(
+                            let padPx = dec.pad * scale
+                            let l = (x0 - padPx).rounded()
+                            let rr = (x0 + w + padPx).rounded()
+                            pieces.append((x0, padPx, InlineCodeBox.RunBackground(
                                 rect: SIMD4<Float>(l, v.top, rr - l, v.bottom - v.top),
                                 color: bg
                             )))
@@ -4572,7 +4591,7 @@ public final class TextSystem: @unchecked Sendable {
                     var merged: [InlineCodeBox.RunBackground] = []
                     var lastBg: Int? = nil
                     for p in pieces {
-                        InlineCodeBox.appendMerging(p.run, into: &merged, last: &lastBg)
+                        InlineCodeBox.appendMerging(p.run, pad: p.padPx, into: &merged, last: &lastBg)
                     }
                     for m in merged {
                         rawBackgroundsOut.append((m.rect * invS, m.color))
@@ -4892,7 +4911,8 @@ public final class TextSystem: @unchecked Sendable {
             lineAdvancesPx: visualLines.map { ($0.widthPx, $0.trailingWsPx) },
             lineGlyphRanges: lineGlyphRanges
         )
-        shapedOut.grownLineTopsPt = lineTopsPx.map { $0 * invS }
+        shapedOut.grownLineTopsPt = grownBoxes.map { $0.topPx * invS }
+        shapedOut.grownLineHeightsPt = grownBoxes.map { ($0.bottomPx - $0.topPx) * invS }
         return shapedOut
     }
 
@@ -4932,7 +4952,7 @@ public final class TextSystem: @unchecked Sendable {
             let offsetPx = CTLineGetOffsetForStringIndex(ctLine, globalU16, nil)
             xPt += Float(offsetPx) / scale
         }
-        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineHeight)
+        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineBoxHeightPt(chosenIdx))
     }
 
     /// Hit-tests `(localX, localY)` in element-local logical points to a UTF-8 byte offset.
@@ -4988,7 +5008,7 @@ public final class TextSystem: @unchecked Sendable {
                 } else {
                     endX = rec.originX
                 }
-                rects.append(SIMD4<Float>(endX, rec.originY, 4.0, shaped.lineHeight))
+                rects.append(SIMD4<Float>(endX, rec.originY, 4.0, shaped.lineBoxHeightPt(lineIdx)))
                 continue
             }
             guard hi > lo else { continue }
@@ -5005,7 +5025,7 @@ public final class TextSystem: @unchecked Sendable {
             }
             let minX = min(x0, x1)
             let w = max(2.0, abs(x1 - x0))
-            rects.append(SIMD4<Float>(minX, rec.originY, w, shaped.lineHeight))
+            rects.append(SIMD4<Float>(minX, rec.originY, w, shaped.lineBoxHeightPt(lineIdx)))
         }
         return rects
     }
@@ -5306,7 +5326,7 @@ public final class TextSystem: @unchecked Sendable {
                 let globalU16 = Self.globalShapedU16Index(in: shaped, lineIdx: lineIdx, authUTF8: utf8Offset, ctLine: ctLine)
                 xPt += Float(CTLineGetOffsetForStringIndex(ctLine, globalU16, nil)) / scale
             }
-            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineHeight)
+            return SIMD4<Float>(xPt, ctRec.originY, 1.5, shaped.lineBoxHeightPt(lineIdx))
         }
         #endif
         if lineIdx < shaped.portableLines.count {

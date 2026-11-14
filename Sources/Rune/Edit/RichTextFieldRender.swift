@@ -63,7 +63,7 @@ internal enum RichTextFieldRender {
                             (textOriginX - 4) * pxScale,
                             (textOriginY + lineY) * pxScale,
                             (innerW + 8) * scaleVec.x * pxScale,
-                            shaped.lineHeight * scaleVec.y * pxScale
+                            shaped.lineBoxHeightPt(lineIdx) * scaleVec.y * pxScale
                         ),
                         radii: SIMD4<Float>(repeating: 3.0 * pxScale),
                         fill: codeBg,
@@ -77,7 +77,7 @@ internal enum RichTextFieldRender {
                             (textOriginX - 5) * pxScale,
                             (textOriginY + lineY + 1) * pxScale,
                             2.5 * scaleVec.x * pxScale,
-                            max(2, shaped.lineHeight - 2) * scaleVec.y * pxScale
+                            max(2, shaped.lineBoxHeightPt(lineIdx) - 2) * scaleVec.y * pxScale
                         ),
                         radii: SIMD4<Float>(repeating: 1.25 * pxScale),
                         fill: quoteCol,
