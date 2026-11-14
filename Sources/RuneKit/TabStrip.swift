@@ -167,6 +167,10 @@ public struct TabDragState: Sendable, Equatable {
 
     public private(set) var phase: TabDragPhase = .idle
     public private(set) var widthLock: Float? = nil
+
+    internal mutating func lockWidthForClose(_ width: Float) {
+        widthLock = width > 0 ? width : nil
+    }
     public private(set) var hoveredId: String? = nil
     public private(set) var incomingIndex: Int? = nil
     public private(set) var handedOff: Bool = false
@@ -1011,26 +1015,15 @@ public struct TabStrip<State> {
         }
 
         if item.isClosable && !item.isPinned, let onCloseFn {
-            tab = tab
-                .pointerButtons([.primary, .middle])
-                .onPointerDown { s, press, tx in
-                    if press.button == .middle {
-                        onCloseFn(&s, idCopy, &tx)
-                    } else if press.button == .primary {
-                        if let dragKeyPath {
-                            s[keyPath: dragKeyPath].press(
-                                id: idCopy,
-                                index: index,
-                                at: press.window,
-                                tabWidth: computedUnpinnedWidth
-                            )
-                        }
-                        if selectEarly {
-                            onSelectFn?(&s, idCopy, &tx)
-                        }
-                    }
+            let closeLock = (orientation == .horizontal) ? computedUnpinnedWidth : nil
+            tab = tab.onMiddlePress { s, tx in
+                if let dragKeyPath, let closeLock, closeLock > 0 {
+                    s[keyPath: dragKeyPath].lockWidthForClose(closeLock)
                 }
-        } else if dragKeyPath != nil || selectEarly {
+                onCloseFn(&s, idCopy, &tx)
+            }
+        }
+        if dragKeyPath != nil || selectEarly {
             tab = tab.onPointerDown { s, press, tx in
                 guard press.button == .primary else { return }
                 if let dragKeyPath {

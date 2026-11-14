@@ -2,6 +2,7 @@ import Foundation
 import RuneMotion
 
 private let runeHoverProp = Prop<Float>.custom(0x484F, .opacity, name: "hover")
+private let runePressProp = Prop<Float>.custom(0x5052, .opacity, name: "press")
 
 extension Runtime {
     // MARK: - Clipboard & Paste Delivery (`Runtime::use_clipboard`, `Tx::request_paste`, `El::on_paste`)
@@ -396,6 +397,50 @@ extension Runtime {
         NodeId.hash("hover:\(nid.rawValue)")
     }
 
+    internal static var pressProp: Prop<Float> { runePressProp }
+
+    internal static func pressTrackId(_ nid: NodeId) -> NodeId {
+        NodeId.hash("press:\(nid.rawValue)")
+    }
+
+    internal func syncPressColorTracks(at now: Double, cut: Bool) {
+        let snapImmediately = cut || cxSettings.hostReducedMotion
+        for node in flatNodes {
+            let el = node.el
+            guard el.pressColor != nil else { continue }
+            let nid = node.nodeId
+            let trackId = Self.pressTrackId(nid)
+            let isDown = isNodePressedVisually(
+                node,
+                restingContains: pressRestingContains(path: node.path, at: pointerPosition)
+            )
+            let target: Float = isDown ? 1.0 : 0.0
+            let prevTarget = lastPressTargetById[nid]
+            let anim = el.styleSpring.map { Anim<Float>(curve: .spring($0)) } ?? .instant
+            if snapImmediately || (el.styleSpring == nil) {
+                liveStore.snap(trackId, Self.pressProp, to: target)
+                lastPressTargetById[nid] = target
+                continue
+            }
+            if prevTarget == nil {
+                liveStore.snap(trackId, Self.pressProp, to: 0.0)
+                if target > 0.5 {
+                    liveStore.set(trackId, Self.pressProp, to: 1.0, anim: anim, at: now)
+                    lastPressTargetById[nid] = 1.0
+                } else {
+                    lastPressTargetById[nid] = 0.0
+                }
+            } else if prevTarget != target {
+                if liveStore.get(trackId, Self.pressProp) == nil {
+                    liveStore.snap(trackId, Self.pressProp, to: prevTarget!)
+                }
+                liveStore.set(trackId, Self.pressProp, to: target, anim: anim, at: now)
+                lastPressTargetById[nid] = target
+            }
+        }
+        lastPressTargetById = lastPressTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }
+    }
+
     internal func makeGroupHoverPredicate(
         presentedRectById: [NodeId: MotionRect] = [:]
     ) -> GroupHoverContext {
@@ -489,9 +534,10 @@ extension Runtime {
 
     internal static func hoverHitPredicate(_ node: FlatNode) -> Bool {
         let h = node.el.handlers
-        return node.el.hoverBg != nil || node.el.pressBg != nil ||
+        return node.el.hoverBg != nil || node.el.pressBg != nil || node.el.pressColor != nil ||
                node.el.isHoverGroup || node.el.isHoverAlone ||
                (!node.el.hasKitHoverDelays && h.onHover != nil) || h.onClick != nil || h.onClickPress != nil ||
+               h.onMiddlePress != nil ||
                h.onDrag != nil || h.editLens != nil || node.el.a11yHelp != nil ||
                (!node.el.textLinks.isEmpty && !node.el.isSecure && h.editLens == nil)
     }

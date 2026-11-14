@@ -75,6 +75,10 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
     private let respectSystemAppearance: Bool
     private let startTime: TimeInterval
     private var activeTouch: UITouch?
+    private var touchOrigin: Vec2 = .zero
+    private var touchMovedBeyondSlop = false
+    private var touchFiredLongPress = false
+    private var touchHoldWorkItem: DispatchWorkItem?
     private var didSignalReady = false
 
     #if canImport(Metal)
@@ -242,30 +246,70 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
         guard activeTouch == nil, let touch = touches.first else { return }
         activeTouch = touch
         let p = point(for: touch)
+        touchOrigin = p
+        touchMovedBeyondSlop = false
+        touchFiredLongPress = false
+        touchHoldWorkItem?.cancel()
         let now = nowSeconds()
         runtime.pointerMove(to: p, mods: .none, at: now)
         runtime.pointerDown(at: p, button: .primary, mods: .none, at: now)
+        let work = DispatchWorkItem { [weak self, weak touch] in
+            guard let self, let touch, self.activeTouch === touch,
+                  !self.touchMovedBeyondSlop, !self.touchFiredLongPress else { return }
+            self.touchFiredLongPress = true
+            let holdNow = self.nowSeconds()
+            self.runtime.cancelPointerForTouchHold(at: holdNow)
+            self.runtime.pointerDown(at: self.touchOrigin, button: .secondary, mods: .none, at: holdNow)
+            self.runtime.pointerUp(at: self.touchOrigin, button: .secondary, mods: .none, at: holdNow)
+            self.renderTick()
+        }
+        touchHoldWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 / max(1e-4, timeScale), execute: work)
         renderTick()
     }
 
     public override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let active = activeTouch, touches.contains(active) else { return }
-        runtime.pointerMove(to: point(for: active), mods: .none, at: nowSeconds())
+        let p = point(for: active)
+        if !touchMovedBeyondSlop && hypotf(p.x - touchOrigin.x, p.y - touchOrigin.y) > 8.0 {
+            touchMovedBeyondSlop = true
+            touchHoldWorkItem?.cancel()
+            touchHoldWorkItem = nil
+        }
+        if touchFiredLongPress { return }
+        runtime.pointerMove(to: p, mods: .none, at: nowSeconds())
         renderTick()
     }
 
     public override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let active = activeTouch, touches.contains(active) else { return }
+        touchHoldWorkItem?.cancel()
+        touchHoldWorkItem = nil
         let p = point(for: active)
+        let firedMenu = touchFiredLongPress
         activeTouch = nil
-        runtime.pointerUp(at: p, button: .primary, mods: .none, at: nowSeconds())
+        touchFiredLongPress = false
+        let now = nowSeconds()
+        if firedMenu {
+            runtime.pointerExit(at: now)
+        } else {
+            runtime.pointerUp(at: p, button: .primary, mods: .none, at: now)
+        }
         renderTick()
     }
 
     public override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let active = activeTouch, touches.contains(active) else { return }
+        touchHoldWorkItem?.cancel()
+        touchHoldWorkItem = nil
+        let firedMenu = touchFiredLongPress
         activeTouch = nil
-        runtime.pointerExit(at: nowSeconds())
+        touchFiredLongPress = false
+        let now = nowSeconds()
+        if !firedMenu {
+            runtime.cancelPointerForTouchHold(at: now)
+        }
+        runtime.pointerExit(at: now)
         renderTick()
     }
 

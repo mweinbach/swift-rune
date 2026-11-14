@@ -306,6 +306,8 @@ public enum MemoScope {
 
     final class TouchedIdsBox {
         var ids: Set<String> = []
+        var reads: [MemoRead] = []
+        var trackedReads = TrackedReads()
     }
 
     /// Runs `body` inside an active `MemoScope` backed by `cache`.
@@ -355,12 +357,15 @@ public enum MemoScope {
         _ body: () throws -> R
     ) rethrows -> R {
         let scope = MemoBuildScope(cache: cache, envHash: envHash, geometry: geometry, pass: pass)
-        defer {
-            if let touchedIdsOut {
-                touchedIdsOut.ids = scope.allTouchedScopedIds
-            }
+        let (out, tracked): (R, TrackedReads) = try $current.withValue(scope) {
+            try trackedReads(body)
         }
-        return try $current.withValue(scope, operation: body)
+        if let touchedIdsOut {
+            touchedIdsOut.ids = scope.allTouchedScopedIds
+            touchedIdsOut.reads = scope.topLevelReads
+            touchedIdsOut.trackedReads = tracked
+        }
+        return out
     }
 
     static func recordedWarnings() -> [String] {

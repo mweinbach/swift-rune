@@ -96,6 +96,7 @@ extension El {
         if isRevealSelected { out.isRevealSelected = true }
         if let hoverBg { out.hoverBg = hoverBg }
         if let pressBg { out.pressBg = pressBg }
+        if let pressColor { out.pressColor = pressColor }
         if let pressScaleFactor { out.pressScaleFactor = pressScaleFactor }
         if isHoverGroup { out.isHoverGroup = true }
         if let hoverGroupShare { out.hoverGroupShare = hoverGroupShare }
@@ -227,6 +228,7 @@ extension El {
         lifted.onClickPress = wrap1(h.onClickPress)
         lifted.onDoubleClick = wrap(h.onDoubleClick)
         lifted.onSecondaryClick = wrap1(h.onSecondaryClick)
+        lifted.onMiddlePress = wrap(h.onMiddlePress)
         lifted.onPointerDown = wrap1(h.onPointerDown)
         lifted.onPointerUp = wrap1(h.onPointerUp)
         lifted.onPointerMove = wrap1(h.onPointerMove)

@@ -523,8 +523,8 @@ internal extension Runtime {
             dirtyCommit(at: now)
             return true
         }
-        guard button == .primary else { return false }
-        pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: .primary)
+        guard button == .primary || (button == .middle && node.el.handlers.onLink != nil) else { return false }
+        pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: button)
         dirtyCommit(at: now)
         return true
     }
@@ -532,10 +532,10 @@ internal extension Runtime {
     /// Completes a pressed link click when pointer releases inside the same link range
     /// and was not suppressed by a selectable text drag.
     func dispatchLinkUp(at pos: Vec2, button: PointerButton, mods: Mods, suppressed: Bool, at now: Double) -> Bool {
-        guard let pl = pressedLink else { return false }
+        guard let pl = pressedLink, button == pl.button else { return false }
         pressedLink = nil
         dirtyCommit(at: now)
-        guard !suppressed && button == pl.button,
+        guard !suppressed,
               linkIndex(atPath: pl.path, at: pos) == pl.linkIndex,
               let idx = nodeByPath[pl.path],
               !flatNodes[idx].effectiveInert,
@@ -558,8 +558,8 @@ internal extension Runtime {
                 onSec(&state, box.link.id, press, &tx)
                 applyTx(tx, at: now)
             }
-        } else if button == .primary, let onLink = flatNodes[idx].el.handlers.onLink {
-            var tx = makeTx(at: now)
+        } else if (button == .primary || button == .middle), let onLink = flatNodes[idx].el.handlers.onLink {
+            var tx = makeTx(at: now, button: button, mods: mods)
             onLink(&state, box.link.id, &tx)
             applyTx(tx, at: now)
         }

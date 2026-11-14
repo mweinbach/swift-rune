@@ -252,6 +252,9 @@ public struct VirtualWindow: Sendable, Equatable {
 
 /// Persistent geometry & scroll-anchor state for a virtualized list (`rune::VirtualList`).
 public final class VirtualListState: @unchecked Sendable {
+    /// The fewest rows a list pinned to its end keeps mounted above the end (`PINNED_ROWS = 32`).
+    public static let pinnedRows: Int = 32
+
     private let lock = NSLock()
     public private(set) var keys: [String] = []
     private var keyToIndex: [String: Int] = [:]
@@ -452,6 +455,46 @@ public final class VirtualListState: @unchecked Sendable {
         let bottom = padTop + mountedEnd
         return (mountedRangeCached.lowerBound > 0 && offset < top + edge)
             || (mountedRangeCached.upperBound < keys.count && offset + lastViewportHeight > bottom - edge)
+    }
+
+    internal func setMountedRangeForTesting(_ range: Range<Int>, viewportHeight: Float? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let vp = viewportHeight { lastViewportHeight = vp }
+        mountedRangeCached = range
+    }
+
+    /// How many rows of the overscan around `offset` (or the end window when `pinned`) are still unmounted (`VirtualList::unfilled`).
+    internal func unfilled(offset: Float, pinned: Bool = false) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !keys.isEmpty else { return 0 }
+        rebuildPrefixSumsIfNeeded()
+        let total = padTop + (prefixSums.last ?? 0) + padBottom
+        let maxOff = max(0, total - lastViewportHeight)
+        let targetOffset = pinned ? maxOff : min(offset, maxOff)
+        let lo = targetOffset - lastViewportHeight * 2.0
+        let hi = targetOffset + lastViewportHeight * 3.0
+        var start = keys.count
+        var end = 0
+        for i in 0..<keys.count {
+            let rowStart = padTop + prefixSums[i]
+            let rowEnd = rowStart + heights[i]
+            if rowEnd > lo && rowStart < hi {
+                start = min(start, i)
+                end = max(end, i + 1)
+            }
+        }
+        if start >= end {
+            start = 0
+            end = min(keys.count, 1)
+        }
+        if pinned {
+            start = min(start, max(0, end - Self.pinnedRows))
+            end = max(end, start)
+        }
+        let mounted = max(0, min(mountedRangeCached.upperBound, end) - max(mountedRangeCached.lowerBound, start))
+        return max(0, end - start) - mounted
     }
 
     /// Records the laid-out height of a mounted row key.

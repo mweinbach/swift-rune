@@ -1,28 +1,36 @@
 import Foundation
 import RuneMotion
 
-internal enum SelectionEdgeScrollState {
+internal enum SelectionEdgeScrollState: Equatable {
     case idle
     case running(attempt: EdgeScrollAttempt, scrollPath: String, last: Double, fromOffset: Double?, due: Double)
-    case laying(next: EdgeScrollAttempt?, scrollPath: String, last: Double, fromOffset: Double?)
+    /// This frame stepped `scrollPath`, whose extent was `max`; the next step is attempt `next`,
+    /// or none when this one reached the end (`edge_scroll.rs::State::Laying`).
+    case laying(next: EdgeScrollAttempt?, scrollPath: String, last: Double, fromOffset: Double?, max: Double)
+    /// Held at an edge with nothing left to scroll that way (or whose last step moved nothing),
+    /// when its extent was `max`; waits without a wake for that extent to change (`State::AtEnd`).
+    case atEnd(scrollPath: String, max: Double)
 
+    /// Stepping, or about to step (not idle, nor resting at an end).
     var isRunning: Bool {
-        if case .idle = self { return false }
-        return true
+        switch self {
+        case .running, .laying: return true
+        case .idle, .atEnd: return false
+        }
     }
 
     var attempt: EdgeScrollAttempt? {
         switch self {
-        case .idle: return nil
+        case .idle, .atEnd: return nil
         case .running(let attempt, _, _, _, _): return attempt
-        case .laying(let next, _, _, _): return next
+        case .laying(let next, _, _, _, _): return next
         }
     }
 
     var scrollPath: String? {
         switch self {
         case .idle: return nil
-        case .running(_, let p, _, _, _), .laying(_, let p, _, _): return p
+        case .running(_, let p, _, _, _), .laying(_, let p, _, _, _), .atEnd(let p, _): return p
         }
     }
 
@@ -563,6 +571,32 @@ internal extension Runtime {
         return resolveVirtualEndpointInfo(forPath: path)?.listIdx
     }
 
+    func hasUnmountedVirtualSelectionPin(
+        listPath: String,
+        keys: [String],
+        mounted: Range<Int>
+    ) -> Bool {
+        guard let activeSel = selectionState.coordinator.phase.selection else { return false }
+        let src = VirtualSelectionSource(
+            listPath: listPath,
+            keys: keys,
+            mounted: mounted,
+            isIndexed: true,
+            source: nil,
+            storedChildren: [],
+            scrollAxes: []
+        )
+        if let r = virtualRowIndex(forPath: activeSel.path, in: src), !mounted.contains(r.rowIndex) {
+            return true
+        }
+        if let far = activeSel.far,
+           let r = virtualRowIndex(forPath: far.path, in: src),
+           !mounted.contains(r.rowIndex) {
+            return true
+        }
+        return false
+    }
+
     func selectableSnapshotsWithVirtuals() -> [SelectableNodeSnapshot] {
         let base = selectableSnapshots()
         guard let activeSel = selectionState.coordinator.phase.selection,
@@ -704,11 +738,11 @@ internal extension Runtime {
         return false
     }
 
-    func selectableHitOffset(node: FlatNode, windowPos: Vec2) -> Int {
+    func selectableHitOffset(node: FlatNode, windowPos: Vec2, preferLayoutRects: Bool = false) -> Int {
         let displayText = selectableNodeText(node) ?? ""
         guard !displayText.isEmpty else { return 0 }
-        let rect = presentedRectByPath[node.path] ?? node.targetRect
-        let sc = presentedScaleByPath[node.path] ?? Vec2(1, 1)
+        let rect = preferLayoutRects ? node.targetRect : (presentedRectByPath[node.path] ?? node.targetRect)
+        let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScaleByPath[node.path] ?? Vec2(1, 1))
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
         let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: displayText, isSecure: false)
         let isClamped = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
@@ -950,7 +984,7 @@ internal extension Runtime {
         dirtyCommit(at: now)
     }
 
-    func handleSelectablePointerMove(to pos: Vec2, mods: Mods, at now: Double) -> Bool {
+    func handleSelectablePointerMove(to pos: Vec2, mods: Mods, at now: Double, preferLayoutRects: Bool = false) -> Bool {
         _ = mods
         guard !hasActivePointerDrag else {
             selectionState.edgeScroll.stop()
@@ -997,9 +1031,15 @@ internal extension Runtime {
 
         let resolvedTarget: (idx: Int, offset: Int)?
         if let gPath = anchorGroup {
-            resolvedTarget = groupPointTarget(groupPath: gPath, anchorOrder: anchorOrder, snaps: snaps, at: pos)
+            resolvedTarget = groupPointTarget(
+                groupPath: gPath,
+                anchorOrder: anchorOrder,
+                snaps: snaps,
+                at: pos,
+                preferLayoutRects: preferLayoutRects
+            )
         } else if let idx = anchorMountedIdx {
-            resolvedTarget = (idx, selectableHitOffset(node: flatNodes[idx], windowPos: pos))
+            resolvedTarget = (idx, selectableHitOffset(node: flatNodes[idx], windowPos: pos, preferLayoutRects: preferLayoutRects))
         } else {
             return true
         }
@@ -1417,7 +1457,7 @@ internal extension Runtime {
         }
     }
 
-    private func dispatchSelectionChanges(at now: Double) {
+    func dispatchSelectionChanges(at now: Double) {
         guard !selectionState.isDispatchingSelectionChanges else { return }
         selectionState.isDispatchingSelectionChanges = true
         defer { selectionState.isDispatchingSelectionChanges = false }
@@ -1480,12 +1520,15 @@ internal extension Runtime {
         groupPath: String,
         anchorOrder: VirtualTreeOrder,
         snaps: [SelectableNodeSnapshot],
-        at pos: Vec2
+        at pos: Vec2,
+        preferLayoutRects: Bool = false
     ) -> (idx: Int, offset: Int)? {
         var boxes: [SelectableBandBox] = []
         for (idx, snap) in snaps.enumerated() where snap.isSelectable && !snap.text.isEmpty {
             guard SelectAllResolver.groupPath(forNodeAt: idx, in: snaps) == groupPath else { continue }
-            let rawRect = presentedRectByPath[snap.path] ?? flatNodes[idx].targetRect
+            let rawRect = preferLayoutRects
+                ? flatNodes[idx].targetRect
+                : (presentedRectByPath[snap.path] ?? flatNodes[idx].targetRect)
             let shown = intersectRects(flatNodes[idx].clipRect, rawRect)
             if shown.width > 0 && shown.height > 0 {
                 boxes.append(SelectableBandBox(idx: idx, rect: shown))
@@ -1510,7 +1553,7 @@ internal extension Runtime {
 
         if let band = bands.first(where: { pos.y >= $0.top && pos.y < $0.bottom }) {
             let best = boxes[band.range].min { distX($0.rect, pos.x) < distX($1.rect, pos.x) }!
-            return (best.idx, selectableHitOffset(node: flatNodes[best.idx], windowPos: pos))
+            return (best.idx, selectableHitOffset(node: flatNodes[best.idx], windowPos: pos, preferLayoutRects: preferLayoutRects))
         }
         let above = bands.last(where: { $0.bottom <= pos.y })
         let below = bands.first(where: { $0.top > pos.y })
@@ -1535,6 +1578,18 @@ internal extension Runtime {
         var speed: Float
         var room: Double
         var offset: Double
+        var max: Double
+
+        var moves: Bool {
+            abs(speed) > 0.0 && room > 0.0
+        }
+    }
+
+    private static func restEdgeScroll(_ edge: SelectionEdgeInfo?, scroll: String?) -> SelectionEdgeScrollState {
+        guard let e = edge, abs(e.speed) > 0.0, scroll == nil || scroll == e.scrollPath else {
+            return .idle
+        }
+        return .atEnd(scrollPath: e.scrollPath, max: e.max)
     }
 
     var hasActiveSelectableEdgeScroll: Bool {
@@ -1545,9 +1600,9 @@ internal extension Runtime {
         switch selectionState.edgeScroll {
         case .running(_, _, _, _, let due):
             return max(now, due)
-        case .laying(let next, _, _, _):
+        case .laying(let next, _, _, _, _):
             return next != nil ? now : nil
-        case .idle:
+        case .idle, .atEnd:
             return nil
         }
     }
@@ -1569,7 +1624,6 @@ internal extension Runtime {
         guard let sNode = scrollNode else { return nil }
         let sPath = sNode.path
         let maxY = Double(scrollMaxExtents[sPath]?.y ?? 0)
-        guard maxY > 0 else { return nil }
         let offset = Double(scrollOffsets[sPath]?.y ?? 0)
         let rawRect = presentedRectByPath[sPath] ?? sNode.targetRect
         let windowRect = MotionRect.fromXYWH(0, 0, viewport.x, viewport.y)
@@ -1590,41 +1644,47 @@ internal extension Runtime {
         } else {
             return nil
         }
-        guard room > 0.0, abs(speedValue) > 0.0 else { return nil }
-        return SelectionEdgeInfo(scrollPath: sPath, speed: speedValue, room: room, offset: offset)
+        guard abs(speedValue) > 0.0 else { return nil }
+        return SelectionEdgeInfo(scrollPath: sPath, speed: speedValue, room: room, offset: offset, max: maxY)
     }
 
     private func updateSelectableEdgeScrollOnMove(pos: Vec2, anchorIdx: Int, at now: Double) {
-        guard let edge = selectableEdgeAt(windowY: pos.y, anchorIdx: anchorIdx) else {
-            selectionState.edgeScroll.stop()
+        let edge = selectableEdgeAt(windowY: pos.y, anchorIdx: anchorIdx)
+        guard let e = edge, e.moves else {
+            selectionState.edgeScroll = Self.restEdgeScroll(edge, scroll: nil)
             return
         }
-        if case .running(_, let existingPath, _, _, _) = selectionState.edgeScroll, existingPath == edge.scrollPath {
+        if case .running(_, let existingPath, _, _, _) = selectionState.edgeScroll, existingPath == e.scrollPath {
             return
         }
         let attempt = selectionState.edgeScrollSeq.next()
-        selectionState.edgeScroll = .running(attempt: attempt, scrollPath: edge.scrollPath, last: now, fromOffset: nil, due: now)
+        selectionState.edgeScroll = .running(attempt: attempt, scrollPath: e.scrollPath, last: now, fromOffset: nil, due: now)
     }
 
     @discardableResult
     func stepSelectableEdgeScroll(at now: Double) -> Bool {
         guard case .running(let armedAttempt, let scrollPath, let last, let fromOffset, let due) = selectionState.edgeScroll,
               selectionState.edgeScroll.attempt == armedAttempt,
-              now >= due,
-              case .dragging(let sel, _) = selectionState.coordinator.phase,
+              now >= due else {
+            return false
+        }
+        guard case .dragging(let sel, _) = selectionState.coordinator.phase,
               let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
               let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx),
+              edge.moves,
               edge.scrollPath == scrollPath else {
-            if case .running = selectionState.edgeScroll,
-               case .dragging(let sel, _) = selectionState.coordinator.phase,
-               let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path),
-               selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx) == nil {
-                selectionState.edgeScroll.stop()
-            }
+            let fallback: SelectionEdgeInfo? = {
+                if case .dragging(let sel, _) = selectionState.coordinator.phase,
+                   let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path) {
+                    return selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx)
+                }
+                return nil
+            }()
+            selectionState.edgeScroll = Self.restEdgeScroll(fallback, scroll: scrollPath)
             return false
         }
         if let prevOffset = fromOffset, abs(edge.offset - prevOffset) <= 1e-9 {
-            selectionState.edgeScroll.stop()
+            selectionState.edgeScroll = .atEnd(scrollPath: scrollPath, max: edge.max)
             return false
         }
         let dt = min(max(0.0, now - last), 0.05)
@@ -1650,29 +1710,96 @@ internal extension Runtime {
         let curOffset = scrollOffsets[scrollPath] ?? .zero
         let nextY = Float((Double(curOffset.y) + by).clamped(to: 0.0...maxY))
         if abs(nextY - curOffset.y) <= 1e-6 {
-            selectionState.edgeScroll.stop()
+            selectionState.edgeScroll = .atEnd(scrollPath: scrollPath, max: edge.max)
             return false
         }
         let updated = Vec2(curOffset.x, nextY)
         scrollOffsets[scrollPath] = updated
-        if nextY < Float(maxY) - 0.5 {
+        if by < 0 || nextY < Float(maxY) - 0.5 {
             wasPinnedToBottom.remove(scrollPath)
         }
         scrollStore.snap(NodeId.hash("scroll:" + scrollPath), Props.SCROLL, to: updated)
         let nextAttempt = reachedEnd ? nil : selectionState.edgeScrollSeq.next()
+        scrollGlidingPaths.remove(scrollPath)
+        directScrolledPaths.insert(scrollPath)
+        scrollRequestsState.stepCancel()
+        pendingCommitKind = pendingCommitKind.instant()
         selectionState.edgeScroll = .laying(
             next: nextAttempt,
             scrollPath: scrollPath,
             last: now,
-            fromOffset: by != 0 ? edge.offset : nil
+            fromOffset: abs(by) > 0 ? edge.offset : nil,
+            max: edge.max
         )
         dirtyCommit(at: now, external: false)
         return true
     }
 
-    func laidSelectableEdgeScroll(at now: Double) {
-        guard case .laying(let nextAttempt, let scrollPath, let last, let fromOffset) = selectionState.edgeScroll else {
-            return
+    private func extendSelectableAfterEdgeStep(at now: Double) -> Bool {
+        let before = selectionState.coordinator.phase.selection.map {
+            ($0.anchor, $0.focus, $0.far?.path)
+        }
+        let prevNeedsCommit = needsCommit
+        _ = handleSelectablePointerMove(to: pointerPosition, mods: .none, at: now, preferLayoutRects: true)
+        let after = selectionState.coordinator.phase.selection.map {
+            ($0.anchor, $0.focus, $0.far?.path)
+        }
+        let changed: Bool
+        switch (before, after) {
+        case (nil, nil): changed = false
+        case let (.some(b), .some(a)): changed = b.0 != a.0 || b.1 != a.1 || b.2 != a.2
+        default: changed = true
+        }
+        if !changed {
+            needsCommit = prevNeedsCommit
+        }
+        return changed
+    }
+
+    @discardableResult
+    private func edgeScrollExtent(at now: Double) -> Bool {
+        guard case .atEnd(let scrollPath, let max) = selectionState.edgeScroll else {
+            return false
+        }
+        let curMax = Double(scrollMaxExtents[scrollPath]?.y ?? 0)
+        if curMax == max {
+            return false
+        }
+        guard case .dragging(let sel, _) = selectionState.coordinator.phase,
+              let anchorIdx = resolvedSelectionScrollAnchorIdx(forPath: sel.path) else {
+            selectionState.edgeScroll = .idle
+            return false
+        }
+        let edge = selectableEdgeAt(windowY: pointerPosition.y, anchorIdx: anchorIdx)
+        // Shrunk under a resting drag: end the wait so later arrivals move nothing (`7cca3272`).
+        if let e = edge, e.scrollPath == scrollPath, e.max < max {
+            selectionState.edgeScroll = .idle
+            return false
+        }
+        // Grown with room left to scroll: resume stepping at `now` (`2aa1b6df`).
+        if let e = edge, e.moves, e.scrollPath == scrollPath {
+            selectionState.edgeScroll = .running(
+                attempt: selectionState.edgeScrollSeq.next(),
+                scrollPath: scrollPath,
+                last: now,
+                fromOffset: nil,
+                due: now
+            )
+            return false
+        }
+        // Grown while already at the new end (stuck to bottom): extend selection over newly arrived rows (`9d57825b`).
+        if let e = edge, e.scrollPath == scrollPath, abs(e.speed) > 0.0, e.max > max {
+            selectionState.edgeScroll = .atEnd(scrollPath: scrollPath, max: e.max)
+            return extendSelectableAfterEdgeStep(at: now)
+        }
+        selectionState.edgeScroll = Self.restEdgeScroll(edge, scroll: scrollPath)
+        return false
+    }
+
+    @discardableResult
+    func laidSelectableEdgeScroll(at now: Double) -> Bool {
+        guard case .laying(let nextAttempt, let scrollPath, let last, let fromOffset, let max) = selectionState.edgeScroll else {
+            return edgeScrollExtent(at: now)
         }
         if let attempt = nextAttempt {
             selectionState.edgeScroll = .running(
@@ -1683,9 +1810,11 @@ internal extension Runtime {
                 due: last + (1.0 / 60.0)
             )
         } else {
-            selectionState.edgeScroll.stop()
+            selectionState.edgeScroll = .atEnd(scrollPath: scrollPath, max: max)
         }
-        _ = handleSelectablePointerMove(to: pointerPosition, mods: .none, at: now)
+        let changed = extendSelectableAfterEdgeStep(at: now)
+        // A step that reached the end, when this layout changed the extent it saw.
+        return edgeScrollExtent(at: now) || changed
     }
 
     /// Scrolls the focused `TextEdit` field's nearest ancestor scroll viewport on each axis just far

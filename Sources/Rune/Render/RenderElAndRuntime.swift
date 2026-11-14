@@ -746,10 +746,12 @@ extension Runtime {
         var nodeOwnOpacityById: [NodeId: Float] = [:]
         var nodeHoverFracById: [NodeId: Float] = [:]
         var inheritedGroupFracById: [NodeId: Float] = [:]
+        var nodePressById: [NodeId: (color: Color?, frac: Float)] = [:]
         func collectHoverAndOwnOpacity(
             _ n: FlatNode,
             inheritedInert: Bool,
-            inheritedGroupFrac: Float
+            inheritedGroupFrac: Float,
+            inheritedPress: (color: Color?, frac: Float)
         ) {
             let effInert = inheritedInert || n.el.isInert
             let nid = n.nodeId
@@ -771,9 +773,18 @@ extension Runtime {
             )
             let ownOp = ((liveOp ?? opacityMap[nid] ?? el.opacity) * groupFactor * loopOp).clamped(to: 0...1)
             let ownHoverFrac = resolveNodeHoverFrac(n, inert: effInert)
+            let ownPress: (color: Color?, frac: Float) = {
+                if let pc = el.pressColor {
+                    let isPressedNode = isNodePressedVisually(path: n.path, effectiveInert: effInert || exitingIds.contains(nid))
+                    let frac = (liveStore.get(Runtime.pressTrackId(nid), Runtime.pressProp) ?? (isPressedNode ? 1.0 : 0.0)).clamped(to: 0...1)
+                    return (pc, frac)
+                }
+                return inheritedPress
+            }()
             nodeOwnOpacityById[nid] = ownOp
             nodeHoverFracById[nid] = ownHoverFrac
             inheritedGroupFracById[nid] = inheritedGroupFrac
+            nodePressById[nid] = ownPress
 
             let isGroupScope = el.isHoverGroup || el.hoverBg != nil || el.hoverGroupShare != nil
             let nextGroupFrac = isGroupScope ? ownHoverFrac : inheritedGroupFrac
@@ -781,7 +792,8 @@ extension Runtime {
                 collectHoverAndOwnOpacity(
                     child,
                     inheritedInert: effInert,
-                    inheritedGroupFrac: nextGroupFrac
+                    inheritedGroupFrac: nextGroupFrac,
+                    inheritedPress: ownPress
                 )
             }
         }
@@ -789,7 +801,8 @@ extension Runtime {
             collectHoverAndOwnOpacity(
                 r,
                 inheritedInert: false,
-                inheritedGroupFrac: 0.0
+                inheritedGroupFrac: 0.0,
+                inheritedPress: (nil, 0.0)
             )
         }
 
@@ -1105,7 +1118,8 @@ extension Runtime {
             let hoverFrac = isExiting ? 0.0 : (nodeHoverFracById[nid] ?? 0.0)
             let flatFocusWithin = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
             let hovered = !flatFocusWithin && !isExiting && (hoverFrac > 0.0005 || (!effInert && node.key != nil && hoveredKey == node.key))
-            let pressed = !effInert && (pressedPath == node.path || (node.key != nil && pressedKey == node.key))
+            let pressed = isNodePressedVisually(path: node.path, effectiveInert: effInert || isExiting) || (!effInert && !isExiting && pressedPath != node.path && node.key != nil && pressedKey == node.key && pressedPointerInside)
+            let pressTint = nodePressById[nid] ?? (nil, 0.0)
             let focused = (focusedPath == node.path) && !isExiting
             let highlightActive = focused && (focusVisible || (el.focusHighlightColor != nil && hoveredHighlightActive))
 
@@ -2042,7 +2056,7 @@ extension Runtime {
                         guard points.count >= 2 else { continue }
                         let hw = max(0.25, strokeWidth * 0.5 * swScale)
                         let pad = hw + 1.5
-                        let col = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
+                        let col = premulSIMD4(applyPressColor(pressTint.color, to: color, frac: pressTint.frac), opacity: localOpacity, srgb: srgbBlend)
                         let capFlag: Float = cap == .round ? 1.0 : 0.0
                         let segCount = closed ? points.count : (points.count - 1)
                         for sIdx in 0..<segCount {
@@ -2070,7 +2084,7 @@ extension Runtime {
                         }
                     case let .fill(points, color):
                         let tris = Shape.triangulate(points)
-                        let col = premulSIMD4(color, opacity: localOpacity, srgb: srgbBlend)
+                        let col = premulSIMD4(applyPressColor(pressTint.color, to: color, frac: pressTint.frac), opacity: localOpacity, srgb: srgbBlend)
                         for (indices, aaMask) in tris {
                             let p0 = points[indices[0]]
                             let p1 = points[indices[1]]
@@ -2101,7 +2115,7 @@ extension Runtime {
             // 10. Icon (`SVGIcon`)
             if let (svg, iconSizePt) = el.iconPayload {
                 let iconPx = max(1, Int((iconSizePt * scale).rounded()))
-                let iconColor = scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black)
+                let iconColor = applyPressColor(pressTint.color, to: scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black), frac: pressTint.frac)
                 if let colorDecoded = textSystem.colorIcons.rasterize(
                     svg,
                     pixelSize: iconPx,
@@ -2431,7 +2445,7 @@ extension Runtime {
                         )
                     }
                 }
-                let defaultTextColor = scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black)
+                let defaultTextColor = applyPressColor(pressTint.color, to: scene.store.get(nid, Props.TEXT_COLOR).map(Color.init) ?? el.textColor ?? (systemDark ? Color.white : Color.black), frac: pressTint.frac)
                 emitTextBackdropsAndPills(
                     shaped: shaped,
                     textLeft: textLeft,
@@ -2541,7 +2555,8 @@ extension Runtime {
                     let gy = (textTop + gq.rect.y * sc.y) * scale
                     let gw = max(1.0, gq.rect.z * sc.x * scale)
                     let gh = max(1.0, gq.rect.w * sc.y * scale)
-                    let gcol = premulSIMD4(gq.color ?? defaultTextColor, opacity: gAlpha, srgb: srgbBlend)
+                    let glyphBaseColor = gq.color.map { applyPressColor(pressTint.color, to: $0, frac: pressTint.frac) } ?? defaultTextColor
+                    let gcol = premulSIMD4(glyphBaseColor, opacity: gAlpha, srgb: srgbBlend)
                     let idx = instances.count
                     instances.append(RenderInstance(
                         rect: SIMD4<Float>(gx, gy, gw, gh),

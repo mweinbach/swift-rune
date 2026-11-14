@@ -854,6 +854,7 @@ public struct ElementHandlers<State> {
     public var onClickPress: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onDoubleClick: ((inout State, inout Tx) -> Void)?
     public var onSecondaryClick: ((inout State, PointerPress, inout Tx) -> Void)?
+    public var onMiddlePress: ((inout State, inout Tx) -> Void)?
     public var onPointerDown: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerUp: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onPointerMove: ((inout State, PointerPress, inout Tx) -> Void)?
@@ -933,6 +934,7 @@ final class ElColdData<State> {
 
     var hoverBg: Color? = nil
     var pressBg: Color? = nil
+    var pressColor: Color? = nil
     var pressScaleFactor: Float? = nil
     var isHoverGroup: Bool = false
     var hoverGroupShare: String? = nil
@@ -1082,6 +1084,7 @@ final class ElColdData<State> {
         c.revealSelected = revealSelected
         c.hoverBg = hoverBg
         c.pressBg = pressBg
+        c.pressColor = pressColor
         c.pressScaleFactor = pressScaleFactor
         c.isHoverGroup = isHoverGroup
         c.hoverGroupShare = hoverGroupShare
@@ -1230,6 +1233,8 @@ public struct El<State> {
 
     public var keyId: String? = nil
     public var role: ElementRole = .group
+    internal var memoRegionReused: Bool = false
+    internal var memoRegionEnvHash: UInt64 = 0
     public var layout: LayoutStyle
     public var children: [El<State>] = []
 
@@ -1330,6 +1335,7 @@ public struct El<State> {
     public var isRevealSelected: Bool { get { _cold?.data.revealSelected ?? false } set { ensureCold().data.revealSelected = newValue } }
     public var hoverBg: Color? { get { _cold?.data.hoverBg } set { ensureCold().data.hoverBg = newValue } }
     public var pressBg: Color? { get { _cold?.data.pressBg } set { ensureCold().data.pressBg = newValue } }
+    public var pressColor: Color? { get { _cold?.data.pressColor } set { ensureCold().data.pressColor = newValue } }
     public var pressScaleFactor: Float? { get { _cold?.data.pressScaleFactor } set { ensureCold().data.pressScaleFactor = newValue } }
     public var isHoverGroup: Bool { get { _cold?.data.isHoverGroup ?? false } set { ensureCold().data.isHoverGroup = newValue } }
     public var hoverGroupShare: String? { get { _cold?.data.hoverGroupShare } set { ensureCold().data.hoverGroupShare = newValue } }
@@ -2517,6 +2523,13 @@ public struct El<State> {
         return copy
     }
 
+    /// Colors text, icons, and vector shapes in this element's subtree while pressed (`El::press_color`).
+    public func pressColor(_ color: Color) -> Self {
+        var copy = self
+        copy.pressColor = color
+        return copy
+    }
+
     public func pressScale(_ factor: Float = 0.97) -> Self {
         var copy = self
         copy.pressScaleFactor = factor
@@ -3051,6 +3064,14 @@ public struct El<State> {
     public func onSecondaryClick(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
         copy.handlers.onSecondaryClick = handler
+        return copy
+    }
+
+    /// Handles a middle-button click (`El::on_middle_press`): fires on middle release inside when
+    /// not handled by `pointerButtons` opt-in or a link, without changing focus or starting drags.
+    public func onMiddlePress(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
+        var copy = self
+        copy.handlers.onMiddlePress = handler
         return copy
     }
 

@@ -526,6 +526,7 @@ extension Runtime {
         var pass = buildMeasureResult(
             rootEl: cached.viewRootEl,
             remountRowCache: cached.virtualRowCache,
+            rowReuseMode: .remount,
             memoGeometryOverride: preGeom,
             passHelpLook: cached.helpLook,
             collector: LayoutReadCollector(rects: layoutSeen.rects),
@@ -555,6 +556,7 @@ extension Runtime {
             pass = buildMeasureResult(
                 rootEl: cached.viewRootEl,
                 remountRowCache: remeasureCache,
+                rowReuseMode: .remount,
                 memoGeometryOverride: preGeom,
                 passHelpLook: cached.helpLook,
                 collector: LayoutReadCollector(rects: layoutSeen.rects),

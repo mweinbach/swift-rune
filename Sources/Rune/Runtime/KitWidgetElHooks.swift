@@ -215,7 +215,7 @@ extension Runtime {
     }
 
     internal func nodeHasPressVisuals(_ node: FlatNode) -> Bool {
-        node.el.pressBg != nil || node.el.pressScaleFactor != nil
+        node.el.pressBg != nil || node.el.pressColor != nil || node.el.pressScaleFactor != nil
     }
 
     private func isPointerInsideHoverDelayNode(_ node: FlatNode, at pos: Vec2) -> Bool {

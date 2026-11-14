@@ -114,7 +114,9 @@ extension Runtime {
         inputMachines.currentDoubleClickPair = nil
         inputMachines.secondaryCapture = .up
         inputMachines.pressedLeft = false
-        inputMachines.pressedButton = .primary
+        pressedButton = .primary
+        pressedPointerInside = false
+        pressedTint = nil
         inputMachines.wheelLock.lost()
         pointerExit(at: now)
         dragFilesLeave(at: now)
@@ -162,7 +164,11 @@ extension Runtime {
         selectionState.isDraggingSelection = false
         selectionState.edgeScroll.stop()
         selectionState.suppressedClickOnRelease = false
+        // gap2/el (r365): a cancelled selection drag lets go where the selection stands
+        // (`pointer.rs::drop_press` -> `select_step(Release)`), and its listeners hear it.
+        selectionState.coordinator.phase.endDrag()
         dirtyCommit(at: now)
+        dispatchSelectionChanges(at: now)
     }
 
     /// Cancels an active pointer drag without firing press, emitting `DragPhase.up` with `isCancelled = true`
@@ -177,6 +183,8 @@ extension Runtime {
             pressedPath = nil
             pressedKey = nil
             pressedLink = nil
+            pressedButton = .primary
+            pressedPointerInside = false
             inputMachines.pressedLeft = false
             inputMachines.currentDoubleClickPair = nil
             stopTextSelectionDrag(at: now)
@@ -193,6 +201,8 @@ extension Runtime {
         pressedPath = nil
         pressedKey = nil
         pressedLink = nil
+        pressedButton = .primary
+        pressedPointerInside = false
         inputMachines.pressedLeft = false
         inputMachines.currentDoubleClickPair = nil
 
