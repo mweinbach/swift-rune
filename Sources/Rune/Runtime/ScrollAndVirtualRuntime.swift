@@ -569,141 +569,25 @@ extension Runtime {
         settleAll: Bool,
         snaps: Bool
     ) -> El<State> {
-        var out = el
-        let stackId = el.flightId.map { NodeId.hash("screen:@" + $0) } ?? NodeId.hash(path)
-        let replaced = kitHooks.unseenPresence.isFilterReplaced(containerId: stackId, newKeys: el.kitFilterKeysValue)
         let prevStack = kitHooks.growthStacks[path]
-        let existed = (prevStack != nil) && !settleAll && !snaps && !el.hasInstantChanges
         var nextStack = prevStack ?? KitGrowthStackState()
         nextStack.isNewStack = (prevStack == nil)
         nextStack.spacerPaths.removeAll(keepingCapacity: true)
 
         var newChildSegs: [String] = []
         var childSeen: [String: Int] = [:]
-        for (cIdx, child) in out.children.enumerated() {
+        for (cIdx, child) in el.children.enumerated() {
             let (cSeg, _) = layoutPathSegment(keyId: child.keyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
             let isSpacer = (child.keyId == "__v_top_spacer" || child.keyId == "__v_bot_spacer") || child.isKitVirtualSpacer
             if !isSpacer {
                 newChildSegs.append(cSeg)
             }
         }
-
-        if existed, let prev = prevStack {
-            let newSet = Set(newChildSegs)
-            var mergedOrder: [String] = []
-            var nextClosing: [String: RuntimeGrowthClosingRow] = [:]
-            var ni = 0
-
-            for oldSeg in prev.order {
-                if newSet.contains(oldSeg) {
-                    while ni < newChildSegs.count && newChildSegs[ni] != oldSeg {
-                        if !mergedOrder.contains(newChildSegs[ni]) {
-                            mergedOrder.append(newChildSegs[ni])
-                        }
-                        ni += 1
-                    }
-                    if !mergedOrder.contains(oldSeg) {
-                        mergedOrder.append(oldSeg)
-                    }
-                    if let revived = prev.closing[oldSeg] {
-                        let revivedPath = "\(path)/\(oldSeg)"
-                        if growthRows["growth:\(revivedPath)"] == nil {
-                            growthRows["growth:\(revivedPath)"] = RuntimeGrowthEntry(
-                                track: revived.track,
-                                edge: revived.edge,
-                                spring: revived.spring,
-                                foldLimit: .infinity
-                            )
-                        }
-                    }
-                    ni += 1
-                } else if !replaced {
-                    let oldPath = "\(path)/\(oldSeg)"
-                    if let closing = prev.closing[oldSeg] {
-                        if closing.track.h > 0.01 && (scene.contains(closing.nodeId) || exitingSnapshots[closing.nodeId] != nil) {
-                            nextClosing[oldSeg] = closing
-                            mergedOrder.append(oldSeg)
-                        }
-                    } else if let fIdx = nodeByPath[oldPath] {
-                        let oldNode = flatNodes[fIdx]
-                        let oldNid = oldNode.nodeId
-                        let wasSeen = !kitHooks.unseenPresence.hasBuilt || (kitHooks.unseenPresence.frameSeenById[oldNid] ?? true)
-                        let existingEntry = growthRows["growth:\(oldPath)"]
-                        let startH = existingEntry?.track.h ?? oldNode.localRect.height
-                        if wasSeen && startH > 0.01 {
-                            var track = existingEntry?.track ?? GrowTrack.settled(startH)
-                            let rowSpring = existingEntry?.spring ?? spec.spring
-                            let rowEdge = existingEntry?.edge ?? spec.edge
-                            track.retarget(0.0)
-                            if kitHooks.frameGrowthStepDt > 0 {
-                                let steps = max(1, min(240, Int(floor(kitHooks.frameGrowthStepDt / Double(Growth.substep)))))
-                                for _ in 0..<steps {
-                                    track.step(spring: rowSpring, edge: rowEdge, carryingTail: false)
-                                }
-                            }
-                            nextClosing[oldSeg] = RuntimeGrowthClosingRow(
-                                segment: oldSeg,
-                                nodeId: oldNid,
-                                track: track,
-                                spring: rowSpring,
-                                edge: rowEdge,
-                                originalLocalRect: oldNode.localRect
-                            )
-                            mergedOrder.append(oldSeg)
-                        }
-                    }
-                }
-            }
-            if ni < newChildSegs.count {
-                for seg in newChildSegs[ni...] where !mergedOrder.contains(seg) {
-                    mergedOrder.append(seg)
-                }
-            }
-
-            if !nextClosing.isEmpty {
-                var realChildBySeg: [String: El<State>] = [:]
-                var preSpacers: [El<State>] = []
-                var postSpacers: [El<State>] = []
-                var sawReal = false
-                var rebuildSeen: [String: Int] = [:]
-                for (cIdx, child) in out.children.enumerated() {
-                    let (cSeg, _) = layoutPathSegment(keyId: child.keyId, siblingIndex: cIdx, siblingKeysSeen: &rebuildSeen)
-                    let isSpacer = (child.keyId == "__v_top_spacer" || child.keyId == "__v_bot_spacer") || child.isKitVirtualSpacer
-                    if isSpacer {
-                        if !sawReal { preSpacers.append(child) } else { postSpacers.append(child) }
-                    } else {
-                        sawReal = true
-                        realChildBySeg[cSeg] = child
-                    }
-                }
-
-                var mergedChildren: [El<State>] = preSpacers
-                for seg in mergedOrder {
-                    if let realChild = realChildBySeg[seg] {
-                        mergedChildren.append(realChild)
-                    } else if let closing = nextClosing[seg] {
-                        let spacerKey = "__growth_close_\(closing.nodeId.rawValue)"
-                        let spacerEl: El<State> = El<State>()
-                            .key(spacerKey)
-                            .wFull()
-                            .h(max(0, closing.track.h))
-                            .shrink(0.0)
-                            .kitVirtualSpacer()
-                        mergedChildren.append(spacerEl)
-                        nextStack.spacerPaths[closing.nodeId] = "\(path)/@\(spacerKey)"
-                    }
-                }
-                mergedChildren.append(contentsOf: postSpacers)
-                out.children = mergedChildren
-            }
-            nextStack.order = mergedOrder
-            nextStack.closing = nextClosing
-        } else {
-            nextStack.order = newChildSegs
-            nextStack.closing.removeAll()
-        }
+        // RuntimeGrowthStackState (`growthStacks`) handles closing holds, foldGlide shuts, and monotonic runs.
+        nextStack.order = newChildSegs
+        nextStack.closing.removeAll()
         kitHooks.growthStacks[path] = nextStack
-        return out
+        return el
     }
 
     internal func syncClosingGrowthFrames(on scene: inout Scene) {
@@ -1009,7 +893,7 @@ extension Runtime {
                         track = GrowTrack.settled(0)
                         track.setKind(streaming: streaming, whole: whole, glide: glideArg)
                         track.retarget(naturalH)
-                        if kitHooks.frameGrowthStepDt > 0 {
+                        if kitHooks.frameGrowthStepDt > 0 && el.foldGlideSpec == nil {
                             let steps = max(1, min(240, Int(floor(kitHooks.frameGrowthStepDt / Double(Growth.substep)))))
                             for _ in 0..<steps {
                                 track.step(spring: spring, edge: edge, carryingTail: false)

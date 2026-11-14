@@ -2959,7 +2959,7 @@ public final class Runtime<State> {
                 specTransition = nil
             } else if let t = el.transition {
                 specTransition = t
-            } else if item.parentHasGrowth || item.parentUnderFold || el.foldGlideSpec != nil {
+            } else if (reducedMotion && item.parentHasGrowth) || item.parentUnderFold || el.foldGlideSpec != nil {
                 specTransition = Transition.opacity
             } else if el.flightId != nil {
                 specTransition = Transition(insertion: .identity, removal: TransitionEffect(zeroOpacity: 0))
