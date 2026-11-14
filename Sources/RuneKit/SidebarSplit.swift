@@ -23,6 +23,7 @@ public struct WindowTitlebar<State> {
     private var gapValue: Float = 6.0
     private var hasBottomBorder: Bool = true
     private var fillColor: Color?
+    private var directionValue: TextBaseDirection = .ltr
 
     public init(key: String = "window-titlebar", title: String? = nil) {
         self.keyId = key
@@ -52,16 +53,23 @@ public struct WindowTitlebar<State> {
     public func borderBottom(_ show: Bool) -> Self { var c = self; c.hasBottomBorder = show; return c }
     public func bg(_ color: Color) -> Self { var c = self; c.fillColor = color; return c }
 
+    /// The direction the titlebar band sits in (`rune_kit::shell::WindowTitlebar::direction`).
+    /// Under `.rtl`, tabs and controls run right-to-left while keeping leading/trailing chrome insets on their physical sides.
+    public func direction(_ dir: TextBaseDirection) -> Self { var c = self; c.directionValue = dir; return c }
+
     public var effectiveHeight: Float {
         max(heightOverride ?? Self.defaultHeight, insets.top)
     }
 
     public func build(_ k: Kit) -> El<State> {
+        let (leftInset, rightInset): (Float, Float) = directionValue == .rtl
+            ? (insets.trailing, insets.leading)
+            : (insets.leading, insets.trailing)
         var leftSlot: El<State> = row()
             .key("\(keyId)-leading")
             .gap(gapValue)
             .itemsCenter()
-            .pl(insets.leading + leadingPaddingValue)
+            .pl(leftInset + leadingPaddingValue)
         if let leadingEl {
             leftSlot = leftSlot.child(leadingEl)
         }
@@ -107,7 +115,7 @@ public struct WindowTitlebar<State> {
             .key("\(keyId)-trailing")
             .gap(gapValue)
             .itemsCenter()
-            .pr(insets.trailing + trailingPaddingValue)
+            .pr(rightInset + trailingPaddingValue)
         if let trailingEl {
             rightSlot = rightSlot.child(trailingEl)
         }
@@ -125,10 +133,11 @@ public struct Toolbar<State> {
     private var leadingEl: El<State>?
     private var centerEl: El<State>?
     private var trailingEl: El<State>?
-    private var leadingInset: Float = 0
-    private var trailingInset: Float = 0
+    fileprivate var leadingInset: Float = 0
+    fileprivate var trailingInset: Float = 0
     private var hasBottomBorder: Bool = true
     private var fillColor: Color?
+    private var directionValue: TextBaseDirection = .ltr
     private var systemMaterialSpec: (SystemMaterial, MaterialBlendingMode)?
 
     public init(key: String = "toolbar", title: String? = nil) {
@@ -160,6 +169,8 @@ public struct Toolbar<State> {
             .key("\(keyId)-leading")
             .gap(8)
             .itemsCenter()
+            .shrink(1)
+            .minW(0)
             .pl(12 + leadingInset)
         if let leadingEl {
             left = left.child(leadingEl)
@@ -199,6 +210,7 @@ public struct Toolbar<State> {
             .key("\(keyId)-trailing")
             .gap(6)
             .itemsCenter()
+            .shrink(0)
             .pr(12 + trailingInset)
         if let trailingEl {
             right = right.child(trailingEl)
@@ -445,7 +457,8 @@ public struct SidebarRow<State> {
         var isDragging: Bool
         var isHeld: Bool
         var onDown: (inout State, PointerPress, inout Tx) -> Void
-        var onDrag: (inout State, Drag, inout Tx) -> Void
+        var onPointerMove: (inout State, PointerPress, inout Tx) -> Void
+        var onDrag: (inout State, Drag, Float, inout Tx) -> Void
         var onEnd: (inout State, Bool, inout Tx) -> Void
     }
 
@@ -500,7 +513,6 @@ public struct SidebarRow<State> {
         count: Int,
         onSwap: @escaping (inout State, Int, Int) -> Void
     ) -> Self {
-        let rowHeight = subtitleText == nil ? SidebarConstants.rowHeight : SidebarConstants.twoLineRowHeight
         var c = self
         c.dragReorderHandlers = DragHandlers(
             offsetY: 0,
@@ -510,7 +522,15 @@ public struct SidebarRow<State> {
                 guard press.button == .primary else { return }
                 state[keyPath: keyPath].press(id: id, index: index, at: press.window)
             },
-            onDrag: { state, drag, _ in
+            onPointerMove: { state, press, tx in
+                if state[keyPath: keyPath].pointerMoved(to: press.window) {
+                    tx.animated()
+                } else {
+                    tx.liveOnly()
+                }
+            },
+            onDrag: { state, drag, rowHeight, tx in
+                tx.animated()
                 _ = state[keyPath: keyPath].drag(to: drag.window, rowHeight: rowHeight, count: count)
             },
             onEnd: { state, cancelled, _ in
@@ -543,7 +563,8 @@ public struct SidebarRow<State> {
                 isDragging: isDragged,
                 isHeld: state.isHeld,
                 onDown: { _, _, _ in },
-                onDrag: { _, _, _ in },
+                onPointerMove: { _, _, tx in tx.liveOnly() },
+                onDrag: { _, _, _, _ in },
                 onEnd: { _, _, _ in }
             )
         }
@@ -609,23 +630,25 @@ public struct SidebarRow<State> {
             content = content.child(Rune.icon(iconSpec.svg, size: 15).color(iconSpec.color ?? k.c.iconMuted).a11yHidden())
         }
 
+        let resolvedTitleStyle = titleStyleOverride ?? ((subtitleText != nil || selected) ? k.ty.uiMedium : k.ty.ui)
+        let resolvedSubtitleStyle = subtitleStyleOverride ?? k.ty.small
+        let titleEl: El<State>
         if let renameConfig {
             var input: El<State> = Rune.textInput(key: renameConfig.inputKey, renameConfig.keyPath)
-                .grow(1)
-                .minW(0)
-                .py(2)
-                .px(4)
-                .font(titleStyleOverride ?? k.ty.ui)
+                .noWrap()
+                .wFull()
+                .focusSelected(true)
+                .focusReturn(keyId)
+                .font(resolvedTitleStyle)
                 .color(k.c.textBase)
                 .bg(k.c.bgBase)
                 .rounded(k.radius.xs)
-                .border(1.0, k.c.borderFocus)
                 .autofocus()
                 .onSubmit { state, text, tx in
                     renameConfig.onCommit(&state, text, &tx)
                 }
             if let onCancel = renameConfig.onCancel {
-                input = input.onKey { state, event, tx in
+                input = input.onInputKey { state, event, tx in
                     if event.key == .escape {
                         onCancel(&state, &tx)
                         return true
@@ -633,17 +656,15 @@ public struct SidebarRow<State> {
                     return false
                 }
             }
-            content = content.child(input)
+            titleEl = input
         } else {
-            let resolvedTitleStyle = titleStyleOverride ?? ((subtitleText != nil || selected) ? k.ty.uiMedium : k.ty.ui)
-            let resolvedSubtitleStyle = subtitleStyleOverride ?? k.ty.small
-            var textBlock: El<State> = col().grow(1).minW(0).gap(1).a11yHidden()
-                .child(text(titleText).key("\(keyId)-label").font(resolvedTitleStyle).color(fg).ellipsis())
-            if let subtitleText, !subtitleText.isEmpty {
-                textBlock = textBlock.child(text(subtitleText).key("\(keyId)-subtitle").font(resolvedSubtitleStyle).color(subColor).ellipsis())
-            }
-            content = content.child(textBlock)
+            titleEl = text(titleText).key("\(keyId)-label").font(resolvedTitleStyle).color(fg).ellipsis().a11yHidden()
         }
+        var textBlock: El<State> = col().grow(1).minW(0).gap(1).child(titleEl)
+        if let subtitleText, !subtitleText.isEmpty {
+            textBlock = textBlock.child(text(subtitleText).key("\(keyId)-subtitle").font(resolvedSubtitleStyle).color(subColor).ellipsis().a11yHidden())
+        }
+        content = content.child(textBlock)
 
         switch rowStatus {
         case .none:
@@ -688,22 +709,33 @@ public struct SidebarRow<State> {
                     content = content.focusable().focusRing(k.c.borderFocus).onClick(onClickFn)
                 }
             } else if selectOnlyFlag {
-                content = content.focusable(false).preserveFocusOnPress(true).focusSelected(selected)
+                content = content.focusable(false).preserveFocusOnPress(true).focusSelected(selected && renameConfig == nil)
+            } else if renameConfig != nil {
+                content = content.focusable(false).focusSelected(false)
             }
             if renameConfig == nil, let onDoubleClickFn, !selectOnlyFlag {
                 content = content.onDoubleClick(onDoubleClickFn)
             }
             if let drag = dragReorderHandlers, !selectOnlyFlag {
+                if drag.isHeld {
+                    content = content.onPointerMoveLocal(drag.onPointerMove)
+                }
                 content = content
                     .onPointerDown(drag.onDown)
-                    .onDrag(drag.onDrag)
+                    .onDrag { st, ev, tx in
+                        drag.onDrag(&st, ev, height, &tx)
+                    }
                     .onDragEnd(drag.onEnd)
                 if drag.offsetY != 0 {
                     content = content.offset(0, drag.offsetY)
                 }
                 if drag.isDragging {
-                    content = content.z(20).shadows(k.shadowLayers(k.elevation.raised))
+                    content = content.z(20).instantChanges().shadows(k.shadowLayers(k.elevation.raised))
+                } else {
+                    content = content.motion(k.motion.control)
                 }
+            } else {
+                content = content.motion(k.motion.control)
             }
         }
         return content
@@ -792,6 +824,8 @@ public struct Sidebar<State> {
             .key("\(keyId)-body")
             .role(.list)
             .label(labelText)
+            .focusGroup()
+            .focusFollows()
             .wFull()
             .grow(1)
             .minH(0)
@@ -961,6 +995,7 @@ public struct SplitView<State> {
     private var inspectorCfg: PaneConfig?
     private var contentBuilder: (State) -> El<State>
     private var toolbarEl: El<State>?
+    private var toolbarBuilder: Toolbar<State>?
     private var titlebarInsetValue: ChromeInsets = ChromeInsets()
     private var showSidebarToggle: Bool = true
     private var sidebarToggleSpec: SidebarToggle<State> = SidebarToggle<State>()
@@ -999,7 +1034,8 @@ public struct SplitView<State> {
         return c
     }
 
-    public func toolbar(_ element: El<State>?) -> Self { var c = self; c.toolbarEl = element; return c }
+    public func toolbar(_ element: El<State>?) -> Self { var c = self; c.toolbarEl = element; c.toolbarBuilder = nil; return c }
+    public func toolbar(_ builder: Toolbar<State>) -> Self { var c = self; c.toolbarBuilder = builder; c.toolbarEl = nil; return c }
     public func titlebarInset(_ insets: ChromeInsets) -> Self { var c = self; c.titlebarInsetValue = insets; return c }
     public func hideSidebarToggle(_ hidden: Bool = true) -> Self { var c = self; c.showSidebarToggle = !hidden; return c }
     public func sidebarToggle(_ shown: Bool) -> Self { var c = self; c.showSidebarToggle = shown; return c }
@@ -1017,25 +1053,62 @@ public struct SplitView<State> {
     public func reducedMotion(_ reduced: Bool) -> Self { var c = self; c.reducedMotionValue = reduced; return c }
 
     public func build(_ state: State, kit k: Kit) -> El<State> {
-        let spring = paneMotionValue.spring(reducedMotion: reducedMotionValue)
-        let sidebarToggleEl = buildSidebarToggleEl(kit: k)
+        let sharedWidth = sidebarCfg?.state.width ?? inspectorCfg?.state.width ?? 0
+        let sharedSpring = paneSpring(for: sharedWidth, kit: k)
+        let sidebarToggleEl = buildSidebarToggle(kit: k)
+        let mainCol = buildMainColumn(state, kit: k, sidebarToggleEl: sidebarToggleEl, sharedSpring: sharedSpring)
         var rootRow: El<State> = row().key(keyId).sizeFull().bg(k.c.layer01)
-        for sbEl in buildSidebarElements(state, kit: k, spring: spring, sidebarToggleEl: sidebarToggleEl) {
-            rootRow = rootRow.child(sbEl)
+        if let sharedSpring {
+            rootRow = rootRow.animateLayout(sharedSpring)
         }
-        rootRow = rootRow.child(buildMainColumn(state, kit: k, sidebarToggleEl: sidebarToggleEl))
-        for insEl in buildInspectorElements(state, kit: k, spring: spring) {
-            rootRow = rootRow.child(insEl)
+        if let sidebarCfg {
+            appendSidebarChildren(to: &rootRow, state: state, kit: k, cfg: sidebarCfg, toggleEl: sidebarToggleEl, sharedSpring: sharedSpring)
+        }
+        rootRow = rootRow.child(mainCol)
+        if let inspectorCfg {
+            appendInspectorChildren(to: &rootRow, state: state, kit: k, cfg: inspectorCfg, sharedSpring: sharedSpring)
+        }
+        if sidebarCfg?.state.isResizing == true || sidebarCfg?.state.isPeeking == true || inspectorCfg?.state.isResizing == true {
+            let sbKp = sidebarCfg?.keyPath
+            let insKp = inspectorCfg?.keyPath
+            rootRow = rootRow
+                .onWindowFocus { s, focused, _ in
+                    if !focused {
+                        if let sbKp {
+                            s[keyPath: sbKp].loseGrip()
+                            s[keyPath: sbKp].endPeek()
+                        }
+                        if let insKp {
+                            s[keyPath: insKp].loseGrip()
+                        }
+                    }
+                }
+                .onPointerMove { s, press, _ in
+                    if let sbKp, s[keyPath: sbKp].isResizing {
+                        _ = s[keyPath: sbKp].pointerGrip(movedTo: press.window)
+                    }
+                    if let insKp, s[keyPath: insKp].isResizing {
+                        _ = s[keyPath: insKp].pointerGrip(movedTo: press.window)
+                    }
+                }
         }
         return rootRow
     }
 
-    private func buildGrip(
-        key gripKey: String,
-        cfg: PaneConfig,
-        positiveGrows: Bool,
-        kit k: Kit
-    ) -> El<State> {
+    @inline(never)
+    private func paneSpring(for width: Float, kit k: Kit) -> Spring? {
+        if reducedMotionValue || paneMotionValue == .instant {
+            return nil
+        }
+        let resolved = paneMotionValue.spring(forWidth: width, kit: k)
+        if resolved == Spring.none || resolved.duration <= 0 {
+            return nil
+        }
+        return resolved
+    }
+
+    @inline(never)
+    private func buildGrip(key gripKey: String, cfg: PaneConfig, positiveGrows: Bool, kit k: Kit) -> El<State> {
         let keyPath = cfg.keyPath
         let isActive = cfg.state.isResizing
         var handle: El<State> = col()
@@ -1059,11 +1132,7 @@ public struct SplitView<State> {
                 s[keyPath: keyPath].pressGrip(at: press.window)
             }
             .onDrag { s, drag, _ in
-                s[keyPath: keyPath].dragGrip(
-                    deltaX: drag.delta.x,
-                    at: drag.window,
-                    positiveGrows: positiveGrows
-                )
+                s[keyPath: keyPath].dragGrip(deltaX: drag.delta.x, at: drag.window, positiveGrows: positiveGrows)
             }
             .onDragEnd { s, cancelled, _ in
                 if cancelled {
@@ -1082,7 +1151,8 @@ public struct SplitView<State> {
         return handle
     }
 
-    private func buildSidebarToggleEl(kit k: Kit) -> El<State>? {
+    @inline(never)
+    private func buildSidebarToggle(kit k: Kit) -> El<State>? {
         guard let cfg = sidebarCfg, showSidebarToggle else { return nil }
         var toggleBtn = SidebarToggle<State>(
             key: "\(keyId)-sidebar-toggle",
@@ -1110,19 +1180,27 @@ public struct SplitView<State> {
         return toggleBtn
     }
 
-    private func buildMainColumn(
-        _ state: State,
-        kit k: Kit,
-        sidebarToggleEl: El<State>?
-    ) -> El<State> {
+    @inline(never)
+    private func buildMainColumn(_ state: State, kit k: Kit, sidebarToggleEl: El<State>?, sharedSpring: Spring?) -> El<State> {
         var mainCol: El<State> = col().key("\(keyId)-main").role(.main).grow(1).minW(0).hFull()
-        var effectiveToolbar = toolbarEl
+        if let sharedSpring {
+            mainCol = mainCol.animateLayout(sharedSpring)
+        }
+        let leadPad = max(
+            0,
+            (titlebarInsetValue.leading > 0 ? titlebarInsetValue.leading + sidebarToggleSpec.pastLightsOffset : sidebarToggleSpec.edgeOffset)
+                - (toolbarInPanelValue ? frameInsetValue : 0)
+        )
+        var effectiveToolbar: El<State>? = toolbarEl
+        if effectiveToolbar == nil, var builder = toolbarBuilder {
+            let needsLeadingClearance = (sidebarCfg?.state.isCollapsed ?? true) && sidebarToggleEl == nil
+            if needsLeadingClearance && builder.leadingInset == 0 {
+                builder = builder.inset(leading: max(0, leadPad - 12), trailing: builder.trailingInset)
+            }
+            effectiveToolbar = builder.build(k)
+        }
+        var floatingToggle: El<State>? = nil
         if let sidebarCfg, let toggleBtn = sidebarToggleEl, sidebarCfg.state.isCollapsed {
-            let leadPad = max(
-                0,
-                (titlebarInsetValue.leading > 0 ? titlebarInsetValue.leading + sidebarToggleSpec.pastLightsOffset : sidebarToggleSpec.edgeOffset)
-                    - (toolbarInPanelValue ? frameInsetValue : 0)
-            )
             if let bar = effectiveToolbar {
                 effectiveToolbar = row().key("\(keyId)-toolbar-wrap").wFull().itemsCenter()
                     .child(row().pl(max(8, leadPad)).pr(sidebarToggleSpec.trailingGap).child(toggleBtn))
@@ -1137,14 +1215,26 @@ public struct SplitView<State> {
                     .itemsCenter()
                     .child(toggleBtn)
                     .borderSides(bottom: 1.0, color: k.c.borderMuted)
+            } else {
+                floatingToggle = el()
+                    .key("\(keyId)-toggle-float")
+                    .absolute(
+                        x: max(8, leadPad),
+                        y: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5)
+                    )
+                    .z(30)
+                    .child(toggleBtn)
             }
+        }
+        if let sharedSpring, let bar = effectiveToolbar {
+            effectiveToolbar = bar.animateLayout(sharedSpring)
         }
         if let effectiveToolbar, !toolbarInPanelValue {
             mainCol = mainCol.child(effectiveToolbar)
         }
         let bodyEl: El<State> = el().key("\(keyId)-content").grow(1).minH(0).wFull().child(contentBuilder(state))
         if let effectiveToolbar, toolbarInPanelValue {
-            let panel: El<State> = col()
+            var panel: El<State> = col()
                 .key("\(keyId)-panel")
                 .sizeFull()
                 .rounded(k.radius.lg)
@@ -1153,64 +1243,129 @@ public struct SplitView<State> {
                 .clip(true)
                 .child(effectiveToolbar)
                 .child(bodyEl)
-            mainCol = mainCol.p(frameInsetValue).child(panel)
+            if let sharedSpring {
+                panel = panel.animateLayout(sharedSpring)
+            }
+            mainCol = mainCol
+                .pt(frameInsetValue)
+                .pb(frameInsetValue)
+                .pl(sidebarCfg?.state.isOpen == true ? 0 : frameInsetValue)
+                .pr(inspectorCfg?.state.isOpen == true ? 0 : frameInsetValue)
+                .child(panel)
             if frameInsetValue > 0 {
                 mainCol = mainCol.windowDrag()
             }
         } else {
             mainCol = mainCol.child(bodyEl)
         }
+        if let floatingToggle {
+            mainCol = mainCol.child(floatingToggle)
+        }
         return mainCol
     }
 
-    private func buildSidebarElements(
-        _ state: State,
+    @inline(never)
+    private func appendSidebarChildren(
+        to rootRow: inout El<State>,
+        state: State,
         kit k: Kit,
-        spring: Spring?,
-        sidebarToggleEl: El<State>?
-    ) -> [El<State>] {
-        guard let sidebarCfg else { return [] }
+        cfg sidebarCfg: PaneConfig,
+        toggleEl sidebarToggleEl: El<State>?,
+        sharedSpring sbSpring: Spring?
+    ) {
         let pane = sidebarCfg.state
         let sbW = pane.shownWidth
-        if sbW > 0 {
-            var sbPane: El<State> = col()
-                .key("\(keyId)-sidebar-pane")
-                .role(.region)
-                .label("Sidebar")
-                .w(sbW)
-                .hFull()
-                .p(sidebarPaddingValue)
-                .pt(max(sidebarPaddingValue, titlebarInsetValue.top))
-                .clip(true)
-                .child(sidebarCfg.builder(state))
-            if let spring, !pane.fromPeek {
-                sbPane = sbPane.animateLayout(spring)
-            }
-            if !pane.isCollapsed, showSidebarToggle, sidebarToggleSpec.isInHeader, let toggleBtn = sidebarToggleEl {
-                sbPane = sbPane.child(
-                    row()
-                        .key("\(keyId)-sidebar-toggle-slot")
-                        .pin(top: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5), right: max(8, sidebarPaddingValue))
-                        .child(toggleBtn)
-                )
-            }
-            return [
-                sbPane,
-                buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true, kit: k),
-            ]
+        let sbFade = paneMotionValue.fade(
+            spring: sbSpring ?? MotionTokens.SETTLE,
+            open: pane.isOpen,
+            reducedMotion: reducedMotionValue
+        )
+        var sbContent: El<State> = col()
+            .key("\(keyId)-pane-content")
+            .pin(top: 0, right: 0, bottom: 0)
+            .w(pane.width)
+            .hFull()
+            .p(sidebarPaddingValue)
+            .pt(max(sidebarPaddingValue, titlebarInsetValue.top))
+            .opacity(pane.isOpen ? 1.0 : 0.0)
+        if !pane.isPeeking {
+            sbContent = sbContent.child(sidebarCfg.builder(state))
         }
-        if pane.isResizing {
-            return [
-                buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true, kit: k)
-                    .w(0)
+        if let sbSpring, !pane.fromPeek {
+            sbContent = sbContent
+                .animateLayout(sbSpring)
+                .animateOpacity(sbFade)
+        } else if reducedMotionValue && paneMotionValue.reducedFadeSeconds > 0 {
+            sbContent = sbContent.animateOpacity(sbFade)
+        }
+        var sbPane: El<State> = col()
+            .key("\(keyId)-sidebar-pane")
+            .role(.region)
+            .label("Sidebar")
+            .w(sbW)
+            .hFull()
+            .clip(true)
+            .inert(!pane.isOpen)
+            .child(sbContent)
+        if !pane.isOpen {
+            sbPane = sbPane.a11yHidden()
+        } else {
+            sbPane = sbPane.child(
+                el()
+                    .key("\(keyId)-pane-open")
+                    .size(0, 0)
+                    .a11yHidden()
+                    .focusReturn("\(keyId)-sidebar-toggle")
+            )
+        }
+        if sidebarPeekValue.isEnabled && !pane.isPeeking {
+            sbPane = sbPane.child(
+                el()
+                    .key("\(keyId)-pane-surface")
+                    .absolute(x: 0, y: 0)
+                    .w(pane.width)
+                    .hFull()
+                    .bg(k.c.layer01)
                     .opacity(0)
-                    .a11yHidden(),
-            ]
+                    .a11yHidden()
+                    .inert(true)
+            )
         }
-        guard sidebarPeekValue.isEnabled else { return [] }
+        if let sbSpring, !pane.fromPeek {
+            sbPane = sbPane.animateLayout(sbSpring)
+        }
+        if !pane.isCollapsed, showSidebarToggle, sidebarToggleSpec.isInHeader, let toggleBtn = sidebarToggleEl {
+            sbPane = sbPane.child(
+                row()
+                    .key("\(keyId)-sidebar-toggle-slot")
+                    .pin(top: max(8, titlebarInsetValue.top + (Toolbar<State>.height - sidebarToggleSpec.sideLength) * 0.5), right: max(8, sidebarPaddingValue))
+                    .child(toggleBtn)
+            )
+        }
+        if pane.isOpen || pane.isResizing {
+            let grip = buildGrip(key: "\(keyId)-sidebar-grip", cfg: sidebarCfg, positiveGrows: true, kit: k)
+                .pin(top: 0, right: 0, bottom: 0)
+                .z(30)
+                .focusable(false)
+            sbPane = sbPane.child(grip)
+        }
+        rootRow = rootRow.child(sbPane)
+        if sbW <= 0 && sidebarPeekValue.isEnabled {
+            appendSidebarPeek(to: &rootRow, state: state, kit: k, cfg: sidebarCfg, sbSpring: sbSpring)
+        }
+    }
+
+    @inline(never)
+    private func appendSidebarPeek(
+        to rootRow: inout El<State>,
+        state: State,
+        kit k: Kit,
+        cfg sidebarCfg: PaneConfig,
+        sbSpring: Spring?
+    ) {
+        let pane = sidebarCfg.state
         let sbKeyPath = sidebarCfg.keyPath
         let edgeTop = sidebarPeekValue.belowY ?? max(titlebarInsetValue.top, frameInsetValue + Toolbar<State>.height)
-        var out: [El<State>] = []
         if !pane.isPeeking {
             let edgeTrigger: El<State> = el()
                 .key("\(keyId)-peek-edge")
@@ -1224,87 +1379,114 @@ public struct SplitView<State> {
                         s[keyPath: sbKeyPath].peek()
                     }
                 }
-            out.append(edgeTrigger)
-        } else {
-            let holdZone: El<State> = el()
-                .key("\(keyId)-peek-hold")
-                .a11yHidden()
-                .pin(top: 0, bottom: 0, left: 0)
-                .w(pane.width + sidebarPeekValue.holdMargin)
-                .z(34)
-                .hoverDelays(0, sidebarPeekValue.holdGraceSeconds)
-                .onHover { s, hovering, _ in
-                    if !hovering {
-                        s[keyPath: sbKeyPath].endPeek()
-                    }
-                }
-                .onWindowFocus { s, focused, _ in
-                    if !focused {
-                        s[keyPath: sbKeyPath].endPeek()
-                    }
-                }
-            out.append(holdZone)
-            let peekSurface: El<State> = el()
-                .key("\(keyId)-pane-surface")
-                .pin(top: 0, right: 0, bottom: 0, left: 0)
-                .bg(k.c.layer01)
-                .a11yHidden()
-            var peekDrawer: El<State> = col()
-                .key("\(keyId)-sidebar-peek")
-                .role(.region)
-                .label("Sidebar")
-                .pin(top: max(8, titlebarInsetValue.top + 8), bottom: 8, left: 8)
-                .w(pane.width)
-                .rounded(k.radius.lg)
-                .bg(k.c.layer01)
-                .border(1.0, k.c.borderBase)
-                .shadows(k.shadowLayers(k.elevation.overlay))
-                .z(35)
-                .clip(true)
-                .onKey { s, ev, _ in
-                    if ev.key == .escape {
-                        s[keyPath: sbKeyPath].endPeek()
-                        return true
-                    }
-                    return false
-                }
-                .child(peekSurface)
-                .child(sidebarCfg.builder(state))
-            if reducedMotionValue && sidebarPeekValue.reducedFadeSeconds > 0 {
-                peekDrawer = peekDrawer.transition(.opacity)
-            } else if let peekSpring = reducedMotionValue ? nil : (sidebarPeekValue.springOverride ?? spring) {
-                peekDrawer = peekDrawer.animateLayout(peekSpring)
-            }
-            out.append(peekDrawer)
+            rootRow = rootRow.child(edgeTrigger)
+            return
         }
-        return out
+        let holdZone: El<State> = el()
+            .key("\(keyId)-peek-hold")
+            .a11yHidden()
+            .pin(top: 0, bottom: 0, left: 0)
+            .w(pane.width + sidebarPeekValue.holdMargin)
+            .z(34)
+            .hoverDelays(0, sidebarPeekValue.holdGraceSeconds)
+            .onHover { s, hovering, _ in
+                if !hovering {
+                    s[keyPath: sbKeyPath].endPeek()
+                }
+            }
+            .onWindowFocus { s, focused, _ in
+                if !focused {
+                    s[keyPath: sbKeyPath].endPeek()
+                }
+            }
+        rootRow = rootRow.child(holdZone)
+        let peekSurface: El<State> = el()
+            .key("\(keyId)-pane-surface")
+            .pin(top: 0, right: 0, bottom: 0, left: 0)
+            .bg(k.c.layer01)
+            .a11yHidden()
+        var peekDrawer: El<State> = col()
+            .key("\(keyId)-sidebar-peek")
+            .role(.region)
+            .label("Sidebar")
+            .pin(top: max(8, titlebarInsetValue.top + 8), bottom: 8, left: 8)
+            .w(pane.width)
+            .rounded(k.radius.lg)
+            .bg(k.c.layer01)
+            .border(1.0, k.c.borderBase)
+            .shadows(k.shadowLayers(k.elevation.overlay))
+            .z(35)
+            .clip(true)
+            .onKey { s, ev, _ in
+                if ev.key == .escape {
+                    s[keyPath: sbKeyPath].endPeek()
+                    return true
+                }
+                return false
+            }
+            .child(peekSurface)
+            .child(sidebarCfg.builder(state))
+        if reducedMotionValue && sidebarPeekValue.reducedFadeSeconds > 0 {
+            peekDrawer = peekDrawer.transition(.opacity)
+        } else if let peekSpring = reducedMotionValue ? nil : (sidebarPeekValue.springOverride ?? sbSpring) {
+            peekDrawer = peekDrawer.animateLayout(peekSpring)
+        }
+        rootRow = rootRow.child(peekDrawer)
     }
 
-    private func buildInspectorElements(
-        _ state: State,
+    @inline(never)
+    private func appendInspectorChildren(
+        to rootRow: inout El<State>,
+        state: State,
         kit k: Kit,
-        spring: Spring?
-    ) -> [El<State>] {
-        guard let inspectorCfg else { return [] }
+        cfg inspectorCfg: PaneConfig,
+        sharedSpring insSpring: Spring?
+    ) {
         let pane = inspectorCfg.state
         let insW = pane.shownWidth
-        guard insW > 0 else { return [] }
+        let insFade = paneMotionValue.fade(
+            spring: insSpring ?? MotionTokens.SETTLE,
+            open: pane.isOpen,
+            reducedMotion: reducedMotionValue
+        )
+        var insContent: El<State> = col()
+            .key("\(keyId)-inspector-pane-content")
+            .pin(top: 0, bottom: 0, left: 0)
+            .w(pane.width)
+            .hFull()
+            .p(sidebarPaddingValue)
+            .opacity(pane.isOpen ? 1.0 : 0.0)
+            .child(inspectorCfg.builder(state))
+        if let insSpring {
+            insContent = insContent
+                .animateLayout(insSpring)
+                .animateOpacity(insFade)
+        } else if reducedMotionValue && paneMotionValue.reducedFadeSeconds > 0 {
+            insContent = insContent.animateOpacity(insFade)
+        }
         var insPane: El<State> = col()
             .key("\(keyId)-inspector-pane")
             .role(.region)
             .label("Inspector")
             .w(insW)
             .hFull()
-            .p(sidebarPaddingValue)
             .clip(true)
-            .child(inspectorCfg.builder(state))
-        if let spring {
-            insPane = insPane.animateLayout(spring)
+            .inert(!pane.isOpen)
+            .child(insContent)
+        if !pane.isOpen {
+            insPane = insPane.a11yHidden()
         }
-        return [
-            buildGrip(key: "\(keyId)-inspector-grip", cfg: inspectorCfg, positiveGrows: false, kit: k),
-            insPane,
-        ]
+        if let insSpring {
+            insPane = insPane.animateLayout(insSpring)
+        }
+        if pane.isOpen || pane.isResizing {
+            let grip = buildGrip(key: "\(keyId)-inspector-grip", cfg: inspectorCfg, positiveGrows: false, kit: k)
+                .pin(top: 0, bottom: 0, left: 0)
+                .z(30)
+                .focusable(false)
+            insPane = insPane.child(grip)
+        }
+        rootRow = rootRow.child(insPane)
     }
 }
 

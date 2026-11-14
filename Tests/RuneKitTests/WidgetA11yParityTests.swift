@@ -519,10 +519,11 @@ struct WidgetA11yParityTests {
     }
 
     @Test("TableView reads grid, columnHeader sort state, row position/selection, gridCell, and activeDescendant")
-    func tableA11y() {
+    func tableA11y() throws {
         struct S {
             var table = TableState()
             var names = ["alpha.rs", "beta.rs", "gamma.rs", "delta.rs"]
+            var chosen: String?
         }
         let k = Kit.neutral(dark: false)
         var capturedRoot: El<S>?
@@ -541,13 +542,13 @@ struct WidgetA11yParityTests {
                 default: return .text("\(i + 1) KB").mono()
                 }
             }
+            .onOpen { st, id, _ in st.chosen = id }
             .build(s, cx: cx, kit: k)
             .h(300.0)
             capturedRoot = tbl
             return col().size(500, 300).child(tbl)
         }
         rt.state.table.select("f1")
-        rt.state.table.setSort("name", .ascending)
         rt.markNeedsCommit()
         rt.frame(at: 0.0)
 
@@ -568,8 +569,10 @@ struct WidgetA11yParityTests {
             if let header = findEl(root, key: "header"), let nameCol = findEl(header, key: "name") {
                 #expect(nameCol.role == .columnHeader)
                 #expect(nameCol.a11yLabel == "Name")
-                #expect(nameCol.a11ySorted == true)
-                #expect(findEl(header, key: "name-resize")?.role == .splitter)
+                #expect(nameCol.handlers.onClick != nil)
+                let resizer = findEl(header, key: "name-resize")
+                #expect(resizer?.role == .splitter)
+                #expect(resizer?.a11yLabel == "Resize Name")
             }
             if let f1El = findEl(root, key: "f1") {
                 #expect(f1El.a11yPosInSet?.position == 2)
@@ -578,6 +581,26 @@ struct WidgetA11yParityTests {
                 #expect(findEl(f1El, key: "size")?.a11yLabel == "2 KB")
             }
         }
+
+        // Assistive click on sortable header sorts ascending, click row selects, focus + Up + Enter opens cursor row
+        #expect(rt.accessibilityAction("name", .press, at: 0.02))
+        rt.frame(at: 0.03)
+        #expect(rt.state.table.sort?.0 == "name" && rt.state.table.sort?.1 == .ascending)
+        #expect(rt.accessibilityJSON(pretty: false).contains("\"ascending\""))
+
+        #expect(rt.accessibilityAction("f3", .press, at: 0.04))
+        rt.frame(at: 0.05)
+        #expect(rt.state.table.selected.contains("f3"))
+
+        #expect(rt.accessibilityAction("table", .focus, at: 0.06))
+        rt.frame(at: 0.07)
+        #expect(rt.keyDown(KeyEvent(key: .arrowUp, mods: .none), at: 0.08))
+        rt.frame(at: 0.09)
+        #expect(rt.state.table.selected.contains("f2"))
+        #expect(capturedRoot?.a11yActiveDescendant == "f2")
+        #expect(rt.keyDown(KeyEvent(key: .enter, mods: .none), at: 0.10))
+        rt.frame(at: 0.11)
+        #expect(rt.state.chosen == "f2")
     }
 
     // MARK: - Shell & TabStrip (`tests/a11y/shell.rs`)
@@ -773,6 +796,9 @@ struct WidgetA11yParityTests {
             var wrap = false
             var clicks = 0
             var accOpen = false
+            var search = TextEdit()
+            var email = TextEdit("a@b.c")
+            var notes = TextEdit("hi", multiline: true)
             var token = TextEdit("tok")
             var username = TextEdit("ada")
         }
@@ -789,6 +815,18 @@ struct WidgetA11yParityTests {
                 .open(true)
                 .build(kit: k, layer: &layer, cx: cx)
             let body = col().key("content").gap(8).children([
+                TextInput<S>(key: "search", \.search)
+                    .placeholder("Search files")
+                    .clearButton()
+                    .build(k),
+                TextInput<S>(key: "email", \.email)
+                    .label("Email")
+                    .placeholder("you@example.com")
+                    .disabled(true)
+                    .build(k),
+                TextArea<S>(key: "notes", \.notes)
+                    .label("Notes")
+                    .build(k),
                 Field<S>()
                     .label("API Token")
                     .prefix("From your account")
@@ -835,6 +873,12 @@ struct WidgetA11yParityTests {
         #expect(json.contains("\"From your account. Kept in keychain\""))
         #expect(json.contains("\"Name is taken\""))
         #expect(json.contains("\"invalid\""))
+        #expect(json.contains("\"live-assertive\""))
+        #expect(json.contains("\"Search files\""))
+        #expect(json.contains("\"Notes\""))
+        #expect(info(rt, "search-input")?.label == "Search files")
+        #expect(info(rt, "email-input")?.disabled == true)
+        #expect(info(rt, "notes-input")?.label == "Notes")
 
         #expect(rt.accessibilityAction("menu-item0", .press, at: 0.04))
         rt.frame(at: 0.05)
@@ -850,5 +894,27 @@ struct WidgetA11yParityTests {
         #expect(rt.accessibilityAction("act-btn", .press, at: 0.09))
         rt.frame(at: 0.10)
         #expect(rt.state.clicks == 1)
+    }
+
+    @Test("Page names its Toolbar and exposes main landmark and Back button (`tests/a11y/shell.rs:87`)")
+    func aPageNamesItsToolbar() {
+        struct App {}
+        let k = Kit.neutral(dark: false)
+        let rt = Runtime(state: App(), viewport: Vec2(640, 480), systemDark: false) { _, _ in
+            Page<App>(key: "page")
+                .title("Settings")
+                .leading(k.iconButton(key: "back", svg: k.glyph.close, label: "Back") { _, _ in })
+                .child(col().key("settings"))
+                .build(k)
+        }
+        rt.frame(at: 0.0)
+        let toolbar = rt.elements().first { $0.role == .toolbar }
+        #expect(toolbar?.label == "Settings")
+        let mainPane = rt.elements().first { $0.key == "page-panel" || $0.role == .main }
+        #expect(mainPane?.role == .main)
+        let json = rt.accessibilityJSON(pretty: false)
+        #expect(json.contains("\"toolbar\""))
+        #expect(json.contains("\"Settings\""))
+        #expect(json.contains("\"Back\""))
     }
 }

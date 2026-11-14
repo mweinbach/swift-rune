@@ -133,7 +133,7 @@ internal enum ElDisplayResolver {
         var edit = inputEdit
         if el.isSecure {
             edit.isSecure = true
-            if el.isRevealed { edit.isRevealed = true }
+            if let rev = el.revealedOverride { edit.isRevealed = rev }
         }
         let richStyle = el.richStyleSpec ?? RichStyle()
         let isSingle = el.isSingleLineInput
@@ -153,6 +153,7 @@ internal enum ElDisplayResolver {
             inputStyle.direction = fallbackDirection
         }
 
+        let shapeMaxW: Float? = (inputStyle.direction == .rtl || (!isSingle && inputStyle.wrap != .noWrap)) ? innerWidth : nil
         let isSecureHidden = edit.isSecure && !edit.isRevealed
         let rawDisplay = edit.displayString
         let showingPlaceholder = rawDisplay.isEmpty && (edit.preedit?.text.isEmpty ?? true)
@@ -168,7 +169,7 @@ internal enum ElDisplayResolver {
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: isSingle ? nil : (inputStyle.wrap == .noWrap ? nil : innerWidth)
+                maxWidthForShape: shapeMaxW
             )
         }
 
@@ -186,7 +187,7 @@ internal enum ElDisplayResolver {
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: isSingle ? nil : (inputStyle.wrap == .noWrap ? nil : innerWidth)
+                maxWidthForShape: shapeMaxW
             )
         }
 
@@ -250,7 +251,7 @@ internal enum ElDisplayResolver {
             isRich: true,
             isSecure: edit.isSecure,
             richStyle: richStyle,
-            maxWidthForShape: isSingle ? nil : (inputStyle.wrap == .noWrap ? nil : innerWidth),
+            maxWidthForShape: shapeMaxW,
             blocks: specs.blocks
         )
     }

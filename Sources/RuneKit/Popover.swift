@@ -238,15 +238,18 @@ public enum PopoverAnchor {
         at point: (x: Float, y: Float)? = nil,
         window: Vec2? = nil,
         estimatedSize: (Float, Float) = (260.0, 200.0),
-        instant: Bool = true
+        instant: Bool = true,
+        animateLayout: Bool = true
     ) -> El<State> {
         let fade = Transition.asymmetric(insertion: .identity, removal: .opacity)
             .springs(SpringPair(enter: MotionTokens.INSTANT, exit: Spring(duration: 0.25, bounce: 0.0)))
         var styled = content
             .transition(fade)
             .motionIntent(.cut)
-            .tokenMotion(k.motion.overlay)
             .z(60)
+        if animateLayout {
+            styled = styled.tokenMotion(k.motion.overlay)
+        }
         if instant {
             styled = styled.instantChanges()
         }

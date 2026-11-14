@@ -121,12 +121,20 @@ public struct ScrollPos: Sendable, Equatable {
     public var max: Vec2
     public var viewport: Vec2
     public var drawn: Vec2
+    public var direction: TextBaseDirection
 
-    public init(offset: Vec2 = .zero, max: Vec2 = .zero, viewport: Vec2 = .zero, drawn: Vec2 = .zero) {
+    public init(
+        offset: Vec2 = .zero,
+        max: Vec2 = .zero,
+        viewport: Vec2 = .zero,
+        drawn: Vec2 = .zero,
+        direction: TextBaseDirection = .ltr
+    ) {
         self.offset = offset
         self.max = max
         self.viewport = viewport
         self.drawn = drawn
+        self.direction = direction
     }
 }
 

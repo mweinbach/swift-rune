@@ -424,6 +424,27 @@ struct FeedbackAndInputsTests {
         #expect(store.contains(key: "c"))
         #expect(store.contains(key: "d"))
 
+        // Default 512-label / 256 KiB cap over 10,000 steps + busy label keeps memory & strictly advances ids
+        let bounded = RollingTextStore()
+        for i in 0..<10_000 {
+            _ = bounded.update(key: "busy", value: "\(i % 7)")
+            _ = bounded.update(key: "row-\(i)", value: "0:30")
+            #expect(bounded.count <= RollingTextLimits.maxLabels)
+            #expect(bounded.storedBytes <= RollingTextLimits.maxBytes)
+        }
+        let busyFirst = bounded.update(key: "busy", value: "3")
+        let busyAgain = bounded.update(key: "busy", value: "3")
+        #expect(busyAgain[0].retained && busyAgain[0].key == busyFirst[0].key)
+        let firstNum = Int(busyFirst[0].key.split(separator: "#").last ?? "0") ?? 0
+        #expect(firstNum > 1)
+
+        // Long 5,000-char labels bounded by maxBytes
+        let longVal = String(repeating: "x", count: 5_000)
+        for i in 0..<200 {
+            _ = bounded.update(key: "long-\(i)", value: longVal)
+            #expect(bounded.storedBytes <= RollingTextLimits.maxBytes)
+        }
+
         let testStore = RollingTextStore()
         struct S { var text = "99" }
         let kit = Kit.neutral(dark: false)
@@ -642,17 +663,26 @@ struct FeedbackAndInputsTests {
 
     @Test("RollingText value(Double) direction, ScrollBar Chromium presets & live store, and ShortcutRecorder finishing key")
     func parityFixesVerification() throws {
-        // RollingText value(Double) falling flips edge + font defaults to ui
+        // RollingText value(Double) falling flips edge + font defaults to ui (`rolling_text.rs:441`)
         let store = RollingTextStore()
-        _ = store.updateWithDirection(key: "n", value: "10s", numericValue: 10.0)
+        let initial = store.updateWithDirection(key: "n", value: "9s", numericValue: 9.0)
+        let rise10 = store.updateWithDirection(key: "n", value: "10s", numericValue: 10.0)
         let fall = store.updateWithDirection(key: "n", value: "8s", numericValue: 8.0)
         let hold = store.updateWithDirection(key: "n", value: "8 s", numericValue: 8.0)
+        let noVal = store.updateWithDirection(key: "n", value: "8s", numericValue: nil)
         let nanStep = store.updateWithDirection(key: "n", value: "-", numericValue: .nan)
+        let negInf = store.updateWithDirection(key: "n", value: "∞", numericValue: -.infinity)
         let resumeFall = store.updateWithDirection(key: "n", value: "7s", numericValue: 7.0)
+        let rise12 = store.updateWithDirection(key: "n", value: "12s", numericValue: 12.0)
+        #expect(!initial.falling)
+        #expect(!rise10.falling)
         #expect(fall.falling)
         #expect(!hold.falling)
+        #expect(!noVal.falling)
         #expect(!nanStep.falling)
+        #expect(!negInf.falling)
         #expect(resumeFall.falling)
+        #expect(!rise12.falling)
 
         let kit = Kit.neutral(dark: false)
         struct Dummy {}
@@ -665,6 +695,8 @@ struct FeedbackAndInputsTests {
         let menu = KitScrollBarStyle.menuScroll(thumb: kit.c.borderMuted, thumbHover: kit.c.borderStrong)
         #expect(sv.stripWidth == 12 && sv.edgeInset == 4 && sv.trackStartInset == 8 && sv.minThumb == 32)
         #expect(nat.stripWidth == 8 && nat.gutter && nat.border == 2 && nat.minThumb == 32)
+        #expect(!nat.devicePixels && nat.scale == 1.0)
+        #expect(nat.devicePixels(scale: 2.0).devicePixels && nat.devicePixels(scale: 2.0).scale == 2.0)
         #expect(menu.stripWidth == 8 && menu.scrollOnly && menu.minThumb == 24)
         #expect(ScrollBarMetrics.fadeDelay == 0.75)
 
@@ -680,6 +712,7 @@ struct FeedbackAndInputsTests {
         #expect(!ScrollBarMath.trackLength(for: ScrollAxisMetrics(offset: 0, content: 100, viewport: 20), minThumb: 24).shows)
 
         let liveSlot = ScrollBarLiveStore.shared.slot(for: "sb-test", style: sv)
+        liveSlot.updateFromScrollPos(ScrollPos(offset: .zero, max: Vec2(0, 400), viewport: Vec2(200, 100)), style: sv)
         liveSlot.hover(true, style: sv, now: 1.0)
         #expect(liveSlot.liveOpacity.get() == 1.0)
         #expect(liveSlot.liveFill.get() == sv.thumbHoverColor)
@@ -864,6 +897,46 @@ struct FeedbackAndInputsTests {
         #expect(rt.state.changes == 0)
     }
 
+    @Test("ShortcutRecorder keyboard activation and both kinds of blur (tests/shortcut_recorder.rs:78)")
+    func shortcutRecorderKeyboardActivationAndBothKindsOfBlur() throws {
+        struct S {
+            var recorder = ShortcutRecorderState()
+            var changes = 0
+        }
+        let kit = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(320, 160), systemDark: false) { s, _ in
+            col().p(16).gap(12).children([
+                ShortcutRecorder(key: "shortcut", \.recorder)
+                    .onChange { st, _ in st.changes += 1; return nil }
+                    .build(using: kit, in: s),
+                el().key("other").focusable(true).size(80, 28)
+            ])
+        }
+        rt.frame(at: 0.0)
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.01)
+        _ = rt.keyDown(KeyEvent(key: .text(" ")), at: 0.02)
+        rt.frame(at: 0.03)
+        #expect(rt.state.recorder.isRecording)
+
+        let other = try #require(rt.element(byKey: "other")).rect
+        let otherPt = Vec2(other[0] + other[2] * 0.5, other[1] + other[3] * 0.5)
+        rt.pointerDown(at: otherPt, at: 0.04)
+        rt.pointerUp(at: otherPt, at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(!rt.state.recorder.isRecording)
+
+        let rec = try #require(rt.element(byKey: "shortcut")).rect
+        let recPt = Vec2(rec[0] + 20, rec[1] + 12)
+        rt.pointerDown(at: recPt, at: 0.07)
+        rt.pointerUp(at: recPt, at: 0.08)
+        rt.frame(at: 0.09)
+        #expect(rt.state.recorder.isRecording)
+        _ = rt.physicalInput(.focusLost, at: 0.10)
+        rt.frame(at: 0.11)
+        #expect(!rt.state.recorder.isRecording)
+        #expect(rt.state.changes == 0)
+    }
+
     @Test("RollingText countdown preserves prefix identity and rolls entering/exiting glyphs by value direction")
     func rollingTextCountdownAndValueDirectionRuntime() throws {
         struct S { var text = "0:30"; var val = 30.0 }
@@ -982,9 +1055,7 @@ struct FeedbackAndInputsTests {
         #expect(abs(advRolledW - advPlainW) <= 0.5)
     }
 
-    @Test(
-        "ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)"
-    )
+    @Test("ScrollBar thumb draws whole over viewport that fades at bottom (tests/scroll_bar_fade.rs)")
     func scrollBarFadeOverViewportDrawsWholeThumb() throws {
         let width: Float = 200
         let height: Float = 100
@@ -1042,11 +1113,15 @@ struct FeedbackAndInputsTests {
             .thumbKey("live-thumb")
         style.overlay = true
         let viewportKey = "live-vp-\(UUID().uuidString)"
-        final class Counter: @unchecked Sendable { var count = 0 }
+        final class Counter: @unchecked Sendable {
+            var count = 0
+            var scope: AnyObject?
+        }
         let builds = Counter()
 
         let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
             builds.count += 1
+            builds.scope = MemoScope.activeCacheObject
             let rows: [El<Int>] = (0..<40).map { i in
                 el().key("live-row-\(i)").wFull().h(20.0).shrink(0.0)
             }
@@ -1061,17 +1136,17 @@ struct FeedbackAndInputsTests {
         }
 
         _ = rt.frame(at: 0.0)
-        let slot = ScrollBarLiveStore.shared.slot(for: "\(style.key)::\(viewportKey)", style: style)
+        let slot = ScrollBarLiveStore.shared.slot(for: "\(style.key)::\(viewportKey)-scroll-area::y", style: style, scope: builds.scope)
         #expect(builds.count == 1)
         #expect(abs(slot.lastMetrics.viewport - 100.0) < 0.5)
         #expect(abs(slot.lastMetrics.content - 800.0) < 0.5)
         #expect(abs(slot.lastMetrics.offset) < 0.5)
-        let topBefore = slot.liveThumb.get().top
+        let topBefore = slot.liveSlot.get().top
 
         rt.wheel(WheelEvent(dx: 0, dy: -160), at: Vec2(100, 50), now: 0.02)
         _ = rt.frame(at: 0.03)
         #expect(slot.lastMetrics.offset > 50.0)
-        #expect(slot.liveThumb.get().top > topBefore)
+        #expect(slot.liveSlot.get().top > topBefore)
         #expect(slot.visibility.opacity == 1.0)
         _ = rt.frame(at: 0.25)
         let barOpacity = rt.elements().first { !$0.exiting && $0.key == style.key }?.opacity ?? 0.0

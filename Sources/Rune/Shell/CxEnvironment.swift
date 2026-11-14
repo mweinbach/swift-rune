@@ -496,6 +496,7 @@ extension Runtime {
         )
         if next != cxSettings.scrollBarsState {
             cxSettings.scrollBarsState = next
+            memo.invalidateAll()
             markNeedsCommit()
         }
     }
@@ -511,6 +512,7 @@ extension Runtime {
         )
         if next != cxSettings.scrollBarsState {
             cxSettings.scrollBarsState = next
+            memo.invalidateAll()
             markNeedsCommit()
         }
     }
@@ -526,6 +528,7 @@ extension Runtime {
         )
         if next != cxSettings.scrollBarsState {
             cxSettings.scrollBarsState = next
+            memo.invalidateAll()
             markNeedsCommit()
         }
     }

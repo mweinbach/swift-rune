@@ -101,6 +101,24 @@ struct OverlaysAndTableTests {
         #expect(rt.elements().first(where: { $0.focused })?.key == "open")
     }
 
+    @Test("Popover anchored mounts beside its trigger (`popover_tests.rs:32`)")
+    func anchoredMountsBesideTrigger() throws {
+        struct Empty {}
+        let k = Kit.neutral(dark: true)
+        let rt = Runtime(state: Empty(), viewport: Vec2(400, 300), systemDark: true) { _, _ -> El<Empty> in
+            let content: El<Empty> = col().w(120).h(60).child(text("Menu"))
+            let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
+            let layer = [PopoverAnchor.anchored(k, surface, anchor: "t", placement: .bottomStart, gap: 4.0)]
+            return RuneKit.root(col().p(40).child(el().key("t").w(50).h(20)), layer)
+        }
+        rt.frame(at: 0.0)
+        for i in 1...30 { rt.frame(at: Double(i)) }
+        let trigger = try #require(rt.elements().first { $0.key == "t" }).rect
+        let word = try #require(rt.elements().first { $0.text == "Menu" }).rect
+        #expect(abs(word[0] - trigger[0]) < 8.0)
+        #expect(word[1] >= trigger[1] + trigger[3] + 4.0)
+    }
+
     // MARK: - Table & TableState (table.rs)
 
     private struct TableFile {
@@ -189,6 +207,14 @@ struct OverlaysAndTableTests {
             #expect(abs(c.rect[0] - size.rect[0]) < 0.5)
             #expect(abs(c.rect[2] - size.rect[2]) < 0.5)
         }
+
+        // Column min/max clamping (`table.rs:804`)
+        let c = TableCol("a", "A").min(60).max(200)
+        #expect(c.clamp(10) == 60)
+        #expect(c.clamp(120) == 120)
+        #expect(c.clamp(900) == 200)
+        let odd = TableCol("b", "B").min(80).max(40)
+        #expect(odd.clamp(10) == 80)
     }
 
     @Test("Dragging a table header edge resizes within column bounds and fixed column has no handle")
@@ -607,6 +633,28 @@ struct OverlaysAndTableTests {
         #expect(!rt.state.combo.isOpen)
         let triggerAfterScrim = try #require(rt.elements().first(where: { $0.focused }))
         #expect(triggerAfterScrim.key == "models-value-trigger")
+
+        // Upstream `tests/combobox.rs:91`: Up to scroll end, filter "099", Alt+Down leaves active nil, preedit Enter stays open, Escape closes.
+        let rt2 = makeComboRuntime()
+        _ = rt2.keyDown(KeyEvent(key: .arrowUp, mods: .none), at: 0.1)
+        rt2.frame(at: 0.11)
+        _ = rt2.keyDown(KeyEvent(key: .text("099"), mods: .none), at: 0.15)
+        rt2.frame(at: 0.16)
+        #expect(rt2.elements().contains { $0.key == "models-option-item-99" })
+        #expect(rt2.state.combo.search.text == "099")
+        _ = rt2.keyDown(KeyEvent(key: .arrowDown, mods: Mods(alt: true)), at: 0.2)
+        rt2.frame(at: 0.21)
+        #expect(rt2.state.combo.active == nil)
+        _ = rt2.dispatchImeEvent(.preedit("x", cursorUTF8: 1..<1, clauses: []), at: 0.25)
+        rt2.frame(at: 0.26)
+        _ = rt2.keyDown(KeyEvent(key: .enter, mods: .none), at: 0.3)
+        rt2.frame(at: 0.31)
+        #expect(rt2.state.combo.isOpen && rt2.state.chosen == nil)
+        _ = rt2.dispatchImeEvent(.preedit("", cursorUTF8: 0..<0, clauses: []), at: 0.35)
+        rt2.frame(at: 0.36)
+        _ = rt2.keyDown(KeyEvent(key: .escape, mods: .none), at: 0.4)
+        rt2.frame(at: 0.41)
+        #expect(!rt2.state.combo.isOpen)
     }
 
     @Test("Combobox unhandled key modal bubbling & focusVisible return (tests/combobox.rs:108)")
@@ -810,6 +858,57 @@ struct OverlaysAndTableTests {
         #expect(rtCustom.state.combo.active == "item-199")
         let last = rtCustom.elements().first { $0.key == "models-option-item-199" }
         #expect((last?.visible[3] ?? 0) > 0)
+    }
+
+    @Test("Held Enter chooses once and repeats do not reopen from trigger (tests/combobox.rs:138)")
+    func comboboxHeldEnterChoosesOnceAndDoesNotReopenFromTrigger() throws {
+        let rt = makeComboRuntime()
+        rt.globalOnKey = { s, _, _ in s.appKeys += 1; return false }
+        let searchRect = try #require(rt.elements().first { $0.key == "models-search" }).rect
+        rt.pointerDown(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.01)
+        rt.pointerUp(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.02)
+        rt.frame(at: 0.03)
+
+        _ = rt.keyDown(KeyEvent(key: .arrowDown), at: 0.04)
+        rt.frame(at: 0.05)
+        _ = rt.keyDown(KeyEvent(key: .enter), isRepeat: false, at: 0.06)
+        rt.frame(at: 0.07)
+        for i in 1...2 {
+            _ = rt.keyDown(KeyEvent(key: .enter), isRepeat: true, at: 0.08 + Double(i) * 0.01)
+            rt.frame(at: 0.085 + Double(i) * 0.01)
+        }
+        #expect(rt.state.chosen == "item-2")
+        #expect(rt.state.chooses == 1)
+        #expect(!rt.state.combo.isOpen)
+        #expect(rt.state.appKeys == 0)
+    }
+
+    @Test("Repeats after an IME composition neither choose nor close (tests/combobox.rs:152)")
+    func comboboxRepeatsAfterImeCompositionNeitherChooseNorClose() throws {
+        for held in [Key.enter, Key.escape] {
+            let rt = makeComboRuntime()
+            let searchRect = try #require(rt.elements().first { $0.key == "models-search" }).rect
+            rt.pointerDown(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.01)
+            rt.pointerUp(at: Vec2(searchRect[0] + 10, searchRect[1] + 10), at: 0.02)
+            rt.frame(at: 0.03)
+            _ = rt.keyDown(KeyEvent(key: .arrowDown), at: 0.04)
+            rt.frame(at: 0.05)
+
+            _ = rt.dispatchImeEvent(.preedit("ka", cursorUTF8: nil, clauses: []), at: 0.06)
+            rt.frame(at: 0.07)
+            _ = rt.keyDown(KeyEvent(key: held), at: 0.08)
+            rt.frame(at: 0.09)
+            #expect(rt.state.combo.isOpen)
+
+            _ = rt.dispatchImeEvent(.commit("か"), at: 0.10)
+            rt.frame(at: 0.11)
+            for i in 1...2 {
+                _ = rt.keyDown(KeyEvent(key: held), isRepeat: true, at: 0.12 + Double(i) * 0.01)
+                rt.frame(at: 0.125 + Double(i) * 0.01)
+            }
+            #expect(rt.state.combo.isOpen)
+            #expect(rt.state.chooses == 0)
+        }
     }
 
     // MARK: - PopupList (popup_list.rs)
@@ -1238,6 +1337,93 @@ struct OverlaysAndTableTests {
         #expect(rt.state.point == nil)
     }
 
+    @Test("Shift+F10 and ContextMenu key open focused row menu at bottom-left and Escape returns focus (tests/context_menu.rs:83)")
+    func contextMenuShiftF10AndMenuKeyOpenAtBottomLeftAndEscapeReturnsFocus() throws {
+        struct S { var point: PointerPress? = nil; var rowKeys = false }
+        let k = Kit.neutral(dark: true)
+        let rt = Runtime(state: S(), viewport: Vec2(400, 300), systemDark: true) { s, cx in
+            let rowEl: El<S> = row()
+                .key("row")
+                .focusable(true)
+                .size(200, 32)
+                .onKey { st, _, _ in st.rowKeys }
+                .onSecondaryClick { st, p, _ in st.point = p }
+            var layer: [El<S>] = []
+            let body = contextMenu("context", trigger: rowEl, at: s.point)
+                .item(MenuItem<S>("Copy").onSelect { st in st.point = nil })
+                .onClose { st in st.point = nil }
+                .build(kit: k, layer: &layer, cx: cx)
+            return RuneKit.root(col().p(20).child(body), layer)
+        }
+        var now = 0.0
+        func settle() {
+            rt.frame(at: now)
+            for _ in 0..<60 {
+                now += 1.0 / 60.0
+                rt.frame(at: now)
+            }
+        }
+        settle()
+        _ = rt.keyDown(KeyEvent(key: .tab), at: now)
+        settle()
+        #expect(rt.elements().first(where: \.focused)?.key == "row")
+
+        _ = rt.keyDown(KeyEvent(key: .f(10), mods: Mods(shift: true)), at: now)
+        settle()
+        let p = try #require(rt.state.point)
+        let rowEl = try #require(rt.elements().first { $0.key == "row" })
+        #expect(abs(p.window.x - rowEl.rect[0]) < 1e-4)
+        #expect(abs(p.window.y - (rowEl.rect[1] + rowEl.rect[3])) < 1e-4)
+        #expect(rt.elements().contains { $0.key == "context-menu" })
+
+        _ = rt.keyDown(KeyEvent(key: .escape), at: now)
+        settle()
+        #expect(rt.state.point == nil)
+        #expect(!rt.elements().contains { $0.key == "context-menu" })
+        #expect(rt.elements().first(where: \.focused)?.key == "row")
+
+        _ = rt.keyDown(KeyEvent(key: .contextMenu), at: now)
+        settle()
+        #expect(rt.state.point != nil)
+        #expect(rt.elements().contains { $0.key == "context-menu" })
+    }
+
+    @Test("Focused onKey taking Shift+F10 keeps it, plain F10 does not open, and nothing focused is a no-op (tests/context_menu.rs:99)")
+    func contextMenuKeyHandlerTakesShiftF10AndNothingFocusedIsNoOp() {
+        struct S { var point: PointerPress? = nil; var rowKeys = false }
+        let k = Kit.neutral(dark: true)
+        let rt = Runtime(state: S(), viewport: Vec2(400, 300), systemDark: true) { s, cx in
+            let rowEl: El<S> = row()
+                .key("row")
+                .focusable(true)
+                .size(200, 32)
+                .onKey { st, _, _ in st.rowKeys }
+                .onSecondaryClick { st, p, _ in st.point = p }
+            var layer: [El<S>] = []
+            let body = contextMenu("context", trigger: rowEl, at: s.point)
+                .item(MenuItem<S>("Copy").onSelect { st in st.point = nil })
+                .onClose { st in st.point = nil }
+                .build(kit: k, layer: &layer, cx: cx)
+            return RuneKit.root(col().p(20).child(body), layer)
+        }
+        rt.frame(at: 0.0)
+        _ = rt.keyDown(KeyEvent(key: .contextMenu), at: 0.01)
+        rt.frame(at: 0.02)
+        #expect(rt.state.point == nil && !rt.elements().contains(where: \.focused))
+
+        _ = rt.keyDown(KeyEvent(key: .tab), at: 0.03)
+        rt.frame(at: 0.04)
+        rt.state.rowKeys = true
+        _ = rt.keyDown(KeyEvent(key: .f(10), mods: Mods(shift: true)), at: 0.05)
+        rt.frame(at: 0.06)
+        #expect(rt.state.point == nil)
+
+        rt.state.rowKeys = false
+        _ = rt.keyDown(KeyEvent(key: .f(10)), at: 0.07)
+        rt.frame(at: 0.08)
+        #expect(rt.state.point == nil)
+    }
+
     @Test("Menus and submenus open on the next frame and fade only on close (tests/menu_open.rs)")
     func menusAndSubmenusOpenOnNextFrameAndFadeOnlyOnClose() throws {
         struct MState { var open = false; var sub = false }
@@ -1642,7 +1828,10 @@ struct OverlaysAndTableTests {
             var t = 0.0
             let rt = settled(six, time: &t)
             rt.update { s, _ in s.ids = ["a1"] }
-            for _ in 0..<20 { t += 1.0 / 120.0; rt.frame(at: t) }
+            for _ in 0..<20 {
+                t += 1.0 / 120.0
+                rt.frame(at: t)
+            }
             #expect(rt.elements().first { $0.key == "p-option-a2" } != nil)
             try checkGrowsWithoutOvershoot(rt, time: &t)
         }
@@ -1737,5 +1926,175 @@ struct OverlaysAndTableTests {
         for (i, id) in ten.enumerated() {
             #expect(abs(try y(rt, "p-option-\(id)") - (108.0 + 28.0 * Float(i))) < 0.05)
         }
+    }
+
+    @Test("PopupList 5 -> 2 -> 0 -> 3 springs height, fades removed rows, and toggles empty state (`tests/popup_list.rs:82`)")
+    func popupList5203SpringHeightAndEmptyToggle() throws {
+        struct PState {
+            var count = 5
+            var active: Int? = 0
+            var open = true
+            var animate = false
+            var composer = TextEdit()
+        }
+        let k = Kit.neutral(dark: true)
+        let rt = Runtime(state: PState(), viewport: Vec2(480, 480), systemDark: true) { s, cx in
+            var layer: [El<PState>] = []
+            let input: El<PState> = Rune.textInput(key: "composer", \PState.composer).size(240, 32)
+            let items = (0..<s.count).map { i in
+                PopupItem<PState>("cmd-\(i)", "Command \(i)")
+            }
+            PopupList<PState>("commands", anchor: "composer")
+                .open(s.open)
+                .items(items)
+                .active(s.active)
+                .animateFiltering(s.animate)
+                .emptyMessage("No matching commands")
+                .onClose { st in st.open = false }
+                .build(kit: k, layer: &layer, cx: cx)
+            return RuneKit.root(col().pt(300).px(24).child(input), layer)
+        }
+        var t = 0.0
+        func step() { t += 1.0 / 60.0; rt.frame(at: t) }
+        rt.frame(at: t)
+        rt.update { s, _ in s.animate = true }
+        for _ in 0..<60 { step() }
+
+        let h5 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        let empty5 = try #require(rt.element(byKey: "empty"))
+        #expect(empty5.opacity == 0.0)
+        #expect(empty5.rect[3] == 0.0)
+
+        // 5 -> 2 items: height springs down and removed rows fade out.
+        rt.update { s, _ in s.count = 2 }
+        step()
+        let fading = try #require(rt.element(byKey: "commands-option-cmd-4"))
+        #expect(fading.opacity > 0.0 && fading.opacity < 1.0)
+        let mid5to2 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        #expect(mid5to2 < h5 && mid5to2 > 64.0)
+        var last = mid5to2
+        for _ in 0..<60 {
+            step()
+            let h = try #require(rt.element(byKey: "commands-content")).rect[3]
+            #expect(abs(h - last) < 25.0)
+            last = h
+        }
+        let h2 = last
+        #expect(abs(h2 - 64.0) < 1.0)
+        #expect(try #require(rt.element(byKey: "empty")).opacity == 0.0)
+
+        // 2 -> 0 items: height springs to empty state and empty message becomes visible.
+        rt.update { s, _ in s.count = 0 }
+        step()
+        #expect(try #require(rt.element(byKey: "empty")).opacity > 0.0)
+        let mid2to0 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        #expect(mid2to0 < h2 && mid2to0 > 36.0)
+        for _ in 0..<60 { step() }
+        let h0 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        #expect(abs(h0 - 36.0) < 1.0)
+        let empty0 = try #require(rt.element(byKey: "empty"))
+        #expect(empty0.opacity == 1.0)
+        #expect(abs(empty0.rect[3] - 28.0) < 1.0)
+
+        // 0 -> 3 items: height springs back up and empty state hides.
+        rt.update { s, _ in
+            s.count = 3
+            s.active = 0
+        }
+        step()
+        #expect(try #require(rt.element(byKey: "empty")).opacity < 1.0)
+        let mid0to3 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        #expect(mid0to3 > h0 && mid0to3 < 92.0)
+        for _ in 0..<60 { step() }
+        let h3 = try #require(rt.element(byKey: "commands-content")).rect[3]
+        #expect(abs(h3 - 92.0) < 1.0)
+        #expect(try #require(rt.element(byKey: "empty")).opacity == 0.0)
+    }
+
+    @Test("UnseenPresence honors stuck header shift and RTL horizontal scroll clamping slack")
+    func unseenPresenceStuckHeaderAndRtlScrollSlack() throws {
+        struct S {
+            var showBadge = false
+            var wideContent = true
+            var showRtlChip = false
+        }
+        let rt = Runtime(state: S(), viewport: Vec2(240, 140), systemDark: true) { s, _ in
+            var header: El<S> = row()
+                .key("stuck-hdr")
+                .wFull()
+                .h(30.0)
+                .stickyTop(0.0)
+                .child(el().key("hdr-title").size(80.0, 20.0))
+            if s.showBadge {
+                header = header.child(
+                    el().key("hdr-badge")
+                        .size(24.0, 16.0)
+                        .transition(.opacity)
+                )
+            }
+            let scroll = col()
+                .key("stuck-scroll")
+                .size(200.0, 100.0)
+                .scrollY()
+                .child(el().key("lead-spacer").wFull().h(80.0))
+                .child(header)
+                .child(el().key("tail-spacer").wFull().h(400.0))
+
+            var rtlChildren: [El<S>] = [el().key("rtl-a").size(80.0, 24.0)]
+            if s.wideContent {
+                rtlChildren.append(el().key("rtl-b").size(320.0, 24.0))
+            }
+            if s.showRtlChip {
+                rtlChildren.append(
+                    el().key("rtl-chip")
+                        .size(40.0, 24.0)
+                        .transition(.opacity)
+                )
+            }
+            let rtlScroll = row()
+                .key("rtl-scroll")
+                .dir(.rtl)
+                .size(200.0, 32.0)
+                .scrollX()
+                .children(rtlChildren)
+
+            return col().size(240.0, 140.0).children([scroll, rtlScroll])
+        }
+
+        var t = 0.0
+        _ = rt.frame(at: t)
+        // Scroll down past lead spacer + header (80 + 30 = 110) so header targetRect is above viewport yet held stuck at top.
+        rt.wheel(WheelEvent(dx: 0, dy: -180), at: Vec2(100, 50), now: t)
+        t += 1.0 / 60.0
+        _ = rt.frame(at: t)
+        for _ in 0..<20 {
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        let stuckRect = rt.element(byKey: "stuck-hdr")!.rect
+        #expect(stuckRect[1] >= 0.0 && stuckRect[1] < 5.0)
+
+        // Scroll RTL horizontal container toward the end (`ox0 > 150`) and then shrink content while mounting a chip in sight.
+        rt.wheel(WheelEvent(dx: 180, dy: 0), at: Vec2(100, 115), now: t)
+        t += 1.0 / 60.0
+        _ = rt.frame(at: t)
+        if rt.scrollOffset(forKey: "rtl-scroll").x == 0 {
+            rt.wheel(WheelEvent(dx: -180, dy: 0), at: Vec2(100, 115), now: t)
+            t += 1.0 / 60.0
+            _ = rt.frame(at: t)
+        }
+        #expect(rt.scrollOffset(forKey: "rtl-scroll").x > 100.0)
+
+        rt.update(at: t) { s, _ in
+            s.showBadge = true
+            s.wideContent = false
+            s.showRtlChip = true
+        }
+        t += 1.0 / 60.0
+        _ = rt.frame(at: t)
+        let badge = try #require(rt.element(byKey: "hdr-badge"))
+        #expect(badge.opacity > 0.0 && badge.opacity < 1.0, "Child mounted in stuck header must fade in instead of snapping unseen")
+        let rtlChip = try #require(rt.element(byKey: "rtl-chip"))
+        #expect(rtlChip.opacity > 0.0 && rtlChip.opacity < 1.0, "Child mounted inside clamped RTL horizontal scroll must fade in")
     }
 }

@@ -227,27 +227,30 @@ struct ShellAndTabStripTests {
         rt.frame(at: 0.19)
         #expect(!rt.state.reorder.isDragging)
         #expect(rt.state.items.map(\.id) == ["c", "a"])
+        for i in 1...30 {
+            rt.frame(at: 0.19 + Double(i) * (1.0 / 60.0))
+        }
 
         // Lost pointer release (another press without pointerUp) lets go and drags the new row
-        rt.pointerDown(at: cStart, at: 0.191)
-        rt.pointerMove(to: Vec2(cStart.x, cStart.y + 10), at: 0.192)
-        rt.frame(at: 0.193)
+        rt.pointerDown(at: cStart, at: 0.71)
+        rt.pointerMove(to: Vec2(cStart.x, cStart.y + 10), at: 0.72)
+        rt.frame(at: 0.73)
         let rowA2 = try #require(rt.element(byKey: "row-a")).rect
         let a2Start = Vec2(rowA2[0] + 24, rowA2[1] + rowA2[3] * 0.5)
-        rt.pointerDown(at: a2Start, at: 0.194)
-        rt.pointerMove(to: Vec2(a2Start.x, a2Start.y - 30), at: 0.195)
-        rt.pointerUp(at: Vec2(a2Start.x, a2Start.y - 30), at: 0.196)
-        rt.frame(at: 0.197)
+        rt.pointerDown(at: a2Start, at: 0.74)
+        rt.pointerMove(to: Vec2(a2Start.x, a2Start.y - 30), at: 0.75)
+        rt.pointerUp(at: Vec2(a2Start.x, a2Start.y - 30), at: 0.76)
+        rt.frame(at: 0.77)
         #expect(rt.state.items.map(\.id) == ["a", "c"])
         // Swap back to ["c", "a"] so rename index stays untouched below
         rt.state.items.swapAt(0, 1)
         rt.markNeedsCommit()
-        rt.frame(at: 0.198)
+        rt.frame(at: 0.78)
 
         // Rename submit commits updated title
         rt.state.renamingId = "a"
         rt.markNeedsCommit()
-        rt.frame(at: 0.20)
+        rt.frame(at: 0.80)
         _ = rt.keyDown(KeyEvent(key: .enter, mods: .none), at: 0.22)
         rt.frame(at: 0.23)
         #expect(rt.state.renamingId == nil)
@@ -287,7 +290,7 @@ struct ShellAndTabStripTests {
         #expect(abs(sbRect[2] - 220.0) < 0.5)
         #expect(abs(gripRect[2] - SplitView<S>.gripWidth) < 0.5)
 
-        // Drag grip to resize, then collapse below 80pt
+        // Drag grip to max clamp (360), min clamp (140), collapse (<70), drag back out to reopen, then double-click to reset (220)
         let gx = gripRect[0] + gripRect[2] * 0.5
         let gy = gripRect[1] + gripRect[3] * 0.5
         rt.pointerDown(at: Vec2(gx, gy), at: 0.05)
@@ -295,9 +298,45 @@ struct ShellAndTabStripTests {
         rt.frame(at: 0.07)
         #expect(rt.state.sidebar.width == 280)
 
+        rt.pointerMove(to: Vec2(gx + 400, gy), at: 0.072)
+        rt.frame(at: 0.073)
+        #expect(rt.state.sidebar.width == 360)
+
+        rt.pointerMove(to: Vec2(gx - 100, gy), at: 0.075)
+        rt.frame(at: 0.076)
+        #expect(rt.state.sidebar.isOpen && rt.state.sidebar.width == 140)
+
         rt.pointerMove(to: Vec2(gx - 180, gy), at: 0.08)
-        rt.pointerUp(at: Vec2(gx - 180, gy), at: 0.09)
-        rt.frame(at: 0.10)
+        rt.frame(at: 0.085)
+        #expect(rt.state.sidebar.isCollapsed)
+
+        // Drag back out reopens sidebar before releasing
+        rt.pointerMove(to: Vec2(gx - 20, gy), at: 0.088)
+        rt.frame(at: 0.09)
+        #expect(rt.state.sidebar.isOpen && rt.state.sidebar.width == 200)
+        rt.pointerUp(at: Vec2(gx - 20, gy), at: 0.092)
+        rt.frame(at: 0.094)
+
+        // Double-click grip resets width back to 220
+        let resetGrip = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+        let rgx = resetGrip[0] + resetGrip[2] * 0.5
+        let rgy = resetGrip[1] + resetGrip[3] * 0.5
+        for i in 0..<2 {
+            let tClick = 0.095 + Double(i) * 0.005
+            rt.pointerDown(at: Vec2(rgx, rgy), at: tClick)
+            rt.pointerUp(at: Vec2(rgx, rgy), at: tClick + 0.001)
+            rt.frame(at: tClick + 0.002)
+        }
+        #expect(rt.state.sidebar.width == 220)
+
+        // Collapse below threshold for peek check
+        let g2 = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+        let g2x = g2[0] + g2[2] * 0.5
+        let g2y = g2[1] + g2[3] * 0.5
+        rt.pointerDown(at: Vec2(g2x, g2y), at: 0.105)
+        rt.pointerMove(to: Vec2(g2x - 180, g2y), at: 0.107)
+        rt.pointerUp(at: Vec2(g2x - 180, g2y), at: 0.108)
+        rt.frame(at: 0.11)
         #expect(rt.state.sidebar.isCollapsed)
         #expect(rt.element(byKey: "sv-sidebar-toggle") != nil)
 
@@ -517,6 +556,30 @@ struct ShellAndTabStripTests {
         rt.pointerDown(at: Vec2(btnRect[0] + btnRect[2] * 0.5, btnRect[1] + btnRect[3] * 0.5), at: 0.25)
         #expect(rt.takeTitlebarAction() == nil)
         rt.pointerUp(at: Vec2(btnRect[0] + btnRect[2] * 0.5, btnRect[1] + btnRect[3] * 0.5), at: 0.26)
+    }
+
+    @Test("WindowTitlebar.direction(.rtl) mirrors bands while preserving physical chrome insets")
+    func windowTitlebarDirectionRtlMirrorsBandsWhileKeepingChromeInsets() throws {
+        struct S {}
+        let kit = Kit.neutral(dark: true)
+        let insets = ChromeInsets(leading: 76, trailing: 18, top: 44)
+        let rt = Runtime(state: S(), viewport: Vec2(640, 80), systemDark: true) { _, _ in
+            col().dir(.rtl).wFull().child(
+                WindowTitlebar<S>.fromInsets(insets, key: "rtl-tb", title: "Workspace")
+                    .direction(.rtl)
+                    .leading(text("L").key("lead-lbl"))
+                    .trailing(text("R").key("trail-lbl"))
+                    .build(kit)
+            )
+        }
+        rt.frame(at: 0.0)
+        let lead = try #require(rt.element(byKey: "lead-lbl")?.rect)
+        let trail = try #require(rt.element(byKey: "trail-lbl")?.rect)
+        // Under RTL, leading sits on the right clearing trailing chrome inset (18) + leadingPadding (14) = 32,
+        // and trailing sits on the left clearing leading chrome inset (76) + trailingPadding (12) = 88.
+        #expect(lead[0] > trail[0])
+        #expect(640.0 - (lead[0] + lead[2]) >= 31.0)
+        #expect(trail[0] >= 87.0)
     }
 
     @Test("TabStrip exposes Tab role group, single Tab stop re-entry, and ArrowLeft/Right focus roving")
@@ -1243,5 +1306,535 @@ struct ShellAndTabStripTests {
         rt2.windowFocus(false, at: t2 + 0.01)
         rt2.frame(at: t2 + 0.02)
         #expect(!rt2.state.sidebar.isPeeking, "window losing focus ends peek")
+    }
+
+    @Test("Shell keyboard navigation, focus-out on collapse, rename preservation, and stuck-resize blur (`tests/shell.rs`)")
+    func shellKeyboardCollapseRenameAndResizeBlurParity() throws {
+        // 1. `a_wider_range_keeps_the_width_new_was_given`
+        var wider = PaneState(width: 640).range(360, 960)
+        #expect(wider.width == 640 && wider.defaultWidth == 640)
+        wider = wider.withWidth(700)
+        #expect(wider.width == 700 && wider.defaultWidth == 640)
+        wider.resetWidth()
+        #expect(wider.width == 640)
+        let clamped = PaneState(width: 900).range(360, 600)
+        #expect(clamped.width == 600 && clamped.defaultWidth == 600)
+        #expect(PaneState(width: 640).width == PaneState.defaultMax)
+
+        // 2. Multi-section sidebar single tab stop, collapse focus-out/rename blur, arrow preservation during rename, and stuck resize blur
+        struct S {
+            var sidebar = PaneState(width: 240).range(160, 420)
+            var picked = 1
+            var twoLines = false
+            var renaming: Int? = nil
+            var edit = TextEdit()
+            var committed: String? = nil
+        }
+        let kit = Kit.neutral(dark: true)
+        let names = ["Alpha", "Bravo", "Charlie", "Delta"]
+        let rt = Runtime(
+            state: S(),
+            viewport: Vec2(800, 500),
+            systemDark: true,
+            onKey: { st, ev, _ in
+                if isSidebarToggle(ev.key, mods: ev.mods) {
+                    st.sidebar.toggle()
+                    return true
+                }
+                return false
+            }
+        ) { s, _ in
+            let rowEls: [El<S>] = names.enumerated().map { i, name in
+                var r = SidebarRow<S>(key: "row\(i)", title: name)
+                    .selected(s.picked == i)
+                    .onClick { st, _ in st.picked = i }
+                if s.twoLines {
+                    r = r.subtitle("user\(i)@example.com")
+                }
+                if s.renaming == i {
+                    r = r.renaming(
+                        \S.edit,
+                        onCommit: { st, text, _ in
+                            st.committed = text
+                            st.renaming = nil
+                        },
+                        onCancel: { st, _ in
+                            st.renaming = nil
+                        }
+                    )
+                }
+                return r.build(kit)
+            }
+            let sb = Sidebar<S>(key: "sb")
+                .section(SidebarSection<S>(key: "sec0", title: "Primary").children(Array(rowEls[0..<2])).build(kit))
+                .section(SidebarSection<S>(key: "sec1", title: "Secondary").children(Array(rowEls[2..<4])).build(kit))
+                .build(kit)
+            return SplitView<S>(key: "sv") { _ in
+                Page<S>().child(kit.button(key: "after-main", "Action") { _, _ in }).build(kit)
+            }
+            .sidebar(\.sidebar, current: s.sidebar) { _ in sb }
+            .paneMotion(.instant)
+            .build(s, kit: kit)
+        }
+        var t = 0.0
+        func step() { t += 1.0 / 60.0; rt.frame(at: t) }
+        func press(_ key: Key, mods: Mods = .none) {
+            _ = rt.keyDown(KeyEvent(key: key, mods: mods), at: t + 0.005)
+            step()
+        }
+        func focusedKey() -> String? { rt.elements().first(where: { $0.focused })?.key }
+        func focusKey(_ key: String) {
+            if let r = rt.element(byKey: key)?.rect {
+                let pt = Vec2(r[0] + r[2] * 0.5, r[1] + r[3] * 0.5)
+                rt.pointerDown(at: pt, at: t + 0.002)
+                rt.pointerUp(at: pt, at: t + 0.004)
+                step()
+            }
+        }
+
+        rt.frame(at: t)
+        press(.tab)
+        #expect(focusedKey() == "row1")
+        press(.arrowDown)
+        #expect(focusedKey() == "row2" && rt.state.picked == 2)
+        for _ in 0..<4 { press(.arrowDown) }
+        #expect(rt.state.picked == 3)
+        press(.home)
+        #expect(rt.state.picked == 0)
+        press(.text("c"))
+        #expect(rt.state.picked == 2)
+        rt.update { s, _ in s.picked = 0 }
+        press(.enter)
+        #expect(rt.state.picked == 2)
+
+        // Two-line rows keep keyboard nav and Return/Escape rename behavior
+        rt.update { s, tx in tx.instant(); s.twoLines = true; s.picked = 1 }
+        step()
+        let r2 = try #require(rt.element(byKey: "row2"))
+        #expect(r2.role == .listItem && r2.label == "Charlie, user2@example.com" && abs(r2.rect[3] - 40.0) < 0.5)
+
+        // Rename keeps letters and arrows without type-selecting another row, then Escape returns focus to row1
+        rt.update { s, _ in
+            s.renaming = 1
+            s.edit = TextEdit("Bravo")
+            s.edit.selectAll()
+        }
+        step()
+        focusKey("row1-rename")
+        rt.update { s, _ in s.edit.selectAll() }
+        step()
+        #expect(focusedKey() == "row1-rename")
+        for ch in ["D", "e", "l"] { press(.text(ch)) }
+        for k in [Key.arrowDown, .arrowUp, .home, .end] { press(k) }
+        #expect(rt.state.edit.text == "Del")
+        #expect(rt.state.picked == 1 && focusedKey() == "row1-rename")
+        press(.escape)
+        #expect(rt.state.renaming == nil && rt.state.committed == nil)
+        #expect(focusedKey() == "row1")
+
+        // Return commits rename
+        rt.update { s, _ in
+            s.renaming = 1
+            s.edit = TextEdit("Bravo")
+        }
+        step()
+        focusKey("row1-rename")
+        rt.update { s, _ in s.edit.selectAll() }
+        step()
+        press(.text("Beta"))
+        press(.enter)
+        #expect(rt.state.renaming == nil && rt.state.committed == "Beta")
+
+        // Collapsing sidebar moves focus to sidebar-toggle and blurs active rename field
+        rt.update { s, _ in
+            s.renaming = 1
+            s.edit = TextEdit("Bravo")
+        }
+        step()
+        focusKey("row1-rename")
+        #expect(focusedKey() == "row1-rename")
+        _ = rt.keyDown(KeyEvent(key: .text("b"), mods: Mods(shift: true, cmd: true)), at: t + 0.005)
+        step()
+        #expect(!rt.state.sidebar.isOpen)
+        #expect(focusedKey() == "sv-sidebar-toggle")
+        press(.arrowDown)
+        #expect(rt.state.picked == 1)
+        press(.text("X"))
+        #expect(rt.state.edit.text == "Bravo")
+
+        // Stuck resize clears on window blur
+        rt.update { s, _ in s.sidebar.setOpen(true) }
+        step()
+        let grip = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+        let gx = grip[0] + grip[2] * 0.5
+        let gy = grip[1] + grip[3] * 0.5
+        rt.pointerMove(to: Vec2(gx, gy), at: t + 0.01)
+        rt.pointerDown(at: Vec2(gx, gy), at: t + 0.02)
+        rt.pointerMove(to: Vec2(gx - 180, gy), at: t + 0.03)
+        step()
+        #expect(!rt.state.sidebar.isOpen && rt.state.sidebar.isResizing)
+        rt.windowFocus(false, at: t + 0.04)
+        step()
+        #expect(!rt.state.sidebar.isResizing)
+    }
+
+    @Test("Toolbar truncation & two-line rename preserve geometry (`tests/shell.rs:699,766`)")
+    func toolbarTruncationAndTwoLineRenameGeometry() throws {
+        struct T {}
+        let k = Kit.neutral(dark: true)
+        let tbRt = Runtime(state: T(), viewport: Vec2(400, 200), systemDark: true) { _, _ in
+            let longEl: El<T> = text(String(repeating: "a", count: 400)).key("long").ellipsis().shrink().minW(0)
+            let trailEl: El<T> = el().key("trail").size(24, 24)
+            return Toolbar<T>(key: "tb")
+                .leading(longEl)
+                .trailing(trailEl)
+                .build(k)
+        }
+        tbRt.frame(at: 0.0)
+        let long = try #require(tbRt.element(byKey: "long")).rect
+        let trail = try #require(tbRt.element(byKey: "trail")).rect
+        #expect(trail[0] + trail[2] <= 400.5)
+        #expect(long[0] + long[2] <= trail[0] + 0.5)
+
+        struct Ren {
+            var renaming = false
+            var custom = false
+            var edit = TextEdit()
+        }
+        for custom in [false, true] {
+            let rt = Runtime(state: Ren(custom: custom), viewport: Vec2(240, 200), systemDark: true) { s, _ in
+                var r = SidebarRow<Ren>(key: "r", title: "Name").subtitle("Detail")
+                if s.custom {
+                    r = r.titleStyle(TextStyle(size: 15, weight: 600, lineHeight: 22))
+                }
+                if s.renaming {
+                    r = r.renaming(\Ren.edit, onCommit: { _, _, _ in }, onCancel: { _, _ in })
+                }
+                return col().w(240).child(r.build(Kit.neutral(dark: true)))
+            }
+            rt.frame(at: 0.0)
+            let labelRect = try #require(rt.element(byKey: "r-label")).rect
+            let subRect = try #require(rt.element(byKey: "r-subtitle")).rect
+            var t = 0.0
+            for text in ["Name", ""] {
+                rt.update { s, _ in
+                    s.renaming = true
+                    s.edit = TextEdit(text)
+                }
+                t += 1.0 / 60.0
+                rt.frame(at: t)
+                let renRect = try #require(rt.element(byKey: "r-rename")).rect
+                let subNow = try #require(rt.element(byKey: "r-subtitle")).rect
+                #expect(abs(renRect[1] - labelRect[1]) < 0.5 && abs(renRect[3] - labelRect[3]) < 0.5)
+                #expect(abs(subNow[1] - subRect[1]) < 0.5 && abs(subNow[3] - subRect[3]) < 0.5)
+            }
+        }
+    }
+
+    @Test("Desktop SplitView framing, lockstep fade/slide, hidden peek width, live row drag, and resize cancel (`tests/shell_desktop.rs`)")
+    func desktopSplitViewFramingLockstepPeekWidthAndLiveRowDrag() throws {
+        struct S {
+            var sidebar = PaneState(width: 276).range(180, 480)
+            var inspector = PaneState(width: 300).range(180, 480)
+            var order = [0, 1, 2, 3, 4]
+            var reorder = Reorder<Int>().gap(4)
+            var picked = 0
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: S(), viewport: Vec2(1000, 600), systemDark: true) { s, _ in
+            let rowEls: [El<S>] = s.order.enumerated().map { idx, id in
+                SidebarRow<S>(key: "row\(id)", title: "Item \(id)")
+                    .subtitle("Sub \(id)")
+                    .height(45)
+                    .selected(s.picked == id)
+                    .reorder(\S.reorder, id: id, index: idx, count: s.order.count) { st, from, to in
+                        let moving = st.order.remove(at: from)
+                        st.order.insert(moving, at: to)
+                    }
+                    .reorderState(s.reorder, id: id, index: idx)
+                    .onClick { st, _ in st.picked = id }
+                    .build(kit)
+            }
+            let sb = Sidebar<S>(key: "sb")
+                .rowGap(4)
+                .sections(rowEls)
+                .build(kit)
+            let motion = PaneMotion()
+                .spring(Spring(duration: 0.3, bounce: 0.0))
+                .scaleWithWidth(reference: 480, min: 0.15, max: 0.3)
+                .fadeTail(0.15)
+            return SplitView<S>(key: "sv") { _ in col().key("main-body").sizeFull() }
+                .sidebar(\.sidebar, current: s.sidebar) { _ in sb }
+                .inspector(\.inspector, current: s.inspector) { _ in col().key("insp-body").sizeFull() }
+                .toolbar(Toolbar<S>(key: "tb", title: "App").build(kit))
+                .frameInset(8)
+                .toolbarInPanel()
+                .sidebarPadding(10)
+                .sidebarPeek(SidebarPeek())
+                .paneMotion(motion)
+                .build(s, kit: kit)
+        }
+        var t = 0.0
+        func step(_ dt: Double = 1.0 / 60.0) { t += dt; rt.frame(at: t) }
+        rt.frame(at: 0.0)
+        step()
+
+        // 1. Framed main panel (`8pt` inset) + toolbar inside panel + drag strip above
+        let card = try #require(rt.element(byKey: "sv-panel")).rect
+        let insp = try #require(rt.element(byKey: "sv-inspector-pane")).rect
+        #expect(abs(card[0] - 276.0) < 0.5 && abs(card[1] - 8.0) < 0.5)
+        #expect(abs(card[1] + card[3] - 592.0) < 0.5)
+        #expect(abs(card[0] + card[2] - insp[0]) < 0.5)
+        let tb = try #require(rt.element(byKey: "tb")).rect
+        #expect(abs(tb[1] - 8.0) < 0.5 && abs(tb[3] - 48.0) < 0.5)
+        rt.pointerDown(at: Vec2(500, 4), at: t + 0.005)
+        #expect(rt.takeTitlebarAction() == .drag)
+        rt.pointerUp(at: Vec2(500, 4), at: t + 0.01)
+
+        // 2. Hidden peek surface takes width immediately while content springs
+        rt.update { s, _ in s.sidebar.setWidth(400) }
+        step(1.0 / 120.0)
+        step(1.0 / 120.0)
+        let contentW = try #require(rt.element(byKey: "sv-pane-content")).rect[2]
+        #expect(contentW < 399.0)
+        let surface = try #require(rt.element(byKey: "sv-pane-surface"))
+        #expect(surface.opacity == 0.0)
+        #expect(abs(surface.rect[2] - 400.0) < 0.5)
+        rt.update { s, _ in s.sidebar.setWidth(276) }
+        for _ in 0..<60 { step(1.0 / 60.0) }
+
+        // 3. Sidebar + main + inspector share width-scaled spring & late fade, with pane-content pinned to edge
+        rt.update { s, _ in
+            s.sidebar.setOpen(false)
+            s.inspector.setOpen(false)
+        }
+        var frames = 0
+        var fadedEarly = false
+        while frames <= 120 {
+            step(1.0 / 120.0)
+            frames += 1
+            let sidePane = try #require(rt.element(byKey: "sv-sidebar-pane")).rect
+            let mainPane = try #require(rt.element(byKey: "sv-main")).rect
+            let paneContent = try #require(rt.element(byKey: "sv-pane-content"))
+            let contentRight = paneContent.rect[0] + paneContent.rect[2]
+            let sideRight = sidePane[0] + sidePane[2]
+            #expect(abs(sidePane[2] - mainPane[0]) < 0.05)
+            #expect(abs(contentRight - sideRight) < 0.5)
+            let sideRatio = sidePane[2] / 276.0
+            let inspRatio = try #require(rt.element(byKey: "sv-inspector-pane")).rect[2] / 300.0
+            #expect(abs(sideRatio - inspRatio) < 0.02)
+            let expectedOp = min(sideRatio / 0.15, 1.0)
+            #expect(abs(paneContent.opacity - expectedOp) < 0.08)
+            if sideRatio > 0.3 && paneContent.opacity < 0.99 { fadedEarly = true }
+            if sideRatio < 0.001 { break }
+        }
+        #expect(!fadedEarly && frames < 60)
+
+        // Instant open & collapse with both panes closed gives 8..992 framed width
+        rt.update { s, tx in
+            tx.instant()
+            s.sidebar.setOpen(false)
+            s.inspector.setOpen(false)
+        }
+        step()
+        let closedPanel = try #require(rt.element(byKey: "sv-panel")).rect
+        let closedRight = closedPanel[0] + closedPanel[2]
+        #expect(abs(closedPanel[0] - 8.0) < 0.5 && abs(closedPanel[1] - 8.0) < 0.5 && abs(closedRight - 992.0) < 0.5)
+
+        // Reopen both cleanly and test resize cancel (both Escape and window blur) without peeking
+        rt.update { s, tx in
+            tx.instant()
+            s.sidebar.setOpen(true)
+            s.inspector.setOpen(true)
+        }
+        for _ in 0..<5 { step() }
+        for blur in [false, true] {
+            let grip = try #require(rt.element(byKey: "sv-sidebar-grip")).rect
+            let gx = grip[0] + grip[2] * 0.5
+            let gy = grip[1] + grip[3] * 0.5
+            rt.pointerDown(at: Vec2(gx, gy), at: t + 0.005)
+            rt.pointerMove(to: Vec2(12, gy), at: t + 0.01)
+            step(0.1)
+            #expect(!rt.state.sidebar.isPeeking)
+            if blur {
+                rt.windowFocus(false, at: t + 0.01)
+            } else {
+                _ = rt.keyDown(KeyEvent(key: .escape), at: t + 0.01)
+            }
+            step()
+            #expect(rt.state.sidebar.width == 276.0)
+            #expect(rt.state.sidebar.isOpen && !rt.state.sidebar.isResizing)
+            if blur {
+                rt.windowFocus(true, at: t + 0.02)
+                step()
+            }
+        }
+
+        // 4. Live row drag: reflows other rows smoothly and Escape cancels back in place, drop commits [1, 2, 0, 3, 4]
+        for _ in 0..<60 { step() }
+        let r0 = try #require(rt.element(byKey: "row0")).rect
+        let r1 = try #require(rt.element(byKey: "row1")).rect
+        let r2 = try #require(rt.element(byKey: "row2")).rect
+        let pitch = r1[1] - r0[1]
+        #expect(abs(pitch - 49.0) < 0.5)
+        let rx = r0[0] + r0[2] * 0.5
+        let ry = r0[1] + r0[3] * 0.5
+        rt.pointerMove(to: Vec2(rx, ry), at: t + 0.005)
+        rt.pointerDown(at: Vec2(rx, ry), at: t + 0.01)
+        rt.pointerMove(to: Vec2(rx, ry + 2 * pitch + 4), at: t + 0.02)
+        step()
+        #expect(rt.state.reorder.target() == 2)
+        let r0LiveY = try #require(rt.element(byKey: "row0")).rect[1]
+        let expectedLiveY = r0[1] + 2 * pitch + 4
+        #expect(abs(r0LiveY - expectedLiveY) < 0.5)
+        step()
+        let mid1 = try #require(rt.element(byKey: "row1")).rect[1]
+        #expect(mid1 < r1[1] && mid1 > r0[1])
+        for _ in 0..<60 { step() }
+        let settledR1 = try #require(rt.element(byKey: "row1")).rect[1]
+        #expect(abs(settledR1 - r0[1]) < 0.5)
+        _ = rt.keyDown(KeyEvent(key: .escape), at: t + 0.005)
+        step()
+        #expect(rt.state.reorder.dragging() == nil && rt.state.order == [0, 1, 2, 3, 4])
+        for _ in 0..<60 { step() }
+        let restoredR0 = try #require(rt.element(byKey: "row0")).rect[1]
+        #expect(abs(restoredR0 - r0[1]) < 0.5)
+        rt.pointerUp(at: Vec2(rx, ry), at: t + 0.005)
+
+        rt.pointerMove(to: Vec2(rx, ry), at: t + 0.01)
+        rt.pointerDown(at: Vec2(rx, ry), at: t + 0.015)
+        rt.pointerMove(to: Vec2(rx, ry + 2 * pitch), at: t + 0.02)
+        step()
+        rt.pointerUp(at: Vec2(rx, ry + 2 * pitch), at: t + 0.025)
+        step()
+        #expect(rt.state.order == [1, 2, 0, 3, 4])
+        for _ in 0..<60 { step() }
+        let droppedR0 = try #require(rt.element(byKey: "row0")).rect[1]
+        #expect(abs(droppedR0 - r2[1]) < 0.5)
+        #expect(rt.state.picked == 0)
+    }
+
+    @Test("Page matches SplitView toolbar and frame pixel for pixel (`tests/shell.rs:578`)")
+    func pageMatchesSplitViewToolbarAndFramePixelForPixel() throws {
+        struct P {
+            var page = false
+            var sidebar = PaneState(width: 240).collapsed()
+            var backs = 0
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: P(), viewport: Vec2(960, 600), pixelScale: 2.0, systemDark: true) { s, cx -> El<P> in
+            let lead: El<P> = el().key("lead").size(24, 24).role(.button).focusable(true).onClick { st, _ in st.backs += 1 }
+            let trail: El<P> = el().key("trail").size(24, 24).role(.button).focusable(true)
+            let body: El<P> = col().key("content").sizeFull()
+            if s.page {
+                return Page<P>(key: "pg", content: body)
+                    .title("Settings")
+                    .leading(lead)
+                    .trailing(trail)
+                    .titlebarInset(cx.chromeInsets().leading)
+                    .frameInset(8)
+                    .toolbarInPanel(true)
+                    .build(kit)
+            } else {
+                return SplitView<P>(key: "sv") { _ in body }
+                    .sidebar(\.sidebar, current: s.sidebar) { _ in col() }
+                    .hideSidebarToggle()
+                    .toolbar(Toolbar<P>(key: "tb", title: "Settings").leading(lead).trailing(trail))
+                    .titlebarInset(cx.chromeInsets())
+                    .frameInset(8)
+                    .toolbarInPanel(true)
+                    .build(s, kit: kit)
+            }
+        }
+        rt.setTitlebarInset(78)
+        rt.frame(at: 0.0)
+
+        func rectIn(_ key: String) throws -> [Float] {
+            try #require(rt.elements().first { !$0.exiting && $0.key == key }).rect
+        }
+        let splitLead = try rectIn("lead")
+        let splitTrail = try rectIn("trail")
+        let splitToolbar = try rectIn("tb")
+        let splitPane = try rectIn("sv-panel")
+
+        rt.update { st, _ in st.page = true }
+        rt.frame(at: 1.0 / 60.0)
+        #expect(try rectIn("pg-toolbar") == splitToolbar)
+        #expect(try rectIn("lead") == splitLead)
+        #expect(try rectIn("trail") == splitTrail)
+        #expect(try rectIn("pg-main-pane") == splitPane)
+
+        let titleEl = try #require(rt.elements().first { $0.text == "Settings" }).rect
+        let tx = titleEl[0] + titleEl[2] * 0.5
+        let ty = titleEl[1] + titleEl[3] * 0.5
+        rt.pointerDown(at: Vec2(tx, ty), at: 0.1)
+        #expect(rt.takeTitlebarAction() == .drag)
+        rt.pointerUp(at: Vec2(tx, ty), at: 0.11)
+
+        let lr = try rectIn("lead")
+        let lx = lr[0] + lr[2] * 0.5
+        let ly = lr[1] + lr[3] * 0.5
+        rt.pointerDown(at: Vec2(lx, ly), at: 0.12)
+        #expect(rt.takeTitlebarAction() == nil)
+        rt.pointerUp(at: Vec2(lx, ly), at: 0.13)
+        rt.frame(at: 0.14)
+        #expect(rt.state.backs == 1)
+    }
+
+    @Test("Dragged reorder row whose release is lost lets go and next press drags its own row (`tests/reorder.rs:63`)")
+    func aRowWhoseReleaseIsLostLetsGoAndNextPressDragsItsOwnRow() throws {
+        struct R {
+            var ids = [0, 1, 2, 3, 4]
+            var reorder = Reorder<Int>()
+            var dropped: [(Int, Int)] = []
+        }
+        let kit = Kit.neutral(dark: true)
+        let rt = Runtime(state: R(), viewport: Vec2(200, 200), systemDark: true) { s, _ -> El<R> in
+            col().w(200).children(
+                s.ids.enumerated().map { idx, id in
+                    SidebarRow<R>(key: "row-\(id)", title: "Row \(id)")
+                        .height(30)
+                        .reorder(\R.reorder, id: id, index: idx, count: s.ids.count) { st, from, to in
+                            st.dropped.append((from, to))
+                        }
+                        .reorderState(s.reorder, id: id, index: idx)
+                        .build(kit)
+                }
+            )
+        }
+        var t = 0.0
+        func step(_ dt: Double = 1.0 / 60.0) { t += dt; rt.frame(at: t) }
+        rt.frame(at: 0.0)
+
+        let r1 = try #require(rt.element(byKey: "row-1")).rect
+        let x1 = r1[0] + r1[2] * 0.5
+        let y1 = r1[1] + r1[3] * 0.5
+        rt.pointerMove(to: Vec2(x1, y1), at: t + 0.005)
+        rt.pointerDown(at: Vec2(x1, y1), at: t + 0.01)
+        rt.pointerMove(to: Vec2(x1, y1 + 60), at: t + 0.015)
+        step()
+        #expect(rt.state.reorder.dragging() == 1)
+
+        // Dragged row vanishes mid-drag so release never reaches it
+        rt.update { st, _ in st.ids.removeAll { $0 == 1 } }
+        step()
+        rt.pointerUp(at: Vec2(x1, y1 + 60), at: t + 0.005)
+        step()
+        rt.pointerMove(to: Vec2(x1, 10), at: t + 0.005)
+        rt.pointerMove(to: Vec2(x1, 20), at: t + 0.01)
+        step()
+        #expect(rt.state.reorder.dragging() == nil)
+
+        // Row 3 (now index 2) drags down one place
+        for _ in 0..<60 { step() }
+        let r3 = try #require(rt.element(byKey: "row-3")).rect
+        let x3 = r3[0] + r3[2] * 0.5
+        let y3 = r3[1] + r3[3] * 0.5
+        rt.pointerMove(to: Vec2(x3, y3), at: t + 0.005)
+        rt.pointerDown(at: Vec2(x3, y3), at: t + 0.01)
+        rt.pointerMove(to: Vec2(x3, y3 + 30), at: t + 0.015)
+        rt.pointerUp(at: Vec2(x3, y3 + 30), at: t + 0.02)
+        step()
+        #expect(rt.state.dropped.count == 1 && rt.state.dropped[0] == (2, 3))
     }
 }

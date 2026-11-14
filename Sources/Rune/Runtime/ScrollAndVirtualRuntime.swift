@@ -477,6 +477,216 @@ extension Runtime {
 
     // MARK: - GrowthStack & FoldGlide
 
+    internal func prepareGrowthStacksBeforeLayout(
+        in rootEl: El<State>,
+        cut: Bool,
+        snaps: Bool,
+        lands: Bool
+    ) -> El<State> {
+        let settleAll = cut || lands || reducedMotion
+        var activeStackPaths: Set<String> = []
+
+        @inline(never)
+        func walk(
+            _ el: El<State>,
+            parentPath: String,
+            siblingIndex: Int,
+            siblingKeysSeen: inout [String: Int]
+        ) -> El<State> {
+            let (seg, _) = layoutPathSegment(keyId: el.keyId, siblingIndex: siblingIndex, siblingKeysSeen: &siblingKeysSeen)
+            let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
+
+            var out = el
+            if let spec = el.growthSpec, el.virtualEstimate == nil, el.virtualRowsSource == nil {
+                activeStackPaths.insert(path)
+                out = mergeGrowthStackContainer(out, path: path, spec: spec, settleAll: settleAll, snaps: snaps)
+            }
+
+            if !out.children.isEmpty {
+                var childSeen: [String: Int] = [:]
+                var nextChildren: [El<State>] = []
+                nextChildren.reserveCapacity(out.children.count)
+                for idx in out.children.indices {
+                    nextChildren.append(walk(out.children[idx], parentPath: path, siblingIndex: idx, siblingKeysSeen: &childSeen))
+                }
+                out.children = nextChildren
+            }
+            return out
+        }
+
+        var rootSeen: [String: Int] = [:]
+        let result = walk(rootEl, parentPath: "", siblingIndex: 0, siblingKeysSeen: &rootSeen)
+        if !kitHooks.growthStacks.isEmpty {
+            kitHooks.growthStacks = kitHooks.growthStacks.filter { activeStackPaths.contains($0.key) }
+        }
+        return result
+    }
+
+    @inline(never)
+    private func mergeGrowthStackContainer(
+        _ el: El<State>,
+        path: String,
+        spec: GrowthSpec,
+        settleAll: Bool,
+        snaps: Bool
+    ) -> El<State> {
+        var out = el
+        let stackId = el.flightId.map { NodeId.hash("screen:@" + $0) } ?? NodeId.hash(path)
+        let replaced = kitHooks.unseenPresence.isFilterReplaced(containerId: stackId, newKeys: el.kitFilterKeysValue)
+        let prevStack = kitHooks.growthStacks[path]
+        let existed = (prevStack != nil) && !settleAll && !snaps && !el.hasInstantChanges
+        var nextStack = prevStack ?? KitGrowthStackState()
+        nextStack.isNewStack = (prevStack == nil)
+        nextStack.spacerPaths.removeAll(keepingCapacity: true)
+
+        var newChildSegs: [String] = []
+        var childSeen: [String: Int] = [:]
+        for (cIdx, child) in out.children.enumerated() {
+            let (cSeg, _) = layoutPathSegment(keyId: child.keyId, siblingIndex: cIdx, siblingKeysSeen: &childSeen)
+            let isSpacer = (child.keyId == "__v_top_spacer" || child.keyId == "__v_bot_spacer") || child.isKitVirtualSpacer
+            if !isSpacer {
+                newChildSegs.append(cSeg)
+            }
+        }
+
+        if existed, let prev = prevStack {
+            let newSet = Set(newChildSegs)
+            var mergedOrder: [String] = []
+            var nextClosing: [String: RuntimeGrowthClosingRow] = [:]
+            var ni = 0
+
+            for oldSeg in prev.order {
+                if newSet.contains(oldSeg) {
+                    while ni < newChildSegs.count && newChildSegs[ni] != oldSeg {
+                        if !mergedOrder.contains(newChildSegs[ni]) {
+                            mergedOrder.append(newChildSegs[ni])
+                        }
+                        ni += 1
+                    }
+                    if !mergedOrder.contains(oldSeg) {
+                        mergedOrder.append(oldSeg)
+                    }
+                    if let revived = prev.closing[oldSeg] {
+                        let revivedPath = "\(path)/\(oldSeg)"
+                        if growthRows["growth:\(revivedPath)"] == nil {
+                            growthRows["growth:\(revivedPath)"] = RuntimeGrowthEntry(
+                                track: revived.track,
+                                edge: revived.edge,
+                                spring: revived.spring,
+                                foldLimit: .infinity
+                            )
+                        }
+                    }
+                    ni += 1
+                } else if !replaced {
+                    let oldPath = "\(path)/\(oldSeg)"
+                    if let closing = prev.closing[oldSeg] {
+                        if closing.track.h > 0.01 && (scene.contains(closing.nodeId) || exitingSnapshots[closing.nodeId] != nil) {
+                            nextClosing[oldSeg] = closing
+                            mergedOrder.append(oldSeg)
+                        }
+                    } else if let fIdx = nodeByPath[oldPath] {
+                        let oldNode = flatNodes[fIdx]
+                        let oldNid = oldNode.nodeId
+                        let wasSeen = !kitHooks.unseenPresence.hasBuilt || (kitHooks.unseenPresence.frameSeenById[oldNid] ?? true)
+                        let existingEntry = growthRows["growth:\(oldPath)"]
+                        let startH = existingEntry?.track.h ?? oldNode.localRect.height
+                        if wasSeen && startH > 0.01 {
+                            var track = existingEntry?.track ?? GrowTrack.settled(startH)
+                            let rowSpring = existingEntry?.spring ?? spec.spring
+                            let rowEdge = existingEntry?.edge ?? spec.edge
+                            track.retarget(0.0)
+                            if kitHooks.frameGrowthStepDt > 0 {
+                                let steps = max(1, min(240, Int(floor(kitHooks.frameGrowthStepDt / Double(Growth.substep)))))
+                                for _ in 0..<steps {
+                                    track.step(spring: rowSpring, edge: rowEdge, carryingTail: false)
+                                }
+                            }
+                            nextClosing[oldSeg] = RuntimeGrowthClosingRow(
+                                segment: oldSeg,
+                                nodeId: oldNid,
+                                track: track,
+                                spring: rowSpring,
+                                edge: rowEdge,
+                                originalLocalRect: oldNode.localRect
+                            )
+                            mergedOrder.append(oldSeg)
+                        }
+                    }
+                }
+            }
+            if ni < newChildSegs.count {
+                for seg in newChildSegs[ni...] where !mergedOrder.contains(seg) {
+                    mergedOrder.append(seg)
+                }
+            }
+
+            if !nextClosing.isEmpty {
+                var realChildBySeg: [String: El<State>] = [:]
+                var preSpacers: [El<State>] = []
+                var postSpacers: [El<State>] = []
+                var sawReal = false
+                var rebuildSeen: [String: Int] = [:]
+                for (cIdx, child) in out.children.enumerated() {
+                    let (cSeg, _) = layoutPathSegment(keyId: child.keyId, siblingIndex: cIdx, siblingKeysSeen: &rebuildSeen)
+                    let isSpacer = (child.keyId == "__v_top_spacer" || child.keyId == "__v_bot_spacer") || child.isKitVirtualSpacer
+                    if isSpacer {
+                        if !sawReal { preSpacers.append(child) } else { postSpacers.append(child) }
+                    } else {
+                        sawReal = true
+                        realChildBySeg[cSeg] = child
+                    }
+                }
+
+                var mergedChildren: [El<State>] = preSpacers
+                for seg in mergedOrder {
+                    if let realChild = realChildBySeg[seg] {
+                        mergedChildren.append(realChild)
+                    } else if let closing = nextClosing[seg] {
+                        let spacerKey = "__growth_close_\(closing.nodeId.rawValue)"
+                        let spacerEl: El<State> = El<State>()
+                            .key(spacerKey)
+                            .wFull()
+                            .h(max(0, closing.track.h))
+                            .shrink(0.0)
+                            .kitVirtualSpacer()
+                        mergedChildren.append(spacerEl)
+                        nextStack.spacerPaths[closing.nodeId] = "\(path)/@\(spacerKey)"
+                    }
+                }
+                mergedChildren.append(contentsOf: postSpacers)
+                out.children = mergedChildren
+            }
+            nextStack.order = mergedOrder
+            nextStack.closing = nextClosing
+        } else {
+            nextStack.order = newChildSegs
+            nextStack.closing.removeAll()
+        }
+        kitHooks.growthStacks[path] = nextStack
+        return out
+    }
+
+    internal func syncClosingGrowthFrames(on scene: inout Scene) {
+        guard !kitHooks.growthStacks.isEmpty else { return }
+        for stack in kitHooks.growthStacks.values {
+            for closing in stack.closing.values {
+                guard let spacerPath = stack.spacerPaths[closing.nodeId],
+                      let spacerIdx = nodeByPath[spacerPath] else {
+                    continue
+                }
+                let spacerLocal = flatNodes[spacerIdx].localRect
+                let orig = closing.originalLocalRect
+                let shifted = MotionRect.fromXYWH(orig.x, spacerLocal.y, orig.width, orig.height)
+                if var snap = exitingSnapshots[closing.nodeId] {
+                    snap.localRect = shifted
+                    exitingSnapshots[closing.nodeId] = snap
+                }
+                scene.setFrame(closing.nodeId, shifted, .instant)
+            }
+        }
+    }
+
     internal func updateGrowthRowsPostLayout(
         rootResult: LayoutEngine.ResultNode,
         rootEl: El<State>,
@@ -547,7 +757,7 @@ extension Runtime {
                 growthStacks[path] = stack
             }
 
-            let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer")
+            let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer") || el.isKitVirtualSpacer
             if !isVirtualSpacer && (inGrowthSpec != nil || el.foldGlideSpec != nil) {
                 let gKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
                 seenGrowthKeys.insert(gKey)
@@ -590,6 +800,7 @@ extension Runtime {
                     }
                 }
 
+                let instantGrowth = settleAll || el.hasInstantChanges || (snaps && el.foldGlideSpec == nil && !streaming && !whole)
                 if var existing = growthRows[gKey] {
                     let prevTarget = existing.track.target
                     let prevH = existing.track.h
@@ -599,7 +810,7 @@ extension Runtime {
                     existing.foldLimit = limit
                     existing.naturalHeight = unlaggedH
                     existing.track.setKind(streaming: streaming, whole: whole, glide: glideArg)
-                    if settleAll || (snaps && el.foldGlideSpec == nil && !streaming && !whole) {
+                    if instantGrowth {
                         existing.track = existing.track.restarted(at: naturalH)
                         existing.contentSlide = nil
                         if let sp = parentStackPath {
@@ -656,15 +867,22 @@ extension Runtime {
                             req.scope == nil || req.scope == sp || req.scope.map { selectsElementSelector($0, path: sp, key: sKey) } == true
                         }
                     } ?? false
-                    let startsFromZero = !settleAll
+                    let stackExisted = (inGrowthSpec != nil) ? !(kitHooks.growthStacks[parentStackPath ?? ""]?.isNewStack ?? true) : (viewCommitCount > 1)
+                    let startsFromZero = !instantGrowth
                         && !revealedInCommit
-                        && viewCommitCount > 1
                         && (whole || streaming)
+                        && (stackExisted || (viewCommitCount > 1 && streaming))
                     var track: GrowTrack
                     if startsFromZero {
                         track = GrowTrack.settled(0)
                         track.setKind(streaming: streaming, whole: whole, glide: glideArg)
                         track.retarget(naturalH)
+                        if kitHooks.frameGrowthStepDt > 0 {
+                            let steps = max(1, min(240, Int(floor(kitHooks.frameGrowthStepDt / Double(Growth.substep)))))
+                            for _ in 0..<steps {
+                                track.step(spring: spring, edge: edge, carryingTail: false)
+                            }
+                        }
                         result.needsClampedRelayout = true
                         result.activeCount += 1
                     } else {
@@ -753,7 +971,7 @@ extension Runtime {
             let path = parentPath.isEmpty ? (el.keyId.map { "/@\($0)" } ?? "/0") : "\(parentPath)/\(seg)"
             var out = el
 
-            let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer")
+            let isVirtualSpacer = (el.keyId == "__v_top_spacer" || el.keyId == "__v_bot_spacer") || el.isKitVirtualSpacer
             if !isVirtualSpacer && (inGrowthSpec != nil || el.foldGlideSpec != nil) {
                 let gKey = el.foldGlideSpec != nil ? "fold:\(path)" : "growth:\(path)"
                 if let entry = growthRows[gKey] {
@@ -801,6 +1019,7 @@ extension Runtime {
         var flushedHold = false
         let prevNow = lastGrowthStepTime
         let hasDeferredAtEnd = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
+        let hasClosing = kitHooks.growthStacks.values.contains { !$0.closing.isEmpty }
         let dt = prevNow.map { max(0, min(0.1, now - $0)) } ?? (1.0 / 60.0)
         lastGrowthStepTime = now
 
@@ -818,7 +1037,7 @@ extension Runtime {
             }
         }
 
-        if growthRows.isEmpty && !hasDeferredAtEnd {
+        if growthRows.isEmpty && !hasDeferredAtEnd && !hasClosing {
             growthSubstepAccumulator = 0
             return false
         }
@@ -830,7 +1049,8 @@ extension Runtime {
                 pendingGrowthRelayout = true
             }
             let hasPending = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
-            return hasPending || growthRows.values.contains { $0.track.moving }
+            let closingMoving = kitHooks.growthStacks.values.contains { $0.closing.values.contains { $0.track.moving } }
+            return hasPending || growthRows.values.contains { $0.track.moving } || closingMoving
         }
 
         let stepSize = 1.0 / 240.0
@@ -881,6 +1101,31 @@ extension Runtime {
             }
         }
         flushReleasedHolds(at: now)
+        if hasClosing {
+            for (stackPath, var stack) in kitHooks.growthStacks where !stack.closing.isEmpty {
+                var finished: [String] = []
+                for (seg, var row) in stack.closing {
+                    let prevH = row.track.h
+                    for _ in 0..<substeps {
+                        row.track.step(spring: row.spring, edge: row.edge, carryingTail: false)
+                    }
+                    if abs(row.track.h - prevH) > 0.05 || !row.track.moving {
+                        anyChanged = true
+                    }
+                    if !row.track.moving && row.track.h <= 0.01 {
+                        finished.append(seg)
+                    } else {
+                        anyMoving = true
+                        stack.closing[seg] = row
+                    }
+                }
+                for seg in finished {
+                    stack.closing.removeValue(forKey: seg)
+                    stack.order.removeAll { $0 == seg }
+                }
+                kitHooks.growthStacks[stackPath] = stack
+            }
+        }
         let hasPendingHold = growthStacks.values.contains { !$0.pendingHeights.isEmpty }
         if anyChanged || flushedHold {
             needsCommit = true
@@ -1460,6 +1705,7 @@ extension Runtime {
                 scrollOffsets[path] = clamped
                 scrollGlidingPaths.remove(path)
                 frameInstantScrollKey = path
+                clearScrollHandGliding(path: path)
             }
             if maxExt.y > 0.5 && abs(clamped.y - maxExt.y) <= 1.0 {
                 wasPinnedToBottom.insert(path)
@@ -1473,6 +1719,7 @@ extension Runtime {
                 let path = flatNodes[i].path
                 let maxExt = scrollMaxExtents[path] ?? .zero
                 scrollRequestsState.stepNewTail(viewport: path, key: flatNodes[i].key ?? path)
+                clearScrollHandGliding(path: path)
                 applyScrollOffset(path: path, next: Vec2(scrollOffsets[path]?.x ?? 0, maxExt.y), glide: cut ? nil : MotionTokens.GLIDE)
             }
         }
@@ -1578,6 +1825,7 @@ extension Runtime {
                 to: destY
             )
             if case .move(let targetY) = eff {
+                clearScrollHandGliding(path: vPath)
                 applyScrollOffset(path: vPath, next: Vec2(cur.x, Float(targetY)), glide: (req.animated && !snaps) ? MotionTokens.GLIDE : nil)
             }
         }
@@ -1634,6 +1882,7 @@ extension Runtime {
                     from: Double(cur.y),
                     to: Double(maxExt.y)
                 )
+                clearScrollHandGliding(path: path)
                 applyScrollOffset(path: path, next: Vec2(cur.x, maxExt.y), glide: req.animated ? MotionTokens.GLIDE : nil)
             }
         }
@@ -1644,6 +1893,8 @@ extension Runtime {
                 let cur = scrollOffsets[path] ?? .zero
                 let vpH = scrollViewportSizes[path]?.y ?? flatNodes[vIdx].targetRect.height
                 let nextY = cur.y + Float(req.pages) * max(1, vpH * 0.9)
+                markScrollMovedByHand(path: path)
+                markScrollHandGliding(path: path)
                 applyScrollOffset(path: path, next: Vec2(cur.x, nextY), glide: MotionTokens.GLIDE)
             }
         }
@@ -1661,12 +1912,22 @@ extension Runtime {
                 let at = req.y ?? 0
                 let targetY = cur.y + (tRect.top - vpRect.top) - at
                 markScrollMovedByHand(path: vPath)
+                if req.glide != nil {
+                    markScrollHandGliding(path: vPath)
+                } else {
+                    clearScrollHandGliding(path: vPath)
+                }
                 applyScrollOffset(path: vPath, next: Vec2(cur.x, targetY), glide: req.glide)
             } else if let vIdx = findScrollNode(bySelector: req.key) {
                 let path = flatNodes[vIdx].path
                 let cur = scrollOffsets[path] ?? .zero
                 let next = Vec2(req.x ?? cur.x, req.y ?? cur.y)
                 markScrollMovedByHand(path: path)
+                if req.glide != nil {
+                    markScrollHandGliding(path: path)
+                } else {
+                    clearScrollHandGliding(path: path)
+                }
                 applyScrollOffset(path: path, next: next, glide: req.glide)
             }
         }
@@ -1724,26 +1985,47 @@ extension Runtime {
                 }
             }
 
-            dispatchScrollOffsetObserverIfChanged(for: node, at: now)
+            dispatchScrollOffsetObserverIfChanged(for: node, at: cxSettings.scaledTime(at: now), instant: currentCommitInstant)
         }
     }
 
-    internal func dispatchScrollOffsetObserverIfChanged(for node: FlatNode, at now: Double = 0.0) {
+    internal func dispatchScrollOffsetObserverIfChanged(
+        for node: FlatNode,
+        at now: Double = 0.0,
+        instant: Bool = false,
+        drawnOverride: Vec2? = nil
+    ) {
         guard node.el.handlers.onScrollOffset != nil || node.el.handlers.onScroll != nil else { return }
         let path = node.path
         let cur = scrollOffsets[path] ?? .zero
         let maxExt = scrollMaxExtents[path] ?? .zero
         let vp = scrollViewportSizes[path] ?? Vec2(node.targetRect.width, node.targetRect.height)
+        let drawn: Vec2
+        if let d = drawnOverride {
+            drawn = Vec2(
+                abs(d.x - vp.x) > 0.05 ? d.x : vp.x,
+                abs(d.y - vp.y) > 0.05 ? d.y : vp.y
+            )
+        } else if let pres = scene.presented(node.nodeId)?.rect {
+            drawn = Vec2(
+                abs(pres.width - vp.x) > 0.05 ? pres.width : vp.x,
+                abs(pres.height - vp.y) > 0.05 ? pres.height : vp.y
+            )
+        } else {
+            drawn = vp
+        }
         let pos = ScrollPos(
             offset: cur,
             max: maxExt,
             viewport: vp,
-            drawn: Vec2(node.targetRect.width, node.targetRect.height)
+            drawn: drawn,
+            direction: node.flow == .rtl ? .rtl : .ltr
         )
-        if lastScrollOffsetReports[path] != pos {
+        let isNewHandler = consumeNewScrollOffsetHandlerToken(path: path, token: node.el.handlers.onScrollOffsetToken)
+        if lastScrollOffsetReports[path] != pos || isNewHandler {
             lastScrollOffsetReports[path] = pos
             if let onScrollOffset = node.el.handlers.onScrollOffset {
-                dispatchScrollOffsetWithWatch(path: path, pos: pos, handler: onScrollOffset)
+                dispatchScrollOffsetWithWatch(path: path, pos: pos, instant: instant, now: now, handler: onScrollOffset)
             }
             if let onScroll = node.el.handlers.onScroll {
                 var tx = makeTx(at: now)
@@ -1754,6 +2036,12 @@ extension Runtime {
                 }
                 applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested, liveOnlyLabel: "onScroll")
             }
+        }
+    }
+
+    internal func tellScrollOffsetsAfterSceneFrame(at now: Double, instant: Bool) {
+        for node in flatNodes where !node.el.layout.scrollAxes.isEmpty && (node.el.handlers.onScrollOffset != nil || node.el.handlers.onScroll != nil) {
+            dispatchScrollOffsetObserverIfChanged(for: node, at: now, instant: instant)
         }
     }
 

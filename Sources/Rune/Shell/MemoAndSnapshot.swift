@@ -256,6 +256,7 @@ public enum MemoScope {
     nonisolated(unsafe) private static var lastWarnings: [String] = []
 
     static var activeCache: MemoCache? { current?.cache }
+    public static var activeCacheObject: AnyObject? { current?.cache }
     static var activeEnvHash: UInt64 { current?.envHash ?? currentEnvironmentHash() }
     static var isInsideMemo: Bool { !(current?.readFrames.isEmpty ?? true) }
 

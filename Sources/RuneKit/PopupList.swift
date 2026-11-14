@@ -392,7 +392,7 @@ public struct PopupList<State> {
         let beforeH = Float(safeStart) * rh
         let afterH = Float(max(0, itemList.count - end)) * rh
 
-        var rows: El<State> = col().key("\(key)-rows").wFull().shrink(0.0)
+        var rows: El<State> = col().key("\(key)-rows").wFull().shrink(0.0).kitFilterKeys(itemList.map(\.id))
         let extraActiveBefore = validActive.flatMap { $0 < safeStart ? $0 : nil }
         let extraActiveAfter = validActive.flatMap { $0 >= end ? $0 : nil }
 
@@ -418,6 +418,9 @@ public struct PopupList<State> {
                 .rounded(rowRadiusValue)
                 .transition(Transition.opacity)
                 .bg(isActive ? k.c.hover : .transparent)
+            if shouldAnimateFiltering {
+                itemRow = itemRow.animate(k.motion.overlay)
+            }
 
             if let desc = option.descriptionText {
                 itemRow = itemRow.description(desc)
@@ -452,21 +455,24 @@ public struct PopupList<State> {
                     .focusable(false)
                 }
             }
+            if shouldAnimateFiltering {
+                itemRow = itemRow.arrivesWhole()
+            }
             return itemRow
         }
 
         if let activeIdx = extraActiveBefore {
             let headH = Float(activeIdx) * rh
             if headH > 0 {
-                rows = rows.child(el().key("\(key)-before-head").wFull().h(headH).shrink(0.0))
+                rows = rows.child(el().key("\(key)-before-head").wFull().h(headH).shrink(0.0).kitVirtualSpacer())
             }
             rows = rows.child(makeItemRow(activeIdx))
             let midH = Float(max(0, safeStart - activeIdx - 1)) * rh
             if midH > 0 {
-                rows = rows.child(el().key("\(key)-before-tail").wFull().h(midH).shrink(0.0))
+                rows = rows.child(el().key("\(key)-before-tail").wFull().h(midH).shrink(0.0).kitVirtualSpacer())
             }
         } else if beforeH > 0 {
-            rows = rows.child(el().key("\(key)-before").wFull().h(beforeH).shrink(0.0))
+            rows = rows.child(el().key("\(key)-before").wFull().h(beforeH).shrink(0.0).kitVirtualSpacer())
         }
 
         for i in safeStart..<end {
@@ -476,15 +482,15 @@ public struct PopupList<State> {
         if let activeIdx = extraActiveAfter {
             let midH = Float(max(0, activeIdx - end)) * rh
             if midH > 0 {
-                rows = rows.child(el().key("\(key)-after-head").wFull().h(midH).shrink(0.0))
+                rows = rows.child(el().key("\(key)-after-head").wFull().h(midH).shrink(0.0).kitVirtualSpacer())
             }
             rows = rows.child(makeItemRow(activeIdx))
             let tailH = Float(max(0, itemList.count - activeIdx - 1)) * rh
             if tailH > 0 {
-                rows = rows.child(el().key("\(key)-after-tail").wFull().h(tailH).shrink(0.0))
+                rows = rows.child(el().key("\(key)-after-tail").wFull().h(tailH).shrink(0.0).kitVirtualSpacer())
             }
         } else if afterH > 0 {
-            rows = rows.child(el().key("\(key)-after").wFull().h(afterH).shrink(0.0))
+            rows = rows.child(el().key("\(key)-after").wFull().h(afterH).shrink(0.0).kitVirtualSpacer())
         }
 
         let isEmpty = itemList.isEmpty
@@ -493,16 +499,18 @@ public struct PopupList<State> {
             .role(.listbox)
             .wFull()
             .shrink(1.0)
-            .h(naturalVpH)
-            .minH(isEmpty ? 0.0 : rh)
             .clipSoft(0.0)
             .scrollY()
             .child(rows)
+        viewport = viewport.h(naturalVpH).minH(isEmpty ? 0.0 : rh)
+        if shouldAnimateFiltering {
+            viewport = viewport.animateLayout(MotionTokens.REFLOW)
+        }
         if let a11yLabel {
             viewport = viewport.label(a11yLabel)
         }
 
-        let emptyEl: El<State> = row()
+        var emptyEl: El<State> = row()
             .key("empty")
             .h(isEmpty ? rh : 0.0)
             .px(8.0)
@@ -510,6 +518,9 @@ public struct PopupList<State> {
             .clip(true)
             .opacity(isEmpty ? 1.0 : 0.0)
             .child(text(emptyText).font(k.ty.uiCompact).color(weakColor))
+        if shouldAnimateFiltering {
+            emptyEl = emptyEl.tokenMotion(k.motion.overlay)
+        }
 
         return col()
             .key("list")
@@ -534,23 +545,24 @@ public struct PopupList<State> {
             .p(paddingValue)
             .preserveFocusOnPress(true)
             .child(list)
-        if shouldAnimateFiltering {
-            content = content.animate(k.motion.overlay)
-        } else {
-            content = content.instantChanges()
+        if !shouldAnimateFiltering {
+            content = content.animate(k.motion.overlay).instantChanges()
         }
         let surface = PopoverAnchor.raised(k, content, radius: k.radius.md)
-        layer.append(
-            PopoverAnchor.anchored(
-                k,
-                surface,
-                anchor: anchorKey,
-                placement: placementValue,
-                gap: gutterValue,
-                window: cx?.viewport,
-                instant: !shouldAnimateFiltering
-            )
+        var anchoredOverlay = PopoverAnchor.anchored(
+            k,
+            surface,
+            anchor: anchorKey,
+            placement: placementValue,
+            gap: gutterValue,
+            window: cx?.viewport,
+            instant: !shouldAnimateFiltering,
+            animateLayout: shouldAnimateFiltering
         )
+        if shouldAnimateFiltering {
+            anchoredOverlay = anchoredOverlay.animateLayout(MotionTokens.REFLOW)
+        }
+        layer.append(anchoredOverlay)
     }
 
     private static func placement(side: Side, align: Align) -> Placement {

@@ -8,7 +8,7 @@ import Testing
 @Suite("ScrollBar Runtime Parity Tests")
 struct ScrollBarRuntimeParityTests {
 
-    private func makeView(_ rows: Int, onScroll: ((ScrollPos) -> Void)? = nil) -> El<Int> {
+    private nonisolated func makeView(_ rows: Int, onScroll: ((ScrollPos) -> Void)? = nil) -> El<Int> {
         let k = Kit.neutral(dark: true)
         var vp: El<Int> = col()
             .key("scroll")
@@ -200,10 +200,8 @@ struct ScrollBarRuntimeParityTests {
         rt.pointerUp(at: Vec2(195.0, 40.0), at: now)
     }
 
-    // 3c. crates/rune-kit/src/scroll_bar/tests.rs:108 (blocked part: 30-frame GLIDE settle exact equality)
-    @Test(
-        "Track press settles 30-frame GLIDE exact equality (scroll_bar/tests.rs:108)"
-    )
+    // 3c. crates/rune-kit/src/scroll_bar/tests.rs:108 (30-frame GLIDE settle exact equality)
+    @Test("Track press settles 30-frame GLIDE exact equality (scroll_bar/tests.rs:108)")
     func trackPressSettlesThirtyFrameGlide() throws {
         func press(jumps: Bool, option: Bool, hold: Int) throws -> Float {
             let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
@@ -306,6 +304,12 @@ struct ScrollBarRuntimeParityTests {
         rt.pointerUp(at: Vec2(100.0, 30.0), at: now)
         frames(rt, 30, now: &now)
         #expect(try rect(rt, "thumb")[2] == ScrollBarMetrics.thumbWidth)
+
+        rt.pointerMove(to: Vec2(195.0, 10.0), at: now)
+        frames(rt, 30, now: &now)
+        rt.pointerExit(at: now)
+        frames(rt, 30, now: &now)
+        #expect(try rect(rt, "thumb")[2] == ScrollBarMetrics.thumbWidth)
     }
 
     // 5b. crates/rune-kit/src/scroll_bar/tests.rs:320 (blocked no-view-run check)
@@ -375,10 +379,8 @@ struct ScrollBarRuntimeParityTests {
         #expect(runs.count == baseRuns)
     }
 
-    // 6b. crates/rune-kit/src/scroll_bar/tests.rs:390 (blocked exact bitwise Color == after OKLab liveFill)
-    @Test(
-        "Styled thumb exact fill equality (scroll_bar/tests.rs:390)"
-    )
+    // 6b. crates/rune-kit/src/scroll_bar/tests.rs:390 (exact bitwise Color == after OKLab liveFill)
+    @Test("Styled thumb exact fill equality (scroll_bar/tests.rs:390)")
     func styledThumbExactFill() throws {
         final class Runs: @unchecked Sendable { var count = 0 }
         let runs = Runs()
@@ -454,5 +456,511 @@ struct ScrollBarRuntimeParityTests {
         _ = rt.frame(at: 1.0 / 60.0)
         #expect(try rect(rt, "scroll-bar")[3] == 0.0)
         #expect(try rect(rt, "thumb")[3] == 0.0)
+    }
+
+    // 9. crates/rune-kit/src/scroll_bar/tests.rs:205
+    @Test("Live preference and pointing device changes update mounted scroll bars (scroll_bar/tests.rs:205)")
+    func livePreferenceAndPointingDeviceChangesUpdateMountedScrollBars() throws {
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            memo("pane", rows) {
+                let k = Kit.neutral(dark: true)
+                return col().size(200.0, 100.0).child(
+                    col()
+                        .key("memo-scroll")
+                        .w(200.0)
+                        .h(100.0)
+                        .scroll(stickBottom: false)
+                        .child(col().children((0..<rows).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                        .scrollBar(k)
+                )
+            }
+        }
+        var now = 0.0
+        _ = rt.frame(at: now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.setSystemScrollBars(.always)
+        frames(rt, 30, now: &now)
+        #expect(try opacity(rt, "thumb") == 1.0)
+
+        rt.setSystemScrollBars(.automatic)
+        rt.setSystemScrollerOverlay(true)
+        frames(rt, 45, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.setSystemScrollerOverlay(false)
+        frames(rt, 30, now: &now)
+        #expect(try opacity(rt, "thumb") == 1.0)
+    }
+
+    // 10. crates/rune-kit/src/scroll_bar/tests.rs:247
+    @Test("Scrolling and dragging the bar run zero view commits and chain existing watchers (scroll_bar/tests.rs:247)")
+    func scrollingAndDraggingRunZeroViewCommitsAndChainWatchers() throws {
+        var viewRuns = 0
+        var userOffset: Float = -1.0
+        let rt = Runtime(state: (), viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            viewRuns += 1
+            let k = Kit.neutral(dark: true)
+            return col()
+                .w(200.0)
+                .h(100.0)
+                .scroll(stickBottom: false)
+                .onScrollOffset { at in userOffset = at.offset.y }
+                .child(col().children((0..<30).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                .scrollBar(k)
+        }
+        rt.checkLiveOnly(false)
+        var now = 0.0
+        _ = rt.frame(at: now)
+        #expect(viewRuns == 1)
+        #expect(userOffset == 0.0)
+        let gen0 = rt.viewCommitCount
+
+        for step in 0..<20 {
+            rt.wheel(WheelEvent(dy: -10.0), at: Vec2(100.0, 50.0), now: now)
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+            #expect(userOffset == Float((step + 1) * 10))
+        }
+
+        let thumbR = try rect(rt, "thumb")
+        let x = thumbR[0] + 3.0
+        let y0 = thumbR[1] + 4.0
+        rt.pointerMove(to: Vec2(x, y0), at: now)
+        rt.pointerDown(at: Vec2(x, y0), at: now)
+        for dy: Float in [12.0, 24.0, 36.0] {
+            rt.pointerMove(to: Vec2(x, y0 + dy), at: now)
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+        }
+        frames(rt, 70, now: &now)
+        #expect(try opacity(rt, "thumb") > 0.99)
+        rt.pointerUp(at: Vec2(x, y0 + 36.0), at: now)
+        rt.pointerMove(to: Vec2(100.0, y0 + 36.0), at: now)
+        frames(rt, 90, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+        #expect(viewRuns == 1)
+        #expect(rt.viewCommitCount == gen0)
+    }
+
+    // 11. crates/rune-kit/src/scroll_bar/tests.rs:358
+    @Test("Held thumb whose release is lost narrows once pointer moves on (scroll_bar/tests.rs:358)")
+    func heldThumbWhoseReleaseIsLostNarrowsOncePointerMovesOn() throws {
+        let rt = Runtime(state: (20, true), viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { s, _ in
+            let k = Kit.neutral(dark: true)
+            let area: El<(Int, Bool)> = col()
+                .key("scroll")
+                .wFull()
+                .h(100.0)
+                .scroll(stickBottom: false)
+                .child(col().children((0..<s.0).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                .scrollBar(k)
+            return col().size(200.0, 100.0).children(s.1 ? [area] : [])
+        }
+        rt.setSystemScrollBars(.always)
+        var now = 0.0
+        _ = rt.frame(at: now)
+        frames(rt, 2, now: &now)
+        rt.pointerMove(to: Vec2(195.0, 10.0), at: now)
+        rt.pointerDown(at: Vec2(195.0, 10.0), at: now)
+        rt.pointerMove(to: Vec2(100.0, 30.0), at: now)
+        frames(rt, 30, now: &now)
+        #expect(try rect(rt, "thumb")[2] == ScrollBarMetrics.thumbHoverWidth)
+
+        rt.update(at: now) { s, _ in s.1 = false }
+        frames(rt, 2, now: &now)
+        rt.pointerUp(at: Vec2(100.0, 30.0), at: now)
+        rt.update(at: now) { s, _ in s.1 = true }
+        frames(rt, 30, now: &now)
+        rt.pointerMove(to: Vec2(110.0, 40.0), at: now)
+        rt.pointerMove(to: Vec2(120.0, 50.0), at: now)
+        frames(rt, 30, now: &now)
+        #expect(try rect(rt, "thumb")[2] == ScrollBarMetrics.thumbWidth)
+    }
+
+    // 12. crates/rune-kit/src/scroll_bar/tests.rs:430
+    @Test("Pointer at right edge brings up overlay bar (scroll_bar/tests.rs:430)")
+    func pointerAtRightEdgeBringsUpOverlayBar() throws {
+        var hoverRuns = 0
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            hoverRuns += 1
+            return makeView(rows)
+        }
+        rt.checkLiveOnly(false)
+        var now = 0.0
+        _ = rt.frame(at: now)
+        frames(rt, 2, now: &now)
+        let runs = hoverRuns
+        let generation = rt.viewCommitCount
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.pointerMove(to: Vec2(150.0, 50.0), at: now)
+        frames(rt, 20, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.pointerMove(to: Vec2(184.0, 50.0), at: now)
+        frames(rt, 20, now: &now)
+        #expect(try opacity(rt, "thumb") > 0.95)
+        #expect(try rect(rt, "thumb")[2] == ScrollBarMetrics.thumbWidth)
+        rt.wheel(WheelEvent(dy: -20.0), at: Vec2(100.0, 50.0), now: now)
+        frames(rt, 150, now: &now)
+        #expect(try opacity(rt, "thumb") > 0.99)
+
+        rt.pointerMove(to: Vec2(150.0, 50.0), at: now)
+        frames(rt, 20, now: &now)
+        #expect(try opacity(rt, "thumb") > 0.99)
+        frames(rt, 120, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.pointerMove(to: Vec2(196.0, 50.0), at: now)
+        frames(rt, 20, now: &now)
+        rt.pointerExit(at: now)
+        frames(rt, 150, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+        #expect(hoverRuns == runs)
+        #expect(rt.viewCommitCount == generation)
+    }
+
+    // 13. crates/rune-kit/src/scroll_bar/tests.rs:494
+    @Test("Still view stops asking for frames (scroll_bar/tests.rs:494)")
+    func stillViewStopsAskingForFrames() {
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            makeView(rows)
+        }
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 60, now: &now)
+        rt.wheel(WheelEvent(dy: -40.0), at: Vec2(100.0, 50.0), now: now)
+        frames(rt, 90, now: &now)
+        rt.invalidate()
+        frames(rt, 60, now: &now)
+        let wants = (0..<5).map { _ -> (Bool, Bool) in
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+            return (rt.isAnimating, rt.livePending)
+        }
+        #expect(wants.allSatisfy { !$0.0 && !$0.1 })
+    }
+
+    // 14. crates/rune-kit/src/scroll_bar/tests.rs:513
+    @Test("New content moves thumb at once (scroll_bar/tests.rs:513)")
+    func newContentMovesThumbAtOnce() throws {
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            makeView(rows)
+        }
+        rt.setSystemScrollBars(.always)
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 60, now: &now)
+        rt.update(at: now) { rows, tx in
+            rows = 40
+            tx.instant()
+        }
+        now += 1.0 / 120.0
+        _ = rt.frame(at: now)
+        let moving = rt.elements().filter(\.moving).map(\.key)
+        #expect(moving.isEmpty)
+        #expect(try rect(rt, "thumb")[3] == max(24.0, 96.0 * 100.0 / 800.0))
+    }
+
+    // 15. crates/rune-kit/src/scroll_bar/tests.rs:531
+    @Test("Thumb glides to new length without view run (scroll_bar/tests.rs:531)")
+    func thumbGlidesToNewLengthWithoutViewRun() throws {
+        var hoverRuns = 0
+        let rt = Runtime(state: 10, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            hoverRuns += 1
+            return makeView(rows)
+        }
+        rt.setSystemScrollBars(.always)
+        var now = 0.0
+        frames(rt, 30, now: &now)
+        #expect(try rect(rt, "thumb")[3] == 48.0)
+
+        rt.update(at: now) { rows, _ in rows = 20 }
+        frames(rt, 3, now: &now)
+        let runs = hoverRuns
+        let drawn = try rect(rt, "thumb")
+        let slot = try rect(rt, "thumb-slot")
+        #expect(24.0 < drawn[3] && drawn[3] < 48.0)
+        #expect(drawn[3] == slot[3])
+        #expect(try info(rt, "thumb").moving)
+
+        frames(rt, 60, now: &now)
+        #expect(try rect(rt, "thumb")[3] == 24.0)
+        #expect(hoverRuns == runs)
+
+        func thumbAt(_ rt: Runtime<Int>) throws -> Float {
+            let offset = try -top(rt)
+            return ScrollBarMetrics.inset + ScrollBarMath.thumbAlong(
+                ScrollAxisMetrics(offset: offset, content: 200.0, viewport: 100.0),
+                trackLength: 96.0
+            ).start
+        }
+
+        rt.update(at: now) { rows, _ in rows = 10 }
+        frames(rt, 3, now: &now)
+        rt.wheel(WheelEvent(dy: -40.0), at: Vec2(100.0, 50.0), now: now)
+        now += 1.0 / 60.0
+        _ = rt.frame(at: now)
+        let snapped = try rect(rt, "thumb")
+        let expectedThumbY = try thumbAt(rt)
+        #expect(abs(snapped[1] - expectedThumbY) < 0.01)
+        #expect(abs(snapped[3] - 48.0) < 1e-4)
+
+        frames(rt, 60, now: &now)
+        rt.wheel(WheelEvent(dy: -10.0), at: Vec2(100.0, 50.0), now: now)
+        for _ in 0..<30 {
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+            let yDrawn = try rect(rt, "thumb")[1]
+            let yShown = try thumbAt(rt)
+            #expect(abs(yDrawn - yShown) < 0.01)
+        }
+    }
+
+    // 16. crates/rune-kit/src/scroll_bar/tests.rs:564
+    @Test("Hidden overlay thumb lands new length at once (scroll_bar/tests.rs:564)")
+    func hiddenOverlayThumbLandsNewLengthAtOnce() throws {
+        let rt = Runtime(state: 10, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            makeView(rows)
+        }
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 30, now: &now)
+        #expect(try opacity(rt, "scroll-bar") == 0.0)
+        rt.update(at: now) { rows, _ in rows = 20 }
+        frames(rt, 2, now: &now)
+        #expect(try rect(rt, "thumb")[3] == 24.0)
+        #expect(try !info(rt, "thumb").moving && !info(rt, "thumb-slot").moving)
+    }
+
+    // 17. crates/rune-kit/src/scroll_bar/tests.rs:581
+    @Test("Pulse is due at hold and fade summed before now (scroll_bar/tests.rs:581)")
+    func pulseDueAtHoldAndFadeSummedBeforeNow() {
+        let hold = 0.750
+        func follow(
+            _ state: inout ScrollBarVisibilityMachine.BarState,
+            now: Double,
+            scrolled: Bool,
+            instant: Bool,
+            extentChanged: Bool
+        ) -> [ScrollBarVisibilityMachine.Effect] {
+            ScrollBarVisibilityMachine.step(
+                &state,
+                .follow(.init(
+                    shows: true,
+                    overlay: true,
+                    scrolled: scrolled,
+                    instant: instant,
+                    resized: false,
+                    lengthened: false,
+                    extentChanged: extentChanged,
+                    pressed: false,
+                    revealed: false,
+                    now: now,
+                    holdSeconds: hold
+                ))
+            )
+        }
+        var state: ScrollBarVisibilityMachine.BarState = .overlay(phase: .hidden, glide: .idle)
+        _ = follow(&state, now: 0.3, scrolled: true, instant: false, extentChanged: false)
+        #expect(state.pulseUntil == 1.4000000000000001)
+
+        let effects = follow(&state, now: 1.4, scrolled: false, instant: true, extentChanged: true)
+        #expect(effects.contains { effect in
+            if case .opacity(.pulse) = effect { return true }
+            return false
+        })
+
+        var held: ScrollBarVisibilityMachine.BarState = .overlay(phase: .held, glide: .idle)
+        _ = ScrollBarVisibilityMachine.step(
+            &held,
+            .letGo(pressed: false, revealed: false, areaReveals: false, now: 0.3, holdSeconds: hold)
+        )
+        #expect(held.pulseUntil == 1.4000000000000001)
+    }
+
+    // 18. crates/rune-kit/src/scroll_bar/tests.rs:620
+    @Test("New bar lands at once (scroll_bar/tests.rs:620)")
+    func newBarLandsAtOnce() throws {
+        let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            rows == 0 ? col().size(200.0, 100.0) : makeView(rows)
+        }
+        rt.setSystemScrollBars(.always)
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 60, now: &now)
+        rt.update(at: now) { rows, tx in
+            rows = 40
+            tx.instant()
+        }
+        now += 1.0 / 120.0
+        _ = rt.frame(at: now)
+        let moving = rt.elements().filter(\.moving).map(\.key)
+        #expect(moving.isEmpty)
+        #expect(try rect(rt, "thumb")[3] == 24.0)
+    }
+
+    // 19. crates/rune-kit/src/scroll_bar/tests.rs:641
+    @Test("Following the end and gliding to it don't show overlay bar (scroll_bar/tests.rs:641)")
+    func followingEndAndGlidingToItDontShowOverlayBar() throws {
+        let rt = Runtime(state: 20, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+            let k = Kit.neutral(dark: true)
+            return col().size(200.0, 100.0).child(
+                col()
+                    .key("feed")
+                    .wFull()
+                    .h(100.0)
+                    .scroll(stickBottom: true)
+                    .child(col().children((0..<rows).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                    .scrollBar(k)
+            )
+        }
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 60, now: &now)
+        for _ in 0..<30 {
+            rt.update(at: now) { rows, _ in rows += 1 }
+            for _ in 0..<4 {
+                now += 1.0 / 60.0
+                _ = rt.frame(at: now)
+                #expect(try opacity(rt, "thumb") == 0.0)
+            }
+        }
+        rt.wheel(WheelEvent(dy: 400.0), at: Vec2(100.0, 50.0), now: now)
+        frames(rt, 150, now: &now)
+        #expect(try opacity(rt, "thumb") == 0.0)
+
+        rt.update(at: now) { _, tx in tx.scrollToBottom("feed") }
+        for _ in 0..<90 {
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+            #expect(try opacity(rt, "thumb") == 0.0)
+        }
+        rt.update(at: now) { _, tx in tx.scrollPage("feed", -1) }
+        frames(rt, 20, now: &now)
+        #expect(try opacity(rt, "thumb") > 0.95)
+    }
+
+    // 20. crates/rune-kit/src/scroll_bar/tests.rs:701
+    @Test("ScrollBar motion gate (scroll_bar/tests.rs:701)")
+    func scrollBarMotionGate() throws {
+        let cells = MotionGateGate.run([
+            (
+                "scroll-bar/when-scrolling-pulse-and-preference-switch",
+                {
+                    let rt = Runtime(state: 24, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+                        makeView(rows)
+                    }
+                    let r = MotionGateRun(rt, hz: 120.0)
+                    r.idle(0.3)
+                    for _ in 0..<12 {
+                        r.act("wheel") { rt in rt.wheel(WheelEvent(dy: -12.0), at: Vec2(100.0, 50.0), now: rt.currentTime) }
+                    }
+                    r.play(1.6)
+                    r.act("always") { rt in rt.setSystemScrollBars(.always) }
+                    r.play(0.6)
+                    r.act("when-scrolling") { rt in rt.setSystemScrollBars(.whenScrolling) }
+                    r.play(1.2)
+                    return r.rec
+                }
+            ),
+            (
+                "scroll-bar/hover-widen-and-edge-reveal",
+                {
+                    let rt = Runtime(state: 24, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+                        makeView(rows)
+                    }
+                    let r = MotionGateRun(rt, hz: 120.0)
+                    r.idle(0.3)
+                    r.act("near-edge") { rt in rt.pointerMove(to: Vec2(184.0, 50.0), at: rt.currentTime) }
+                    r.play(0.5)
+                    r.act("over-bar") { rt in rt.pointerMove(to: Vec2(195.0, 10.0), at: rt.currentTime) }
+                    r.play(0.4)
+                    r.act("off-bar") { rt in rt.pointerMove(to: Vec2(170.0, 10.0), at: rt.currentTime) }
+                    r.play(0.4)
+                    r.act("away") { rt in rt.pointerMove(to: Vec2(100.0, 50.0), at: rt.currentTime) }
+                    r.play(1.6)
+                    r.act("always") { rt in rt.setSystemScrollBars(.always) }
+                    r.play(0.4)
+                    r.act("over-always") { rt in rt.pointerMove(to: Vec2(195.0, 10.0), at: rt.currentTime) }
+                    r.play(0.4)
+                    r.act("away-always") { rt in rt.pointerMove(to: Vec2(100.0, 50.0), at: rt.currentTime) }
+                    r.play(0.4)
+                    return r.rec
+                }
+            ),
+            (
+                "scroll-bar/length-glide",
+                {
+                    let rt = Runtime(state: 10, viewport: Vec2(200, 100), pixelScale: 1.0, systemDark: true) { rows, _ in
+                        makeView(rows)
+                    }
+                    rt.setSystemScrollBars(.always)
+                    let r = MotionGateRun(rt, hz: 120.0)
+                    r.idle(0.3)
+                    r.act("grow") { rt in rt.update(at: rt.currentTime) { rows, _ in rows = 20 } }
+                    r.play(0.6)
+                    r.act("shrink") { rt in rt.update(at: rt.currentTime) { rows, _ in rows = 12 } }
+                    r.play(0.6)
+                    return r.rec
+                }
+            ),
+        ])
+        let report = MotionGateGate.report(cells)
+        #expect(report.failing == 0, Comment(rawValue: report.text))
+    }
+
+    // 21. crates/rune-kit/src/scroll_bar/tests.rs:785
+    @Test("Bar follows viewport while its height animates (scroll_bar/tests.rs:785)")
+    func barFollowsViewportWhileHeightAnimates() throws {
+        var paneRuns = 0
+        let rt = Runtime(state: Float(40.0), viewport: Vec2(200, 200), pixelScale: 1.0, systemDark: true) { composer, _ in
+            paneRuns += 1
+            let k = Kit.neutral(dark: true)
+            return col()
+                .size(200.0, 200.0)
+                .child(
+                    col()
+                        .key("scroll")
+                        .wFull()
+                        .grow(1.0)
+                        .minH(0.0)
+                        .scroll(stickBottom: false)
+                        .animateLayout(MotionTokens.SETTLE)
+                        .child(col().children((0..<40).map { i in el().key("row\(i)").wFull().h(20.0) }))
+                        .scrollBar(k)
+                )
+                .child(el().key("composer").wFull().h(composer).animateLayout(MotionTokens.SETTLE))
+        }
+        rt.setSystemScrollBars(.always)
+        rt.setLiveWaker {}
+        var now = 0.0
+        frames(rt, 30, now: &now)
+        rt.wheel(WheelEvent(dy: -10_000.0), at: Vec2(100.0, 50.0), now: now)
+        frames(rt, 60, now: &now)
+        rt.update(at: now) { h, _ in h = 95.0 }
+        var runs = 0
+        var between = 0
+        for i in 0..<60 {
+            now += 1.0 / 60.0
+            _ = rt.frame(at: now)
+            if i == 0 {
+                runs = paneRuns
+            }
+            let vp = try rect(rt, "scroll")
+            let track = try rect(rt, "scroll-bar")
+            let thumb = try rect(rt, "thumb")
+            let bottom = vp[1] + vp[3]
+            #expect(abs(track[1] + track[3] - (bottom - ScrollBarMetrics.inset)) < 0.05)
+            #expect(thumb[1] + thumb[3] <= bottom - ScrollBarMetrics.inset + 0.05)
+            if 105.0 < vp[3] && vp[3] < 160.0 {
+                between += 1
+            }
+        }
+        #expect(between > 5)
+        frames(rt, 120, now: &now)
+        #expect(try rect(rt, "scroll-bar")[3] == 105.0 - 2.0 * ScrollBarMetrics.inset)
+        #expect(paneRuns == runs)
     }
 }
