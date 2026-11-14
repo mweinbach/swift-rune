@@ -236,6 +236,34 @@ extension Runtime {
         return false
     }
 
+    /// A wheel or trackpad scroll at window point (`ev.x`, `ev.y`), with its modifiers and phase
+    /// (`Runtime::wheel_event`, `runtime/input/gesture.rs:25`). The innermost `onWheel` handler
+    /// there hears it first, up to the nearest scroll view; what none takes scrolls as
+    /// `wheelXY` does.
+    public func wheelEvent(_ ev: WheelEvent, now: Double) {
+        dispatchLockedWheel(ev, at: Vec2(ev.x, ev.y), now: now)
+    }
+
+    /// A wheel or trackpad delta in points on both axes at window point (x, y), positive moving
+    /// content right and down (`Runtime::wheel_xy`, `runtime/scroll/x.rs`). The gesture's first
+    /// delta picks the axis and the rest keeps it; without phases a pause of 0.1 s ends a gesture.
+    /// An `onWheel` handler under the pointer hears it first.
+    public func wheelXY(_ x: Float, _ y: Float, _ dx: Float, _ dy: Float, now: Double) {
+        if dx == 0 && dy == 0 { return }
+        wheelEvent(WheelEvent(dx: dx, dy: dy, x: x, y: y), now: now)
+    }
+
+    /// The platform began a trackpad gesture (`Runtime::wheel_began`): its first delta picks the
+    /// axis afresh, unless it is the momentum of one that just ended.
+    public func wheelBegan(now: Double) {
+        inputMachines.wheelLock.began(at: now)
+    }
+
+    /// The platform ended a trackpad gesture (`Runtime::wheel_ended`).
+    public func wheelEnded(now: Double) {
+        inputMachines.wheelLock.ended(at: now)
+    }
+
     internal func dispatchLockedWheel(_ event: WheelEvent, at pos: Vec2?, now: Double) {
         releaseHoverHold()
         let targetPos = pos ?? pointerPosition
