@@ -2302,6 +2302,9 @@ public struct El<State> {
         looping(.cycle(c))
     }
 
+    /// A finite opacity/scale sequence on the shared render clock. The final pose holds;
+    /// reduced motion and explicit settle land it immediately. A new key replays it; dropping
+    /// the loop and putting it back carries on from where it was.
     public func sequence(_ frames: MotionSequence) -> Self {
         looping(.sequence(frames))
     }
