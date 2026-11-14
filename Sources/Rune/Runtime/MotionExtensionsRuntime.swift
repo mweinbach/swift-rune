@@ -97,10 +97,14 @@ internal extension Runtime {
 
     /// Earliest wall-clock deadline needed by any active painted `Cycle` frame interval OR delayed `LoopTrack`.
     func nextLoopWakeDeadline(after now: Double) -> Double? {
-        _ = now
         if reducedMotion || !liveVisible {
             return nil
         }
-        return activePaintedLoopWake
+        // The painted loop wake (`loop_wake`) is set by the last build; one at or before `now` is
+        // already due and is renewed by the next paint, so it is not a future deadline. Returning it
+        // would let `frameSplitImpl`'s catch-up loop spin at `now` without advancing (upstream
+        // `timer_step` always steps forward).
+        guard let wake = activePaintedLoopWake, wake > now else { return nil }
+        return wake
     }
 }

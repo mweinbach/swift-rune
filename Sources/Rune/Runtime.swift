@@ -6366,10 +6366,11 @@ public final class Runtime<State> {
             )
             let shouldEmit = logicalAlpha > 0.001 && alpha > 0.001 && visClip.width > 0 && visClip.height > 0 && onScreenForEmit
             let surfaceVisible = shouldEmit && visibleRect.width > 0 && visibleRect.height > 0
+            let geometricallyInView = isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
             unseenPresence.recordPaintedNode(
                 id: p.id,
-                inView: logicalAlpha >= (1.0 / 512.0)
-                    && isNodeInViewForUnseen(el: el, isActiveFlight: isActiveFlight, visibleRect: visibleRect)
+                inView: logicalAlpha >= (1.0 / 512.0) && geometricallyInView,
+                geometricallyInView: geometricallyInView
             )
             let drawnArr = Self.rotatedBoundsArray(rect, turn: effRotate)
             kitHooks.unseenPresence.recordFrameNode(

@@ -15,6 +15,9 @@ internal struct UnseenPresenceState: Sendable {
     var seenAncestorIds: Set<NodeId> = []
     var currentPaintSeenIds: Set<NodeId> = []
     var currentPaintUnseenIds: Set<NodeId> = []
+    /// Nodes painted outside the window/clip on the last frame (geometry only, ignoring opacity).
+    var currentPaintOffscreenIds: Set<NodeId> = []
+    var currentPaintOnscreenIds: Set<NodeId> = []
     var prevMountedIds: Set<NodeId> = []
     var prevNodesById: [NodeId: PrevNodeSnapshot] = [:]
     var prevChildrenByParent: [NodeId: [NodeId]] = [:]
@@ -22,14 +25,22 @@ internal struct UnseenPresenceState: Sendable {
     mutating func beginPaint() {
         currentPaintSeenIds.removeAll(keepingCapacity: true)
         currentPaintUnseenIds.removeAll(keepingCapacity: true)
+        currentPaintOffscreenIds.removeAll(keepingCapacity: true)
+        currentPaintOnscreenIds.removeAll(keepingCapacity: true)
     }
 
-    mutating func recordPaintedNode(id: NodeId, inView: Bool) {
+    mutating func recordPaintedNode(id: NodeId, inView: Bool, geometricallyInView: Bool? = nil) {
         if inView {
             currentPaintSeenIds.insert(id)
             currentPaintUnseenIds.remove(id)
         } else if !currentPaintSeenIds.contains(id) {
             currentPaintUnseenIds.insert(id)
+        }
+        if geometricallyInView ?? inView {
+            currentPaintOnscreenIds.insert(id)
+            currentPaintOffscreenIds.remove(id)
+        } else if !currentPaintOnscreenIds.contains(id) {
+            currentPaintOffscreenIds.insert(id)
         }
     }
 }
@@ -515,8 +526,10 @@ extension Runtime {
         }
         unseenPresence.seenAncestorIds = ancestors
 
+        // Entrances land only when they draw out of view (`land_unseen_entrances` checks geometry):
+        // an entrance still transparent at its start, or held by `enterDelay`, keeps animating.
         for p in frameNodes where !p.isExiting {
-            if unseenPresence.unseenIds.contains(p.id), scene.phase(p.id) == .entering {
+            if unseenPresence.currentPaintOffscreenIds.contains(p.id), scene.phase(p.id) == .entering {
                 scene.enterNow(p.id)
             }
         }
