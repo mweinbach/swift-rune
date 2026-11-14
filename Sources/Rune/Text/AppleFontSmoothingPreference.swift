@@ -22,7 +22,10 @@ public enum AppleFontSmoothingPreference {
         let cf = value as CFTypeRef
         let type = CFGetTypeID(cf)
         if type == CFNumberGetTypeID() {
-            return (cf as! NSNumber).int64Value
+            // `CFNumber::as_i64`: `CFNumberGetValue(…, SInt64Type)` reporting a lossy conversion
+            // (a fraction such as `-float 0.5`, or out of range) gives `None`.
+            var v: Int64 = 0
+            return CFNumberGetValue((cf as! CFNumber), .sInt64Type, &v) ? v : nil
         }
         if type == CFStringGetTypeID() {
             return Int64((cf as! String).trimmingCharacters(in: .whitespacesAndNewlines))
@@ -33,7 +36,10 @@ public enum AppleFontSmoothingPreference {
             return Int64(string.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         if let number = value as? NSNumber, !(value is Bool) {
-            return number.int64Value
+            // `CFNumber::as_i64`: only a lossless conversion to a 64-bit integer.
+            let d = number.doubleValue
+            if d.rounded(.towardZero) != d { return nil }
+            return Int64(exactly: d)
         }
         return nil
         #endif

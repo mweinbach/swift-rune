@@ -250,6 +250,52 @@ struct UpText2ParityTests {
         #expect(secondGlyphs.map(\.rect.y) == plainSecond.map(\.rect.y), "line 2 keeps its baseline (29)")
     }
 
+    @Test("#983: every run in a font of its own grows its line as Parley's does, in a monospace paragraph too")
+    func spanBoxesGrowLinesBeyondCode() throws {
+        #expect(DefaultFonts.registerIfNeeded())
+        let ts = TextSystem()
+        // `parley` probe: 13/16 text with a 16 px run (line FontSizeRelative(16/13)): layout 19.692308
+        // px at 1x (line box 0..20, baseline 15), 39.384617 px at 2x, for Plex Mono in a Plex Mono
+        // paragraph and for Inter in an Inter paragraph alike.
+        var mono = TextStyle(size: 13, weight: 400, lineHeight: 16)
+        mono.family = .monospace
+        let sans = TextStyle(size: 13, weight: 400, lineHeight: 16)
+        for (style, spans) in [
+            (mono, [TextSpan("a table cell with "), TextSpan("code", monospace: true, size: 16), TextSpan(" in it")]),
+            (sans, [TextSpan("a table cell with "), TextSpan("code", size: 16), TextSpan(" in it")]),
+        ] {
+            let text = spans.map(\.text).joined()
+            for (scale, heightPx) in [(Float(1), Float(19.692308)), (2, 39.384617)] {
+                let shaped = ts.shape(text: text, spans: spans, style: style, maxWidth: nil, pixelScale: scale, emitGlyphs: true)
+                let spec = (heightPx * 64).rounded() / 64
+                #expect(abs(shaped.size.y * scale - spec) < 1e-3, "\(style.family) \(scale)x: \(shaped.size.y * scale) px, want \(spec)")
+                #expect(abs(shaped.lineMetricHeightPt(0) * scale - heightPx) < 1e-3)
+                if scale == 1 { #expect(shaped.lineBoxHeightPt(0) == 20) }
+            }
+        }
+        // A smaller mono run in a monospace paragraph stays inside the strut (Parley: 16 at 1x).
+        let small = [TextSpan("a table cell with "), TextSpan("code", monospace: true, size: 11.7), TextSpan(" in it")]
+        let smallShaped = ts.shape(text: small.map(\.text).joined(), spans: small, style: mono, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        #expect(smallShaped.size.y == 16)
+        #expect(smallShaped.grownLineTopsPt.isEmpty)
+
+        // `mono_fits`: the smaller spaces padding inline code are cut to the strut, never growing it.
+        let style = sans
+        let padded = [TextSpan("say "), TextSpan("\u{202F}", size: 13 * 0.9), TextSpan("code", monospace: true), TextSpan("\u{202F}", size: 13 * 0.9), TextSpan(" now")]
+        let bare = [TextSpan("say \u{202F}"), TextSpan("code", monospace: true), TextSpan("\u{202F} now")]
+        let content = padded.map(\.text).joined()
+        let a = ts.shape(text: content, spans: padded, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        let b = ts.shape(text: content, spans: bare, style: style, maxWidth: nil, pixelScale: 1, emitGlyphs: true)
+        #expect(a.size.y == b.size.y && b.size.y == 17)
+
+        // `stream_height_lag` reads the last line's own height: 16.4 for 0.9-sized code at 1x.
+        let code = Self.codeSpans(13 * 0.9)
+        let sized = ts.shape(text: code.map(\.text).joined(), spans: code, style: sans, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
+        #expect(abs(sized.lineMetricHeightPt(sized.lineCount - 1) - 16.4) < 1e-4)
+        let plain = ts.shape(text: "plain", style: sans, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
+        #expect(plain.lineMetricHeightPt(0) == 16)
+    }
+
     @Test("#983: a span's background pad widens its chip on each side (Span::bg_pad), carried through RichSpan")
     func backgroundPad() throws {
         #expect(DefaultFonts.registerIfNeeded())
@@ -337,6 +383,12 @@ struct UpText2ParityTests {
         #expect(AppleFontSmoothingPreference.allows(value: kCFBooleanFalse))
         #expect(AppleFontSmoothingPreference.level(from: 0) == 0)
         #endif
+        // `CFNumber::as_i64` is lossless only: `-float 0.5` is `None`,
+        // so smoothing stays allowed; a whole float still reads as its integer.
+        #expect(AppleFontSmoothingPreference.level(from: NSNumber(value: 0.5)) == nil)
+        #expect(AppleFontSmoothingPreference.allows(value: NSNumber(value: 0.5)) == true)
+        #expect(AppleFontSmoothingPreference.level(from: NSNumber(value: 2.0)) == 2)
+        #expect(AppleFontSmoothingPreference.level(from: NSNumber(value: 0.0)) == 0)
         #if os(macOS)
         let raw = CFPreferencesCopyAppValue("AppleFontSmoothing" as CFString, kCFPreferencesCurrentApplication)
         #expect(AppleFontSmoothingPreference.smoothingAllowedByUser == AppleFontSmoothingPreference.allows(value: raw))

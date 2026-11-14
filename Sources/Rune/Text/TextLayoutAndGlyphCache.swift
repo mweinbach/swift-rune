@@ -122,7 +122,7 @@ internal final class TextPreparedShape: @unchecked Sendable {
     let spanPalette: [Color]
     let decoratedRanges: [TextSystem.DecoratedRange]
     /// Inline code runs whose boxes may grow their lines (`#983`).
-    let monoCodeBoxes: [TextSystem.MonoCodeBox]
+    let spanBoxes: [TextSystem.InlineSpanBox]
     #if canImport(CoreText) && canImport(CoreGraphics)
     let baseFont: CTFont
     let baseAscentPx: CGFloat
@@ -152,9 +152,9 @@ internal final class TextPreparedShape: @unchecked Sendable {
         baseDescentPx: CGFloat,
         attrStr: CFAttributedString,
         typesetter: CTTypesetter,
-        monoCodeBoxes: [TextSystem.MonoCodeBox] = []
+        spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
-        self.monoCodeBoxes = monoCodeBoxes
+        self.spanBoxes = spanBoxes
         self.authText = authText
         self.shapedText = shapedText
         self.style = style
@@ -184,9 +184,9 @@ internal final class TextPreparedShape: @unchecked Sendable {
         preparedPills: [TextSystem.PreparedPill],
         spanPalette: [Color],
         decoratedRanges: [TextSystem.DecoratedRange],
-        monoCodeBoxes: [TextSystem.MonoCodeBox] = []
+        spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
-        self.monoCodeBoxes = monoCodeBoxes
+        self.spanBoxes = spanBoxes
         self.authText = authText
         self.shapedText = shapedText
         self.style = style

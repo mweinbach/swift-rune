@@ -513,6 +513,15 @@ public struct ShapedText: @unchecked Sendable {
     /// Each grown layout line's box height in points (`block_max_coord - block_min_coord`).
     internal var grownLineHeightsPt: [Float] = []
 
+    /// Each grown layout line's `line_height` in points (unrounded `over + under`).
+    internal var grownLineMetricHeightsPt: [Float] = []
+
+    /// Line `i`'s `line.metrics().line_height` in points: its grown height when inline code grew
+    /// lines (`#983`), else `lineHeight` (`line_metrics::stream_height_lag` reads the last line's).
+    internal func lineMetricHeightPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineMetricHeightsPt.count) ? grownLineMetricHeightsPt[i] : lineHeight
+    }
+
     /// Line `i`'s box height in points, for carets and selections: its grown box's when inline
     /// code grew lines (`#983`), else `lineHeight`.
     internal func lineBoxHeightPt(_ i: Int) -> Float {
@@ -2054,10 +2063,11 @@ public final class TextSystem: @unchecked Sendable {
         var pad: Float = 0
     }
 
-    /// A monospace span over proportional text (inline code) whose quantized box may grow the
-    /// lines it sits on (`#983`, `inline_fit.rs`): its shaped range and its font's ascent and
-    /// descent in device px.
-    internal struct MonoCodeBox {
+    /// A span set in a font of its own (inline code, a run of another size) whose quantized box may
+    /// grow the lines it sits on, as Parley lays every run's box out (`#983`, `inline_fit.rs`): its
+    /// shaped range and its font's ascent and descent in device px. Weight and italic alone keep
+    /// the family's metrics (Parley synthesizes them from the same face), so they make no box.
+    internal struct InlineSpanBox {
         var u16Range: Range<Int>
         var ascentPx: Float
         var descentPx: Float
@@ -3995,7 +4005,11 @@ public final class TextSystem: @unchecked Sendable {
         let pillMarkerKey = "RunePillMarker" as CFString
         var spanPalette: [Color] = []
         var decoratedRanges: [DecoratedRange] = []
-        var monoCodeBoxes: [MonoCodeBox] = []
+        var spanBoxes: [InlineSpanBox] = []
+        // `inline_fit::mono_fits`: the smaller spaces that stand for inline code's CSS padding have
+        // no box in a browser, so theirs is cut to fit the strut (never growing the line); only for
+        // proportional text holding code (`mono_style` turns the strut cut off).
+        let cutsCodePadding = style.family != .monospace && (spans?.contains(where: { $0.monospace }) ?? false)
         var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
         if let spans {
             var authU16Cursor = 0
@@ -4015,8 +4029,13 @@ public final class TextSystem: @unchecked Sendable {
                         if let sz = span.size { subStyle.size = sz }
                         let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
                         CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
-                        if span.monospace && style.family != .monospace {
-                            monoCodeBoxes.append(MonoCodeBox(
+                        let isCodePadding = cutsCodePadding
+                            && !span.monospace
+                            && (span.size.map { $0 < style.size } ?? false)
+                            && !span.text.isEmpty
+                            && span.text.unicodeScalars.allSatisfy { CharacterSet.whitespacesAndNewlines.contains($0) }
+                        if (span.monospace || span.size != nil) && !isCodePadding {
+                            spanBoxes.append(InlineSpanBox(
                                 u16Range: sLo..<sHi,
                                 ascentPx: Float(CTFontGetAscent(subFont)),
                                 descentPx: Float(CTFontGetDescent(subFont)),
@@ -4139,7 +4158,7 @@ public final class TextSystem: @unchecked Sendable {
             baseDescentPx: baseDescentPx,
             attrStr: attrStr,
             typesetter: typesetter,
-            monoCodeBoxes: monoCodeBoxes
+            spanBoxes: spanBoxes
         )
     }
 
@@ -4451,15 +4470,17 @@ public final class TextSystem: @unchecked Sendable {
 
         // Inline code grows its line as Blink's does (`#983`, `inline_fit.rs`): each line's code
         // boxes past the strut's push its baseline down and the next lines with it.
-        let monoCodeBoxes = prepared.monoCodeBoxes
+        let spanBoxes = prepared.spanBoxes
         var lineGrowthPx: [(over: Float, under: Float)] = []
         var grownBoxes: [InlineCodeBox.LineBox] = []
+        var grownLineHeightsPx: [Float] = []
         var grownExtraPx: Float = 0
-        if !monoCodeBoxes.isEmpty {
+        let strutParleyOverPx = InlineCodeBox.quantizedBox(ascentPx: ascentPx, descentPx: descentPx, lineHeightPx: lhPx).over
+        if !spanBoxes.isEmpty {
             var anyGrown = false
             lineGrowthPx.reserveCapacity(visualLines.count)
             for item in visualLines {
-                let code = monoCodeBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float, lineHeightPx: Float)? in
+                let code = spanBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float, lineHeightPx: Float)? in
                     (b.u16Range.lowerBound < item.u16End && item.u16Start < b.u16Range.upperBound)
                         ? (b.ascentPx, b.descentPx, b.lineHeightPx) : nil
                 }
@@ -4473,6 +4494,7 @@ public final class TextSystem: @unchecked Sendable {
                 let boxes = InlineCodeBox.lineBoxes(growth: lineGrowthPx, lineHeightPx: lhPx)
                 grownBoxes = boxes.lines
                 grownExtraPx = boxes.heightPx - Float(visualLines.count) * lhPx
+                grownLineHeightsPx = boxes.lines.map(\.heightPx)
             } else {
                 lineGrowthPx = []
             }
@@ -4500,7 +4522,12 @@ public final class TextSystem: @unchecked Sendable {
             let lineStartGlyphIdx = glyphsOut.count
             let lineTopPx = lineIdx < grownBoxes.count ? grownBoxes[lineIdx].topPx : Float(lineIdx) * lhPx
             let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
-            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx + growOverPx).rounded()
+            let strutBaselinePx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
+            // A line a box grew above the strut sits its baseline at that box's reach (Parley's
+            // `top + over`), never above the strut's own baseline.
+            let baselineYPx = growOverPx > 0
+                ? max(strutBaselinePx, lineTopPx + strutParleyOverPx + growOverPx)
+                : strutBaselinePx
             let alignOffsetPx: Float
             switch style.align {
             case .leading:
@@ -4913,6 +4940,7 @@ public final class TextSystem: @unchecked Sendable {
         )
         shapedOut.grownLineTopsPt = grownBoxes.map { $0.topPx * invS }
         shapedOut.grownLineHeightsPt = grownBoxes.map { ($0.bottomPx - $0.topPx) * invS }
+        shapedOut.grownLineMetricHeightsPt = grownLineHeightsPx.map { $0 * invS }
         return shapedOut
     }
 
