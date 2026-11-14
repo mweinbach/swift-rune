@@ -29,6 +29,15 @@ public struct SelectedText: Equatable, Hashable, Sendable {
         self.content = content
     }
 
+    /// True when the selected byte slice is empty (`SelectedText::is_empty`).
+    public var isEmpty: Bool { range.isEmpty }
+
+    /// True when at least one byte is selected in this text (`SelectedText::is_selected`).
+    public var isSelected: Bool { !range.isEmpty }
+
+    /// True when every copiable byte of this text is covered (`SelectedText::is_whole`).
+    public var isWhole: Bool { whole }
+
     /// Builds a persistent `SelectionMark` for rendering custom CSS-like highlight boxes later.
     public func mark() -> SelectionMark {
         SelectionMark(path: path, range: range, text: text)

@@ -35,7 +35,13 @@ extension Runtime {
 
     // MARK: - Helpers
 
-    internal func makeTx(at now: Double, button: PointerButton = .primary) -> Tx {
+    internal func makeTx(
+        at now: Double,
+        button: PointerButton = .primary,
+        mods: Mods? = nil,
+        physicalKey: PhysicalKeyCode? = nil,
+        isRepeat: Bool = false
+    ) -> Tx {
         var tx = Tx()
         tx.clock = now
         if let sel = currentTextSelection() {
@@ -52,6 +58,12 @@ extension Runtime {
         tx.byKeysAtEvent = activeByKeys || kitHooks.isDispatchingByKeys
         tx.assistiveTechnologyActive = assistiveTechnology
         tx.eventInputTime = now
+        tx.mods = mods ?? inputMachines.currentMods
+        tx.physicalKeyCode = physicalKey
+        tx.isKeyRepeat = isRepeat
+        tx.focusedElementKey = focusedKey ?? focusedPath.flatMap { fp in
+            nodeByPath[fp].map { "#\($0)" }
+        }
         return tx
     }
 
@@ -258,11 +270,13 @@ extension Runtime {
                 || req.scope.map { selectsElementSelector($0, path: vpPath, key: vpScrollKey) } == true
         }
         var curOffsetY = scrollOffsets[vpPath]?.y ?? 0
+        let scrolledSinceCommit = vState.lastCommittedOffsetY.map { abs($0 - curOffsetY) > 0.25 } ?? false
         if stickyPin {
             curOffsetY = max(0, total - vpH)
             scrollOffsets[vpPath] = Vec2(scrollOffsets[vpPath]?.x ?? 0, curOffsetY)
             wasPinnedToBottom.insert(vpPath)
         } else if curOffsetY > 0.5,
+                  !scrolledSinceCommit,
                   let anchorKey = vState.lastAnchorKey,
                   !scrollRequestsState.owns(vpPath),
                   !directScrolledPaths.contains(vpPath),
@@ -311,6 +325,7 @@ extension Runtime {
         vState.wantsMoreFrames = wantedMore
         vState.missingOverscanRows = missing
         vState.isIndexed = isIndexed
+        vState.lastCommittedOffsetY = curOffsetY
         virtualLists[path] = vState
         if !isIndexed {
             PerfWarn.overbuilt(path: path, site: el.virtualizeSite, built: count, mounted: mounted.count)
@@ -1177,6 +1192,7 @@ extension Runtime {
                 let keepSet = Set(vState.lastKeys)
                 vState.pruneMeasurements(keeping: keepSet)
             }
+            vState.lastCommittedOffsetY = offsetY
             virtualLists[listPath] = vState
 
             if prevVis != vis,
@@ -1652,17 +1668,25 @@ extension Runtime {
     }
 
     internal func processScrollRequestsAndCallbacks(at now: Double, cut: Bool, followEdge: Bool, snaps: Bool = false) {
+        func nodeMatchesScope(_ idx: Int, scopeKey: String?) -> Bool {
+            guard let scopeKey else { return true }
+            var walk: Int? = idx
+            while let wi = walk {
+                if selectsElementSelector(scopeKey, path: flatNodes[wi].path, key: flatNodes[wi].key) {
+                    return true
+                }
+                walk = flatNodes[wi].parentIndex
+            }
+            return false
+        }
+
         func findScrollViewportIndex(forNode idx: Int, scopeKey: String?, verticalOnly: Bool = false) -> Int? {
             var cur = flatNodes[idx].parentIndex
             while let ci = cur {
                 let axes = flatNodes[ci].el.layout.scrollAxes
                 let matchesAxis = verticalOnly ? axes.contains(.vertical) : !axes.isEmpty
                 if matchesAxis {
-                    if let scopeKey {
-                        if selectsElementSelector(scopeKey, path: flatNodes[ci].path, key: flatNodes[ci].key) {
-                            return ci
-                        }
-                    } else {
+                    if nodeMatchesScope(ci, scopeKey: scopeKey) {
                         return ci
                     }
                 }
@@ -1748,7 +1772,10 @@ extension Runtime {
             let itemH: Double
             let itemTop: Double
 
-            if let tIdx = flatNodes.firstIndex(where: { selectsElementSelector(req.key, path: $0.path, key: $0.key) }),
+            if let tIdx = flatNodes.indices.first(where: {
+                nodeMatchesScope($0, scopeKey: req.scope)
+                    && selectsElementSelector(req.key, path: flatNodes[$0].path, key: flatNodes[$0].key)
+            }),
                let foundVIdx = findScrollViewportIndex(forNode: tIdx, scopeKey: req.scope) {
                 vIdx = foundVIdx
                 vPath = flatNodes[vIdx].path
@@ -1769,13 +1796,13 @@ extension Runtime {
                 itemTop = Double(hlHit.rect.y - vpRect.y) + Double(cur.y)
             } else {
                 var resolved: (vIdx: Int, itemTop: Double, itemH: Double, cur: Vec2)? = nil
-                for (listIdx, node) in flatNodes.enumerated() {
+                for (listIdx, node) in flatNodes.enumerated() where nodeMatchesScope(listIdx, scopeKey: req.scope) {
                     guard let vState = virtualLists[node.path],
                           let rowIdx = vState.lastKeys.firstIndex(where: {
                               $0 == req.key || selectsElementSelector(req.key, path: "\(node.path)/\($0)", key: $0)
                           }) else { continue }
                     let candidateVIdx: Int?
-                    if !node.el.layout.scrollAxes.isEmpty && (req.scope == nil || selectsElementSelector(req.scope!, path: node.path, key: node.key)) {
+                    if !node.el.layout.scrollAxes.isEmpty && nodeMatchesScope(listIdx, scopeKey: req.scope) {
                         candidateVIdx = listIdx
                     } else {
                         candidateVIdx = findScrollViewportIndex(forNode: listIdx, scopeKey: req.scope)

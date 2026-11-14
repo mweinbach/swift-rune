@@ -461,9 +461,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private var materialHost: RuneMaterialHost?
     private var restingGiveBackDone: Bool = false
     private let accessibilityHost = MacOSAccessibilityHost()
-    private lazy var textInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
+    private lazy var textInputBridge: MacOSTextInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
-        if self.runtime.dispatchImeEvent(imeEvent, at: self.nowSeconds()) {
+        if self.runtime.dispatchImeEvent(imeEvent, recordReleaseGuard: self.textInputBridge.isTrackingKeyEvent, at: self.nowSeconds()) {
             self.requestRender()
         }
     }

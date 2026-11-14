@@ -203,6 +203,7 @@ public final class MacOSTextInputBridge {
 
     public var isComposing: Bool { !markedString.isEmpty }
     public var currentMarkedText: String { markedString }
+    public var isTrackingKeyEvent: Bool { trackingKeyEvent }
 
     /// Publishes focused field context & screen-space caret rect to AppKit IME (`rune::platform::ime::sync`).
     public func sync(

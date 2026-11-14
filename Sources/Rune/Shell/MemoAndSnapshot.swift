@@ -59,11 +59,18 @@ public struct MemoElementGeometry: Sendable, Equatable {
     public var rect: MotionRect
     public var windowRect: MotionRect
     public var caretRect: MotionRect?
+    public var selectionBoxes: [[Float]]?
 
-    public init(rect: MotionRect, windowRect: MotionRect? = nil, caretRect: MotionRect? = nil) {
+    public init(
+        rect: MotionRect,
+        windowRect: MotionRect? = nil,
+        caretRect: MotionRect? = nil,
+        selectionBoxes: [[Float]]? = nil
+    ) {
         self.rect = rect
         self.windowRect = windowRect ?? rect
         self.caretRect = caretRect
+        self.selectionBoxes = selectionBoxes
     }
 }
 
@@ -75,6 +82,7 @@ public enum MemoRead: Sendable, Equatable {
     case windowLayoutWith(key: String, tag: UInt64, matchesRect: @Sendable (MotionRect?) -> Bool)
     case layoutSize(key: String, size: Vec2?)
     case caret(key: String, rect: MotionRect?)
+    case selectionRects(boxes: [[Float]])
     case tracked(cellId: UInt32, version: UInt64)
 
     public static func == (lhs: MemoRead, rhs: MemoRead) -> Bool {
@@ -85,6 +93,7 @@ public enum MemoRead: Sendable, Equatable {
         case let (.windowLayoutWith(k1, t1, _), .windowLayoutWith(k2, t2, _)): return k1 == k2 && t1 == t2
         case let (.layoutSize(k1, s1), .layoutSize(k2, s2)): return k1 == k2 && s1 == s2
         case let (.caret(k1, r1), .caret(k2, r2)): return k1 == k2 && r1 == r2
+        case let (.selectionRects(b1), .selectionRects(b2)): return b1 == b2
         case let (.tracked(c1, v1), .tracked(c2, v2)): return c1 == c2 && v1 == v2
         default: return false
         }
@@ -104,6 +113,9 @@ public enum MemoRead: Sendable, Equatable {
             return prev == geometry[key]?.rect.size
         case .caret(let key, let prev):
             return prev == geometry[key]?.caretRect
+        case .selectionRects(let boxes):
+            let next = geometry[MemoScope.selectionRectsKey]?.selectionBoxes ?? []
+            return !SelectionRectsMath.boxesMoved(boxes, next)
         case .tracked(let cellId, let recordedVer):
             return MemoTrackedBridge.version(for: cellId) == recordedVer
         }
@@ -131,6 +143,7 @@ public enum MemoRead: Sendable, Equatable {
         case let (.windowLayoutWith(k1, _, _), .windowLayoutWith(k2, _, _)): return k1 == k2
         case let (.layoutSize(k1, _), .layoutSize(k2, _)): return k1 == k2
         case let (.caret(k1, _), .caret(k2, _)): return k1 == k2
+        case (.selectionRects, .selectionRects): return true
         case let (.tracked(c1, _), .tracked(c2, _)): return c1 == c2
         default: return false
         }
@@ -456,6 +469,14 @@ public enum MemoScope {
         current?.record(.caret(key: key, rect: rect))
         return rect.map { [$0.left, $0.top, $0.width, $0.height] }
     }
+
+    static let selectionRectsKey = "\u{1}selection"
+
+    static func readSelectionRects(fallback: [[Float]]) -> [[Float]] {
+        let boxes = current?.geometry[selectionRectsKey]?.selectionBoxes ?? fallback
+        current?.record(.selectionRects(boxes: boxes))
+        return boxes
+    }
 }
 
 private final class UncheckedMotionPredicateBox: @unchecked Sendable {
@@ -515,12 +536,36 @@ public func caretRect(_ key: String) -> [Float]? {
     MemoScope.readCaret(key)
 }
 
+/// Active `El.selectable` line rects `[x, y, width, height]` inside a `memo` or view pass.
+public func selectionRects() -> [[Float]] {
+    MemoScope.readSelectionRects(fallback: [])
+}
+
 extension Cx {
     /// Last rendered `[x, y, width, height]` caret rect of text field `.key(key)`.
     public func caret(_ key: String) -> [Float]? {
         envState.reads.caretRead = true
         let scoped = MemoScope.readCaret(key)
         return caretRectForKey(envState.caret, key: key) ?? scoped
+    }
+
+    /// Line boxes `[x, y, width, height]` of the active `El.selectable` text selection in
+    /// post-scroll window points (`Cx::selection_rects`). Triggers re-evaluation when boxes appear,
+    /// disappear, or move by > 0.5 pt.
+    public func selectionRects() -> [[Float]] {
+        envState.reads.selectionRectsRead = true
+        let boxes = MemoScope.isInsideMemo
+            ? MemoScope.readSelectionRects(fallback: envState.selectionRects)
+            : envState.selectionRects
+        envState.reads.layoutReads.append(.selectionRects(boxes: boxes))
+        return boxes
+    }
+
+    /// Registers `SelectionMark` slices saved via `SelectedText.mark()` so custom highlight boxes
+    /// remain drawn after selection clears (`Cx::mark_texts`).
+    public mutating func markTexts(_ marks: [SelectionMark]) {
+        guard !marks.isEmpty else { return }
+        envState.markedTexts.append(contentsOf: marks)
     }
 }
 
