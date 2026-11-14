@@ -20,7 +20,9 @@ struct MarkdownPhase2ParityTests {
         return out
     }
 
-    @Test("#882: Streaming Markdown sets wrapGreedy only on the last block while settled earlier blocks allow pretty wrap")
+    // #941 (`d77610b5`) removed #882's `Flow.growing`: the last block of a source still streaming
+    // in no longer opts out of pretty wrap, so a streaming reply wraps prettily too, as Desktop's.
+    @Test("#882/#941: Streaming Markdown keeps pretty wrap on every block, the growing last block too")
     @MainActor
     func streamingLastBlockWrapGreedy() {
         defer { TextSystem.setPrettyWrap(false) }
@@ -44,7 +46,7 @@ struct MarkdownPhase2ParityTests {
         #expect(settledTexts.count == 2)
         if streamingTexts.count == 2 {
             #expect(streamingTexts[0].isWrapGreedy == false)
-            #expect(streamingTexts[1].isWrapGreedy == true)
+            #expect(streamingTexts[1].isWrapGreedy == false)
         }
         for el in settledTexts {
             #expect(el.isWrapGreedy == false)
