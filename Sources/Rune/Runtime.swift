@@ -1025,8 +1025,10 @@ public final class Runtime<State> {
         for nid in Array(exitingSnapshots.keys) where !liveIds.contains(nid) {
             guard var snap = exitingSnapshots[nid] else { continue }
             let prevInfo = lastSecureMaskInfo.removeValue(forKey: nid)
-            let edit = snap.el.handlers.editLens?.get(state)
-            let isSec = snap.el.isSecure || (edit?.isSecure == true) || prevInfo != nil
+            // An exiting node's edit accessor may point at state that no longer exists (a deleted
+            // row's `\.rows[i]`, `pointer_hit.rs:111`): never read it. Every live secure node recorded
+            // its mask in `lastSecureMaskInfo` on its last commit, so `prevInfo` covers `TextEdit.isSecure`.
+            let isSec = snap.el.isSecure || prevInfo != nil
             guard isSec else { continue }
             exitingTextLayouts.removeValue(forKey: nid)
             snap.el.isRevealed = false
@@ -1037,10 +1039,6 @@ public final class Runtime<State> {
                 snap.el.plainText = prevInfo.multiline
                     ? TextEdit.multilineSecureMask
                     : String(repeating: "•", count: prevInfo.count)
-            } else if let edit {
-                snap.el.plainText = edit.multiline
-                    ? TextEdit.multilineSecureMask
-                    : String(repeating: "•", count: edit.text.count)
             } else if let raw = snap.el.plainText {
                 snap.el.plainText = raw.isEmpty ? "" : TextEdit.multilineSecureMask
             } else {

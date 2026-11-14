@@ -1403,7 +1403,10 @@ struct ShellAndTabStripTests {
         #expect(rt.state.picked == 0)
         press(.text("c"))
         #expect(rt.state.picked == 2)
-        rt.update { s, _ in s.picked = 0 }
+        // Upstream `tests/shell.rs:210` sets `rt.state.picked = 0` without a commit: a routed key
+        // commits pending state first (`frame.rs` "Resolve the new tree before routing"), so an
+        // `update` here would move the selection (and focus) before Return.
+        rt.state.picked = 0
         press(.enter)
         #expect(rt.state.picked == 2)
 

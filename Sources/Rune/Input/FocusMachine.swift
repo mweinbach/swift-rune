@@ -314,9 +314,11 @@ extension Runtime {
             return true
         }
 
-        // 3. Popup/combobox trigger opens on unmodified Up/Down once per press (`focus.rs:1465`).
+        // 3. Popup/combobox trigger opens on unmodified Up/Down once per press (`focus.rs:647`: only
+        // `role == "combobox"` without an input; a disclosure such as a sidebar toggle merely reports
+        // `expanded` and must not toggle on arrows).
         if fNode.el.handlers.editLens == nil,
-           fNode.el.role == .combobox || fNode.el.a11yExpanded != nil,
+           fNode.el.role == .combobox,
            fNode.el.role != .slider,
            findFocusGroupAncestor(of: fIdx) == nil,
            ev.mods == .none,
