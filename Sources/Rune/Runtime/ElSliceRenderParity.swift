@@ -15,6 +15,38 @@ internal enum ElSliceRenderConstants {
     static let loopJitter: Double = 1.0 / 30.0
 }
 
+internal struct ElNodeCacheEntry {
+    var signature: UInt64
+    var rasterScale: Float
+    var scale: Float
+    var since: Double
+    var envScale: Float
+    var isLivePhase: Bool
+    var relBounds: SIMD4<Float>
+    var commitGen: UInt64
+    var paintHash: UInt64
+
+    @inline(__always)
+    static func stepScaleSettle(
+        seenScale: inout Float,
+        since: inout Double,
+        to newScale: Float,
+        now: Double,
+        reset: Bool,
+        poll: Bool
+    ) -> Bool {
+        let changed = !reset && abs(newScale - seenScale) > 1e-4
+        if reset {
+            seenScale = newScale
+            since = -.infinity
+        } else if changed {
+            seenScale = newScale
+            since = now
+        }
+        return poll && (now - since < ElSliceRenderConstants.staticScaleSettle)
+    }
+}
+
 internal struct ElScaleSettle {
     var stillScale: Float
     var scale: Float
@@ -95,6 +127,8 @@ internal struct ElLoopCatchUpClock {
 internal struct ElSliceRenderState {
     var groupFadeIds: Set<NodeId> = []
     var scaleSettles: [NodeId: ElScaleSettle] = [:]
+    var nodeCaches: [NodeId: ElNodeCacheEntry] = [:]
+    var cacheScaleFramePending: Bool = false
     var pressRestingHitByPath: [String: (rect: MotionRect, clip: MotionRect, turn: Float)] = [:]
     var loopCatchUp = ElLoopCatchUpClock()
     var loopOffsetSyncedIds: Set<NodeId> = []
@@ -318,14 +352,20 @@ internal extension Runtime {
     }
 
     func pruneScaleSettles() {
-        guard !elSliceRenderState.scaleSettles.isEmpty else { return }
-        elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
-            scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+        if !elSliceRenderState.scaleSettles.isEmpty {
+            elSliceRenderState.scaleSettles = elSliceRenderState.scaleSettles.filter {
+                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            }
+        }
+        if !elSliceRenderState.nodeCaches.isEmpty {
+            elSliceRenderState.nodeCaches = elSliceRenderState.nodeCaches.filter {
+                scene.contains($0.key) || nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil
+            }
         }
     }
 
     var hasMovingScaleSettle: Bool {
-        elSliceRenderState.scaleSettles.values.contains(where: \.moving)
+        elSliceRenderState.scaleSettles.values.contains(where: \.moving) || elSliceRenderState.cacheScaleFramePending
     }
 
     func recordPressRestingHit(path: String, rect: MotionRect, clip: MotionRect, turn: Float) {

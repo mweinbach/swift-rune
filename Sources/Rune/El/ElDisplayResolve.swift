@@ -128,6 +128,73 @@ internal enum ElDisplayResolver {
         return String(str[startIdx..<endIdx])
     }
 
+    private static func buildInputPills<State>(
+        el: El<State>,
+        specPills: [(Range<Int>, String)],
+        defaultPillBg: Color,
+        defaultPillFg: Color?
+    ) -> [PillChip] {
+        var pills: [PillChip] = []
+        pills.reserveCapacity(specPills.count)
+        for (pRange, pillId) in specPills {
+            let customStyle = el.pillStyleLookup?(pillId)
+            let resolvedBg: Color?
+            if let st = customStyle {
+                resolvedBg = (st.background == PillStyle.default.background) ? defaultPillBg : st.background
+            } else {
+                resolvedBg = defaultPillBg
+            }
+            let resolvedFg = customStyle?.color ?? defaultPillFg
+            let resolvedIcon = customStyle?.icon ?? el.pillIconLookup?(pillId).map { BareIcon($0, size: 12.0) }
+            let pillStyle = PillStyle(
+                background: resolvedBg,
+                ring: customStyle?.ring,
+                color: resolvedFg,
+                pad: customStyle?.pad ?? 4.0,
+                gap: customStyle?.gap ?? 4.0,
+                bold: customStyle?.bold ?? false,
+                italic: customStyle?.italic ?? false,
+                mono: customStyle?.mono ?? false,
+                icon: resolvedIcon
+            )
+            pills.append(PillChip(pRange, style: pillStyle, icon: resolvedIcon))
+        }
+        return pills
+    }
+
+    static func preResolveInputPills<State>(el: inout El<State>, edit inputEdit: TextEdit) {
+        var edit = inputEdit
+        if el.isSecure {
+            edit.isSecure = true
+            if el.isRevealed { edit.isRevealed = true }
+        }
+        let isSecureHidden = edit.isSecure && !edit.isRevealed
+        guard !isSecureHidden, edit.isRichEnabled else { return }
+        let richStyle = el.richStyleSpec ?? RichStyle()
+        var inputStyle = el.textStyle
+        inputStyle.maxLines = 0
+        let specs = edit.richDisplaySpecs(baseStyle: inputStyle, style: richStyle)
+        let specRanges = specs.pills.map(\.0)
+        if el.runtimeExtras["resolvedPillInputPills"] is [PillChip],
+           let cachedRanges = el.runtimeExtras["resolvedPillInputRanges"] as? [Range<Int>],
+           let cachedText = el.runtimeExtras["resolvedPillInputText"] as? String,
+           cachedText == specs.displayText && cachedRanges == specRanges {
+            return
+        }
+        let defaultPillBg = el.pillColorsSpec?.bg ?? richStyle.link.alpha(0.2)
+        let defaultPillFg = el.pillColorsSpec?.fg
+        let pills = buildInputPills(
+            el: el,
+            specPills: specs.pills,
+            defaultPillBg: defaultPillBg,
+            defaultPillFg: defaultPillFg
+        )
+        el.runtimeExtras["pillChips"] = pills
+        el.runtimeExtras["resolvedPillInputPills"] = pills
+        el.runtimeExtras["resolvedPillInputRanges"] = specRanges
+        el.runtimeExtras["resolvedPillInputText"] = specs.displayText
+    }
+
     static func resolveInput<State>(
         el: El<State>,
         edit inputEdit: TextEdit,
@@ -214,37 +281,28 @@ internal enum ElDisplayResolver {
                 combinedSpans.append(shifted)
             }
         }
-        var pills: [PillChip] = []
-        pills.reserveCapacity(specs.pills.count)
-
-        for (pRange, pillId) in specs.pills {
-            let customStyle = el.pillStyleLookup?(pillId)
-            let resolvedBg: Color?
-            if let st = customStyle {
-                resolvedBg = (st.background == PillStyle.default.background) ? defaultPillBg : st.background
-            } else {
-                resolvedBg = defaultPillBg
-            }
-            let resolvedFg = customStyle?.color ?? defaultPillFg
-            let resolvedIcon = customStyle?.icon ?? el.pillIconLookup?(pillId).map { BareIcon($0, size: 12.0) }
-            let pillStyle = PillStyle(
-                background: resolvedBg,
-                ring: customStyle?.ring,
-                color: resolvedFg,
-                pad: customStyle?.pad ?? 4.0,
-                gap: customStyle?.gap ?? 4.0,
-                bold: customStyle?.bold ?? false,
-                italic: customStyle?.italic ?? false,
-                mono: customStyle?.mono ?? false,
-                icon: resolvedIcon
+        let pills: [PillChip]
+        if let cachedPills = el.runtimeExtras["resolvedPillInputPills"] as? [PillChip],
+           let cachedRanges = el.runtimeExtras["resolvedPillInputRanges"] as? [Range<Int>],
+           let cachedText = el.runtimeExtras["resolvedPillInputText"] as? String,
+           cachedText == specs.displayText && cachedRanges == specs.pills.map(\.0) {
+            pills = cachedPills
+        } else {
+            pills = buildInputPills(
+                el: el,
+                specPills: specs.pills,
+                defaultPillBg: defaultPillBg,
+                defaultPillFg: defaultPillFg
             )
-            pills.append(PillChip(pRange, style: pillStyle, icon: resolvedIcon))
-            if resolvedFg != nil || pillStyle.bold || pillStyle.italic || pillStyle.mono {
-                var sp = RichSpan(pRange)
+        }
+        for pill in pills {
+            let resolvedFg = pill.style.color
+            if resolvedFg != nil || pill.style.bold || pill.style.italic || pill.style.mono {
+                var sp = RichSpan(pill.range)
                 if let fg = resolvedFg { sp = sp.color(fg) }
-                if pillStyle.bold { sp = sp.weight(700) }
-                if pillStyle.italic { sp = sp.italic(true) }
-                if pillStyle.mono { sp = sp.mono(true) }
+                if pill.style.bold { sp = sp.weight(700) }
+                if pill.style.italic { sp = sp.italic(true) }
+                if pill.style.mono { sp = sp.mono(true) }
                 combinedSpans.append(sp)
             }
         }

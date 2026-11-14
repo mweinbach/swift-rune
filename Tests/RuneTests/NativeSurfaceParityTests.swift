@@ -50,6 +50,59 @@ struct NativeSurfaceParityTests {
         surface.clear()
         #expect(surface.currentFrame() == nil)
         #expect(wakes.withLock { $0 } == 3)
+
+        #if os(macOS)
+        // Upstream `native_surface/mod.rs:455` (`latest_wins_and_releases_old_frames`):
+        // concurrent producer pushes 2..<100 while caller holds frame 1; dropping `held` & `clear()` release backing buffers.
+        let concSurface = NativeSurface()
+        var oldRef: CoreVideoPixelBuffer?
+        weak var weakOld: CoreVideoPixelBuffer?
+        do {
+            let initial = try CoreVideoPixelBuffer.fromBytes(ByteFrame.synthetic(width: 16, height: 16, index: 0))
+            weakOld = initial
+            try concSurface.push(initial, frameId: 1)
+        }
+        var held = concSurface.currentFrame()
+        #expect(held?.id == 1)
+        if case let .pixelBuffer(pb) = held?.source {
+            oldRef = pb
+        }
+        #expect(oldRef != nil)
+        oldRef = nil
+        #expect(weakOld != nil)
+
+        let group = DispatchGroup()
+        let pushError = Box<String?>(nil)
+        group.enter()
+        DispatchQueue.global().async {
+            defer { group.leave() }
+            for id: UInt64 in 2..<100 {
+                do {
+                    try concSurface.pushBytes(ByteFrame.synthetic(width: 16, height: 16, index: id), frameId: id)
+                } catch {
+                    pushError.withLock { $0 = "\(error)" }
+                    return
+                }
+            }
+        }
+        group.wait()
+        #expect(pushError.withLock { $0 } == nil)
+        #expect(concSurface.currentFrame()?.id == 99)
+        #expect(weakOld != nil)
+        held = nil
+        #expect(weakOld == nil)
+
+        weak var weakNewest: CoreVideoPixelBuffer?
+        do {
+            let newest = try CoreVideoPixelBuffer.fromBytes(ByteFrame.synthetic(width: 16, height: 16, index: 100))
+            weakNewest = newest
+            try concSurface.push(newest, frameId: 100)
+        }
+        #expect(weakNewest != nil)
+        concSurface.clear()
+        #expect(concSurface.currentFrame() == nil)
+        #expect(weakNewest == nil)
+        #endif
     }
 
     @Test("byte frame validates dimensions and plane byte counts")
@@ -101,17 +154,28 @@ struct NativeSurfaceParityTests {
     @Test("replaced waker and observer callbacks drop outside surface lock")
     func replacedCallbackDropsOutsideLock() {
         let surface = NativeSurface()
-        let first = DropNotifyingBox {
-            // Re-entering `surface.currentFrame()` inside old callback's deinit would deadlock if lock was held!
-            _ = surface.currentFrame()
+        let freed = Box<[Bool]>([])
+        do {
+            let first = DropNotifyingBox {
+                // Re-entering `surface.currentFrame()` inside old callback's deinit would deadlock if lock was held!
+                _ = surface.currentFrame()
+                freed.withLock { $0.append(true) }
+            }
+            surface.setWaker { _ = first }
         }
-        surface.setWaker { _ = first }
-        surface.setWaker(nil)
+        surface.setWaker {}
 
-        let obsBox = DropNotifyingBox {
-            _ = surface.isMirrored
+        do {
+            let obsBox = DropNotifyingBox {
+                let mirrored = surface.isMirrored
+                freed.withLock { $0.append(!mirrored) }
+            }
+            surface.setObserver { _ in _ = obsBox }
         }
-        surface.setObserver { _ in _ = obsBox }
+        surface.setObserver { _ in }
+
+        #expect(freed.withLock { $0 } == [true, true])
+        surface.setWaker(nil)
         surface.setObserver(nil)
     }
 
@@ -129,6 +193,17 @@ struct NativeSurfaceParityTests {
 
     @Test("surface place anchors and unscaled placement match upstream")
     func surfacePlaceRects() {
+        // `place_tests.rs:16` `centred_default_is_the_old_placement`
+        let c = SurfacePlace()
+        #expect(c == SurfacePlace.centered)
+        let stale: (UInt32, UInt32) = (100, 50)
+        #expect(c.imageRect(forNode: SIMD4<Float>(0, 0, 120, 50), imageSize: stale, fit: .fit) == SIMD4<Float>(10, 0, 100, 50))
+        let fillWide = c.imageRect(forNode: SIMD4<Float>(0, 0, 120, 50), imageSize: stale, fit: .fill)
+        #expect(abs(fillWide.x - 0) < 1e-3 && abs(fillWide.y - (-5)) < 1e-3 && abs(fillWide.z - 120) < 1e-3 && abs(fillWide.w - 60) < 1e-3)
+        #expect(c.imageRect(forNode: SIMD4<Float>(0, 0, 80, 60), imageSize: stale, fit: .fit) == SIMD4<Float>(0, 10, 80, 40))
+        let fillTall = c.imageRect(forNode: SIMD4<Float>(0, 0, 80, 60), imageSize: stale, fit: .fill)
+        #expect(abs(fillTall.x - (-20)) < 1e-3 && abs(fillTall.y - 0) < 1e-3 && abs(fillTall.z - 120) < 1e-3 && abs(fillTall.w - 60) < 1e-3)
+
         let topLeftUnscaled = SurfacePlace(anchor: (.start, .start), unscaled: true)
         let node = SIMD4<Float>(10, 20, 100, 80)
         let r = topLeftUnscaled.imageRect(forNode: node, imageSize: (32, 16), fit: .fill)
