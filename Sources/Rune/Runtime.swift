@@ -366,6 +366,7 @@ public final class Runtime<State> {
         var parentMoving: Bool = false
         var rectSpringing: Bool = false
         var clip: MotionRect? = nil
+        var inCache: Bool = false
     }
 
     private struct LiftedFlightSubtree {
@@ -6401,15 +6402,28 @@ public final class Runtime<State> {
                     }
 
                     // Text glyphs
+                    let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                    let inputRotated = (ancestorTurn != nil) || abs(useLayer ? 0 : effRotate) > 1e-4
+                    let inputShownY0 = (!inputRotated && !inputInCache) ? max(devInputClip.y, -filterMargin) : devInputClip.y
+                    let inputShownY1 = (!inputRotated && !inputInCache) ? min(devInputClip.y + devInputClip.w, Float(devH) + filterMargin) : (devInputClip.y + devInputClip.w)
+                    let inputBasePt = resolvedInput.style.lineHeight ?? resolvedInput.style.size
+                    let inputSpanPt = resolvedInput.spans?.compactMap(\.size).max() ?? 0
+                    let inputEmPt = max(max(resolvedInput.style.size, inputBasePt), inputSpanPt)
+                    let inputBandPad = 2.0 * inputEmPt * scaleVec.y * pxScale + 2.0 / max(1e-4, pxScale)
+                    let inputVisMinY = inputShownY0 - inputBandPad
+                    let inputVisMaxY = inputShownY1 + inputBandPad
                     for g in shaped.glyphs {
+                        let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                        let gh = g.rect.w * scaleVec.y * pxScale
+                        if !inputRotated && (gy + gh < inputVisMinY || gy > inputVisMaxY) { continue }
                         let gc = (g.color ?? textCol).scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
                         let primIdx = primitives.count
                         primitives.append(.glyph(
                             rect: SIMD4<Float>(
                                 (inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                (restOriginY + g.rect.y * scaleVec.y) * pxScale,
+                                gy,
                                 g.rect.z * scaleVec.x * pxScale,
-                                g.rect.w * scaleVec.y * pxScale
+                                gh
                             ),
                             uv: g.uv,
                             color: gc,
@@ -6657,7 +6671,20 @@ public final class Runtime<State> {
                                 now: revealClock
                             )
                             : nil
+                        let textInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                        let textRotated = (ancestorTurn != nil) || abs(useLayer ? 0 : effRotate) > 1e-4
+                        let textShownY0 = (!textRotated && !textInCache) ? max(glyphClip.y, -filterMargin) : glyphClip.y
+                        let textShownY1 = (!textRotated && !textInCache) ? min(glyphClip.y + glyphClip.w, Float(devH) + filterMargin) : (glyphClip.y + glyphClip.w)
+                        let textBasePt = resolvedText.style.lineHeight ?? resolvedText.style.size
+                        let textSpanPt = resolvedText.spans?.compactMap(\.size).max() ?? 0
+                        let textEmPt = max(max(resolvedText.style.size, textBasePt), textSpanPt)
+                        let textBandPad = 2.0 * textEmPt * scaleVec.y * pxScale + 2.0 / max(1e-4, textRasterScale * pxScale)
+                        let textVisMinY = textShownY0 - textBandPad
+                        let textVisMaxY = textShownY1 + textBandPad
                         for g in shaped.glyphs {
+                            let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                            let gh = g.rect.w * scaleVec.y * pxScale
+                            if !textRotated && (gy + gh < textVisMinY || gy > textVisMaxY) { continue }
                             let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
                             let effGlyphAlpha = glyphAlpha * wordAlpha
                             if effGlyphAlpha <= 0.0005 { continue }
@@ -6666,9 +6693,9 @@ public final class Runtime<State> {
                             var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
                                     (restOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                    (restOriginY + g.rect.y * scaleVec.y) * pxScale,
+                                    gy,
                                     g.rect.z * scaleVec.x * pxScale,
-                                    g.rect.w * scaleVec.y * pxScale
+                                    gh
                                 ),
                                 uv: g.uv,
                                 color: gc,
@@ -7090,6 +7117,7 @@ public final class Runtime<State> {
                 let childFullDelta = Vec2(inh.fullDelta.x + ownLiveOff.x + ownAnchorShift.x, inh.fullDelta.y + ownLiveOff.y + ownAnchorShift.y)
                 let childScaleMotion: PaintScaleMotion = (childFlightCover != nil) ? .moving : nodeScaleMotion
                 let childStillScale: Float = (childScaleMotion == .still) ? ((scaleVec.x + scaleVec.y) * 0.5) : inh.stillScale
+                let childInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
                 let childInh = PaintInh(
                     opacity: childAncestorOp,
                     scale: rawScaleVec,
@@ -7105,7 +7133,8 @@ public final class Runtime<State> {
                     parentTargetWidth: snap.targetRect.width,
                     parentMoving: nodeMoving,
                     rectSpringing: nodeRectSpringing,
-                    clip: childClip
+                    clip: childClip,
+                    inCache: childInCache
                 )
                 let sorted = sortByZOrder(children)
                 childSteps.reserveCapacity(sorted.count)

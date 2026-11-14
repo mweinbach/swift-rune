@@ -601,4 +601,9 @@ public enum IconSwapRegistry {
         let (resolved, _) = resolvedIcon(for: icon)
         return GlyphAtlas.rasterizeIconBitmap(resolved, pixelSize: max(1, pixelSize))
     }
+
+    public static func iconCoveragePlaced(icon: SVGIcon, pixelSize: Int, origin: SIMD2<Float>) -> [UInt8] {
+        let (resolved, _) = resolvedIcon(for: icon)
+        return GaneshIcon.coverageAt(resolved, pixelSize: max(1, pixelSize), origin: GPoint(x: origin.x, y: origin.y))
+    }
 }

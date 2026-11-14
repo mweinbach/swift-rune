@@ -1315,58 +1315,7 @@ public final class GlyphAtlas: @unchecked Sendable {
 
     public static func rasterizeIconBitmap(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil) -> [UInt8] {
         let px = max(1, pixelSize)
-        let drawn = min(Float(px), max(1e-4, drawnSize ?? Float(px)))
-        #if canImport(CoreGraphics)
-        var bitmap = Array<UInt8>(repeating: 0, count: px * px)
-        let graySpace = CGColorSpaceCreateDeviceGray()
-        if let ctx = CGContext(
-            data: &bitmap,
-            width: px,
-            height: px,
-            bitsPerComponent: 8,
-            bytesPerRow: px,
-            space: graySpace,
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) {
-            ctx.setAllowsAntialiasing(true)
-            ctx.setShouldAntialias(true)
-            // Flip Y so SVG top-left (0,0) maps to top of bitmap!
-            ctx.translateBy(x: 0, y: CGFloat(px))
-            let scale = CGFloat(drawn) / CGFloat(icon.viewBox)
-            ctx.scaleBy(x: scale, y: -scale)
-
-            for d in icon.paths {
-                let cgPath = Self.parseSVGPath(d)
-                ctx.addPath(cgPath)
-                if let sw = icon.strokeWidth, sw > 0 {
-                    ctx.setStrokeColor(gray: 1.0, alpha: 1.0)
-                    ctx.setLineWidth(CGFloat(sw))
-                    ctx.setLineCap(.round)
-                    ctx.setLineJoin(.round)
-                    ctx.strokePath()
-                } else {
-                    ctx.setFillColor(gray: 1.0, alpha: 1.0)
-                    ctx.fillPath()
-                }
-            }
-            if icon.paths.isEmpty, let body = icon.body {
-                SVGIconRenderer.drawMonochromeBody(body, in: ctx)
-            }
-        }
-        return bitmap
-        #else
-        let resolvedIcon: SVGIcon
-        if icon.paths.isEmpty, let body = icon.body {
-            resolvedIcon = SVGIcon(
-                viewBox: icon.viewBox,
-                paths: SVGIconRenderer.extractPathStrings(fromBody: body),
-                strokeWidth: icon.strokeWidth
-            )
-        } else {
-            resolvedIcon = icon
-        }
-        return PortableSVGRasterizer.rasterize(resolvedIcon, pixelSize: px, drawnSize: drawn)
-        #endif
+        return GaneshIcon.coverageAt(icon, pixelSize: px, drawnSize: drawnSize, origin: .zero)
     }
 
     public func rasterizeIconIfPlaced(_ icon: SVGIcon, pixelSize: Int, drawnSize: Float? = nil, mirrored: Bool = false) -> Entry? {
