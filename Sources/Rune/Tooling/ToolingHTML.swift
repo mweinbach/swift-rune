@@ -1064,7 +1064,7 @@ public extension Runtime {
         func takesPointer(_ el: El<State>, role: String) -> Bool {
             let h = el.handlers
             if h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil
-                || h.onSecondaryClick != nil || h.onPointerDown != nil || h.onDrag != nil
+                || h.onSecondaryClick != nil || h.onMiddlePress != nil || h.onPointerDown != nil || h.onDrag != nil
                 || h.editLens != nil || el.a11yHref != nil {
                 return true
             }

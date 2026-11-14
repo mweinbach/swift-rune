@@ -467,6 +467,14 @@ struct ShellAndTabStripTests {
 
         // Middle-clicking tab 'b' closes it
         let tabB = try #require(rt.element(byKey: "ts-tab-b")).rect
+        // Moving pointer outside before middle release does NOT close tab 'a' (.onMiddlePress semantics)
+        let tabA = try #require(rt.element(byKey: "ts-tab-a")).rect
+        rt.pointerDown(at: Vec2(tabA[0] + 12, tabA[1] + 12), button: .middle, at: 0.08)
+        rt.pointerMove(to: Vec2(460, 110), at: 0.085)
+        rt.pointerUp(at: Vec2(460, 110), button: .middle, at: 0.09)
+        rt.frame(at: 0.095)
+        #expect(rt.state.closed.isEmpty)
+
         rt.pointerDown(at: Vec2(tabB[0] + 12, tabB[1] + 12), button: .middle, at: 0.10)
         rt.pointerUp(at: Vec2(tabB[0] + 12, tabB[1] + 12), button: .middle, at: 0.11)
         rt.frame(at: 0.12)

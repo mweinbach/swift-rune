@@ -11,7 +11,7 @@ public enum RuneLuauModule {
         "opacity", "role", "label", "help",
         "gap", "align", "justify", "center", "wrap",
         "fill", "hover", "press", "border", "borderWidth", "radius", "clip",
-        "scrollY", "scrollX", "stickBottom", "onPress",
+        "scrollY", "scrollX", "stickBottom", "onPress", "onMiddlePress",
         "color", "size", "weight", "lineHeight", "tracking", "mono",
         "tabular", "noWrap", "truncate", "selectable", "textAlign",
         "count", "estimatedRowHeight", "version", "renderRow", "rowKey", "rowVersions", "onVisibleRows",

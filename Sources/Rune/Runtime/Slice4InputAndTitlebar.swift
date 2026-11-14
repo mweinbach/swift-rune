@@ -516,10 +516,22 @@ extension Runtime {
             dirtyCommit(at: now)
             didMarkDirty = true
         }
-        if pressedPath != nil || pressedKey != nil || pressedLink != nil {
+        if selectionState.isDraggingSelection || selectionState.edgeScroll != .idle {
+            selectionState.isDraggingSelection = false
+            selectionState.suppressedClickOnRelease = false
+            selectionState.edgeScroll.stop()
+            selectionState.coordinator.phase.endDrag()
+            dirtyCommit(at: now, external: false)
+            dispatchSelectionChanges(at: now)
+            didMarkDirty = true
+        }
+        if pressedPath != nil || pressedKey != nil || pressedLink != nil || pressedTint != nil {
             pressedPath = nil
             pressedKey = nil
             pressedLink = nil
+            pressedTint = nil
+            pressedPointerInside = false
+            syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             dirtyCommit(at: now)
             didMarkDirty = true
         }

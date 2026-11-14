@@ -369,6 +369,7 @@ internal extension Runtime {
             scene.setTime(now)
         }
         let reduce = reducedMotion || cxSettings.hostReducedMotion
+        syncPressColorTracks(at: now, cut: cut)
         for node in flatNodes {
             let nid = node.nodeId
             guard scene.contains(nid) else { continue }
@@ -378,8 +379,7 @@ internal extension Runtime {
                 }
                 continue
             }
-            let captureInside = pressRestingContains(path: node.path, at: pointerPosition)
-            let isDown = !cut && !reduce && !node.effectiveInert && pressedPath == node.path && captureInside
+            let isDown = !cut && !reduce && isNodePressedVisually(node, restingContains: pressRestingContains(path: node.path, at: pointerPosition))
             let target: Float = isDown ? k : 1.0
             if cut || reduce {
                 if scene.store.has(nid, Props.PRESS_SCALE) {

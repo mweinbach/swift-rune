@@ -1929,6 +1929,10 @@ public enum HeadlessRunner {
         }
         try traceWriter?.finish()
         try videoEncoder?.finish()
+        // Headless runs open no links (`Tx::open_url`): say which URLs handlers asked to open.
+        for req in runtime.urlOpener.takeRequests() {
+            FileHandle.standardError.write(Data("rune: open_url \(req.url) (headless: not opened)\n".utf8))
+        }
 
         return Output(
             finalFrame: finalFrame,

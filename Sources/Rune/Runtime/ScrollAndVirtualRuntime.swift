@@ -7,6 +7,12 @@ extension Runtime {
     internal struct CachedVirtualRow {
         var el: El<State>
         var memoIds: Set<String>
+        var reads: [MemoRead] = []
+        var trackedReads: TrackedReads = TrackedReads()
+
+        func holds(against geometry: [String: MemoElementGeometry]) -> Bool {
+            !trackedReads.changed() && reads.allSatisfy { $0.matches(geometry) }
+        }
     }
 
     internal struct VirtualSelectionSource {
@@ -35,13 +41,14 @@ extension Runtime {
 
     // MARK: - Helpers
 
-    internal func makeTx(at now: Double, button: PointerButton = .primary) -> Tx {
+    internal func makeTx(at now: Double, button: PointerButton = .primary, mods: Mods = .none) -> Tx {
         var tx = Tx()
         tx.clock = now
         if let sel = currentTextSelection() {
             tx.setCurrentTextSelection(sel)
         }
         tx.button = button
+        tx.mods = mods
         tx.runtimeActions["focusVisible"] = focusVisible
         tx.runtimeActions["byKeys"] = kitHooks.isDispatchingByKeys || activeByKeys
         tx.physicalKeyValue = currentPhysicalKey
@@ -293,7 +300,8 @@ extension Runtime {
             prefix: prefix,
             count: count,
             indexed: isIndexed,
-            pinnedIndices: pinned
+            pinnedIndices: pinned,
+            pinned: stickyPin
         )
 
         // Track first visible anchor row for prepend/resize scroll preservation.
@@ -337,7 +345,9 @@ extension Runtime {
             let rowKey = keys[i]
             var rowEl: El<State>
             if isIndexed {
-                if let reused = remountRowCache?[path]?[rowKey] {
+                if let reused = remountRowCache?[path]?[rowKey],
+                   reused.holds(against: memoGeometry) {
+                    self.memo.touchEntries(ids: reused.memoIds, pass: memoPass)
                     rowEl = reused.el
                     ctx.builtVirtualRows[path, default: [:]][rowKey] = reused
                 } else {
@@ -356,7 +366,12 @@ extension Runtime {
                     }
                     builtEl = builtEl.key(rowKey)
                     rowEl = builtEl
-                    ctx.builtVirtualRows[path, default: [:]][rowKey] = CachedVirtualRow(el: rowEl, memoIds: rowTouchedBox.ids)
+                    ctx.builtVirtualRows[path, default: [:]][rowKey] = CachedVirtualRow(
+                        el: rowEl,
+                        memoIds: rowTouchedBox.ids,
+                        reads: rowTouchedBox.reads,
+                        trackedReads: rowTouchedBox.trackedReads
+                    )
                 }
             } else {
                 rowEl = el.children[i]
@@ -1068,11 +1083,14 @@ extension Runtime {
             let est = max(1, (nodeByPath[listPath].flatMap { flatNodes[$0].el.virtualEstimate }) ?? 40)
             let count = vState.lastKeys.count
             let (prefix, _) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
+            let stickyPin = scrollIdx.map { flatNodes[$0].el.layout.stickBottom } == true
+                && wasPinnedToBottom.contains(scrollPath)
             let (listWanted, listMissing) = vState.fillDemand(
                 offset: curScroll.y,
                 viewport: vpH,
                 prefix: prefix,
-                count: count
+                count: count,
+                pinned: stickyPin
             )
             vState.wantsMoreFrames = listWanted
             vState.missingOverscanRows = listMissing

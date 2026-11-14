@@ -317,6 +317,19 @@ public final class MemoCache: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Marks cached entries used when their enclosing cached virtual row is reused directly (`keep_rows`, `25916a93`).
+    func touchEntries(ids: Set<String>, pass: UInt64) {
+        guard !ids.isEmpty else { return }
+        lock.lock()
+        for id in ids {
+            if var entry = entries[id] {
+                entry.passBuilt = pass
+                entries[id] = entry
+            }
+        }
+        lock.unlock()
+    }
+
     public func getOrBuild<State, Deps: Equatable>(
         id: String,
         deps: Deps,
@@ -804,6 +817,56 @@ public final class Tracked<T>: @unchecked Sendable {
         defer { lock.unlock() }
         return _version
     }
+}
+
+/// The `Tracked` values a closure read, at the versions it read them (`trackedReads`),
+/// for keeping a value derived from state outside a `region` while the state it came from is unchanged (`rune::Reads`).
+public struct TrackedReads: Sendable {
+    private let entries: [(id: UInt32, version: UInt64)]
+
+    public init() {
+        self.entries = []
+    }
+
+    internal init(entries: [(id: UInt32, version: UInt64)]) {
+        self.entries = entries
+    }
+
+    /// Whether any value read was written since.
+    public func changed() -> Bool {
+        entries.contains { TrackedIDGenerator.version(for: $0.id) != $0.version }
+    }
+
+    /// Counts the values as read again by a `region` building around a caller that reuses what
+    /// it derived from them instead of reading them directly (`Reads::read`).
+    public func read() {
+        guard !TrackedRecorder.stack.isEmpty else { return }
+        for (id, _) in entries {
+            TrackedRecorder.record(id: id, version: TrackedIDGenerator.version(for: id))
+        }
+    }
+}
+
+/// Rust alias for `TrackedReads` (`rune::Reads`).
+public typealias Reads = TrackedReads
+
+/// Runs `body`, recording which `Tracked` values it reads (`rune::tracked_reads`).
+/// A `region` building around the call reads them too.
+public func trackedReads<R>(_ body: () throws -> R) rethrows -> (R, TrackedReads) {
+    TrackedRecorder.pushEmpty()
+    var recorded: [UInt32: UInt64] = [:]
+    let out: R
+    do {
+        out = try body()
+        recorded = TrackedRecorder.pop()
+    } catch {
+        _ = TrackedRecorder.pop()
+        throw error
+    }
+    let entries = recorded.keys.sorted().map { ($0, recorded[$0] ?? 0) }
+    let reads = TrackedReads(entries: entries)
+    reads.read()
+    return (out, reads)
 }
 
 /// Builds and caches a region based on the `Tracked` values read during its build (`rune::region`).
