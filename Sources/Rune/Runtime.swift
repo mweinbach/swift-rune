@@ -111,6 +111,8 @@ public struct ElementInfo: Sendable, Equatable {
     public var scrolling: Bool = false
     public var liveIntent: UInt32 = 0
     public var shapeKey: UInt64? = nil
+    public var drawnText: String? = nil
+    public var elision: TextElision? = nil
 
     public static func stub(_ key: String) -> ElementInfo {
         ElementInfo(
@@ -1089,6 +1091,7 @@ public final class Runtime<State> {
     internal var liveOnlyCheckEnabled: Bool = true
     internal var lastLiveCommitClock: Double = -.infinity
     internal var pendingLiveOnlyCheck: (handler: String, before: LiveOnlyViewPrint)? = nil
+    internal var checkingLiveOnly: Bool = false
     internal var stateUnchangedSinceBuild: Bool = false
     internal var pendingResizeRelayout: Bool = false
     internal var pendingGrowthRelayout: Bool = false
@@ -1523,6 +1526,9 @@ public final class Runtime<State> {
             sceneOut = measureFramePhase(.paint) {
                 buildRefScene(frameOut: frameOut, now: animNow)
             }
+        }
+        if frameHadCommitted {
+            textSystem.pruneUnusedElisions()
         }
         finishPostFrameHooks(at: now)
         if rewindRecorder != nil {
@@ -2109,6 +2115,7 @@ public final class Runtime<State> {
             activeExplicitSnap = prevExplicitSnap
         }
         measureFramePhase(.commit) {
+            textSystem.beginElisionCommit()
             let commitAskedMotion = pendingAskedMotion
             pendingAskedMotion = false
             let isUnprompted = pendingUnprompted || (motionNeedsCause && !frameCommittedFromInput && !commitAskedMotion)
@@ -2149,6 +2156,8 @@ public final class Runtime<State> {
             let sincePass = memo.nextPass()
             let liveCheck = pendingLiveOnlyCheck
             pendingLiveOnlyCheck = nil
+            checkingLiveOnly = (liveCheck != nil)
+            defer { checkingLiveOnly = false }
             var didRunView = false
             MemoSnapshot.enter {
                 commitTreePass(
@@ -3259,10 +3268,20 @@ public final class Runtime<State> {
         let ox = boxRect.x + padL
         let oy = boxRect.y + padT
         let utf8Len = content.utf8.count
+        let drawnLen = (shaped.elided != nil ? shaped.drawnText : content).utf8.count
         var out: [(Int, MotionRect)] = []
         for (k, hl) in hls.enumerated() {
-            let a = max(0, min(hl.byteRange.lowerBound, utf8Len))
-            let b = max(a, min(hl.byteRange.upperBound, utf8Len))
+            let aOrig = max(0, min(hl.byteRange.lowerBound, utf8Len))
+            let bOrig = max(aOrig, min(hl.byteRange.upperBound, utf8Len))
+            guard aOrig < bOrig else { continue }
+            let mappedRange: Range<Int>
+            if let elided = shaped.elided {
+                mappedRange = elided.mark(aOrig, bOrig, isLink: false)
+            } else {
+                mappedRange = aOrig..<bOrig
+            }
+            let a = max(0, min(mappedRange.lowerBound, drawnLen))
+            let b = max(a, min(mappedRange.upperBound, drawnLen))
             guard a < b else { continue }
             for r in textSystem.selectionRects(in: shaped, utf8Range: a..<b, pixelScale: pixelScale) where r.z > 0 {
                 let x = ox + r.x * scale.x
@@ -4136,10 +4155,61 @@ public final class Runtime<State> {
         var pendingBorderBottoms: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
         pendingBorderBottoms.reserveCapacity(8)
         var pendingRadialStops: [(id: NodeId, index: Int, target: MotionColor, spring: Spring?)] = []
+        var pendingTextColors: [(id: NodeId, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
+        pendingTextColors.reserveCapacity(8)
+        var pendingShadowColors: [(id: NodeId, index: Int, seed: MotionColor?, target: MotionColor, spring: Spring?)] = []
+        pendingShadowColors.reserveCapacity(8)
+        var prevElById: [NodeId: El<State>] = [:]
+        prevElById.reserveCapacity(prevFlatNodesSnapshot.count)
+        for prev in prevFlatNodesSnapshot {
+            prevElById[prev.nodeId] = prev.el
+        }
+        let commitDefaultViewFg = cxSettings.viewDefaults.foreground
         for (i, node) in pass.nodes.enumerated() where i < specs.count {
             let nid = node.nodeId
             let wasPresent = scene.contains(nid)
-            let csp: Spring? = (!commitCut && !reducedMotion && wasPresent) ? specs[i].colorSpring : nil
+            let csp: Spring? = (!commitCut && !commitKind.snaps && !reducedMotion && wasPresent) ? specs[i].colorSpring : nil
+            let prevEl = prevElById[nid]
+            let prevHadTextOrIcon = prevEl.map {
+                $0.textColor != nil
+                    || $0.richSpans != nil
+                    || $0.plainText != nil
+                    || $0.liveText != nil
+                    || $0.handlers.editLens != nil
+                    || $0.iconPayload != nil
+            } ?? false
+            let hasTextOrIcon = node.el.textColor != nil
+                || node.el.richSpans != nil
+                || node.el.plainText != nil
+                || node.el.liveText != nil
+                || node.el.handlers.editLens != nil
+                || node.el.iconPayload != nil
+            if hasTextOrIcon {
+                let fallbackFg = commitDefaultViewFg ?? Tok.theme(dark: systemDark).text
+                let targetTextCol = (node.el.textColor ?? fallbackFg).motionColor
+                let hadTextTrack = scene.store.has(nid, Props.TEXT_COLOR)
+                if let prevEl, prevHadTextOrIcon {
+                    let prevTextCol = (prevEl.textColor ?? fallbackFg).motionColor
+                    if hadTextTrack || (csp != nil && targetTextCol != prevTextCol) {
+                        let seed: MotionColor? = (!hadTextTrack && wasPresent) ? prevTextCol : nil
+                        pendingTextColors.append((id: nid, seed: seed, target: targetTextCol, spring: csp))
+                    }
+                } else if hadTextTrack {
+                    pendingTextColors.append((id: nid, seed: nil, target: targetTextCol, spring: csp))
+                }
+            }
+            for (si, sh) in node.el.shadows.prefix(shadowColorProps.count).enumerated() {
+                let prop = shadowColorProps[si]
+                let hadShTrack = scene.store.has(nid, prop)
+                let prevShCol: MotionColor? = (prevEl != nil && si < prevEl!.shadows.count)
+                    ? prevEl!.shadows[si].color.motionColor
+                    : nil
+                let targetShCol = sh.color.motionColor
+                if hadShTrack || (csp != nil && prevShCol != nil && targetShCol != prevShCol!) {
+                    let seed: MotionColor? = (!hadShTrack && wasPresent) ? prevShCol : nil
+                    pendingShadowColors.append((id: nid, index: si, seed: seed, target: targetShCol, spring: csp))
+                }
+            }
             if let rGrad = node.el.runtimeExtras[RenderExtrasKey.radialGradient] as? RenderRadialGradientSpec {
                 for (si, stop) in rGrad.stops.prefix(16).enumerated() {
                     pendingRadialStops.append((id: nid, index: si, target: stop.color.motionColor, spring: csp))
@@ -4335,6 +4405,27 @@ public final class Runtime<State> {
                 scene.animate(rs.id, prop, to: rs.target, anim: Anim(curve: Curve.from(csp)))
             } else {
                 scene.set(rs.id, prop, rs.target)
+            }
+        }
+        for item in pendingTextColors {
+            if let seed = item.seed {
+                scene.set(item.id, Props.TEXT_COLOR, seed)
+            }
+            if let csp = item.spring {
+                scene.animate(item.id, Props.TEXT_COLOR, to: item.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(item.id, Props.TEXT_COLOR, item.target)
+            }
+        }
+        for item in pendingShadowColors {
+            let prop = shadowColorProps[item.index]
+            if let seed = item.seed {
+                scene.set(item.id, prop, seed)
+            }
+            if let csp = item.spring {
+                scene.animate(item.id, prop, to: item.target, anim: Anim(curve: Curve.from(csp)))
+            } else {
+                scene.set(item.id, prop, item.target)
             }
         }
         unmountOmittedUnseenNodes(unseenOmittedToUnmount, on: &scene)
@@ -6090,6 +6181,17 @@ public final class Runtime<State> {
             var liveShadowColor: Color? = nil
             var liveGradientTop: Color? = nil
             var liveGradientBottom: Color? = nil
+            let sceneTextColor: Color? = scene.store.get(p.id, Props.TEXT_COLOR).map { st in
+                if let targetText = el.textColor,
+                   !scene.store.isMoving(p.id, Props.TEXT_COLOR),
+                   abs(st.r - targetText.r) < 1e-3,
+                   abs(st.g - targetText.g) < 1e-3,
+                   abs(st.b - targetText.b) < 1e-3,
+                   abs(st.a - targetText.a) < 1e-3 {
+                    return targetText
+                }
+                return Color(st)
+            }
             var blurPt = p.blur
             var liveTrim: Vec2? = nil
             for b in el.liveBindings {
@@ -6321,6 +6423,8 @@ public final class Runtime<State> {
             let rawTextValue: String? = editValue?.text ?? el.liveText?.get() ?? el.plainText
             // Never expose secure plaintext (hidden or revealed) in ElementInfo / --tree snapshots.
             let elementTextValue: String? = nodeIsSecure ? nil : rawTextValue
+            var elementDrawnText: String? = nil
+            var elementElision: TextElision? = nil
             let paintedLabelValue: String? = {
                 guard let raw = el.liveText?.get() ?? el.plainText else { return nil }
                 if nodeIsSecure && !el.isRevealed && !raw.isEmpty && !(p.isExiting && el.role == .textInput) {
@@ -6526,8 +6630,16 @@ public final class Runtime<State> {
                 // 1. Outer drop shadows
                 let stuckShadowFactor = (el.stickyConfig != nil) ? StickyMath.stuckShadowFactor(shift: stickyMag) : 0.0
                 if !flatFocusWithin {
-                    for sh in resolvedNodeShadows where !sh.inset {
-                        let shColor = liveShadowColor ?? sh.color
+                    for (sIdx, sh) in resolvedNodeShadows.enumerated() where !sh.inset {
+                        let sceneShColor: Color? = sIdx < shadowColorProps.count ? scene.store.get(p.id, shadowColorProps[sIdx]).map { sc in
+                            let settled = !scene.store.isMoving(p.id, shadowColorProps[sIdx])
+                                && abs(sc.r - sh.color.r) < 1e-3
+                                && abs(sc.g - sh.color.g) < 1e-3
+                                && abs(sc.b - sh.color.b) < 1e-3
+                                && abs(sc.a - sh.color.a) < 1e-3
+                            return (settled || sc == sh.color.motionColor) ? sh.color : Color(sc)
+                        } : nil
+                        let shColor = liveShadowColor ?? sceneShColor ?? sh.color
                         guard shColor.a > 0.001 else { continue }
                         let sc = shColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                         primitives.append(.dropShadow(
@@ -6695,8 +6807,16 @@ public final class Runtime<State> {
 
                 // 4. Inset shadows
                 if !flatFocusWithin {
-                    for sh in resolvedNodeShadows where sh.inset {
-                        let shColor = liveShadowColor ?? sh.color
+                    for (sIdx, sh) in resolvedNodeShadows.enumerated() where sh.inset {
+                        let sceneShColor: Color? = sIdx < shadowColorProps.count ? scene.store.get(p.id, shadowColorProps[sIdx]).map { sc in
+                            let settled = !scene.store.isMoving(p.id, shadowColorProps[sIdx])
+                                && abs(sc.r - sh.color.r) < 1e-3
+                                && abs(sc.g - sh.color.g) < 1e-3
+                                && abs(sc.b - sh.color.b) < 1e-3
+                                && abs(sc.a - sh.color.a) < 1e-3
+                            return (settled || sc == sh.color.motionColor) ? sh.color : Color(sc)
+                        } : nil
+                        let shColor = liveShadowColor ?? sceneShColor ?? sh.color
                         guard shColor.a > 0.001 else { continue }
                         primitives.append(.insetShadow(
                             rect: devRect,
@@ -6773,7 +6893,7 @@ public final class Runtime<State> {
 
                 // 6. SVG Icon payload
                 if let (svg, _) = el.iconPayload {
-                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
+                    let resolvedColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? sceneTextColor ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
                     let animIconTurn = scene.get(p.id, Props.ICON_TURN) ?? el.iconRotation
                     let effGlyphTurn = (useLayer ? 0 : effRotate) + animIconTurn
                     let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
@@ -7094,7 +7214,7 @@ public final class Runtime<State> {
                     : .zero
                 let restOriginX = textOriginX - glideOffPx.x / pxScale
                 let restOriginY = textOriginY - glideOffPx.y / pxScale
-                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                let defaultTextColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? sceneTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
 
                 if let edit = editValue {
                     let resolvedInput = ElDisplayResolver.resolveInput(
@@ -7122,6 +7242,10 @@ public final class Runtime<State> {
                         isSecure: resolvedInput.isSecure
                     )
                     let shaped = inputBox.shaped
+                    if !nodeIsSecure {
+                        elementDrawnText = shaped.drawnText
+                        elementElision = shaped.elided
+                    }
                     let inputClip = intersectRects(visClip, rect)
                     let devInputClip = SIMD4<Float>(
                         inputClip.x * pxScale,
@@ -7370,13 +7494,21 @@ public final class Runtime<State> {
                         shaped = box.shaped
                     }
                     let elided = shaped.elided
+                    if !nodeIsSecure {
+                        elementDrawnText = shaped.drawnText
+                        elementElision = elided
+                    }
                     let innerH = max(0, (snappedEdgesPx[3] - snappedEdgesPx[1]) / pxScale - (el.layout.padding.top + el.layout.padding.bottom) * scaleVec.y)
+                    let exactInnerWPx = max(0, (rExact[2] - rExact[0]) - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x * pxScale)
+                    let layoutInnerW = max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right)
                     let fadeRes = resolvedText.truncateFade
                         ? ElDisplayResolver.truncateFadeParams(
                             el: el,
                             shaped: shaped,
                             innerW: innerW,
                             innerH: innerH,
+                            exactInnerWPx: exactInnerWPx,
+                            layoutInnerW: layoutInnerW,
                             scaleVec: scaleVec,
                             pxScale: pxScale,
                             textOriginX: textOriginX,
@@ -7791,7 +7923,7 @@ public final class Runtime<State> {
                 blur: effBlur,
                 radius: p.corners.maxMagnitude,
                 fill: fillColor,
-                textColor: liveTextColor ?? el.textColor ?? (elementTextValue != nil ? cxSettings.viewDefaults.foreground : nil),
+                textColor: liveTextColor ?? sceneTextColor ?? el.textColor ?? (elementTextValue != nil ? cxSettings.viewDefaults.foreground : nil),
                 text: elementTextValue,
                 label: el.a11yLabel,
                 help: resolvedRawHelp.map(runeHelpWords),
@@ -7847,7 +7979,9 @@ public final class Runtime<State> {
                         pixelScale: pxScale,
                         wrapAnywhere: (el.runtimeExtras["htmlWrapAnywhere"] as? Bool) ?? false
                     )
-                    : nil
+                    : nil,
+                drawnText: elementDrawnText,
+                elision: elementElision
             ))
             if shouldEmit && !nodeExiting && !snap.effectiveInert {
                 if el.isImeCursor && !hasFocusedTextInput && nextImeCursorArea == nil {
@@ -8975,9 +9109,11 @@ public final class Runtime<State> {
                     let (ranAnyHover, hoverAllLiveOnly) = dispatchHoverCallbacks(to: newPath, at: now)
                     isDispatchingHover = false
                     let hoverNeedsCommit = (ranAnyHover && !hoverAllLiveOnly)
-                        || (!ranAnyHover && moveDispatched && !moveAllLiveOnly)
-                        || hoverVisualNeedsCommit(oldPath: oldPath, newPath: newPath)
-                    if hoverNeedsCommit || linkChanged || helpTargetChanges(at: pos) || menuHoverChanged {
+                        || (moveDispatched && !moveAllLiveOnly)
+                        || linkChanged
+                        || helpTargetChanges(at: pos)
+                        || menuHoverChanged
+                    if hoverNeedsCommit {
                         suppressRevealFromHoverCommit = true
                         dirtyCommit(at: now)
                         changed = true

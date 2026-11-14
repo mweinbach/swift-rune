@@ -68,7 +68,8 @@ internal struct ElResolvedText {
                 style: style,
                 maxWidth: shapeMaxW,
                 pixelScale: pixelScale,
-                emitGlyphs: false
+                emitGlyphs: false,
+                bypassCache: isSecure
             ).size
         }
         return textSystem.measure(
@@ -76,7 +77,8 @@ internal struct ElResolvedText {
             style: style,
             maxWidth: shapeMaxW,
             pixelScale: pixelScale,
-            pills: pills
+            pills: pills,
+            bypassCache: isSecure
         )
     }
 
@@ -85,7 +87,8 @@ internal struct ElResolvedText {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        bypassCache: Bool? = nil
     ) -> ShapedText {
         if let (run, offset) = advanceRun {
             if let sliced = textSystem.shapeRunSlice(run, at: offset, style: style, pixelScale: pixelScale, emitGlyphs: emitGlyphs) {
@@ -109,7 +112,8 @@ internal struct ElResolvedText {
             maxWidth: shapeMaxW,
             pixelScale: pixelScale,
             emitGlyphs: emitGlyphs,
-            glidePx: glidePx
+            glidePx: glidePx,
+            bypassCache: bypassCache ?? isSecure
         )
     }
 }
@@ -410,6 +414,8 @@ internal enum ElDisplayResolver {
         shaped: ShapedText,
         innerW: Float,
         innerH: Float,
+        exactInnerWPx: Float? = nil,
+        layoutInnerW: Float? = nil,
         scaleVec: Vec2,
         pxScale: Float,
         textOriginX: Float,
@@ -423,28 +429,42 @@ internal enum ElDisplayResolver {
         refFadeOrigin: SIMD2<Float>,
         isTruncated: Bool
     ) {
-        let wrapWidth = innerW / max(1e-4, scaleVec.x)
-        let overflows = shaped.size.x > wrapWidth + 0.5 / pxScale
+        let sc = max(1e-4, scaleVec.x)
+        let laidWidth = layoutInnerW ?? (innerW / sc)
+        let fullWidthPx = shaped.size.x * pxScale
+        let laidOutPx = max(0, laidWidth) * pxScale
         let boxX = textOriginX * pxScale
         let boxY = textOriginY * pxScale
         let boxW = max(0, innerW) * pxScale
         let boxH = max(0, max(innerH, shaped.size.y * scaleVec.y)) * pxScale
-        let boxBoundsPx = SIMD4<Float>(boxX, boxY, boxX + boxW, boxY + boxH)
-        let x0 = max(baseClipPx.x, boxX)
-        let y0 = max(baseClipPx.y, boxY)
-        let x1 = min(baseClipPx.x + baseClipPx.z, boxBoundsPx.z)
-        let y1 = min(baseClipPx.y + baseClipPx.w, boxBoundsPx.w)
-        let clipped = SIMD4<Float>(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
-        guard overflows else {
-            return (baseClipPx, .zero, boxBoundsPx, .zero, .zero, false)
-        }
-        let fadeW = min(el.textStyle.size * el.truncateFadeEm * scaleVec.x * pxScale, max(0, x1 - x0))
+        let exactW = max(0, exactInnerWPx ?? boxW)
+        let overflows = fullWidthPx > laidOutPx + 0.5 && fullWidthPx * sc > max(boxW, exactW) + 0.5 * sc
         let isRtl: Bool
         if let dir = shaped.forcedDirection ?? el.textStyle.direction {
             isRtl = (dir == .rtl)
         } else {
             isRtl = shaped.primaryIsRTL
         }
+        var boxLeftPx = boxX
+        var boxRightPx = boxX + boxW
+        if !overflows {
+            let needed = max(exactW, fullWidthPx * sc)
+            if isRtl {
+                boxLeftPx = min(boxLeftPx, boxRightPx - needed)
+            } else {
+                boxRightPx = max(boxRightPx, boxLeftPx + needed)
+            }
+        }
+        let boxBoundsPx = SIMD4<Float>(boxLeftPx, boxY, boxRightPx, boxY + boxH)
+        let x0 = max(baseClipPx.x, boxBoundsPx.x)
+        let y0 = max(baseClipPx.y, boxBoundsPx.y)
+        let x1 = min(baseClipPx.x + baseClipPx.z, boxBoundsPx.z)
+        let y1 = min(baseClipPx.y + baseClipPx.w, boxBoundsPx.w)
+        let clipped = SIMD4<Float>(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
+        guard overflows else {
+            return (clipped, .zero, boxBoundsPx, .zero, .zero, false)
+        }
+        let fadeW = min(el.textStyle.size * el.truncateFadeEm * scaleVec.x * pxScale, max(0, x1 - x0))
         let fadeLeft = (el.textStyle.align == .trailing) != isRtl
         let fadeLTRB = fadeLeft ? SIMD4<Float>(fadeW, 0, 0, 0) : SIMD4<Float>(0, 0, fadeW, 0)
         let refFade: SIMD4<Float>

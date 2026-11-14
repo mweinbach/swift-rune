@@ -717,7 +717,8 @@ internal extension Runtime {
             using: textSystem,
             maxWidth: wrapWidth,
             pixelScale: pixelScale,
-            emitGlyphs: false
+            emitGlyphs: false,
+            bypassCache: node.el.isSecure
         )
         let unturned = hitGeometryByPath[node.path]?.turn?.unturn(windowPos) ?? windowPos
         let localX = (unturned.x - (rect.x + node.el.layout.padding.left * sc.x)) / max(1e-4, sc.x)

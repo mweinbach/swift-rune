@@ -500,7 +500,7 @@ public struct ShapedText: @unchecked Sendable {
     internal var lastLineWidthPx: Float = 0
     internal var lastLineTrailingWsPx: Float = 0
     public var elided: TextElision? = nil
-    internal var drawnText: String = ""
+    public var drawnText: String = ""
     internal var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
     internal var lineGlyphRanges: [Range<Int>] = []
 
@@ -2071,6 +2071,7 @@ public final class TextSystem: @unchecked Sendable {
         var elision: TextElision
         var withoutGlyphs: ShapedText?
         var withGlyphs: ShapedText?
+        var epoch: UInt64 = 0
     }
 
     internal struct PreparedPill {
@@ -2332,6 +2333,8 @@ public final class TextSystem: @unchecked Sendable {
     private var _shapedCount: Int = 0
     private var _rebrokenCount: Int = 0
     private var _typesetterRebrokenCount: Int = 0
+    private var elisionEpoch: UInt64 = 0
+    private var _shapeCount: UInt64 = 0
     internal private(set) var measureMissCount: Int = 0
     internal private(set) var shapeMissCount: Int = 0
     internal private(set) var shapedBuildCount: Int = 0
@@ -2365,7 +2368,13 @@ public final class TextSystem: @unchecked Sendable {
         )
     }
 
-    internal var cachedElisionCount: Int {
+    public var shapeCount: UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return _shapeCount
+    }
+
+    public var cachedElisionCount: Int {
         lock.lock()
         defer { lock.unlock() }
         return elisionCache.count
@@ -2451,6 +2460,19 @@ public final class TextSystem: @unchecked Sendable {
         for k in evictedKeys {
             glyphCache.forget(shapeKey: k)
         }
+    }
+
+    public func beginElisionCommit() {
+        lock.lock()
+        elisionEpoch &+= 1
+        lock.unlock()
+    }
+
+    public func pruneUnusedElisions() {
+        lock.lock()
+        let cur = elisionEpoch
+        elisionCache = elisionCache.filter { $0.value.epoch == cur }
+        lock.unlock()
     }
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
@@ -2824,8 +2846,12 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         pills: [PillChip] = [],
-        keep: TextKeep = .cached
+        keep requestedKeep: TextKeep = .cached,
+        bypassCache requestedBypass: Bool = false
     ) -> Vec2 {
+        // `bypassCache` (Slice 3) and `keep: .secret` (kitc) both keep secure text out of every cache.
+        let keep: TextKeep = requestedBypass ? .secret : requestedKeep
+        let bypassCache = keep == .secret
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
         }
@@ -2856,19 +2882,39 @@ public final class TextSystem: @unchecked Sendable {
             pillsHash: pHash,
             fontEpoch: fontEpoch()
         )
-        lock.lock()
-        if let cached = measureCache[key] {
+        if !bypassCache {
+            lock.lock()
+            if let cached = measureCache[key] {
+                if effectiveStyle.wrap == .ellipsis || effectiveStyle.maxLines > 0, maxWidth != nil {
+                    let eKey = ElisionKey(
+                        text: text,
+                        spans: nil,
+                        style: effectiveStyle,
+                        maxWidthHalfPt: maxWKey,
+                        scale100: key.scale100,
+                        pillsHash: pHash,
+                        fontEpoch: key.fontEpoch,
+                        langEpoch: TextLanguageRegistry.currentEpoch()
+                    )
+                    if var entry = elisionCache[eKey] {
+                        entry.epoch = elisionEpoch
+                        elisionCache[eKey] = entry
+                    }
+                }
+                lock.unlock()
+                return cached
+            }
             lock.unlock()
-            return cached
         }
-        lock.unlock()
         let shaped = shapeForMeasure(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale)
         lock.lock()
         measureMissCount += 1
-        if measureCache.count > 4096 {
-            measureCache.removeAll(keepingCapacity: true)
+        if !bypassCache {
+            if measureCache.count > 4096 {
+                measureCache.removeAll(keepingCapacity: true)
+            }
+            measureCache[key] = shaped.size
         }
-        measureCache[key] = shaped.size
         lock.unlock()
         return shaped.size
     }
@@ -3121,7 +3167,8 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         emitGlyphs: Bool = true,
-        glidePx: Vec2 = .zero
+        glidePx: Vec2 = .zero,
+        bypassCache: Bool = false
     ) -> ShapedText {
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
@@ -3136,7 +3183,8 @@ public final class TextSystem: @unchecked Sendable {
                 maxWidth: maxWidth,
                 pixelScale: pixelScale,
                 emitGlyphs: emitGlyphs,
-                glidePx: glidePx
+                glidePx: glidePx,
+                bypassCache: bypassCache
             )
         }
     }
@@ -3150,7 +3198,8 @@ public final class TextSystem: @unchecked Sendable {
         pixelScale: Float,
         emitGlyphs: Bool = true,
         glidePx: Vec2 = .zero,
-        countRebreak: Bool = true
+        countRebreak: Bool = true,
+        bypassCache: Bool = false
     ) -> ShapedText {
         let authText = spans.map { $0.map(\.text).joined() } ?? text
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
@@ -3174,8 +3223,7 @@ public final class TextSystem: @unchecked Sendable {
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         let scaleKey = Int((scale * 100.0).rounded())
         let needsElide = (style.maxLines > 0) || (style.wrap == .ellipsis && maxWidth != nil && maxWidth! > 0)
-
-        if glidePx == .zero {
+        let canCacheShape = glidePx == .zero && !bypassCache
             let sKey = ShapeKey(
                 text: authText,
                 spans: spans,
@@ -3187,12 +3235,31 @@ public final class TextSystem: @unchecked Sendable {
                 langEpoch: lEpoch,
                 emitGlyphs: emitGlyphs
             )
-            lock.lock()
-            if let cached = shapeCache[sKey] {
+
+            if canCacheShape {
+                lock.lock()
+                if let cached = shapeCache[sKey] {
+                    if cached.elided != nil {
+                        let eKey = ElisionKey(
+                            text: authText,
+                            spans: spans,
+                            style: style,
+                            maxWidthHalfPt: maxWKey,
+                            scale100: scaleKey,
+                            pillsHash: pHash,
+                            fontEpoch: fEpoch,
+                            langEpoch: lEpoch
+                        )
+                        if var entry = elisionCache[eKey] {
+                            entry.epoch = elisionEpoch
+                            elisionCache[eKey] = entry
+                        }
+                    }
+                    lock.unlock()
+                    return cached
+                }
                 lock.unlock()
-                return cached
             }
-            lock.unlock()
 
             let res: ShapedText
             if needsElide {
@@ -3208,7 +3275,8 @@ public final class TextSystem: @unchecked Sendable {
                     maxWidthHalfPt: maxWKey,
                     scale100: scaleKey,
                     fontEpoch: fEpoch,
-                    langEpoch: lEpoch
+                    langEpoch: lEpoch,
+                    bypassCache: bypassCache
                 )
             } else {
                 res = shapeCoreImpl(
@@ -3226,42 +3294,17 @@ public final class TextSystem: @unchecked Sendable {
                 shapeMissCount += 1
                 lock.unlock()
             }
+
             lock.lock()
-            if shapeCache.count > 2048 {
-                shapeCache.removeAll(keepingCapacity: true)
+            _shapeCount &+= 1
+            if canCacheShape {
+                if shapeCache.count > 2048 {
+                    shapeCache.removeAll(keepingCapacity: true)
+                }
+                shapeCache[sKey] = res
             }
-            shapeCache[sKey] = res
             lock.unlock()
             return res
-        }
-
-        if needsElide {
-            return resolveElidedShape(
-                authText: authText,
-                spans: spans,
-                pills: pills,
-                style: style,
-                maxWidth: maxWidth,
-                scale: scale,
-                emitGlyphs: emitGlyphs,
-                pillsHash: pHash,
-                maxWidthHalfPt: maxWKey,
-                scale100: scaleKey,
-                fontEpoch: fEpoch,
-                langEpoch: lEpoch
-            )
-        }
-        return shapeCoreImpl(
-            text: authText,
-            spans: spans,
-            pills: pills,
-            style: style,
-            maxWidth: maxWidth,
-            pixelScale: scale,
-            emitGlyphs: emitGlyphs,
-            glidePx: glidePx,
-            countRebreak: countRebreak
-        )
     }
 
     private func resolveElidedShape(
@@ -3276,9 +3319,10 @@ public final class TextSystem: @unchecked Sendable {
         maxWidthHalfPt: Int,
         scale100: Int,
         fontEpoch: UInt64,
-        langEpoch: UInt64
+        langEpoch: UInt64,
+        bypassCache: Bool = false
     ) -> ShapedText {
-        let eKey: ElisionKey? = maxWidth != nil
+        let eKey: ElisionKey? = (maxWidth != nil && !bypassCache)
             ? ElisionKey(
                 text: authText,
                 spans: spans,
@@ -3294,6 +3338,10 @@ public final class TextSystem: @unchecked Sendable {
         if let eKey {
             lock.lock()
             let cached = elisionCache[eKey]
+            if var entry = cached {
+                entry.epoch = elisionEpoch
+                elisionCache[eKey] = entry
+            }
             lock.unlock()
             if let cached {
                 if emitGlyphs {
@@ -3313,6 +3361,7 @@ public final class TextSystem: @unchecked Sendable {
                     lock.lock()
                     if var existing = elisionCache[eKey] {
                         existing.withGlyphs = rebuilt
+                        existing.epoch = elisionEpoch
                         elisionCache[eKey] = existing
                     }
                     lock.unlock()
@@ -3377,7 +3426,8 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache[eKey] = CachedElision(
                     elision: elision,
                     withoutGlyphs: candNoGlyphs,
-                    withGlyphs: emitGlyphs ? finalRes : nil
+                    withGlyphs: emitGlyphs ? finalRes : nil,
+                    epoch: elisionEpoch
                 )
             }
             lock.unlock()
@@ -3414,7 +3464,8 @@ public final class TextSystem: @unchecked Sendable {
                 elisionCache[eKey] = CachedElision(
                     elision: elision,
                     withoutGlyphs: candNoGlyphs,
-                    withGlyphs: emitGlyphs ? finalRes : nil
+                    withGlyphs: emitGlyphs ? finalRes : nil,
+                    epoch: elisionEpoch
                 )
             }
             lock.unlock()
@@ -3614,6 +3665,7 @@ public final class TextSystem: @unchecked Sendable {
                 backgrounds: [],
                 lineStrings: [(0, "", 0, emptyOriginX, nil)],
                 forcedDirection: style.direction,
+                drawnText: "",
                 lineGlyphRanges: [0..<0]
             )
         }
@@ -4733,15 +4785,19 @@ public final class TextSystem: @unchecked Sendable {
         maxWidth: Float?,
         pixelScale: Float,
         pills: [PillChip] = [],
-        keep: TextKeep = .cached
+        keep requestedKeep: TextKeep = .cached,
+        bypassCache requestedBypass: Bool = false
     ) -> Vec2 {
+        // `bypassCache` (Slice 3) and `keep: .secret` (kitc) both keep secure text out of every cache.
+        let keep: TextKeep = requestedBypass ? .secret : requestedKeep
+        let bypassCache = keep == .secret
         measureFramePhase(.text) {
             if keep == .secret {
                 var effectiveStyle = style
                 if maxWidth != nil && effectiveStyle.wrap == .noWrap { effectiveStyle.wrap = .wrap }
                 return shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false).size
             }
-            return measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, pills: pills)
+            return measurePortable(text, style: style, maxWidth: maxWidth, pixelScale: pixelScale, pills: pills, bypassCache: bypassCache)
         }
     }
 
@@ -4810,14 +4866,15 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        bypassCache: Bool = false
     ) -> ShapedText {
         var effectiveStyle = style
         if effectiveStyle.fontSmoothing == .systemDefault {
             effectiveStyle.fontSmoothing = smoothing
         }
         return measureFramePhase(.text) {
-            shapePortable(text: text, spans: spans, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs)
+            shapePortable(text: text, spans: spans, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: emitGlyphs, bypassCache: bypassCache)
         }
     }
 
@@ -4912,7 +4969,8 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        pills: [PillChip] = []
+        pills: [PillChip] = [],
+        bypassCache: Bool = false
     ) -> Vec2 {
         if text.isEmpty {
             return Vec2(0, Self.specLineHeight(lineCount: 1, lineHeightPt: style.resolvedLineHeight, scale: pixelScale, exact: style.exactLines))
@@ -4932,21 +4990,25 @@ public final class TextSystem: @unchecked Sendable {
             pillsHash: Self.hashPills(pills),
             fontEpoch: fontEpoch()
         )
-        lock.lock()
-        if let cached = measureCache[key] {
+        if !bypassCache {
+            lock.lock()
+            if let cached = measureCache[key] {
+                lock.unlock()
+                return cached
+            }
             lock.unlock()
-            return cached
         }
-        lock.unlock()
 
-        let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false)
-        lock.lock()
-        measureMissCount += 1
-        if measureCache.count > 4096 {
-            measureCache.removeAll(keepingCapacity: true)
+        let shaped = shapePortable(text: text, spans: nil, pills: pills, style: effectiveStyle, maxWidth: maxWidth, pixelScale: pixelScale, emitGlyphs: false, bypassCache: bypassCache)
+        if !bypassCache {
+            lock.lock()
+            measureMissCount += 1
+            if measureCache.count > 4096 {
+                measureCache.removeAll(keepingCapacity: true)
+            }
+            measureCache[key] = shaped.size
+            lock.unlock()
         }
-        measureCache[key] = shaped.size
-        lock.unlock()
         return shaped.size
     }
 
@@ -4957,8 +5019,10 @@ public final class TextSystem: @unchecked Sendable {
         style: TextStyle,
         maxWidth: Float?,
         pixelScale: Float,
-        emitGlyphs: Bool = true
+        emitGlyphs: Bool = true,
+        bypassCache: Bool = false
     ) -> ShapedText {
+        let _ = bypassCache
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
         let invS = 1.0 / scale
         let lineH = style.resolvedLineHeight

@@ -340,14 +340,25 @@ extension Runtime {
             }
         }
 
-        let (mounted, wantedMore, missing) = vState.overscanWindow(
-            offset: curOffsetY,
-            viewport: vpH,
-            prefix: prefix,
-            count: count,
-            indexed: isIndexed,
-            pinnedIndices: pinned
-        )
+        let mounted: Range<Int>
+        let wantedMore: Bool
+        let missing: Int
+        if checkingLiveOnly && !vState.lastMountedRange.isEmpty {
+            let lo = max(0, min(vState.lastMountedRange.lowerBound, count))
+            let hi = max(lo, min(vState.lastMountedRange.upperBound, count))
+            mounted = lo..<hi
+            wantedMore = false
+            missing = 0
+        } else {
+            (mounted, wantedMore, missing) = vState.overscanWindow(
+                offset: curOffsetY,
+                viewport: vpH,
+                prefix: prefix,
+                count: count,
+                indexed: isIndexed,
+                pinnedIndices: pinned
+            )
+        }
 
         // Track first visible anchor row for prepend/resize scroll preservation.
         let vis = vState.visibleRange(offset: curOffsetY, viewport: vpH, prefix: prefix, count: count)

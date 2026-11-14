@@ -59,6 +59,26 @@ private func collectTreeKeys(_ node: Any, into out: inout Set<String>) {
     }
 }
 
+private func findTreeNodeValue(_ node: Any, forKey targetKey: String) -> String? {
+    if let dict = node as? [String: Any] {
+        if (dict["key"] as? String) == targetKey, let value = dict["value"] as? String {
+            return value
+        }
+        for (_, v) in dict {
+            if let found = findTreeNodeValue(v, forKey: targetKey) {
+                return found
+            }
+        }
+    } else if let arr = node as? [Any] {
+        for item in arr {
+            if let found = findTreeNodeValue(item, forKey: targetKey) {
+                return found
+            }
+        }
+    }
+    return nil
+}
+
 private func parseTree(_ data: Data) throws -> (keys: Set<String>, texts: [String]) {
     let json = try JSONSerialization.jsonObject(with: data)
     var keys = Set<String>()
@@ -229,9 +249,14 @@ struct Phase3KitUnblockedTests {
             #expect(parsed.keys.contains(btnKey))
         }
 
-        // Script replay: click "@" mention button and verify rendered tree/state updates cleanly without error.
+        let headJSON = try JSONSerialization.jsonObject(with: head.treeJSON)
+        let beforeValue = findTreeNodeValue(headJSON, forKey: "composer-input-input") ?? ""
+        #expect(beforeValue.contains("edit.rs"))
+        #expect(!beforeValue.contains("text.rs"))
+
+        // Script replay: tap "@" mention button and verify mention pill insertion in rendered tree.
         let steps: [[String: Any]] = [
-            ["at": 0.05, "click": "mention"],
+            ["t": 0.05, "type": "tap", "key": "mention"],
         ]
         let scriptData = try JSONSerialization.data(withJSONObject: steps)
         let scriptString = String(decoding: scriptData, as: UTF8.self)
@@ -241,6 +266,9 @@ struct Phase3KitUnblockedTests {
         )
         let afterParsed = try parseTree(after.treeJSON)
         #expect(afterParsed.keys.contains("composer-input-input"))
+        let afterJSON = try JSONSerialization.jsonObject(with: after.treeJSON)
+        let afterValue = findTreeNodeValue(afterJSON, forKey: "composer-input-input") ?? ""
+        #expect(afterValue.contains("text.rs"))
     }
 
     @Test("launcher: multi-window notes + launcher + globalShortcut cmd+space + desktop menu-bar")
