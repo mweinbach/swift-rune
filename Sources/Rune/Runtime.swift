@@ -7626,7 +7626,9 @@ public final class Runtime<State> {
                     let inputBandPad = 2.0 * inputEmPt * scaleVec.y * pxScale + 2.0 / max(1e-4, pxScale)
                     let inputVisMinY = inputShownY0 - inputBandPad
                     let inputVisMaxY = inputShownY1 + inputBandPad
-                    let (inBandTop, inBandBot): (Float, Float) = (abs(effRotate) <= 1e-4 && abs(scaleVec.y) > 1e-4)
+                    // Under a turn (own or inherited) the upright clip doesn't bound the glyphs: upstream drops
+                    // the clip inside a turned layer (`pinh.clip = NO_CLIP`), so no band.
+                    let (inBandTop, inBandBot): (Float, Float) = (!inputRotated && abs(scaleVec.y) > 1e-4)
                         ? (
                             (devInputClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
                             ((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
@@ -7947,7 +7949,7 @@ public final class Runtime<State> {
                         let textVisMaxY = textShownY1 + textBandPad
                         let glyphsToEmit: ArraySlice<PositionedGlyph>
                         if let labelBox, !wrapTruncateLayer {
-                            let (lblBandTop, lblBandBot): (Float, Float) = (abs(effRotate) <= 1e-4 && abs(scaleVec.y) > 1e-4)
+                            let (lblBandTop, lblBandBot): (Float, Float) = (!textRotated && abs(scaleVec.y) > 1e-4)
                                 ? (
                                     (devClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
                                     ((devClip.y + devClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
