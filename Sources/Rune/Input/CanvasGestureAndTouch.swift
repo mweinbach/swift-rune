@@ -394,6 +394,11 @@ extension Runtime {
     private func applyManualScroll(path: String, to cur: Vec2, at now: Double) {
         let nid = NodeId.hash("scroll:" + path)
         scrollOffsets[path] = cur
+        // Upstream `pointer.rs::wheel` / `scroll/x.rs::wheel_scroll_for`: a wheel that moved the
+        // offset cancels a held press inside this viewport (`scroll_cancels_press`).
+        if let scrollIdx = nodeByPath[path] {
+            cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollIdx, at: now)
+        }
         frameMovedScrollPaths.insert(path)
         scrollStore.snap(nid, Props.SCROLL, to: cur)
         scrollGlidingPaths.remove(path)

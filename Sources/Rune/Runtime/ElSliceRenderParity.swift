@@ -445,6 +445,8 @@ internal extension Runtime {
 
     func cancelPressedOnScrollIfNeeded(scrollNodeIndex: Int, at now: Double) {
         guard let pp = pressedPath, let pIdx = nodeByPath[pp], flatNodes.indices.contains(pIdx) else { return }
+        // Upstream `scroll_cancels_press`: a drag keeps its capture.
+        guard flatNodes[pIdx].el.handlers.onDrag == nil else { return }
         var cur: Int? = pIdx
         var insideScroll = false
         while let i = cur, flatNodes.indices.contains(i) {
