@@ -718,7 +718,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else if !restingGiveBackDone {
             restingGiveBackDone = true
             let hidden = window?.occlusionState.contains(.visible) == false
-            renderer.giveBack(all: hidden, residentCaches: false)
+            runtime.rest(at: t)
+            renderer.giveBack(all: hidden, residentCaches: hidden)
         }
         surfaceMeter?.setPacing(isAnim ? .paced : .idle)
         _ = surfaceMeter?.redraw(paced: displayLinkDriver?.isRunning ?? false)
@@ -818,7 +819,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     internal func syncPlatformBridges(treeCommitted: Bool) {
         let focused = window?.isKeyWindow ?? true
-        let imeAllowed = runtime.hasFocusedTextInput && !runtime.hasSecureFocus && focused
+        let imeAllowed = runtime.hasImeTarget && !runtime.hasSecureFocus && focused
         let cancelIme = runtime.consumeImeReset()
         let caretRect = MacOSHostViewHelper.caretScreenRect(caret: runtime.focusedCaretRect(), in: self)
         textInputBridge.sync(
@@ -1065,7 +1066,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     private func makeKeyEvent(from event: NSEvent) -> KeyEvent? {
-        MacOSKeyMapper.makeKeyEvent(from: event)
+        let focused = window?.isKeyWindow ?? true
+        let optionAsAlt = runtime.hasImeTarget && focused && runtime.effectiveImeOptionAsAlt
+        return MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt)
     }
 
     @discardableResult
@@ -1083,8 +1086,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func keyDown(with event: NSEvent) {
-        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus {
-            let imeResult = textInputBridge.processKeyDown(event, in: self)
+        let focused = window?.isKeyWindow ?? true
+        let imeAllowed = runtime.hasImeTarget && !runtime.hasSecureFocus && focused
+        let optionAsAlt = imeAllowed && runtime.effectiveImeOptionAsAlt
+        if imeAllowed {
+            let imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt)
             if imeResult == .handledByIME {
                 renderTick()
                 return
@@ -1094,7 +1100,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func keyUp(with event: NSEvent) {
-        if runtime.hasFocusedTextInput && !runtime.hasSecureFocus && textInputBridge.hasMarkedText() {
+        if runtime.hasImeTarget && !runtime.hasSecureFocus && textInputBridge.hasMarkedText() {
             return
         }
         guard let kev = makeKeyEvent(from: event) else { return }

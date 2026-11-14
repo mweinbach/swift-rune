@@ -110,6 +110,9 @@ internal final class TextPreparedShape: @unchecked Sendable {
     let typesetter: CTTypesetter
     #endif
     let estimatedBytes: Int
+    /// Layout commit (`TextSystem.layoutCommitSeq`) this shape was last used in through the
+    /// typesetter cache; mutated only under `TextSystem.lock` (`#905` rest eviction).
+    internal var lastUsedCommit: UInt64 = 0
 
     #if canImport(CoreText) && canImport(CoreGraphics)
     init(

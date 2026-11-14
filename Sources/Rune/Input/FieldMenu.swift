@@ -16,6 +16,10 @@ extension Runtime {
         focusedPath = path
         focusedKey = nodeByPath[path].flatMap { flatNodes[$0].key }
         focusVisible = false
+        focusKeyboard = false
+        blurredFocusPath = nil
+        focusHandoff = false
+        clearTabStartFocusPath()
         dirtyCommit(at: now)
     }
 

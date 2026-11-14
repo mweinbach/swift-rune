@@ -280,34 +280,10 @@ public extension Runtime {
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
             if let grid = el.terminalGridPayload {
-                let cw = grid.cellSize.x
-                let ch = grid.cellSize.y
-                for (k, row) in grid.rows.enumerated() {
-                    let y = rect.y + Float(k) * ch
-                    if y >= rect.y + rect.height { break }
-                    let (rowText, places) = row.readingText()
-                    let chars = Array(rowText)
-                    let lengths: [UInt8] = chars.map { UInt8(clamping: String($0).utf8.count) }
-                    let positions: [Float] = places.map { Float($0.column) * cw }
-                    let widths: [Float] = places.map { Float($0.width) * cw }
-                    var starts: [UInt8] = []
-                    for idx in 0..<chars.count {
-                        let curWs = chars[idx].isWhitespace
-                        let prevWs = (idx == 0) || chars[idx - 1].isWhitespace
-                        if !curWs && prevWs {
-                            starts.append(UInt8(min(idx, 255)))
-                        }
-                    }
-                    builtChildren.append(AccessibilityNode(
-                        id: "\(nodeId)/line:\(k)",
-                        role: .text,
-                        value: rowText,
-                        frame: MotionRect.fromXYWH(rect.x, y, Float(grid.columns) * cw, ch),
-                        characterLengths: lengths,
-                        characterPositions: positions,
-                        characterWidths: widths,
-                        wordStarts: starts
-                    ))
+                let projected = AccessibilityTreeBuilder.projectTerminalGrid(grid, nodeId: nodeId, bounds: rect)
+                builtChildren.append(contentsOf: projected.children)
+                if editSel == nil {
+                    editSel = projected.selection
                 }
             }
             if hasLinks, let boxes = linkBoxesByPath[node.path], !boxes.isEmpty {

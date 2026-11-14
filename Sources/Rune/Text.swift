@@ -733,14 +733,15 @@ public final class GlyphAtlas: @unchecked Sendable {
     private var rasterizedCount: UInt64 = 0
     private var accessCounter: UInt64 = 0
     #if canImport(CoreText) && canImport(CoreGraphics)
-    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
-    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64)] = [:]
+    private var glyphCache: [GlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var colorGlyphCache: [ColorGlyphKey: (entry: ColorGlyphEntry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
     private var colorGlyphByIndex: [UInt32: ColorGlyphEntry] = [:]
     private var colorGlyphBytes: Int = 0
     private var nextColorGlyphIndex: UInt32 = 1
     #endif
-    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64)] = [:]
-    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64)] = [:]
+    private var portableGlyphCache: [PortableGlyphKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var iconCache: [IconKey: (entry: Entry, lastUsed: UInt64, lastFrame: UInt64)] = [:]
+    private var frameSequence: UInt64 = 0
 
     /// Initializes the atlas with lazy CPU pixel backing (`#830`: keeps a 1-byte 1x1 stub until the first mask is placed).
     public convenience init(width: Int = GlyphAtlas.atlasSize, height: Int = GlyphAtlas.atlasSize, maxCachedEntries: Int = 4096) {
@@ -873,6 +874,7 @@ public final class GlyphAtlas: @unchecked Sendable {
     public func beginFrame(pinnedMask: UInt32 = 0) {
         lock.lock()
         defer { lock.unlock() }
+        frameSequence &+= 1
         let total = 1 + overflowPages.count
         var totalLive: UInt64 = 0
         for p in 0..<total {
@@ -912,6 +914,27 @@ public final class GlyphAtlas: @unchecked Sendable {
                 touchLocked(page: UInt16(p), texels: 0)
             }
         }
+    }
+
+    /// Drops glyph and icon cache entries older than 1 frame (`GlyphCache::drop_orphans`, `#905`).
+    public func dropOrphans() {
+        lock.lock()
+        defer { lock.unlock() }
+        let f = frameSequence
+        portableGlyphCache = portableGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        iconCache = iconCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        #if canImport(CoreText) && canImport(CoreGraphics)
+        glyphCache = glyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        colorGlyphCache = colorGlyphCache.filter { (f &- $0.value.lastFrame) <= 1 }
+        var liveIndices = Set<UInt32>()
+        var totalBytes = 0
+        for v in colorGlyphCache.values {
+            liveIndices.insert(v.entry.index)
+            totalBytes += v.entry.rgba.count
+        }
+        colorGlyphByIndex = colorGlyphByIndex.filter { liveIndices.contains($0.key) }
+        colorGlyphBytes = totalBytes
+        #endif
     }
 
     /// Current CPU bytes held by cached RGBA color glyphs (`#807`).
@@ -1056,6 +1079,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = portableGlyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             portableGlyphCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1082,7 +1106,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        portableGlyphCache[key] = (entry, accessCounter)
+        portableGlyphCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -1111,6 +1135,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = colorGlyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             colorGlyphCache[key] = cached
             lock.unlock()
             return cached.entry
@@ -1167,7 +1192,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             rgba: rgba
         )
         accessCounter &+= 1
-        colorGlyphCache[key] = (entry, accessCounter)
+        colorGlyphCache[key] = (entry, accessCounter, frameSequence)
         colorGlyphByIndex[idx] = entry
         colorGlyphBytes += rgba.count
         evictColorGlyphBudgetLocked(preserving: key)
@@ -1200,6 +1225,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = glyphCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             glyphCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1214,7 +1240,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             let empty = Entry(uv: .zero, pixelSize: .zero, bearingPx: .zero)
             lock.lock()
             accessCounter &+= 1
-            glyphCache[key] = (empty, accessCounter)
+            glyphCache[key] = (empty, accessCounter, frameSequence)
             evictLRUIfNeededLocked()
             lock.unlock()
             return empty
@@ -1315,7 +1341,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        glyphCache[key] = (entry, accessCounter)
+        glyphCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -1395,6 +1421,7 @@ public final class GlyphAtlas: @unchecked Sendable {
         if var cached = iconCache[key] {
             accessCounter &+= 1
             cached.lastUsed = accessCounter
+            cached.lastFrame = frameSequence
             iconCache[key] = cached
             touchLocked(page: cached.entry.page, texels: UInt32(cached.entry.pixelSize.x * cached.entry.pixelSize.y))
             lock.unlock()
@@ -1430,7 +1457,7 @@ public final class GlyphAtlas: @unchecked Sendable {
             pixelOrigin: placed.origin
         )
         accessCounter &+= 1
-        iconCache[key] = (entry, accessCounter)
+        iconCache[key] = (entry, accessCounter, frameSequence)
         evictLRUIfNeededLocked()
         lock.unlock()
         return entry
@@ -2071,6 +2098,7 @@ public final class TextSystem: @unchecked Sendable {
         var elision: TextElision
         var withoutGlyphs: ShapedText?
         var withGlyphs: ShapedText?
+        /// Elision commit epoch it was last used in (`elisionEpoch`; also `rest()`'s staleness clock).
         var epoch: UInt64 = 0
     }
 
@@ -2278,7 +2306,8 @@ public final class TextSystem: @unchecked Sendable {
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
     #endif
-    private var measureCache: [MeasureKey: Vec2] = [:]
+    /// Measured sizes stamped with the layout commit (`layoutCommitSeq`) they were last used in (`#905` rest eviction).
+    private var measureCache: [MeasureKey: (size: Vec2, usedGeneration: UInt64)] = [:]
 
     private struct TypesetterKey: Hashable {
         var text: String
@@ -2324,7 +2353,7 @@ public final class TextSystem: @unchecked Sendable {
 
     public var applePipeline: ApplePipeline { smoothing.pipeline }
 
-    private var shapeCache: [ShapeKey: ShapedText] = [:]
+    private var shapeCache: [ShapeKey: (shaped: ShapedText, usedGeneration: UInt64)] = [:]
     private var elisionCache: [ElisionKey: CachedElision] = [:]
     private var typesetterCache: [TypesetterKey: TextPreparedShape] = [:]
     private var preparedShapeCache: [TextShapeKey: TextPreparedShape] = [:]
@@ -2350,6 +2379,68 @@ public final class TextSystem: @unchecked Sendable {
         preparedShapeCache.removeAll(keepingCapacity: true)
         layoutCache.removeAll(keepingCapacity: true)
         lock.unlock()
+    }
+
+    /// Advances the layout commit generation after a committed frame (`#905`) without any
+    /// still-shown keys to refresh; the same clock and budget sweep as `endCommit(activeKeys:)`.
+    public func endCommit() {
+        endCommit(activeKeys: [])
+    }
+
+    /// Whether an entry last used in commit `used` is two or more commits behind commit `g`.
+    /// Entries a sweep stamped with the commit just begun (`used > g`) count as fresh.
+    private static func isStale(used: UInt64, lastCommit g: UInt64) -> Bool {
+        used <= g && g - used >= 2
+    }
+
+    /// Window at rest (`TextSystem::rest`, `#905`): evicts layout/shape/measure/elision/typesetter
+    /// entries the last two commits didn't use, forgets their glyph runs, and drops orphan glyph
+    /// cache entries.
+    public func rest() {
+        var evictedKeys: [TextShapeKey] = []
+        lock.lock()
+        if layoutCommitSeq > 0 {
+            // `endCommit` moved the generation on after the last commit.
+            let g = layoutCommitSeq &- 1
+            measureCache = measureCache.filter { !Self.isStale(used: $0.value.usedGeneration, lastCommit: g) }
+            shapeCache = shapeCache.filter { !Self.isStale(used: $0.value.usedGeneration, lastCommit: g) }
+            typesetterCache = typesetterCache.filter { !Self.isStale(used: $0.value.lastUsedCommit, lastCommit: g) }
+            for (k, b) in layoutCache where Self.isStale(used: b.lastUsedCommit, lastCommit: g) {
+                evictedKeys.append(k)
+            }
+            for k in evictedKeys {
+                layoutCache.removeValue(forKey: k)
+                preparedShapeCache.removeValue(forKey: k)
+            }
+        }
+        // Elisions run on their own per-commit epoch (`beginElisionCommit`), bumped as each commit begins.
+        let e = elisionEpoch
+        elisionCache = elisionCache.filter { !Self.isStale(used: $0.value.epoch, lastCommit: e) }
+        lock.unlock()
+        for k in evictedKeys {
+            glyphCache.forget(shapeKey: k)
+        }
+        glyphAtlas.dropOrphans()
+    }
+
+    internal var cachedMeasureCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return measureCache.count
+    }
+
+    /// Entries in the `shape(...)`/`measure(...)` `ShapedText` cache (`shapeCache`); distinct from
+    /// `cachedShapeCount`, which counts `layoutKeyed` prepared shapes (`cached_shape_count`).
+    internal var cachedShapedTextCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return shapeCache.count
+    }
+
+    internal var cachedTypesetterCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return typesetterCache.count
     }
 
     /// Rasterizes a standalone `SVGIcon` into the glyph atlas and returns a `PositionedGlyph` quad (`text/mod.rs` `icon_quad`).
@@ -2885,6 +2976,7 @@ public final class TextSystem: @unchecked Sendable {
         if !bypassCache {
             lock.lock()
             if let cached = measureCache[key] {
+                measureCache[key] = (cached.size, layoutCommitSeq)
                 if effectiveStyle.wrap == .ellipsis || effectiveStyle.maxLines > 0, maxWidth != nil {
                     let eKey = ElisionKey(
                         text: text,
@@ -2902,7 +2994,7 @@ public final class TextSystem: @unchecked Sendable {
                     }
                 }
                 lock.unlock()
-                return cached
+                return cached.size
             }
             lock.unlock()
         }
@@ -2913,7 +3005,7 @@ public final class TextSystem: @unchecked Sendable {
             if measureCache.count > 4096 {
                 measureCache.removeAll(keepingCapacity: true)
             }
-            measureCache[key] = shaped.size
+            measureCache[key] = (shaped.size, layoutCommitSeq)
         }
         lock.unlock()
         return shaped.size
@@ -3241,7 +3333,8 @@ public final class TextSystem: @unchecked Sendable {
             if canCacheShape {
                 lock.lock()
                 if let cached = shapeCache[sKey] {
-                    if cached.elided != nil {
+                    shapeCache[sKey] = (cached.shaped, layoutCommitSeq)
+                    if cached.shaped.elided != nil {
                         let eKey = ElisionKey(
                             text: authText,
                             spans: spans,
@@ -3258,7 +3351,7 @@ public final class TextSystem: @unchecked Sendable {
                         }
                     }
                     lock.unlock()
-                    return cached
+                    return cached.shaped
                 }
                 lock.unlock()
             }
@@ -3303,7 +3396,7 @@ public final class TextSystem: @unchecked Sendable {
                 if shapeCache.count > 2048 {
                     shapeCache.removeAll(keepingCapacity: true)
                 }
-                shapeCache[sKey] = res
+                shapeCache[sKey] = (res, layoutCommitSeq)
             }
             lock.unlock()
             return res
@@ -3339,10 +3432,11 @@ public final class TextSystem: @unchecked Sendable {
 
         if let eKey {
             lock.lock()
-            let cached = elisionCache[eKey]
+            var cached = elisionCache[eKey]
             if var entry = cached {
                 entry.epoch = elisionEpoch
                 elisionCache[eKey] = entry
+                cached = entry
             }
             lock.unlock()
             if let cached {
@@ -3686,8 +3780,11 @@ public final class TextSystem: @unchecked Sendable {
         let builtPrepared: TextPreparedShape
         lock.lock()
         let hitTS = typesetterCache[tsKey]
-        if hitTS != nil && countRebreak {
-            _typesetterRebrokenCount += 1
+        if let hitTS {
+            hitTS.lastUsedCommit = layoutCommitSeq
+            if countRebreak {
+                _typesetterRebrokenCount += 1
+            }
         }
         lock.unlock()
 
@@ -3706,6 +3803,7 @@ public final class TextSystem: @unchecked Sendable {
             if typesetterCache.count > 1024 {
                 typesetterCache.removeAll(keepingCapacity: true)
             }
+            created.lastUsedCommit = layoutCommitSeq
             typesetterCache[tsKey] = created
             shapedBuildCount += 1
             lock.unlock()
@@ -4995,8 +5093,9 @@ public final class TextSystem: @unchecked Sendable {
         if !bypassCache {
             lock.lock()
             if let cached = measureCache[key] {
+                measureCache[key] = (cached.size, layoutCommitSeq)
                 lock.unlock()
-                return cached
+                return cached.size
             }
             lock.unlock()
         }
@@ -5008,7 +5107,7 @@ public final class TextSystem: @unchecked Sendable {
             if measureCache.count > 4096 {
                 measureCache.removeAll(keepingCapacity: true)
             }
-            measureCache[key] = shaped.size
+            measureCache[key] = (shaped.size, layoutCommitSeq)
             lock.unlock()
         }
         return shaped.size

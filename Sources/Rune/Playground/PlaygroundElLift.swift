@@ -159,6 +159,7 @@ extension El {
         if pressFocusesBelow { out.pressFocusesBelow = true }
         if noWindowDrag { out.noWindowDrag = true }
         if isImeCursor { out.isImeCursor = true }
+        if isImeOptionAsAlt { out.isImeOptionAsAlt = true }
         if let traceNameValue { out.traceNameValue = traceNameValue }
         if let traceNamespaceValue { out.traceNamespaceValue = traceNamespaceValue }
         if isSpellcheck { out.isSpellcheck = true }

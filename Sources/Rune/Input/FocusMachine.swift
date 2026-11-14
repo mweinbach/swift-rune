@@ -84,7 +84,14 @@ public struct FocusMachine: Sendable {
     public var openedModalKind: ModalOpenedKind = .dialog
     public var typeSelect = TypeSelect()
     public var disarmedScrimReturn: Bool = false
+    /// The focus the gesture or commit underway took away (`Focus::None { blurred }`); a commit
+    /// that settles with no press held clears it (`FocusEvent::Settled`).
     public var blurredFocusPath: String? = nil
+    /// Whether the keyboard drove focus last (`Modality::Keyboard`); it outlives a blur.
+    public var focusKeyboard: Bool = false
+    /// Whether focus the element lost may go to a neighbour once it leaves the tree
+    /// (`Focus::None { handoff }`): Escape hands on, `Tx::blur` doesn't.
+    public var focusHandoff: Bool = false
     public var lastPressedWasPointer: Bool = false
     public var suppressedRepeatKey: Key? = nil
     public var suppressedRepeatPhysicalKeys: Set<PhysicalKeyCode> = []
@@ -494,6 +501,10 @@ extension Runtime {
         inputMachines.focusMachine.highlightHidden = false
         inputMachines.focusMachine.highlightedPath = nextNode.path
         inputMachines.focusMachine.hoveredHighlight = false
+        inputMachines.focusMachine.focusKeyboard = true
+        inputMachines.focusMachine.blurredFocusPath = nil
+        inputMachines.focusMachine.focusHandoff = false
+        clearTabStartFocusPath()
         focusVisible = true
         ensureNodeVisibleInScrollAncestors(index: memberIdx, at: now)
         dirtyCommit(at: now)

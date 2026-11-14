@@ -271,9 +271,10 @@ struct ElSliceGroup1And4ParityTests {
         let termA11y = findNode(id: "term", in: snapshot)
         #expect(termA11y?.children.count == 2)
         if let line0 = termA11y?.children.first {
-            #expect(line0.value == "ls -la  🚀")
+            #expect(line0.value == "ls -la  🚀\n")
             #expect(line0.wordStarts == [0, 3, 8])
-            #expect(line0.characterWidths?.last == 16)
+            #expect(line0.characterWidths?.dropLast().last == 16)
+            #expect(line0.characterWidths?.last == 0)
         }
         if let line1 = termA11y?.children.last {
             #expect(line1.value == "done")

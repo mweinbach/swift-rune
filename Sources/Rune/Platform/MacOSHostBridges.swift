@@ -21,7 +21,7 @@ public enum MacOSKeyMapper {
         mods(from: event.modifierFlags)
     }
 
-    public static func makeKeyEvent(from event: NSEvent) -> KeyEvent? {
+    public static func makeKeyEvent(from event: NSEvent, optionAsAlt: Bool = false) -> KeyEvent? {
         let m = mods(for: event)
         let key: Key
         switch event.keyCode {
@@ -62,8 +62,20 @@ public enum MacOSKeyMapper {
         case 90: key = .f(20)
         case 110: key = .contextMenu
         default:
-            let chars = event.characters ?? ""
-            let ign = event.charactersIgnoringModifiers ?? chars
+            let rawChars = event.characters ?? ""
+            let ign = event.charactersIgnoringModifiers ?? rawChars
+            let chars: String
+            if optionAsAlt, m.alt, !m.cmd, !ign.isEmpty {
+                if !m.shift && !m.ctrl {
+                    chars = ign
+                } else if let applied = event.characters(byApplyingModifiers: event.modifierFlags.subtracting(.option)), !applied.isEmpty {
+                    chars = applied
+                } else {
+                    chars = ign
+                }
+            } else {
+                chars = rawChars
+            }
             if ign.unicodeScalars.count == 1, let s = ign.unicodeScalars.first {
                 switch s.value {
                 case 0xF727: key = .insert; return KeyEvent(key: key, mods: m)

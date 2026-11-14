@@ -368,6 +368,8 @@ public protocol HostedWindowEntry: AnyObject {
     func viewCommitCount(runtimeObj: AnyObject) -> Int
     func dispatchModifiers(runtimeObj: AnyObject, mods: Mods, at: Double)
     func hasFocusedTextInput(runtimeObj: AnyObject) -> Bool
+    func hasImeTarget(runtimeObj: AnyObject) -> Bool
+    func imeOptionAsAlt(runtimeObj: AnyObject) -> Bool
     func hasSecureFocus(runtimeObj: AnyObject) -> Bool
     func consumeImeReset(runtimeObj: AnyObject) -> Bool
     func focusedImeSnapshot(runtimeObj: AnyObject) -> ImeText?
@@ -671,6 +673,14 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).hasFocusedTextInput
     }
 
+    func hasImeTarget(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).hasImeTarget
+    }
+
+    func imeOptionAsAlt(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).effectiveImeOptionAsAlt
+    }
+
     func hasSecureFocus(runtimeObj: AnyObject) -> Bool {
         rt(runtimeObj).hasSecureFocus
     }
@@ -766,8 +776,8 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     }
 
     func trimIdleCaches(runtimeObj: AnyObject, all: Bool) {
-        let _ = (runtimeObj, all)
-        // Renderer-level GPU memory trim hooks run on the host window controller.
+        _ = all
+        rt(runtimeObj).rest(at: ProcessInfo.processInfo.systemUptime)
     }
 
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry? {
