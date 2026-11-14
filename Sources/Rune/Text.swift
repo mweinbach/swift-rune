@@ -2924,7 +2924,7 @@ public final class TextSystem: @unchecked Sendable {
         measureFramePhase(.text) {
             let scale = max(pixelScale, 1.0)
             let authText = spans.map { $0.map(\.text).joined() } ?? text
-            let effectiveMaxW: Float? = (style.wrap == .noWrap) ? nil : maxWidth
+            let effectiveMaxW = maxWidth
             let fEpoch = currentFontEpoch
             let langTag = language
             let shapeKey = TextShapeKey(
@@ -4760,7 +4760,7 @@ public final class TextSystem: @unchecked Sendable {
         measureFramePhase(.text) {
             let scale = max(pixelScale, 1.0)
             let authText = spans.map { $0.map(\.text).joined() } ?? text
-            let effectiveMaxW: Float? = (style.wrap == .noWrap) ? nil : maxWidth
+            let effectiveMaxW = maxWidth
             let shapeKey = TextShapeKey(
                 authText: authText,
                 spans: spans,

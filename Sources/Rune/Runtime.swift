@@ -3583,7 +3583,7 @@ public final class Runtime<State> {
         for (i, node) in pass.nodes.enumerated() {
             let edit = node.el.handlers.editLens?.get(state)
             let isSec = node.el.isSecure || (edit?.isSecure == true)
-            let isRev = node.el.isRevealed || (edit?.isRevealed == true)
+            let isRev = node.el.revealedOverride ?? (edit?.isRevealed ?? false)
             if isSec {
                 if let edit {
                     lastSecureMaskInfo[node.nodeId] = (edit.text.count, edit.multiline)
@@ -4065,10 +4065,8 @@ public final class Runtime<State> {
         )
         rebuildLiveSubscriptionsIncludingExiting()
         if !concealSnapIndices.isEmpty {
-            for j in concealSnapIndices where j < pass.nodes.count && j < specs.count {
-                let nid = pass.nodes[j].nodeId
-                scene.store.snap(nid, Props.RECT, to: specs[j].rect)
-                pixelSnapGlides.remove(id: nid)
+            for j in concealSnapIndices where j < pass.nodes.count {
+                pixelSnapGlides.remove(id: pass.nodes[j].nodeId)
             }
         }
         if scene.isTracing {
@@ -5196,13 +5194,13 @@ public final class Runtime<State> {
         if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
             let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01)
             let matchesWidth: Bool = {
-                if style.wrap == .noWrap || wrapWidth == nil {
+                guard let ww = wrapWidth else {
                     return live.maxWidth == nil
                 }
-                if let mw = live.maxWidth, let ww = wrapWidth {
-                    return abs(mw - ww) <= 0.75
+                guard let mw = live.maxWidth else {
+                    return false
                 }
-                return false
+                return abs(mw - ww) <= 0.75
             }()
             if matchesText && matchesWidth {
                 if live.hasGlyphs {
