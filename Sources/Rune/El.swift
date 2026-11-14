@@ -1003,6 +1003,8 @@ final class ElColdData<State> {
     var iconRotation: Float = 0.0
     var isWidthLeads: Bool = false
     var holdLandingWidthEnabled: Bool = false
+    var paintContain: Vec2? = nil
+    var motionSnapsEnabled: Bool = false
     var isRaised: Bool = false
     var offsetMotionAnim: Anim<Vec2>? = nil
     var opacityMotionAnim: Anim<Float>? = nil
@@ -1147,6 +1149,8 @@ final class ElColdData<State> {
         c.iconRotation = iconRotation
         c.isWidthLeads = isWidthLeads
         c.holdLandingWidthEnabled = holdLandingWidthEnabled
+        c.paintContain = paintContain
+        c.motionSnapsEnabled = motionSnapsEnabled
         c.isRaised = isRaised
         c.offsetMotionAnim = offsetMotionAnim
         c.opacityMotionAnim = opacityMotionAnim
@@ -1372,6 +1376,8 @@ public struct El<State> {
     public var iconRotation: Float { get { _cold?.data.iconRotation ?? 0.0 } set { ensureCold().data.iconRotation = newValue } }
     public var isWidthLeads: Bool { get { _cold?.data.isWidthLeads ?? false } set { ensureCold().data.isWidthLeads = newValue } }
     public var holdLandingWidthEnabled: Bool { get { _cold?.data.holdLandingWidthEnabled ?? false } set { ensureCold().data.holdLandingWidthEnabled = newValue } }
+    public var paintContain: Vec2? { get { _cold?.data.paintContain } set { ensureCold().data.paintContain = newValue } }
+    public var motionSnapsEnabled: Bool { get { _cold?.data.motionSnapsEnabled ?? false } set { ensureCold().data.motionSnapsEnabled = newValue } }
     public var isRaised: Bool { get { _cold?.data.isRaised ?? false } set { ensureCold().data.isRaised = newValue } }
     public var offsetMotionAnim: Anim<Vec2>? { get { _cold?.data.offsetMotionAnim } set { ensureCold().data.offsetMotionAnim = newValue } }
     public var opacityMotionAnim: Anim<Float>? { get { _cold?.data.opacityMotionAnim } set { ensureCold().data.opacityMotionAnim = newValue } }
@@ -1997,6 +2003,27 @@ public struct El<State> {
     public func pixelSnap(_ on: Bool = true) -> Self {
         var copy = self
         copy.pixelSnapEnabled = on
+        return copy
+    }
+
+    /// Snaps this element's children as Blink does inside a box with paint containment
+    /// (`contain: paint`, `content` or `strict`) whose top-left is `origin`, in window points.
+    public func paintContained(_ origin: Vec2) -> Self {
+        var copy = self
+        copy.paintContain = origin
+        return copy
+    }
+
+    /// Convenience overload of ``paintContained(_:)`` taking separate `x` and `y` window points.
+    public func paintContained(_ x: Float, _ y: Float) -> Self {
+        paintContained(Vec2(x, y))
+    }
+
+    /// While it moves, this element and everything in its subtree snap to whole device pixels
+    /// every frame (`El::motion_snaps`), stepping a pixel at a time instead of gliding.
+    public func motionSnaps(_ on: Bool = true) -> Self {
+        var copy = self
+        copy.motionSnapsEnabled = on
         return copy
     }
 
