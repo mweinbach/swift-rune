@@ -204,6 +204,7 @@ public final class AccessibilityTreeState {
         h.combine(node.isDisabled)
         h.combine(node.isReadOnly)
         h.combine(node.isInvalid)
+        h.combine(node.isBusy)
         h.combine(node.toggled)
         h.combine(node.selectedState)
         h.combine(node.liveRegion)

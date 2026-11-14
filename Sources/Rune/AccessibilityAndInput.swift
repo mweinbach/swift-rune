@@ -72,6 +72,7 @@ public struct AccessibilityNode: Sendable, Equatable {
     public var isDisabled: Bool
     public var isReadOnly: Bool
     public var isInvalid: Bool
+    public var isBusy: Bool
     public var toggled: A11yChecked?
     public var liveRegion: LiveRegionPoliteness?
     public var clipsChildren: Bool
@@ -113,6 +114,7 @@ public struct AccessibilityNode: Sendable, Equatable {
         isDisabled: Bool = false,
         isReadOnly: Bool = false,
         isInvalid: Bool = false,
+        isBusy: Bool = false,
         toggled: A11yChecked? = nil,
         liveRegion: LiveRegionPoliteness? = nil,
         clipsChildren: Bool = false,
@@ -153,6 +155,7 @@ public struct AccessibilityNode: Sendable, Equatable {
         self.isDisabled = isDisabled
         self.isReadOnly = isReadOnly
         self.isInvalid = isInvalid
+        self.isBusy = isBusy
         self.toggled = toggled
         self.liveRegion = liveRegion
         self.clipsChildren = clipsChildren
@@ -174,6 +177,47 @@ public struct AccessibilityNode: Sendable, Equatable {
 
 /// Projects a laid-out `El<State>` tree into a semantic `AccessibilityNode` tree.
 public enum AccessibilityTreeBuilder {
+    private static func collectA11yWords<State>(in node: El<State>, out: inout [String]) {
+        guard !node.isSecure else { return }
+        if let lbl = node.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
+            out.append(lbl)
+            return
+        }
+        if node.handlers.editLens == nil,
+           let txt = (node.plainText ?? node.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !txt.isEmpty {
+            out.append(txt)
+        }
+        for child in node.children where !child.isA11yHidden && child.opacity > 0.01 && !child.isSecure {
+            collectA11yWords(in: child, out: &out)
+        }
+    }
+
+    private static func relatedWords<State>(key: String?, ancestors: [El<State>], selfKey: String?) -> String? {
+        guard let key else { return nil }
+        func findFirst(in scope: El<State>, isDirectTarget: Bool) -> El<State>? {
+            for child in scope.children {
+                if child.keyId == key {
+                    // Exclude exact same node if it happens to have an empty or identical key
+                    return child
+                }
+                if let hit = findFirst(in: child, isDirectTarget: false) {
+                    return hit
+                }
+            }
+            return nil
+        }
+        for scope in ancestors.reversed() {
+            if let target = findFirst(in: scope, isDirectTarget: true) {
+                var parts: [String] = []
+                collectA11yWords(in: target, out: &parts)
+                let joined = parts.joined(separator: " ")
+                if !joined.isEmpty { return joined }
+            }
+        }
+        return nil
+    }
+
     public static func project<State>(
         element: El<State>,
         layout: LayoutEngine.ResultNode,
@@ -181,6 +225,26 @@ public enum AccessibilityTreeBuilder {
         origin: Vec2 = .zero,
         focusedKey: String? = nil,
         path: String = "root"
+    ) -> AccessibilityNode? {
+        projectNode(
+            element: element,
+            layout: layout,
+            state: state,
+            origin: origin,
+            focusedKey: focusedKey,
+            path: path,
+            ancestors: []
+        )
+    }
+
+    private static func projectNode<State>(
+        element: El<State>,
+        layout: LayoutEngine.ResultNode,
+        state: State?,
+        origin: Vec2,
+        focusedKey: String?,
+        path: String,
+        ancestors: [El<State>]
     ) -> AccessibilityNode? {
         if element.isInert || element.isA11yHidden {
             return nil
@@ -194,16 +258,19 @@ public enum AccessibilityTreeBuilder {
             layout.layout.localRect.height
         )
 
+        let enabled = !element.a11yDisabled && !element.isInert
         var actions: [AccessibilityAction] = []
-        if element.handlers.onClick != nil || element.handlers.onClickPress != nil {
-            actions.append(.press)
-        }
-        if element.focusable {
-            actions.append(.focus)
-        }
-        if element.role == .slider {
-            actions.append(.increment)
-            actions.append(.decrement)
+        if enabled {
+            if element.handlers.onClick != nil || element.handlers.onClickPress != nil {
+                actions.append(.press)
+            }
+            if element.focusable {
+                actions.append(.focus)
+            }
+            if element.role == .slider {
+                actions.append(.increment)
+                actions.append(.decrement)
+            }
         }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
@@ -215,23 +282,30 @@ public enum AccessibilityTreeBuilder {
         }
 
         let resolvedRole: ElementRole = (isSecure && element.role == .textInput) ? .passwordInput : element.role
-        let label = isSecure ? (element.a11yLabel ?? "Password") : (element.a11yLabel ?? element.plainText)
+        let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
+        let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
+        let label = isSecure
+            ? (element.a11yLabel ?? labelledByText ?? "Password")
+            : (element.a11yLabel ?? labelledByText ?? element.plainText)
+        let resolvedHelp = element.a11yDescription ?? describedByText ?? element.a11yHelp
         let isFocused = (focusedKey != nil && element.keyId == focusedKey)
         let selectableRole = [.listItem, .option, .tab, .treeItem, .gridCell, .row].contains(resolvedRole)
         let selectedState: Bool? = (selectableRole || element.itemSelected) ? element.itemSelected : nil
 
         var projectedChildren: [AccessibilityNode] = []
         let childOrigin = Vec2(absRect.x, absRect.y)
+        let childAncestors = ancestors + [element]
         let count = min(element.children.count, layout.children.count)
         for i in 0..<count {
             let childPath = "\(nodeId)/#\(i)"
-            if let childNode = project(
+            if let childNode = projectNode(
                 element: element.children[i],
                 layout: layout.children[i],
                 state: state,
                 origin: childOrigin,
                 focusedKey: focusedKey,
-                path: childPath
+                path: childPath,
+                ancestors: childAncestors
             ) {
                 projectedChildren.append(childNode)
             }
@@ -273,17 +347,17 @@ public enum AccessibilityTreeBuilder {
             role: resolvedRole,
             label: label,
             value: value,
-            help: element.a11yDescription ?? element.a11yHelp,
+            help: resolvedHelp,
             placeholder: element.placeholder,
             range: element.a11yRange,
             frame: absRect,
             isFocused: isFocused,
-            isFocusable: element.focusable,
+            isFocusable: enabled && element.focusable,
             isSelected: element.itemSelected,
             selectedState: selectedState,
             isExpanded: element.a11yExpanded,
-            level: element.a11yLevel,
-            positionInSet: element.a11yPosInSet?.position,
+            level: element.a11yLevel.map { max(0, $0 - 1) },
+            positionInSet: element.a11yPosInSet.map { max(0, $0.position - 1) },
             sizeOfSet: element.a11yPosInSet?.size,
             keyboardShortcut: element.a11yShortcutHint,
             url: element.a11yHref,
@@ -292,6 +366,7 @@ public enum AccessibilityTreeBuilder {
             isDisabled: element.a11yDisabled,
             isReadOnly: element.a11yReadOnly,
             isInvalid: element.a11yInvalid,
+            isBusy: element.a11yBusy,
             toggled: element.a11yChecked,
             liveRegion: element.a11yLive,
             clipsChildren: element.layout.clipOverflow,

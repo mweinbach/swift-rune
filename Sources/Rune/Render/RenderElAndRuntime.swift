@@ -722,17 +722,17 @@ extension Runtime {
         }
 
         // Direct children with intermediate opacity activate `.plusLighter` dissolve (`runtime/paint/build.rs:81-89`).
-        var dissolveParentIds: Set<NodeId> = []
-        for n in renderNodes where n.el.isDissolve {
-            let children = childrenByParent[n.index] ?? []
-            let hasMidOpacity = children.contains { child in
-                let pOp = nodeOwnOpacityById[child.nodeId] ?? child.el.opacity
-                return pOp > 0.001 && pOp < 1.0
+        let dissolveParentIds = refreshDissolvePrepass(
+            nodeIds: renderNodes.map(\.nodeId),
+            isDissolve: { nid in renderNodes.first(where: { $0.nodeId == nid })?.el.isDissolve ?? false },
+            childIds: { nid in
+                guard let parentIdx = renderNodes.first(where: { $0.nodeId == nid })?.index else { return [] }
+                return (childrenByParent[parentIdx] ?? []).map(\.nodeId)
+            },
+            ownOpacity: { nid in
+                nodeOwnOpacityById[nid] ?? renderNodes.first(where: { $0.nodeId == nid })?.el.opacity ?? 1.0
             }
-            if hasMidOpacity {
-                dissolveParentIds.insert(n.nodeId)
-            }
-        }
+        )
 
         let initialClipPt = MotionRect(left: 0, top: 0, right: viewport.x, bottom: viewport.y)
         let rootClip = RenderClipState(rectPt: initialClipPt, clipPx: NO_CLIP, fade: .zero)
@@ -1320,6 +1320,28 @@ extension Runtime {
                 ?? snapBorderWidthPx(el.borderWidth, scale: scale)
             let hasSolidBg = paintBg.a > 0.001
             let softEdge = max(0.5, (clipSpec?.soft ?? 0) * scale)
+            // Dimmed, an opaque fill and its linear gradient draw as one opaque gradient (`paint/build.rs:926`).
+            let flatDimLinearGradient: Bool = {
+                guard hasSolidBg && paintBg.a >= 0.999 && localOpacity < 0.999 else { return false }
+                if case .linear = el.gradient, radialGradSpec == nil, linearGradSpec == nil {
+                    return true
+                }
+                return false
+            }()
+            let hasAnyGradient = radialGradSpec != nil || linearGradSpec != nil || el.gradient != nil
+            if hasSolidBg && hasAnyGradient && !flatDimLinearGradient {
+                instances.append(RenderInstance(
+                    rect: rectPx,
+                    radii: shapeRadiiPx,
+                    fill: premulSIMD4(paintBg, opacity: localOpacity, srgb: srgbBlend),
+                    border: .zero,
+                    params: SIMD4<Float>(0, KIND_RECT, softEdge, 1.0),
+                    uv: .zero,
+                    clip: activeClip,
+                    fade: activeFade
+                ))
+                marks.append(0)
+            }
 
             if let rGrad = radialGradSpec, !rGrad.stops.isEmpty {
                 let centerLocal = Vec2(rGrad.center.x * effRect.width, rGrad.center.y * effRect.height)
@@ -1366,8 +1388,10 @@ extension Runtime {
                 switch grad {
                 case let .linear(top, bottom, angle):
                     if abs(cosf(angle)) < 0.05 && borderGradSpec == nil {
-                        let tCol = angle >= 0 ? top : bottom
-                        let bCol = angle >= 0 ? bottom : top
+                        let tRaw = angle >= 0 ? top : bottom
+                        let bRaw = angle >= 0 ? bottom : top
+                        let tCol = flatDimLinearGradient ? blendColorOver(bottom: paintBg, top: tRaw, srgb: srgbBlend) : tRaw
+                        let bCol = flatDimLinearGradient ? blendColorOver(bottom: paintBg, top: bRaw, srgb: srgbBlend) : bRaw
                         let hasBorder = bwPx > 0 && el.borderColor.a > 0.001
                         instances.append(RenderInstance(
                             rect: rectPx,
@@ -1930,8 +1954,9 @@ extension Runtime {
                 )
                 let textLeft = effRect.x + el.layout.padding.left * sc.x
                 let textTop = effRect.y + el.layout.padding.top * sc.y
-                let availW = max(1, (effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x) / max(1e-4, sc.x) + 0.5)
-                let innerH = max(0, (effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y) / max(1e-4, sc.y))
+                let scaledInnerW = max(0, effRect.width - (el.layout.padding.left + el.layout.padding.right) * sc.x)
+                let scaledInnerH = max(0, effRect.height - (el.layout.padding.top + el.layout.padding.bottom) * sc.y)
+                let availW = max(1, scaledInnerW / max(1e-4, sc.x) + 0.5)
                 let shaped = resolvedText.shape(
                     using: textSystem,
                     maxWidth: availW,
@@ -1948,8 +1973,8 @@ extension Runtime {
                     let fadeRes = ElDisplayResolver.truncateFadeParams(
                         el: el,
                         shaped: shaped,
-                        innerW: availW,
-                        innerH: innerH,
+                        innerW: scaledInnerW,
+                        innerH: scaledInnerH,
                         scaleVec: sc,
                         pxScale: scale,
                         textOriginX: textLeft,

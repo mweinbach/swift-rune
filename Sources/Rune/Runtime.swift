@@ -633,6 +633,8 @@ public final class Runtime<State> {
     public var wallStart: Double? = nil
     public var timerWake = TimerWake()
     public var surfaceMeter: SurfaceMeter? = nil
+    public internal(set) var hasDissolve: Bool = false
+    public internal(set) var dissolveScratch: [Bool] = []
     public internal(set) var nextWakeDeadline: Double? {
         get {
             var best = wakeDeadlines.first
@@ -4045,6 +4047,7 @@ public final class Runtime<State> {
     }
 
     internal func nodeTakesFocus(_ el: El<State>) -> Bool {
+        if el.a11yDisabled { return false }
         if el.focusable { return true }
         let pressableRoles: Set<ElementRole> = [
             .button, .tab, .checkbox, .switchControl, .radio, .menuItem, .listItem,
@@ -4753,7 +4756,34 @@ public final class Runtime<State> {
 
     // MARK: - Primitive Emission & ElementInfo Snapshot
 
-    @inline(__always)
+    internal func refreshDissolvePrepass(
+        nodeIds: [NodeId],
+        isDissolve: (NodeId) -> Bool,
+        childIds: (NodeId) -> [NodeId],
+        ownOpacity: (NodeId) -> Float
+    ) -> Set<NodeId> {
+        let anyDissolve = nodeIds.contains(where: isDissolve)
+        hasDissolve = anyDissolve
+        guard anyDissolve else {
+            dissolveScratch.removeAll(keepingCapacity: true)
+            return []
+        }
+        var scratch = [Bool](repeating: false, count: nodeIds.count)
+        var parents: Set<NodeId> = []
+        for (idx, nid) in nodeIds.enumerated() where isDissolve(nid) {
+            let hasMid = childIds(nid).contains { cid in
+                let pOp = ownOpacity(cid)
+                return pOp > 0.001 && pOp < 1.0
+            }
+            if hasMid {
+                parents.insert(nid)
+                scratch[idx] = true
+            }
+        }
+        dissolveScratch = scratch
+        return parents
+    }
+
     internal func isLinearTweenActive(_ source: LiveSource, at now: Double) -> Bool {
         guard let lin = source.linearSpec, lin.duration > 0 else { return false }
         guard let tStart = liveTweenStart[ObjectIdentifier(source)] else { return true }
@@ -4926,6 +4956,13 @@ public final class Runtime<State> {
                 return a.offset < b.offset
             }.map(\.element)
         }
+
+        _ = refreshDissolvePrepass(
+            nodeIds: frameOut.nodes.map(\.id),
+            isDissolve: { nid in (nodeById[nid] ?? exitingSnapshots[nid])?.el.isDissolve ?? false },
+            childIds: { nid in (childrenByParent[nid] ?? []).map(\.id) },
+            ownOpacity: { nid in ownOpacityById[nid] ?? nodeByFrameId[nid]?.opacity ?? 1.0 }
+        )
 
         var preStickyShifts = [Vec2](repeating: .zero, count: flatNodes.count)
         var preStickyById: [NodeId: (shift: Vec2, parentShiftMag: Float)] = [:]
