@@ -48,6 +48,10 @@ public enum PixelSnap {
         public var off: Bool = false
         /// Translation in points from scrolls, sticky shifts, and growth rows above, which snaps as a whole.
         public var rigid: SIMD2<Float> = .zero
+        /// Origin in points of the paint containment above (`El.paintContained`), which is part of `rigid`.
+        public var contain: SIMD2<Float> = .zero
+        /// `El.motionSnaps` here or above: a moving box snaps where it is each frame.
+        public var steps: Bool = false
         /// Nearest scaled layer above or here (1-based index into current frame's layers, `0` = none).
         public var layer: UInt32 = 0
         /// Parent's edges for centring. `nil` when parent paints nothing or doesn't share rigid translation / plain grid.
@@ -406,6 +410,12 @@ public enum PixelSnap {
     @inline(__always)
     public static func roundHalfUp(_ v: Float) -> Float {
         (v + 0.5).rounded(.down)
+    }
+
+    /// `v` (device px) on the device grid inside a paint containment at `c` (`on_grid` in `content.rs`).
+    @inline(__always)
+    public static func onGrid(_ v: Float, contain c: Float) -> Float {
+        roundHalfUp(v - c) + roundHalfUp(c)
     }
 
     /// How far a gliding box's top/left (device px) sits from its nearest whole pixel.

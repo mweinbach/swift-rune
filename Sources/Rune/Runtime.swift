@@ -5532,7 +5532,8 @@ public final class Runtime<State> {
             let snapLayer = (canSnap && opensSnapLayer)
                 ? pixelSnapGlides.layer(id: p.id, r: rExact, unscaled: rawEdgesPx, rigid: rigidPx, cached: el.isolatedLayer)
                 : inh.snap.layer
-            let restForMotion: MotionRect? = (snaps && nodeMoving) ? rawRestRect : nil
+            let steps = inh.snap.steps || el.motionSnapsEnabled
+            let restForMotion: MotionRect? = (snaps && nodeMoving && !steps) ? rawRestRect : nil
             let gliding = snaps && (restForMotion != nil || !unscaled)
             let (snappedEdgesPx, snapRest): (SIMD4<Float>, PixelSnap.Parent?)
             if !snaps {
@@ -5997,8 +5998,9 @@ public final class Runtime<State> {
                         )))
                     } else if iconResting && exactSide > 1e-4 {
                         let canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
-                        let atX = floor(rExact[0] + (wExact - exactSide) * 0.5 + 0.5)
-                        let atY = floor(rExact[1] + (hExact - exactSide) * 0.5 + 0.5)
+                        let containPx = inh.snap.contain * pxScale
+                        let atX = PixelSnap.onGrid(rExact[0] + (wExact - exactSide) * 0.5, contain: containPx.x)
+                        let atY = PixelSnap.onGrid(rExact[1] + (hExact - exactSide) * 0.5, contain: containPx.y)
                         let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide, mirrored: snap.mirroredInRtl)
                         let primIdx = primitives.count
                         primitives.append(attachFade(.glyph(
@@ -6046,8 +6048,12 @@ public final class Runtime<State> {
                     && (nodeScaleMotion == .still)
                     && !boxGliding
                     && abs(avgScale - 1.0) < 1e-5
+                let shapeContainPx = inh.snap.contain * pxScale
                 let shapeAt = shapeStill
-                    ? SIMD2<Float>(floor(rExact[0] + 0.5), floor(rExact[1] + 0.5))
+                    ? SIMD2<Float>(
+                        PixelSnap.onGrid(rExact[0], contain: shapeContainPx.x),
+                        PixelSnap.onGrid(rExact[1], contain: shapeContainPx.y)
+                    )
                     : SIMD2<Float>(devRect.x + (devRect.z - wExact) * 0.5, devRect.y + (devRect.w - hExact) * 0.5)
                 for shape in el.shapes {
                     let effectiveShape = liveTrim.map { shape.trimmed(start: $0.x, end: $0.y) } ?? shape
@@ -7060,11 +7066,19 @@ public final class Runtime<State> {
                 }()
                 let firstTreeChildId = children.first?.id
                 var childRigid = rigidPt
+                var childContain = inh.snap.contain
+                if let o = el.paintContain {
+                    childRigid.x = childRigid.x - childContain.x + o.x
+                    childRigid.y = childRigid.y - childContain.y + o.y
+                    childContain = SIMD2<Float>(o.x, o.y)
+                }
                 childRigid.x -= snap.scrollShift.x
                 childRigid.y -= snap.scrollShift.y
                 var childSnap = PixelSnap.Inherit()
                 childSnap.off = inh.snap.off || !el.isPixelSnapEnabled || abs(p.rotate) >= 1e-6
                 childSnap.rigid = childRigid
+                childSnap.contain = childContain
+                childSnap.steps = steps
                 childSnap.layer = snapLayer
                 let paintsFrame = PixelSnap.frames(el, effectiveFill: fillColor, effectiveBorder: borderColor)
                 childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
