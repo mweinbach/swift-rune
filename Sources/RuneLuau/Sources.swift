@@ -5,13 +5,27 @@ public struct Sources: Sendable, Equatable {
     public static let entry = "init.luau"
     private static let configFiles: Set<String> = [".luaurc", ".config.luau"]
 
-    public private(set) var files: [String: String]
+    private enum Input: Sendable, Equatable {
+        case text(String)
+        case embedded(code: Data, native: Bool)
+    }
+
+    private var inputs: [String: Input]
+    public var files: [String: String] {
+        var out: [String: String] = [:]
+        for (path, input) in inputs {
+            if case .text(let source) = input {
+                out[path] = source
+            }
+        }
+        return out
+    }
     public private(set) var parentConfig: String?
     public private(set) var folder: String?
     public private(set) var entryOverride: String?
 
     public init() {
-        self.files = [:]
+        self.inputs = [:]
     }
 
     public static func single(_ source: String) -> Sources {
@@ -25,7 +39,20 @@ public struct Sources: Sendable, Equatable {
     }
 
     public mutating func insert(_ path: String, _ source: String) {
-        files[Self.normalize(path)] = source
+        inputs[Self.normalize(path)] = .text(source)
+    }
+
+    /// Adds a built-in module by its original path without retaining source text (`Sources::with_embedded`).
+    /// The compiled bytecode retains its line table and path for stack traces.
+    public func withEmbedded(_ path: String, _ code: Data, native: Bool = false) -> Sources {
+        var copy = self
+        copy.insertEmbedded(path, code, native: native)
+        return copy
+    }
+
+    /// Adds or replaces a built-in module by its original path without retaining source text.
+    public mutating func insertEmbedded(_ path: String, _ code: Data, native: Bool = false) {
+        inputs[Self.normalize(path)] = .embedded(code: code, native: native)
     }
 
     public func parentConfig(_ luaurc: String) -> Sources {
@@ -50,12 +77,14 @@ public struct Sources: Sendable, Equatable {
         return copy
     }
 
+    /// The text at `path`, if supplied as source rather than as an embedded module.
     public func get(_ path: String) -> String? {
-        files[Self.normalize(path)]
+        guard case .text(let source) = inputs[Self.normalize(path)] else { return nil }
+        return source
     }
 
     public var paths: [String] {
-        files.keys.sorted()
+        inputs.keys.sorted()
     }
 
     /// Reads every `.luau` file and `.luaurc` / `.config.luau` under `dir` recursively.
@@ -144,14 +173,25 @@ public struct Sources: Sendable, Equatable {
 
     private func compileReusing(_ previous: CompiledSources?) throws -> CompiledSources {
         let entry = entryPath
-        guard files[entry] != nil else {
+        guard inputs[entry] != nil else {
             throw ScriptError(kind: .missing, message: "the script has no \(entry)")
         }
         var modules: [String: CompiledModule] = [:]
         var configs: [String: String] = [:]
 
-        for path in files.keys.sorted() {
-            guard let source = files[path] else { continue }
+        for path in inputs.keys.sorted() {
+            guard let input = inputs[path] else { continue }
+            let source: String
+            switch input {
+            case .text(let text):
+                source = text
+            case .embedded(let code, let native):
+                guard let proto = LuauProto.decode(code) else {
+                    throw ScriptError(kind: .syntax, message: "\(path): invalid embedded bytecode")
+                }
+                modules[path] = CompiledModule(proto: proto, native: native, source: nil)
+                continue
+            }
             if !path.hasSuffix(".luau") || path.hasSuffix(".config.luau") {
                 configs[path] = source
                 continue
@@ -162,7 +202,7 @@ public struct Sources: Sendable, Equatable {
             }
             if let precompiledData = PrecompiledStore.shared.lookup(path),
                let proto = LuauProto.decode(precompiledData) {
-                modules[path] = CompiledModule(proto: proto, source: source)
+                modules[path] = CompiledModule(proto: proto, native: Self.isNative(source), source: source)
                 continue
             }
             do {
@@ -172,7 +212,7 @@ public struct Sources: Sendable, Equatable {
                 let stmts = try parser.parseChunk()
                 let compiler = LuauCompiler(sourceName: path)
                 let proto = try compiler.compile(stmts: stmts)
-                modules[path] = CompiledModule(proto: proto, source: source)
+                modules[path] = CompiledModule(proto: proto, native: Self.isNative(source), source: source)
             } catch let err as ScriptError {
                 let msg = err.message.hasPrefix("\(path):") ? err.message : "\(path): \(err.message)"
                 throw ScriptError(kind: err.kind, message: msg)
@@ -192,6 +232,20 @@ public struct Sources: Sendable, Equatable {
         )
     }
 
+    private static func isNative(_ source: String) -> Bool {
+        for rawLine in source.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("--") {
+                if line.hasPrefix("--!native") {
+                    return true
+                }
+                continue
+            }
+            break
+        }
+        return false
+    }
+
     private static func normalize(_ path: String) -> String {
         var s = path.replacingOccurrences(of: "\\", with: "/")
         while s.hasPrefix("./") { s.removeFirst(2) }
@@ -202,10 +256,12 @@ public struct Sources: Sendable, Equatable {
 
 public final class CompiledModule: @unchecked Sendable {
     internal let proto: LuauProto
-    internal let source: String
+    internal let native: Bool
+    internal let source: String?
 
-    internal init(proto: LuauProto, source: String) {
+    internal init(proto: LuauProto, native: Bool = false, source: String?) {
         self.proto = proto
+        self.native = native
         self.source = source
     }
 }
