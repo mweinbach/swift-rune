@@ -1487,13 +1487,14 @@ public final class Runtime<State> {
             splitStep = nil
         }
 
+        let frameStartShapedCount = textSystem.shapedCallCount
         let (frameOut, animNow) = stepToFrameOutputScaled(
             at: now,
             splitStep: splitStep,
             skipFramePoll: timerAlreadyPolled
         )
         let sceneOut = measureFramePhase(.paint) {
-            buildRefScene(frameOut: frameOut, now: animNow)
+            buildRefScene(frameOut: frameOut, now: animNow, startShapedCount: frameStartShapedCount)
         }
         finishPostFrameHooks(at: now)
         if rewindRecorder != nil {
@@ -5241,8 +5242,8 @@ public final class Runtime<State> {
         return box
     }
 
-    private func buildRefScene(frameOut: FrameOutput, now: Double) -> RefScene {
-        let startShapedCount = textSystem.shapedCallCount
+    private func buildRefScene(frameOut: FrameOutput, now: Double, startShapedCount: UInt64? = nil) -> RefScene {
+        let baselineShapedCount = startShapedCount ?? textSystem.shapedCallCount
         textSystem.glyphAtlas.beginFrame(pinnedMask: lastPinnedGlyphMask)
         textSystem.glyphCache.beginFrame()
         var glyphPageEntries: [(index: Int, page: UInt16)] = []
@@ -7853,7 +7854,7 @@ public final class Runtime<State> {
         }
 
         let totalGlyphs = primitives.count(where: { $0.kind == .glyph })
-        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- startShapedCount))
+        let shapedDelta = UInt32(truncatingIfNeeded: min(UInt64(UInt32.max), textSystem.shapedCallCount &- baselineShapedCount))
         FrameStatsSidecar.set(self, glyphs: totalGlyphs, shaped: shapedDelta)
 
         return RefScene(

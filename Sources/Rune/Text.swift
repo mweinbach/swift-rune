@@ -3099,6 +3099,7 @@ public final class TextSystem: @unchecked Sendable {
             )
             lock.lock()
             _shapedCount += 1
+            shapeCallCounter &+= 1
             if keep == .cached {
                 preparedShapeCache[shapeKey] = prepared
                 if glidePx == .zero && countAsRebreak {
