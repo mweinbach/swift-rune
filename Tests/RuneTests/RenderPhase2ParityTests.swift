@@ -171,16 +171,23 @@ struct RenderPhase2ParityTests {
         struct State: Sendable {
             var cacheTree = false
             var rotateAngle: Float = 0
+            var blurRadius: Float = 0
         }
 
         let lines = (0..<40).map { "Line \($0): viewport window culling check" }.joined(separator: "\n")
-        let makeRt: (Bool, Float) -> Runtime<State> = { cached, angle in
-            Runtime<State>(state: State(cacheTree: cached, rotateAngle: angle), viewport: Vec2(320, 120)) { s, _ in
-                let label: El<State> = text(lines).font(TextStyle(size: 14))
+        let makeRt: (Bool, Float, Float) -> Runtime<State> = { cached, angle, blur in
+            Runtime<State>(state: State(cacheTree: cached, rotateAngle: angle, blurRadius: blur), viewport: Vec2(320, 120)) { s, _ in
+                var label: El<State> = text(lines).font(TextStyle(size: 14))
+                if s.blurRadius > 0 {
+                    label = label.blur(s.blurRadius)
+                }
+                if s.rotateAngle != 0 && s.blurRadius > 0 {
+                    label = label.rotate(s.rotateAngle)
+                }
                 var textNode: El<State> = el()
                     .w(300)
                     .child(label)
-                if s.rotateAngle != 0 {
+                if s.rotateAngle != 0 && s.blurRadius == 0 {
                     textNode = textNode.rotate(s.rotateAngle)
                 }
                 var rootNode: El<State> = el()
@@ -193,16 +200,20 @@ struct RenderPhase2ParityTests {
             }
         }
 
-        let uncached = makeRt(false, 0)
+        let uncached = makeRt(false, 0, 0)
         let uncachedRef = uncached.frame(at: 0)
         let uncachedRender = uncached.renderFrame(at: 0)
 
-        let cached = makeRt(true, 0)
+        let cached = makeRt(true, 0, 0)
         let cachedRender = cached.renderFrame(at: 0)
 
-        let rotated = makeRt(false, 0.2)
+        let rotated = makeRt(false, 0.2, 0)
         let rotatedRef = rotated.frame(at: 0)
         let rotatedRender = rotated.renderFrame(at: 0)
+
+        let blurredRotated = makeRt(false, 0.2, 2)
+        let blurredRotatedRef = blurredRotated.frame(at: 0)
+        let blurredRotatedRender = blurredRotated.renderFrame(at: 0)
 
         let refGlyphCount: (RefScene) -> Int = { scene in
             scene.primitives.filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }.count
@@ -213,15 +224,19 @@ struct RenderPhase2ParityTests {
 
         let uncachedRefCount = refGlyphCount(uncachedRef)
         let rotatedRefCount = refGlyphCount(rotatedRef)
+        let blurredRotatedRefCount = refGlyphCount(blurredRotatedRef)
         #expect(uncachedRefCount > 0)
         #expect(uncachedRefCount < rotatedRefCount / 2)
+        #expect(blurredRotatedRefCount == rotatedRefCount)
 
         let uncachedRenderCount = renderGlyphCount(uncachedRender)
         let cachedRenderCount = renderGlyphCount(cachedRender)
         let rotatedRenderCount = renderGlyphCount(rotatedRender)
+        let blurredRotatedRenderCount = renderGlyphCount(blurredRotatedRender)
         #expect(uncachedRenderCount > 0)
         #expect(uncachedRenderCount < cachedRenderCount / 2)
         #expect(uncachedRenderCount < rotatedRenderCount / 2)
+        #expect(blurredRotatedRenderCount == rotatedRenderCount)
 
         // All emitted uncached glyphs should lie within window height + filter/line band pad.
         let maxRefY = uncachedRef.primitives

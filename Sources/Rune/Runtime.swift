@@ -6403,7 +6403,7 @@ public final class Runtime<State> {
 
                     // Text glyphs
                     let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
-                    let inputRotated = (ancestorTurn != nil) || abs(useLayer ? 0 : effRotate) > 1e-4
+                    let inputRotated = nodeTurn != nil
                     let inputShownY0 = (!inputRotated && !inputInCache) ? max(devInputClip.y, -filterMargin) : devInputClip.y
                     let inputShownY1 = (!inputRotated && !inputInCache) ? min(devInputClip.y + devInputClip.w, Float(devH) + filterMargin) : (devInputClip.y + devInputClip.w)
                     let inputBasePt = resolvedInput.style.lineHeight ?? resolvedInput.style.size
@@ -6672,7 +6672,7 @@ public final class Runtime<State> {
                             )
                             : nil
                         let textInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
-                        let textRotated = (ancestorTurn != nil) || abs(useLayer ? 0 : effRotate) > 1e-4
+                        let textRotated = nodeTurn != nil
                         let textShownY0 = (!textRotated && !textInCache) ? max(glyphClip.y, -filterMargin) : glyphClip.y
                         let textShownY1 = (!textRotated && !textInCache) ? min(glyphClip.y + glyphClip.w, Float(devH) + filterMargin) : (glyphClip.y + glyphClip.w)
                         let textBasePt = resolvedText.style.lineHeight ?? resolvedText.style.size
