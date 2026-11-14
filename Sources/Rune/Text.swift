@@ -503,6 +503,32 @@ public struct ShapedText: @unchecked Sendable {
     public var drawnText: String = ""
     internal var lineAdvancesPx: [(widthPx: Float, trailingWsPx: Float)] = []
     internal var lineGlyphRanges: [Range<Int>] = []
+    /// Each line's top (points) when inline code grew some lines (`#983`); empty while every
+    /// line is `lineHeight` tall.
+    internal var grownLineTopsPt: [Float] = []
+
+    /// The line at `localY` (points): by `grownLineTopsPt` when lines grew, else by `lineHeight`.
+    internal func lineIndex(atLocalY localY: Float, lineCount n: Int) -> Int {
+        guard n > 0 else { return 0 }
+        if grownLineTopsPt.count == n {
+            var idx = 0
+            for (i, top) in grownLineTopsPt.enumerated() where localY >= top {
+                idx = i
+            }
+            return idx
+        }
+        return Int(floorf(max(0, localY) / max(1, lineHeight))).clamped(to: 0...(n - 1))
+    }
+
+    /// Line `i`'s top in points (`grownLineTopsPt` when inline code grew lines).
+    internal func lineTopPt(_ i: Int) -> Float {
+        (i >= 0 && i < grownLineTopsPt.count) ? grownLineTopsPt[i] : Float(i) * lineHeight
+    }
+
+    /// The line height glyph-band culling may assume: `0` (no culling) once lines grew.
+    internal var bandLineHeight: Float {
+        grownLineTopsPt.isEmpty ? lineHeight : 0
+    }
 
     internal func lineAdvancePx(at index: Int) -> Float {
         guard index >= 0, index < lineAdvancesPx.count else { return 0 }
@@ -1268,7 +1294,8 @@ public final class GlyphAtlas: @unchecked Sendable {
             return nil
         }
 
-        let allowFontSmoothing = smoothing.isEnabled
+        // `FontSmoothing::pipeline`: `.on` follows `AppleFontSmoothing` 0 on macOS (`#954`).
+        let allowFontSmoothing = smoothing.pipeline.dilate
         ctx.setAllowsAntialiasing(true)
         ctx.setShouldAntialias(true)
         ctx.setAllowsFontSmoothing(allowFontSmoothing)
@@ -2009,6 +2036,17 @@ public final class TextSystem: @unchecked Sendable {
         var underline: Bool
         var strikethrough: Bool
         var background: Color?
+        /// Inline code (`Span::mono`): its background is its font's content area (`#983`).
+        var monospace: Bool = false
+    }
+
+    /// A monospace span over proportional text (inline code) whose quantized box may grow the
+    /// lines it sits on (`#983`, `inline_fit.rs`): its shaped range and its font's ascent and
+    /// descent in device px.
+    internal struct MonoCodeBox {
+        var u16Range: Range<Int>
+        var ascentPx: Float
+        var descentPx: Float
     }
 
     private struct MeasureKey: Hashable {
@@ -2577,6 +2615,10 @@ public final class TextSystem: @unchecked Sendable {
     private static let prettyStorage = PrettyWrapStorage()
 
     /// Opts wrapped proportional text into Chromium's `text-wrap-style: pretty` (`ScoreLineBreaker`, `#882`).
+    /// A paragraph that would end on a lone short word takes a word or more down with it, pills and
+    /// inline boxes included (`#933`). Text in a monospace family, justified, cut to a number of lines
+    /// or opted out with `El.wrapGreedy` keeps greedy lines, as does, as in Chromium, a paragraph whose
+    /// last line holds an isolated run (inline code) and one with a word broken inside to fit (`wrapAnywhere`).
     public static func setPrettyWrap(_ on: Bool) {
         prettyStorage.lock.lock()
         let changed = (prettyStorage.enabled != on)
@@ -2933,9 +2975,10 @@ public final class TextSystem: @unchecked Sendable {
         return max(0, rawW + CGFloat(letterSpacingPx))
     }
 
-    internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool) -> Float {
+    /// `extraPt` is what inline code grows the lines by (`#983`).
+    internal static func specLineHeight(lineCount: Int, lineHeightPt: Float, scale: Float, exact: Bool, extraPt: Float = 0) -> Float {
         let s = max(1.0, scale)
-        let rawPx = Float(max(1, lineCount)) * lineHeightPt * s
+        let rawPx = (Float(max(1, lineCount)) * lineHeightPt + extraPt) * s
         let snappedPx = exact ? ((rawPx * 64.0).rounded() / 64.0) : ceilf(rawPx)
         return snappedPx / s
     }
@@ -2968,7 +3011,6 @@ public final class TextSystem: @unchecked Sendable {
         let effectivePretty = pretty
             && maxWidth != nil
             && effectiveStyle.wrap == .wrap
-            && !effectiveStyle.wrapAnywhere
             && effectiveStyle.align != .justified
             && effectiveStyle.maxLines == 0
         if keep == .secret {
@@ -3360,7 +3402,6 @@ public final class TextSystem: @unchecked Sendable {
             && maxWidth != nil
             && (maxWidth ?? 0) > 0
             && style.wrap == .wrap
-            && !style.wrapAnywhere
             && style.align != .justified
 
             let sKey = ShapeKey(
@@ -3937,6 +3978,7 @@ public final class TextSystem: @unchecked Sendable {
         let pillMarkerKey = "RunePillMarker" as CFString
         var spanPalette: [Color] = []
         var decoratedRanges: [DecoratedRange] = []
+        var monoCodeBoxes: [MonoCodeBox] = []
         var spanTabInfo: [(u16Range: Range<Int>, spacePx: CGFloat, isMonospace: Bool)] = []
         if let spans {
             var authU16Cursor = 0
@@ -3956,6 +3998,13 @@ public final class TextSystem: @unchecked Sendable {
                         if let sz = span.size { subStyle.size = sz }
                         let subFont = resolveCTFont(style: subStyle, pixelScale: scale)
                         CFAttributedStringSetAttribute(attrStr, range, kCTFontAttributeName, subFont)
+                        if span.monospace && style.family != .monospace {
+                            monoCodeBoxes.append(MonoCodeBox(
+                                u16Range: sLo..<sHi,
+                                ascentPx: Float(CTFontGetAscent(subFont)),
+                                descentPx: Float(CTFontGetDescent(subFont))
+                            ))
+                        }
                         spanTabInfo.append((
                             u16Range: sLo..<sHi,
                             spacePx: Self.spaceAdvancePx(font: subFont, letterSpacingPx: style.letterSpacing * scale),
@@ -3972,7 +4021,8 @@ public final class TextSystem: @unchecked Sendable {
                             u16Range: sLo..<sHi,
                             underline: span.underline,
                             strikethrough: span.strikethrough,
-                            background: span.background
+                            background: span.background,
+                            monospace: span.monospace
                         ))
                     }
                 }
@@ -4069,7 +4119,8 @@ public final class TextSystem: @unchecked Sendable {
             baseAscentPx: baseAscentPx,
             baseDescentPx: baseDescentPx,
             attrStr: attrStr,
-            typesetter: typesetter
+            typesetter: typesetter,
+            monoCodeBoxes: monoCodeBoxes
         )
     }
 
@@ -4126,6 +4177,12 @@ public final class TextSystem: @unchecked Sendable {
         }
         var visualLines: [VisualLine] = []
         var anyTruncated = false
+        // Inline boxes (pill chips' lead/trail placeholders, bare icons) for pretty wrapping (`#933`).
+        var pillBoxU16: Set<Int> = []
+        for vp in preparedPills {
+            pillBoxU16.insert(vp.leadShapedU16)
+            if let t = vp.trailShapedU16 { pillBoxU16.insert(t) }
+        }
         let effectiveWrapWidthPx: CGFloat? = (style.wrap == .wrap && maxWidth != nil)
             ? CGFloat(max(1.0, maxWidth! * scale))
             : nil
@@ -4176,12 +4233,13 @@ public final class TextSystem: @unchecked Sendable {
                 // kitc's break loop (wrapAnywhere via `CTTypesetterSuggestLineBreak` + surrogate-pair fix;
                 // a break landing mid-word extends to the next break opportunity) run per line at
                 // `lineCaps[line]` when the pretty pass (`#882`) narrows a line, else at the wrap width.
-                func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float)] {
+                func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] {
                     var cursor = u16Start
-                    var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float)] = []
+                    var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] = []
                     var lineIdxInPara = 0
                     while cursor < hardEnd {
                         var count: CFIndex
+                        var emergency = false
                         if let wrapW = effectiveWrapWidthPx {
                             let targetW = lineCaps?[lineIdxInPara] ?? wrapW
                             let suggested: CFIndex
@@ -4197,6 +4255,9 @@ public final class TextSystem: @unchecked Sendable {
                                 if endIdx < hardEnd && CFStringIsSurrogateHighCharacter(shapedNS.character(at: endIdx - 1)) {
                                     count += 1
                                 }
+                                // A word broken inside to fit: Parley's `BreakReason::Emergency` (`#933`).
+                                emergency = cursor + count < hardEnd
+                                    && !Self.isLineBreakOpportunity(at: cursor + count, in: shapedNS, start: cursor, end: hardEnd)
                             } else if cursor + count < hardEnd {
                                 let b = cursor + count
                                 if !Self.isBreakOpportunity(shapedNS.character(at: b - 1))
@@ -4268,7 +4329,7 @@ public final class TextSystem: @unchecked Sendable {
                         }
                         let wPx = Float(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
                         let twPx = Float(CTLineGetTrailingWhitespaceWidth(ctLine))
-                        out.append((ctLine, cursor, count, isParaLast, wPx, twPx))
+                        out.append((ctLine, cursor, count, isParaLast, wPx, twPx, emergency))
                         cursor += count
                         lineIdxInPara += 1
                     }
@@ -4276,16 +4337,17 @@ public final class TextSystem: @unchecked Sendable {
                 }
 
                 var paraLines = breakParagraph(lineCaps: nil)
+                // `#933`: pills and `wrapAnywhere` text wrap prettily too (`line_break::break_new`
+                // breaks once with the pills' adjustments, scores, then breaks again with the caps
+                // first and the pills' adjustments after them).
                 if pretty,
                    let wrapW = effectiveWrapWidthPx,
                    style.wrap == .wrap,
-                   !style.wrapAnywhere,
                    style.align != .justified,
                    style.maxLines == 0,
                    style.elide == .end,
                    style.family != .monospace,
                    !paraIsRTL,
-                   preparedPills.isEmpty,
                    paraLines.count >= 2 {
                     let greedyInfos: [PrettyLineBreaker.GreedyLineInfo] = paraLines.map { entry in
                         let runs = CTLineGetGlyphRuns(entry.ctLine) as? [CTRun] ?? []
@@ -4297,7 +4359,8 @@ public final class TextSystem: @unchecked Sendable {
                             trailingWsPx: entry.twPx,
                             hasRTLRun: hasRTL,
                             ctLine: entry.ctLine,
-                            strIndexBase: 0
+                            strIndexBase: 0,
+                            isEmergency: entry.emergency
                         )
                     }
                     if let caps = PrettyLineBreaker.prettyLineCaps(
@@ -4305,7 +4368,8 @@ public final class TextSystem: @unchecked Sendable {
                         in: shapedNS,
                         fontSizePt: style.size,
                         scale: scale,
-                        maxWidthPx: Float(wrapW)
+                        maxWidthPx: Float(wrapW),
+                        boxU16: pillBoxU16
                     ) {
                         let rebroken = breakParagraph(lineCaps: caps)
                         if rebroken.count == paraLines.count {
@@ -4366,6 +4430,36 @@ public final class TextSystem: @unchecked Sendable {
         let descentPx = Float(baseDescentPx)
         let halfLeadingPx = (lhPx - (ascentPx + descentPx)) * 0.5
 
+        // Inline code grows its line as Blink's does (`#983`, `inline_fit.rs`): each line's code
+        // boxes past the strut's push its baseline down and the next lines with it.
+        let monoCodeBoxes = prepared.monoCodeBoxes
+        var lineGrowthPx: [(over: Float, under: Float)] = []
+        var lineTopsPx: [Float] = []
+        if !monoCodeBoxes.isEmpty {
+            var anyGrown = false
+            lineGrowthPx.reserveCapacity(visualLines.count)
+            for item in visualLines {
+                let code = monoCodeBoxes.compactMap { b -> (ascentPx: Float, descentPx: Float)? in
+                    (b.u16Range.lowerBound < item.u16End && item.u16Start < b.u16Range.upperBound)
+                        ? (b.ascentPx, b.descentPx) : nil
+                }
+                let g = InlineCodeBox.lineGrowth(strut: (ascentPx, descentPx), code: code, lineHeightPx: lhPx)
+                if g.over > 0 || g.under > 0 { anyGrown = true }
+                lineGrowthPx.append(g)
+            }
+            if anyGrown {
+                var top: Float = 0
+                lineTopsPx.reserveCapacity(visualLines.count)
+                for g in lineGrowthPx {
+                    lineTopsPx.append(top)
+                    top += lhPx + g.over + g.under
+                }
+            } else {
+                lineGrowthPx = []
+            }
+        }
+        let grownExtraPx: Float = lineGrowthPx.reduce(0) { $0 + $1.over + $1.under }
+
         var glyphsOut: [PositionedGlyph] = []
         var underlinesOut: [SIMD4<Float>] = []
         var strikethroughsOut: [SIMD4<Float>] = []
@@ -4386,8 +4480,9 @@ public final class TextSystem: @unchecked Sendable {
 
         for (lineIdx, item) in visualLines.enumerated() {
             let lineStartGlyphIdx = glyphsOut.count
-            let lineTopPx = Float(lineIdx) * lhPx
-            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx).rounded()
+            let lineTopPx = lineIdx < lineTopsPx.count ? lineTopsPx[lineIdx] : Float(lineIdx) * lhPx
+            let growOverPx = lineIdx < lineGrowthPx.count ? lineGrowthPx[lineIdx].over : 0
+            let baselineYPx = (lineTopPx + halfLeadingPx + ascentPx + growOverPx).rounded()
             let alignOffsetPx: Float
             switch style.align {
             case .leading:
@@ -4432,7 +4527,58 @@ public final class TextSystem: @unchecked Sendable {
             ))
 
             if emitGlyphs && !decoratedRanges.isEmpty && item.u16End > item.u16Start {
-                for dec in decoratedRanges {
+                // Span backgrounds per glyph run (`decorations.rs`, `#983`): inline code's box is its
+                // font's content area, other spans balance on the cap height, whole device px;
+                // touching runs with one background merge into a rect as tall as the widest run.
+                if decoratedRanges.contains(where: { $0.background != nil }) {
+                    var pieces: [(x0: Float, x1: Float, run: InlineCodeBox.RunBackground)] = []
+                    let lineRuns = CTLineGetGlyphRuns(item.ctLine) as? [CTRun] ?? []
+                    for dec in decoratedRanges {
+                        guard let bg = dec.background else { continue }
+                        let lo = max(item.u16Start, dec.u16Range.lowerBound)
+                        let hi = min(item.u16End, dec.u16Range.upperBound)
+                        guard hi > lo else { continue }
+                        for run in lineRuns {
+                            let r = CTRunGetStringRange(run)
+                            let rLo = max(lo, r.location + item.strIndexBase)
+                            let rHi = min(hi, r.location + r.length + item.strIndexBase)
+                            guard rHi > rLo else { continue }
+                            let attrs = CTRunGetAttributes(run) as NSDictionary
+                            guard let rf = attrs[kCTFontAttributeName] else { continue }
+                            let runFont = rf as! CTFont
+                            let a = Float(CTLineGetOffsetForStringIndex(item.ctLine, rLo - item.strIndexBase, nil))
+                            let b = Float(CTLineGetOffsetForStringIndex(item.ctLine, rHi - item.strIndexBase, nil))
+                            let x0 = alignOffsetPx + min(a, b)
+                            let w = abs(b - a)
+                            guard w * invS > 0.01 else { continue }
+                            let capPx = Float(CTFontGetCapHeight(runFont))
+                            let v = InlineCodeBox.backgroundVertical(
+                                baselinePx: baselineYPx,
+                                mono: dec.monospace,
+                                ascentPx: Float(CTFontGetAscent(runFont)),
+                                descentPx: Float(CTFontGetDescent(runFont)),
+                                capHeightPx: capPx > 0 ? capPx : nil,
+                                fontSizePx: Float(CTFontGetSize(runFont))
+                            )
+                            let l = x0.rounded()
+                            let rr = (x0 + w).rounded()
+                            pieces.append((x0, x0 + w, InlineCodeBox.RunBackground(
+                                rect: SIMD4<Float>(l, v.top, rr - l, v.bottom - v.top),
+                                color: bg
+                            )))
+                        }
+                    }
+                    pieces.sort { $0.x0 < $1.x0 }
+                    var merged: [InlineCodeBox.RunBackground] = []
+                    var lastBg: Int? = nil
+                    for p in pieces {
+                        InlineCodeBox.appendMerging(p.run, into: &merged, last: &lastBg)
+                    }
+                    for m in merged {
+                        rawBackgroundsOut.append((m.rect * invS, m.color))
+                    }
+                }
+                for dec in decoratedRanges where dec.underline || dec.strikethrough {
                     let lo = max(item.u16Start, dec.u16Range.lowerBound)
                     let hi = min(item.u16End, dec.u16Range.upperBound)
                     guard hi > lo else { continue }
@@ -4441,9 +4587,6 @@ public final class TextSystem: @unchecked Sendable {
                     let xPt = originXPt + min(x0Px, x1Px) * invS
                     let wPt = abs(x1Px - x0Px) * invS
                     guard wPt > 0.01 else { continue }
-                    if let bg = dec.background {
-                        rawBackgroundsOut.append((SIMD4<Float>(xPt, originYPt, wPt, lhPt), bg))
-                    }
                     if dec.underline {
                         let uy = baselineYPx * invS + max(1.0, style.size * 0.12)
                         underlinesOut.append(SIMD4<Float>(xPt, uy, wPt, strokeThicknessPt))
@@ -4724,9 +4867,9 @@ public final class TextSystem: @unchecked Sendable {
 
         markerMap.lines = lineMarkerRanges
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
-        let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines)
+        let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines, extraPt: grownExtraPx * invS)
         let totalWidthPt = ceilf(maxLineWidthPx / scale * 2.0) * 0.5
-        return ShapedText(
+        var shapedOut = ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
             lineCount: max(1, visualLines.count),
             lineHeight: lhPt,
@@ -4749,6 +4892,8 @@ public final class TextSystem: @unchecked Sendable {
             lineAdvancesPx: visualLines.map { ($0.widthPx, $0.trailingWsPx) },
             lineGlyphRanges: lineGlyphRanges
         )
+        shapedOut.grownLineTopsPt = lineTopsPx.map { $0 * invS }
+        return shapedOut
     }
 
     private static func globalShapedU16Index(in shaped: ShapedText, lineIdx: Int, authUTF8: Int, ctLine: CTLine) -> Int {
@@ -4794,8 +4939,7 @@ public final class TextSystem: @unchecked Sendable {
     public func hitTestUTF8Offset(in shaped: ShapedText, localX: Float, localY: Float, pixelScale: Float) -> Int {
         guard !shaped.lineStrings.isEmpty else { return 0 }
         let scale = pixelScale > 0 ? max(pixelScale, 0.0625) : 1.0
-        let lineIdx = Int(floorf(max(0, localY) / max(1, shaped.lineHeight)))
-            .clamped(to: 0...(shaped.lineStrings.count - 1))
+        let lineIdx = shaped.lineIndex(atLocalY: localY, lineCount: shaped.lineStrings.count)
         let rec = shaped.lineStrings[lineIdx]
         guard let ctLine = rec.ctLine, !rec.text.isEmpty else {
             return rec.utf8Start

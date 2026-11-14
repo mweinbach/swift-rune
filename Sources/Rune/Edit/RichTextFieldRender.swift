@@ -54,7 +54,7 @@ internal enum RichTextFieldRender {
                 paraIdx += 1
             }
             let block = paraIdx < blocks.count ? blocks[paraIdx] : .paragraph
-            let lineY = Float(lineIdx) * shaped.lineHeight
+            let lineY = shaped.lineTopPt(lineIdx)
             switch block {
             case .code:
                 if codeBg.w > 0.0005 {

@@ -7640,7 +7640,7 @@ public final class Runtime<State> {
                         bandTopPt: inBandTop,
                         bandBottomPt: inBandBot
                     ) {
-                        (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
+                        (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
                     }
                     for g in visibleInputGlyphs {
                         let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
@@ -7961,7 +7961,7 @@ public final class Runtime<State> {
                                 bandTopPt: lblBandTop,
                                 bandBottomPt: lblBandBot
                             ) {
-                                (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
+                                (shaped.glyphs, shaped.lineGlyphRanges, shaped.bandLineHeight)
                             }
                         } else {
                             glyphsToEmit = shaped.glyphs[...]
