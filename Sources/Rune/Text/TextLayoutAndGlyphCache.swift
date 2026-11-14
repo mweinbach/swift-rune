@@ -330,7 +330,8 @@ public final class GlyphReplayCache: @unchecked Sendable {
     }
 
     /// Returns positioned glyphs whose lines overlap `[bandTopPt, bandBottomPt]` in local points.
-    /// Builds and caches the flattened glyph stream once when `keep != .secret` and size <= `entryBytes`.
+    /// Builds and caches the flattened glyph stream once when `keep == .cached` and size <= `entryBytes`.
+    /// `.owned` (a gliding layout whose glyphs carry this frame's sub-pixel glide) and `.secret` are never cached.
     public func glyphsInBandCached(
         key: GlyphReplayKey,
         keep: TextKeep,
@@ -338,7 +339,7 @@ public final class GlyphReplayCache: @unchecked Sendable {
         bandBottomPt: Float,
         build: () -> (glyphs: [PositionedGlyph], lineGlyphRanges: [Range<Int>], lineHeight: Float)
     ) -> ArraySlice<PositionedGlyph> {
-        guard keep != .secret else {
+        guard keep == .cached else {
             let built = build()
             return Self.sliceInBand(
                 glyphs: built.glyphs,

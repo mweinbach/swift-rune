@@ -7272,7 +7272,7 @@ public final class Runtime<State> {
                         : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                     let visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
                         key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
-                        keep: resolvedInput.isSecure ? .secret : .cached,
+                        keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
                         bandTopPt: inBandTop,
                         bandBottomPt: inBandBot
                     ) {
@@ -7570,7 +7570,7 @@ public final class Runtime<State> {
                                 : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
                             glyphsToEmit = textSystem.glyphCache.glyphsInBandCached(
                                 key: GlyphReplayKey(shapeKey: labelBox.shapeKey, maxWidth: labelBox.maxWidth, glidePx: glidePx),
-                                keep: resolvedText.isSecure ? .secret : .cached,
+                                keep: resolvedText.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
                                 bandTopPt: lblBandTop,
                                 bandBottomPt: lblBandBot
                             ) {

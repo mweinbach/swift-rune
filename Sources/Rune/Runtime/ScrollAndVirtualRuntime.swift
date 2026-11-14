@@ -1066,7 +1066,10 @@ extension Runtime {
                     ni += 1
                 } else {
                     let oldPath = old.hasPrefix("fold:") ? String(old.dropFirst(5)) : (old.hasPrefix("growth:") ? String(old.dropFirst(7)) : old)
-                    let virtualUnseen = isVirtual && (presentedRectByPath[oldPath] == nil)
+                    // Upstream `apply.rs`: `is_virtual && unseen_ids.contains(old)` — a virtual row that drew
+                    // nothing on the last paint (scrolled past, overscan) leaves at once instead of holding its height.
+                    let virtualUnseen = isVirtual && (presentedRectByPath[oldPath] == nil
+                        || nodeByPath[oldPath].map { unseenPresence.currentPaintUnseenIds.contains(flatNodes[$0].nodeId) } ?? true)
                     if let entry = growthRows[old],
                        entry.track.h > 0.01,
                        existed,
