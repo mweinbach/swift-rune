@@ -1,148 +1,7 @@
 import Foundation
 import RuneMotion
 
-// MARK: - Wheel Lock (`scroll/x.rs` + `input/gesture.rs`)
-
-internal enum WheelOwner: Equatable {
-    case unpicked
-    case handler(String)
-    case vertical
-    case horizontal(String)
-
-    var isHorizontalAxis: Bool? {
-        switch self {
-        case .vertical: return false
-        case .horizontal: return true
-        case .unpicked, .handler: return nil
-        }
-    }
-}
-
-internal enum WheelGestureKind: Equatable {
-    case unphased
-    case phased
-    case momentum
-}
-
-internal enum WheelPhaseState: Equatable {
-    case unphased(at: Double?)
-    case phased(at: Double)
-    case momentum(at: Double)
-    case ended(at: Double, from: WheelGestureKind)
-
-    var isPhased: Bool {
-        switch self {
-        case .unphased, .ended(_, .unphased): return false
-        case .phased, .momentum, .ended(_, .phased), .ended(_, .momentum): return true
-        }
-    }
-
-    var isMomentum: Bool {
-        switch self {
-        case .momentum, .ended(_, .momentum): return true
-        default: return false
-        }
-    }
-
-    var at: Double? {
-        switch self {
-        case .unphased(let t): return t
-        case .phased(let t), .momentum(let t), .ended(let t, _): return t
-        }
-    }
-
-    var endedAt: Double? {
-        if case .ended(let t, _) = self { return t }
-        return nil
-    }
-
-    func moving(to now: Double) -> WheelPhaseState {
-        switch self {
-        case .unphased: return .unphased(at: now)
-        case .phased: return .phased(at: now)
-        case .momentum: return .momentum(at: now)
-        case .ended: return self
-        }
-    }
-}
-
-internal struct WheelLock {
-    private static let wheelIdle: Double = 0.1
-    private static let phasedIdle: Double = 1.0
-    private static let momentumGap: Double = 0.05
-
-    var owner: WheelOwner = .unpicked
-    var phase: WheelPhaseState = .unphased(at: nil)
-
-    mutating func restart() {
-        owner = .unpicked
-        phase = .unphased(at: nil)
-    }
-
-    mutating func began(at now: Double) {
-        let active: Bool
-        switch owner {
-        case .unpicked: active = false
-        case .handler, .vertical, .horizontal: active = true
-        }
-        let isMom = !phase.isMomentum && active && phase.endedAt.map { now - $0 <= Self.momentumGap } == true
-        if !isMom {
-            restart()
-        }
-        phase = isMom ? .momentum(at: now) : .phased(at: now)
-    }
-
-    mutating func deltaArrived(at now: Double, dx: Float, dy: Float) {
-        let phased = phase.isPhased
-        let idle = phased ? Self.phasedIdle : Self.wheelIdle
-        let flipped: Bool
-        if !phased, let h = owner.isHorizontalAxis {
-            flipped = h ? (dx == 0) : (dy == 0)
-        } else {
-            flipped = false
-        }
-        let stale = phase.endedAt != nil
-            || phase.at.map { now - $0 > idle } ?? true
-            || flipped
-        if stale {
-            restart()
-        }
-        phase = phase.moving(to: now)
-    }
-
-    mutating func ended(at now: Double) {
-        let kind: WheelGestureKind
-        switch phase {
-        case .unphased: kind = .unphased
-        case .phased: kind = .phased
-        case .momentum: kind = .momentum
-        case .ended(_, let from): kind = from
-        }
-        phase = .ended(at: now, from: kind)
-    }
-
-    mutating func lost() {
-        restart()
-    }
-
-    func keepsAxis(dx: Float, dy: Float) -> Bool? {
-        guard let h = owner.isHorizontalAxis else { return nil }
-        if phase.isPhased || (h ? dx != 0 : dy != 0) {
-            return h
-        }
-        return nil
-    }
-
-    mutating func repick(acrossPath: String?) -> Bool {
-        if let p = acrossPath {
-            owner = .horizontal(p)
-            return true
-        } else {
-            owner = .vertical
-            return false
-        }
-    }
-}
+// Wheel lock types (`WheelOwner`, `WheelRun`, `WheelPhaseState`, `WheelLock`) live in `WheelLock.swift`.
 
 // MARK: - Touch State (`input/touch.rs`)
 
@@ -236,77 +95,92 @@ extension Runtime {
         return false
     }
 
+    /// `gesture.rs` `wheel_event`: a wheel or trackpad scroll at `pos`, with its modifiers and
+    /// phase. The innermost `onWheel` handler there hears it first, up to the nearest scroll
+    /// view; what none takes scrolls on the axis the gesture locked to.
     internal func dispatchLockedWheel(_ event: WheelEvent, at pos: Vec2?, now: Double) {
         releaseHoverHold()
         let targetPos = pos ?? pointerPosition
         if let pos { pointerPosition = pos }
 
         if event.phase == .began {
-            inputMachines.wheelLock.began(at: now)
+            wheelBegan(now: now)
         }
         let moved = event.dx != 0 || event.dy != 0
         if moved {
             dismissHelp(at: now)
-            inputMachines.wheelLock.deltaArrived(at: now, dx: event.dx, dy: event.dy)
+            wheelDeltaArrived(dx: event.dx, dy: event.dy, now: now)
         }
         if moved || event.phase != .changed {
             var ev = event
-            if inputMachines.wheelLock.phase.isMomentum {
+            if inputMachines.wheelLock.momentum {
                 ev.momentum = true
             }
-            var handled = false
-            switch inputMachines.wheelLock.owner {
-            case .handler(let ownerPath):
-                if let idx = nodeByPath[ownerPath],
-                   !flatNodes[idx].effectiveInert,
-                   !subtreeExiting(idx),
-                   let onWheel = flatNodes[idx].el.handlers.onWheel {
-                    let local = wheelLocalPoint(for: flatNodes[idx], at: targetPos)
-                    var localEv = ev
-                    localEv.x = local.x
-                    localEv.y = local.y
-                    var tx = makeTx(at: now, mods: ev.mods)
-                    let took = Tx.took(onWheel(&state, localEv, &tx), &tx)
-                    applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-                    _ = took
-                    handled = true
-                } else {
-                    inputMachines.wheelLock.owner = .unpicked
-                }
-            case .unpicked:
-                if let startIdx = wheelGestureStartIndex(at: targetPos) {
-                    var walkIdx: Int? = startIdx
-                    while let i = walkIdx, i < flatNodes.count {
-                        let node = flatNodes[i]
-                        if node.effectiveInert || subtreeExiting(i) { break }
-                        if let onWheel = node.el.handlers.onWheel {
-                            let local = wheelLocalPoint(for: node, at: targetPos)
-                            var localEv = ev
-                            localEv.x = local.x
-                            localEv.y = local.y
-                            var tx = makeTx(at: now, mods: ev.mods)
-                            let took = Tx.took(onWheel(&state, localEv, &tx), &tx)
-                            applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
-                            if took {
-                                inputMachines.wheelLock.owner = .handler(node.path)
-                                handled = true
-                                break
-                            }
-                        }
-                        if !node.el.layout.scrollAxes.isEmpty || node.el.isModal { break }
-                        walkIdx = node.parentIndex
-                    }
-                }
-            case .vertical, .horizontal:
-                break
-            }
-
-            if !handled && moved {
-                wheelScrollLocked(dx: ev.dx, dy: ev.dy, at: targetPos, now: now)
-            }
+            // Each delta carries its own gesture and that gesture's axis policy (r241).
+            let gesture = inputMachines.wheelLock.gesture
+            let phased = inputMachines.wheelLock.phased
+            runWheel(gesture: gesture, ev, phased: phased, at: targetPos, moved: moved, now: now)
         }
         if event.phase == .ended || event.phase == .cancelled {
-            inputMachines.wheelLock.ended(at: now)
+            wheelEnded(now: now)
+        }
+    }
+
+    /// `gesture.rs` `run_wheel`: the handler holding the delta's gesture hears it, else each
+    /// handler under the pointer until one takes it, else it scrolls. Each delta keeps its own
+    /// gesture's owner and axis policy (`WheelLock.ownerOf` / `setOwner`), so one of an older
+    /// gesture still reaches the owner its own gesture picked.
+    private func runWheel(gesture: AttemptToken, _ ev: WheelEvent, phased: Bool, at targetPos: Vec2, moved: Bool, now: Double) {
+        inputMachines.wheelLock.syncGesture(gesture)
+        var handled = false
+        switch inputMachines.wheelLock.ownerOf(gesture) {
+        case .handler(let ownerPath)?:
+            if let idx = nodeByPath[ownerPath],
+               !flatNodes[idx].effectiveInert,
+               !subtreeExiting(idx),
+               let onWheel = flatNodes[idx].el.handlers.onWheel {
+                let local = wheelLocalPoint(for: flatNodes[idx], at: targetPos)
+                var localEv = ev
+                localEv.x = local.x
+                localEv.y = local.y
+                var tx = makeTx(at: now, mods: ev.mods)
+                let took = Tx.took(onWheel(&state, localEv, &tx), &tx)
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                _ = took
+                handled = true
+            } else {
+                inputMachines.wheelLock.setOwner(gesture, .unpicked)
+            }
+        case .unpicked?:
+            if let startIdx = wheelGestureStartIndex(at: targetPos) {
+                var walkIdx: Int? = startIdx
+                while let i = walkIdx, i < flatNodes.count {
+                    let node = flatNodes[i]
+                    if node.effectiveInert || subtreeExiting(i) { break }
+                    if let onWheel = node.el.handlers.onWheel {
+                        let local = wheelLocalPoint(for: node, at: targetPos)
+                        var localEv = ev
+                        localEv.x = local.x
+                        localEv.y = local.y
+                        var tx = makeTx(at: now, mods: ev.mods)
+                        let took = Tx.took(onWheel(&state, localEv, &tx), &tx)
+                        applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
+                        if took {
+                            inputMachines.wheelLock.setOwner(gesture, .handler(node.path))
+                            handled = true
+                            break
+                        }
+                    }
+                    if !node.el.layout.scrollAxes.isEmpty || node.el.isModal { break }
+                    walkIdx = node.parentIndex
+                }
+            }
+        case .vertical?, .horizontal?, nil:
+            break
+        }
+
+        if !handled && moved {
+            wheelScrollLocked(gesture: gesture, dx: ev.dx, dy: ev.dy, phased: phased, at: targetPos, now: now)
         }
     }
 
@@ -320,21 +194,25 @@ extension Runtime {
         return Vec2((windowPos.x - rect.x) / scale, (windowPos.y - rect.y) / scale)
     }
 
-    private func wheelScrollLocked(dx: Float, dy: Float, at targetPos: Vec2, now: Double) {
+    /// `scroll/x.rs` `wheel_scroll_for`: scrolls by a delta no `onWheel` handler took, on the
+    /// axis `gesture` locked to. `phased` is that delta's own gesture's policy.
+    private func wheelScrollLocked(gesture: AttemptToken, dx: Float, dy: Float, phased: Bool, at targetPos: Vec2, now: Double) {
+        if dx == 0 && dy == 0 { return }
+        inputMachines.wheelLock.syncGesture(gesture)
         let horizontal: Bool
-        if let locked = inputMachines.wheelLock.keepsAxis(dx: dx, dy: dy) {
+        if let locked = inputMachines.wheelLock.keepsAxis(gesture, dx: dx, dy: dy, phased: phased) {
             horizontal = locked
         } else {
             let across: String? = (abs(dx) > abs(dy))
                 ? scrollContainerAt(at: targetPos, axis: .horizontal)
                 : nil
-            horizontal = inputMachines.wheelLock.repick(acrossPath: across)
+            horizontal = inputMachines.wheelLock.repick(gesture, acrossPath: across)
         }
 
         if horizontal {
             guard dx != 0 else { return }
             let latchedPath: String? = {
-                if case .horizontal(let p) = inputMachines.wheelLock.owner,
+                if case .horizontal(let p)? = inputMachines.wheelLock.ownerOf(gesture),
                    let idx = nodeByPath[p],
                    !flatNodes[idx].effectiveInert,
                    !subtreeExiting(idx),

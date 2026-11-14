@@ -11906,7 +11906,7 @@ public final class Runtime<State> {
             selectionState.clearClicks()
             inputMachines.firstDoubleClick = nil
             inputMachines.keyReleases.lost()
-            inputMachines.wheelLock.lost()
+            wheelLost()
             inputMachines.currentMods = .none
             inputMachines.pendingKeysLost = false
             inputMachines.pendingKeysLostTime = nil

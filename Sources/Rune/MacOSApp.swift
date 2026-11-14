@@ -1054,10 +1054,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func scrollWheel(with event: NSEvent) {
-        let mult: Float = event.hasPreciseScrollingDeltas ? 1.0 : 12.0
+        // `window/events.rs`: native wheel distances matched to Chromium (#856).
+        let (dx, dy) = WheelDistance.points(for: event)
         let wev = WheelEvent(
-            dx: Float(event.scrollingDeltaX) * mult,
-            dy: Float(event.scrollingDeltaY) * mult,
+            dx: dx,
+            dy: dy,
             precise: event.hasPreciseScrollingDeltas,
             mods: mods(for: event)
         )
