@@ -352,7 +352,7 @@ struct Slice4EdgeParityWave3BTests {
                 for k in 0..<12 {
                     let r: El<Slide> = row().key("r\(k)").wFull().h(k == 0 && s.open ? 220 : 20)
                         .hoverGroup().hover(Color.white)
-                        .onHover { st, inside, _ in
+                        .onHoverChange { st, inside, _ in
                             st.changes.append((k, inside))
                             if inside { st.enters.append(k) }
                         }

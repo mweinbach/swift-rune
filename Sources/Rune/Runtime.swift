@@ -7684,7 +7684,12 @@ public final class Runtime<State> {
                pointerPosition.y < viewport.y {
                 let prevHoverPath = hoveredPath
                 let prevHoverLink = hoveredLink
-                refreshHoverAndSyncTracks(at: cxSettings.scaledTime(at: currentTime), wallNow: currentTime, cut: false)
+                refreshHoverAndSyncTracks(
+                    at: cxSettings.scaledTime(at: currentTime),
+                    wallNow: currentTime,
+                    cut: false,
+                    dispatchHover: false
+                )
                 if hoverHoldState != .held && pressedPath == nil {
                     let newPath = hoveredPath
                     let linkChanged = (hoveredLink != prevHoverLink)
@@ -8228,6 +8233,7 @@ public final class Runtime<State> {
     private func refreshHover(
         at now: Double,
         isPointerEvent: Bool,
+        updateHoverHighlight: Bool = true,
         moveDispatched: Bool = false,
         moveAllLiveOnly: Bool = true
     ) -> Bool {
@@ -8298,7 +8304,7 @@ public final class Runtime<State> {
             }
             let focusedIsInput = focusedPath.flatMap { focusedInputElement(at: $0) }
                 .map { $0.handlers.editLens != nil || $0.role == .textInput } ?? false
-            if isPointerEvent && !focusedIsInput {
+            if isPointerEvent && updateHoverHighlight && !focusedIsInput {
                 if let rIdx = hit.flatMap({ highlightRowIndex(for: $0.node.index) }) {
                     let rNode = flatNodes[rIdx]
                     if focusedPath != rNode.path || !hoveredHighlightActive {
@@ -8316,8 +8322,13 @@ public final class Runtime<State> {
             }
             settleKitHoverDelays(at: pos, now: now)
             return changed
-        } else if helpTargetChanges(at: pos) {
-            dirtyCommit(at: now)
+        } else {
+            if pressedPath != nil {
+                syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
+            }
+            if helpTargetChanges(at: pos) {
+                dirtyCommit(at: now)
+            }
         }
         settleKitHoverDelays(at: pos, now: now)
         return false
@@ -8725,7 +8736,13 @@ public final class Runtime<State> {
             dirtyCommit(at: now)
         }
 
-        defer { leaveAfterRelease(at: now) }
+        defer {
+            if inputMachines.pressedLeft {
+                leaveAfterRelease(at: now)
+            } else if pointerPosition.x > -9000 && pointerPosition.y > -9000 {
+                _ = refreshHover(at: now, isPointerEvent: true, updateHoverHighlight: false)
+            }
+        }
         var draggedPastThreshold = suppressedClickFromSelDrag
         var hadActiveDrag = false
         if let drag = activeDrag {
@@ -9113,7 +9130,7 @@ public final class Runtime<State> {
             var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
             let taken = globalOnKey(&state, ev, &tx)
             let consumed = Tx.took(taken, &tx)
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed, liveOnlyLabel: "onKey")
             if consumed {
                 return true
             }
@@ -9422,7 +9439,7 @@ public final class Runtime<State> {
             var tx = makeTx(at: now, physicalKey: physKey, isRepeat: isRepeat)
             let taken = globalOnKey(&state, ev, &tx)
             let consumed = Tx.took(taken, &tx)
-            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed)
+            applyTx(tx, at: now, markDirtyIfNotLiveOnly: consumed, liveOnlyLabel: "onKey")
             if consumed {
                 return true
             }

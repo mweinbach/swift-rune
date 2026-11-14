@@ -590,7 +590,12 @@ extension Runtime {
         return false
     }
 
-    internal func refreshHoverAndSyncTracks(at now: Double, wallNow: Double? = nil, cut: Bool) {
+    internal func refreshHoverAndSyncTracks(
+        at now: Double,
+        wallNow: Double? = nil,
+        cut: Bool,
+        dispatchHover: Bool = true
+    ) {
         if cut {
             hoverHoldState = .free
             hoverWithinPaths.removeAll()
@@ -642,9 +647,11 @@ extension Runtime {
             if let cur = hoveredPath, hoverLive(cur) == nil {
                 hoveredPath = nil
                 hoveredKey = nil
-                isDispatchingHover = true
-                dispatchHoverCallbacks(to: nil, at: currentTime)
-                isDispatchingHover = false
+                if dispatchHover {
+                    isDispatchingHover = true
+                    dispatchHoverCallbacks(to: nil, at: currentTime)
+                    isDispatchingHover = false
+                }
             }
         } else if ptrInWindow {
             let newHoveredLink: TextLinkTarget? = {
@@ -661,9 +668,11 @@ extension Runtime {
             if candidatePath != hoveredPath {
                 hoveredPath = candidatePath
                 hoveredKey = candidateHit?.node.key
-                isDispatchingHover = true
-                dispatchHoverCallbacks(to: candidatePath, at: currentTime)
-                isDispatchingHover = false
+                if dispatchHover {
+                    isDispatchingHover = true
+                    dispatchHoverCallbacks(to: candidatePath, at: currentTime)
+                    isDispatchingHover = false
+                }
             }
         }
 
