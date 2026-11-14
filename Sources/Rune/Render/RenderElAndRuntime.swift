@@ -929,18 +929,23 @@ extension Runtime {
                 newRectSpringingById[nid] = parentSpringing || ownSpatialMoving
             }
             let hoverFrac = isExiting ? 0.0 : (nodeHoverFracById[nid] ?? 0.0)
-            let hovered = !isExiting && (hoverFrac > 0.0005 || (!effInert && node.key != nil && hoveredKey == node.key))
+            let flatFocusWithin = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
+            let hovered = !flatFocusWithin && !isExiting && (hoverFrac > 0.0005 || (!effInert && node.key != nil && hoveredKey == node.key))
             let pressed = !effInert && (pressedPath == node.path || (node.key != nil && pressedKey == node.key))
-            let focused = (node.key != nil && focusedKey == node.key)
+            let focused = (focusedPath == node.path) && !isExiting
+            let highlightActive = focused && (focusVisible || (el.focusHighlightColor != nil && hoveredHighlightActive))
 
             var effBg = liveFill ?? fillMap[nid] ?? el.background
             if pressed, let pbg = el.pressBg {
                 effBg = blendColorOver(bottom: effBg, top: pbg, srgb: srgbBlend)
-            } else if let hbg = el.hoverBg {
+            } else if !flatFocusWithin, let hbg = el.hoverBg {
                 let effectiveHover = hoverFrac > 0.0005 ? hoverFrac : (hovered ? 1.0 : 0.0)
                 if effectiveHover > 0.0005 {
                     effBg = blendColorOver(bottom: effBg, top: hbg.scaleAlpha(effectiveHover), srgb: srgbBlend)
                 }
+            }
+            if highlightActive, let activeFocusFill = el.focusFillColor ?? el.focusHighlightColor {
+                effBg = activeFocusFill
             }
 
             newElements.append(ElementInfo(
@@ -1246,7 +1251,8 @@ extension Runtime {
             }
 
             // 3. Outer drop shadows (`runtime/paint/shadow.rs`)
-            let castsShadow = !el.shadows.isEmpty && blurHole == nil
+            let flatFocusWithinShadows = el.focusWithinFlat && !effInert && !isExiting && isFocusWithin(node.path)
+            let castsShadow = !flatFocusWithinShadows && !el.shadows.isEmpty && blurHole == nil
             let fillA = castsShadow ? paintBg.a : 0.0
             let solidFill = castsShadow && fillA >= 1.0
             let opaqueForBands = solidFill && localOpacity >= 1.0 && linearGradSpec == nil && radialGradSpec == nil && el.gradient == nil && el.surfacePayload == nil
@@ -1257,7 +1263,8 @@ extension Runtime {
             let shadowHole = nativeMaterialHole ?? blurHole ?? dimHole
             let circularRadiiPx = SIMD4<Float>(abs(shapeRadiiPx.x), abs(shapeRadiiPx.y), abs(shapeRadiiPx.z), abs(shapeRadiiPx.w))
 
-            for sh in el.shadows where !sh.inset {
+            if !flatFocusWithinShadows {
+                for sh in el.shadows where !sh.inset {
                 let sp = sh.spread * scale
                 let sr = SIMD4<Float>(
                     rectPx.x + sh.x * scale - sp,
@@ -1313,6 +1320,7 @@ extension Runtime {
                     instances.append(shadowInst)
                     marks.append(0)
                 }
+            }
             }
 
             // 4. Background fill, multi-stop gradients, and borders
@@ -1526,19 +1534,21 @@ extension Runtime {
             }
 
             // 5. Inset shadows
-            for sh in el.shadows where sh.inset {
-                let sp = sh.spread * scale
-                instances.append(RenderInstance(
-                    rect: rectPx,
-                    radii: radiiPx,
-                    fill: premulSIMD4(sh.color, opacity: localOpacity, srgb: srgbBlend),
-                    border: .zero,
-                    params: SIMD4<Float>(sp, KIND_INSET, max(0, sh.blur * scale), 1.0),
-                    uv: SIMD4<Float>(sh.x * scale, sh.y * scale, 0, 0),
-                    clip: activeClip,
-                    fade: activeFade
-                ))
-                marks.append(0)
+            if !flatFocusWithinShadows {
+                for sh in el.shadows where sh.inset {
+                    let sp = sh.spread * scale
+                    instances.append(RenderInstance(
+                        rect: rectPx,
+                        radii: radiiPx,
+                        fill: premulSIMD4(sh.color, opacity: localOpacity, srgb: srgbBlend),
+                        border: .zero,
+                        params: SIMD4<Float>(sp, KIND_INSET, max(0, sh.blur * scale), 1.0),
+                        uv: SIMD4<Float>(sh.x * scale, sh.y * scale, 0, 0),
+                        clip: activeClip,
+                        fade: activeFade
+                    ))
+                    marks.append(0)
+                }
             }
 
             // 6. Effect slot (`El.effect`, `runtime/paint/slots.rs`)
@@ -2114,8 +2124,20 @@ extension Runtime {
                     glyphFixups.append((idx, gq.uv, gw, gh, gq.atlasPage, forceScaled))
                 }
             }
-            let hasFocusRingOverride = !isExiting && !effInert && !el.noFocusRing && (focusedPath == node.path) && focusVisible && (el.focusRingColor != nil || el.focusable)
-            if !hasFocusRingOverride, let ol = el.elOutline, localOpacity > 0.0005 {
+            let focusOverlay = !hasActiveTextLinks(el) ? resolvedFocusRingOverlay(
+                el: el,
+                snapIndex: node.index,
+                snapPath: node.path,
+                isExiting: isExiting,
+                effectiveInert: effInert,
+                isFocused: focusedPath == node.path && !isExiting,
+                forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
+                defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
+                devRect: rectPx,
+                devRadii: radiiPx,
+                pxScale: scale
+            ) : nil
+            if focusOverlay == nil, let ol = el.elOutline, localOpacity > 0.0005 {
                 let avgScale = effRect.width > 0.001 ? (rectPx.z / (effRect.width * scale)) : 1.0
                 if let og = ShellSliceRenderHelpers.resolvedOutlineGeometry(
                     outline: ol,
@@ -2165,23 +2187,36 @@ extension Runtime {
         ) {
             let nid = node.nodeId
             let el = node.el
-            let focused = (node.key != nil && focusedKey == node.key)
             let activeClip = needsLayer ? NO_CLIP : parentClip.clipPx
             let activeFade = needsLayer ? SIMD4<UInt32>.zero : parentClip.fade
             let localOpacity = ((needsLayer ? 1.0 : effOpacity) * el.elPaintAlpha).clamped(to: 0...1)
 
             // 13. Focus ring
-            if focused && focusVisible {
-                let ringCol = el.focusRingColor ?? Tok.accent(0, dark: systemDark)
-                let off = el.focusRingOffset * scale
-                let rw = max(1.0, 2.0 * scale)
-                let ringRect = SIMD4<Float>(rectPx.x - off, rectPx.y - off, rectPx.z + 2 * off, rectPx.w + 2 * off)
+            if !hasActiveTextLinks(el),
+               let overlay = resolvedFocusRingOverlay(
+                el: el,
+                snapIndex: node.index,
+                snapPath: node.path,
+                isExiting: exitingIds.contains(nid),
+                effectiveInert: node.effectiveInert,
+                isFocused: focusedPath == node.path && !exitingIds.contains(nid),
+                forceFocusRings: cxSettings.viewDefaults.forceFocusRings,
+                defaultRingOutline: cxSettings.viewDefaults.focusRing ?? Outline(width: 2.0, offset: el.focusRingOffset, color: Tok.accent(0, dark: systemDark)),
+                devRect: rectPx,
+                devRadii: radiiPx,
+                pxScale: scale
+            ) {
                 instances.append(RenderInstance(
-                    rect: ringRect,
-                    radii: SIMD4<Float>(repeating: abs(radiiPx.x) + off),
+                    rect: overlay.rect,
+                    radii: SIMD4<Float>(
+                        overlay.radii.x >= 0 ? overlay.radii.x : abs(radiiPx.x),
+                        overlay.radii.y >= 0 ? overlay.radii.y : abs(radiiPx.y),
+                        overlay.radii.z >= 0 ? overlay.radii.z : abs(radiiPx.z),
+                        overlay.radii.w >= 0 ? overlay.radii.w : abs(radiiPx.w)
+                    ),
                     fill: .zero,
-                    border: premulSIMD4(ringCol, opacity: localOpacity, srgb: srgbBlend),
-                    params: SIMD4<Float>(rw, KIND_RECT, 0.5, 1.0),
+                    border: premulSIMD4(overlay.color, opacity: localOpacity, srgb: srgbBlend),
+                    params: SIMD4<Float>(overlay.widthPx, KIND_RECT, 0.5, 1.0),
                     uv: .zero,
                     clip: activeClip,
                     fade: activeFade

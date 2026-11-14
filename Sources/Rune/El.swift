@@ -874,6 +874,7 @@ public struct ElementHandlers<State> {
     public var drawnRectUpdate: ((MotionRect) -> Bool)?
     public var onBackgroundPress: ((inout State, PointerPress, inout Tx) -> Void)?
     public var onInputChange: ((inout State, String, inout Tx) -> Bool)?
+    public var onSpellcheckEnabled: Bool? = nil
     public var onSpellcheck: ((inout State, Bool, inout Tx) -> Void)?
     public var onSpellcheckLanguages: ((inout State, [String], inout Tx) -> Void)?
 
@@ -3340,8 +3341,24 @@ public struct El<State> {
     public func onSpellcheck(_ enabled: Bool, _ handler: @escaping (inout State, Bool, inout Tx) -> Void) -> Self {
         var copy = self
         copy.isSpellcheck = enabled
+        copy.handlers.onSpellcheckEnabled = enabled
         copy.handlers.onSpellcheck = handler
         return copy
+    }
+
+    /// Rebinds this `textInput` to a custom `(get, set)` accessor pair (`el::input::edit_access`).
+    public func onEdit(
+        get: @escaping (State) -> TextEdit,
+        set: @escaping (inout State, TextEdit) -> Void
+    ) -> Self {
+        var copy = self
+        copy.handlers.editLens = (get: get, set: set)
+        return copy
+    }
+
+    /// Rebinds this `textInput` to a named `EditAccessor` (`el::input::edit_access`).
+    public func onEdit(_ access: EditAccessor<State>) -> Self {
+        onEdit(get: access.get, set: access.set)
     }
 
     /// Receives spellcheck dictionary language selection changes (`El::on_spellcheck_languages`).
@@ -3676,10 +3693,68 @@ extension El {
     }
 }
 
+/// Value-typed text field configuration mirroring `el::input::InputSpec`.
+public struct InputSpec: Sendable, Equatable {
+    public var animateLayout: Bool
+    public var placeholder: String
+    public var placeholderColor: Color
+    public var caret: Color
+    public var selection: Color
+    public var singleLine: Bool
+    public var spellcheck: Bool
+
+    public init(
+        animateLayout: Bool = false,
+        placeholder: String = "",
+        placeholderColor: Color = Color.white.scaleAlpha(0.4),
+        caret: Color = .white,
+        selection: Color = Color.srgb(0.2, 0.48, 0.96, 0.35),
+        singleLine: Bool = false,
+        spellcheck: Bool = false
+    ) {
+        self.animateLayout = animateLayout
+        self.placeholder = placeholder
+        self.placeholderColor = placeholderColor
+        self.caret = caret
+        self.selection = selection
+        self.singleLine = singleLine
+        self.spellcheck = spellcheck
+    }
+}
+
+/// Custom `(get, set)` state lens for a `textInput` (`el::input::edit_access`).
+public struct EditAccessor<State> {
+    public let get: (State) -> TextEdit
+    public let set: (inout State, TextEdit) -> Void
+
+    public init(get: @escaping (State) -> TextEdit, set: @escaping (inout State, TextEdit) -> Void) {
+        self.get = get
+        self.set = set
+    }
+}
+
+/// Wraps a state `TextEdit` accessor closure pair for `textInput` / `El.onEdit` (`el::input::edit_access`).
+public func editAccess<State>(
+    get: @escaping (State) -> TextEdit,
+    set: @escaping (inout State, TextEdit) -> Void
+) -> EditAccessor<State> {
+    EditAccessor(get: get, set: set)
+}
+
 /// Interactive single-line or multiline text input bound via a Swift `WritableKeyPath<State, TextEdit>`.
 public func textInput<State>(
     key: String,
-    _ keyPath: WritableKeyPath<State, TextEdit>
+    _ keyPath: WritableKeyPath<State, TextEdit>,
+    spec: InputSpec? = nil
+) -> El<State> {
+    textInput(key: key, editAccess(get: { $0[keyPath: keyPath] }, set: { $0[keyPath: keyPath] = $1 }), spec: spec)
+}
+
+/// Interactive text input bound via an explicit `EditAccessor<State>` (`el::input::edit_access`).
+public func textInput<State>(
+    key: String,
+    _ access: EditAccessor<State>,
+    spec: InputSpec? = nil
 ) -> El<State> {
     var node = El<State>(direction: .row)
         .key(key)
@@ -3687,10 +3762,16 @@ public func textInput<State>(
         .focusable(true)
         .clip(true)
     node.textStyle.wrap = .wrap
-    node.handlers.editLens = (
-        get: { state in state[keyPath: keyPath] },
-        set: { state, updated in state[keyPath: keyPath] = updated }
-    )
+    node.handlers.editLens = (get: access.get, set: access.set)
+    if let spec {
+        if !spec.placeholder.isEmpty {
+            node = node.placeholder(spec.placeholder, color: spec.placeholderColor)
+        }
+        node = node.caret(spec.caret, selection: spec.selection)
+        if spec.singleLine { node = node.singleLine(true) }
+        if spec.spellcheck { node = node.spellcheck(true) }
+        if spec.animateLayout { node = node.animateEditLayout(true) }
+    }
     return node
 }
 
