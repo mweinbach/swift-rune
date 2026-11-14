@@ -26,6 +26,7 @@ final class RetainedLayoutCoordinator {
         var pills: [PillChip]
         var style: TextStyle
         var isInput: Bool
+        var pretty: Bool = false
     }
 
     private struct MeasureBox: @unchecked Sendable {
@@ -181,6 +182,7 @@ final class RetainedLayoutCoordinator {
                 }
                 hasher.combine(el.isRevealed)
                 hasher.combine(resolved.truncateFade)
+                hasher.combine(resolved.pretty)
                 hasher.combine(scale)
                 hasher.combine(resolved.style)
                 let h = UInt64(bitPattern: Int64(hasher.finalize()))
@@ -196,7 +198,8 @@ final class RetainedLayoutCoordinator {
                         pixelScale: max(scale, 1.0),
                         fontEpoch: fEpoch,
                         languageTag: langTag,
-                        maxWidth: nil
+                        maxWidth: nil,
+                        pretty: resolved.pretty
                     )
                     nonSecretLeaves.append(TextLeafFallback(
                         index: flatIndex,
@@ -206,7 +209,8 @@ final class RetainedLayoutCoordinator {
                         spans: resolved.spans,
                         pills: resolved.pills,
                         style: resolved.style,
-                        isInput: false
+                        isInput: false,
+                        pretty: resolved.pretty
                     ))
                 }
                 let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
@@ -224,7 +228,8 @@ final class RetainedLayoutCoordinator {
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: keep,
-                        countAsRebreak: (textLayouts != nil) && isRealLayout
+                        countAsRebreak: (textLayouts != nil) && isRealLayout,
+                        pretty: resolved.pretty
                     )
                     if !resolved.isSecure, isRealLayout, let collector = textLayouts {
                         collector.map[nodeId] = TextLayoutRecord(box: box, isInput: false)
@@ -602,7 +607,8 @@ final class RetainedLayoutCoordinator {
                         pixelScale: scale,
                         emitGlyphs: false,
                         keep: .cached,
-                        countAsRebreak: true
+                        countAsRebreak: true,
+                        pretty: leaf.pretty
                     )
                     collector.map[leaf.nodeId] = TextLayoutRecord(box: box, isInput: leaf.isInput)
                 }

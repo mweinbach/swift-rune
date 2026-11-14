@@ -1066,6 +1066,8 @@ final class ElColdData<State> {
     var liveText: LiveText? = nil
     var placeholder: String? = nil
     var placeholderColor: Color? = nil
+    var placeholderFontBox: AnyObject? = nil
+    var wrapGreedy: Bool = false
     var caretColor: Color? = nil
     var selectionColor: Color? = nil
     var iconPayload: (SVGIcon, Float)? = nil
@@ -1140,6 +1142,15 @@ final class ElColdData<State> {
 
     func clone() -> ElColdData<State> {
         let c = ElColdData<State>()
+        copyPaintAndMotionFields(to: c)
+        copyFocusAndA11yFields(to: c)
+        copyTextAndMediaFields(to: c)
+        copyStyleAndHandlerFields(to: c)
+        return c
+    }
+
+    @inline(never)
+    private func copyPaintAndMotionFields(to c: ElColdData<State>) {
         c.pixelSnapEnabled = pixelSnapEnabled
         c.clipRadius = clipRadius
         c.clipCorners = clipCorners
@@ -1171,6 +1182,10 @@ final class ElColdData<State> {
         c.groupColor = groupColor
         c.isDissolve = isDissolve
         c.drawnRectLive = drawnRectLive
+    }
+
+    @inline(never)
+    private func copyFocusAndA11yFields(to c: ElColdData<State>) {
         c.focusRingColor = focusRingColor
         c.focusRingWidth = focusRingWidth
         c.focusRingOffset = focusRingOffset
@@ -1209,12 +1224,18 @@ final class ElColdData<State> {
         c.a11yPosInSet = a11yPosInSet
         c.a11yShortcutHint = a11yShortcutHint
         c.a11yHref = a11yHref
+    }
+
+    @inline(never)
+    private func copyTextAndMediaFields(to c: ElColdData<State>) {
         c.richSpans = richSpans
         c.textHighlights = textHighlights
         c.textLinks = textLinks
         c.liveText = liveText
         c.placeholder = placeholder
         c.placeholderColor = placeholderColor
+        c.placeholderFontBox = placeholderFontBox
+        c.wrapGreedy = wrapGreedy
         c.caretColor = caretColor
         c.selectionColor = selectionColor
         c.iconPayload = iconPayload
@@ -1242,6 +1263,10 @@ final class ElColdData<State> {
         c.isUnmirrored = isUnmirrored
         c.mirrorInRtl = mirrorInRtl
         c.textDirByParagraph = textDirByParagraph
+    }
+
+    @inline(never)
+    private func copyStyleAndHandlerFields(to c: ElColdData<State>) {
         c.focusFillColor = focusFillColor
         c.pressFocusesBelow = pressFocusesBelow
         c.noWindowDrag = noWindowDrag
@@ -1275,7 +1300,6 @@ final class ElColdData<State> {
         c.handlersBox = handlersBox.map { ElHandlersBox($0.value) }
         c._runtimeExtras = _runtimeExtras
         c.keyLocation = keyLocation
-        return c
     }
 }
 
@@ -1359,6 +1383,15 @@ public struct El<State> {
     public var liveText: LiveText? { get { _cold?.data.liveText } set { ensureCold().data.liveText = newValue } }
     public var placeholder: String? { get { _cold?.data.placeholder } set { ensureCold().data.placeholder = newValue } }
     public var placeholderColor: Color? { get { _cold?.data.placeholderColor } set { ensureCold().data.placeholderColor = newValue } }
+    private final class PlaceholderFontBox: @unchecked Sendable {
+        let style: TextStyle
+        init(_ style: TextStyle) { self.style = style }
+    }
+    public var placeholderFont: TextStyle? {
+        get { (_cold?.data.placeholderFontBox as? PlaceholderFontBox)?.style }
+        set { ensureCold().data.placeholderFontBox = newValue.map(PlaceholderFontBox.init) }
+    }
+    public var isWrapGreedy: Bool { get { _cold?.data.wrapGreedy ?? false } set { ensureCold().data.wrapGreedy = newValue } }
     public var caretColor: Color? { get { _cold?.data.caretColor } set { ensureCold().data.caretColor = newValue } }
     public var selectionColor: Color? { get { _cold?.data.selectionColor } set { ensureCold().data.selectionColor = newValue } }
     public var iconPayload: (SVGIcon, Float)? { get { _cold?.data.iconPayload } set { ensureCold().data.iconPayload = newValue } }
@@ -2449,6 +2482,20 @@ public struct El<State> {
         var copy = self
         copy.placeholder = p
         if let color { copy.placeholderColor = color }
+        return copy
+    }
+
+    /// Lays this field's placeholder out in `style` rather than the field's own (`El::placeholder_font`, `#896`).
+    public func placeholderFont(_ style: TextStyle) -> Self {
+        var copy = self
+        copy.placeholderFont = style
+        return copy
+    }
+
+    /// Breaks this text's lines greedily even when `TextSystem.setPrettyWrap(true)` is active (`El::wrap_greedy`, `#882`).
+    public func wrapGreedy(_ enabled: Bool = true) -> Self {
+        var copy = self
+        copy.isWrapGreedy = enabled
         return copy
     }
 
@@ -3964,6 +4011,7 @@ public struct InputSpec: Sendable, Equatable {
     public var animateLayout: Bool
     public var placeholder: String
     public var placeholderColor: Color
+    public var placeholderStyle: TextStyle?
     public var caret: Color
     public var selection: Color
     public var singleLine: Bool
@@ -3973,6 +4021,7 @@ public struct InputSpec: Sendable, Equatable {
         animateLayout: Bool = false,
         placeholder: String = "",
         placeholderColor: Color = Color.white.scaleAlpha(0.4),
+        placeholderStyle: TextStyle? = nil,
         caret: Color = .white,
         selection: Color = Color.srgb(0.2, 0.48, 0.96, 0.35),
         singleLine: Bool = false,
@@ -3981,6 +4030,7 @@ public struct InputSpec: Sendable, Equatable {
         self.animateLayout = animateLayout
         self.placeholder = placeholder
         self.placeholderColor = placeholderColor
+        self.placeholderStyle = placeholderStyle
         self.caret = caret
         self.selection = selection
         self.singleLine = singleLine
@@ -4032,6 +4082,9 @@ public func textInput<State>(
     if let spec {
         if !spec.placeholder.isEmpty {
             node = node.placeholder(spec.placeholder, color: spec.placeholderColor)
+        }
+        if let placeholderStyle = spec.placeholderStyle {
+            node = node.placeholderFont(placeholderStyle)
         }
         node = node.caret(spec.caret, selection: spec.selection)
         if spec.singleLine { node = node.singleLine(true) }

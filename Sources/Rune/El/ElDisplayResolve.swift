@@ -35,6 +35,7 @@ internal struct ElResolvedText {
     var isSecure: Bool
     var truncateFade: Bool
     var truncateFadeEm: Float
+    var pretty: Bool = false
 
     func measure(using textSystem: TextSystem, maxWidth: Float?, pixelScale: Float) -> Vec2 {
         if let (run, offset) = advanceRun {
@@ -69,7 +70,8 @@ internal struct ElResolvedText {
                 maxWidth: shapeMaxW,
                 pixelScale: pixelScale,
                 emitGlyphs: false,
-                bypassCache: isSecure
+                bypassCache: isSecure,
+                pretty: pretty
             ).size
         }
         return textSystem.measure(
@@ -78,7 +80,8 @@ internal struct ElResolvedText {
             maxWidth: shapeMaxW,
             pixelScale: pixelScale,
             pills: pills,
-            bypassCache: isSecure
+            bypassCache: isSecure,
+            pretty: pretty
         )
     }
 
@@ -97,12 +100,15 @@ internal struct ElResolvedText {
         }
         var effectiveStyle = style
         var shapeMaxW = maxWidth
+        var effectivePretty = pretty
         if truncateFade {
             effectiveStyle.wrap = .noWrap
             effectiveStyle.maxLines = 0
             shapeMaxW = nil
+            effectivePretty = false
         } else if effectiveStyle.wrap == .noWrap && effectiveStyle.maxLines == 0 {
             shapeMaxW = nil
+            effectivePretty = false
         }
         return textSystem.shape(
             text: displayedText,
@@ -113,7 +119,8 @@ internal struct ElResolvedText {
             pixelScale: pixelScale,
             emitGlyphs: emitGlyphs,
             glidePx: glidePx,
-            bypassCache: bypassCache ?? isSecure
+            bypassCache: bypassCache ?? isSecure,
+            pretty: effectivePretty
         )
     }
 }
@@ -237,18 +244,26 @@ internal enum ElDisplayResolver {
         let rawDisplay = edit.displayString
         let showingPlaceholder = rawDisplay.isEmpty && (edit.preedit?.text.isEmpty ?? true)
         if showingPlaceholder {
+            var placeholderStyle = el.placeholderFont ?? inputStyle
+            placeholderStyle.maxLines = 0
+            placeholderStyle.wrap = inputStyle.wrap
+            if let fDir = edit.forcedDir {
+                placeholderStyle.direction = fDir
+            } else if placeholderStyle.direction == nil, let fallbackDirection {
+                placeholderStyle.direction = fallbackDirection
+            }
             return ElResolvedInput(
                 displayString: rawDisplay,
                 renderedString: el.placeholder ?? "",
                 showingPlaceholder: true,
                 spans: nil,
                 pills: [],
-                style: inputStyle,
+                style: placeholderStyle,
                 isSingleLine: isSingle,
                 isRich: false,
                 isSecure: edit.isSecure,
                 richStyle: richStyle,
-                maxWidthForShape: shapeMaxW
+                maxWidthForShape: (placeholderStyle.direction == .rtl || (!isSingle && placeholderStyle.wrap != .noWrap)) ? innerWidth : nil
             )
         }
 
@@ -412,6 +427,15 @@ internal enum ElDisplayResolver {
             return (r, entry.color, entry.width)
         }
 
+        let isPretty = TextSystem.prettyWrap &&
+            !el.isWrapGreedy &&
+            !isHiddenSecure &&
+            !style.wrapAnywhere &&
+            style.align != .justified &&
+            style.maxLines == 0 &&
+            style.wrap == .wrap &&
+            !el.isTruncateFadeEnabled
+
         return ElResolvedText(
             authoredText: authored,
             displayedText: displayedText,
@@ -423,7 +447,8 @@ internal enum ElDisplayResolver {
             advanceRun: isHiddenSecure ? nil : el.advanceInRun,
             isSecure: isSecure,
             truncateFade: el.isTruncateFadeEnabled,
-            truncateFadeEm: el.truncateFadeEm
+            truncateFadeEm: el.truncateFadeEm,
+            pretty: isPretty
         )
     }
 

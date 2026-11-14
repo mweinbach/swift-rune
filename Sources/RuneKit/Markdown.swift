@@ -4946,6 +4946,7 @@ private final class MarkdownRenderer<State> {
         var ink: Color? = nil
         var cols: Int = 0
         var lead: (cols: Int, lead: Lead, before: UInt8)? = nil
+        var growing: Bool = false
     }
 
     init(view: MarkdownView<State>, style: MarkdownStyle, doc: MarkdownParsedDoc) {
@@ -5077,6 +5078,7 @@ private final class MarkdownRenderer<State> {
 
             if topLevel {
                 currentBlockKey = key
+                flow.growing = (view.config.isStreaming && i + 1 == blocks.count)
             }
             if i > 0 {
                 flow.lead = nil
@@ -5294,7 +5296,7 @@ private final class MarkdownRenderer<State> {
     }
 
     private func withReveal(_ node: El<State>) -> El<State> {
-        node
+        flow.growing ? node.wrapGreedy() : node
     }
 
     private func makeTextHighlights(for renderedText: String, map: MarkdownSpanMap?) -> [TextHighlight] {

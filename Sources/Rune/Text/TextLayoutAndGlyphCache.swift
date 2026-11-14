@@ -67,6 +67,9 @@ public struct TextShapeKey: Hashable, Sendable {
     public var fontEpoch: UInt64
     public var languageTag: String?
     public var ellipsisMaxWKey: Int
+    /// Whether this layout breaks `text-wrap-style: pretty` (`#882`); a pretty and a greedy layout of
+    /// the same text never share an entry (upstream folds `pretty` into `hash::break_key`).
+    public var pretty: Bool
 
     public init(
         authText: String,
@@ -76,7 +79,8 @@ public struct TextShapeKey: Hashable, Sendable {
         pixelScale: Float,
         fontEpoch: UInt64,
         languageTag: String?,
-        maxWidth: Float?
+        maxWidth: Float?,
+        pretty: Bool = false
     ) {
         self.authText = authText
         self.spans = spans
@@ -88,6 +92,21 @@ public struct TextShapeKey: Hashable, Sendable {
         self.ellipsisMaxWKey = (style.wrap == .ellipsis)
             ? (maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1)
             : -1
+        self.pretty = Self.layoutPretty(pretty, style: style)
+    }
+
+    /// Pretty wrapping re-breaks only plainly wrapped, unclamped, unjustified proportional text
+    /// (`text.rs::layout_keyed`: `pretty && max_width.is_some() && !mono`). Width-independent so a
+    /// retained layout keeps its pretty setting across `text_rebreak` width changes; a `nil`
+    /// width never wraps, so `pretty` is inert there.
+    public static func layoutPretty(_ pretty: Bool, style: TextStyle) -> Bool {
+        pretty
+            && style.wrap == .wrap
+            && !style.wrapAnywhere
+            && style.align != .justified
+            && style.maxLines == 0
+            && style.elide == .end
+            && style.family != .monospace
     }
 }
 

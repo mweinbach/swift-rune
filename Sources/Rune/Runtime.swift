@@ -5772,7 +5772,8 @@ public final class Runtime<State> {
         wrapWidth: Float?,
         pxScale: Float,
         glidePx: Vec2,
-        isSecure: Bool
+        isSecure: Bool,
+        pretty: Bool = false
     ) -> TextLayoutBox {
         let keep: TextKeep = isSecure ? .secret : (glidePx == .zero ? .cached : .owned)
         if isSecure {
@@ -5786,7 +5787,8 @@ public final class Runtime<State> {
                 emitGlyphs: true,
                 glidePx: glidePx,
                 keep: .secret,
-                countAsRebreak: false
+                countAsRebreak: false,
+                pretty: pretty
             )
         }
         let targetAuth = spans.map { $0.map(\.text).joined() } ?? text
@@ -5805,7 +5807,8 @@ public final class Runtime<State> {
                 emitGlyphs: true,
                 glidePx: glidePx,
                 keep: glidePx == .zero ? .cached : .owned,
-                countAsRebreak: false
+                countAsRebreak: false,
+                pretty: pretty
             )
             if glidePx == .zero {
                 exitingTextLayouts[snapId]?.box = filled
@@ -5813,7 +5816,9 @@ public final class Runtime<State> {
             return filled
         }
         if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
-            let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01)
+            // A layout measured greedy is not reused for pretty paint (or vice versa, `#882`).
+            let matchesPretty = live.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style)
+            let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
             let matchesWidth: Bool = {
                 guard let ww = wrapWidth else {
                     return live.maxWidth == nil
@@ -5837,7 +5842,8 @@ public final class Runtime<State> {
                     emitGlyphs: true,
                     glidePx: .zero,
                     keep: .cached,
-                    countAsRebreak: false
+                    countAsRebreak: false,
+                    pretty: pretty
                 )
                 nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: filled, isInput: isInput)
                 return filled
@@ -5853,7 +5859,8 @@ public final class Runtime<State> {
             emitGlyphs: true,
             glidePx: glidePx,
             keep: keep,
-            countAsRebreak: false
+            countAsRebreak: false,
+            pretty: pretty
         )
         if !isExiting && glidePx == .zero {
             nodeTextLayouts[snapId] = RetainedLayoutCoordinator.TextLayoutRecord(box: box, isInput: isInput)
@@ -7709,7 +7716,8 @@ public final class Runtime<State> {
                             wrapWidth: shapeMaxW,
                             pxScale: textRasterScale * pxScale,
                             glidePx: glidePx,
-                            isSecure: resolvedText.isSecure
+                            isSecure: resolvedText.isSecure,
+                            pretty: resolvedText.pretty
                         )
                         labelBox = box
                         shaped = box.shaped
