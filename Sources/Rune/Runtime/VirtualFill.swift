@@ -152,6 +152,60 @@ internal struct RuntimeVirtualListState: Sendable {
     var missingOverscanRows: Int = 0
     var isIndexed: Bool = false
     var lastMountedSnapshot: VirtualMountedSnapshot? = nil
+    /// The path of the scroll viewport the list windows against (`VirtualList::scroll_path`).
+    var scrollPath: String = ""
+    /// That viewport's height, as last laid out (`VirtualList::viewport`).
+    var viewport: Float = 0
+    /// Where the list starts in its viewport's content, as last laid out (`VirtualList::top`).
+    var top: Float = 0
+    /// The list lies in a row of another virtual list with the same scroll viewport (an open
+    /// section of a long list, itself long): it windows against that viewport where the row
+    /// places it (`top`), and only that viewport, not this list, is pinned to its end
+    /// (`locate`) (`VirtualList::nested`).
+    var nested: Bool = false
+    /// How far the viewport's content runs on under a nested list, as last laid out: where its
+    /// window stands while the viewport is pinned to its end (`VirtualList::tail`).
+    var tail: Float = 0
+    /// A nested list wholly above the viewport's top holds no reader, so it anchors nothing:
+    /// its rows changing height move the rows under it, which the list around it anchors
+    /// (`VirtualList::passed`).
+    private(set) var passed: Bool = false
+    /// The list's own top and bottom padding (`VirtualList::pad_top` / `pad_bottom`).
+    var padTop: Float = 0
+    var padBottom: Float = 0
+
+    /// The rows' extent, their padding included, for rows totalling `total` (`VirtualList::extent`).
+    func extent(total: Float) -> Float {
+        padTop + total + padBottom
+    }
+
+    /// The list's own scroll offset, and whether its window is pinned to its end, for its
+    /// viewport scrolled to `scroll` (`pinned`: the viewport holds its end). A nested list
+    /// is never pinned itself: it stands where the viewport's end leaves it (`VirtualList::at`).
+    func at(_ scroll: Float, pinned: Bool, total: Float) -> (offset: Float, pinned: Bool) {
+        if !nested {
+            return (max(0, scroll - top), pinned)
+        }
+        let offset = pinned ? extent(total: total) + tail - viewport : scroll - top
+        return (max(0, offset), false)
+    }
+
+    /// `at`, noting whether a nested list lies wholly above the viewport's top and so anchors
+    /// nothing (`select`, `hold` and the commits that anchor the reader) (`VirtualList::locate`).
+    mutating func locate(_ scroll: Float, pinned: Bool, total: Float) -> (offset: Float, pinned: Bool) {
+        let at = self.at(scroll, pinned: pinned, total: total)
+        passed = nested && at.offset >= extent(total: total)
+        return at
+    }
+
+    /// The rows above row `end`, at their measured or estimated heights (`VirtualList::prefix`).
+    func prefix(_ end: Int, estimated: Float) -> Float {
+        var y: Float = 0
+        for key in lastKeys.prefix(max(0, end)) {
+            y += rowHeight(forKey: key, estimated: estimated)
+        }
+        return y
+    }
 
     func rowHeight(forKey key: String, estimated: Float) -> Float {
         measuredByKey[key] ?? max(1, estimated)
