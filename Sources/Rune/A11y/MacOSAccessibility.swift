@@ -57,10 +57,11 @@ public extension AccessibilityTreeBuilder {
                 help: info.help,
                 frame: rect,
                 isFocused: info.focused || info.path == focusedPath,
-                isFocusable: info.focusable,
+                isFocusable: !info.disabled && !info.inert && info.focusable,
                 isSelected: info.itemSelected,
                 isExpanded: info.expanded,
-                level: info.level,
+                level: info.level.map { max(0, $0 - 1) },
+                isDisabled: info.disabled,
                 isModal: info.role == .dialog,
                 isSecure: isSecure,
                 actions: actions,
@@ -138,21 +139,15 @@ public extension Runtime {
             )
         }
 
-        // Map keyed elements to descriptive text for `labelledBy` / `describedBy`.
-        var textByKey: [String: String] = [:]
-        func collectText(_ idx: Int, into parts: inout [String], childrenByParent: [Int: [Int]]) {
-            let n = flatNodes[idx]
-            guard !n.el.isA11yHidden && !n.el.isSecure else { return }
-            if let lbl = n.el.a11yLabel, !lbl.isEmpty { parts.append(lbl) }
-            else if let txt = n.el.plainText ?? n.el.richSpans?.map(\.text).joined(), !txt.isEmpty { parts.append(txt) }
-            for c in (childrenByParent[idx] ?? []) {
-                collectText(c, into: &parts, childrenByParent: childrenByParent)
-            }
-        }
-
+        // Build visible accessibility tree parent/child edges, while preserving full `flatNodes`
+        // for `labelledBy` / `describedBy` scoping (`a11y/node.rs:260-282`).
         var childrenByParent: [Int: [Int]] = [:]
+        var allChildrenByParent: [Int: [Int]] = [:]
         var roots: [Int] = []
         for (idx, node) in flatNodes.enumerated() {
+            if let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count {
+                allChildrenByParent[pIdx, default: []].append(idx)
+            }
             let isVirtualSpacer = (node.key == "__v_top_spacer" || node.key == "__v_bot_spacer")
             if node.effectiveInert || node.el.isA11yHidden || isVirtualSpacer { continue }
             if let pIdx = node.parentIndex,
@@ -165,14 +160,65 @@ public extension Runtime {
                 roots.append(idx)
             }
         }
-        for (idx, node) in flatNodes.enumerated() where !node.effectiveInert && !node.el.isA11yHidden {
-            if let k = node.key {
-                var parts: [String] = []
-                collectText(idx, into: &parts, childrenByParent: childrenByParent)
-                if !parts.isEmpty {
-                    textByKey[k] = parts.joined(separator: " ")
+
+        func isInside(ancestor: Int, candidate: Int) -> Bool {
+            var cur = flatNodes[candidate].parentIndex
+            while let p = cur {
+                if p == ancestor { return true }
+                cur = flatNodes[p].parentIndex
+            }
+            return false
+        }
+
+        func a11yKeyed(from idx: Int, key: String) -> Int? {
+            var scope = flatNodes[idx].parentIndex
+            while let s = scope {
+                for j in (s + 1)..<flatNodes.count {
+                    guard isInside(ancestor: s, candidate: j) else { break }
+                    if j != idx, flatNodes[j].key == key {
+                        return flatNodes[j].effectiveInert ? nil : j
+                    }
+                }
+                scope = flatNodes[s].parentIndex
+            }
+            return nil
+        }
+
+        func a11yContentWords(_ idx: Int) -> String {
+            var parts: [String] = []
+            func visit(_ cur: Int) {
+                for c in (allChildrenByParent[cur] ?? []) {
+                    let cn = flatNodes[c]
+                    if cn.el.isA11yHidden || cn.el.opacity <= 0.01 || cn.el.isSecure { continue }
+                    if let lbl = cn.el.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
+                        parts.append(lbl)
+                        continue
+                    }
+                    if cn.el.handlers.editLens == nil,
+                       let txt = (cn.el.plainText ?? cn.el.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !txt.isEmpty {
+                        parts.append(txt)
+                    }
+                    visit(c)
                 }
             }
+            visit(idx)
+            return parts.joined(separator: " ")
+        }
+
+        func a11yWords(_ idx: Int) -> String? {
+            let n = flatNodes[idx]
+            if n.el.isSecure { return nil }
+            if let lbl = n.el.a11yLabel?.trimmingCharacters(in: .whitespacesAndNewlines), !lbl.isEmpty {
+                return lbl
+            }
+            if n.el.handlers.editLens == nil,
+               let txt = (n.el.plainText ?? n.el.richSpans?.map(\.text).joined())?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !txt.isEmpty {
+                return txt
+            }
+            let content = a11yContentWords(idx)
+            return content.isEmpty ? nil : content
         }
 
         let selectableRoles: Set<ElementRole> = [.listItem, .option, .tab, .treeItem, .gridCell, .row]
@@ -201,22 +247,25 @@ public extension Runtime {
             let rect = presentedRectByPath[node.path] ?? node.targetRect
             let nodeId = node.key ?? node.path
 
+            let enabled = !el.a11yDisabled && !node.effectiveInert
             var actions: [AccessibilityAction] = []
-            if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
-               [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
-                actions.append(.press)
-            }
-            if el.focusable && !node.effectiveInert {
-                actions.append(.focus)
-            }
-            if el.role == .slider || el.handlers.onStep != nil {
-                actions.append(.increment)
-                actions.append(.decrement)
+            if enabled {
+                if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
+                   [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
+                    actions.append(.press)
+                }
+                if el.focusable {
+                    actions.append(.focus)
+                }
+                if el.role == .slider || el.handlers.onStep != nil {
+                    actions.append(.increment)
+                    actions.append(.decrement)
+                }
             }
 
             let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
-            let labelledByText = el.a11yLabelledBy.flatMap { textByKey[$0] }
-            let describedByText = el.a11yDescribedBy.flatMap { textByKey[$0] }
+            let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
+            let describedByText = el.a11yDescribedBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
             let resolvedLabel: String? = isSecure
                 ? (el.a11yLabel ?? labelledByText ?? "Password")
                 : (el.a11yLabel ?? labelledByText ?? (el.role == .textInput ? nil : richPlain))
@@ -287,7 +336,7 @@ public extension Runtime {
             }
 
             let resolvedPosInSet: Int? = {
-                if let explicit = el.a11yPosInSet?.position { return explicit }
+                if let explicit = el.a11yPosInSet?.position { return max(0, explicit - 1) }
                 guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
                       let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
                 let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""
@@ -317,11 +366,11 @@ public extension Runtime {
                 range: el.a11yRange,
                 frame: rect,
                 isFocused: !hasLinks && ((node.path == focusedPath) || (focusedKey != nil && node.key == focusedKey)),
-                isFocusable: !hasLinks && el.focusable && !node.effectiveInert,
+                isFocusable: !hasLinks && enabled && el.focusable,
                 isSelected: el.itemSelected,
                 selectedState: selectedState,
                 isExpanded: el.a11yExpanded,
-                level: el.a11yLevel,
+                level: el.a11yLevel.map { max(0, $0 - 1) },
                 positionInSet: resolvedPosInSet,
                 sizeOfSet: resolvedSizeOfSet,
                 keyboardShortcut: el.a11yShortcutHint,
@@ -331,6 +380,7 @@ public extension Runtime {
                 isDisabled: el.a11yDisabled,
                 isReadOnly: el.a11yReadOnly,
                 isInvalid: el.a11yInvalid,
+                isBusy: el.a11yBusy,
                 toggled: el.a11yChecked,
                 liveRegion: el.a11yLive,
                 clipsChildren: el.layout.clipOverflow,

@@ -2754,6 +2754,8 @@ public struct El<State> {
     }
     public func selected(_ val: String?) -> Self { var c = self; c.a11ySelected = val; return c }
     public func expanded(_ val: Bool?) -> Self { var c = self; c.a11yExpanded = val; return c }
+    /// Outline or heading depth for accessibility (1-based ARIA `aria-level`, `El::level`).
+    public func level(_ level: Int) -> Self { var c = self; c.a11yLevel = level; return c }
     public func headingLevel(_ l: Int) -> Self { var c = self; c.role = .heading; c.a11yLevel = l; return c }
     public func itemSelected(_ on: Bool = true) -> Self { var c = self; c.itemSelected = on; return c }
     public func focusReturn(_ trigger: String) -> Self { var c = self; c.focusReturnKey = trigger; return c }
@@ -2802,7 +2804,10 @@ public struct El<State> {
     public func disabled(_ on: Bool = true) -> Self {
         var c = self
         c.a11yDisabled = on
-        if on { c.focusable = false }
+        if on {
+            c.focusable = false
+            c.focusOptOut = true
+        }
         return c
     }
 
@@ -2944,7 +2949,7 @@ public struct El<State> {
 
     public func onClick(_ handler: @escaping (inout State, inout Tx) -> Void) -> Self {
         var copy = self
-        copy.focusable = true
+        if !copy.a11yDisabled && !copy.focusOptOut { copy.focusable = true }
         if copy.role == .group { copy.role = .button }
         copy.handlers.onClick = handler
         return copy
@@ -2952,7 +2957,7 @@ public struct El<State> {
 
     public func onClickPress(_ handler: @escaping (inout State, PointerPress, inout Tx) -> Void) -> Self {
         var copy = self
-        copy.focusable = true
+        if !copy.a11yDisabled && !copy.focusOptOut { copy.focusable = true }
         if copy.role == .group { copy.role = .button }
         copy.handlers.onClickPress = handler
         return copy

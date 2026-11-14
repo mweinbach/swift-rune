@@ -418,8 +418,8 @@ internal enum ElDisplayResolver {
         let overflows = shaped.size.x > wrapWidth + 0.5 / pxScale
         let boxX = textOriginX * pxScale
         let boxY = textOriginY * pxScale
-        let boxW = max(0, innerW) * scaleVec.x * pxScale
-        let boxH = max(0, max(innerH, shaped.size.y)) * scaleVec.y * pxScale
+        let boxW = max(0, innerW) * pxScale
+        let boxH = max(0, max(innerH, shaped.size.y * scaleVec.y)) * pxScale
         let boxBoundsPx = SIMD4<Float>(boxX, boxY, boxX + boxW, boxY + boxH)
         let x0 = max(baseClipPx.x, boxX)
         let y0 = max(baseClipPx.y, boxY)
