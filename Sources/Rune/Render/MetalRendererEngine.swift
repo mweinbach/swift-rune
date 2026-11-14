@@ -228,6 +228,7 @@ internal final class RenderFrameEngine {
     private func pipelineFor(format: MTLPixelFormat, additive: Bool, springs: Bool) -> MTLRenderPipelineState {
         switch (springs, additive, format) {
         case (false, false, .rgba16Float):
+            if pipelineFloat == nil { _ = try? ensureIsolationPipelines() }
             return pipelineFloat ?? ((try? Self.makePipeline(device: device, vert: uberVert, frag: uberFrag, format: .rgba16Float, additive: false)) ?? pipelineSRGB)
         case (false, false, .bgra8Unorm): return pipelineGamma
         case (false, false, .bgra8Unorm_srgb): return pipelineSRGB
