@@ -148,6 +148,16 @@ public enum OpenInactiveLaunch {
     public static func activatesAtLaunch(accessory: Bool, env: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
         !accessory && !isRequested(env)
     }
+
+    /// Win32 `SW_SHOW` (5) and `SW_SHOWNOACTIVATE` (4).
+    public static let win32Show: Int32 = 5
+    public static let win32ShowNoActivate: Int32 = 4
+
+    /// The `ShowWindow` command a Win32 window first shows with: unfocused (`App::open_inactive`
+    /// or `RUNE_OPEN_INACTIVE`), it never activates (`window/create.rs` `cloak.hold(.., focus)`).
+    public static func win32ShowCommand(openInactive: Bool) -> Int32 {
+        openInactive ? win32ShowNoActivate : win32Show
+    }
 }
 
 #if os(macOS) && canImport(AppKit)

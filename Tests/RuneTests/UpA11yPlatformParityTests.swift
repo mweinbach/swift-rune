@@ -373,6 +373,11 @@ struct UpA11yPlatformParityTests {
         #expect(OpenInactiveLaunch.activatesAtLaunch(accessory: false, env: [:]))
         #expect(!OpenInactiveLaunch.activatesAtLaunch(accessory: false, env: ["RUNE_OPEN_INACTIVE": "1"]))
         #expect(!OpenInactiveLaunch.activatesAtLaunch(accessory: true, env: [:]))
+        // Win32: an unfocused first show never activates (`SW_SHOWNOACTIVATE`), otherwise `SW_SHOW`.
+        #expect(OpenInactiveLaunch.win32ShowCommand(openInactive: true) == 4)
+        #expect(OpenInactiveLaunch.win32ShowCommand(openInactive: false) == 5)
+        #expect(OpenInactiveLaunch.win32ShowCommand(
+            openInactive: OpenInactiveLaunch.openInactive(app: false, env: ["RUNE_OPEN_INACTIVE": ""])) == 4)
     }
 
     // MARK: - #980 display options observer owned by the adapter

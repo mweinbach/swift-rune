@@ -279,11 +279,9 @@ public enum MacOSApp {
         let delegate = RuneAppDelegate(
             keepRunning: appBuilder.keepsRunning || appBuilder.isWindowless,
             onFocusChange: { [weak hostView] focused in
-                if focused {
-                    // `WindowEvent::Focused`: reduced motion, the contrast theme and Increase
-                    // Contrast are read again (`window/events.rs`).
-                    runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
-                }
+                // `WindowEvent::Focused(focused)`, gained or lost: reduced motion, the contrast
+                // theme and Increase Contrast are read again (`window/events.rs`).
+                runtime.readSystemAccessibilitySettings(forceReducedMotion: parsed.reducedMotion)
                 runtime.dispatchFocus(focused, at: hostView?.currentElapsedTime() ?? 0.0)
                 if focused {
                     RuneStandardMenuRouter.setActiveKeyDispatcher {

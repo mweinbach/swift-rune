@@ -618,6 +618,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // `WindowEvent::Focused(false)` re-reads them too.
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: false)
         view.requestRender()
     }
@@ -1291,7 +1293,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         MacOSQuitHook.install()
 
         for spec in windows {
-            try host.openEntry(spec.makeHostEntry(), launch: true)
+            try host.openEntry(spec.makeHostEntry())
         }
 
         // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch
@@ -1311,7 +1313,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         QuitLifecycle.finishOrderlyExit()
     }
 
-    private func openEntry(_ specEntry: HostedWindowEntry, launch: Bool = false) throws {
+    private func openEntry(_ specEntry: HostedWindowEntry) throws {
         // Never duplicate an already-open non-torn-down key.
         if slots.contains(where: { !$0.isTornDown && $0.entry.key == specEntry.key }) {
             return
@@ -1429,7 +1431,9 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             if specEntry.options.position == nil {
                 window.center()
             }
-            let inactive = launch ? OpenInactiveLaunch.openInactive(app: specEntry.inactive) : specEntry.inactive
+            // `Host::new` reads `RUNE_OPEN_INACTIVE` for every window, those opened later too:
+            // a tool's launch never takes the user's keyboard (#962).
+            let inactive = OpenInactiveLaunch.openInactive(app: specEntry.inactive)
             if inactive || specEntry.macosWindow.nonactivatingPanel {
                 window.orderFrontRegardless()
             } else {
