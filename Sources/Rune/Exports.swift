@@ -514,6 +514,7 @@ public struct JsonTheme: Sendable, Equatable {
     public var colors: [String: Color]
     public var numbers: [String: Float]
     public var blendBg: Color?
+    internal var blendOverride: Bool?
 
     public init(
         name: String = "custom",
@@ -527,6 +528,14 @@ public struct JsonTheme: Sendable, Equatable {
         self.colors = colors
         self.numbers = numbers
         self.blendBg = blendBg
+        self.blendOverride = nil
+    }
+
+    /// Returns a copy with an explicit sRGB-blend override (`nil` follows ambient `Theme.blendsSrgb()`).
+    public func withBlendOverride(_ srgbBlend: Bool?) -> JsonTheme {
+        var copy = self
+        copy.blendOverride = srgbBlend
+        return copy
     }
 
     public subscript(_ key: String) -> Color? {
@@ -539,6 +548,12 @@ public struct JsonTheme: Sendable, Equatable {
 
     public static func fromJSON(_ json: String, dark: Bool) throws -> JsonTheme {
         try parse(data: Data(json.utf8), dark: dark)
+    }
+
+    /// Builds a theme from an already-parsed JSON document (`JSONSerialization` object),
+    /// for callers that read more of the document or build both appearances from one parse.
+    public static func fromValue(_ value: Any, dark: Bool) throws -> JsonTheme {
+        try JsonThemeParser.parse(value: value, dark: dark)
     }
 
     public static func parse(data: Data, dark: Bool) throws -> JsonTheme {

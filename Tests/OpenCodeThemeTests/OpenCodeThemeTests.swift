@@ -45,7 +45,7 @@ struct OpenCodeThemeTests {
         for dark in [false, true] {
             let srgb = OpenCodeTheme.kit(dark: dark, srgbBlend: true)
             let linear = OpenCodeTheme.kit(dark: dark, srgbBlend: false)
-            let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"]
+            let authored = OpenCodeTheme.authored("v2-overlay-simple-overlay-hover", dark: dark)
             #expect(authored != nil)
             #expect(srgb.c.hover == authored)
             if let authored {
@@ -134,19 +134,20 @@ struct OpenCodeThemeTests {
         }
     }
 
-    @Test func ambientThemeAndKitFollowThemeWithBlend() {
+    @Test func ambientThemeAndKitFollowThemeWithBlend() throws {
         for dark in [false, true] {
             let defaultKit = OpenCodeTheme.kit(dark: dark)
             let srgbExplicit = OpenCodeTheme.kit(dark: dark, srgbBlend: true)
             #expect(defaultKit == srgbExplicit)
-            if Theme.blendsSrgb(), let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"] {
+            if Theme.blendsSrgb(), let authored = OpenCodeTheme.authored("v2-overlay-simple-overlay-hover", dark: dark) {
                 #expect(defaultKit.c.hover == authored)
             }
+            #expect(OpenCodeTheme.theme(dark: dark) == (try Theme.fromJSON(OpenCodeTheme.themeJSON, dark: dark)))
         }
         Theme.withBlend(true) {
             for dark in [false, true] {
                 let k = OpenCodeTheme.kit(dark: dark)
-                let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"]
+                let authored = OpenCodeTheme.authored("v2-overlay-simple-overlay-hover", dark: dark)
                 #expect(k.c.hover == authored)
                 #expect(OpenCodeTheme.color("v2-overlay-simple-overlay-hover", dark: dark) == authored)
                 let sh = OpenCodeTheme.shadows("v2-elevation-floating", dark: dark)
@@ -156,10 +157,13 @@ struct OpenCodeThemeTests {
         Theme.withBlend(false) {
             for dark in [false, true] {
                 let k = OpenCodeTheme.kit(dark: dark)
-                let authored = OpenCodeTheme.rawTheme(dark: dark)["v2-overlay-simple-overlay-hover"]
+                let authored = OpenCodeTheme.authored("v2-overlay-simple-overlay-hover", dark: dark)
+                #expect(OpenCodeTheme.theme(dark: dark).authored("v2-overlay-simple-overlay-hover") == authored)
+                #expect(OpenCodeTheme.theme(dark: dark, srgbBlend: false).authored("v2-overlay-simple-overlay-hover") == authored)
                 if let authored {
                     #expect(k.c.hover == authored.srgbEquivalent(over: k.c.bgBase))
                     #expect(OpenCodeTheme.color("v2-overlay-simple-overlay-hover", dark: dark) == authored.srgbEquivalent(over: k.c.bgBase))
+                    #expect(OpenCodeTheme.theme(dark: dark).tryColor("v2-overlay-simple-overlay-hover") == authored.srgbEquivalent(over: k.c.bgBase))
                 }
                 let sh = OpenCodeTheme.shadows("v2-elevation-floating", dark: dark)
                 #expect(sh == OpenCodeTheme.shadows("v2-elevation-floating", dark: dark, srgbBlend: false))

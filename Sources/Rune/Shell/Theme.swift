@@ -55,10 +55,9 @@ extension JsonTheme {
     }
 
     private func blended(_ color: Color) -> Color {
-        if let bg = blendBg {
-            return Self.forBlend(color, over: bg)
-        }
-        return color
+        guard let bg = blendBg else { return color }
+        let srgb = blendOverride ?? Self.blendsSrgb()
+        return srgb ? color : color.srgbEquivalent(over: bg)
     }
 
     /// Looks up a color token adapted for the active blend mode (`blendsSrgb()`), or `nil` if absent.
@@ -72,9 +71,14 @@ extension JsonTheme {
         tryColor(key) ?? .transparent
     }
 
+    /// A color token as the theme authors it, never re-solved for the blend mode, or `nil`.
+    public func authored(_ name: String) -> Color? {
+        colors[name]
+    }
+
     /// Returns the authored, unadapted color token if present.
     public func rawColor(_ key: String) -> Color? {
-        colors[key]
+        authored(key)
     }
 }
 
@@ -135,6 +139,10 @@ extension Color {
 enum JsonThemeParser {
     static func parse(data: Data, dark: Bool) throws -> JsonTheme {
         let raw = try JSONSerialization.jsonObject(with: data, options: [])
+        return try parse(value: raw, dark: dark)
+    }
+
+    static func parse(value raw: Any, dark: Bool) throws -> JsonTheme {
         guard let root = raw as? [String: Any] else {
             throw ThemeError.invalidRoot
         }
