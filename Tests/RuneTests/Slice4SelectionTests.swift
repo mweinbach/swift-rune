@@ -286,7 +286,7 @@ struct Slice4SelectionTests {
                 )
         }
         _ = rt.frame(at: 0)
-        let mRect = try #require(rt.element(byKey: "mtxt")?.rect)
+        let mRect = try #require(rt.element(byKey: "m-plain")?.rect)  // upstream memo.rs: keyed(build(), id) — the memo id replaces the root's key
         rt.pointerDown(at: Vec2(mRect[0] + 2, mRect[1] + 6), at: 0.1)
         rt.pointerMove(to: Vec2(mRect[0] + 70, mRect[1] + 6), at: 0.12)
         rt.pointerUp(at: Vec2(mRect[0] + 70, mRect[1] + 6), at: 0.14)
@@ -305,7 +305,7 @@ struct Slice4SelectionTests {
 
         // Double-click drag & Shift+click keep isDragging until release!
         rt.state.dragStates.removeAll()
-        let hRect = try #require(rt.element(byKey: "htxt")?.rect)
+        let hRect = try #require(rt.element(byKey: "m-hover")?.rect)  // upstream memo.rs: keyed(build(), id) — the memo id replaces the root's key
         let hy = hRect[1] + 7
         click(rt, at: Vec2(hRect[0] + 60, hy), t: 1.0)
         rt.pointerDown(at: Vec2(hRect[0] + 60, hy), at: 1.1)
