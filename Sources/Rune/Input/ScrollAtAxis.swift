@@ -25,4 +25,15 @@ extension Runtime {
     internal func scrollAt(_ x: Float, _ y: Float) -> String? {
         scrollAtAxis(x, y, horizontal: false)
     }
+
+    /// The viewport a fling with velocity (`vx`, `vy`) at `pos` releases into, and its axis
+    /// (`Runtime::fling_xy`, `scroll/x.rs`): mostly horizontal over a horizontal viewport with
+    /// room flings that one sideways; anything else is the vertical `fling` (`pointer.rs`) on
+    /// `scroll_at`. Either passes over a viewport whose content fits on that axis (#1021).
+    internal func flingTarget(at pos: Vec2, vx: Float, vy: Float) -> (path: String, horizontal: Bool)? {
+        if abs(vx) > abs(vy), let path = scrollAtAxis(pos.x, pos.y, horizontal: true) {
+            return (path, true)
+        }
+        return scrollAt(pos.x, pos.y).map { ($0, false) }
+    }
 }

@@ -225,13 +225,9 @@ struct WheelOwnerHandoffParityTests {
         #expect(rt.inputMachines.wheelLock.gesture != wheelGesture, "without phases, a delta wholly on the other axis starts another")
     }
 
-    /// `the_wheel_over_a_viewport_with_nothing_to_scroll_scrolls_the_one_around_it` (#1021,
-    /// `5dabf425`): a viewport whose content fits is passed over: the wheel over a section that
-    /// is its own viewport, as tall as its rows, scrolls the list around it, on either axis.
-    @Test("the wheel over a viewport with nothing to scroll scrolls the one around it")
     @MainActor
-    func theWheelOverAViewportWithNothingToScrollScrollsTheOneAroundIt() {
-        let rt = Runtime(
+    static func sectionsView() -> Runtime<Void> {
+        Runtime(
             state: (),
             viewport: Vec2(300, 300),
             pixelScale: 1.0,
@@ -243,6 +239,15 @@ struct WheelOwnerHandoffParityTests {
                 return col().key("list").wFull().h(300).scroll(ScrollSpec(stickBottom: false)).child(list)
             }
         )
+    }
+
+    /// `the_wheel_over_a_viewport_with_nothing_to_scroll_scrolls_the_one_around_it` (#1021,
+    /// `5dabf425`): a viewport whose content fits is passed over: the wheel over a section that
+    /// is its own viewport, as tall as its rows, scrolls the list around it, on either axis.
+    @Test("the wheel over a viewport with nothing to scroll scrolls the one around it")
+    @MainActor
+    func theWheelOverAViewportWithNothingToScrollScrollsTheOneAroundIt() {
+        let rt = Self.sectionsView()
         _ = rt.frame(at: 0.0)
         _ = rt.frame(at: Self.t)
         func path(_ key: String) -> String? { rt.flatNodes.first(where: { $0.key == key })?.path }
@@ -253,6 +258,36 @@ struct WheelOwnerHandoffParityTests {
         #expect(rt.scrollAt(100, 20) == list)
         rt.wheelXY(100, 100, 0, -30, now: Self.t)
         #expect(rt.scrollOffset(forKey: "list").y == 30.0)
+        #expect(rt.scrollOffset(forKey: "section").y == 0.0)
+    }
+
+    /// #1021 through `fling` / `fling_xy` (`pointer.rs` `fling` on `scroll_at`, `scroll/x.rs`
+    /// `fling_xy` on `scroll_at_axis`): a fling over a viewport whose content fits releases into
+    /// the one around it, and a mostly sideways fling over a strip that fits is the vertical one.
+    @Test("a fling over a viewport with nothing to scroll moves the one around it")
+    @MainActor
+    func aFlingOverAViewportWithNothingToScrollMovesTheOneAroundIt() {
+        let rt = Self.sectionsView()
+        var t = 0.0
+        _ = rt.frame(at: t)
+        t += Self.t
+        _ = rt.frame(at: t)
+        let list = rt.flatNodes.first(where: { $0.key == "list" })?.path
+        #expect(list != nil)
+        // `fling_xy`: `vx.abs() > vy.abs()` but no horizontal viewport with room there -> `fling` on `scroll_at`.
+        let sideways = rt.flingTarget(at: Vec2(100, 20), vx: -400, vy: -100)
+        #expect(sideways?.path == list && sideways?.horizontal == false)
+        let overSection = rt.flingTarget(at: Vec2(100, 100), vx: 0, vy: -400)
+        #expect(overSection?.path == list && overSection?.horizontal == false)
+
+        rt.fling(vx: 0, vy: -400, at: Vec2(100, 100), now: t)
+        var frames = 0
+        while rt.scrollStore.isAnimating && frames < 720 {
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            frames += 1
+        }
+        #expect(rt.scrollOffset(forKey: "list").y > 0.0, "the fling over the section moves the list")
         #expect(rt.scrollOffset(forKey: "section").y == 0.0)
     }
 
