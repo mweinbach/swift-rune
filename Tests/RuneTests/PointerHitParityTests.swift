@@ -350,4 +350,77 @@ struct PointerHitParityTests {
         _ = rt.frame(at: 0.13)
         #expect(rt.state.pressed == 0)
     }
+
+    // MARK: - `observe_pointer` and hover delays (`hover.rs:144-158`, `hover_delay.rs:128-137`)
+
+    @Test("observePointer: entering or leaving a hover-delayed on_hover_change element queues no HoverChange")
+    func observePointerSkipsDelayedHoverChange() {
+        struct S { var tip: [Bool] = []; var eager: [Bool] = []; var plain: [Bool] = [] }
+        let rt = Runtime(state: S(), viewport: Vec2(100, 100), pixelScale: 1.0) { _, _ in
+            col()
+                .child(el().key("tip").size(40, 20).hoverDelays(enter: 0.3, leave: 0.3)
+                    .onHoverChange { s, inside, _ in s.tip.append(inside) })
+                .child(el().key("plain").size(40, 20)
+                    .onHoverChange { s, inside, _ in s.plain.append(inside) })
+                .child(el().key("eager").size(40, 20).hoverDelays(enter: 0, leave: 0.3)
+                    .onHoverChange { s, inside, _ in s.eager.append(inside) })
+        }
+        _ = rt.frame(at: 0)
+        #expect(!rt.observePointer(at: Vec2(5, 5), at: 0), "a delayed enter only starts its wait")
+        #expect(rt.state.tip.isEmpty)
+        _ = rt.frame(at: 0.35)
+        #expect(rt.state.tip == [true], "the frame after the wait reports the enter")
+        #expect(!rt.observePointer(at: Vec2(5, 90), at: 0.4), "a delayed leave only starts its wait")
+        _ = rt.frame(at: 0.75)
+        #expect(rt.state.tip == [true, false])
+
+        #expect(rt.observePointer(at: Vec2(5, 25), at: 0.8), "an undelayed enter queues HoverChange")
+        #expect(rt.state.plain == [true])
+        #expect(rt.observePointer(at: Vec2(5, 90), at: 0.9), "and so does its leave")
+        #expect(rt.state.plain == [true, false])
+
+        // No enter wait: the delay machine reports at once (`Effect::Report` queues HoverChange).
+        #expect(rt.observePointer(at: Vec2(5, 45), at: 1.0), "a delay machine report needs a frame")
+        #expect(rt.state.eager == [true])
+        #expect(!rt.observePointer(at: Vec2(5, 90), at: 1.1), "its leave waits")
+        #expect(rt.state.eager == [true])
+    }
+
+    // MARK: - `observe_pointer` visual edges follow the parent clip (`hit.rs:110-113` `node_contains`)
+
+    @Test("observePointer: a hover-painted node's edge outside its parent's clip changes no pixels")
+    func observePointerVisualEdgesFollowTheParentClip() {
+        let rt = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+            el().child(
+                el().key("clip").size(40, 40).clip(true)
+                    .child(el().key("wide").size(100, 20).pin(top: 0, left: 0).hover(Color(r: 1, g: 0, b: 0, a: 1)))
+            )
+        }
+        _ = rt.frame(at: 0)
+        #expect(!rt.observePointer(at: Vec2(60, 5), at: 0), "inside the wide row but outside the clip it shows nothing")
+        #expect(!rt.observePointer(at: Vec2(60, 30), at: 0.01), "leaving its clipped-away part flips nothing drawn")
+        #expect(rt.observePointer(at: Vec2(10, 5), at: 0.02), "its visible part shows hover")
+        #expect(rt.observePointer(at: Vec2(10, 30), at: 0.03), "and leaving it hides hover")
+
+        // A node with no drawn geometry falls back to its layout edges, still within the parent's
+        // inherited clip (`drawn_edges` ∩ `inh.clip`). `pressScale` tracks the press without
+        // making the node a hover target, so only its edges decide.
+        let rest = Runtime(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+            el().child(
+                el().key("clip").size(40, 40).clip(true)
+                    .child(el().key("wide").size(100, 20).pin(top: 0, left: 0).pressScale(0.96))
+            )
+        }
+        _ = rest.frame(at: 0)
+        let wide = rest.flatNodes.first { $0.key == "wide" }
+        #expect(wide != nil)
+        if let wide {
+            // Laid out but not drawn yet (`drawn` has no entry for it).
+            rest.hitGeometryByPath[wide.path] = nil
+        }
+        #expect(!rest.observePointer(at: Vec2(60, 5), at: 0), "outside the clip the rest edges hold nothing")
+        #expect(!rest.observePointer(at: Vec2(60, 30), at: 0.01))
+        #expect(rest.observePointer(at: Vec2(10, 5), at: 0.02), "inside the clip and the row")
+        #expect(rest.observePointer(at: Vec2(10, 30), at: 0.03), "inside the clip, below the row")
+    }
 }

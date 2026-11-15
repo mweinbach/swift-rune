@@ -11,7 +11,7 @@ extension Runtime {
         if let geom = hitGeometryByPath[n.path] {
             return geom.contains(p)
         }
-        return halfOpenContains(presentedRectByPath[n.path] ?? n.targetRect, p)
+        return halfOpenContains(intersectRects(n.clipRect, presentedRectByPath[n.path] ?? n.targetRect), p)
     }
 
     /// Node `i` draws a hover fill or tracks the press (`vis.hover().a > 0 || vis.tracks_press()
@@ -49,6 +49,19 @@ extension Runtime {
         return observedDragsWith(node, drag.button)
     }
 
+    /// `apply_within` (`hover.rs:144-158`) queues `Action::HoverChange` for each element left or
+    /// entered, except one whose `hover_delay` is set: its delay machine reports instead. An element
+    /// no longer in the tree has no delay and hears its leave.
+    private func observedWithinChangeQueues(before: [String], after: [String]) -> Bool {
+        let delayed: (String) -> Bool = { path in
+            guard let idx = self.nodeByPath[path], self.flatNodes.indices.contains(idx) else { return false }
+            let d = self.effectiveHoverDelay(for: self.flatNodes[idx].el)
+            return d.enter > 0 || d.leave > 0
+        }
+        if before.contains(where: { !after.contains($0) && !delayed($0) }) { return true }
+        return after.contains { !before.contains($0) && !delayed($0) }
+    }
+
     /// Overlay observation: moves the pointer to `pos` like `pointerMove` and returns whether the
     /// move needs a frame (`Runtime::observe_pointer`). A duplicate observation, or a move that
     /// leaves hover pixels, help, queued handlers and the press capture unchanged, returns `false`
@@ -77,6 +90,7 @@ extension Runtime {
         let focusBefore = (focusedPath, hoveredHighlightActive)
         let captureInside = pressedPath != nil && pressedPointerInside
         let dragOutsBefore = inputMachines.nextDragOutId
+        let delayReportsBefore = inputMachines.hoverDelayReports
 
         pointerMove(to: pos, mods: mods, at: now)
 
@@ -84,8 +98,10 @@ extension Runtime {
         let dragOutQueued = inputMachines.nextDragOutId != dragOutsBefore
         // `Action::Hover` when what's hovered changes to an element.
         let hoverQueued = hoveredPath != hoveredBefore && hoveredPath != nil
-        // `Action::HoverChange` for elements entered or left.
-        let withinQueued = Set(withinBefore) != Set(hoverWithinPaths)
+        // `Action::HoverChange` for elements entered or left (`apply_within`): an element with a
+        // hover delay queues none there; its delay machine's reports (`Effect::Report`) do.
+        let withinQueued = observedWithinChangeQueues(before: withinBefore, after: hoverWithinPaths)
+            || inputMachines.hoverDelayReports != delayReportsBefore
         // `Action::HoverFocus` when a highlight row takes or gives up hover focus.
         let focusQueued = focusBefore.0 != focusedPath || focusBefore.1 != hoveredHighlightActive
         let queued = moveQueued || heldQueued || dragOutQueued || hoverQueued || withinQueued || focusQueued
