@@ -293,6 +293,8 @@ public struct Tx {
     public internal(set) var shortcutActivationToken: String? = nil
     internal var minimizeOrder: UInt64? = nil
     internal var pickReads: [TxPickRead] = []
+    /// `Tx.readClipboard` callbacks (`Tx::clipboard_reads`).
+    internal var clipboardReads: [TxClipboardRead] = []
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -557,6 +559,7 @@ public struct Tx {
             minimizeOrder = max(minimizeOrder ?? 0, otherMinimizeOrder)
         }
         pickReads.append(contentsOf: one.pickReads)
+        clipboardReads.append(contentsOf: one.clipboardReads)
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }

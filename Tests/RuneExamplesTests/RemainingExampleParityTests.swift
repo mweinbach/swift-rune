@@ -81,7 +81,7 @@ struct RemainingExampleParityTests {
         #expect(rt.state.field.text == "Hi")
         let last = try #require(rt.state.last)
         #expect(last.0 == "Pasted")
-        #expect(last.1.html == "<b>Hi</b><img src=x>")
+        #expect(last.1.html == #"<b>Hi</b><img src="x">"#)
 
         let copyRect = try #require(rt.element(byKey: "copy")?.rect)
         let copyCenter = Vec2(copyRect[0] + copyRect[2] * 0.5, copyRect[1] + copyRect[3] * 0.5)
