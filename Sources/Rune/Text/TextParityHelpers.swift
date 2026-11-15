@@ -434,8 +434,11 @@ extension FontSmoothing {
         return self
     }
 
+    /// The CoreGraphics stages glyphs rasterise with: all of them for `.on`, all but the dilation
+    /// for `.off`. On macOS `.on` draws as `.off` when the user turned smoothing off
+    /// (`AppleFontSmoothing` 0), as AppKit and SwiftUI then do (`#954`).
     public var pipeline: ApplePipeline {
-        isEnabled ? .smoothed : .unsmoothed
+        pipeline(smoothingAllowedByUser: AppleFontSmoothingPreference.smoothingAllowedByUser)
     }
 
     public func support(

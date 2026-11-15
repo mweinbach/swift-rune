@@ -936,7 +936,7 @@ extension Runtime {
                             )
                             let lag = TextLineMetrics.streamHeightLag(
                                 lineCount: shaped.lineCount,
-                                lineHeightPx: shaped.lineHeight * scale,
+                                lineHeightPx: shaped.lineMetricHeightPt(shaped.lineCount - 1) * scale,
                                 lineAdvancePx: shaped.lastLineAdvancePx,
                                 hangingAdvancePx: shaped.hangingAdvancePx,
                                 widthPx: innerW * scale,
