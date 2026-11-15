@@ -448,6 +448,8 @@ extension Runtime {
         guard kitHooks.titlebar.caption != caption else { return }
         kitHooks.titlebar.caption = caption
         needsCommit = true
+        // titlebar.rs:225: `set_caption` marks the state dirty.
+        commitWhyPending |= CommitWhy.dirty
     }
 
     /// Returns and clears the pending window menu request (`Runtime::take_window_menu`).

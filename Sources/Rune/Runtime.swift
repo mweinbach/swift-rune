@@ -547,6 +547,7 @@ public final class Runtime<State> {
             if viewport != oldValue && !suppressViewportCommitFlag {
                 needsCommit = true
                 pendingResizeRelayout = true
+                commitWhyPending |= CommitWhy.relayout
             }
         }
     }
@@ -558,6 +559,7 @@ public final class Runtime<State> {
             scene.pixelScale = pixelScale
             if pixelScale != oldValue {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.relayout
                 stateUnchangedSinceBuild = false
                 pendingResizeRelayout = false
             pendingGrowthRelayout = false
@@ -568,6 +570,7 @@ public final class Runtime<State> {
         didSet {
             if systemDark != oldValue {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.dirty
                 stateUnchangedSinceBuild = false
                 pendingResizeRelayout = false
             pendingGrowthRelayout = false
@@ -585,6 +588,7 @@ public final class Runtime<State> {
             }
             if reducedMotion != oldValue {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.dirty
                 stateUnchangedSinceBuild = false
                 pendingResizeRelayout = false
             pendingGrowthRelayout = false
@@ -598,6 +602,7 @@ public final class Runtime<State> {
         didSet {
             if windowFocused != oldValue {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.dirty
                 stateUnchangedSinceBuild = false
                 pendingResizeRelayout = false
             pendingGrowthRelayout = false
@@ -1133,6 +1138,8 @@ public final class Runtime<State> {
     public var liveOnlySkips: UInt64 { liveOnlyEvents }
     public internal(set) var liveChecks: UInt64 = 0
     public var commitWhy: UInt16 = 0
+    /// `CommitWhy` bits asked for since the last commit, which `commitFor` takes (`CommitWatch.swift`).
+    internal var commitWhyPending: UInt16 = CommitWhy.dirty  // a new runtime starts dirty (`dirty: true`)
     public internal(set) var liveOnlyWarnings: [String] = []
     internal var liveOnlyCheckEnabled: Bool = true
     internal var lastLiveCommitClock: Double = -.infinity
@@ -1293,6 +1300,7 @@ public final class Runtime<State> {
         if external {
             hasExternalDirtyCommit = true
         }
+        commitWhyPending |= CommitWhy.dirty
         pendingEventTime = nil
         if settle {
             forceInitialSettle = true
@@ -1436,14 +1444,12 @@ public final class Runtime<State> {
         at now: Double,
         external: Bool = true,
         clearLiveCheck: Bool = true,
-        why: UInt16 = 0
+        why: UInt16 = CommitWhy.dirty
     ) {
         if clearLiveCheck {
             pendingLiveOnlyCheck = nil
         }
-        if why != 0 {
-            commitWhy |= why
-        }
+        commitWhyPending |= why
         needsCommit = true
         if external {
             hasExternalDirtyCommit = true
@@ -1569,6 +1575,8 @@ public final class Runtime<State> {
            let nextCaret = currentFocusedCaret(),
            cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
             needsCommit = true
+            // frame.rs:632: a moved caret the view reads marks the state dirty.
+            commitWhyPending |= CommitWhy.dirty
             (frameOut, animNow) = stepToFrameOutputScaled(at: now)
             sceneOut = measureFramePhase(.paint) {
                 buildRefScene(frameOut: frameOut, now: animNow)
@@ -1618,17 +1626,21 @@ public final class Runtime<State> {
         }
         if layoutFeedback.isOpen && memo.hasInvalidatedReads(against: currentMemoGeometry()) {
             needsCommit = true
+            commitWhyPending |= CommitWhy.read
             resizeReadMovedFlag = true
         }
         if cxSettings.caretReadByView,
            let nextCaret = currentFocusedCaret(),
            cxSettings.lastCommittedCaret?.keyPath != nextCaret.keyPath || cxSettings.lastCommittedCaret?.rect != nextCaret.rect {
             needsCommit = true
+            commitWhyPending |= CommitWhy.dirty
             resizeReadMovedFlag = true
         }
         if cxSettings.selectionRectsReadByView,
            SelectionRectsMath.boxesMoved(cxSettings.lastCommittedSelectionRects, computeSelectionBoxes()) {
             needsCommit = true
+            // layout_read.rs:446: moved selection rects the view reads mark the state dirty.
+            commitWhyPending |= CommitWhy.dirty
         }
     }
 
@@ -1777,6 +1789,7 @@ public final class Runtime<State> {
         if let attempt = virtualFill.wake(at: now) {
             if virtualFill.step(.due(attempt: attempt, now: now)) == .draw {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.virtual
             }
         }
         stepKitDragRepeatOnFrame(at: now)
@@ -1813,6 +1826,7 @@ public final class Runtime<State> {
             if sz.width > 0 && sz.height > 0 {
                 pixelsAspectSnapIds.insert(node.nodeId)
                 needsCommit = true
+                commitWhyPending |= CommitWhy.relayout
             }
         }
 
@@ -1856,7 +1870,8 @@ public final class Runtime<State> {
             kitHooks.frameGrowthStepDt = 0
             pendingGrowthStepNow = now
             defer { pendingGrowthStepNow = nil }
-            commitTree(at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
+            let why = frameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
+            commitFor(why: why, at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
             flushHiddenDropSteps(at: now)
@@ -1864,9 +1879,10 @@ public final class Runtime<State> {
             if needsCommit {
                 // Landing a `scrollKeyTo` jump mounts virtual rows there; each landing re-commit
                 // places it again from the new layout before the frame draws (`scroll_to_offsets`).
+                // The first is the follow-up the main commit left pending (`commitFollowUp`).
                 var recommits = 0
                 repeat {
-                    commitTree(at: now, cut: false)
+                    commitFollowUp(at: now)
                     _ = laidSelectableEdgeScroll(at: now)
                     recommits += 1
                 } while needsCommit && scrollKeyLandings.awaiting && recommits < ScrollKeyLanding.maxRounds
@@ -1885,6 +1901,7 @@ public final class Runtime<State> {
             virtualFillNeedsCommit = false
             virtualFillWantsDraw = false
             needsCommit = true
+            commitWhyPending |= CommitWhy.virtual
         }
 
         // Advance scaled animation clock after any initial commit so `cx.timeScale(...)` takes effect on this frame
@@ -1948,7 +1965,7 @@ public final class Runtime<State> {
             if anyScrollMoved {
                 scrollMovedSinceLastFrame = true
                 if scrollRequiresCommit {
-                    commitTree(at: now, cut: false)
+                    commitFor(why: scrollCommitWhy, at: now, cut: false)
                 } else {
                     updateScrollPositions(at: now)
                 }
@@ -1987,11 +2004,12 @@ public final class Runtime<State> {
                 layoutFeedback.step(.commit(feedback: true, other: false))
             }
             hasExternalDirtyCommit = false
-            commitTree(at: now, cut: false)
+            commitFor(why: CommitWhy.read, at: now, cut: false)
         }
         if virtualFillNeedsCommit {
             virtualFillNeedsCommit = false
             needsCommit = true
+            commitWhyPending |= CommitWhy.virtual
         }
         scrollMovedSinceLastFrame = false
         return (animNow, prevAnimNow, growthMoving)
@@ -2151,8 +2169,16 @@ public final class Runtime<State> {
     }
 
     internal func flushPendingCommitIfNeeded(at now: Double) {
-        if needsCommit {
-            commitTree(at: now, cut: forceInitialSettle)
+        // frame.rs:563: only when a handler or poll ran, or the state is dirty (`ran || dirty`).
+        if needsCommit, commitWhyPending & (CommitWhy.input | CommitWhy.poll | CommitWhy.dirty) != 0 {
+            // A routed event (key, physical key, IME, paste) sees the state an earlier handler
+            // left before it routes (`frame.rs`'s `ROUTE` commit). Swift dispatches events at
+            // once rather than queueing them for the frame, so a key release doesn't take it:
+            // `live_only_tests.rs:152` (LiveOnlyFullParityTests) updates state, sends a live-only
+            // key release, and wants the update's commit inside the next frame, which a commit
+            // at the release would take out of it. File steps don't either: upstream holds a
+            // stale one to the next frame (`hold_files`) rather than committing before it.
+            commitFor(why: CommitWhy.route, at: now, cut: forceInitialSettle)
             needsCommit = false
             forceInitialSettle = false
         }
@@ -2170,6 +2196,8 @@ public final class Runtime<State> {
             activeExplicitSnap = prevExplicitSnap
             activeExplicitSettleCut = prevExplicitSettleCut
         }
+        let budget = CommitBudget.Commit.start()
+        defer { budget.end(why: perfWatch.cause) }
         measureFramePhase(.commit) {
             textSystem.beginElisionCommit()
             let commitAskedMotion = pendingAskedMotion
@@ -2178,6 +2206,10 @@ public final class Runtime<State> {
             pendingUnprompted = false
             let rawCommitKind: TxCommit = isUnprompted ? pendingCommitKind.instant() : pendingCommitKind
             activeExplicitSnap = rawCommitKind.snaps
+            // `apply.rs`: an instant commit's changes land at once, by design.
+            if rawCommitKind.snaps && commitCount > 0 {
+                commitWhy |= CommitWhy.instant
+            }
             let explicitSettle = rawCommitKind == .settle
             let explicitInstant = rawCommitKind == .instant
             let commitKind: TxCommit = resizeSnap
@@ -2234,9 +2266,6 @@ public final class Runtime<State> {
             compareLiveOnlyCheck(liveCheck)
             commitCount &+= 1
             frameHadCommitted = true
-            if InteractionGate.isOn {
-                perfWatch.interaction.committed(why: 1)
-            }
         }
     }
 
@@ -4536,6 +4565,7 @@ public final class Runtime<State> {
         stepVirtualFillAfterCommit(now: now)
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
+            commitWhyPending |= CommitWhy.virtual
         }
         finishScrollKeyLandings(anyVirtualList: pass.virtualExpansion.anyVirtualList)
         if !needsCommit && scrollGlidingPaths.isEmpty && scrollRequestsState.isEmpty {
@@ -10871,6 +10901,7 @@ public final class Runtime<State> {
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
+        flushPendingCommitIfNeeded(at: now)
         deliverPaste(content, at: now)
     }
 
@@ -11477,7 +11508,7 @@ public final class Runtime<State> {
                 scheduled = true
             }
             if scheduled {
-                dirtyCommit(at: now, external: external)
+                dirtyCommit(at: now, external: external, why: why)
             }
         }
         if !tx.launches.isEmpty {
@@ -11485,7 +11516,7 @@ public final class Runtime<State> {
             for (src, dst) in tx.launches {
                 pendingLaunches.append(makePendingFlightRequest(source: src, destination: dst, motionSpring: springOverride))
             }
-            dirtyCommit(at: now, external: external)
+            dirtyCommit(at: now, external: external, why: why)
         }
         if tx.unclippedFlightsRequested {
             pendingUnclippedFlights = true
@@ -11522,10 +11553,12 @@ public final class Runtime<State> {
         if tx.liveOnlyRequested {
             livePendingDirty = true
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
-                dirtyCommit(at: now, external: external, clearLiveCheck: false)
+                dirtyCommit(at: now, external: external, clearLiveCheck: false, why: why)
             }
         } else if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
-            dirtyCommit(at: now, external: external, why: why)
+            // A commit something asked for without a cause of its own (a poll that changed
+            // nothing yet asked for a scroll) is a state change outside a handler.
+            dirtyCommit(at: now, external: external, why: why == 0 ? CommitWhy.dirty : why)
         }
     }
 
@@ -11537,6 +11570,7 @@ public final class Runtime<State> {
         let (viewVP, viewScale) = cxSettings.zoomState.view()
         if fitHeight && windowResting && fitWindowState.resized(to: viewVP.y, current: viewport.y) {
             needsCommit = true
+            commitWhyPending |= CommitWhy.relayout
             userResizeNeedsCut = false
         }
         if fitHeight && viewVP.x == viewport.x && viewScale == pixelScale {
@@ -11553,6 +11587,7 @@ public final class Runtime<State> {
             cxSettings.isApplyingZoom = false
             userResizeNeedsCut = true
             needsCommit = true
+            commitWhyPending |= CommitWhy.relayout
             if vpChanged {
                 pendingResizeRelayout = true
             }
@@ -11578,6 +11613,7 @@ public final class Runtime<State> {
             pixelScale = viewScale
             cxSettings.isApplyingZoom = false
             needsCommit = true
+            commitWhyPending |= CommitWhy.relayout
             if vpChanged {
                 pendingResizeRelayout = true
             }
@@ -12273,6 +12309,8 @@ public final class Runtime<State> {
         forceInitialSettle = true
         explicitSettleRequested = true
         needsCommit = true
+        // `settle_all` sets `settle` and `dirty`: the frame commits for both.
+        commitWhyPending |= CommitWhy.dirty
     }
 
     /// Advances the app-requested minimize latch (`window/minimize.rs::Runtime::minimize_step`).

@@ -567,7 +567,7 @@ internal extension Runtime {
                 )
                 let pollRan = runPoll(at: w)
                 if pollRan && needsCommit {
-                    commitTree(at: w, cut: forceInitialSettle, resizeSnap: userResizeNeedsCut)
+                    commitFor(why: 0, at: w, cut: forceInitialSettle, resizeSnap: userResizeNeedsCut)
                     forceInitialSettle = false
                     userResizeNeedsCut = false
                     needsCommit = false

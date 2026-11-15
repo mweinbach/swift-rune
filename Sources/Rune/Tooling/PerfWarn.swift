@@ -39,10 +39,9 @@ public enum CommitBudget {
         let top = parts.max(by: { $0.1 < $1.1 }).flatMap { $0.1 > 0 ? $0 : nil }
         let whyNames = CommitWhy.names(why)
 
-        var line = String(
-            format: "rune: commit took %.1f ms, over RUNE_COMMIT_BUDGET_MS=%g: view %.1f, layout %.1f (text %.1f), apply %.1f ms",
-            totalMs, budgetMs, view, layout, text, apply
-        )
+        var line = String(format: "rune: commit took %.1f ms, over RUNE_COMMIT_BUDGET_MS=", totalMs)
+            + rustDisplay(budgetMs)
+            + String(format: ": view %.1f, layout %.1f (text %.1f), apply %.1f ms", view, layout, text, apply)
         if let top {
             let pct = totalMs > 0 ? (100.0 * top.1 / totalMs) : 0
             line += String(format: "; most in %@ (%.0f%%)", top.0, pct)

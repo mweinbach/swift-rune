@@ -653,6 +653,9 @@ private enum FramePhaseStorage {
         row[phase.rawValue] += wallMs
         row[phase.rawValue + FRAME_PHASES] += cpuMs
         Thread.current.threadDictionary[key] = row
+        if CommitBudget.isOn {
+            CommitBudget.add(phase, ms: wallMs)
+        }
         if InteractionGate.isOn {
             InteractionTracker.recordActiveThreadPhase(phase.rawValue, ms: wallMs)
         }

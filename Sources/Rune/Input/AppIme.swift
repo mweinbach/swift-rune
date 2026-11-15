@@ -57,6 +57,7 @@ extension Runtime {
     @discardableResult
     public func ime(_ event: Ime, at now: Double? = nil) -> Bool {
         let t = now ?? currentTime
+        flushPendingCommitIfNeeded(at: t)
         let activeIme: Bool = {
             if isAnyImeComposing { return true }
             switch event {

@@ -485,8 +485,10 @@ extension Runtime {
         if swaps {
             leavePlaygroundStage(wasOpen: wasOpen, keepSideFocus: keepSideFocus, at: now)
         }
-        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
+        // playground.rs:53: applying the playground's pending change marks the state dirty.
+        applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, why: CommitWhy.dirty)
         needsCommit = true
+        commitWhyPending |= CommitWhy.dirty
         if live.swapsResetSettle(swaps) {
             forceInitialSettle = true
         }
@@ -537,7 +539,7 @@ extension Runtime {
                 nextWakeDeadline = due
             }
         }
-        applyTx(tx, at: now, markDirtyIfNotLiveOnly: changed)
+        applyTx(tx, at: now, markDirtyIfNotLiveOnly: changed, why: changed ? CommitWhy.poll : 0)
 
         let keys = live.takePressed()
         for ev in keys {
@@ -611,6 +613,7 @@ extension Runtime {
         )
         if live.moved(.focus(focus: focusedPath, region: nextRegion)) {
             needsCommit = true
+            commitWhyPending |= CommitWhy.dirty
         }
     }
 
@@ -622,6 +625,7 @@ extension Runtime {
         }()
         if live.moved(.slot(active)) {
             needsCommit = true
+            commitWhyPending |= CommitWhy.dirty
         }
     }
 

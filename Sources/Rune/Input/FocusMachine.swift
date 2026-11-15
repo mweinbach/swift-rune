@@ -173,6 +173,8 @@ extension Runtime {
             _ = dispatchIme(.commit(activePreedit), at: now)
             imeReset = true
             needsCommit = true
+            // `Action::FinishIme` runs as a handler (frame.rs:598, `INPUT`).
+            commitWhyPending |= CommitWhy.input
         }
     }
 

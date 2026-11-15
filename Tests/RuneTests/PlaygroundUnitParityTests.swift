@@ -284,6 +284,24 @@ struct PlaygroundCoreUnitParityTests {
         #expect(!rt.state.holdsEscape)
     }
 
+    @Test("frame.rs: a page's poll that changed something commits for `poll`, not `input`")
+    func pagePollCommitsForPoll() {
+        var (rt, t) = unitRuntime(open: .some("lab"))
+        #expect(showsText(rt, "lab").hasPrefix("ticks 0"))
+        var tickWhy: UInt16? = nil
+        for _ in 0..<90 {
+            rt.commitWhy = 0
+            rt.frame(at: stepClock(&t))
+            if tickWhy == nil, showsText(rt, "lab").hasPrefix("ticks 1") {
+                tickWhy = rt.commitWhy
+            }
+        }
+        let why = tickWhy ?? 0
+        #expect(tickWhy != nil, "the page's timer ticked")
+        #expect(why & CommitWhy.poll != 0, "\(CommitWhy.names(why))")
+        #expect(why & CommitWhy.input == 0, "\(CommitWhy.names(why))")
+    }
+
     @Test("a page keeps its own state and timer while open, and replay requests immediate poll")
     func pageKeepsOwnStateAndTimerWhileOpen() {
         var (rt, t) = unitRuntime(open: .some("lab"))

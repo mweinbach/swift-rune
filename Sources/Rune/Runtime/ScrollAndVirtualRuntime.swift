@@ -1461,6 +1461,7 @@ extension Runtime {
             flushReleasedHolds(at: now)
             if flushedHold && markRelayoutDirty {
                 needsCommit = true
+                commitWhyPending |= CommitWhy.relayout
                 pendingGrowthRelayout = true
             }
             let hasPending = growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
@@ -1650,6 +1651,7 @@ extension Runtime {
         let hasPendingHold = growthStacks.values.contains { !$0.pendingHeights.isEmpty || !$0.closing.isEmpty || !$0.runs.isEmpty }
         if (anyChanged || flushedHold) && markRelayoutDirty {
             needsCommit = true
+            commitWhyPending |= CommitWhy.relayout
             pendingGrowthRelayout = true
         }
         return anyMoving || hasPendingHold
@@ -2545,6 +2547,8 @@ extension Runtime {
                         onAtBottom(&state, isAtBottom)
                     }
                     needsCommit = true
+                    // scroll/bottom.rs:298: `Action::AtBottom` runs as a handler (`INPUT`).
+                    commitWhyPending |= CommitWhy.input
                 }
             }
 
@@ -2566,6 +2570,8 @@ extension Runtime {
                         farSpec.handler(&state, isFar)
                     }
                     needsCommit = true
+                    // scroll/bottom.rs:306: `Action::FarFromBottom` runs as a handler (`INPUT`).
+                    commitWhyPending |= CommitWhy.input
                 }
             }
 
