@@ -830,8 +830,10 @@ public final class Runtime<State> {
     internal var secondaryPointerHeld: Bool = false
     internal var hasActivePointerDrag: Bool { activeDrag != nil || armedDragOut != nil }
     /// Whether either the primary or secondary pointer button is currently held (`Runtime::pointer_captured`).
+    /// A started drag-out hands the pointer to the OS session, so it no longer captures
+    /// (`pointer.rs:89`: press, secondary, or press tint only).
     public var pointerCaptured: Bool {
-        primaryPointerHeld || secondaryPointerHeld || activeDrag != nil || armedDragOut != nil || activeDragOut != nil
+        primaryPointerHeld || secondaryPointerHeld || activeDrag != nil || armedDragOut != nil
     }
 
     // Scroll state keyed by element path
@@ -2489,6 +2491,7 @@ public final class Runtime<State> {
         cxSettings.viewDefaults = cx.envState.defaults
         let passHelpLook = cx.helpLook ?? cx.envState.defaults.help
         cxSettings.captionColor = cx.envState.captionColor
+        if cx.envState.titlebar != cxSettings.titlebarOverride { cxSettings.titlebarSetChanged = true }
         cxSettings.titlebarOverride = cx.envState.titlebar
         cxSettings.caretReadByView = cx.envState.reads.caretRead
         cxSettings.selectionRectsReadByView = cx.envState.reads.selectionRectsRead
@@ -8103,7 +8106,8 @@ public final class Runtime<State> {
                 opacity: logicalAlpha,
                 isExiting: nodeExiting,
                 hasVisualBlocker: hasVisualBlocker,
-                isInteractiveBlocker: isInteractiveBlocker
+                isInteractiveBlocker: isInteractiveBlocker,
+                parentScreenClip: Self.screenClipOfParent(inheritedClip: flightClipOverride ?? inh.clip, ancestorTurn: ancestorTurn, outerTurnClip: outerTurnClip, localTurnClip: localTurnClip)
             )
 
             var nodeEditRange: [Int]? = nil
@@ -9067,6 +9071,9 @@ public final class Runtime<State> {
         syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
         pressedLink = nil
         hoveredLink = nil
+        // `start_drag_out`: `drop_press()` then `pointer_leave()`, which, with nothing captured,
+        // forgets the pointer (`pointer = None`) until the next move.
+        pointerPosition = Vec2(-10000, -10000)
         if hoveredPath != nil {
             hoveredPath = nil
             hoveredKey = nil
@@ -11218,7 +11225,8 @@ public final class Runtime<State> {
                 bounds = .fromXYWH(pointerPosition.x, pointerPosition.y, 1, 1)
                 key = nil
             }
-            pendingDragOutStart = DragOutStart(item: drag, bounds: bounds, press: pointerPosition, key: key)
+            let clip = (pressedPath ?? hoveredPath).flatMap { dragOutParentClip(path: $0) }
+            pendingDragOutStart = DragOutStart(item: drag, rect: Self.dragOutVisibleRect(bounds: bounds, clip: clip), bounds: bounds, press: pointerPosition, key: key)
         }
         if let actions = tx.runtimeActions["erasedActions"] as? [ErasedRuntimeAction] {
             for action in actions {

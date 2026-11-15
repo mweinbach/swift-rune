@@ -623,6 +623,8 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
         if !window.occlusionState.contains(.visible) {
             stepRest(.unseen)
         } else {
+            // Uncovered: re-sync the chrome as `window/sight.rs` does.
+            entry.syncWindowChrome(runtimeObj: runtime, window: window)
             view.requestRender()
         }
     }
@@ -811,6 +813,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         } else {
             entry.applyViewport(runtimeObj: runtime, viewport: newVP, pixelScale: Float(scale))
         }
+        // Resized / ScaleFactorChanged re-sync the chrome (`window/events.rs`).
+        if let w = window {
+            entry.syncWindowChrome(runtimeObj: runtime, window: w)
+        }
         requestRender()
     }
 
@@ -835,6 +841,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         )
         let commitsBefore = entry.viewCommitCount(runtimeObj: runtime)
         let refScene = entry.frame(runtimeObj: runtime, at: t)
+        // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
+        // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
+        if entry.takeTitlebarChanged(runtimeObj: runtime), let w = window {
+            entry.syncWindowChrome(runtimeObj: runtime, window: w)
+            DispatchQueue.main.async { [weak self] in self?.requestRender() }
+        }
         if let title = entry.windowTitle(runtimeObj: runtime), let w = window, w.title != title {
             w.title = title
         }
@@ -1324,18 +1336,12 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
             slot.shortcutBridge = shortcutBridge
         }
-        _ = RuneMacWindowConfig.syncChrome(
-            window: window,
-            chrome: specEntry.chrome,
-            titlebar: specEntry.titlebar
-        )
-        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view] in
-            guard let window, let specEntry else { return }
-            _ = RuneMacWindowConfig.syncChrome(
-                window: window,
-                chrome: specEntry.chrome,
-                titlebar: specEntry.titlebar
-            )
+        // `window/chrome.rs::sync_chrome`: place the traffic lights, then tell the runtime what
+        // the window's controls take of the titlebar (`set_titlebar_inset`, `set_chrome_insets`).
+        specEntry.syncWindowChrome(runtimeObj: rt, window: window)
+        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view, weak rt] in
+            guard let window, let specEntry, let rt else { return }
+            specEntry.syncWindowChrome(runtimeObj: rt, window: window)
             view?.requestRender()
         }
 
