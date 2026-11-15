@@ -59,10 +59,12 @@ struct Slice4InputWave1CTests {
         #expect(rt.state.wheels.count == 3)
         rt.wheel(WheelEvent(dx: 0, dy: 0, phase: .ended), at: Vec2(40, 25), now: 0.07)
 
-        // 3. Momentum phase locks after gesture until momentumGap elapses.
+        // 3. Only the WheelLock decides momentum (`gesture.rs` `wheel_event` sets
+        // `momentum: self.wheel_lock.momentum()`): a phaseless delta after the gesture ended
+        // restarts an unphased gesture, so the caller's `momentum: true` is overridden to false.
         rt.wheel(WheelEvent(dx: 0, dy: -5, phase: .changed, momentum: true), at: Vec2(40, 25), now: 0.09)
         #expect(rt.state.wheels.count == 5)
-        #expect(rt.state.wheels[4].2 == true)
+        #expect(rt.state.wheels[4].2 == false)
 
         // 4. pinchWheel synthesizes Magnify gesture when handler exists, else falls back cleanly.
         let consumed = rt.pinchWheel(dy: 20.0, at: Vec2(40, 25), now: 0.20)

@@ -95,6 +95,24 @@ extension Runtime {
         return false
     }
 
+    /// A wheel or trackpad scroll at window point (`ev.x`, `ev.y`), with its modifiers and phase
+    /// (`Runtime::wheel_event`, `runtime/input/gesture.rs:25`). The innermost `onWheel` handler
+    /// there hears it first, up to the nearest scroll view; what none takes scrolls as
+    /// `wheelXY` does.
+    public func wheelEvent(_ ev: WheelEvent, now: Double) {
+        dispatchLockedWheel(ev, at: Vec2(ev.x, ev.y), now: now)
+    }
+
+    /// A wheel or trackpad delta in points on both axes at window point (x, y), positive moving
+    /// content right and down (`Runtime::wheel_xy`, `runtime/scroll/x.rs`). The gesture's first
+    /// delta picks the axis and the rest keeps it; without phases a pause of 0.1 s ends a gesture.
+    /// An `onWheel` handler under the pointer hears it first.
+    public func wheelXY(_ x: Float, _ y: Float, _ dx: Float, _ dy: Float, now: Double) {
+        if dx == 0 && dy == 0 { return }
+        // `WheelEvent::new(dx, dy).at(x, y)`: the derived default leaves `precise` false.
+        wheelEvent(WheelEvent(dx: dx, dy: dy, precise: false, x: x, y: y), now: now)
+    }
+
     /// `gesture.rs` `wheel_event`: a wheel or trackpad scroll at `pos`, with its modifiers and
     /// phase. The innermost `onWheel` handler there hears it first, up to the nearest scroll
     /// view; what none takes scrolls on the axis the gesture locked to.
@@ -113,9 +131,9 @@ extension Runtime {
         }
         if moved || event.phase != .changed {
             var ev = event
-            if inputMachines.wheelLock.momentum {
-                ev.momentum = true
-            }
+            // `WheelEvent { momentum: self.wheel_lock.momentum(), ..ev }`: the lock alone says
+            // whether a delta is momentum, whatever the caller passed.
+            ev.momentum = inputMachines.wheelLock.momentum
             // Each delta carries its own gesture and that gesture's axis policy (r241).
             let gesture = inputMachines.wheelLock.gesture
             let phased = inputMachines.wheelLock.phased
