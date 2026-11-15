@@ -10822,7 +10822,8 @@ public final class Runtime<State> {
                 path = String(path[..<slash])
             }
         }()
-        let hoveredIdx = hitTest(at: pointerPosition)?.node.index
+        // `keys.rs` `page_scroll`: `self.pointer.and_then(|(x, y)| self.scroll_at(x, y))`.
+        let hoveredIdx = scrollAt(pointerPosition.x, pointerPosition.y).flatMap { nodeByPath[$0] }
         guard let targetIdx = focusedIdx.flatMap(around)
             ?? hoveredIdx.flatMap(around)
             ?? flatNodes.indices.first(where: pageable) else {

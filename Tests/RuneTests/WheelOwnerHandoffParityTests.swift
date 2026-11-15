@@ -225,6 +225,37 @@ struct WheelOwnerHandoffParityTests {
         #expect(rt.inputMachines.wheelLock.gesture != wheelGesture, "without phases, a delta wholly on the other axis starts another")
     }
 
+    /// `the_wheel_over_a_viewport_with_nothing_to_scroll_scrolls_the_one_around_it` (#1021,
+    /// `5dabf425`): a viewport whose content fits is passed over: the wheel over a section that
+    /// is its own viewport, as tall as its rows, scrolls the list around it, on either axis.
+    @Test("the wheel over a viewport with nothing to scroll scrolls the one around it")
+    @MainActor
+    func theWheelOverAViewportWithNothingToScrollScrollsTheOneAroundIt() {
+        let rt = Runtime(
+            state: (),
+            viewport: Vec2(300, 300),
+            pixelScale: 1.0,
+            view: { _, _ in
+                let fits: El<Void> = col().key("section").wFull().h(200).scroll(ScrollSpec(stickBottom: false))
+                    .child(el().wFull().h(200))
+                let fitsX: El<Void> = row().key("chips").wFull().h(40).scrollX().child(el().w(100).h(40))
+                let list: El<Void> = col().wFull().child(fitsX).child(fits).child(el().wFull().h(2000))
+                return col().key("list").wFull().h(300).scroll(ScrollSpec(stickBottom: false)).child(list)
+            }
+        )
+        _ = rt.frame(at: 0.0)
+        _ = rt.frame(at: Self.t)
+        func path(_ key: String) -> String? { rt.flatNodes.first(where: { $0.key == key })?.path }
+        let list = path("list")
+        #expect(list != nil && path("section") != nil && path("chips") != nil)
+        // The strip that fits sideways is no horizontal viewport for the wheel, and over it the list scrolls.
+        #expect(rt.scrollAtAxis(100, 20, horizontal: true) == nil)
+        #expect(rt.scrollAt(100, 20) == list)
+        rt.wheelXY(100, 100, 0, -30, now: Self.t)
+        #expect(rt.scrollOffset(forKey: "list").y == 30.0)
+        #expect(rt.scrollOffset(forKey: "section").y == 0.0)
+    }
+
     /// `the_phase_carries_when_the_gesture_last_moved_and_when_it_ended`
     @Test("the phase carries when the gesture last moved and when it ended")
     func thePhaseCarriesWhenTheGestureLastMovedAndWhenItEnded() {
