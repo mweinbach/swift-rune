@@ -192,6 +192,10 @@ struct RuntimeShellSettings {
     var viewDefaults: ViewDefaults = ViewDefaults()
     var captionColor: Color? = nil
     var titlebarInset: Float = 0.0
+    /// What the native window's controls take of the titlebar, in window points, as the host
+    /// last set it (`Runtime::set_chrome_insets`); `nil` until a host sets it, when the
+    /// headless derivation from `App::titlebar` stands in (`Runtime::headless_chrome`).
+    var hostChromeInsets: ChromeInsets? = nil
     var baseTitlebar: Titlebar? = nil
     var titlebarOverride: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default
@@ -480,13 +484,10 @@ extension Runtime {
         return ov.over(cxSettings.baseTitlebar ?? Titlebar())
     }
 
-    /// Computed chrome insets in current zoomed view points (`Cx::chrome_insets`).
+    /// Chrome insets in current zoomed view points, as the view reads them (`Cx::chrome_insets`):
+    /// `windowChromeInsets()` over the zoom (`Measurement::chrome`, `insets.zoomed(zoom)`).
     public func chromeInsets() -> ChromeInsets {
-        let base = effectiveTitlebar()
-        let rawH = base?.height ?? 0.0
-        let rawLeading = cxSettings.titlebarInset > 0 ? cxSettings.titlebarInset : (base?.insetLeading ?? 0.0)
-        let rawTrailing = base?.insetTrailing ?? 0.0
-        return ChromeInsets(leading: rawLeading, trailing: rawTrailing, top: rawH).zoomed(cxSettings.zoomState.k)
+        windowChromeInsets().zoomed(cxSettings.zoomState.k)
     }
 
     /// Sets the system accent palette (`Runtime::set_system_accent`).

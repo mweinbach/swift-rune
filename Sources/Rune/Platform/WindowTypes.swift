@@ -357,6 +357,7 @@ public protocol HostedWindowEntry: AnyObject {
     func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
+    func setWindowChrome(runtimeObj: AnyObject, titlebarInset: Float, insets: ChromeInsets)
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
@@ -721,6 +722,14 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart? {
         rt(runtimeObj).takeDragOutStart()
+    }
+
+    /// The window's controls, as the shell places them on every resize and full-screen change
+    /// (`window/chrome.rs::sync_chrome`: `set_titlebar_inset`, then `set_chrome_insets`).
+    func setWindowChrome(runtimeObj: AnyObject, titlebarInset: Float, insets: ChromeInsets) {
+        let runtime = rt(runtimeObj)
+        runtime.setTitlebarInset(titlebarInset)
+        runtime.setChromeInsets(insets)
     }
 
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {

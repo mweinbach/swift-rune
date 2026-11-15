@@ -593,15 +593,18 @@ extension Runtime {
         activeDragOut != nil || !inputMachines.activeDragOuts.isEmpty
     }
 
+    /// A drag-out the pointer move just delivered asked for, its rects and press in window
+    /// points (the view's times its zoom). The shell must start the OS session before
+    /// returning from that move event (`Runtime::take_drag_out`).
     public func takeDragOutStart() -> DragOutStart? {
         if let idx = inputMachines.untakenDragOuts.firstIndex(where: { !$0.cancelledByHost }) {
             let entry = inputMachines.untakenDragOuts.remove(at: idx)
             inputMachines.activeDragOuts.append((id: entry.id, path: entry.path, key: entry.key, onEnd: entry.onEnd))
             pendingDragOutStart = nil
-            return entry.start
+            return entry.start.zoomed(zoom())
         }
         defer { pendingDragOutStart = nil }
-        return pendingDragOutStart
+        return pendingDragOutStart?.zoomed(zoom())
     }
 
     internal func checkArmedDragOutMove(to pos: Vec2, at now: Double) -> Bool {
@@ -610,9 +613,11 @@ extension Runtime {
             return false
         }
         armedDragOut = nil
-        return startDragOut(path: armed.path, at: pos, fallbackBounds: armed.bounds, fallbackKey: armed.key, now: now)
+        return startDragOut(path: armed.path, at: armed.startWindow, fallbackBounds: armed.bounds, fallbackKey: armed.key, now: now)
     }
 
+    /// Starts a drag-out from the element at `path`; `pos` is where the pointer went down
+    /// (`start_drag_out`'s `press`, `held.at`), in view points.
     @discardableResult
     internal func startDragOut(
         path: String,
@@ -634,7 +639,8 @@ extension Runtime {
                 anyState = typed
             }
         }
-        let start = DragOutStart(item: item, bounds: bounds, press: pos, key: key)
+        let rect = Self.dragOutVisibleRect(bounds: bounds, clip: dragOutParentClip(path: path))
+        let start = DragOutStart(item: item, rect: rect, bounds: bounds, press: pos, key: key)
         let id = inputMachines.nextDragOutId
         inputMachines.nextDragOutId &+= 1
         activeDragOut = (path: path, key: key, onEnd: nodeInfo.onEnd)

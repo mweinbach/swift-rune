@@ -1323,18 +1323,31 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             shortcutBridge.sync(registry: specEntry.shortcutRegistry(runtimeObj: rt))
             slot.shortcutBridge = shortcutBridge
         }
-        _ = RuneMacWindowConfig.syncChrome(
-            window: window,
-            chrome: specEntry.chrome,
-            titlebar: specEntry.titlebar
-        )
-        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view] in
-            guard let window, let specEntry else { return }
-            _ = RuneMacWindowConfig.syncChrome(
+        // `window/chrome.rs::sync_chrome`: place the traffic lights, then tell the runtime what
+        // the window's controls take of the titlebar (`set_titlebar_inset`, `set_chrome_insets`).
+        specEntry.setWindowChrome(
+            runtimeObj: rt,
+            titlebarInset: RuneTrafficLights.titlebarInset(window),
+            insets: RuneMacWindowConfig.syncChrome(
                 window: window,
                 chrome: specEntry.chrome,
                 titlebar: specEntry.titlebar
             )
+        )
+        slot.fullScreenWatch = FullScreenWatch(window: window) { [weak window, weak specEntry, weak view, weak rt] in
+            guard let window, let specEntry else { return }
+            let insets = RuneMacWindowConfig.syncChrome(
+                window: window,
+                chrome: specEntry.chrome,
+                titlebar: specEntry.titlebar
+            )
+            if let rt {
+                specEntry.setWindowChrome(
+                    runtimeObj: rt,
+                    titlebarInset: RuneTrafficLights.titlebarInset(window),
+                    insets: insets
+                )
+            }
             view?.requestRender()
         }
 

@@ -11212,7 +11212,8 @@ public final class Runtime<State> {
                 bounds = .fromXYWH(pointerPosition.x, pointerPosition.y, 1, 1)
                 key = nil
             }
-            pendingDragOutStart = DragOutStart(item: drag, bounds: bounds, press: pointerPosition, key: key)
+            let clip = (pressedPath ?? hoveredPath).flatMap { dragOutParentClip(path: $0) }
+            pendingDragOutStart = DragOutStart(item: drag, rect: Self.dragOutVisibleRect(bounds: bounds, clip: clip), bounds: bounds, press: pointerPosition, key: key)
         }
         if let actions = tx.runtimeActions["erasedActions"] as? [ErasedRuntimeAction] {
             for action in actions {
