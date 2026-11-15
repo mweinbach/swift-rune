@@ -578,4 +578,35 @@ struct HoverRuntimeParityTests {
         #expect(rt.activeModalPath != nil, "the sheet is modal")
         #expect(rt.liveStore.target(track, Runtime<PressState>.pressProp) == 0.0, "behind the modal the press lets go")
     }
+
+    /// `hover.rs::hovered_alone` (`max_by_key(path.len())`): of equally deep `hoverAlone`
+    /// elements under the pointer, the last one shadows its ancestors. Two overlapping rows each
+    /// hold a `hoverAlone` face at the same spot: the later face wins, so the later row goes
+    /// unlit while the earlier one, not an ancestor of the winning face, stays lit.
+    @Test("of equally deep hover_alone elements the last one shadows")
+    func ofEquallyDeepHoverAloneElementsTheLastOneShadows() {
+        struct S {}
+        let rt = Runtime<S>(state: S(), viewport: Vec2(240, 100), pixelScale: 1.0, systemDark: true) { _, _ in
+            func r(_ k: String) -> El<S> {
+                row().key("r\(k)").absolute(x: 0.0, y: 0.0).size(200.0, 30.0).hover(Color.white)
+                    .child(el().key("f\(k)").size(20.0, 20.0).hover(Color.white).hoverAlone())
+            }
+            return col().wFull().hFull().child(r("a")).child(r("b"))
+        }
+        var t = 0.0
+        _ = rt.frame(at: t)
+        func lit(_ key: String) -> Float {
+            guard let n = rt.flatNodes.first(where: { $0.key == key }) else { return -1 }
+            return rt.liveStore.target(Runtime<S>.hoverTrackId(n.nodeId), Runtime<S>.hoverProp) ?? 0.0
+        }
+        let fa = rt.flatNodes.first(where: { $0.key == "fa" })?.path ?? ""
+        let fb = rt.flatNodes.first(where: { $0.key == "fb" })?.path ?? "x"
+        #expect(fa.count == fb.count, "the faces are equally deep: \(fa) / \(fb)")
+        t += 1.0 / 120.0
+        rt.pointerMove(to: Vec2(10.0, 10.0), at: t)
+        _ = rt.frame(at: t)
+        #expect(rt.hoveredAlone().map { rt.flatNodes[$0].key } == "fb", "the last equally deep face is the one")
+        #expect(lit("rb") == 0.0 && lit("ra") == 1.0, "only the winning face's row is shadowed")
+        #expect(lit("fa") == 1.0 && lit("fb") == 1.0, "both faces hold the pointer and light")
+    }
 }

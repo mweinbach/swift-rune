@@ -56,16 +56,16 @@ internal struct HoverHold: Sendable, Equatable {
 /// scroll lands in holds, and hover resolves once at the pointer when the hold is over. A held
 /// nudge draws nothing in between: it asks for one frame at its due time, the frame that ends
 /// it (`nudge.rs::Nudge`).
-public struct ScrollNudge: Sendable, Equatable {
+internal struct ScrollNudge: Sendable, Equatable {
     /// How long an instant scroll holds hover: the two frames at 60 Hz its frame countdown took
     /// (`NUDGE_HOLD`).
-    public static let nudgeHold: Double = 2.0 / 60.0
+    internal static let nudgeHold: Double = 2.0 / 60.0
 
     /// A deadline comparison's slack, so a frame that lands on the due time ends the hold (`SLACK`).
     static let slack: Double = 1e-6
 
     /// Where the hold stands (`nudge.rs::Hold`).
-    public enum Hold: Sendable, Equatable {
+    internal enum Hold: Sendable, Equatable {
         /// Nothing holds hover.
         case free
         /// An instant scroll landed, and hover holds until this clock time, as `attempt`.
@@ -73,7 +73,7 @@ public struct ScrollNudge: Sendable, Equatable {
     }
 
     /// `nudge.rs::Event`.
-    public enum Event: Sendable, Equatable {
+    internal enum Event: Sendable, Equatable {
         /// An app's instant scroll landed at this clock time.
         case arm(now: Double)
         /// A frame at `now`, carrying the `attempt` its arm asked for: the hold ends only if that
@@ -82,22 +82,22 @@ public struct ScrollNudge: Sendable, Equatable {
     }
 
     /// `nudge.rs::Effect`.
-    public enum Effect: Sendable, Equatable {
+    internal enum Effect: Sendable, Equatable {
         /// Wake at this clock time, when the hold is due.
         case wakeAt(Double)
     }
 
-    public var seq: Seq
-    public var state: Hold
+    internal var seq: Seq
+    internal var state: Hold
 
-    public init(seq: Seq = Seq(), state: Hold = .free) {
+    internal init(seq: Seq = Seq(), state: Hold = .free) {
         self.seq = seq
         self.state = state
     }
 
     /// `nudge.rs::step`.
     @discardableResult
-    public static func step(seq: inout Seq, state: inout Hold, event: Event) -> Effects<Effect> {
+    internal static func step(seq: inout Seq, state: inout Hold, event: Event) -> Effects<Effect> {
         switch event {
         case .arm(let now):
             let attempt = seq.nextAttempt()
@@ -115,25 +115,25 @@ public struct ScrollNudge: Sendable, Equatable {
     /// An instant scroll landed at `now` from the clock: hover holds, and this asks for the wake
     /// that brings the frame the hold ends on.
     @discardableResult
-    public mutating func arm(now: Double) -> Effects<Effect> {
+    internal mutating func arm(now: Double) -> Effects<Effect> {
         Self.step(seq: &seq, state: &state, event: .arm(now: now))
     }
 
     /// A frame at `now`, the one its wake asked for: a hold that came due ends.
-    public mutating func tick(now: Double) {
+    internal mutating func tick(now: Double) {
         if case .held(let attempt, _) = state {
             Self.step(seq: &seq, state: &state, event: .due(attempt: attempt, now: now))
         }
     }
 
     /// Hover holds at `now`.
-    public func holdAt(now: Double) -> Bool {
+    internal func holdAt(now: Double) -> Bool {
         if case .held(_, let due) = state { return now + Self.slack < due }
         return false
     }
 
     /// The clock time a pending hold ends.
-    public func due() -> Double? {
+    internal func due() -> Double? {
         if case .held(_, let due) = state { return due }
         return nil
     }
@@ -279,7 +279,8 @@ extension Runtime {
         var best: Int? = nil
         for i in flatNodes.indices where flatNodes[i].el.isHoverAlone {
             guard !hoverIsExiting(i), hoverAllowed(i), hoverNodeContains(i) else { continue }
-            if best.map({ flatNodes[i].path.count > flatNodes[$0].path.count }) ?? true { best = i }
+            // `max_by_key(path.len())`: of equally deep matches, the last wins.
+            if best.map({ flatNodes[i].path.count >= flatNodes[$0].path.count }) ?? true { best = i }
         }
         return best
     }

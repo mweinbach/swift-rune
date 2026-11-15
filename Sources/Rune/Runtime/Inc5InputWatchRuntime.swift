@@ -694,14 +694,17 @@ extension Runtime {
             let forceNow = !isLit && !hoverAllowed(i)
             let current = hoverTarget(nid)
             let changed = current != target
-            let snapImmediately = cut || cxSettings.hostReducedMotion
-            if snapImmediately {
+            // A cut lands every track where it belongs; nothing holds through it.
+            if cut {
                 if readyHoverFromRest(nid, to: target) {
                     liveStore.snap(trackId, Self.hoverProp, to: target)
                 }
                 lastHoverTargetById[nid] = target
                 continue
             }
+            // Reduce Motion lands each change instead of animating it, but the hold still
+            // applies: upstream skips a held flip whatever the motion setting (`hover.rs:384-385`).
+            let reduce = cxSettings.hostReducedMotion
             let curves = hoverCurvesById[nid]
             if !changed {
                 // Default hover animations inherit velocity and have no completion token. An
@@ -712,7 +715,11 @@ extension Runtime {
                     if !liveStore.has(trackId, Self.hoverProp) {
                         liveStore.snap(trackId, Self.hoverProp, to: 0.0)
                     }
-                    liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
+                    if reduce {
+                        liveStore.snap(trackId, Self.hoverProp, to: target)
+                    } else {
+                        liveStore.set(trackId, Self.hoverProp, to: target, anim: isLit ? curves.enter : curves.exit, at: now)
+                    }
                 }
                 lastHoverTargetById[nid] = current
                 continue
@@ -728,7 +735,7 @@ extension Runtime {
             if readyHoverFromRest(nid, to: target) {
                 let drewNothing = unseen ?? kitHooks.unseenPresence.drewNothing(nodes: flatNodes)
                 unseen = drewNothing
-                if drewNothing.indices.contains(i) && drewNothing[i] {
+                if reduce || (drewNothing.indices.contains(i) && drewNothing[i]) {
                     liveStore.snap(trackId, Self.hoverProp, to: target)
                 } else {
                     liveStore.set(trackId, Self.hoverProp, to: target, anim: anim, at: now)

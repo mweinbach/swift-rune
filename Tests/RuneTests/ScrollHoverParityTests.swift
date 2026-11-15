@@ -501,4 +501,101 @@ struct ScrollHoverParityTests {
         #expect(rt.scrollGlidingPaths.contains(path))
         #expect(rt.scrollNudges[path]?.holdAt(now: rt.currentTime) == true, "the jumped axis armed the hold")
     }
+
+    /// `hover.rs:384-385` (`if held && !f.now { continue; }`): a held flip waits whatever the
+    /// motion setting. Under Reduce Motion an instant scroll's hold keeps r5's hover track lit
+    /// and r25's dark until the hold's wake, which then lands both at once.
+    @Test("reduce motion still holds hover tracks under an instant scroll's hold")
+    func reduceMotionStillHoldsHoverTracks() {
+        let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 200), pixelScale: 1.0, systemDark: true, view: Self.view)
+        rt.setSystemReducedMotion(true)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        rt.pointerMove(to: Vec2(100.0, 110.0), at: t)
+        t += Self.dt
+        _ = rt.frame(at: t)
+        #expect(Self.shown(rt) == ["a5"])
+        func lit(_ key: String) -> Float? {
+            guard let n = rt.flatNodes.first(where: { $0.key == key }) else { return nil }
+            return rt.liveStore.target(Runtime<Int>.hoverTrackId(n.nodeId), Runtime<Int>.hoverProp) ?? 0.0
+        }
+        rt.update(at: t) { _, tx in tx.scrollToInstant("scroll", x: 0.0, y: 400.0) }
+        t += Self.dt
+        _ = rt.frame(at: t)
+        #expect(rt.hoverHold.held, "the nudge holds hover")
+        #expect(lit("r5") == 1.0 && lit("r25") == 0.0, "held, neither track moves: r5 \(String(describing: lit("r5"))), r25 \(String(describing: lit("r25")))")
+        #expect(Self.shown(rt) == ["a5"])
+        guard let due = rt.nextWakeDeadline(after: rt.currentTime) else {
+            Issue.record("the hold wakes a frame")
+            return
+        }
+        _ = rt.frame(at: due)
+        #expect(lit("r5") == 0.0 && lit("r25") == 1.0, "the wake's frame resolves hover at the pointer")
+        #expect(Self.shown(rt) == ["a25"])
+    }
+
+    /// `offset.rs:281-308,331-338`: a request touches only the axes it names. A jump on x while y
+    /// glides lands x and leaves the y glide running to its end; a jump on y while x glides does
+    /// the same the other way. Both from a committing and a non-committing transaction.
+    @Test("an offset request leaves an axis it doesn't name alone, glide and all")
+    func anOffsetRequestLeavesAnUnnamedAxisAlone() {
+        for committing in [true, false] {
+            // y glides, x jumps.
+            var (rt, path, t) = Self.planeRuntime()
+            rt.update(at: t) { _, tx in tx.scrollTo("plane", x: 0.0, y: 300.0) }
+            t += Self.dt
+            _ = rt.frame(at: t)
+            let yStart = rt.scrollOffsets[path]?.y ?? 0.0
+            #expect(yStart > 0.0 && yStart < 300.0 && rt.scrollGlidingPaths.contains(path), "committing=\(committing): y glides")
+            if committing {
+                rt.update(at: t) { _, tx in tx.scrollToX("plane", 100.0) }
+            } else {
+                _ = rt.updateIf(at: t) { _, tx in tx.scrollToX("plane", 100.0); return false }
+            }
+            t += Self.dt
+            _ = rt.frame(at: t)
+            let mid = rt.scrollOffsets[path] ?? .zero
+            #expect(mid.x == 100.0, "committing=\(committing): x jumped: \(mid)")
+            #expect(mid.y > yStart && mid.y < 300.0, "committing=\(committing): y carries on gliding: \(mid.y)")
+            #expect(rt.scrollGlidingPaths.contains(path), "committing=\(committing): the y glide still runs")
+            #expect(rt.scrollNudges[path]?.holdAt(now: rt.currentTime) == true, "committing=\(committing): the x jump armed the hold")
+            for _ in 0..<120 { t += Self.dt; _ = rt.frame(at: t) }
+            #expect(rt.scrollOffsets[path] == Vec2(100.0, 300.0), "committing=\(committing): y reached its end: \(String(describing: rt.scrollOffsets[path]))")
+
+            // x glides, y jumps.
+            var (rt2, path2, t2) = Self.planeRuntime()
+            rt2.update(at: t2) { _, tx in tx.scrollTo("plane", x: 300.0, y: 0.0) }
+            t2 += Self.dt
+            _ = rt2.frame(at: t2)
+            let xStart = rt2.scrollOffsets[path2]?.x ?? 0.0
+            if committing {
+                rt2.update(at: t2) { _, tx in tx.scrollToY("plane", 50.0) }
+            } else {
+                _ = rt2.updateIf(at: t2) { _, tx in tx.scrollToY("plane", 50.0); return false }
+            }
+            t2 += Self.dt
+            _ = rt2.frame(at: t2)
+            let mid2 = rt2.scrollOffsets[path2] ?? .zero
+            #expect(mid2.y == 50.0 && mid2.x > xStart && mid2.x < 300.0, "committing=\(committing): y jumped, x glides on: \(mid2)")
+            for _ in 0..<120 { t2 += Self.dt; _ = rt2.frame(at: t2) }
+            #expect(rt2.scrollOffsets[path2] == Vec2(300.0, 50.0), "committing=\(committing): x reached its end")
+        }
+    }
+
+    /// `offset.rs` / `apply_jumps`: a jump on one axis that lands where that axis already is
+    /// moves nothing and arms no hold, whatever the other axis stands at.
+    @Test("a jump that doesn't move its own axis arms nothing")
+    func aJumpThatDoesntMoveItsOwnAxisArmsNothing() {
+        var (rt, path, t) = Self.planeRuntime()
+        rt.update(at: t) { _, tx in tx.scrollToInstant("plane", x: 0.0, y: 200.0) }
+        t += Self.dt
+        _ = rt.frame(at: t)
+        for _ in 0..<10 { t += Self.dt; _ = rt.frame(at: t) }
+        #expect(rt.scrollNudges[path] == nil)
+        rt.update(at: t) { _, tx in tx.scrollToX("plane", 0.0) }
+        t += Self.dt
+        _ = rt.frame(at: t)
+        #expect(rt.scrollOffsets[path] == Vec2(0.0, 200.0))
+        #expect(rt.scrollNudges[path] == nil, "x stood at 0 already: nothing moved, nothing holds")
+    }
 }

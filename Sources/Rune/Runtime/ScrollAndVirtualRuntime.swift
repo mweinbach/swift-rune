@@ -2446,8 +2446,8 @@ extension Runtime {
         }
 
         /// `offset.rs::scroll_to_offsets` + `apply_jumps` (`ScrollOffsetRequests.swift`).
-        func applyOffsetRequest(path: String, next: Vec2, glide: Spring?) {
-            applyScrollOffsetRequest(path: path, next: next, glide: glide, cut: cut, animNow: now)
+        func applyOffsetRequest(path: String, x: Float?, y: Float?, glide: Spring?) {
+            applyScrollOffsetRequest(path: path, x: x, y: y, glide: glide, cut: cut, animNow: now)
         }
 
         for landing in offsets {
@@ -2473,23 +2473,16 @@ extension Runtime {
                     continue
                 }
                 let vPath = flatNodes[vIdx].path
-                let cur = scrollOffsets[vPath] ?? .zero
                 scrollKeyLandings.land(landing)
                 markScrollMovedByHand(path: vPath)
-                // `offset.rs:33-38`: an anchored request always jumps (and halts any glide).
-                clearScrollHandGliding(path: vPath)
-                applyOffsetRequest(path: vPath, next: Vec2(cur.x, targetY), glide: nil)
+                // `offset.rs:33-38`: an anchored request always jumps, vertically only.
+                applyOffsetRequest(path: vPath, x: nil, y: targetY, glide: nil)
             } else if let vIdx = findScrollNode(bySelector: req.key) {
                 let path = flatNodes[vIdx].path
-                let cur = scrollOffsets[path] ?? .zero
-                let next = Vec2(req.x ?? cur.x, req.y ?? cur.y)
                 markScrollMovedByHand(path: path)
-                if req.glide != nil {
-                    markScrollHandGliding(path: path)
-                } else {
-                    clearScrollHandGliding(path: path)
-                }
-                applyOffsetRequest(path: path, next: next, glide: req.glide)
+                if req.glide != nil { markScrollHandGliding(path: path) }
+                // Only the axes the request names move (`offset.rs`: `r.x` / `r.y`).
+                applyOffsetRequest(path: path, x: req.x, y: req.y, glide: req.glide)
             }
         }
 

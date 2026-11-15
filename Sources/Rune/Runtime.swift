@@ -11505,12 +11505,8 @@ public final class Runtime<State> {
                 let path = match.path
                 let cur = scrollOffsets[path] ?? .zero
                 markScrollMovedByHand(path: path)
-                if req.glide != nil {
-                    markScrollHandGliding(path: path)
-                } else {
-                    clearScrollHandGliding(path: path)
-                }
-                applyScrollOffsetRequest(path: path, next: Vec2(req.x ?? cur.x, req.y ?? cur.y), glide: req.glide, cut: false, animNow: animNow)
+                if req.glide != nil { markScrollHandGliding(path: path) }
+                applyScrollOffsetRequest(path: path, x: req.x, y: req.y, glide: req.glide, cut: false, animNow: animNow)
                 if scrollOffsets[path] != cur {
                     frameMovedScrollPaths.insert(path)
                     anySnapped = true
