@@ -258,11 +258,29 @@ internal struct WordRevealCommitEntry {
 
 /// Runtime storage for active `El.reveal(wordFade:)` text nodes and the window's reveal chain.
 internal struct WordRevealStore: Sendable {
+    /// Reveal states kept for texts that left the tree, newest first: a keyed child that comes back
+    /// under its old path still shows its words (r349). One that never comes back would otherwise
+    /// keep its entry for the window's life, so only this many stay and the oldest leave
+    /// (`prune::REVEALS_KEPT`, r364).
+    internal static let REVEALS_KEPT: Int = 64
+
     internal var phases: [NodeId: WordRevealPhase] = [:]
     private var texts: [NodeId: String] = [:]
     private var parentIds: [NodeId: NodeId] = [:]
-    private var keptForUnmountedParent: Set<NodeId> = []
+    /// The reveal states `phases` keeps for texts that have left the tree, newest first, at most
+    /// `REVEALS_KEPT` of them (`Runtime::reveals_kept`).
+    internal private(set) var revealsKept: [NodeId] = []
+    /// When each state was first created; upstream orders a batch that left together by its
+    /// monotonically allocated `NodeId`, newest first, which Swift's path-hashed ids can't express.
+    private var born: [NodeId: UInt64] = [:]
+    private var nextBorn: UInt64 = 0
     internal var chain = WordRevealChain()
+
+    /// Per-id side tables the store keeps alongside `phases` (the Swift analogue of the paths
+    /// upstream keeps mapped while they hold reveal state); each is bounded with `phases`.
+    internal var sideTableCounts: (texts: Int, parentIds: Int, born: Int) {
+        (texts.count, parentIds.count, born.count)
+    }
 
     func hasActiveFades(timeScaleOf: (NodeId) -> Float) -> Bool {
         phases.contains { id, phase in
@@ -274,17 +292,39 @@ internal struct WordRevealStore: Sendable {
         phases.removeAll(keepingCapacity: true)
         texts.removeAll(keepingCapacity: true)
         parentIds.removeAll(keepingCapacity: true)
-        keptForUnmountedParent.removeAll(keepingCapacity: true)
+        revealsKept.removeAll(keepingCapacity: true)
+        born.removeAll(keepingCapacity: true)
         chain = WordRevealChain()
     }
 
     mutating func prune(exitedIds: [NodeId]) {
         guard !exitedIds.isEmpty else { return }
-        for id in exitedIds where !keptForUnmountedParent.contains(id) {
-            phases.removeValue(forKey: id)
-            texts.removeValue(forKey: id)
-            parentIds.removeValue(forKey: id)
+        for id in exitedIds where !revealsKept.contains(id) {
+            forget(id)
         }
+    }
+
+    private mutating func forget(_ id: NodeId) {
+        phases.removeValue(forKey: id)
+        texts.removeValue(forKey: id)
+        parentIds.removeValue(forKey: id)
+        born.removeValue(forKey: id)
+    }
+
+    /// Keeps the newest `REVEALS_KEPT` states of texts that left (`orphans`) and drops the rest,
+    /// the oldest first (`prune_exited`, `commit/prune.rs:46-62`). Ones already kept are older
+    /// than any that left with this commit.
+    private mutating func boundKept(orphans: Set<NodeId>) {
+        let kept = revealsKept.filter { orphans.contains($0) && phases[$0] != nil }
+        let keptSet = Set(kept)
+        var gone = orphans.filter { !keptSet.contains($0) && phases[$0] != nil }
+            .sorted { (born[$0] ?? 0) > (born[$1] ?? 0) }
+        gone.append(contentsOf: kept)
+        if gone.count > Self.REVEALS_KEPT {
+            for id in gone[Self.REVEALS_KEPT...] { forget(id) }
+            gone.removeSubrange(Self.REVEALS_KEPT...)
+        }
+        revealsKept = gone
     }
 
     mutating func commit(
@@ -300,12 +340,15 @@ internal struct WordRevealStore: Sendable {
             chain = WordRevealChain()
         }
         for entry in entries {
-            keptForUnmountedParent.remove(entry.id)
             if let pid = entry.parentId {
                 parentIds[entry.id] = pid
             }
             let wasMounted = prevMountedIds.contains(entry.id)
             let prevPhase = phases[entry.id]
+            if prevPhase == nil {
+                born[entry.id] = nextBorn
+                nextBorn &+= 1
+            }
             let prevShown: Int = {
                 switch prevPhase {
                 case let .idle(s), let .fading(s, _, _): return s
@@ -349,20 +392,28 @@ internal struct WordRevealStore: Sendable {
 
         if !phases.isEmpty {
             let currentParentIds = parentIds
-            var retainedUnmounted: Set<NodeId> = []
+            let previouslyKept = Set(revealsKept)
+            var orphans: Set<NodeId> = []
             let keep: (NodeId) -> Bool = { id in
                 if retainIds.contains(id) { return true }
+                // A state that outlived its node keeps waiting for the child's return (r349), while
+                // it is one of the newest `REVEALS_KEPT` that left (r364, below).
+                if previouslyKept.contains(id) {
+                    orphans.insert(id)
+                    return true
+                }
                 // An instant parent unmount retains its child's reveal state across omission (`apply.rs:630`).
                 if instant, let pid = currentParentIds[id], !presentIds.contains(pid) {
-                    retainedUnmounted.insert(id)
+                    orphans.insert(id)
                     return true
                 }
                 return false
             }
             phases = phases.filter { keep($0.key) }
-            keptForUnmountedParent = keptForUnmountedParent.union(retainedUnmounted).intersection(phases.keys)
             texts = texts.filter { phases.keys.contains($0.key) }
             parentIds = parentIds.filter { phases.keys.contains($0.key) }
+            born = born.filter { phases.keys.contains($0.key) }
+            boundKept(orphans: orphans)
         }
     }
 
