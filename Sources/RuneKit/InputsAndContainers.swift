@@ -781,6 +781,8 @@ public struct TextInput<State> {
     public var editKeyPath: WritableKeyPath<State, TextEdit>
     public var placeholderText: String = ""
     public var labelText: String?
+    /// The editor's accessible description (`TextInput::description`); `nil` leaves it unset.
+    public var descriptionText: String?
     public var isPlain: Bool = false
     public var trailingEl: El<State>?
     public var hasCopyButton: Bool = false
@@ -816,6 +818,12 @@ public struct TextInput<State> {
 
     public func label(_ l: String) -> TextInput<State> {
         var copy = self; copy.labelText = l; return copy
+    }
+
+    /// Help or a validation error for the inner editor, separate from its name
+    /// (`TextInput::description`, #1015): read by assistive technology as the editor's description.
+    public func description(_ text: String) -> TextInput<State> {
+        var copy = self; copy.descriptionText = text; return copy
     }
 
     public func plain(_ on: Bool = true) -> TextInput<State> {
@@ -976,6 +984,10 @@ public struct TextInput<State> {
             field = field.label(labelText)
         } else if !placeholderText.isEmpty {
             field = field.label(placeholderText)
+        }
+        // `name_field(.., self.description.as_deref(), ..)`: the description goes on the editor.
+        if let descriptionText {
+            field = field.description(descriptionText)
         }
         if let activeDescendantKey {
             field = field.activeDescendant(activeDescendantKey)

@@ -726,6 +726,43 @@ struct WidgetA11yParityTests {
         #expect(tabC?.a11yDisabled == true)
     }
 
+    // MARK: - TextInput description (`text_input.rs`, upstream 270222a2 / #1015)
+
+    @Test("TextInput.description is the inner editor's accessible description, separate from its name")
+    func textInputDescriptionOnEditor() {
+        struct S {
+            var name = TextEdit("")
+            var plain = TextEdit("")
+        }
+        let k = Kit.neutral(dark: false)
+        let described: El<S> = TextInput<S>(key: "name", \.name)
+            .label("Name")
+            .description("Letters and spaces only")
+            .build(k)
+        let editor = findEl(described, key: "name-input")
+        #expect(editor?.a11yLabel == "Name")
+        #expect(editor?.a11yDescription == "Letters and spaces only")
+        // Without one the editor has none (it was always `None` before #1015).
+        let bare: El<S> = TextInput<S>(key: "plain", \.plain).placeholder("Search").build(k)
+        #expect(findEl(bare, key: "plain-input")?.a11yLabel == "Search")
+        #expect(findEl(bare, key: "plain-input")?.a11yDescription == nil)
+
+        let rt = Runtime(state: S(), viewport: Vec2(400, 120), systemDark: false) { _, _ in
+            col().child(
+                TextInput<S>(key: "name", \.name)
+                    .label("Name")
+                    .description("Letters and spaces only")
+                    .invalid(true)
+                    .build(k)
+            )
+        }
+        rt.frame(at: 0.0)
+        let node = info(rt, "name-input")
+        #expect(node?.role == .textInput)
+        #expect(node?.label == "Name")
+        #expect(node?.a11yDescription == "Letters and spaces only")
+    }
+
     // MARK: - FileTree (`tests/a11y/disclosure.rs`)
 
     @Test("Tree and FileTree expose level, expanded state, selection, description, and no-echo")
