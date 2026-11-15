@@ -711,7 +711,7 @@ struct WidgetA11yParityTests {
             .build(0, kit: k)
 
         assertNoEcho(elTree)
-        let track = findEl(elTree, key: "tabs-track")
+        let track = findEl(elTree, key: "tabs-list")
         #expect(track?.role == .tabList)
         #expect(track?.a11yLabel == "Tabs")
 
@@ -742,10 +742,12 @@ struct WidgetA11yParityTests {
         let editor = findEl(described, key: "name-input")
         #expect(editor?.a11yLabel == "Name")
         #expect(editor?.a11yDescription == "Letters and spaces only")
-        // Without one the editor has none (it was always `None` before #1015).
-        let bare: El<S> = TextInput<S>(key: "plain", \.plain).placeholder("Search").build(k)
+        // Without one `name_field` still sets `description.unwrap_or_default()`: an empty
+        // description, which also keeps any help-derived one off the editor. An empty label
+        // falls back to the placeholder (`label.filter(|l| !l.is_empty())`).
+        let bare: El<S> = TextInput<S>(key: "plain", \.plain).label("").placeholder("Search").build(k)
         #expect(findEl(bare, key: "plain-input")?.a11yLabel == "Search")
-        #expect(findEl(bare, key: "plain-input")?.a11yDescription == nil)
+        #expect(findEl(bare, key: "plain-input")?.a11yDescription == "")
 
         let rt = Runtime(state: S(), viewport: Vec2(400, 120), systemDark: false) { _, _ in
             col().child(

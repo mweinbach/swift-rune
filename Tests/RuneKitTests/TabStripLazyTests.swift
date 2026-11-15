@@ -60,9 +60,9 @@ struct TabStripLazyTests {
     @Test("band() before the first layout is the strip's start and the fallback long, a step more each side")
     func bandFallsBackBeforeLayout() {
         // Outside any layout the reads miss: `at` is 0 and `shows` is ceil(fallback / step).
-        let h = TabStripBand.band(listKey: "x-track", scrollKey: "x-scroll", vertical: false, step: 120, fallback: 800)
+        let h = TabStripBand.band(listKey: "x-list", scrollKey: "x-scroll", vertical: false, step: 120, fallback: 800)
         #expect(h.lo == -120 && h.hi == 9 * 120)
-        let v = TabStripBand.band(listKey: "x-track", scrollKey: "x-scroll", vertical: true, step: 180, fallback: 1200)
+        let v = TabStripBand.band(listKey: "x-list", scrollKey: "x-scroll", vertical: true, step: 180, fallback: 1200)
         #expect(v.lo == -180 && v.hi == 9 * 180)
     }
 
@@ -106,7 +106,7 @@ struct TabStripLazyTests {
         // `.tabs` takes the same path: 41 whole tabs past BAND_PAST build only the band.
         let whole = (0..<(BAND_PAST + 1)).map { StripTabItem<S>(id: "t\($0)", title: "Tab \($0)") }
         let wholeTree: El<S> = TabStrip<S>(key: "wh", tabs: whole, selected: "t0").availableWidth(400).build(S(), kit: k)
-        #expect(!keys(wholeTree, containing: "wh-track-unbuilt-").isEmpty)
+        #expect(!keys(wholeTree, containing: "wh-list-unbuilt-").isEmpty)
         #expect(builtTabs(wholeTree, strip: "wh").contains(BAND_PAST))
         let last = findEl(wholeTree, key: "wh-tab-t\(BAND_PAST)")
         #expect(last?.a11yPosInSet?.position == BAND_PAST + 1)
@@ -135,22 +135,22 @@ struct TabStripLazyTests {
         let expectedBuilt = Array(0...32) + [50, 70, 99]
         #expect(calls.built == expectedBuilt)
         #expect(builtTabs(tree, strip: "hz") == expectedBuilt)
-        #expect(keys(tree, containing: "hz-track-unbuilt-") == ["hz-track-unbuilt-33", "hz-track-unbuilt-51", "hz-track-unbuilt-71"])
+        #expect(keys(tree, containing: "hz-list-unbuilt-") == ["hz-list-unbuilt-33", "hz-list-unbuilt-51", "hz-list-unbuilt-71"])
 
-        let list = try #require(findEl(tree, key: "hz-track"))
+        let list = try #require(findEl(tree, key: "hz-list"))
         #expect(list.role == .tabList)
         let childKeys = list.children.map { $0.keyId ?? "" }
         // tab32, its separator, the run 33..49, then the active tab (no separators either side).
         let i32 = try #require(childKeys.firstIndex(of: "hz-tab-t32"))
-        #expect(Array(childKeys[i32...(i32 + 4)]) == ["hz-tab-t32", "hz-sep-32", "hz-track-unbuilt-33", "hz-tab-t50", "hz-track-unbuilt-51"])
+        #expect(Array(childKeys[i32...(i32 + 4)]) == ["hz-tab-t32", "hz-sep-32", "hz-list-unbuilt-33", "hz-tab-t50", "hz-list-unbuilt-51"])
 
         // Each spacer is its run's length less the list's own gap after it, a row high.
-        let run33 = try #require(findEl(tree, key: "hz-track-unbuilt-33"))
+        let run33 = try #require(findEl(tree, key: "hz-list-unbuilt-33"))
         #expect(run33.isA11yHidden)
         #expect(run33.layout.width == .points(16 * 33 + 30 - 2))
         #expect(run33.layout.height == .points(TabDensity.full.height))
-        #expect(findEl(tree, key: "hz-track-unbuilt-51")?.layout.width == .points(19 * 33 - 2))
-        #expect(findEl(tree, key: "hz-track-unbuilt-71")?.layout.width == .points(28 * 33 - 2))
+        #expect(findEl(tree, key: "hz-list-unbuilt-51")?.layout.width == .points(19 * 33 - 2))
+        #expect(findEl(tree, key: "hz-list-unbuilt-71")?.layout.width == .points(28 * 33 - 2))
 
         // position_in_set still counts every tab.
         let t99 = try #require(findEl(tree, key: "hz-tab-t99"))
@@ -180,7 +180,7 @@ struct TabStripLazyTests {
         expected.append(79)
         #expect(builtTabs(tree, strip: "vt") == expected)
         let firstUnbuilt = expected.last(where: { $0 != 79 })! + 1
-        let spacer = try #require(findEl(tree, key: "vt-track-unbuilt-\(firstUnbuilt)"))
+        let spacer = try #require(findEl(tree, key: "vt-list-unbuilt-\(firstUnbuilt)"))
         var len: Float = 0
         for i in firstUnbuilt..<79 { len += (i % 10 == 5 ? 45 : 28) + 3 }
         #expect(spacer.isA11yHidden)
@@ -203,9 +203,9 @@ struct TabStripLazyTests {
             .build(S(), kit: k)
         let built = builtTabs(tree, strip: "in")
         #expect(built.contains(59) && built.contains(60))
-        let list = try #require(findEl(tree, key: "in-track"))
+        let list = try #require(findEl(tree, key: "in-list"))
         let childKeys = list.children.map { $0.keyId ?? "" }
-        let place = try #require(childKeys.firstIndex(of: "in-track-incoming"))
+        let place = try #require(childKeys.firstIndex(of: "in-list-incoming"))
         #expect(childKeys[place + 1] == "in-tab-t60")
         let placeEl = list.children[place]
         #expect(placeEl.isA11yHidden)
@@ -220,7 +220,94 @@ struct TabStripLazyTests {
             .dragState(\.drag, current: end)
             .availableWidth(800)
             .build(S(), kit: k)
-        #expect(findEl(endTree, key: "in-track")?.children.last?.keyId == "in-track-incoming")
+        #expect(findEl(endTree, key: "in-list")?.children.last?.keyId == "in-list-incoming")
+    }
+
+    @Test("With no availableWidth every horizontal tab is the overflow's max_width wide, and spacers use that pitch")
+    func noViewportUsesMaxWidth() throws {
+        let k = Kit.neutral(dark: false)
+        let slots = (0..<60).map { TabSlot(id: "t\($0)") }
+        let tree: El<S> = TabStrip<S>(key: "mw")
+            .lazyTabs(slots) { i in StripTabItem<S>(id: "t\(i)", title: "Tab \(i)") }
+            .active("t0")
+            .build(S(), kit: k)
+        // `viewport.map_or(max_width, ..)`: 224 for HORIZONTAL_DEFAULT, drawn at that width.
+        #expect(findEl(tree, key: "mw-tab-t1")?.layout.width == .points(224))
+        // Step max((224 + 2) * 4, 64) = 904, fallback 2000 shows ceil(2000 / 904) = 3: band
+        // (-904, 4520). Pitches: 226 for t0 (active, no separator), 229 after.
+        var start: Float = 0
+        var expected: [Int] = []
+        for i in 0..<60 {
+            let p: Float = i == 0 || i == 59 ? 226 : 229
+            if start < 4520 && start + p > -904 { expected.append(i) }
+            start += p
+        }
+        expected.append(59)
+        #expect(builtTabs(tree, strip: "mw") == expected)
+        let from = expected[expected.count - 2] + 1
+        let spacer = try #require(findEl(tree, key: "mw-list-unbuilt-\(from)"))
+        #expect(spacer.layout.width == .points(Float(59 - from) * 229 - 2))
+
+        // `.scroll` has no bound upstream (infinite); a horizontal strip takes HORIZONTAL_DEFAULT's 224.
+        let scrollTree: El<S> = TabStrip<S>(key: "sc")
+            .overflow(.scroll())
+            .lazyTabs(Array(slots.prefix(3))) { i in StripTabItem<S>(id: "t\(i)", title: "Tab \(i)") }
+            .build(S(), kit: k)
+        #expect(findEl(scrollTree, key: "sc-tab-t1")?.layout.width == .points(224))
+        // `.shrink` takes its own max_width; pinned tabs take ShrinkThenScroll's pinned_width.
+        let shrinkTree: El<S> = TabStrip<S>(key: "sh")
+            .overflow(.shrink(minWidth: 88, maxWidth: 200))
+            .lazyTabs(Array(slots.prefix(3))) { i in StripTabItem<S>(id: "t\(i)", title: "Tab \(i)") }
+            .build(S(), kit: k)
+        #expect(findEl(shrinkTree, key: "sh-tab-t1")?.layout.width == .points(200))
+        let pinTree: El<S> = TabStrip<S>(key: "pn")
+            .overflow(.shrinkThenScroll(pinnedWidth: 40))
+            .lazyTabs([TabSlot(id: "p", pinned: true), TabSlot(id: "u")]) { i in
+                StripTabItem<S>(id: i == 0 ? "p" : "u", title: "T").pinned(i == 0)
+            }
+            .build(S(), kit: k)
+        #expect(findEl(pinTree, key: "pn-tab-p")?.layout.width == .points(40))
+    }
+
+    @MainActor
+    @Test("In a Runtime a strip with no availableWidth draws its tabs at max_width, so unbuilt runs keep the last tab in place")
+    func runtimeNoViewportKeepsPlaces() throws {
+        let k = Kit.neutral(dark: false)
+        let rt = Runtime(state: S(), viewport: Vec2(812, 80), systemDark: false) { s, _ in
+            col().sizeFull().child(
+                TabStrip<S>(key: "nv")
+                    .lazyTabs((0..<60).map { TabSlot(id: "t\($0)") }) { i in StripTabItem<S>(id: "t\(i)", title: "Tab \(i)") }
+                    .active("t0")
+                    .build(s, kit: k)
+            )
+        }
+        rt.frame(at: 0.0)
+        rt.frame(at: 1.0 / 60.0)
+        let list = try #require(info(rt, "nv-list"))
+        #expect(info(rt, "nv-tab-t30") == nil)
+        let t1 = try #require(info(rt, "nv-tab-t1"))
+        #expect(abs(t1.rect[2] - 224) < 0.5)
+        // t0 226 (no separator by the active tab), then 229 a tab.
+        let t59 = try #require(info(rt, "nv-tab-t59"))
+        #expect(abs((t59.rect[0] - list.rect[0]) - (226 + 58 * 229)) < 0.5)
+    }
+
+    @Test("A tab given whole that is marked (its menu open) or renaming stays built wherever the strip has scrolled")
+    func wholeTabsMarkedOrEditingAreKept() throws {
+        let k = Kit.neutral(dark: false)
+        let tabs = (0..<100).map { i in
+            StripTabItem<S>(id: "t\(i)", title: "Tab \(i)")
+                .marked(i == 80)
+                .editor(i == 90 ? text("rename") : nil)
+        }
+        #expect(tabs[80].isMarked && !tabs[79].isMarked)
+        let tree: El<S> = TabStrip<S>(key: "mk", tabs: tabs, selected: "t0").availableWidth(800).build(S(), kit: k)
+        let built = builtTabs(tree, strip: "mk")
+        #expect(built.contains(80))
+        #expect(built.contains(90))
+        #expect(!built.contains(79) && !built.contains(81) && !built.contains(89))
+        // The marked tab keeps the hover wash, as upstream's `item.marked => c.hover`.
+        #expect(findEl(tree, key: "mk-tab-t80")?.background == k.c.surfaceHover)
     }
 
     @MainActor
@@ -239,7 +326,7 @@ struct TabStripLazyTests {
         }
         rt.frame(at: 0.0)
         rt.frame(at: 1.0 / 60.0)
-        let list = try #require(info(rt, "rt-track"))
+        let list = try #require(info(rt, "rt-list"))
         let scroller = try #require(info(rt, "rt-scroll"))
         #expect(abs(scroller.rect[2] - 800) < 0.5)
         // Tab 50 starts after the pinned tab (41) and 48 tabs of 33 and tab 49's 30; tab 99 after
@@ -259,7 +346,7 @@ struct TabStripLazyTests {
         for _ in 0..<60 { t += 1.0 / 60.0; rt.frame(at: t) }
         let offset = rt.scrollOffset(forKey: "rt-scroll").x
         #expect(offset > 1000)
-        let listAfter = try #require(info(rt, "rt-track"))
+        let listAfter = try #require(info(rt, "rt-list"))
         #expect(abs((scroller.rect[0] - listAfter.rect[0]) - offset) < 0.5)
         // The band is read in steps of 120: `at = floor(offset / 120)`, built over
         // ((at - 1) * 120, (at + 2 + 7) * 120).
@@ -278,7 +365,7 @@ struct TabStripLazyTests {
         }
         #expect(info(rt, "rt-tab-t40") != nil)
         #expect(info(rt, "rt-tab-t10") == nil)
-        #expect(info(rt, "rt-track-unbuilt-1") != nil)
+        #expect(info(rt, "rt-list-unbuilt-1") != nil)
         // Every tab kept its place.
         let t99After = try #require(info(rt, "rt-tab-t99"))
         #expect(abs((t99After.rect[0] - listAfter.rect[0]) - start(99)) < 0.5)

@@ -980,15 +980,15 @@ public struct TextInput<State> {
             .focusRing(0, offset: 0, .transparent)
         field = richModifiers.apply(to: field, kit: k)
 
-        if let labelText {
+        // `name_field`: the name is the label if it's not empty, else the placeholder if that isn't,
+        // and the description always goes on the editor (`description.unwrap_or_default()`), so
+        // an editor given none has an empty one rather than one from elsewhere.
+        if let labelText, !labelText.isEmpty {
             field = field.label(labelText)
         } else if !placeholderText.isEmpty {
             field = field.label(placeholderText)
         }
-        // `name_field(.., self.description.as_deref(), ..)`: the description goes on the editor.
-        if let descriptionText {
-            field = field.description(descriptionText)
-        }
+        field = field.description(descriptionText ?? "")
         if let activeDescendantKey {
             field = field.activeDescendant(activeDescendantKey)
         }
