@@ -174,8 +174,8 @@ struct CommitWatchTests {
         var far: [Bool] = []
     }
 
-    @Test("scroll/bottom.rs:298 - at-bottom and far-from-bottom handlers commit for `input`")
-    func scrollEdgeHandlersCommitForInput() {
+    @Test("action.rs:87-90 - at-bottom and far-from-bottom handlers aren't input: they commit for `dirty`")
+    func scrollEdgeHandlersCommitForDirty() {
         let rt = Runtime<Feed>(state: Feed(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
             col().key("scroll").size(200, 100).scrollY(stickBottom: false)
                 .onAtBottom { s, at in s.atBottom.append(at) }
@@ -195,7 +195,8 @@ struct CommitWatchTests {
         #expect(rt.state.far.contains(false) && rt.state.far.last == true, "\(rt.state.far)")
         #expect(!got.isEmpty)
         #expect(got.allSatisfy { $0 != 0 }, "\(got.map(CommitWhy.names))")
-        #expect(got.contains { $0 & CommitWhy.input != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.contains { $0 & CommitWhy.dirty != 0 }, "\(got.map(CommitWhy.names))")
+        #expect(got.allSatisfy { $0 & CommitWhy.input == 0 }, "nothing here is input: \(got.map(CommitWhy.names))")
     }
 
     private struct Fields {

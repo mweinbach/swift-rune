@@ -520,12 +520,12 @@ internal extension Runtime {
         if button == .secondary {
             guard node.el.handlers.onLinkSecondary != nil else { return false }
             pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: .secondary)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         }
         guard button == .primary || (button == .middle && node.el.handlers.onLink != nil) else { return false }
         pressedLink = TextLinkTarget(path: node.path, key: node.key, linkIndex: linkIdx, button: button)
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         return true
     }
 
@@ -534,7 +534,7 @@ internal extension Runtime {
     func dispatchLinkUp(at pos: Vec2, button: PointerButton, mods: Mods, suppressed: Bool, at now: Double) -> Bool {
         guard let pl = pressedLink, button == pl.button else { return false }
         pressedLink = nil
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         guard !suppressed,
               linkIndex(atPath: pl.path, at: pos) == pl.linkIndex,
               let idx = nodeByPath[pl.path],

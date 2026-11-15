@@ -318,7 +318,7 @@ extension Runtime {
                 if after.text != before.text {
                     deliverInputEdit(el: fEl, previousEdit: before, newEdit: after, editLens: editLens, at: now)
                 } else {
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             } else {
                 var edit = before

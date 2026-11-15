@@ -808,7 +808,7 @@ internal extension Runtime {
                 selectionState.coordinator.phase.clear()
                 selectionState.isDraggingSelection = false
                 if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
+                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
                 }
                 dispatchSelectionChanges(at: now)
             }
@@ -828,7 +828,7 @@ internal extension Runtime {
                 selectionState.isDraggingSelection = false
                 selectionState.suppressedClickOnRelease = false
                 if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
+                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
                 }
                 dispatchSelectionChanges(at: now)
             }
@@ -868,7 +868,7 @@ internal extension Runtime {
                 }
                 selectionState.suppressedClickOnRelease = false
                 if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
+                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
                 }
                 dispatchSelectionChanges(at: now)
                 return
@@ -898,7 +898,7 @@ internal extension Runtime {
                 }
                 selectionState.suppressedClickOnRelease = false
                 if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
+                    dirtyCommit(at: now, external: false, why: CommitWhy.input)
                 }
                 dispatchSelectionChanges(at: now)
                 return
@@ -925,7 +925,7 @@ internal extension Runtime {
         }
         selectionState.suppressedClickOnRelease = false
         if cxSettings.selectionRectsReadByView {
-            dirtyCommit(at: now, external: false)
+            dirtyCommit(at: now, external: false, why: CommitWhy.input)
         }
         dispatchSelectionChanges(at: now)
     }
@@ -957,7 +957,7 @@ internal extension Runtime {
                 let sUnit = SelectAllResolver.groupPath(forNodeAt: sIdx, in: snaps) ?? sNode.path
                 selectionState.coordinator.pick.noteClick(groupPath: sUnit)
             }
-            dirtyCommit(at: now, external: false)
+            dirtyCommit(at: now, external: false, why: CommitWhy.input)
             dispatchSelectionChanges(at: now)
         }
         #endif
@@ -981,7 +981,7 @@ internal extension Runtime {
             }
         ))
         popupNeedsLayout = true
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
     }
 
     func handleSelectablePointerMove(to pos: Vec2, mods: Mods, at now: Double, preferLayoutRects: Bool = false) -> Bool {
@@ -1023,7 +1023,7 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             selectionState.coordinator.phase.clear()
             if cxSettings.selectionRectsReadByView {
-                dirtyCommit(at: now, external: false)
+                dirtyCommit(at: now, external: false, why: CommitWhy.input)
             }
             return false
         }
@@ -1096,7 +1096,7 @@ internal extension Runtime {
             selectionState.suppressedClickOnRelease = true
         }
         if cxSettings.selectionRectsReadByView {
-            dirtyCommit(at: now, external: false)
+            dirtyCommit(at: now, external: false, why: CommitWhy.input)
         }
         dispatchSelectionChanges(at: now)
         return true
@@ -1113,7 +1113,7 @@ internal extension Runtime {
         selectionState.suppressedClickOnRelease = false
         selectionState.coordinator.phase.endDrag()
         if cxSettings.selectionRectsReadByView {
-            dirtyCommit(at: now, external: false)
+            dirtyCommit(at: now, external: false, why: CommitWhy.input)
         }
         dispatchSelectionChanges(at: now)
         return suppressClick
@@ -1139,7 +1139,7 @@ internal extension Runtime {
                 appHandledCmdA: false
             )
             if case .selectGroup = outcome {
-                dirtyCommit(at: now, external: false)
+                dirtyCommit(at: now, external: false, why: CommitWhy.input)
                 dispatchSelectionChanges(at: now)
                 return true
             }

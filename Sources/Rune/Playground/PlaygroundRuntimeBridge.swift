@@ -644,7 +644,7 @@ extension Runtime {
         focusedKey = nil
         syncPlaygroundSideFocus()
         _ = live.moved(.give(.list, seen: nil))
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
     }
 
     @discardableResult
@@ -661,7 +661,7 @@ extension Runtime {
             if !isRepeat {
                 live.enqueue(.toggle)
                 applyPlaygroundIfNeeded(at: now)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
             return true
         }
@@ -693,7 +693,7 @@ extension Runtime {
             var tx = Tx()
             if live.dispatchSideKey(event, tx: &tx) {
                 applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
         }
@@ -709,7 +709,7 @@ extension Runtime {
                 focusedKey = fNode.key
                 focusVisible = true
                 if live.moved(.give(.list, seen: focusedPath)) || true {
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
             return true
@@ -721,7 +721,7 @@ extension Runtime {
                 focusVisible = true
                 _ = live.moved(.give(.side, seen: focusedPath))
                 syncPlaygroundSideFocus()
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
             return true
@@ -737,7 +737,7 @@ extension Runtime {
                 focusedKey = nil
             }
             _ = live.moved(.give(.stage, seen: focusedPath))
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         case .outOfSide:
             toPlaygroundList(at: now)
@@ -753,13 +753,13 @@ extension Runtime {
                 focusedKey = flatNodes[idx].key
                 focusVisible = true
                 syncPlaygroundSideFocus()
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
             return true
         case .request(let req):
             live.enqueue(req)
             applyPlaygroundIfNeeded(at: now)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         }
     }
@@ -772,7 +772,7 @@ extension Runtime {
         }
         if event.key == .escape {
             if live.clearFilter() {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
             toPlaygroundList(at: now)
@@ -811,7 +811,7 @@ extension Runtime {
         } else {
             live.enqueue(.close)
             applyPlaygroundIfNeeded(at: now)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
         return true
     }
@@ -828,7 +828,7 @@ extension Runtime {
             target = .stage
         }
         if live.moved(.give(target, seen: focusedPath)) {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
     }
 
@@ -871,7 +871,8 @@ extension Runtime {
 
     internal func playgroundWithErasedState(
         _ body: (inout Any, inout Tx) -> Void,
-        at now: Double
+        at now: Double,
+        why: UInt16 = CommitWhy.input
     ) -> Bool {
         // Handle Playground size picker target cleanly without colliding with AppState
         var testTx = Tx()
@@ -883,18 +884,18 @@ extension Runtime {
             testTx.isForceCommitRequested ||
             testTx.settleRequested
         if let live = playgroundLive, hasChromeRequests || !(chromeMarker is PlaygroundSizePopupTarget) {
-            applyTx(testTx, at: now)
+            applyTx(testTx, at: now, why: why)
             live.enqueue([])
             applyPlaygroundIfNeeded(at: now)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: why)
             return true
         }
 
         if let live = playgroundLive, live.isOpen {
             var tx = Tx()
             if live.withErasedStageState(tx: &tx, body) {
-                applyTx(tx, at: now, markDirtyIfNotLiveOnly: true)
-                dirtyCommit(at: now)
+                applyTx(tx, at: now, markDirtyIfNotLiveOnly: true, why: why)
+                dirtyCommit(at: now, why: why)
                 return true
             }
         }

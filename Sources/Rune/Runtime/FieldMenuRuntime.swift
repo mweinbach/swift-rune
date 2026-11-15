@@ -183,7 +183,7 @@ extension Runtime {
             isFieldMenu: true
         ))
         popupNeedsLayout = true
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         return true
     }
 
@@ -224,7 +224,7 @@ extension Runtime {
         case "learn-spelling":
             if let word, !word.isEmpty {
                 SpellChecker.shared.learnWord(word)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         case "spellcheck":
             if let spellToggle {

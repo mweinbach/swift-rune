@@ -334,7 +334,7 @@ extension Runtime {
                     var edit = editLens.get(state)
                     edit.forceDir(flow)
                     editLens.set(&state, edit)
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                     recordFocusShiftSuppression()
                     return true
                 }

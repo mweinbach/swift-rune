@@ -2547,8 +2547,10 @@ extension Runtime {
                         onAtBottom(&state, isAtBottom)
                     }
                     needsCommit = true
-                    // scroll/bottom.rs:298: `Action::AtBottom` runs as a handler (`INPUT`).
-                    commitWhyPending |= CommitWhy.input
+                    // scroll/bottom.rs:309 queues `Action::AtBottom` from the frame (`frame_step`'s
+                    // `input::time::scope(None)`), and `ActionQueue::push` (action.rs:87-90) keeps
+                    // it `input: false`: its handler's change commits for `DIRTY`.
+                    commitWhyPending |= CommitWhy.dirty
                 }
             }
 
@@ -2570,8 +2572,8 @@ extension Runtime {
                         farSpec.handler(&state, isFar)
                     }
                     needsCommit = true
-                    // scroll/bottom.rs:306: `Action::FarFromBottom` runs as a handler (`INPUT`).
-                    commitWhyPending |= CommitWhy.input
+                    // `Action::FarFromBottom` likewise (scroll/bottom.rs, action.rs:88): `DIRTY`.
+                    commitWhyPending |= CommitWhy.dirty
                 }
             }
 

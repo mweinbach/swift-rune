@@ -72,11 +72,13 @@ extension Runtime {
     }
 
     /// A scroll that moved a viewport commits when a virtual list's window may shift, the view
-    /// read a scroll offset, or scroll callbacks (`on_at_bottom`, `on_far_from_bottom`, which
-    /// upstream queues as actions and runs as handlers: `INPUT`) watch it.
+    /// read a scroll offset, or scroll callbacks (`on_at_bottom`, `on_far_from_bottom`) watch it.
+    /// Upstream queues those from the frame as actions that aren't input (`ActionQueue::push`,
+    /// action.rs:87-90: `AtBottom` and `FarFromBottom` are `input: false`), so their handlers'
+    /// changes commit for `DIRTY` (frame.rs: `why |= if input { INPUT } else { DIRTY }`).
     internal var scrollCommitWhy: UInt16 {
         (activeVirtualPaths.isEmpty ? 0 : CommitWhy.virtual)
             | (lastViewReadScroll ? CommitWhy.read : 0)
-            | (hasScrollCallbacks() ? CommitWhy.input : 0)
+            | (hasScrollCallbacks() ? CommitWhy.dirty : 0)
     }
 }

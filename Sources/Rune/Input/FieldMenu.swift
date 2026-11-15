@@ -20,7 +20,7 @@ extension Runtime {
         blurredFocusPath = nil
         focusHandoff = false
         clearTabStartFocusPath()
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
     }
 
     /// Opens a text field's context menu (`cut`, `copy`, `paste`, optional `select-all`, spelling suggestions,
@@ -83,11 +83,11 @@ extension Runtime {
                     edit.setCursor(utf8Offset: range.lowerBound, extendSelection: false)
                     edit.setCursor(utf8Offset: range.upperBound, extendSelection: true)
                     editLens.set(&state, edit)
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 } else {
                     edit.setCursor(utf8Offset: caret, extendSelection: false)
                     editLens.set(&state, edit)
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
         }
@@ -227,7 +227,7 @@ extension Runtime {
         case "learn-spelling":
             if let word = menu.misspelledWord?.word {
                 SpellChecker.shared.learnWord(word)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         case "spellcheck":
             if let toggle = menu.spellcheckToggle {
@@ -253,7 +253,7 @@ extension Runtime {
                 langs.binding.call(&erased, next, &tx)
                 if let typed = erased as? State { state = typed }
                 applyTx(tx, at: now)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             } else if pickedId.hasPrefix("suggestion-"),
                       let n = Int(pickedId.dropFirst("suggestion-".count)),
                       n >= 0 && n < menu.suggestions.count,
@@ -272,7 +272,7 @@ extension Runtime {
                 flatNodes[fIdx].el.handlers.onTextChange?(&state, edit.text, &tx)
                 _ = flatNodes[fIdx].el.handlers.onInputChange?(&state, edit.text, &tx)
                 applyTx(tx, at: now)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         }
     }

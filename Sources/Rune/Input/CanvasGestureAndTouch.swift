@@ -308,7 +308,7 @@ extension Runtime {
         if scrollRequiresCommit {
             directScrolledPaths.insert(path)
             pendingCommitKind = pendingCommitKind.instant()
-            dirtyCommit(at: now, external: false)
+            dirtyCommit(at: now, external: false, why: scrollCommitWhy)
         } else {
             directScrolledPaths.remove(path)
             updateScrollPositions(at: now)

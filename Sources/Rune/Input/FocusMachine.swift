@@ -303,7 +303,7 @@ extension Runtime {
                     inputMachines.focusMachine.highlightedPath = flatNodes[members[nextPos]].path
                     inputMachines.focusMachine.hoveredHighlight = false
                     ensureNodeVisibleInScrollAncestors(index: members[nextPos], at: now)
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                     return true
                 }
                 if ev.mods == .none && ev.key == .enter && !isRepeat && !fm.highlightHidden,
@@ -509,7 +509,7 @@ extension Runtime {
         clearTabStartFocusPath()
         focusVisible = true
         ensureNodeVisibleInScrollAncestors(index: memberIdx, at: now)
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         if let g = findFocusGroupAncestor(of: memberIdx),
            (nextNode.el.role == .radio || nextNode.el.role == .tab || flatNodes[g].el.isFocusFollowsSelection),
            moved {

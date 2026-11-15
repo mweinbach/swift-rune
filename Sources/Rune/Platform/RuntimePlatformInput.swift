@@ -10,8 +10,12 @@ extension Runtime {
 
     // MARK: - State Mutation Bridge
 
-    internal func withErasedState(_ body: (inout Any, inout Tx) -> Void, at now: Double) {
-        if playgroundWithErasedState(body, at: now) {
+    /// Runs `body` on the state as a handler would, for the platform answers that reach it
+    /// (file dialog answers, popup picks, drag-out ends). Upstream queues each as an action whose
+    /// `Queued::input` is true (`ActionQueue::push`, action.rs:87-90), so its change commits for
+    /// `INPUT` (frame.rs: `why |= if input { INPUT } else { DIRTY }`).
+    internal func withErasedState(_ body: (inout Any, inout Tx) -> Void, at now: Double, why: UInt16 = CommitWhy.input) {
+        if playgroundWithErasedState(body, at: now, why: why) {
             return
         }
         var tx = Tx()
@@ -20,9 +24,9 @@ extension Runtime {
         if let updated = boxed as? State {
             state = updated
         }
-        applyTx(tx, at: now)
+        applyTx(tx, at: now, why: why)
         if !tx.liveOnlyRequested {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: why)
         }
     }
 
@@ -67,7 +71,7 @@ extension Runtime {
                 onMove(&state, files, &tx)
                 applyTx(tx, at: now)
                 if !tx.liveOnlyRequested {
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
         }
@@ -76,7 +80,7 @@ extension Runtime {
     internal func reconcileDropHoverAfterCommit(at now: Double) {
         guard let path = dropHoverPath else { return }
         if !dropTargetStillActive(path: path) {
-            endDropHover(at: now)
+            endDropHover(at: now, why: CommitWhy.dirty)
         }
     }
 
@@ -109,7 +113,9 @@ extension Runtime {
         )
     }
 
-    private func endDropHover(at now: Double) {
+    /// `why`: a file step's hover end is its input's (`Action::Files`, `INPUT`); one that ends
+    /// after the commit unmounted its target is the state's (`DIRTY`).
+    private func endDropHover(at now: Double, why: UInt16 = CommitWhy.input) {
         guard dropHoverPath != nil else { return }
         let endFn = activeDropHoverEnd
         dropHoverPath = nil
@@ -121,9 +127,9 @@ extension Runtime {
         guard let endFn else { return }
         var tx = Tx()
         endFn(&state, &tx)
-        applyTx(tx, at: now)
+        applyTx(tx, at: now, why: why)
         if !tx.liveOnlyRequested {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: why)
         }
     }
 
@@ -148,7 +154,7 @@ extension Runtime {
 
     /// Updates active drop hover/move state for `urls` dragged at `point` in window coordinates.
     public func dragFiles(_ urls: [URL], at point: Vec2?, at now: Double = 0.0) {
-        if !liveVisible {
+        if !liveVisible || holdsFileStep(aims: true) {
             pendingHiddenDrops.append(.drag(urls: urls, point: point, at: now))
             return
         }
@@ -188,7 +194,7 @@ extension Runtime {
                     tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
                     cb(&state, true, &tx)
                     applyTx(tx, at: now)
-                    if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+                    if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
                 }
             } else {
                 activeDropHoverEnd = spec.onDropRejectedHover.map { cb in
@@ -199,7 +205,7 @@ extension Runtime {
                     tx.dropPoint = makeDropPoint(windowPos: pt, rect: hit.rect)
                     cb(&state, true, &tx)
                     applyTx(tx, at: now)
-                    if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+                    if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
                 }
             }
             if acceptsSome && spec.onDropMove != nil {
@@ -217,7 +223,7 @@ extension Runtime {
     /// Returns `true` only when hover state changed or a new per-frame `onDropMove` wake is needed.
     @discardableResult
     public func dragFilesTo(_ point: Vec2, at now: Double = 0.0) -> Bool {
-        if !liveVisible {
+        if !liveVisible || holdsFileStep(aims: true) {
             pendingHiddenDrops.append(.dragTo(point: point, at: now))
             return true
         }
@@ -238,7 +244,7 @@ extension Runtime {
 
     /// Clears active file drag hover state when the drag exits the window or is cancelled.
     public func dragFilesLeave(at now: Double = 0.0) {
-        if !liveVisible {
+        if !liveVisible || holdsFileStep(aims: false) {
             pendingHiddenDrops.append(.leave(at: now))
             return
         }
@@ -275,7 +281,7 @@ extension Runtime {
     /// and falling back to `onAppFileDrop` if no drop zone handled accepted files.
     @discardableResult
     public func dropFiles(_ urls: [URL], at point: Vec2? = nil, at now: Double = 0.0) -> Bool {
-        if !liveVisible {
+        if !liveVisible || holdsFileStep(aims: true) {
             pendingHiddenDrops.append(.drop(urls: urls, point: point, at: now))
             return false
         }
@@ -299,7 +305,7 @@ extension Runtime {
             onMove(&state, files, &tx)
             applyTx(tx, at: now)
             if !tx.liveOnlyRequested {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         }
         draggedFiles = nil
@@ -321,7 +327,7 @@ extension Runtime {
                 }
                 onFiles(&state, accepted, &tx)
                 applyTx(tx, at: now)
-                if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+                if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
                 handledByElement = true
             }
             if !rejected.isEmpty, let onRejected = hit.spec.onDropRejected {
@@ -331,7 +337,7 @@ extension Runtime {
                 }
                 onRejected(&state, rejected, &tx)
                 applyTx(tx, at: now)
-                if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+                if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
             }
         }
 
@@ -342,7 +348,7 @@ extension Runtime {
             }
             appDrop(&state, urls, &tx)
             applyTx(tx, at: now)
-            if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+            if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
             handledByElement = true
         }
         return handledByElement
@@ -653,7 +659,7 @@ extension Runtime {
             var tx = Tx()
             onStart(&state, &tx)
             applyTx(tx, at: now)
-            if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+            if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
         }
         return true
     }
@@ -727,7 +733,7 @@ extension Runtime {
         var tx = Tx()
         handler(&state, outcome, &tx)
         applyTx(tx, at: now)
-        if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+        if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
     }
 
     /// Finishes an outbound drag session matching `path` (supports stale session completion).
@@ -759,7 +765,7 @@ extension Runtime {
             var tx = Tx()
             liveHandler(&state, outcome, &tx)
             applyTx(tx, at: now)
-            if !tx.liveOnlyRequested { dirtyCommit(at: now) }
+            if !tx.liveOnlyRequested { dirtyCommit(at: now, why: CommitWhy.input) }
         } else if let fallbackOnEnd {
             withErasedState({ anyState, tx in
                 fallbackOnEnd(&anyState, outcome, &tx)

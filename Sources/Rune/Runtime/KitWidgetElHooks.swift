@@ -391,7 +391,7 @@ extension Runtime {
                         onChange(&state, edit.text, &tx)
                         applyTx(tx, at: now, markDirtyIfNotLiveOnly: !tx.liveOnlyRequested)
                     }
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
             if let onPhys = prevNode.el.handlers.onPhysicalInput {

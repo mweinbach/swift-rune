@@ -9139,7 +9139,7 @@ public final class Runtime<State> {
             dispatchHoverCallbacks(to: nil, at: now)
             isDispatchingHover = false
         }
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
     }
 
     internal func dragSourceNode(byPath path: String) -> (
@@ -9230,10 +9230,10 @@ public final class Runtime<State> {
         pointerPosition = Vec2(-10000, -10000)
         if hoveredLink != nil {
             hoveredLink = nil
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
         if helpState.tipState != .idle {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
         var exitedHover = false
         if let old = hoveredPath {
@@ -9255,7 +9255,7 @@ public final class Runtime<State> {
             }
         }
         if exitedHover {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
         settleKitHoverDelays(at: pointerPosition, now: now)
         syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -9297,7 +9297,7 @@ public final class Runtime<State> {
             pressedTint = (path: target.path, button: button)
             syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             if nodeHasPressVisuals(target) {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         } else {
             pressedTint = nil
@@ -9363,7 +9363,7 @@ public final class Runtime<State> {
                 let pVisual = pressedChanged && (pressedPath.flatMap { nodeByPath[$0] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false)
                 let tVisual = tintChanged && (pressedTint.flatMap { nodeByPath[$0.path] }.map { nodeHasPressVisuals(flatNodes[$0]) } ?? false)
                 if pVisual || tVisual {
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
         }
@@ -9440,7 +9440,7 @@ public final class Runtime<State> {
                     edit.isRevealed = stateRevealed
                     editLens.set(&state, edit)
                     pendingCommitKind = pendingCommitKind.instant()
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 } else if let onDrag = node.el.handlers.onDrag {
                     let sx = abs(drag.startScale.x) > 1e-6 ? drag.startScale.x : 1.0
                     let sy = abs(drag.startScale.y) > 1e-6 ? drag.startScale.y : 1.0
@@ -9544,16 +9544,16 @@ public final class Runtime<State> {
                         || menuHoverChanged
                     if hoverNeedsCommit {
                         suppressRevealFromHoverCommit = true
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                         changed = true
                     }
                 } else if linkChanged || menuHoverChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
                     suppressRevealFromHoverCommit = true
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                     changed = true
                 }
             } else if linkChanged || helpTargetChanges(at: pos) {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                 changed = true
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -9569,12 +9569,12 @@ public final class Runtime<State> {
                         focusedPath = rNode.path
                         focusedKey = rNode.key
                         hoveredHighlightActive = true
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                         changed = true
                     }
                 } else if hoveredHighlightActive {
                     hoveredHighlightActive = false
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
                     changed = true
                 }
             }
@@ -9585,7 +9585,7 @@ public final class Runtime<State> {
                 syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             }
             if helpTargetChanges(at: pos) {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: isPointerEvent ? CommitWhy.input : CommitWhy.dirty)
             }
         }
         settleKitHoverDelays(at: pos, now: now)
@@ -9733,7 +9733,7 @@ public final class Runtime<State> {
                     blurredFocusPath = prevFp
                     focusHandoff = false
                     imeReset = true
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                 }
             }
             return
@@ -9953,7 +9953,7 @@ public final class Runtime<State> {
                 textSelectionOrigin: textSelOrigin,
                 stateSnapshotBeforeDrag: snapshot
             )
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return
         }
 
@@ -10007,7 +10007,7 @@ public final class Runtime<State> {
 
         let needsPressVisual = downFocusChanged || nodeHasPressVisuals(node) || !downRanHandler || !downAllLiveOnly
         if needsPressVisual {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
     }
 
@@ -10031,7 +10031,7 @@ public final class Runtime<State> {
         if pressedPath != nil && button != pressedButton {
             syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             if hadTintPressVisual {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
             return
         }
@@ -10060,7 +10060,7 @@ public final class Runtime<State> {
         var upRanHandler = false
         var upAllLiveOnly = true
         if cxSettings.selectionRectsReadByView {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
 
         defer {
@@ -10137,13 +10137,13 @@ public final class Runtime<State> {
         }
 
         if dispatchLinkUp(at: pos, button: button, mods: mods, suppressed: suppressedClickFromSelDrag, at: now) {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return
         }
 
         guard let rPath = releasedPath, let idx = nodeByPath[rPath] else {
             if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
             return
         }
@@ -10254,7 +10254,7 @@ public final class Runtime<State> {
         }
 
         if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
         }
     }
 
@@ -10594,7 +10594,7 @@ public final class Runtime<State> {
                             focusedPath = nil
                             focusedKey = nil
                             syncedEditFocusedPaths.removeAll()
-                            dirtyCommit(at: now)
+                            dirtyCommit(at: now, why: CommitWhy.input)
                         }
                         return true
                     }
@@ -10603,7 +10603,7 @@ public final class Runtime<State> {
                     editLens.set(&state, edit)
                     pendingCaretFollow = true
                     selectionState.pendingFollowCaret = true
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                     return true
                 case .modified:
                     selectionState.pendingFollowCaret = true
@@ -10618,7 +10618,7 @@ public final class Runtime<State> {
                         tx.animated()
                         onSubmit(&state, edit.text, &tx)
                         applyTx(tx, at: now)
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, why: CommitWhy.input)
                         return true
                     }
                     // Without `onTextSubmit`, let Return fall through to `.defaultButton()` if one exists.
@@ -10635,7 +10635,7 @@ public final class Runtime<State> {
                             fNode.el.handlers.onTextChange?(&state, edit.text, &tx)
                             applyTx(tx, at: now)
                         }
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, why: CommitWhy.input)
                     }
                     return true
                 }
@@ -10737,7 +10737,7 @@ public final class Runtime<State> {
                 dismiss(&state, &tx)
                 applyTx(tx, at: now)
             }
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         }
 
@@ -10753,7 +10753,7 @@ public final class Runtime<State> {
             if advanceTabFocus(backward: ev.mods.shift) {
                 hoveredHighlightActive = false
                 focusVisible = true
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
             if activeModalPath != nil {
@@ -10799,7 +10799,7 @@ public final class Runtime<State> {
         if activeModalPath == nil, let registry = shortcutRegistry {
             let result = registry.dispatch(ev)
             if result != .unhandled {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
         }
@@ -10896,7 +10896,7 @@ public final class Runtime<State> {
             if maxY - cur.y <= 2.0 { wasPinnedToBottom.insert(path) } else { wasPinnedToBottom.remove(path) }
         }
         logInputEvent("page \(ev.key)")
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         return true
     }
 
@@ -11170,7 +11170,7 @@ public final class Runtime<State> {
             handler(&state, phase, &tx)
             applyTx(tx, at: now)
             if !tx.liveOnlyRequested {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
             }
         }
     }
@@ -11315,11 +11315,11 @@ public final class Runtime<State> {
         if let srgb = tx.srgbBlendRequest, srgb != srgbBlend {
             srgbBlend = srgb
             pendingColorMotionSpring = pendingColorMotionSpring ?? Spring.none
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: why == 0 ? CommitWhy.dirty : why)
         }
         if let smoothing = tx.fontSmoothingRequest, smoothing != fontSmoothing {
             fontSmoothing = smoothing
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: why == 0 ? CommitWhy.dirty : why)
         }
         if tx.isCloseWindowRequested {
             closeWindowRequested = true
@@ -11906,7 +11906,7 @@ public final class Runtime<State> {
             return false
         case .navigation:
             editLens.set(&state, edit)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         case .modified:
             editLens.set(&state, edit)
@@ -11918,7 +11918,7 @@ public final class Runtime<State> {
                 onChange(&state, edit.text, &tx)
             }
             applyTx(tx, at: now)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         case .submit:
             editLens.set(&state, edit)
@@ -11927,7 +11927,7 @@ public final class Runtime<State> {
                 tx.animated()
                 onSubmit(&state, edit.text, &tx)
                 applyTx(tx, at: now)
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, why: CommitWhy.input)
                 return true
             }
             return false
@@ -11939,7 +11939,7 @@ public final class Runtime<State> {
                 onChange(&state, edit.text, &tx)
                 applyTx(tx, at: now)
             }
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         }
     }
@@ -12093,8 +12093,16 @@ public final class Runtime<State> {
     /// Commits any open preedit composition on focus loss or window deactivation (`Runtime::finish_composition`).
     public func finishComposition(at now: Double? = nil) {
         let t = now ?? currentTime
+        // `Action::FinishIme` is routed (frame.rs:573): a change an earlier handler or the state
+        // left commits before it, so the composition finishes on the tree that shows it. Before
+        // the first commit there is no tree yet: the first frame builds one before anything it
+        // queued runs (frame.rs:547), so a blur before then waits for it.
+        if commitCount > 0 { flushPendingCommitIfNeeded(at: t) }
         imeReset = true
-        if finishAppImeComposition(at: t) {
+        // It isn't input (`ActionQueue::push`, action.rs:89: `FinishIme` is `input: false`; the
+        // window's focus loss that asks for it carries no arrival time): its change commits for
+        // `DIRTY` (frame.rs: `why |= if input { INPUT } else { DIRTY }`).
+        if finishAppImeComposition(at: t, why: CommitWhy.dirty) {
             return
         }
         guard let fp = focusedPath,
@@ -12106,7 +12114,7 @@ public final class Runtime<State> {
         let prevEdit = editLens.get(state)
         var edit = prevEdit
         if let activePreedit = edit.preedit?.text, edit.finishPreedit() {
-            deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t)
+            deliverInputEdit(el: el, previousEdit: prevEdit, newEdit: edit, editLens: editLens, at: t, why: CommitWhy.dirty)
             _ = dispatchIme(.commit(activePreedit), at: t)
         }
     }
@@ -12193,7 +12201,7 @@ public final class Runtime<State> {
                 editLens.set(&state, edit)
                 pendingCaretFollow = true
                 selectionState.pendingFollowCaret = true
-                dirtyCommit(at: t)
+                dirtyCommit(at: t, why: CommitWhy.input)
                 handledByEdit = true
             case .modified:
                 selectionState.pendingFollowCaret = true
@@ -12202,7 +12210,7 @@ public final class Runtime<State> {
             case .submit, .copy:
                 editLens.set(&state, edit)
                 selectionState.pendingFollowCaret = true
-                dirtyCommit(at: t)
+                dirtyCommit(at: t, why: CommitWhy.input)
                 handledByEdit = true
             }
         }
@@ -12405,7 +12413,8 @@ public final class Runtime<State> {
         previousEdit: TextEdit,
         newEdit: TextEdit,
         editLens: (get: (State) -> TextEdit, set: (inout State, TextEdit) -> Void),
-        at now: Double
+        at now: Double,
+        why: UInt16 = CommitWhy.input
     ) {
         editLens.set(&state, newEdit)
         pendingCaretFollow = true
@@ -12423,8 +12432,8 @@ public final class Runtime<State> {
             let rejected = onInputChange(&state, newEdit.text, &tx)
             if rejected {
                 editLens.set(&state, previousEdit)
-                applyTx(tx, at: now)
-                dirtyCommit(at: now)
+                applyTx(tx, at: now, why: why)
+                dirtyCommit(at: now, why: why)
                 return
             }
         }
@@ -12432,8 +12441,8 @@ public final class Runtime<State> {
             let currentText = editLens.get(state).text
             onChange(&state, currentText, &tx)
         }
-        applyTx(tx, at: now)
-        dirtyCommit(at: now)
+        applyTx(tx, at: now, why: why)
+        dirtyCommit(at: now, why: why)
     }
 
     private func scrollRegionBelow(node overlay: FlatNode, at point: Vec2) -> FlatNode? {
@@ -12666,7 +12675,7 @@ public final class Runtime<State> {
             if let nav {
                 kitHooks.typeSelectBuffer = ""
                 if moveFocusInGroup(groupIndex: groupIdx, forward: nav.forward, jumpEndpoint: nav.jump, at: now) {
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, why: CommitWhy.input)
                     return true
                 }
                 return false
@@ -12703,7 +12712,7 @@ public final class Runtime<State> {
             return false
         }
         activateFocusGroupMember(groupIndex: groupIdx, members: members, curIdx: curIdx, targetPos: targetPos, at: now)
-        dirtyCommit(at: now)
+        dirtyCommit(at: now, why: CommitWhy.input)
         return true
     }
 

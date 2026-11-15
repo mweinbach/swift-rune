@@ -433,7 +433,7 @@ public extension Runtime {
             var tx = makeTx(at: now)
             onStep(&state, delta, &tx)
             applyTx(tx, at: now)
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, why: CommitWhy.input)
             return true
         }
     }

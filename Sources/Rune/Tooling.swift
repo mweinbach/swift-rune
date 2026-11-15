@@ -1751,7 +1751,7 @@ public enum HeadlessRunner {
                         screencastKeycaps.key(at: s.t, event: sev)
                         if runtime.activeModalPath == nil, let registry = runtime.shortcutRegistry {
                             if registry.dispatch(sev) != .unhandled {
-                                runtime.dirtyCommit(at: animNow)
+                                runtime.dirtyCommit(at: animNow, why: CommitWhy.input)
                             }
                         }
                     case .paste(let clip):
