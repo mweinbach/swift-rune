@@ -981,6 +981,13 @@ public final class Runtime<State> {
     private var focusReturnStack: [FocusReturnEntry] = []
     private var syncedEditFocusedPaths: Set<String> = []
     private var pendingTxFocusKey: String? = nil
+    /// `Tx.focusWhenShown` asked since the last commit: the key and whether its ring shows.
+    internal var pendingFocusWhenShown: (key: String, ring: Bool)? = nil
+    /// `Tx::focus_when_shown` still waiting for its element (`Runtime::focus_owed`): the key and
+    /// whether its ring shows. Dropped by the user's own key or press, or by another focus ask.
+    internal var focusOwed: (key: String, ring: Bool)? = nil
+    /// A resting poll changed the model but hasn't committed its tree yet (`Tx::polled_change`).
+    internal var polledChange: Bool = false
     private var pendingTxFocusVisible: Bool? = nil
     private var pendingTxBlurRequested: Bool = false
     internal var kitHooks = KitRuntimeHooksState()
@@ -1536,6 +1543,8 @@ public final class Runtime<State> {
         let wasLive = frameHadLiveWake
         frameCommittedFromInput = frameHadInputSinceLastFrame
         frameHadInputSinceLastFrame = false
+        // This frame commits what a resting poll changed (`std::mem::take(&mut self.pending)`).
+        polledChange = false
         frameHadLiveWake = false
         frameHadCommitted = false
         frameInstantScrollKey = nil
@@ -5113,6 +5122,8 @@ public final class Runtime<State> {
         pendingTxBlurRequested = false
         pendingTxFocusKey = nil
         pendingTxFocusVisible = nil
+        // `asked = focus_request.take().or(owed)`: a `Tx.focusWhenShown` asked now, or one owed.
+        let whenShown = takeFocusWhenShown(otherAsk: txFocusKey != nil)
 
         // Detect newly requested `.focused(true)` on non-inert mounted focusable nodes.
         var requestedFocusIdx: Int? = nil
@@ -5196,6 +5207,10 @@ public final class Runtime<State> {
         } else if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
             nextIdx = rIdx
             focusVisible = false
+        } else if let shown = whenShown {
+            nextIdx = shown.index
+            focusVisible = shown.ring
+            hoveredHighlightActive = false
         } else if let fp = focusedPath,
                   let idx = nodeByPath[fp],
                   canFocusIndex(idx),
@@ -5325,6 +5340,8 @@ public final class Runtime<State> {
             webFocusTabStartPath = nil
             if txFocusKey != nil, let vis = txFocusVisible {
                 focusKeyboard = vis
+            } else if let shown = whenShown, shown.index == nextIdx {
+                focusKeyboard = shown.ring
             } else if requestedFocusIdx == nextIdx && requestedFocusIdx != nil && txFocusKey == nil {
                 focusKeyboard = false
             }
@@ -9616,7 +9633,7 @@ public final class Runtime<State> {
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
-        frameHadInputSinceLastFrame = true
+        noteInput(at: now)
         releaseHoverHold()
         if button != .secondary {
             primaryPointerHeld = true
@@ -9631,7 +9648,8 @@ public final class Runtime<State> {
         focusVisible = false
         hoveredHighlightActive = false
         inputMachines.focusMachine.lastPressedWasPointer = true
-        pressHelp(at: pos, now: now)
+        // Every press dismisses the tooltip, a press on its own trigger too (`press_help` is gone, #1013).
+        dismissHelp(at: now)
 
         if button != .primary {
             inputMachines.pressClicks.clear()
@@ -9806,6 +9824,8 @@ public final class Runtime<State> {
             webFocusTabStartPath = node.path
         }
         let isTextBox = node.el.handlers.editLens != nil
+        // A press in a text field (`Action::Focus`) takes over from a `Tx.focusWhenShown` still waiting.
+        if optedButton && isTextBox { dropOwedFocus() }
         var downFocusChanged = false
         if optedButton {
             if node.el.pressFocusesBelow {
@@ -10035,7 +10055,7 @@ public final class Runtime<State> {
     }
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
-        frameHadInputSinceLastFrame = true
+        noteInput(at: now)
         let pointerMovedAtUp = (pos != pointerPosition)
         pointerPosition = pos
         let releasedTintPath = (pressedTint?.button == button) ? pressedTint?.path : nil
@@ -10217,6 +10237,8 @@ public final class Runtime<State> {
         if inside && allowsButton && !suppressedClickFromSelDrag && !(draggedPastThreshold && node.el.handlers.onDrag != nil) {
             if node.el.handlers.onClick != nil || node.el.handlers.onClickPress != nil {
                 logInputEvent("press \(rPath)")
+                // The user's own press (`Action::Press`) takes over from a `Tx.focusWhenShown` still waiting.
+                dropOwedFocus()
             }
             if let onClick = node.el.handlers.onClick {
                 var tx = makeTx(at: now, button: button, mods: effMods)
@@ -10352,7 +10374,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
-        frameHadInputSinceLastFrame = true
+        noteInput(at: now)
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -10371,7 +10393,9 @@ public final class Runtime<State> {
 
     internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
         currentTime = now
+        commitPolledChangeApart(at: now)
         flushPendingCommitIfNeeded(at: now)
+        if case .key(_, _, true, _) = event { dropOwedFocus() }
         if case .focusLost = event {
             dirChord = .idle
         }
@@ -10445,10 +10469,13 @@ public final class Runtime<State> {
 
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
-        frameHadInputSinceLastFrame = true
+        noteInput(at: now)
         recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
         currentTime = now
         flushPendingCommitIfNeeded(at: now)
+        // The user's own key takes over from a `Tx.focusWhenShown` still waiting; a playground
+        // step's press for the stage (`Action::Key { stage: true }`) doesn't.
+        if playgroundLive?.pressing != true { dropOwedFocus() }
         let prevKitByKeys = kitHooks.isDispatchingByKeys
         let prevByKeys = activeByKeys
         let prevRepeat = currentKeyRepeat
@@ -11405,7 +11432,16 @@ public final class Runtime<State> {
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
+        } else if let fk = tx.requestedFocusKey, tx.focusAskedWhenShown {
+            // `Tx.focusWhenShown`: the next commit resolves it against the tree it builds, and it
+            // waits there until an element with the key shows (`sync_requested_focus`).
+            pendingTxBlurRequested = false
+            pendingTxFocusKey = nil
+            kitHooks.pendingTxFocusVisible = nil
+            pendingTxFocusVisible = nil
+            pendingFocusWhenShown = (fk, tx.requestedFocusVisible)
         } else if let fk = tx.requestedFocusKey {
+            pendingFocusWhenShown = nil
             hoveredHighlightActive = false
             let matchedNode = flatNodes.first(where: { $0.key == fk })
             if let prevFp = focusedPath, matchedNode?.path != prevFp {
@@ -12140,7 +12176,7 @@ public final class Runtime<State> {
 
     @discardableResult
     internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
-        frameHadInputSinceLastFrame = true
+        noteInput(at: now ?? currentTime)
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime
         let shellIme: Ime?
@@ -12857,19 +12893,6 @@ public final class Runtime<State> {
         }
     }
 
-    private func pressHelp(at pos: Vec2, now: Double) {
-        let onOpen: Bool
-        if case .open(let target, _) = helpState.tipState,
-           let at = helpAt(point: pos) {
-            onOpen = (at.hit.path == target.path && at.hit.linkIndex == target.link)
-        } else {
-            onOpen = false
-        }
-        if !onOpen || viewHelpLook == nil {
-            dismissHelp(at: now)
-        }
-    }
-
     private func stepHelpState(event: HelpStepEvent, at now: Double) {
         let delays = currentHelpDelays()
         for effect in stepHelpTip(&helpState.tipState, event: event, openDelay: delays.open, skipDelay: delays.skip) {
@@ -12962,6 +12985,7 @@ public final class Runtime<State> {
             underHit = nil
         } else if let u = helpUnder(point: pointerPosition) {
             let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
+            // A press holds the pointer: a drag across other elements starts no tooltip.
             if activeDrag != nil && helpState.tipState.target != target {
                 over = .nothing
                 underHit = nil

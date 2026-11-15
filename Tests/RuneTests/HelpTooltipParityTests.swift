@@ -150,6 +150,32 @@ struct HelpTooltipParityTests {
         #expect(h.tip != nil, "back after leaving")
     }
 
+    // Upstream 38e3535b (#1013): `press_help` is gone. Every press dismisses the tooltip, a press
+    // on the open tooltip's own trigger too, whether Rune draws it with its default look or a
+    // `HelpLook` the view set (the case `press_help` used to keep it open for).
+    @Test("a press on the open tooltip's own trigger dismisses it, with a view HelpLook too")
+    func pressOnOwnTriggerDismissesWithCustomLook() {
+        let rt = Runtime<S>(state: S(), viewport: Vec2(400.0, 300.0), pixelScale: 2.0, systemDark: true) { s, cx in
+            cx.setHelpLook(HelpLook.system(dark: true))
+            return HelpTooltipParityTests.view(s, &cx)
+        }
+        var t = 0.0
+        rt.frame(at: t)
+        let e = rt.elements().first { $0.key == "copy" }!
+        let p = Vec2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+        rt.pointerMove(to: p, at: t)
+        t += 1.0 / 60.0; rt.frame(at: t)
+        t += 1.0; rt.frame(at: t)
+        #expect(rt.helpTooltip()?.text == "Copy the command", "shown")
+        rt.pointerDown(at: p, at: t)
+        rt.pointerUp(at: p, at: t)
+        t += 1.0 / 60.0; rt.frame(at: t)
+        #expect(rt.helpTooltip() == nil, "the trigger's own press dismisses it")
+        t += 2.0; rt.frame(at: t)
+        #expect(rt.helpTooltip() == nil, "stays hidden while the pointer rests on the trigger")
+        #expect(rt.state.presses == 1, "the press went to the trigger")
+    }
+
     // help_tooltip.rs:111
     @Test("follows_its_element_and_flips_above_at_the_bottom")
     func followsItsElementAndFlipsAboveAtTheBottom() throws {

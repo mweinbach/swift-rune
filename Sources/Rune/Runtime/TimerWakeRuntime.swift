@@ -141,6 +141,9 @@ extension Runtime {
         schedulePendingWakes(from: clock)
         drainDueWakeDeadlines(through: clock)
         let changed = runPoll(at: clock)
+        // The tree this change builds hasn't committed: input before the next frame commits it
+        // apart (`self.pending.polled_change |= changed`).
+        polledChange = polledChange || changed
         return changed || hasPendingHiddenWork
     }
 
