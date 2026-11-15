@@ -62,7 +62,7 @@ extension TextSystem {
         let lineIdx = shaped.lineIndex(forUTF8Offset: utf8Offset, affinity: affinity)
         let rec = shaped.lineStrings[lineIdx]
         let xPt = xInLine(rec: rec, utf8Offset: utf8Offset, pixelScale: pixelScale)
-        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineHeight)
+        return SIMD4<Float>(xPt, rec.originY, 1.5, shaped.lineBoxHeightPt(lineIdx))
     }
 
     /// Moves visually up (`delta < 0`) or down (`delta > 0`) by visual lines, preserving `goalX` in points

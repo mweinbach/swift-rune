@@ -96,13 +96,13 @@ public struct TextShapeKey: Hashable, Sendable {
     }
 
     /// Pretty wrapping re-breaks only plainly wrapped, unclamped, unjustified proportional text
-    /// (`text.rs::layout_keyed`: `pretty && max_width.is_some() && !mono`). Width-independent so a
+    /// (`text.rs::layout_keyed`: `pretty && max_width.is_some() && !mono`); `wrapAnywhere` text
+    /// is scored too (`#933`), a paragraph with a word broken inside keeping its greedy lines. Width-independent so a
     /// retained layout keeps its pretty setting across `text_rebreak` width changes; a `nil`
     /// width never wraps, so `pretty` is inert there.
     public static func layoutPretty(_ pretty: Bool, style: TextStyle) -> Bool {
         pretty
             && style.wrap == .wrap
-            && !style.wrapAnywhere
             && style.align != .justified
             && style.maxLines == 0
             && style.elide == .end
@@ -121,6 +121,8 @@ internal final class TextPreparedShape: @unchecked Sendable {
     let preparedPills: [TextSystem.PreparedPill]
     let spanPalette: [Color]
     let decoratedRanges: [TextSystem.DecoratedRange]
+    /// Inline code runs whose boxes may grow their lines (`#983`).
+    let spanBoxes: [TextSystem.InlineSpanBox]
     #if canImport(CoreText) && canImport(CoreGraphics)
     let baseFont: CTFont
     let baseAscentPx: CGFloat
@@ -149,8 +151,10 @@ internal final class TextPreparedShape: @unchecked Sendable {
         baseAscentPx: CGFloat,
         baseDescentPx: CGFloat,
         attrStr: CFAttributedString,
-        typesetter: CTTypesetter
+        typesetter: CTTypesetter,
+        spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
+        self.spanBoxes = spanBoxes
         self.authText = authText
         self.shapedText = shapedText
         self.style = style
@@ -179,8 +183,10 @@ internal final class TextPreparedShape: @unchecked Sendable {
         markerMap: ShapedText.MarkerMap,
         preparedPills: [TextSystem.PreparedPill],
         spanPalette: [Color],
-        decoratedRanges: [TextSystem.DecoratedRange]
+        decoratedRanges: [TextSystem.DecoratedRange],
+        spanBoxes: [TextSystem.InlineSpanBox] = []
     ) {
+        self.spanBoxes = spanBoxes
         self.authText = authText
         self.shapedText = shapedText
         self.style = style

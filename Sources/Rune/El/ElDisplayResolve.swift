@@ -430,7 +430,6 @@ internal enum ElDisplayResolver {
         let isPretty = TextSystem.prettyWrap &&
             !el.isWrapGreedy &&
             !isHiddenSecure &&
-            !style.wrapAnywhere &&
             style.align != .justified &&
             style.maxLines == 0 &&
             style.wrap == .wrap &&
