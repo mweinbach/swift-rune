@@ -4448,6 +4448,7 @@ public struct MarkdownStyle: Sendable, Equatable, Hashable {
         t.clusterFill = diagram.clusterFill
         t.noteFill = diagram.noteFill
         t.noteBorder = diagram.noteBorder
+        t.font = diagram.font
         t.maxWidth = diagram.maxWidth
         return t
     }
