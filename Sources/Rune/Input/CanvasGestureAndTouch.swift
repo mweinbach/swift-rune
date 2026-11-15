@@ -69,16 +69,19 @@ extension Runtime {
         return hitIdx ?? scrollIdx
     }
 
-    private func scrollContainerAt(at pos: Vec2, axis: ScrollAxes) -> String? {
+    /// `pointer.rs` `scroll_at_axis`: the innermost scroll viewport at `pos` that moves on `axis`.
+    /// One whose content fits on that axis (`scrollHasRoom`) is passed over for the one around
+    /// it, as Chromium skips a scroller with nothing to scroll (#1021).
+    internal func scrollContainerAt(at pos: Vec2, axis: ScrollAxes) -> String? {
         guard let (hitNode, _) = hitTest(at: pos, ignoreBlockers: true, predicate: {
-            $0.el.layout.scrollAxes.contains(axis) && !self.subtreeExiting($0.index)
+            $0.el.layout.scrollAxes.contains(axis) && self.scrollHasRoom($0.path, axis: axis) && !self.subtreeExiting($0.index)
         }) else {
             return nil
         }
         var walkIdx: Int? = hitNode.index
         while let i = walkIdx {
             let n = flatNodes[i]
-            if !n.effectiveInert && n.el.layout.scrollAxes.contains(axis) && !subtreeExiting(i) {
+            if !n.effectiveInert && n.el.layout.scrollAxes.contains(axis) && scrollHasRoom(n.path, axis: axis) && !subtreeExiting(i) {
                 return n.path
             }
             walkIdx = n.parentIndex
@@ -263,7 +266,8 @@ extension Runtime {
             var walkIdx: Int? = hitNode.index
             while let i = walkIdx {
                 let scrollNode = flatNodes[i]
-                if !scrollNode.effectiveInert && scrollNode.el.layout.scrollAxes.contains(.vertical) {
+                // `scroll_at`: a viewport whose content fits vertically is passed over (#1021).
+                if !scrollNode.effectiveInert && scrollNode.el.layout.scrollAxes.contains(.vertical) && scrollHasRoom(scrollNode.path, axis: .vertical) {
                     let path = scrollNode.path
                     let maxExt = scrollMaxExtents[path] ?? .zero
                     let prev = scrollOffsets[path] ?? .zero

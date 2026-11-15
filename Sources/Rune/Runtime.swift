@@ -10238,14 +10238,16 @@ public final class Runtime<State> {
         releaseHoverHold()
         dismissHelp(at: now)
         let targetPos = pos ?? pointerPosition
-        guard let (scrollNode, _) = hitTest(at: targetPos, ignoreBlockers: true, predicate: { !$0.el.layout.scrollAxes.isEmpty }) else {
+        // `fling_xy` / `fling`: the target comes from `scroll_at_axis` / `scroll_at`, skipping a
+        // viewport with nothing to scroll on that axis (#1021).
+        guard let (path, horizontal) = flingTarget(at: targetPos, vx: vx, vy: vy),
+              let scrollIdx = nodeByPath[path] else {
             return
         }
-        let path = scrollNode.path
-        if vy != 0 {
+        if !horizontal && vy != 0 {
             logEvent(String(format: "fling %.0f", vy))
         }
-        if vx != 0 {
+        if horizontal && vx != 0 {
             logEvent(String(format: "fling-x %.0f", vx))
         }
         let nid = NodeId.hash("scroll:" + path)
@@ -10259,9 +10261,17 @@ public final class Runtime<State> {
         }
         scrollRequestsState.stepCancel()
         scrollStore.snap(nid, Props.SCROLL, to: cur)
-        cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollNode.index, at: now)
-        // Upstream `pointer.rs:501-509` & `scroll/x.rs:331`: positive velocity moves content down/right (reduces scroll offset).
-        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(Vec2(-vx, -vy)), decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: now))
+        cancelPressedOnScrollIfNeeded(scrollNodeIndex: scrollIdx, at: now)
+        // Upstream `pointer.rs` `fling` & `scroll/x.rs` `fling_xy`: positive velocity moves content down/right
+        // (reduces scroll offset), on the one axis picked; `st.x.toward` mirrors it right to left.
+        let velocity: Vec2
+        if horizontal {
+            let signVx = flatNodes[scrollIdx].flow == .rtl ? -vx : vx
+            velocity = Vec2(-signVx, 0)
+        } else {
+            velocity = Vec2(0, -vy)
+        }
+        _ = scrollStore.fling(nid, Props.SCROLL, from: cur, velocity: Velocity(velocity), decay: .IOS_NORMAL, at: cxSettings.scaledTime(at: now))
     }
 
     /// Routes keyboard `KeyEvent` through active drag cancel (`Escape`), focused `TextEdit`,
@@ -10822,7 +10832,8 @@ public final class Runtime<State> {
                 path = String(path[..<slash])
             }
         }()
-        let hoveredIdx = hitTest(at: pointerPosition)?.node.index
+        // `keys.rs` `page_scroll`: `self.pointer.and_then(|(x, y)| self.scroll_at(x, y))`.
+        let hoveredIdx = scrollAt(pointerPosition.x, pointerPosition.y).flatMap { nodeByPath[$0] }
         guard let targetIdx = focusedIdx.flatMap(around)
             ?? hoveredIdx.flatMap(around)
             ?? flatNodes.indices.first(where: pageable) else {
