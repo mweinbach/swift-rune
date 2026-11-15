@@ -117,7 +117,7 @@ extension Runtime {
         pressedButton = .primary
         pressedPointerInside = false
         pressedTint = nil
-        inputMachines.wheelLock.lost()
+        wheelLost()
         pointerExit(at: now)
         dragFilesLeave(at: now)
     }
