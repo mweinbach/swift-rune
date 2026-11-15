@@ -272,8 +272,6 @@ extension Runtime {
     internal func flushPendingPasteRequests(at now: Double) {
         pollSecretCopy()
         guard !clipboardRouting.replies.isEmpty else { return }
-        let inputMark = beginInputDispatch(at: now)
-        defer { endInputDispatch(inputMark) }
         let replies = clipboardRouting.replies
         clipboardRouting.replies.removeAll()
         for (reply, at) in replies {
@@ -281,9 +279,15 @@ extension Runtime {
             InputTime.withArrival(at) {
                 switch reply {
                 case .paste(let content, let target):
+                    // `Action::Paste` is routed input: the poll's change splits from it, and what
+                    // it changes is INPUT.
+                    let inputMark = beginInputDispatch(at: now)
                     runPasteReply(content, target: target, at: now)
+                    endInputDispatch(inputMark, queuedAction: true)
                 case .read(let id, let content):
-                    runClipboardRead(id: id, content, at: now)
+                    // `Action::ClipboardRead` is no input (`ActionQueue::push`): its change is
+                    // DIRTY, and lands unprompted under `motionNeedsCause`.
+                    asInputObserver { runClipboardRead(id: id, content, at: now) }
                 }
             }
         }

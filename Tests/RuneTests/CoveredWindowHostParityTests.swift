@@ -118,22 +118,50 @@ struct CoveredWindowHostParityTests {
         #expect(rt.focusedKey == "allow")
     }
 
-    @Test("a minimised window can't draw until it's restored, whatever occlusion says meanwhile")
-    func minimizedWindowIsCovered() {
+    @Test("on macOS minimising is occlusion: an uncover after it always settles and redraws (`Win::minimized()` is false there)")
+    func minimiseIsOcclusionOnMacOS() {
         let rt = Self.runtime()
         var driver = CoveredWindowDriver()
-        #expect(driver.setMinimized(true, runtime: rt, at: 0.01) == .rest)
+        // Miniaturize drops `.visible` from the occlusion state (winit's `Occluded(true)`).
+        #expect(driver.setOccluded(true, runtime: rt, at: 0.01) == .rest)
         #expect(!driver.canDraw)
         #expect(!rt.liveVisible)
-        #expect(driver.setOccluded(false, runtime: rt, at: 0.02) == .rest, "uncovered but still minimised")
-        #expect(!rt.liveVisible)
         driver.assistiveClientAttached(rt)
-        rt.update(at: 0.03) { s, _ in s.extra = 5 }
-        #expect(driver.step(rt, at: 0.04), "a minimised window a reader reads builds at once too")
+        rt.update(at: 0.02) { s, _ in s.extra = 5 }
+        #expect(driver.step(rt, at: 0.03), "a minimised window a reader reads builds at once too")
         #expect(Self.shownCount(rt) == "5")
-        #expect(driver.setMinimized(false, runtime: rt, at: 0.05) == .redraw, "restored: it settles and draws")
+        #expect(!rt.isStale, "nothing left to build")
+        // Deminiaturize brings `.visible` back (`Occluded(false)`): it was covered, so it settles and redraws.
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.04) == .redraw)
+        #expect(rt.isStale, "settle_all asks for the settled frame")
         #expect(driver.canDraw)
         #expect(rt.liveVisible)
+    }
+
+    @Test("a covered window a reader reads builds for pending frame work alone (`needs_commit`: `pending.frame_work()`)")
+    func readerBuildsForPendingFrameWork() {
+        struct L { var rows = 40 }
+        for reader in [false, true] {
+            let rt = Runtime<L>(state: L(), viewport: Vec2(200, 100), pixelScale: 1.0) { s, _ in
+                col().size(200, 100).child(
+                    col().key("list").size(200, 100).scrollY()
+                        .children((0..<s.rows).map { i in el().key("row\(i)").size(200, 20) })
+                )
+            }
+            _ = rt.frame(at: 0.0)
+            var driver = CoveredWindowDriver()
+            _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+            if reader { driver.assistiveClientAttached(rt) }
+            // Frame work with nothing to rebuild: a scroll request the last commit left pending.
+            rt.pendingScrollBottoms.append((key: "list", animated: false))
+            #expect(!rt.needsCommit)
+            driver.step(rt, at: 0.02)
+            if reader {
+                #expect(rt.pendingScrollBottoms.isEmpty, "built at once for the reader")
+            } else {
+                #expect(!rt.pendingScrollBottoms.isEmpty, "waits for the frame that uncovers it")
+            }
+        }
     }
 
     @Test("uncovering settles what changed while covered, so its first frame paints where motion ends")

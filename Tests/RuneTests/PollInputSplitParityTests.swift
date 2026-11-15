@@ -213,4 +213,41 @@ struct PollInputSplitParityTests {
         #expect(rt.state.clickedWide, "the paste reached the window's handler")
         Self.expectSplit(rt, "frame poll + queued paste")
     }
+
+    @Test("a Tx.readClipboard reply is no input (`ActionQueue::push`): its change is DIRTY and lands at once")
+    func clipboardReadIsNotInput() throws {
+        let rt = Self.runtime(motionNeedsCause: true)
+        rt.useClipboard(Clipboard(kind: .memory))
+        rt.update(at: 1.001) { _, tx in
+            tx.readClipboard { (s: inout S, _: ClipboardContent, _: inout Tx) in s.clickedWide = true }
+        }
+        for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
+        #expect(rt.state.clickedWide, "the read answered")
+        #expect(abs(Self.width(rt, "clicked") - 180) < 0.5, "unprompted, so it shows at once: \(Self.width(rt, "clicked"))")
+    }
+
+    @Test("a press that changes nothing is no input cause (`if r { why |= INPUT }`): an update the same frame lands at once")
+    func pressWithoutChangeIsNoInputCause() throws {
+        let rt = Self.runtime(motionNeedsCause: true)
+        rt.update(at: 1.001) { s, _ in s.clickedWide = true }
+        // A press and release on empty space, with nothing focused: no handler, no focus move.
+        let empty = Vec2(390, 290)
+        rt.pointerDown(at: empty, at: 1.005)
+        rt.pointerUp(at: empty, at: 1.006)
+        let keyed = rt.keyDown(KeyEvent(key: .text("q"), mods: .none), at: 1.007)
+        #expect(!keyed, "nothing takes the key")
+        for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
+        #expect(abs(Self.width(rt, "clicked") - 180) < 0.5, "no input changed anything: \(Self.width(rt, "clicked"))")
+    }
+
+    @Test("a press whose handler changes the model is the input cause: its change animates")
+    func pressWithChangeIsInputCause() throws {
+        let rt = Self.runtime(motionNeedsCause: true)
+        let p = try Self.centre(rt, "btn")
+        rt.pointerDown(at: p, at: 1.005)
+        rt.pointerUp(at: p, at: 1.006)
+        for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
+        let clicked = Self.width(rt, "clicked")
+        #expect(clicked > 40 && clicked < 180, "the click's change animates: \(clicked)")
+    }
 }

@@ -26,6 +26,8 @@ struct FocusWhenShownParityTests {
             .child(el().key("other").size(120, 24).onClick { (s: inout S) in s.presses += 1 })
             .child(text("\(s.extra)").key("count"))
             .child(el().key("bar").size(s.wide ? 180 : 40, 20).motion(Spring(duration: 0.4, bounce: 0.0)))
+            // A press target that takes no focus (upstream's plain `El::on_press`).
+            .child(el().key("plain").size(120, 24).onClick { (s: inout S) in s.presses += 1 }.focusable(false))
         if s.autofocused {
             root = root.child(el().key("palette").size(120, 24).focusable().autofocus())
         }
@@ -273,5 +275,88 @@ struct FocusWhenShownParityTests {
         }
         _ = rt.frame(at: 0.04)
         #expect(rt.focusedKey == "allow")
+    }
+
+    // Review round 3: `focus_owed` vs the poll split across a frame's whole queue (frame.rs:565-596).
+    static func pollAsking(_ rt: Runtime<S>) {
+        rt.motionNeedsCause = true
+        rt.poll = { s, _, tx in
+            guard s.askOnPoll else { return false }
+            s.askOnPoll = false
+            s.extra += 1
+            tx.focusWhenShown("card", ring: true)
+            return true
+        }
+    }
+
+    @Test("a click after a resting poll asked keeps the ask: the press drops what was owed before the split made it owed")
+    func clickAfterRestingPollKeepsAsk() throws {
+        let rt = Self.runtime()
+        Self.pollAsking(rt)
+        rt.state.askOnPoll = true
+        _ = try #require(rt.restingWake(), "the runtime rests, so the poll runs alone")
+        let plain = try #require(rt.elements().first { $0.key == "plain" })
+        let p = Vec2(plain.rect[0] + plain.rect[2] / 2, plain.rect[1] + plain.rect[3] / 2)
+        rt.pointerDown(at: p, at: 0.505)
+        rt.pointerUp(at: p, at: 0.506)
+        #expect(rt.state.presses == 1)
+        _ = rt.frame(at: 0.52)
+        #expect(rt.focusWhenShownPending, "Action::Press ran before the split made it owed")
+        rt.update(at: 0.53) { s, _ in s.loaded = true }
+        _ = rt.frame(at: 0.54)
+        #expect(rt.focusedKey == "allow")
+    }
+
+    @Test("a second click in the same frame, after the first's press ran, drops the ask the split made owed")
+    func secondClickSameFrameDropsAsk() throws {
+        let rt = Self.runtime()
+        Self.pollAsking(rt)
+        rt.state.askOnPoll = true
+        _ = try #require(rt.restingWake())
+        let plain = try #require(rt.elements().first { $0.key == "plain" })
+        let p = Vec2(plain.rect[0] + plain.rect[2] / 2, plain.rect[1] + plain.rect[3] / 2)
+        rt.pointerDown(at: p, at: 0.505)
+        rt.pointerUp(at: p, at: 0.506)
+        rt.pointerDown(at: p, at: 0.507)
+        rt.pointerUp(at: p, at: 0.508)
+        _ = rt.frame(at: 0.52)
+        #expect(!rt.focusWhenShownPending, "the second Action::Press comes after the split")
+    }
+
+    @Test("a blur in the same commit as an ask still lets a newly requested text field win (focus.rs `requested` before `asked`)")
+    func newlyRequestedFieldBeatsAskThroughBlur() {
+        struct F { var ask = false; var field = false }
+        let rt = Runtime<F>(state: F(), viewport: Vec2(400, 300), pixelScale: 1.0) { s, _ in
+            col().size(400, 300)
+                .child(el().key("prompt").size(120, 24).focusable())
+                .child(el().key("card").size(80, 40).child(el().key("allow").size(60, 24).focusable()))
+                .child(el().key("field").size(120, 24).focusable().focused(s.field))
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update(at: 0.01) { _, tx in tx.focus("prompt") }
+        _ = rt.frame(at: 0.02)
+        rt.update(at: 0.03) { s, tx in
+            tx.focusWhenShown("card", ring: true)
+            tx.blur()
+            s.field = true
+        }
+        _ = rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "field", "the newly requested field wins over the asked focus")
+    }
+
+    @Test("a click on a control that takes focus drops it: its focus move (`Action::FocusControl`) runs after the split, before `Action::Press`")
+    func clickOnFocusTakingControlDropsAsk() throws {
+        let rt = Self.runtime()
+        Self.pollAsking(rt)
+        rt.state.askOnPoll = true
+        _ = try #require(rt.restingWake())
+        // Swift's `onClick` makes its element focusable, as `.focusable()` does upstream.
+        let other = try #require(rt.elements().first { $0.key == "other" })
+        let p = Vec2(other.rect[0] + other.rect[2] / 2, other.rect[1] + other.rect[3] / 2)
+        rt.pointerDown(at: p, at: 0.505)
+        rt.pointerUp(at: p, at: 0.506)
+        _ = rt.frame(at: 0.52)
+        #expect(rt.focusedKey == "other")
+        #expect(!rt.focusWhenShownPending, "Action::Press comes after FocusControl, which the split preceded")
     }
 }

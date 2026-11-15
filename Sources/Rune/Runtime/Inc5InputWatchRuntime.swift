@@ -33,7 +33,7 @@ extension Runtime {
     @discardableResult
     internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0) -> Bool {
         let inputMark = beginInputDispatch(at: now)
-        defer { endInputDispatch(inputMark) }
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         if !fromPhysicalRelease && inputMachines.keyReleases.eat(composing: isAnyImeComposing) {
             return false
         }

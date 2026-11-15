@@ -32,7 +32,10 @@ public protocol CoveredWindowRuntime: AnyObject {
 extension Runtime: CoveredWindowRuntime {}
 
 /// A shown window's sight as its host tracks it, and what each change asks of the host
-/// (`window/sight.rs`, `Host::set_cover`, `Win::minimized`).
+/// (`window/sight.rs`, `Host::set_cover`). On macOS minimising is occlusion too: AppKit's
+/// occlusion state drops `.visible` for a miniaturized window, and `Win::minimized()` is always
+/// false there (`isMiniaturized` stays true into a deminiaturize whose first redraws would
+/// otherwise draw nothing).
 public struct CoveredWindowDriver: Equatable, Sendable {
     /// What a cover change asks of the host.
     public enum Outcome: Equatable, Sendable {
@@ -46,47 +49,33 @@ public struct CoveredWindowDriver: Equatable, Sendable {
 
     /// The window's life; a host's window is shown while it drives it.
     public private(set) var life: WindowLife = .shown(sight: .seen)
-    /// The window is minimised (`Win::minimized`).
-    public private(set) var minimized: Bool = false
 
     public init() {}
 
-    /// The window can draw: shown, uncovered and not minimised. Otherwise every wake, due timer
-    /// and redraw runs `step` (`covered_step`) instead of a frame.
-    public var canDraw: Bool { life.isUncovered && !minimized }
+    /// The window can draw: shown and uncovered. Otherwise every wake, due timer and redraw runs
+    /// `step` (`covered_step`) instead of a frame.
+    public var canDraw: Bool { life.isUncovered }
 
     /// `cover` starts (`on`) or stops covering the window (`Host::set_cover`). Covered, the
     /// runtime is no longer live and its timer frame is cancelled; uncovered after being covered,
     /// its first frame paints the settled state of what changed meanwhile (guarantee 8).
     public mutating func setCover(_ cover: WindowCover, on: Bool, runtime: any CoveredWindowRuntime, at now: Double? = nil) -> Outcome {
         let was = life.cover(cover, on: on)
-        return applySight(wasCovered: was, runtime: runtime, at: now)
-    }
-
-    /// The system's occlusion report (`WindowEvent::Occluded`): `Cover::System`.
-    public mutating func setOccluded(_ occluded: Bool, runtime: any CoveredWindowRuntime, at now: Double? = nil) -> Outcome {
-        setCover(.system, on: occluded, runtime: runtime, at: now)
-    }
-
-    /// The window was minimised or restored. A minimised window is not live and draws nothing
-    /// (`set_live_visible(uncovered && !minimized)`); restored, it settles as an uncovered one does.
-    public mutating func setMinimized(_ minimized: Bool, runtime: any CoveredWindowRuntime, at now: Double? = nil) -> Outcome {
-        let was = !canDraw
-        self.minimized = minimized
-        return applySight(wasCovered: was, runtime: runtime, at: now)
-    }
-
-    private func applySight(wasCovered: Bool, runtime: any CoveredWindowRuntime, at now: Double?) -> Outcome {
-        runtime.setLiveVisible(life.isUncovered && !minimized, at: now)
-        if life.isCovered || minimized {
+        runtime.setLiveVisible(life.isUncovered, at: now)
+        if life.isCovered {
             runtime.cancelTimerFrame()
             return .rest
         }
-        if wasCovered {
+        if was {
             runtime.settleAll()
             return .redraw
         }
         return runtime.isStale ? .redraw : .none
+    }
+
+    /// The system's occlusion report (`WindowEvent::Occluded`, minimising included): `Cover::System`.
+    public mutating func setOccluded(_ occluded: Bool, runtime: any CoveredWindowRuntime, at now: Double? = nil) -> Outcome {
+        setCover(.system, on: occluded, runtime: runtime, at: now)
     }
 
     /// What a shown window that can't draw runs for an update, a wake, a due timer or a redraw

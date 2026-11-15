@@ -20,12 +20,22 @@ import Foundation
 //   `framePollChanged`): the same two trees with the same motion, in the order Swift's dispatch
 //   allows. Input the frame itself runs after its poll (pastes, sent keys, hover delays,
 //   playground stage keys) splits as upstream does.
-// - `Queued::input` (INPUT vs DIRTY): an input entry point (`beginInputDispatch`) counts as the
-//   commit's input cause only when one of its handlers changed the model (`why |= INPUT` when
-//   `r`, `noteHandlerChange`). `on_selection_change` callbacks fired inside an entry point are
-//   DIRTY (`inputObserverDepth`). Layout and visibility observers and the stationary pointer's
-//   re-hit after layout run in the frame, outside every input entry point, so they stay DIRTY,
-//   as `ActionQueue::push` and `observe_since` keep them.
+// - `Queued::input` (INPUT vs DIRTY): every input entry point (presses, keys, IME, pointer move
+//   and leave, wheel, paste, file drop, gestures; `beginInputDispatch`) counts as the commit's
+//   input cause only when it changed the model (`if r { why |= INPUT }`): a handler's change
+//   (`applyTx`), a state change asking for a commit (`dirtyCommit(external:)`), or a press moving
+//   focus (`noteHandlerChange`). `on_selection_change` callbacks and `Tx.readClipboard` replies
+//   are DIRTY however they're reached (`inputObserverDepth`, `ActionQueue::push`'s non-input
+//   actions). Layout and visibility observers and the stationary pointer's re-hit after layout
+//   run in the frame, outside every input entry point, so they stay DIRTY, as
+//   `ActionQueue::push` and `observe_since` keep them.
+// - `focus_owed` vs the split: upstream drops an owed `Tx.focusWhenShown` for each key, press or
+//   field focus in the frame's queue, the split commits the poll's tree (making an unresolved ask
+//   owed) before the first input action, after that action's own drop. So an ask the split made
+//   owed survives the presses of the input that split, and is dropped by a press or key that runs
+//   after another input action did. `focusOwedFromSplit` holds until the next frame or until an
+//   input entry point that upstream queues as an action ran (a key, a release, a press that moved
+//   focus or changed the model).
 
 extension Tx {
     /// `Tx.focus` for an element that may not be shown yet: content still loading, a card that
@@ -51,7 +61,8 @@ extension Runtime {
     /// The user's own key or press takes over from a `Tx.focusWhenShown` still waiting
     /// (`frame.rs`: `Action::Key { stage: false }`, a pressed physical key, `Action::Press`,
     /// `Action::Focus`). Upstream drops it before that action's poll split commits an ask not yet
-    /// resolved; `keepingSplit` keeps one this input's own split made owed.
+    /// resolved; `keepingSplit` keeps one the split made owed when no input action has run since
+    /// (`focusOwedFromSplit`).
     internal func dropOwedFocus(keepingSplit: Bool = false) {
         if keepingSplit && focusOwedFromSplit { return }
         focusOwed = nil
@@ -113,6 +124,9 @@ extension Runtime {
     /// A frame that builds what changed without advancing time or motion
     /// (`Runtime::hidden_timer_frame`, `frame(0.0)`): a zero step (`frameStep(dt: 0)`).
     internal func hiddenTimerFrame() {
+        // Upstream's frame commits for `needs_commit()`, pending frame work included; Swift's
+        // commit is what resolves pending scroll requests, flights and launches.
+        if hasPendingHiddenWork { needsCommit = true }
         _ = frameStep(dt: 0.0)
     }
 
@@ -124,26 +138,25 @@ extension Runtime {
     @discardableResult
     public func coveredWake(at now: Double? = nil) -> Bool {
         let stale = hiddenWake(at: now)
-        if assistiveTechnology && needsCommit { hiddenTimerFrame() }
+        // `needs_commit()`: `dirty || pending.frame_work() || patch_pending()`, pending scroll
+        // requests, text flights and launches included (`hasPendingHiddenWork`).
+        if assistiveTechnology && hasPendingHiddenWork { hiddenTimerFrame() }
         return stale
     }
 
     // MARK: - Poll change committed apart from same-frame input (#970)
 
-    /// A host input event is being dispatched whose arrival alone counts as the frame's input
-    /// cause (presses, keys, IME): a resting poll's change waiting to commit commits first.
-    internal func noteInput(at now: Double) {
+    /// A host input event arrives (presses, keys, IME): it marks the frame as not quiet for the
+    /// idle meter, and starts an input entry point (`beginInputDispatch`). Returns the enclosing
+    /// dispatch's state, for `endInputDispatch`.
+    internal func noteInput(at now: Double) -> Bool {
         frameHadInputSinceLastFrame = true
-        focusOwedFromSplit = false
-        commitPolledChangeApart(at: now)
+        return beginInputDispatch(at: now)
     }
 
-    /// An input entry point starts (pointer move and leave, wheel, key-up, paste, file drop, the
-    /// gestures, and the input a frame runs itself): a poll's change waiting to commit commits
-    /// first (`split` on `input || routed`). Returns the enclosing dispatch's change flag, for
-    /// `endInputDispatch`.
+    /// An input entry point starts: a poll's change waiting to commit commits first (`split` on
+    /// `input || routed`). Returns the enclosing dispatch's change flag, for `endInputDispatch`.
     internal func beginInputDispatch(at now: Double) -> Bool {
-        focusOwedFromSplit = false
         commitPolledChangeApart(at: now)
         let outer = inputDispatchChanged
         inputDispatchChanged = false
@@ -151,26 +164,40 @@ extension Runtime {
         return outer
     }
 
-    /// The input entry point ends: when one of its handlers changed the model, the commit has an
-    /// input cause (`if r { why |= CommitWhy::INPUT }`), whether or not a commit was already
-    /// pending. Within a frame that's the frame's commit; between frames, the next frame's.
-    internal func endInputDispatch(_ outer: Bool) {
+    /// The input entry point ends: when it changed the model, the commit has an input cause
+    /// (`if r { why |= CommitWhy::INPUT }`), whether or not a commit was already pending. Within a
+    /// frame that's the frame's commit; between frames, the next frame's. `queuedAction`: upstream
+    /// queues this input as an action whatever it changes (a key, a release); with a change, any
+    /// input entry point did. Either way a later press or key in the frame comes after an input
+    /// action, so it drops an ask the split made owed (`focusOwedFromSplit`).
+    internal func endInputDispatch(_ outer: Bool, queuedAction: Bool = false) {
         inputDispatchDepth -= 1
         let changed = inputDispatchChanged
         inputDispatchChanged = outer || changed
+        if inputDispatchDepth == 0 && (changed || queuedAction) { focusOwedFromSplit = false }
         guard changed else { return }
         if insideFramePollOrInput {
             frameCommittedFromInput = true
         } else {
             frameHadInputSinceLastFrame = true
+            frameInputCauseSinceLastFrame = true
         }
     }
 
-    /// A handler's transaction changed the model or asked for a commit (`applyTx`). Inside an
-    /// input entry point that's the input's change (`r`), unless an observer callback that
-    /// upstream counts as DIRTY made it (`on_selection_change`).
+    /// The input changed the model (`r`): a handler's transaction (`applyTx`), a state change that
+    /// asks for a commit (`dirtyCommit`), or a press that moved focus. Inside an input entry point
+    /// that's the input's change, unless an observer callback that upstream counts as DIRTY made
+    /// it (`on_selection_change`, `Tx.readClipboard`'s reply).
     internal func noteHandlerChange() {
         if inputDispatchDepth > 0 && inputObserverDepth == 0 { inputDispatchChanged = true }
+    }
+
+    /// Runs `body` as an observer: whatever it changes is DIRTY, never the enclosing input's
+    /// (`ActionQueue::push`'s non-input actions).
+    internal func asInputObserver<R>(_ body: () -> R) -> R {
+        inputObserverDepth += 1
+        defer { inputObserverDepth -= 1 }
+        return body()
     }
 
     /// Both a poll and an input handler see ordinary `inout State`; after the handler's mutation a

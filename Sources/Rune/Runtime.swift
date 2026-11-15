@@ -626,6 +626,8 @@ public final class Runtime<State> {
     internal var frameInstantScrollKey: String? = nil
     internal var frameHadCommitted: Bool = false
     internal var frameHadInputSinceLastFrame: Bool = false
+    /// Input since the last frame changed the model (`CommitWhy::INPUT`, #970).
+    internal var frameInputCauseSinceLastFrame: Bool = false
     internal var frameHadLiveWake: Bool = false
     internal var frameHadScrollSinceLastFrame: Bool = false
     public var windowTitle: String? = nil
@@ -1458,7 +1460,8 @@ public final class Runtime<State> {
         at now: Double,
         external: Bool = true,
         clearLiveCheck: Bool = true,
-        why: UInt16 = 0
+        why: UInt16 = 0,
+        inputChange: Bool = true
     ) {
         if clearLiveCheck {
             pendingLiveOnlyCheck = nil
@@ -1468,6 +1471,9 @@ public final class Runtime<State> {
         }
         needsCommit = true
         if external {
+            // A state change inside an input entry point is that input's (`r`, #970); a press's
+            // own visuals and selection drags (`inputChange: false`) are not.
+            if inputChange { noteHandlerChange() }
             hasExternalDirtyCommit = true
             stateUnchangedSinceBuild = false
             pendingResizeRelayout = false
@@ -1550,8 +1556,13 @@ public final class Runtime<State> {
         let timerAlreadyPolled = timerWake.framePolled(due: dueTimerDeadline)
         drainDueWakeDeadlines(through: now)
         let wasLive = frameHadLiveWake
-        frameCommittedFromInput = frameHadInputSinceLastFrame
+        // The input cause is input that changed the model (`if r { why |= INPUT }`), not any
+        // input's arrival; arrival alone only ends the frame's quiet.
+        frameCommittedFromInput = frameInputCauseSinceLastFrame
+        frameInputCauseSinceLastFrame = false
         frameHadInputSinceLastFrame = false
+        // A new frame, a new queue: an ask the last one's split made owed is owed like any other.
+        focusOwedFromSplit = false
         frameHadLiveWake = false
         frameHadCommitted = false
         frameInstantScrollKey = nil
@@ -5203,11 +5214,18 @@ public final class Runtime<State> {
 
         var nextIdx: Int? = nil
         if txBlur, let shown = whenShown {
-            // A blur lands before the commit; a `Tx.focusWhenShown` whose element shows in it
-            // still resolves after it (`sync_requested_focus` runs after the latched blur).
-            nextIdx = shown.index
-            focusVisible = shown.ring
-            hoveredHighlightActive = false
+            // A blur lands before the commit; `sync_requested_focus` runs after the latched blur,
+            // where a newly requested text field still wins over the asked focus
+            // (`requested.find(newly_requested)` before `asked`), and a `Tx.focusWhenShown` whose
+            // element shows in it resolves otherwise.
+            if let rIdx = requestedFocusIdx, canFocusIndex(rIdx) {
+                nextIdx = rIdx
+                focusVisible = false
+            } else {
+                nextIdx = shown.index
+                focusVisible = shown.ring
+                hoveredHighlightActive = false
+            }
         } else if txBlur {
             nextIdx = nil
         } else if let fk = txFocusKey,
@@ -9602,16 +9620,16 @@ public final class Runtime<State> {
                         || menuHoverChanged
                     if hoverNeedsCommit {
                         suppressRevealFromHoverCommit = true
-                        dirtyCommit(at: now)
+                        dirtyCommit(at: now, inputChange: false)
                         changed = true
                     }
                 } else if linkChanged || menuHoverChanged || hasHoverVisualInChain(oldPath) || hasHoverVisualInChain(newPath) || helpTargetChanges(at: pos) {
                     suppressRevealFromHoverCommit = true
-                    dirtyCommit(at: now)
+                    dirtyCommit(at: now, inputChange: false)
                     changed = true
                 }
             } else if linkChanged || helpTargetChanges(at: pos) {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, inputChange: false)
                 changed = true
             }
             syncHoverTracks(at: cxSettings.scaledTime(at: now), cut: false, held: false)
@@ -9643,7 +9661,7 @@ public final class Runtime<State> {
                 syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             }
             if helpTargetChanges(at: pos) {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, inputChange: false)
             }
         }
         settleKitHoverDelays(at: pos, now: now)
@@ -9651,7 +9669,14 @@ public final class Runtime<State> {
     }
 
     public func pointerDown(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
-        noteInput(at: now)
+        let inputMark = noteInput(at: now)
+        let focusBeforePress = focusedPath
+        defer {
+            // A press that moved focus ran an input action (`Action::FocusControl`, `Action::Blur`)
+            // that changed something (`r`).
+            if focusedPath != focusBeforePress { noteHandlerChange() }
+            endInputDispatch(inputMark)
+        }
         releaseHoverHold()
         if button != .secondary {
             primaryPointerHeld = true
@@ -10014,7 +10039,7 @@ public final class Runtime<State> {
                 textSelectionOrigin: textSelOrigin,
                 stateSnapshotBeforeDrag: snapshot
             )
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, inputChange: false)
             return
         }
 
@@ -10068,12 +10093,15 @@ public final class Runtime<State> {
 
         let needsPressVisual = downFocusChanged || nodeHasPressVisuals(node) || !downRanHandler || !downAllLiveOnly
         if needsPressVisual {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, inputChange: false)
         }
     }
 
     public func pointerUp(at pos: Vec2, button: PointerButton = .primary, mods: Mods = .none, at now: Double) {
-        noteInput(at: now)
+        let inputMark = noteInput(at: now)
+        // The release queued a press (`Action::Press`), an input action whatever it changes.
+        var releaseQueuedPress = false
+        defer { endInputDispatch(inputMark, queuedAction: releaseQueuedPress) }
         let pointerMovedAtUp = (pos != pointerPosition)
         pointerPosition = pos
         let releasedTintPath = (pressedTint?.button == button) ? pressedTint?.path : nil
@@ -10092,7 +10120,7 @@ public final class Runtime<State> {
         if pressedPath != nil && button != pressedButton {
             syncPressScale(at: cxSettings.scaledTime(at: now), cut: false)
             if hadTintPressVisual {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, inputChange: false)
             }
             return
         }
@@ -10121,7 +10149,7 @@ public final class Runtime<State> {
         var upRanHandler = false
         var upAllLiveOnly = true
         if cxSettings.selectionRectsReadByView {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, inputChange: false)
         }
 
         defer {
@@ -10198,13 +10226,13 @@ public final class Runtime<State> {
         }
 
         if dispatchLinkUp(at: pos, button: button, mods: mods, suppressed: suppressedClickFromSelDrag, at: now) {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, inputChange: false)
             return
         }
 
         guard let rPath = releasedPath, let idx = nodeByPath[rPath] else {
             if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
-                dirtyCommit(at: now)
+                dirtyCommit(at: now, inputChange: false)
             }
             return
         }
@@ -10257,6 +10285,7 @@ public final class Runtime<State> {
                 logInputEvent("press \(rPath)")
                 // The user's own press (`Action::Press`) takes over from a `Tx.focusWhenShown` still waiting.
                 dropOwedFocus(keepingSplit: true)
+                releaseQueuedPress = true
             }
             if let onClick = node.el.handlers.onClick {
                 var tx = makeTx(at: now, button: button, mods: effMods)
@@ -10317,14 +10346,14 @@ public final class Runtime<State> {
         }
 
         if suppressedClickFromSelDrag || hadPressVisual || !upRanHandler || !upAllLiveOnly {
-            dirtyCommit(at: now)
+            dirtyCommit(at: now, inputChange: false)
         }
     }
 
     /// Routes wheel / trackpad scroll deltas through `WheelLock` to `onWheel` or scrollable ancestors (`gesture.rs`, `scroll/x.rs`).
     public func wheel(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
         let inputMark = beginInputDispatch(at: now)
-        defer { endInputDispatch(inputMark) }
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         dispatchLockedWheel(event, at: pos, now: now)
     }
 
@@ -10395,7 +10424,8 @@ public final class Runtime<State> {
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
         if case .key(_, _, true, _) = event { dropOwedFocus() }
-        noteInput(at: now)
+        let inputMark = noteInput(at: now)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
         let prevRepeat = currentKeyRepeat
@@ -10494,7 +10524,8 @@ public final class Runtime<State> {
         // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
         // (frame.rs:565), before this key's commit boundary resolves an ask not yet committed.
         if playgroundLive?.pressing != true { dropOwedFocus() }
-        noteInput(at: now)
+        let inputMark = noteInput(at: now)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
         currentTime = now
         flushPendingCommitIfNeeded(at: now)
@@ -10974,7 +11005,7 @@ public final class Runtime<State> {
 
     public func paste(_ content: ClipboardContent, at now: Double) {
         let inputMark = beginInputDispatch(at: now)
-        defer { endInputDispatch(inputMark) }
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         deliverPaste(content, at: now)
     }
 
@@ -12204,7 +12235,8 @@ public final class Runtime<State> {
 
     @discardableResult
     internal func dispatchImeEvent(_ event: ImeEvent, recordReleaseGuard: Bool, at now: Double? = nil) -> Bool {
-        noteInput(at: now ?? currentTime)
+        let inputMark = noteInput(at: now ?? currentTime)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         let imeStartNs = InteractionGate.isOn ? DispatchTime.now().uptimeNanoseconds : 0
         let t = now ?? currentTime
         let shellIme: Ime?

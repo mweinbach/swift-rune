@@ -625,27 +625,22 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     }
 
     func windowDidChangeOcclusionState(_ notification: Notification) {
-        // Covered or uncovered (`WindowEvent::Occluded`): the view's driver steps its sight and
-        // routes wakes through `covered_step` while it can't draw (#995).
-        if !window.occlusionState.contains(.visible) {
-            view.coverChanged(.occluded(WindowCoverWatch.occluded(window)))
+        // Covered or uncovered, minimising included (`WindowEvent::Occluded`): the view's driver
+        // steps its sight and routes wakes through `covered_step` while it can't draw (#995).
+        if WindowCoverWatch.occluded(window) {
+            view.coverChanged(occluded: true)
             stepRest(.unseen)
         } else {
             // Uncovered: re-sync the chrome as `window/sight.rs` does, then draw what changed.
             entry.syncWindowChrome(runtimeObj: runtime, window: window)
-            if view.coverChanged(.occluded(false)) != .redraw {
+            if view.coverChanged(occluded: false) != .redraw {
                 view.requestRender()
             }
         }
     }
 
     func windowDidMiniaturize(_ notification: Notification) {
-        view.coverChanged(.minimized(true))
         stepRest(.unseen)
-    }
-
-    func windowDidDeminiaturize(_ notification: Notification) {
-        view.coverChanged(.minimized(false))
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -718,6 +713,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
     private var didSignalReady = false
+    private var didRunOnReady = false
     private var shadowResample = ShadowResampleState()
     private var drawableCounter: UInt64 = 0
     private let popupPresenter = MacOSPopupMenuPresenter()
@@ -912,26 +908,12 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 didSignalReady = true
                 ReadySignal.ready()
                 entry.handle.setReady(true)
-                entry.fireOnReady()
+                runOnReadyOnce()
             }
         }
         slot?.host?.drainOpenedWindows()
         pumpPlatformActions()
-        if let frameReq = entry.takeWindowFrameRequest(runtimeObj: runtime), let w = window {
-            let scale = Float(w.backingScaleFactor)
-            let minSz = entry.options.minSize ?? WindowOptions.defaultMinSize
-            windowFrameDriver.applyRequest(
-                frameReq,
-                window: w,
-                now: t,
-                minSize: (minSz.x, minSz.y),
-                maxSize: entry.options.maxSize.map { ($0.x, $0.y) },
-                scale: scale
-            ) { [weak self] vp, sc in
-                guard let self else { return }
-                self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
-            }
-        }
+        applyWindowFrameRequest(at: t)
         // The accessibility stamp: a commit, held words or an attaching reader, or words said since
         // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
         syncPlatformBridges(
@@ -955,8 +937,8 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     /// The window was covered, uncovered, minimised or restored (`Host::set_cover`). Returns what
     /// the driver asks of the host; the slot rests a covered window (`rest_step(Unseen)`).
     @discardableResult
-    func coverChanged(_ report: WindowCoverWatch.Report) -> CoveredWindowDriver.Outcome {
-        let outcome = coverDriver.apply(report, runtime: entry.coveredRuntime(runtimeObj: runtime), at: nowSeconds())
+    func coverChanged(occluded: Bool) -> CoveredWindowDriver.Outcome {
+        let outcome = coverDriver.setOccluded(occluded, runtime: entry.coveredRuntime(runtimeObj: runtime), at: nowSeconds())
         switch outcome {
         case .rest:
             stopTimer()
@@ -974,6 +956,11 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private func coveredTick(at t: Double) {
         stopTimer()
         let committed = coverDriver.step(entry.coveredRuntime(runtimeObj: runtime), at: t)
+        // `on_ready` starts an app's live work, so it can't wait on a drawable: the first frame
+        // skipped for being off screen runs it; the window isn't ready until it draws
+        // (`FirstFrame::skipped`).
+        runOnReadyOnce()
+        // What the step asked of the shell goes out now (`self.shell(event_loop)`).
         if let title = entry.windowTitle(runtimeObj: runtime), let w = window, w.title != title {
             w.title = title
         }
@@ -985,7 +972,36 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
         slot?.host?.drainOpenedWindows()
         pumpPlatformActions()
-        syncPlatformBridges(treeCommitted: committed)
+        applyWindowFrameRequest(at: t)
+        syncPlatformBridges(
+            treeCommitted: committed || a11yFollowUp
+                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
+        )
+    }
+
+    /// `App::on_ready`, once per window: at its first drawn frame or first covered one.
+    private func runOnReadyOnce() {
+        guard !didRunOnReady else { return }
+        didRunOnReady = true
+        entry.fireOnReady()
+    }
+
+    /// A `Tx.setWindowFrame` the runtime holds goes to the window (`window/frame.rs`).
+    private func applyWindowFrameRequest(at t: Double) {
+        guard let frameReq = entry.takeWindowFrameRequest(runtimeObj: runtime), let w = window else { return }
+        let scale = Float(w.backingScaleFactor)
+        let minSz = entry.options.minSize ?? WindowOptions.defaultMinSize
+        windowFrameDriver.applyRequest(
+            frameReq,
+            window: w,
+            now: t,
+            minSize: (minSz.x, minSz.y),
+            maxSize: entry.options.maxSize.map { ($0.x, $0.y) },
+            scale: scale
+        ) { [weak self] vp, sc in
+            guard let self else { return }
+            self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
+        }
     }
 
     private func syncPlatformBridges(treeCommitted: Bool) {

@@ -473,6 +473,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let windowHandle: WindowHandle?
     private let onReady: ((WindowHandle) -> Void)?
     private var didFireReady: Bool = false
+    private var didRunOnReady: Bool = false
     private let chromeStyle: Chrome
     private let customTitlebar: Titlebar?
     private var chromeWatch: WindowChromeWatch?
@@ -631,14 +632,14 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             self?.syncWindowChrome()
             self?.requestRender()
         }
-        coverWatch = WindowCoverWatch(window: w) { [weak self] report in
-            self?.coverChanged(report)
+        coverWatch = WindowCoverWatch(window: w) { [weak self] occluded in
+            self?.coverChanged(occluded: occluded)
         }
     }
 
-    /// The window was covered, uncovered, minimised or restored (`Host::set_cover`).
-    private func coverChanged(_ report: WindowCoverWatch.Report) {
-        switch coverDriver.apply(report, runtime: runtime, at: nowSeconds()) {
+    /// The window was covered or uncovered, minimising included (`Host::set_cover`).
+    private func coverChanged(occluded: Bool) {
+        switch coverDriver.setOccluded(occluded, runtime: runtime, at: nowSeconds()) {
         case .rest:
             stopTimer()
         case .redraw:
@@ -654,6 +655,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private func coveredTick(at t: Double) {
         stopTimer()
         let committed = coverDriver.step(runtime, at: t)
+        // `on_ready` starts an app's live work, so it can't wait on a drawable: the first frame
+        // skipped for being off screen runs it; the window isn't ready until it draws
+        // (`FirstFrame::skipped`).
+        runOnReadyOnce()
+        // What the step asked of the shell goes out now (`self.shell(event_loop)`).
         if let title = runtime.windowTitle, window?.title != title {
             window?.title = title
         }
@@ -662,14 +668,44 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             window?.performClose(nil)
             return
         }
+        if runtime.minimizeRequested {
+            runtime.clearShellRequests()
+            window?.miniaturize(nil)
+        }
         if runtime.quitRequested {
             let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
             _ = QuitLifecycle.send(.start(ending: false, after: after))
             NSApplication.shared.terminate(nil)
             return
         }
+        applyWindowFrameRequest(at: t)
         pumpPlatformActions()
         syncPlatformBridges(treeCommitted: committed)
+    }
+
+    /// `App::on_ready`, once per window: at its first drawn frame or first covered one.
+    private func runOnReadyOnce() {
+        guard !didRunOnReady else { return }
+        didRunOnReady = true
+        if let wh = windowHandle {
+            onReady?(wh)
+        }
+    }
+
+    /// A `Tx.setWindowFrame` the runtime holds goes to the window (`window/frame.rs`).
+    private func applyWindowFrameRequest(at t: Double) {
+        guard let frameReq = runtime.takeWindowFrameRequest(), let w = window else { return }
+        let scale = Float(w.backingScaleFactor)
+        windowFrameDriver.applyRequest(
+            frameReq,
+            window: w,
+            now: t,
+            minSize: minWindowSize,
+            maxSize: maxWindowSize,
+            scale: scale
+        ) { [weak self] vp, sc in
+            self?.runtime.stepViewport(vp, pixelScale: sc)
+        }
     }
 
     func stopTimer() {
@@ -795,19 +831,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             return
         }
 
-        if let frameReq = runtime.takeWindowFrameRequest(), let w = window {
-            let scale = Float(w.backingScaleFactor)
-            windowFrameDriver.applyRequest(
-                frameReq,
-                window: w,
-                now: t,
-                minSize: minWindowSize,
-                maxSize: maxWindowSize,
-                scale: scale
-            ) { [weak self] vp, sc in
-                self?.runtime.stepViewport(vp, pixelScale: sc)
-            }
-        }
+        applyWindowFrameRequest(at: t)
         let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false) || windowFrameDriver.isMoving
         if isAnim {
             restingGiveBackDone = false
@@ -869,9 +893,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             if !didFireReady {
                 didFireReady = true
                 ReadySignal.ready()
-                if let wh = windowHandle {
-                    onReady?(wh)
-                }
+                runOnReadyOnce()
             }
             if let reports {
                 let encoded = FrameEncoded(
