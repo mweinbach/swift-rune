@@ -15,7 +15,7 @@ private final class RectsLog: @unchecked Sendable {
     var last: [[Float]] { runs.last ?? [] }
 }
 
-/// Monotonic frame clock (upstream `tick` at 60 Hz).
+/// Advancing frame clock (selection_rects_memo.rs:38 `t += 1.0 / 60.0`).
 private final class Clock: @unchecked Sendable {
     var t: Double = 0
 }
@@ -66,16 +66,22 @@ struct SelectionRectsParityTests {
         return rt
     }
 
+    /// selection_toolbar.rs:49 `fn tick(rt) { rt.frame(1.0 / 60.0); }`: always the same timestamp.
+    private func tick<S>(_ rt: Runtime<S>) {
+        _ = rt.frame(at: 1.0 / 60.0)
+    }
+
+    /// selection_rects_memo.rs:38: a clock that advances 1/60 s per tick.
     private func tick<S>(_ rt: Runtime<S>, _ clock: Clock) {
         clock.t += 1.0 / 60.0
         _ = rt.frame(at: clock.t)
     }
 
     /// Code's selection is heard, and read, the frame after the handler's commit.
-    private func act<S>(_ rt: Runtime<S>, _ clock: Clock, _ f: (inout Tx) -> Void) {
+    private func act<S>(_ rt: Runtime<S>, _ f: (inout Tx) -> Void) {
         rt.update { _, tx in f(&tx) }
-        tick(rt, clock)
-        tick(rt, clock)
+        tick(rt)
+        tick(rt)
     }
 
     private func rect<S>(_ rt: Runtime<S>, _ key: String) throws -> [Float] {
@@ -85,14 +91,13 @@ struct SelectionRectsParityTests {
     @Test("selection_toolbar.rs:81 selection_rects_are_the_selected_lines_and_follow_scrolling")
     func selectionRectsAreTheSelectedLinesAndFollowScrolling() throws {
         let log = RectsLog()
-        let clock = Clock()
         let rt = toolbarRuntime(log)
         rt.update { s, _ in s.readRects = true }
-        tick(rt, clock)
+        tick(rt)
         #expect(!log.runs.isEmpty, "the view reads the rects")
         #expect(log.last.isEmpty, "nothing selected")
 
-        act(rt, clock) { $0.selectText("a", range: 0..<5) }
+        act(rt) { $0.selectText("a", range: 0..<5) }
         let a = try rect(rt, "a")
         let one = log.last
         #expect(one.count == 1, "one line: \(one)")
@@ -101,7 +106,7 @@ struct SelectionRectsParityTests {
         #expect(r[1] >= a[1] - 0.5 && r[1] + r[3] <= a[1] + a[3] + 0.5, "\(r) in \(a)")
 
         // Across texts: a box per line, in reading order.
-        act(rt, clock) { $0.selectAllText("doc") }
+        act(rt) { $0.selectAllText("doc") }
         let boxes = log.last
         let b = try rect(rt, "b")
         #expect(boxes.count >= 3, "a's line and b's wrapped lines: \(boxes)")
@@ -111,8 +116,8 @@ struct SelectionRectsParityTests {
         // Scrolling moves them, and re-runs the view.
         let before = log.last
         let s = try rect(rt, "scroller")
-        rt.wheel(WheelEvent(dx: 0, dy: -40), at: Vec2(s[0] + 10, s[1] + 10), now: clock.t)
-        for _ in 0..<30 { tick(rt, clock) }
+        rt.wheel(WheelEvent(dx: 0, dy: -40), at: Vec2(s[0] + 10, s[1] + 10), now: 1.0 / 60.0)
+        for _ in 0..<30 { tick(rt) }
         let after = log.last
         #expect(after.count == before.count, "\(before) -> \(after)")
         let first = try #require(before.first)
@@ -124,7 +129,7 @@ struct SelectionRectsParityTests {
         )
 
         // Clearing empties them.
-        act(rt, clock) { $0.clearTextSelection() }
+        act(rt) { $0.clearTextSelection() }
         #expect(log.last.isEmpty)
     }
 
@@ -147,13 +152,11 @@ struct SelectionRectsParityTests {
 
     private func selectedThenRecommitted(within: Bool) {
         let log = RectsLog()
-        let cache = MemoCache()
-        let build: () -> El<MemoS> = { self.doc() }
         let rt = Runtime(state: MemoS(within: within), viewport: Vec2(400, 300), pixelScale: 2.0, systemDark: true) {
             (s: MemoS, cx: inout Cx<MemoS>) -> El<MemoS> in
             log.runs.append(cx.selectionRects())
             let root = col().key("root").wFull().hFull().p(10).gap(12)
-                .child(memo("doc", 0, cache: cache, build: build))
+                .child(memo("doc", 0) { self.doc() })
                 .child(text("\(s.other)").key("other"))
             // A view builds a new pair each run, as an app's root does.
             return s.within ? root.hoverMotionWithin(Anim<Float>.instant, Anim<Float>.instant) : root
