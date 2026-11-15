@@ -1464,7 +1464,13 @@ internal extension Runtime {
     func dispatchSelectionChanges(at now: Double) {
         guard !selectionState.isDispatchingSelectionChanges else { return }
         selectionState.isDispatchingSelectionChanges = true
-        defer { selectionState.isDispatchingSelectionChanges = false }
+        // `on_selection_change` is an observer: its change is DIRTY, never the user's INPUT
+        // (`frame.rs` `selection_changes()`), even inside an input entry point.
+        inputObserverDepth += 1
+        defer {
+            selectionState.isDispatchingSelectionChanges = false
+            inputObserverDepth -= 1
+        }
 
         let snaps = selectableSnapshotsWithVirtuals()
         let watchers: [(path: String, el: El<State>)] = flatNodes.compactMap { n in

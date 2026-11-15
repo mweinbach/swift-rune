@@ -222,6 +222,8 @@ extension Runtime {
     /// Routes a two-finger rotation gesture at `windowPos` from innermost element outward (`Runtime::rotate_event`).
     @discardableResult
     public func rotate(_ ev: RotateEvent, at windowPos: Vec2, now: Double = 0) -> Bool {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         return dispatchGestureChain(at: windowPos) { node, local in
             guard let handler = node.el.handlers.onRotate else { return nil }
             var localEv = ev
@@ -236,6 +238,8 @@ extension Runtime {
     /// Routes a smart-magnify tap at `windowPos` from innermost element outward (`Runtime::smart_magnify`).
     @discardableResult
     public func smartMagnify(at windowPos: Vec2, now: Double = 0) -> Bool {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         return dispatchGestureChain(at: windowPos) { node, local in
             guard let handler = node.el.handlers.onSmartMagnify else { return nil }
             var tx = makeTx(at: now)

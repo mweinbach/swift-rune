@@ -17,6 +17,7 @@ struct FocusWhenShownParityTests {
         var autofocused = false
         var presses = 0
         var wide = false
+        var askOnPoll = false
     }
 
     nonisolated static func view(_ s: S, _: inout Cx<S>) -> El<S> {
@@ -243,5 +244,34 @@ struct FocusWhenShownParityTests {
         #expect(bar.target[2] == 180, "the change is built")
         let presented = try #require(rt.presented("bar")).rect[2]
         #expect(abs(presented - 40) < 0.5, "no time passed for its motion: \(presented)")
+    }
+
+    @Test("a latched focusWhenShown schedules a commit: from a poll that changed nothing it resolves on the next frame (`latch_requests`)")
+    func pollAskWithoutChangeResolves() {
+        let rt = Self.runtime()
+        rt.update(at: 0.01) { s, _ in s.loaded = true }
+        _ = rt.frame(at: 0.02)
+        rt.poll = { s, _, tx in
+            guard s.askOnPoll else { return false }
+            s.askOnPoll = false
+            tx.focusWhenShown("card", ring: true)
+            return false
+        }
+        rt.state.askOnPoll = true
+        _ = rt.frame(at: 0.03)
+        #expect(rt.focusedKey == "allow")
+    }
+
+    @Test("a focusWhenShown from an updateIf that reports no change still resolves")
+    func updateIfAskWithoutChangeResolves() {
+        let rt = Self.runtime()
+        rt.update(at: 0.01) { s, _ in s.loaded = true }
+        _ = rt.frame(at: 0.02)
+        _ = rt.updateIf(at: 0.03) { _, tx in
+            tx.focusWhenShown("card", ring: false)
+            return false
+        }
+        _ = rt.frame(at: 0.04)
+        #expect(rt.focusedKey == "allow")
     }
 }

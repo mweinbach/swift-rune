@@ -988,6 +988,12 @@ public final class Runtime<State> {
     internal var focusOwed: (key: String, ring: Bool)? = nil
     /// A resting poll changed the model but hasn't committed its tree yet (`Tx::polled_change`).
     internal var polledChange: Bool = false
+    /// Input entry points being dispatched (`beginInputDispatch`), observer callbacks running
+    /// inside them that upstream counts as DIRTY (`on_selection_change`), and whether a handler of
+    /// the input being dispatched changed the model (`if r { why |= CommitWhy::INPUT }`).
+    internal var inputDispatchDepth: Int = 0
+    internal var inputObserverDepth: Int = 0
+    internal var inputDispatchChanged: Bool = false
     /// The poll split of the input being dispatched turned a pending `Tx.focusWhenShown` into an
     /// owed one: upstream drops `focus_owed` before that split, so this input's press keeps it.
     internal var focusOwedFromSplit: Bool = false
@@ -11628,13 +11634,17 @@ public final class Runtime<State> {
             lastAnnouncement = ann
             a11yAnnouncement.say(ann.text, politeness: ann.politeness)
         }
-        let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus
+        // A latched focus ask schedules a commit (`latch_requests`: `focus_to` sets `dirty`), so a
+        // `Tx.focusWhenShown` from a poll or handler that changed nothing still resolves.
+        let latchedFocusWhenShown = tx.requestedFocusKey != nil && tx.focusAskedWhenShown
+        let hasCommitRequests = nonOffsetCommitRequests || (!canFastApplyOffsets && !tx.scrollOffsetRequests.isEmpty) || blurDroppedFocus || latchedFocusWhenShown
         if tx.liveOnlyRequested {
             livePendingDirty = true
             if recordLiveOnlySkip(handler: liveOnlyLabel, at: now) {
                 dirtyCommit(at: now, external: external, clearLiveCheck: false)
             }
         } else if markDirtyIfNotLiveOnly || tx.isForceCommitRequested || hasCommitRequests {
+            noteHandlerChange()
             dirtyCommit(at: now, external: external, why: why)
         }
     }

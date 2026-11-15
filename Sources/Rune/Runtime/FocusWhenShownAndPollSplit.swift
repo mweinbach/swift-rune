@@ -21,9 +21,11 @@ import Foundation
 //   allows. Input the frame itself runs after its poll (pastes, sent keys, hover delays,
 //   playground stage keys) splits as upstream does.
 // - `Queued::input` (INPUT vs DIRTY): an input entry point (`beginInputDispatch`) counts as the
-//   commit's input cause only when its handlers changed the model (`why |= INPUT` when `r`).
-//   Layout and state observers and the stationary pointer's re-hit after layout never go through
-//   an input entry point, so they stay DIRTY, as `ActionQueue::push` and `observe_since` keep them.
+//   commit's input cause only when one of its handlers changed the model (`why |= INPUT` when
+//   `r`, `noteHandlerChange`). `on_selection_change` callbacks fired inside an entry point are
+//   DIRTY (`inputObserverDepth`). Layout and visibility observers and the stationary pointer's
+//   re-hit after layout run in the frame, outside every input entry point, so they stay DIRTY,
+//   as `ActionQueue::push` and `observe_since` keep them.
 
 extension Tx {
     /// `Tx.focus` for an element that may not be shown yet: content still loading, a card that
@@ -136,26 +138,39 @@ extension Runtime {
         commitPolledChangeApart(at: now)
     }
 
-    /// An input entry point starts (pointer move and leave, wheel, key-up, paste, file drop,
+    /// An input entry point starts (pointer move and leave, wheel, key-up, paste, file drop, the
     /// gestures, and the input a frame runs itself): a poll's change waiting to commit commits
-    /// first (`split` on `input || routed`). Returns whether a commit was already pending, for
+    /// first (`split` on `input || routed`). Returns the enclosing dispatch's change flag, for
     /// `endInputDispatch`.
     internal func beginInputDispatch(at now: Double) -> Bool {
         focusOwedFromSplit = false
         commitPolledChangeApart(at: now)
-        return needsCommit
+        let outer = inputDispatchChanged
+        inputDispatchChanged = false
+        inputDispatchDepth += 1
+        return outer
     }
 
-    /// The input entry point ends: when its handlers changed the model, the commit has an input
-    /// cause (`why |= CommitWhy::INPUT` when `r`). Within a frame that's the frame's commit;
-    /// between frames, the next frame's.
-    internal func endInputDispatch(_ pendingBefore: Bool) {
-        guard needsCommit && !pendingBefore else { return }
+    /// The input entry point ends: when one of its handlers changed the model, the commit has an
+    /// input cause (`if r { why |= CommitWhy::INPUT }`), whether or not a commit was already
+    /// pending. Within a frame that's the frame's commit; between frames, the next frame's.
+    internal func endInputDispatch(_ outer: Bool) {
+        inputDispatchDepth -= 1
+        let changed = inputDispatchChanged
+        inputDispatchChanged = outer || changed
+        guard changed else { return }
         if insideFramePollOrInput {
             frameCommittedFromInput = true
         } else {
             frameHadInputSinceLastFrame = true
         }
+    }
+
+    /// A handler's transaction changed the model or asked for a commit (`applyTx`). Inside an
+    /// input entry point that's the input's change (`r`), unless an observer callback that
+    /// upstream counts as DIRTY made it (`on_selection_change`).
+    internal func noteHandlerChange() {
+        if inputDispatchDepth > 0 && inputObserverDepth == 0 { inputDispatchChanged = true }
     }
 
     /// Both a poll and an input handler see ordinary `inout State`; after the handler's mutation a

@@ -29,6 +29,16 @@ struct PollInputSplitParityTests {
                 el().key("field").size(80, 24).focusable()
                     .onKeyUp { s, _, _ in s.clickedWide = true; return true }
             )
+            .child(el().key("magnify").size(80, 24).onMagnify { s, _, _ in s.clickedWide = true; return true })
+            .child(el().key("rotate").size(80, 24).onRotate { s, _, _ in s.clickedWide = true; return true })
+            .child(el().key("smart").size(80, 24).onSmartMagnify { s, _, _, _ in s.clickedWide = true; return true })
+            .child(
+                col().key("doc").w(300).h(24).selectionGroup()
+                    .onSelectionChange { s, change, _ in
+                        if change.selection?.text.isEmpty == false { s.clickedWide = true }
+                    }
+                    .child(text("select these words").key("sel").w(300).h(24).selectable())
+            )
     }
 
     static func runtime(motionNeedsCause: Bool) -> Runtime<S> {
@@ -133,7 +143,7 @@ struct PollInputSplitParityTests {
 
     @Test("a resting poll then a hover, wheel or key-up handler: each splits as an input action (`input || routed`)")
     func restingPollThenOtherInputSplits() throws {
-        for kind in ["hover", "wheel", "keyUp"] {
+        for kind in ["hover", "wheel", "keyUp", "magnify", "rotate", "smartMagnify"] {
             let rt = Self.runtime(motionNeedsCause: true)
             if kind == "keyUp" {
                 rt.update(at: 1.0) { _, tx in tx.focus("field") }
@@ -149,6 +159,12 @@ struct PollInputSplitParityTests {
             case "wheel":
                 let p = try Self.centre(rt, "wheel")
                 rt.wheel(WheelEvent(dx: 0, dy: 10, x: p.x, y: p.y), at: p, now: 1.005)
+            case "magnify":
+                _ = rt.magnify(MagnifyEvent(delta: 0.1), at: try Self.centre(rt, "magnify"), now: 1.005)
+            case "rotate":
+                _ = rt.rotate(RotateEvent(degrees: 10), at: try Self.centre(rt, "rotate"), now: 1.005)
+            case "smartMagnify":
+                _ = rt.smartMagnify(at: try Self.centre(rt, "smart"), now: 1.005)
             default:
                 _ = rt.keyUp(KeyEvent(key: .text("a"), mods: .none), at: 1.005)
             }
@@ -156,6 +172,36 @@ struct PollInputSplitParityTests {
             for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
             Self.expectSplit(rt, kind)
         }
+    }
+
+    @Test("a handler's change counts as input even when a commit was already pending (`if r { why |= INPUT }`)")
+    func inputCauseWithCommitAlreadyPending() throws {
+        let rt = Self.runtime(motionNeedsCause: true)
+        // A change no input caused is pending when the wheel handler runs.
+        rt.update(at: 1.001) { s, _ in s.polledWide = true }
+        let p = try Self.centre(rt, "wheel")
+        rt.wheel(WheelEvent(dx: 0, dy: 10, x: p.x, y: p.y), at: p, now: 1.005)
+        #expect(rt.state.clickedWide)
+        for i in 1...4 { _ = rt.frame(at: 1.0 + Double(i) / 60.0) }
+        let clicked = Self.width(rt, "clicked")
+        #expect(clicked > 40 && clicked < 180, "the wheel handler's change animates: \(clicked)")
+    }
+
+    @Test("an onSelectionChange change inside a pointer move is DIRTY, not INPUT: it lands at once (frame.rs selection_changes)")
+    func selectionChangeIsNotInput() throws {
+        let rt = Self.runtime(motionNeedsCause: true)
+        let sel = try #require(rt.elements().first { $0.key == "sel" })
+        let start = Vec2(sel.rect[0] + 2, sel.rect[1] + sel.rect[3] / 2)
+        let end = Vec2(sel.rect[0] + sel.rect[2] - 2, sel.rect[1] + sel.rect[3] / 2)
+        rt.pointerDown(at: start, at: 1.005)
+        _ = rt.frame(at: 1.01)
+        _ = rt.frame(at: 1.02)
+        #expect(!rt.state.clickedWide, "nothing selected yet")
+        rt.pointerMove(to: end, at: 1.03)
+        #expect(rt.state.clickedWide, "the drag selected text and the observer heard it")
+        _ = rt.frame(at: 1.04)
+        #expect(abs(Self.width(rt, "clicked") - 180) < 0.5, "no input caused it, so it shows at once")
+        rt.pointerUp(at: end, at: 1.05)
     }
 
     @Test("a paste the frame delivers after its poll splits from it and keeps its motion (routed `Action::Paste`)")
