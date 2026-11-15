@@ -737,6 +737,8 @@ extension Runtime {
             if let tracked = liveStore.get(Runtime.hoverTrackId(nid), Runtime.hoverProp) {
                 return tracked.clamped(to: 0...1)
             }
+            // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
+            if lastHoverTargetById[nid] != nil { return 0.0 }
             if n.el.isHoverGroup || n.el.hoverGroupShare != nil {
                 return groupHoverChecker(n) ? 1.0 : 0.0
             }

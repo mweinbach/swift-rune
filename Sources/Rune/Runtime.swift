@@ -1006,12 +1006,13 @@ public final class Runtime<State> {
     internal var pressedKeyFocusPath: String? = nil
     internal var lastPixelsSizeByPath: [String: (UInt32, UInt32)] = [:]
     internal var pixelsAspectSnapIds: Set<NodeId> = []
-    internal enum HoverHoldState: Equatable {
-        case free
-        case held
-        case released
-    }
-    internal var hoverHoldState: HoverHoldState = .free
+    /// `hover.rs::HoverHold` (`Runtime/HoverHold.swift`).
+    internal var hoverHold = HoverHold()
+    /// Per scroll viewport path: the hover hold an app's instant scroll armed (`ScrollState::nudge`).
+    internal var scrollNudges: [String: ScrollNudge] = [:]
+    /// The node ids the last build drew, in order (`Runtime::built_ids`): hover tracks retarget
+    /// only against geometry built for these nodes.
+    internal var builtHoverIds: [NodeId] = []
     internal var hoverWithinPaths: [String] = []
     internal var hoverDelays = HoverDelays()
     internal var hoverPaused: Bool = false
@@ -1415,6 +1416,9 @@ public final class Runtime<State> {
         }
         if let hoverDue = hoverDelays.nextDue(), hoverDue > now {
             best = best.map { min($0, hoverDue) } ?? hoverDue
+        }
+        if let nudgeDue = scrollNudgeWakeDeadline(after: now) {
+            best = best.map { min($0, nudgeDue) } ?? nudgeDue
         }
         if let loopWake = nextLoopWakeDeadline(after: now) {
             best = best.map { min($0, loopWake) } ?? loopWake
@@ -4003,7 +4007,7 @@ public final class Runtime<State> {
         }
         rebuildHoverCurves(for: pass.nodes)
         if cut || viewCommitCount == 1 {
-            hoverHoldState = .free
+            hoverHold = HoverHold()
             syncHoverTracks(at: lastScaledAnimNow, cut: true, held: false)
         }
 
@@ -6538,6 +6542,8 @@ public final class Runtime<State> {
                 if let tracked = liveStore.get(Self.hoverTrackId(p.id), Self.hoverProp) {
                     return tracked.clamped(to: 0...1)
                 }
+                // Synced hover without a track rests at 0 (`paint/tracks.rs::ready_from_rest`).
+                if lastHoverTargetById[p.id] != nil { return 0.0 }
                 if el.isHoverGroup || el.hoverGroupShare != nil {
                     return (!p.isExiting && isGroupHovered(snap)) ? 1.0 : 0.0
                 }
@@ -8853,7 +8859,10 @@ public final class Runtime<State> {
         paintOrderPaths = newPaintOrder
         drawnRectByPath = newDrawnRectByPath
         rectSpringingById = newRectSpringingById
-        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted || hoverHoldState == .held || layoutMoving() {
+        builtHoverIds = flatNodes.map(\.nodeId)
+        // A hold draws nothing while it waits: its wake asks for the one frame that ends it.
+        stepScrollNudges(at: currentTime)
+        if scrollOffsets != lastHoverScrollOffsets || frameHadCommitted || hoverHold.held || layoutMoving() {
             lastHoverScrollOffsets = scrollOffsets
             if activeDrag == nil,
                pointerPosition.x >= 0,
@@ -8868,7 +8877,7 @@ public final class Runtime<State> {
                     cut: false,
                     dispatchPolicy: .onHoldRelease
                 )
-                if hoverHoldState != .held && pressedPath == nil {
+                if !hoverHold.held && pressedPath == nil {
                     let newPath = hoveredPath
                     let linkChanged = (hoveredLink != prevHoverLink)
                     if newPath != prevHoverPath {
@@ -9249,7 +9258,7 @@ public final class Runtime<State> {
     }
 
     public func pointerExit(at now: Double) {
-        hoverHoldState = .free
+        hoverHold = HoverHold()
         pointerPosition = Vec2(-10000, -10000)
         if hoveredLink != nil {
             hoveredLink = nil
@@ -9544,7 +9553,7 @@ public final class Runtime<State> {
         }()
         let linkChanged = (newHoveredLink != hoveredLink)
 
-        if hoverHoldState != .held && pressedPath == nil {
+        if !hoverHold.held && pressedPath == nil {
             if linkChanged {
                 hoveredLink = newHoveredLink
             }
@@ -12242,6 +12251,9 @@ public final class Runtime<State> {
         var curIdx: Int?
         if let tp = pressedPath, let idx = nodeByPath[tp], !flatNodes[idx].effectiveInert {
             curIdx = idx
+        } else if let held = heldHover(), let idx = held {
+            // Moving layout holds hover: the cursor stays with what the pointer was over.
+            curIdx = idx
         } else if let hp = hoveredPath, let idx = hoverLive(hp) {
             curIdx = idx
         } else if let hit = hitTest(at: pointerPosition, predicate: { _ in true }) {
@@ -12960,6 +12972,18 @@ public final class Runtime<State> {
         if !inViewport {
             over = .away
             underHit = nil
+        } else if heldHover() != nil {
+            // While moving layout holds hover, the tooltip keeps its element, and nothing sliding
+            // under the pointer starts a wait (`help.rs::help_over`).
+            if let kept = helpState.tipState.target, hoverLive(kept.path) != nil {
+                // Kept whenever the element is live, drawn into this frame's hits or not (a glide
+                // may carry it out of view); the tip draws from its hit when there is one.
+                over = .help(kept)
+                underHit = helpState.hits.last(where: { $0.path == kept.path && $0.linkIndex == kept.link })
+            } else {
+                over = .nothing
+                underHit = nil
+            }
         } else if let u = helpUnder(point: pointerPosition) {
             let target = HelpTarget(path: u.hit.path, link: u.hit.linkIndex)
             if activeDrag != nil && helpState.tipState.target != target {

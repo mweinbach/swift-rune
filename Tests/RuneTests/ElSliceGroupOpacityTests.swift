@@ -39,7 +39,10 @@ struct ElSliceGroupOpacityTests {
         #expect((afterExit?.opacity ?? 1.0) < 0.01)
     }
 
-    @Test("Keyboard focus activates only the groupOpacity element containing the focused path")
+    /// Upstream 4e215eac (#726): every hover group lights while keyboard focus is on it or inside
+    /// it (CSS `:is(:hover, :has(:focus-visible))`, `hover.rs::keyboard_within`), so all the
+    /// controls it reveals show when Tab reaches one of them, not just the focused one.
+    @Test("Keyboard focus inside a hover group lights the group's groupOpacity elements")
     func keyboardFocusWithinTriggersGroupOpacity() {
         let rt = Runtime<Int>(
             state: 0,
@@ -72,7 +75,7 @@ struct ElSliceGroupOpacityTests {
         let focusedChild = rt.elements().first(where: { $0.key == "focused" })
         let siblingChild = rt.elements().first(where: { $0.key == "sibling" })
         #expect((focusedChild?.opacity ?? 0.0) > 0.99)
-        #expect((siblingChild?.opacity ?? 1.0) < 0.01)
+        #expect((siblingChild?.opacity ?? 0.0) > 0.99, "the group lights for keyboard focus inside it, revealing its sibling too")
         let rf = rt.renderFrame(at: 0.02)
         #expect(rf.instances.contains { $0.fill.w > 0.99 })
     }

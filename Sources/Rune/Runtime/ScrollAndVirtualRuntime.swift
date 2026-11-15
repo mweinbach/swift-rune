@@ -2470,6 +2470,35 @@ extension Runtime {
             }
         }
 
+        /// An offset request: a jump (no glide, or motion off) that moves the viewport arms its
+        /// hover hold (`offset.rs::apply_jumps`, `nudge.rs`).
+        func applyOffsetRequest(path: String, next: Vec2, glide: Spring?) {
+            let before = scrollOffsets[path] ?? .zero
+            let maxExt = scrollMaxExtents[path] ?? .zero
+            let end = Vec2(max(0, min(maxExt.x, next.x)), max(0, min(maxExt.y, next.y)))
+            // `offset.rs::scroll_to_offsets`, per axis: an axis glides only with motion on and
+            // more than half a point to go; otherwise it jumps.
+            let animate = glide != nil && !cut && !reducedMotion
+            let glideX = animate && abs(end.x - before.x) > 0.5
+            let glideY = animate && abs(end.y - before.y) > 0.5
+            if glideX || glideY {
+                if !glideX || !glideY {
+                    // Jump the short axis first; the long one then glides from there.
+                    let jumped = Vec2(glideX ? before.x : end.x, glideY ? before.y : end.y)
+                    if jumped != before { applyScrollOffset(path: path, next: jumped, glide: nil) }
+                }
+                applyScrollOffset(path: path, next: end, glide: glide)
+            } else {
+                applyScrollOffset(path: path, next: end, glide: nil)
+            }
+            // `apply_jumps`: a jumped axis that moved more than 1e-3 arms the hover hold.
+            let movedX = !glideX && abs(end.x - before.x) > 1e-3
+            let movedY = !glideY && abs(end.y - before.y) > 1e-3
+            if movedX || movedY {
+                armScrollNudge(path: path, at: currentTime)
+            }
+        }
+
         for landing in offsets {
             let req = landing.request
             if req.anchor {
@@ -2496,12 +2525,9 @@ extension Runtime {
                 let cur = scrollOffsets[vPath] ?? .zero
                 scrollKeyLandings.land(landing)
                 markScrollMovedByHand(path: vPath)
-                if req.glide != nil {
-                    markScrollHandGliding(path: vPath)
-                } else {
-                    clearScrollHandGliding(path: vPath)
-                }
-                applyScrollOffset(path: vPath, next: Vec2(cur.x, targetY), glide: req.glide)
+                // `offset.rs:33-38`: an anchored request always jumps (and halts any glide).
+                clearScrollHandGliding(path: vPath)
+                applyOffsetRequest(path: vPath, next: Vec2(cur.x, targetY), glide: nil)
             } else if let vIdx = findScrollNode(bySelector: req.key) {
                 let path = flatNodes[vIdx].path
                 let cur = scrollOffsets[path] ?? .zero
@@ -2512,7 +2538,7 @@ extension Runtime {
                 } else {
                     clearScrollHandGliding(path: path)
                 }
-                applyScrollOffset(path: path, next: next, glide: req.glide)
+                applyOffsetRequest(path: path, next: next, glide: req.glide)
             }
         }
 
