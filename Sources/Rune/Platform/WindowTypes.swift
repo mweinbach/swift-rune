@@ -320,6 +320,8 @@ public protocol HostedWindowEntry: AnyObject {
 
     func createRuntime(pixelScale: Float, systemDark: Bool, reducedMotion: Bool, waker: Waker) -> AnyObject
     func frame(runtimeObj: AnyObject, at time: Double) -> RefScene
+    /// The runtime as its host's `CoveredWindowDriver` drives it (`covered_step`, #995).
+    func coveredRuntime(runtimeObj: AnyObject) -> any CoveredWindowRuntime
     func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float)
     func stepViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float)
     func takeWindowFrameRequest(runtimeObj: AnyObject) -> WindowFrameRequest?
@@ -472,6 +474,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func frame(runtimeObj: AnyObject, at time: Double) -> RefScene {
         rt(runtimeObj).frame(at: time)
+    }
+
+    func coveredRuntime(runtimeObj: AnyObject) -> any CoveredWindowRuntime {
+        rt(runtimeObj)
     }
 
     func applyViewport(runtimeObj: AnyObject, viewport: Vec2, pixelScale: Float) {

@@ -476,6 +476,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let chromeStyle: Chrome
     private let customTitlebar: Titlebar?
     private var chromeWatch: WindowChromeWatch?
+    /// Whether the shown window can draw, and what covering it runs (`window/sight.rs`, #995).
+    private var coverDriver = CoveredWindowDriver()
+    private var coverWatch: WindowCoverWatch?
     private var lastFrameTime: Double = 0.0
     private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
@@ -628,6 +631,45 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             self?.syncWindowChrome()
             self?.requestRender()
         }
+        coverWatch = WindowCoverWatch(window: w) { [weak self] report in
+            self?.coverChanged(report)
+        }
+    }
+
+    /// The window was covered, uncovered, minimised or restored (`Host::set_cover`).
+    private func coverChanged(_ report: WindowCoverWatch.Report) {
+        switch coverDriver.apply(report, runtime: runtime, at: nowSeconds()) {
+        case .rest:
+            stopTimer()
+        case .redraw:
+            requestRender()
+        case .none:
+            break
+        }
+    }
+
+    /// A wake, due timer or redraw for a shown window that can't draw (`covered_step`): `poll`,
+    /// due timers and queued input run, and while an assistive client reads the window what
+    /// changed builds at once for it (`Runtime::covered_wake`); nothing draws or moves.
+    private func coveredTick(at t: Double) {
+        stopTimer()
+        let committed = coverDriver.step(runtime, at: t)
+        if let title = runtime.windowTitle, window?.title != title {
+            window?.title = title
+        }
+        if runtime.closeWindowRequested {
+            runtime.clearShellRequests()
+            window?.performClose(nil)
+            return
+        }
+        if runtime.quitRequested {
+            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
+            _ = QuitLifecycle.send(.start(ending: false, after: after))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        pumpPlatformActions()
+        syncPlatformBridges(treeCommitted: committed)
     }
 
     func stopTimer() {
@@ -688,6 +730,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             applyDrainedRequests(drained)
         }
         syncNativeMenus()
+        if !coverDriver.canDraw {
+            coveredTick(at: t)
+            return
+        }
 
         let desiredFmt: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         if metalLayer.pixelFormat != desiredFmt {
@@ -1277,7 +1323,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     nonisolated override func accessibilityChildren() -> [Any]? {
         guard Thread.isMainThread else { return nil }
         return MainActor.assumeIsolated {
-            MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
+            // An assistive client reads the tree (AccessKit's activation): covered, the window
+            // builds what changed for it at once (`Runtime::covered_wake`).
+            coverDriver.assistiveClientAttached(runtime)
+            return MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
         }.value
     }
 
