@@ -357,7 +357,8 @@ public protocol HostedWindowEntry: AnyObject {
     func answerFileDialog(runtimeObj: AnyObject, id: UInt64, result: FileDialogResult)
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double)
     func takeDragOutStart(runtimeObj: AnyObject) -> DragOutStart?
-    func setWindowChrome(runtimeObj: AnyObject, titlebarInset: Float, insets: ChromeInsets)
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject)
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double)
     func copyTitlebarDragHits(runtimeObj: AnyObject, point: Vec2) -> Bool
     func runQuitHook(runtimeObj: AnyObject)
@@ -724,12 +725,20 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
         rt(runtimeObj).takeDragOutStart()
     }
 
-    /// The window's controls, as the shell places them on every resize and full-screen change
-    /// (`window/chrome.rs::sync_chrome`: `set_titlebar_inset`, then `set_chrome_insets`).
-    func setWindowChrome(runtimeObj: AnyObject, titlebarInset: Float, insets: ChromeInsets) {
-        let runtime = rt(runtimeObj)
-        runtime.setTitlebarInset(titlebarInset)
-        runtime.setChromeInsets(insets)
+    /// `window/chrome.rs::sync_chrome` for this window's `chrome` and `titlebar` (an `NSWindow`
+    /// on macOS; nothing elsewhere).
+    @MainActor func syncWindowChrome(runtimeObj: AnyObject, window: AnyObject) {
+        #if os(macOS)
+        // A borderless window has no titlebar (`window.rs`: `app.titlebar.filter(|_| !borderless)`).
+        let titlebar = spec.options.borderless ? nil : spec.titlebar
+        rt(runtimeObj).syncWindowChrome(windowObject: window, chrome: spec.chrome, titlebar: titlebar)
+        #else
+        let _ = (runtimeObj, window)
+        #endif
+    }
+
+    func takeTitlebarChanged(runtimeObj: AnyObject) -> Bool {
+        rt(runtimeObj).takeTitlebarChanged()
     }
 
     func finishDragOut(runtimeObj: AnyObject, outcome: DragOutcome, at: Double) {

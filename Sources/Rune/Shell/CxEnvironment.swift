@@ -196,6 +196,9 @@ struct RuntimeShellSettings {
     /// last set it (`Runtime::set_chrome_insets`); `nil` until a host sets it, when the
     /// headless derivation from `App::titlebar` stands in (`Runtime::headless_chrome`).
     var hostChromeInsets: ChromeInsets? = nil
+    /// A commit's `Cx::set_titlebar` / `Cx::titlebar_height` differed from the last
+    /// (`titlebar.set_changed`), for the shell to re-sync its chrome (`take_titlebar_changed`).
+    var titlebarSetChanged: Bool = false
     var baseTitlebar: Titlebar? = nil
     var titlebarOverride: TitlebarSet = TitlebarSet()
     var systemAccent: SystemAccent = .default

@@ -10,7 +10,8 @@ import RuneMotion
 
 extension Runtime {
     /// What `Cx::chromeInsets()` reports, in window points. Native windows set it from their
-    /// controls on every resize, full screen included; a change re-runs the view
+    /// controls whenever they may have moved (resize, scale change, full screen, a new
+    /// `Cx::set_titlebar` / `titlebar_height`); a change re-runs the view
     /// (`Runtime::set_chrome_insets`).
     public func setChromeInsets(_ insets: ChromeInsets) {
         let changed = insets != windowChromeInsets()
@@ -20,7 +21,9 @@ extension Runtime {
         }
     }
 
-    /// The chrome insets in window points, before the view's zoom (`Runtime::chrome_insets`):
+    /// The chrome insets in window points, before the view's zoom (`Runtime::chrome_insets`).
+    /// Deliberate naming deviation: Swift's `chromeInsets()` keeps its existing meaning (the
+    /// zoomed view points `Cx::chrome_insets` reads), so upstream's getter lives here:
     /// what the host last set with `setChromeInsets(_:)`, else what a run without a window
     /// derives from `App::titlebar` (`Runtime::headless_chrome`).
     public func windowChromeInsets() -> ChromeInsets {
@@ -31,15 +34,25 @@ extension Runtime {
         let rawTrailing = base?.insetTrailing ?? 0.0
         return ChromeInsets(leading: rawLeading, trailing: rawTrailing, top: rawH)
     }
+
+    /// Whether a commit since the last call set a different `Cx::set_titlebar` /
+    /// `Cx::titlebar_height`; the shell then re-syncs its chrome (traffic lights, band height,
+    /// `setChromeInsets`) (`Runtime::take_titlebar_changed`).
+    public func takeTitlebarChanged() -> Bool {
+        defer { cxSettings.titlebarSetChanged = false }
+        return cxSettings.titlebarSetChanged
+    }
 }
 
 // MARK: - Drag-out geometry (`runtime/input/pointer.rs:166-188`)
 
 extension Runtime {
-    /// The scroll clip a node's drawn rect is cut to for a drag-out's visible `rect`
-    /// (`screen_clip_of_parent`): its ancestors' clip, or `nil` (`NO_CLIP`) when no ancestor
-    /// clips its children.
+    /// The clip a node's drawn rect is cut to for a drag-out's visible `rect`
+    /// (`pointer.rs:178` `screen_clip_of_parent(n.parent)`): the drawn screen clip its parent
+    /// passed down at the last paint, `nil` (`NO_CLIP`) when nothing clips it. Before the node
+    /// has painted, its ancestors' layout clip stands in.
     internal func dragOutParentClip(path: String) -> MotionRect? {
+        if let geom = hitGeometryByPath[path] { return geom.parentScreenClip }
         guard let idx = nodeByPath[path], flatNodes.indices.contains(idx) else { return nil }
         var cur = flatNodes[idx].parentIndex
         while let p = cur, flatNodes.indices.contains(p) {
@@ -50,6 +63,25 @@ extension Runtime {
             cur = flatNodes[p].parentIndex
         }
         return nil
+    }
+
+    /// `turn.rs::screen_clip_of`: a parent under a turn clips its children on screen to its
+    /// outer clip cut to the bounding box of its turned local clip; otherwise to its inherited
+    /// clip. `nil` is `NO_CLIP`.
+    internal static func screenClipOfParent(
+        inheritedClip: MotionRect?,
+        ancestorTurn: Turn?,
+        outerTurnClip: MotionRect?,
+        localTurnClip: MotionRect?
+    ) -> MotionRect? {
+        guard let turn = ancestorTurn else { return inheritedClip }
+        let ic = localTurnClip.map { turn.bbox($0) }
+        switch (outerTurnClip, ic) {
+        case let (oc?, ic?): return intersectRects(oc, ic)
+        case let (oc?, nil): return oc
+        case let (nil, ic?): return ic
+        case (nil, nil): return nil
+        }
     }
 
     /// The element's visible drawn rect: `bounds` cut to its parent's clip, empty sides

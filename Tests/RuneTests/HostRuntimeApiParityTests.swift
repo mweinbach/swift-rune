@@ -3,11 +3,89 @@ import Testing
 @testable import Rune
 @testable import RuneMotion
 
+#if os(macOS)
+import AppKit
+#endif
+
 /// Host-facing runtime APIs (`runtime/input/titlebar.rs` `set_chrome_insets` / `chrome_insets`,
-/// `runtime/drag_out_host.rs` `take_drag_out`). Upstream has no `#[test]` for these; these are
-/// regression tests for the upstream behaviour.
+/// `runtime/drag_out_host.rs` `take_drag_out`). The drag-out geometry ports
+/// `runtime/tests/pointer_drag.rs:171` and `:361` 1:1; upstream has no `#[test]` for
+/// `set_chrome_insets` itself, so those are regression tests of its behaviour.
 @Suite("Host Runtime API Parity Tests", .serialized)
 struct HostRuntimeApiParityTests {
+    // MARK: - pointer_drag.rs ports
+
+    private struct DragOutState {
+        var presses = 0
+        var drags = 0
+        var offer = false
+        var ended: [DragOutcome] = []
+        var dragging = false
+        var starts = 0
+        var log: [String] = []
+    }
+
+    /// `pointer_drag.rs:152` `drag_out_view`.
+    private static func dragOutView(_ s: DragOutState, _ cx: inout Cx<DragOutState>) -> El<DragOutState> {
+        col().size(200, 200).child(
+            el().key("file").size(100, 40)
+                .onClick { s in s.presses += 1 }
+                .onDrag { s, _, _ in s.drags += 1 }
+                .dragOut { s in s.offer ? DragItem().file(path: "/Applications/Example.app") : nil }
+                .onDragStart { s, _ in s.dragging = true; s.starts += 1; s.log.append("start") }
+                .onDragOutEnd { s, outcome, _ in s.dragging = false; s.ended.append(outcome); s.log.append("end \(outcome)") }
+        )
+    }
+
+    /// `pointer_drag.rs:162` `drag_out_rt`.
+    private static func dragOutRt(offer: Bool) -> Runtime<DragOutState> {
+        let rt = Runtime(state: DragOutState(offer: offer), viewport: Vec2(200, 200), pixelScale: 1.0, view: dragOutView)
+        _ = rt.frame(at: 0.0)
+        rt.pointerMove(to: Vec2(10, 10), at: 0.0)
+        rt.pointerDown(at: Vec2(10, 10), at: 0.0)
+        return rt
+    }
+
+    /// `pointer_drag.rs:171` `crossing_the_threshold_hands_a_drag_out_to_the_host_and_releases_the_pointer`.
+    @Test func crossingTheThresholdHandsADragOutToTheHostAndReleasesThePointer() throws {
+        let rt = Self.dragOutRt(offer: true)
+        let t = DragItem.defaultThreshold
+        #expect(t == 4.0, "DRAG_THRESHOLD on Apple platforms")
+        rt.pointerMove(to: Vec2(10 + t, 10), at: 0.0)
+        #expect(rt.takeDragOutStart() == nil, "at the threshold it's still a press")
+        #expect(rt.pointerCaptured)
+        rt.pointerMove(to: Vec2(12 + t, 10), at: 0.0)
+        let start = try #require(rt.takeDragOutStart(), "drag-out requested")
+        #expect(start.item.files.map(\.path) == ["/Applications/Example.app"])
+        #expect(start.press == Vec2(10, 10))
+        #expect(start.rect == .fromXYWH(0, 0, 100, 40))
+        #expect(rt.events.contains { $0.hasPrefix("drag-out ") && $0.hasSuffix("file") }, "\(rt.events)")
+        #expect(!rt.pointerCaptured && rt.pointer() == nil, "nothing stays pressed or hovered")
+        rt.pointerMove(to: Vec2(40, 30), at: 0.0)
+        #expect(rt.takeDragOutStart() == nil, "one request per press")
+        rt.pointerUp(at: Vec2(40, 30), at: 0.0)
+        _ = rt.frame(at: 0.0)
+        #expect(rt.state.presses == 0 && rt.state.drags == 0, "neither on_press nor on_drag runs")
+    }
+
+    /// `pointer_drag.rs:361` `a_drag_image_over_the_element_gets_its_unclipped_bounds`.
+    @Test func aDragImageOverTheElementGetsItsUnclippedBounds() throws {
+        let rt = Runtime(state: DragOutState(), viewport: Vec2(200, 200), pixelScale: 1.0) { (_: DragOutState, _: inout Cx<DragOutState>) -> El<DragOutState> in
+            col().child(
+                col().size(200, 100).clipSoft(0.0)
+                    .child(el().size(200, 80))
+                    .child(el().key("row").size(200, 40).dragOut { _ in DragItem().text("row") })
+            )
+        }
+        _ = rt.frame(at: 0.0)
+        rt.pointerMove(to: Vec2(10, 90), at: 0.0)
+        rt.pointerDown(at: Vec2(10, 90), at: 0.0)
+        rt.pointerMove(to: Vec2(40, 90), at: 0.0)
+        let start = try #require(rt.takeDragOutStart())
+        #expect(start.rect == .fromXYWH(0, 80, 200, 20), "the visible strip")
+        #expect(start.bounds == .fromXYWH(0, 80, 200, 40), "the whole row")
+    }
+
     // MARK: - set_chrome_insets / chrome_insets
 
     @Test func setChromeInsetsStoresReturnsAndRerunsViewOnlyOnChange() {
@@ -201,6 +279,88 @@ struct HostRuntimeApiParityTests {
         // Without a separate visible rect, it is the bounds.
         #expect(DragOutStart(item: DragItem(), bounds: .fromXYWH(0, 0, 5, 5), press: .zero).rect == .fromXYWH(0, 0, 5, 5))
     }
+
+    // MARK: - screen_clip_of (`turn.rs:67`)
+
+    @Test func screenClipOfParentFollowsTurnsLikeUpstream() {
+        typealias R = Runtime<Int>
+        let clip = MotionRect.fromXYWH(0, 0, 100, 50)
+        // No turn: the inherited clip, `NO_CLIP` staying `nil`.
+        #expect(R.screenClipOfParent(inheritedClip: clip, ancestorTurn: nil, outerTurnClip: nil, localTurnClip: nil) == clip)
+        #expect(R.screenClipOfParent(inheritedClip: nil, ancestorTurn: nil, outerTurnClip: nil, localTurnClip: nil) == nil)
+        // Under a quarter turn about (50, 25): the outer clip cut to the turned local clip's bbox.
+        let turn = Turn.about(Vec2(50, 25), radians: .pi / 2)
+        let bbox = turn.bbox(clip)
+        #expect(abs(bbox.left - 25) < 1e-3 && abs(bbox.top - -25) < 1e-3 && abs(bbox.right - 75) < 1e-3 && abs(bbox.bottom - 75) < 1e-3)
+        let outer = MotionRect.fromXYWH(0, 0, 60, 60)
+        let got = R.screenClipOfParent(inheritedClip: nil, ancestorTurn: turn, outerTurnClip: outer, localTurnClip: clip)
+        #expect(got == intersectRects(outer, bbox))
+        // `NO_CLIP` inside the turn leaves the outer clip; nothing at all stays `NO_CLIP`.
+        #expect(R.screenClipOfParent(inheritedClip: nil, ancestorTurn: turn, outerTurnClip: outer, localTurnClip: nil) == outer)
+        #expect(R.screenClipOfParent(inheritedClip: clip, ancestorTurn: turn, outerTurnClip: nil, localTurnClip: nil) == nil)
+    }
+
+    // MARK: - take_titlebar_changed + sync_chrome
+
+    @Test func takeTitlebarChangedReportsANewViewTitlebarOnce() {
+        struct S { var h: Float? = nil }
+        let rt = Runtime(state: S(), viewport: Vec2(400, 300), pixelScale: 2.0) { s, cx in
+            if let h = s.h { cx.titlebarHeight(h) }
+            return el().size(10, 10)
+        }
+        _ = rt.frame(at: 0.0)
+        #expect(!rt.takeTitlebarChanged())
+        rt.update(at: 0.05) { s, _ in s.h = 52 }
+        _ = rt.frame(at: 0.1)
+        #expect(rt.takeTitlebarChanged())
+        #expect(!rt.takeTitlebarChanged(), "taken")
+        rt.update(at: 0.15) { s, _ in s.h = 52 }
+        _ = rt.frame(at: 0.2)
+        #expect(!rt.takeTitlebarChanged(), "the same set is no change")
+    }
+
+    #if os(macOS)
+    /// `window/chrome.rs::sync_chrome`: the band height follows the view's `titlebar_set()` over
+    /// `App::titlebar`, so `cx.titlebarHeight` still reaches `cx.chromeInsets()` in a window.
+    @Test @MainActor func syncWindowChromeUsesTheViewsTitlebarSet() {
+        struct S { var h: Float? = nil }
+        let seen = HostChromeRecorder()
+        let rt = Runtime(state: S(), viewport: Vec2(400, 300), pixelScale: 2.0) { s, cx in
+            if let h = s.h { cx.titlebarHeight(h) }
+            seen.record(cx.chromeInsets())
+            return el().size(10, 10)
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: true
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let app = Titlebar(height: 38)
+        _ = rt.frame(at: 0.0)
+        rt.syncWindowChrome(window: window, chrome: .standard, titlebar: app)
+        let lights = RuneTrafficLights.titlebarInset(window)
+        #expect(rt.titlebarInset == lights)
+        #expect(rt.windowChromeInsets().height == 38)
+        _ = rt.frame(at: 0.1)
+        #expect(seen.last.height == 38)
+
+        rt.update(at: 0.15) { s, _ in s.h = 52 }
+        _ = rt.frame(at: 0.2)
+        #expect(rt.takeTitlebarChanged())
+        rt.syncWindowChrome(window: window, chrome: .standard, titlebar: app)
+        #expect(rt.windowChromeInsets().height == 52)
+        #expect(rt.needsCommit, "the new band re-runs the view")
+        _ = rt.frame(at: 0.3)
+        #expect(seen.last.height == 52)
+
+        // No titlebar (the native frame stays): no band.
+        rt.syncWindowChrome(window: window, chrome: .standard, titlebar: nil)
+        #expect(rt.windowChromeInsets().height == 0)
+    }
+    #endif
 }
 
 private final class HostChromeRecorder: @unchecked Sendable {

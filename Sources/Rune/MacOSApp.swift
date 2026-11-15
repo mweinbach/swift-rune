@@ -228,7 +228,9 @@ public enum MacOSApp {
             windowHandle: windowHandle,
             minWindowSize: (minSz.x, minSz.y),
             maxWindowSize: opts.maxSize.map { ($0.x, $0.y) },
-            onReady: appBuilder.onReadyHook
+            onReady: appBuilder.onReadyHook,
+            chrome: appBuilder.chromeStyle,
+            titlebar: (appBuilder.chromeStyle.borderless || opts.borderless) ? nil : appBuilder.customTitlebar
         )
 
         let windowlessDriver = MacOSWindowlessDriver<State>(
@@ -322,6 +324,7 @@ public enum MacOSApp {
         window.delegate = delegate
         window.contentView = hostView
         window.center()
+        hostView.attachChromeSync()
 
         appBuilder.sharedHandle.shared.setWaker(waker)
         appBuilder.sharedHandle.shared.setVisible(windowlessDriver.isWindowShown)
@@ -460,6 +463,9 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let windowHandle: WindowHandle?
     private let onReady: ((WindowHandle) -> Void)?
     private var didFireReady: Bool = false
+    private let chromeStyle: Chrome
+    private let customTitlebar: Titlebar?
+    private var chromeWatch: WindowChromeWatch?
     private var lastFrameTime: Double = 0.0
     private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
@@ -502,8 +508,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         windowHandle: WindowHandle? = nil,
         minWindowSize: (Float, Float) = (WindowOptions.defaultMinSize.x, WindowOptions.defaultMinSize.y),
         maxWindowSize: (Float, Float)? = nil,
-        onReady: ((WindowHandle) -> Void)? = nil
+        onReady: ((WindowHandle) -> Void)? = nil,
+        chrome: Chrome = .standard,
+        titlebar: Titlebar? = nil
     ) {
+        self.chromeStyle = chrome
+        self.customTitlebar = titlebar
         self.runtime = runtime
         self.renderer = renderer
         self.timeScale = timeScale
@@ -583,7 +593,25 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else {
             runtime.setViewport(newVP, pixelScale: Float(scale))
         }
+        // Resized / ScaleFactorChanged re-sync the chrome (`window/events.rs`).
+        syncWindowChrome()
         renderTick()
+    }
+
+    /// `window/chrome.rs::sync_chrome` for this window's `App::chrome` and `App::titlebar`.
+    fileprivate func syncWindowChrome() {
+        guard let w = window else { return }
+        runtime.syncWindowChrome(window: w, chrome: chromeStyle, titlebar: customTitlebar)
+    }
+
+    /// Syncs the chrome now and again on full screen and uncovering (`window/sight.rs`).
+    fileprivate func attachChromeSync() {
+        guard let w = window else { return }
+        syncWindowChrome()
+        chromeWatch = WindowChromeWatch(window: w) { [weak self] in
+            self?.syncWindowChrome()
+            self?.requestRender()
+        }
     }
 
     func stopTimer() {
@@ -661,6 +689,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         let updateStart = CACurrentMediaTime()
         let renderFrame = runtime.renderFrame(at: t)
         let updateMs = (CACurrentMediaTime() - updateStart) * 1000.0
+        // A new `Cx::set_titlebar` / `Cx::titlebar_height` moves the traffic lights and the band
+        // (`window/lifecycle.rs` `take_titlebar_changed`); changed insets re-run the view next.
+        if runtime.takeTitlebarChanged(), window != nil {
+            syncWindowChrome()
+            DispatchQueue.main.async { [weak self] in self?.requestRender() }
+        }
 
         if let w = window {
             if !w.isOpaque && materialMode != .fallback && !renderFrame.materials.isEmpty {
