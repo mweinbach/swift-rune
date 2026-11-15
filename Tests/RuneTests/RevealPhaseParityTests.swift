@@ -8,6 +8,10 @@ import RuneRef
 @Suite("Reveal Phase Parity Tests")
 struct RevealPhaseParityTests {
     private static let length: Int = 5
+    /// The ignored deep run's depth: the same walk, one letter further.
+    private static let deep: Int = 6
+    /// Upstream `#[ignore = "the deep run"]`: opt in with `RUNE_REVEAL_DEEP=1`.
+    private static let deepRunEnabled: Bool = ProcessInfo.processInfo.environment["RUNE_REVEAL_DEEP"] != nil
     private static let fade: Float = 0.05
     private static let chunk: Int = 6
 
@@ -572,6 +576,15 @@ struct RevealPhaseParityTests {
     @Test("every short sequence of streaming events leaves what dev left")
     func everyShortSequenceOfStreamingEventsLeavesWhatDevLeft() {
         Self.walkAll(alphabet: Letter.allCases, depth: Self.length)
+    }
+
+    // The deep run: `RUNE_REVEAL_DEEP=1 xcrun swift test --no-parallel --filter everyDeeperSequence`.
+    @Test(
+        "every deeper sequence of streaming events leaves what dev left",
+        .enabled(if: RevealPhaseParityTests.deepRunEnabled, "the deep run (set RUNE_REVEAL_DEEP=1)")
+    )
+    func everyDeeperSequenceOfStreamingEventsLeavesWhatDevLeft() {
+        Self.walkAll(alphabet: Letter.allCases, depth: Self.deep)
     }
 
     @Test("a chunk fades its words and the chain follows")

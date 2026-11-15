@@ -11018,22 +11018,12 @@ public final class Runtime<State> {
 
     /// Tracks sampled in the last frame step (`Runtime::touched_tracks`).
     public func touchedTracks() -> [(path: String, prop: String, active: Bool)] {
-        let builtinNames = [
-            "opacity", "frame", "offset", "scale", "rotation", "blur",
-            "radius", "fill", "mask", "scroll", "presence", "travel",
-        ]
         var seen = Set<String>()
         var out: [(path: String, prop: String, active: Bool)] = []
-        for (track, node, prop) in scene.store.touchedTracks() {
-            let path = nodeById[node]?.path ?? "node:\(node.rawValue)"
-            let propName: String
-            let raw = Int(prop.rawValue)
-            if raw < builtinNames.count {
-                propName = builtinNames[raw]
-            } else {
-                propName = "prop:\(raw)"
-            }
-            let active = scene.store.isActive(track)
+        let sceneTracks = scene.store.touchedTracks().map { (track, node, prop) in
+            (path: nodeById[node]?.path ?? "node:\(node.rawValue)", prop: PropTraceName.name(prop), active: scene.store.isActive(track))
+        }
+        for (path, propName, active) in sceneTracks + liveTouchedTracks() {
             let dedupKey = "\(path)\u{0}\(propName)\u{0}\(active ? 1 : 0)"
             if seen.insert(dedupKey).inserted {
                 out.append((path, propName, active))
