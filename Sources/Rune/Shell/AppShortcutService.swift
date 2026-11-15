@@ -5,15 +5,9 @@ import Foundation
 /// Attachment state for an `App`'s shortcut routing (`machine.rs::Attachment`).
 internal enum ShortcutAttachmentState<Job> {
     case detached
+    /// `host` is the routed host's generation: the wake is its, and only it takes `jobs`.
     case attached(owner: ObjectIdentifier, wake: Waker, host: UInt64, jobs: [Job])
     case closed
-
-    var host: UInt64? {
-        if case .attached(_, _, let host, _) = self {
-            return host
-        }
-        return nil
-    }
 }
 
 internal enum ShortcutAttachEvent<Job> {

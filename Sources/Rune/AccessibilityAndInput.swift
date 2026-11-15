@@ -1740,6 +1740,13 @@ public final class ShortcutProcessClaims: @unchecked Sendable {
         defer { lock.unlock() }
         return claims.count
     }
+
+    /// The registration ids on record for `shortcut` (the process claim list, filtered by chord).
+    internal func claimedIDs(for shortcut: ParsedShortcut) -> [UInt32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return claims[shortcut].map { [$0.regID] } ?? []
+    }
 }
 
 /// Coordinates `ShortcutBindingsState`, backend connect/bind/unbind, and process-wide claim names (`shortcuts/service.rs:377`).

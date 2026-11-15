@@ -923,6 +923,10 @@ public final class Runtime<State> {
     public internal(set) var noWindowDragRects: [MotionRect] = []
     internal var activeByKeys: Bool = false
     internal var pendingSentKeys: [KeyEvent] = []
+    /// Arrival stamps of host-dispatched input and queued sent keys (`Tx.inputWaiting`).
+    internal var queuedInputArrivals = QueuedInputArrivals()
+    /// How many handler transactions have been applied, so `hostInput` can tell input that ran a handler.
+    internal var inputHandlerRuns: UInt64 = 0
     private struct MatchedSeenSnapshot {
         var id: NodeId
         var path: String
@@ -1753,6 +1757,9 @@ public final class Runtime<State> {
         skipFramePoll: Bool = false
     ) -> (animNow: Double, prevAnimNow: Double, growthMoving: Bool) {
         currentTime = now
+        // Each queued action runs with its own input's arrival time; nothing else has one (`frame.rs`).
+        let outerArrival = InputTime.swapArrival(nil)
+        defer { InputTime.swapArrival(outerArrival) }
         if !MediaPlaybackGate.isEnabled {
             HeadlessClock.set(now)
             Recorder.headlessFrame(clock: now)
@@ -1764,6 +1771,7 @@ public final class Runtime<State> {
         if !skipFramePoll {
             _ = runPoll(at: now)
         }
+        frameTookDispatchedInput()
         flushPlatformFrameWork(at: now)
         pollPlaygroundIfNeeded(at: now)
         applyPlaygroundIfNeeded(at: now)
@@ -11208,6 +11216,7 @@ public final class Runtime<State> {
         why: UInt16 = CommitWhy.input,
         runPicks: Bool = true
     ) {
+        inputHandlerRuns &+= 1
         var resolvedTx = tx
         if runPicks {
             runPickReads(&resolvedTx)
@@ -11508,6 +11517,7 @@ public final class Runtime<State> {
         latchClipboardRequests(tx)
         if !tx.sentKeys.isEmpty {
             pendingSentKeys.append(contentsOf: tx.sentKeys)
+            queuedInputArrivals.sentKeys.append(contentsOf: repeatElement(InputTime.arrival(), count: tx.sentKeys.count))
         }
         if tx.toggleMaximizedRequested {
             toggleMaximizedRequested = true
@@ -11643,6 +11653,7 @@ public final class Runtime<State> {
         RuntimeIdScope.$current.withValue(runtimeId) {
             guard let pollFn = poll else { return false }
             var tx = makeTx(at: now)
+            tx.isInputWaiting = queuedInputWaiting
             let changed: Bool = PerfWarn.Stall.timed("poll") {
                 if let scope = turnScope {
                     var res = false
@@ -12356,9 +12367,14 @@ public final class Runtime<State> {
     internal func flushPendingSentKeys(at now: Double) {
         guard !pendingSentKeys.isEmpty else { return }
         let queued = pendingSentKeys
+        let stamps = queuedInputArrivals.sentKeys
         pendingSentKeys.removeAll()
-        for ev in queued {
-            _ = keyDown(ev, isRepeat: false, at: now)
+        queuedInputArrivals.sentKeys.removeAll()
+        for (i, ev) in queued.enumerated() {
+            // Each runs under the stamp of the input that sent it, so what it sends keeps it.
+            InputTime.withArrival(i < stamps.count ? stamps[i] : nil) {
+                _ = keyDown(ev, isRepeat: false, at: now)
+            }
         }
     }
 

@@ -711,7 +711,9 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     private let accessibilityHost = MacOSAccessibilityHost()
     private lazy var textInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
-        if self.entry.dispatchImeEvent(runtimeObj: self.runtime, event: imeEvent, at: self.nowSeconds()) {
+        var dispatched = false
+        self.arrived(.keyPress, nil) { dispatched = self.entry.dispatchImeEvent(runtimeObj: self.runtime, event: imeEvent, at: self.nowSeconds()) }
+        if dispatched {
             self.requestRender()
         }
     }
@@ -952,18 +954,24 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         MacOSKeyMapper.mods(for: event)
     }
 
+    /// Dispatches `body` as the platform input `event` of `kind` (else AppKit's current event
+    /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
+    private func arrived(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> Void) {
+        entry.hostInput(runtimeObj: runtime, kind: kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseExited(with event: NSEvent) {
-        entry.pointerExit(runtimeObj: runtime, at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerExit(runtimeObj: runtime, at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerMove(runtimeObj: runtime, to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
@@ -977,22 +985,22 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             win.performDrag(with: event)
             return
         }
-        entry.pointerDown(runtimeObj: runtime, at: pt, button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerDown(runtimeObj: runtime, at: pt, button: .primary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func mouseUp(with event: NSEvent) {
-        entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        entry.pointerDown(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerDown(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { entry.pointerUp(runtimeObj: runtime, at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         requestRender()
     }
 
@@ -1005,7 +1013,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             precise: event.hasPreciseScrollingDeltas,
             mods: mods(for: event)
         )
-        entry.wheel(runtimeObj: runtime, event: wev, at: localPoint(for: event), now: nowSeconds())
+        arrived(.wheel, event) { entry.wheel(runtimeObj: runtime, event: wev, at: localPoint(for: event), now: nowSeconds()) }
         requestRender()
     }
 
@@ -1014,14 +1022,15 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         let imeAllowed = entry.hasImeTarget(runtimeObj: runtime) && !entry.hasSecureFocus(runtimeObj: runtime) && focused
         let optionAsAlt = imeAllowed && entry.imeOptionAsAlt(runtimeObj: runtime)
         if imeAllowed {
-            let imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt)
+            var imeResult: MacOSKeyInterceptResult = .forwardKeyDown
+            arrived(.keyPress, event) { imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt) }
             if imeResult == .handledByIME {
                 requestRender()
                 return
             }
         }
         guard let kev = MacOSKeyMapper.makeKeyEvent(from: event, optionAsAlt: optionAsAlt) else { return }
-        _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds())
+        arrived(.keyPress, event) { _ = entry.keyDownWithClipboardSync(runtimeObj: runtime, event: kev, at: nowSeconds()) }
         requestRender()
     }
 
@@ -1035,6 +1044,11 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
 
     override func flagsChanged(with event: NSEvent) {
+        arrived(.keyRelease, event) { dispatchFlagsChanged(event) }
+        requestRender()
+    }
+
+    private func dispatchFlagsChanged(_ event: NSEvent) {
         let now = nowSeconds()
         let fnTransitions = fnKeyMonitor.take()
         if !fnTransitions.isEmpty {
@@ -1052,7 +1066,6 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         } else {
             entry.dispatchModifiers(runtimeObj: runtime, mods: mods(for: event), at: now)
         }
-        requestRender()
     }
 
     // MARK: - NSTextInputClient

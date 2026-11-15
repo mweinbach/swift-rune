@@ -342,6 +342,8 @@ public protocol HostedWindowEntry: AnyObject {
     func relaunchRequested(runtimeObj: AnyObject) -> Bool
     func isAnimating(runtimeObj: AnyObject) -> Bool
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double)
+    /// Dispatches platform input `body` in the scope holding when it arrived (`Runtime.hostInput`).
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void)
     func pointerExit(runtimeObj: AnyObject, at: Double)
     func pointerDown(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
     func pointerUp(runtimeObj: AnyObject, at: Vec2, button: PointerButton, mods: Mods, at: Double)
@@ -604,6 +606,10 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
 
     func pointerMove(runtimeObj: AnyObject, to: Vec2, mods: Mods, at: Double) {
         rt(runtimeObj).pointerMove(to: to, mods: mods, at: at)
+    }
+
+    func hostInput(runtimeObj: AnyObject, kind: HostInputKind, eventTimestamp: Double?, _ body: () -> Void) {
+        rt(runtimeObj).hostInput(kind, eventTimestamp: eventTimestamp, body)
     }
 
     func pointerExit(runtimeObj: AnyObject, at: Double) {
