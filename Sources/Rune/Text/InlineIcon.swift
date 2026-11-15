@@ -575,6 +575,12 @@ private extension Array {
 
 extension TextSystem {
     /// Emits shaped background boxes, pill chip backgrounds/rings/icons, bare inline icons, and underlines/strikethroughs.
+    ///
+    /// Upright at its own size, each decoration rounds to whole device pixels where it lands, as
+    /// `decorations.rs` rounds them at their absolute place, against its line's baseline as the
+    /// glyphs round it (`roundedBaselines`, #935); a glide (`glideOffPx`, device px from where the
+    /// text lays out to where it is) moves them after. An underline's edges always come from
+    /// `underline_edges` (`decorations.rs:134`, #963).
     internal func emitTextDecorationsAndPills(
         shaped: ShapedText,
         textOriginX: Float,
@@ -587,20 +593,25 @@ extension TextSystem {
         devClip: SIMD4<Float>,
         rot: Float,
         spanRadius: Float = TextDecorations.spanRadius,
+        roundedBaselines: [Float] = [],
+        glideOffPx: SIMD2<Float> = .zero,
         insertImage: (RGBA8Atlas) -> SIMD4<Float>,
         into primitives: inout [Primitive]
     ) {
+        let place = TextDecorationPlacement(
+            shaped: shaped,
+            textOrigin: SIMD2<Float>(textOriginX, textOriginY),
+            scale: SIMD2<Float>(scaleVec.x, scaleVec.y),
+            pxScale: pxScale,
+            roundedBaselines: roundedBaselines,
+            glideOffPx: glideOffPx
+        )
         for (bgRect, bgColor) in shaped.backgrounds {
             let col = bgColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
             if col.w <= 0.0005 { continue }
             let clampedRadius = min(max(0, spanRadius), bgRect.w * 0.5)
             primitives.append(.roundedRect(
-                rect: SIMD4<Float>(
-                    (textOriginX + bgRect.x * scaleVec.x) * pxScale,
-                    (textOriginY + bgRect.y * scaleVec.y) * pxScale,
-                    bgRect.z * scaleVec.x * pxScale,
-                    bgRect.w * scaleVec.y * pxScale
-                ),
+                rect: place.edges(bgRect),
                 radii: SIMD4<Float>(repeating: clampedRadius * pxScale),
                 fill: col,
                 clip: devClip,
@@ -614,12 +625,7 @@ extension TextSystem {
             let ringCol = chip.ring.map { $0.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) } ?? .zero
             let ringW = (chip.ring?.width ?? 0) * pxScale
             primitives.append(.roundedRect(
-                rect: SIMD4<Float>(
-                    (textOriginX + chip.rect.x * scaleVec.x) * pxScale,
-                    (textOriginY + chip.rect.y * scaleVec.y) * pxScale,
-                    chip.rect.z * scaleVec.x * pxScale,
-                    chip.rect.w * scaleVec.y * pxScale
-                ),
+                rect: place.edges(chip.rect),
                 radii: SIMD4<Float>(repeating: chip.cornerRadius * pxScale),
                 fill: chipCol,
                 borderColor: ringCol,
@@ -632,12 +638,7 @@ extension TextSystem {
                 let entry = glyphAtlas.rasterizeIcon(svg, pixelSize: pxSize)
                 let tint = (chip.iconColor ?? defaultTextColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                 primitives.append(.glyph(
-                    rect: SIMD4<Float>(
-                        (textOriginX + ir.x * scaleVec.x) * pxScale,
-                        (textOriginY + ir.y * scaleVec.y) * pxScale,
-                        ir.z * scaleVec.x * pxScale,
-                        ir.w * scaleVec.y * pxScale
-                    ),
+                    rect: place.origin(ir),
                     uv: entry.uv,
                     color: tint,
                     gamma: 1.0,
@@ -648,12 +649,7 @@ extension TextSystem {
         }
 
         for inline in shaped.inlineIcons {
-            let devRect = SIMD4<Float>(
-                (textOriginX + inline.rect.x * scaleVec.x) * pxScale,
-                (textOriginY + inline.rect.y * scaleVec.y) * pxScale,
-                inline.rect.z * scaleVec.x * pxScale,
-                inline.rect.w * scaleVec.y * pxScale
-            )
+            let devRect = place.origin(inline.rect)
             if let img = inline.image {
                 let uv = insertImage(img)
                 let tint = Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
@@ -682,14 +678,9 @@ extension TextSystem {
 
         let lineColor = defaultTextColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
         if lineColor.w > 0.0005 {
-            for u in shaped.underlines {
+            for (i, u) in shaped.underlines.enumerated() {
                 primitives.append(.roundedRect(
-                    rect: SIMD4<Float>(
-                        (textOriginX + u.x * scaleVec.x) * pxScale,
-                        (textOriginY + u.y * scaleVec.y) * pxScale,
-                        u.z * scaleVec.x * pxScale,
-                        u.w * scaleVec.y * pxScale
-                    ),
+                    rect: place.underline(u, lineEndPt: i < shaped.underlineLineEndsPt.count ? shaped.underlineLineEndsPt[i] : nil),
                     fill: lineColor,
                     clip: devClip,
                     turn: rot
@@ -697,12 +688,7 @@ extension TextSystem {
             }
             for st in shaped.strikethroughs {
                 primitives.append(.roundedRect(
-                    rect: SIMD4<Float>(
-                        (textOriginX + st.x * scaleVec.x) * pxScale,
-                        (textOriginY + st.y * scaleVec.y) * pxScale,
-                        st.z * scaleVec.x * pxScale,
-                        st.w * scaleVec.y * pxScale
-                    ),
+                    rect: place.line(st),
                     fill: lineColor,
                     clip: devClip,
                     turn: rot

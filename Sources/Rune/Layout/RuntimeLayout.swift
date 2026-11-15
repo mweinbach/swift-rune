@@ -152,7 +152,8 @@ final class RetainedLayoutCoordinator {
                     ))
                 }
                 let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
-                    let shapeW = resolved.measureWidth(maxW)
+                    // Wraps at `w * scale + FIT_SLACK` device px, as every text node lays out (#948).
+                    let shapeW = TextBoxGeometry.wrapWidth(resolved.measureWidth(maxW), scale: scale)
                     let box = textSystem.layoutKeyed(
                         text: measureStr,
                         spans: resolved.spans,
@@ -230,9 +231,17 @@ final class RetainedLayoutCoordinator {
                 }
                 let fn: (Float?, Bool) -> Vec2 = { maxW, isRealLayout in
                     if resolved.truncateFade || resolved.advanceRun != nil || isClampedOrEllipsis {
-                        return resolved.measure(using: textSystem, maxWidth: maxW, pixelScale: scale)
+                        // Every text wraps at `w * scale + FIT_SLACK` device px; a truncated or clamped
+                        // one is no wider than its room (`compute_layout`: `lw.min(a)`, #948).
+                        var sz = resolved.measure(using: textSystem, maxWidth: TextBoxGeometry.wrapWidth(maxW, scale: scale), pixelScale: scale)
+                        if resolved.advanceRun == nil, let mw = maxW, mw.isFinite {
+                            sz.x = min(sz.x, max(0, mw))
+                        }
+                        return sz
                     }
-                    let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : maxW
+                    // A text laid out again in its own box fits: it wraps at `w * scale + FIT_SLACK`
+                    // device px (`compute_layout` / `relayout::lay_out_text`, #948).
+                    let shapeMaxW: Float? = (resolved.style.wrap == .noWrap && resolved.style.maxLines == 0) ? nil : TextBoxGeometry.wrapWidth(maxW, scale: scale)
                     let hasSpans = (resolved.spans?.isEmpty == false)
                     let box = textSystem.layoutKeyed(
                         text: hasSpans ? "" : resolved.displayedText,

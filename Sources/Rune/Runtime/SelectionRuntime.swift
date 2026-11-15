@@ -745,8 +745,10 @@ internal extension Runtime {
         let sc = preferLayoutRects ? Vec2(1, 1) : (presentedScaleByPath[node.path] ?? Vec2(1, 1))
         let innerW = max(0, rect.width - (node.el.layout.padding.left + node.el.layout.padding.right) * sc.x)
         let resolvedText = ElDisplayResolver.resolveText(el: node.el, rawText: displayText, isSecure: false)
-        let isClamped = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
-        let wrapWidth = isClamped ? (innerW / max(1e-4, sc.x)) : ((innerW / max(1e-4, sc.x)) + 0.5)
+        // A text wraps at its layout width, `w * scale + FIT_SLACK` device px, as it laid out and
+        // paints (`relayout::lay_out_text`, #948).
+        let layoutInnerW = max(0, node.targetRect.width - node.el.layout.padding.left - node.el.layout.padding.right)
+        let wrapWidth = TextBoxGeometry.wrapWidth(layoutInnerW, scale: pixelScale)!
         let shaped = resolvedText.shape(
             using: textSystem,
             maxWidth: wrapWidth,
@@ -1260,11 +1262,12 @@ internal extension Runtime {
                         )
                         for r in markRects {
                             primitives.append(.roundedRect(
-                                rect: SIMD4<Float>(
-                                    (textOriginX + r.x * scaleVec.x) * pxScale,
-                                    (textOriginY + r.y * scaleVec.y) * pxScale,
-                                    r.z * scaleVec.x * pxScale,
-                                    r.w * scaleVec.y * pxScale
+                                // Its edges on the device grid wherever the text's origin falls (`text_marks::pixel_rect`, #935).
+                                rect: TextBoxGeometry.pixelRect(
+                                    origin: SIMD2<Float>(textOriginX, textOriginY),
+                                    box: r,
+                                    k: SIMD2<Float>(scaleVec.x, scaleVec.y),
+                                    pxScale: pxScale
                                 ),
                                 radii: .zero,
                                 fill: markColor,
@@ -1292,11 +1295,12 @@ internal extension Runtime {
         for r in lineRects {
             SelectionRunExtender.appendHighlight(
                 into: &primitives,
-                rect: SIMD4<Float>(
-                    (textOriginX + r.x * scaleVec.x) * pxScale,
-                    (textOriginY + r.y * scaleVec.y) * pxScale,
-                    r.z * scaleVec.x * pxScale,
-                    r.w * scaleVec.y * pxScale
+                // Its edges on the device grid wherever the text's origin falls (`text_marks::pixel_rect`, #935).
+                rect: TextBoxGeometry.pixelRect(
+                    origin: SIMD2<Float>(textOriginX, textOriginY),
+                    box: r,
+                    k: SIMD2<Float>(scaleVec.x, scaleVec.y),
+                    pxScale: pxScale
                 ),
                 fill: hlColor,
                 radius: radiusPx,
