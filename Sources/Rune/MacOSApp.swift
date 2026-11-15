@@ -246,7 +246,9 @@ public enum MacOSApp {
             onShowWindow: { [weak window, weak hostView] in
                 guard let window, let hostView else { return }
                 if openInactive {
-                    window.orderFront(nil)
+                    // Unfocused (`App::open_inactive`, `RUNE_OPEN_INACTIVE`): ordered front without
+                    // becoming key or activating the app (`platform/macos.rs` `show_without_focus`).
+                    window.orderFrontRegardless()
                 } else {
                     window.makeKeyAndOrderFront(nil)
                     window.makeFirstResponder(hostView)
@@ -360,7 +362,9 @@ public enum MacOSApp {
             windowlessDriver.start()
         } else {
             if openInactive {
-                window.orderFront(nil)
+                // Unfocused (`App::open_inactive`, `RUNE_OPEN_INACTIVE`): ordered front without
+                // becoming key or activating the app (`platform/macos.rs` `show_without_focus`).
+                window.orderFrontRegardless()
             } else {
                 window.makeKeyAndOrderFront(nil)
                 window.makeFirstResponder(hostView)
