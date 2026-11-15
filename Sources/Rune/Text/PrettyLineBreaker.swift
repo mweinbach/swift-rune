@@ -14,6 +14,9 @@ import CoreText
 /// opportunity at a box's position breaks before the box. `wrapAnywhere` text is scored too, but a
 /// paragraph with a word broken inside to fit (Parley's `BreakReason::Emergency`) keeps its greedy
 /// lines, as Blink turns the score breaker off once a line overflows (`RetryAfterOverflow`).
+///
+/// `#1023`: a paragraph with a line that holds no text, only an inline box, keeps its greedy
+/// breaks (nothing can slice such a line).
 public enum PrettyLineBreaker {
     /// Maximum trailing lines of a paragraph considered by `ScoreLineBreaker::Optimize`.
     private static let maxLines = 4
@@ -60,7 +63,13 @@ public enum PrettyLineBreaker {
         boxU16: Set<Int> = []
     ) -> [Int: CGFloat]? {
         let n = lines.count
-        guard n >= 2, !lines.contains(where: { $0.hasRTLRun }) else { return nil }
+        // `#1023`: a line that holds no text (only an inline box) reports an empty range at
+        // `usize::MAX` in Parley: nothing here can slice such a line, so keep the greedy breaks.
+        // The shaped text here carries each box as a placeholder unit, so a line whose units are
+        // all box positions is that line.
+        guard n >= 2,
+              lines.allSatisfy({ isSliceable($0, in: shapedNS, boxU16: boxU16) }),
+              !lines.contains(where: { $0.hasRTLRun }) else { return nil }
         guard scale > 0, maxWidthPx > 0 else { return nil }
         // A word broken inside to fit (`wrap_anywhere`'s overflow-wrap) keeps the greedy lines: Blink
         // turns the score breaker off once a line overflows and breaks again (`RetryAfterOverflow`).
@@ -162,6 +171,17 @@ public enum PrettyLineBreaker {
         #else
         return nil
         #endif
+    }
+
+    /// Upstream's `sliceable` (`#1023`): a line's range is a valid slice of the text
+    /// (`start <= end && end <= text.len`) and the line holds text, not only inline boxes (Parley
+    /// gives a box-only line an empty range at `usize::MAX`, which fails the bounds check).
+    internal static func isSliceable(_ line: GreedyLineInfo, in shapedNS: NSString, boxU16: Set<Int>) -> Bool {
+        guard line.u16Start >= 0, line.u16Start <= line.u16End, line.u16End <= shapedNS.length else { return false }
+        if line.u16End > line.u16Start, (line.u16Start..<line.u16End).allSatisfy({ boxU16.contains($0) }) {
+            return false
+        }
+        return true
     }
 
     /// Optimal line breaks using Blink's DP (`ComputeScores` / `ComputeBreakPoints`).
