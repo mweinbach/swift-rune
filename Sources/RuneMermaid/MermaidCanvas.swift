@@ -337,6 +337,15 @@ struct Canvas {
     }
 }
 
+/// Text highlights for a drawn label, by its element key (upstream `canvas::Marks`).
+typealias MermaidMarks = (String) -> [TextHighlight]
+
+/// `el` with `marks(key)` applied as text highlights, or untouched without marks (`canvas::marked`).
+func mermaidMarked<State>(_ el: El<State>, _ key: String, _ marks: MermaidMarks?) -> El<State> {
+    if let paint = marks { return el.textHighlights(paint(key)) }
+    return el
+}
+
 struct MermaidScene: @unchecked Sendable {
     var title: String?
     var size: Vec2
@@ -373,35 +382,36 @@ struct MermaidScene: @unchecked Sendable {
         if size.x > Canvas.room(for: paint) + 0.5 {
             card = card.clipFade(left: CanvasConstants.cardPad, top: 0, right: CanvasConstants.cardPad, bottom: 0)
         }
-        if let titleEl: El<State> = makeTitleEl(paint: paint, streaming: streaming) {
+        if let titleEl: El<State> = makeTitleEl(paint: paint, streaming: streaming, marks: nil) {
             card = card.gap(CanvasConstants.titleGap).child(titleEl)
         }
-        return card.child(diagramEl(streaming: streaming))
+        return card.child(diagramEl(streaming: streaming, marks: nil))
     }
 
-    func drawing<State>(paint: MermaidTheme) -> (El<State>, Vec2) {
+    func drawing<State>(paint: MermaidTheme, marks: MermaidMarks? = nil) -> (El<State>, Vec2) {
         var sz = size
         var out = col() as El<State>
         out = out.itemsCenter()
-        if let titleEl: El<State> = makeTitleEl(paint: paint, streaming: false), let t = title {
+        if let titleEl: El<State> = makeTitleEl(paint: paint, streaming: false, marks: marks), let t = title {
             let m = measureText(t, font: titleFont(paint)).size
             sz = Vec2(max(sz.x, m.x + 2.0), sz.y + m.y + CanvasConstants.titleGap)
             out = out.gap(CanvasConstants.titleGap).child(titleEl)
         }
-        return (out.child(diagramEl(streaming: false)), sz)
+        return (out.child(diagramEl(streaming: false, marks: marks)), sz)
     }
 
-    private func makeTitleEl<State>(paint: MermaidTheme, streaming: Bool) -> El<State>? {
+    private func makeTitleEl<State>(paint: MermaidTheme, streaming: Bool, marks: MermaidMarks?) -> El<State>? {
         guard let title else { return nil }
         let still: Transition = streaming ? .opacity : .none
-        return text(title)
+        let t: El<State> = text(title)
             .key("title")
             .font(titleFont(paint))
             .color(paint.text)
             .transition(still)
+        return mermaidMarked(t, "title", marks)
     }
 
-    private func diagramEl<State>(streaming: Bool) -> El<State> {
+    private func diagramEl<State>(streaming: Bool, marks: MermaidMarks?) -> El<State> {
         let still: (Transition) -> Transition = { streaming ? $0 : .none }
         var body = Rune.el() as El<State>
         body = body.key("fit").absolute(x: 0, y: 0).size(size.x, size.y).transition(.none)
@@ -416,7 +426,7 @@ struct MermaidScene: @unchecked Sendable {
         }
         for (l, lk) in zip(labels, labelKeys) {
             let (enter, delay) = lk.kind?.labelEnter ?? (.opacity, 0.0)
-            var t = makeLabel(l, color: l.color)
+            var t = mermaidMarked(makeLabel(l, color: l.color), lk.key, marks)
                 .absolute(x: 0, y: 0)
                 .offset((l.at.x - 1.0) * scale, l.at.y * scale)
                 .origin(0.0, 0.0)
@@ -447,8 +457,9 @@ struct MermaidScene: @unchecked Sendable {
             var glowChildren: [El<State>] = []
             for i in s.labels where i >= 0 && i < labels.count {
                 let l = labels[i]
+                // A hover copy carries the same marks as the label underneath it.
                 glowChildren.append(
-                    makeLabel(l, color: lit)
+                    mermaidMarked(makeLabel(l, color: lit), labelKeys[i].key, marks)
                         .absolute(x: 0, y: 0)
                         .offset(l.at.x - 1.0, l.at.y)
                         .key("t\(i)")

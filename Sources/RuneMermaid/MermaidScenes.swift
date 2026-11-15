@@ -7,9 +7,23 @@ enum MermaidScenes {
     private static let cacheLen = 16
     private static let maxHeldLines = 64
 
+    /// A built scene shared by reference, as upstream's `Rc<Scene>`: every cache hit hands out
+    /// the same instance, so `MermaidDrawingModel.sameLayout` can compare identity.
+    final class Shared: Sendable {
+        let scene: MermaidScene
+        init(_ scene: MermaidScene) { self.scene = scene }
+    }
+
     struct Built: Sendable {
-        var scene: MermaidScene?
+        var shared: Shared?
         var memory: SteadyMemory?
+
+        var scene: MermaidScene? { shared?.scene }
+
+        init(scene: MermaidScene?, memory: SteadyMemory?) {
+            self.shared = scene.map(Shared.init)
+            self.memory = memory
+        }
     }
 
     private final class Cache: @unchecked Sendable {
