@@ -1308,9 +1308,12 @@ public struct App<State> {
 
     /// Creates a headless `Runtime<State>` matching upstream `App::headless_runtime`,
     /// attaching `playgroundHost` if enabled without reading command-line flags.
+    /// `processEnvironment`: where the capture presets are read (`RUNE_CONTRAST`,
+    /// `RUNE_INCREASE_CONTRAST`), the process's own by default.
     public func headlessRuntime(
         size viewportSize: Vec2? = nil,
-        env: Env = Env()
+        env: Env = Env(),
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Runtime<State> {
         HeadlessRunner.registerFonts(fontData)
         let runtime = makeRuntime(
@@ -1320,6 +1323,9 @@ public struct App<State> {
             reducedMotion: false,
             waker: Waker()
         )
+        // `tooling::runtime_for` (which `App::headless_runtime` builds through): the capture
+        // presets, never the machine's own settings, so runs stay reproducible (#981).
+        runtime.applyCapturePresets(processEnvironment)
         let resolvedChrome = customTitlebar?.macChrome(chromeStyle) ?? chromeStyle
         if resolvedChrome.fullSizeContent && !(windowOptionsValue.borderless || chromeStyle.borderless) {
             runtime.cxSettings.titlebarInset = resolvedChrome.titlebarInset()

@@ -260,6 +260,41 @@ struct UpA11yPlatformParityTests {
         #expect(host.lastSpoken.map(\.text) == ["Saved"])
     }
 
+    /// The stamp's `announced` (`a11y/tree.rs`): words from a live-only handler, which commit
+    /// nothing, still change the stamp, so the live host updates and speaks them at once.
+    @MainActor
+    @Test func liveOnlyAnnouncementChangesTheStampWithoutACommit() throws {
+        let rt = Runtime(state: 0, viewport: Vec2(300, 200), pixelScale: 1.0) { (_: Int, _: inout Cx<Int>) in
+            col().children([el().key("ok").role(.button).focusable().size(80, 30)])
+        }
+        _ = rt.frame(at: 0.0)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let host = MacOSAccessibilityHost()
+        #expect(!host.announcementChanged(rt.a11yAnnouncement), "nothing said yet")
+        host.update(tree: rt.accessibilitySnapshot(), announcement: rt.a11yAnnouncement, now: 10, parentView: view) { _, _ in }
+
+        let commits = rt.viewCommitCount
+        rt.update(at: 0.01) { _, tx in
+            tx.liveOnly()
+            tx.announce("Copied")
+        }
+        _ = rt.frame(at: 0.02)
+        #expect(rt.viewCommitCount == commits, "a live-only handler commits nothing")
+        #expect(host.announcementChanged(rt.a11yAnnouncement), "the stamp's announced count changed")
+        let said = try #require(rt.a11yAnnouncement.at)
+        #expect(!host.update(tree: rt.accessibilitySnapshot(), announcement: rt.a11yAnnouncement, now: said, parentView: view) { _, _ in })
+        #expect(host.lastSpoken.map(\.text) == ["Copied"])
+        #expect(host.sentAnnouncementCount == rt.a11yAnnouncement.count)
+        #expect(!host.announcementChanged(rt.a11yAnnouncement), "sent: the stamp matches again")
+
+        // The same words again are a new announcement (the count, not the text).
+        rt.update(at: 0.03) { _, tx in
+            tx.liveOnly()
+            tx.announce("Copied")
+        }
+        #expect(host.announcementChanged(rt.a11yAnnouncement))
+    }
+
     @MainActor
     @Test func liveMacHostSaysNothingOfOldWordsInAWholeTree() throws {
         let rt = Runtime(state: 0, viewport: Vec2(300, 200), pixelScale: 1.0) { (_: Int, _: inout Cx<Int>) in
@@ -357,6 +392,22 @@ struct UpA11yPlatformParityTests {
         rt.applyCapturePresets([:])
         #expect(rt.systemContrast() == nil)
         #expect(!rt.systemIncreasedContrast())
+    }
+
+    /// `App::headless_runtime` builds through `tooling::runtime_for`, which applies the presets.
+    @MainActor
+    @Test func appHeadlessRuntimeAppliesTheCapturePresets() {
+        let app = App<Int>("presets", size: Vec2(200, 100), init: { 0 }, view: { _, _ in el().size(10, 10) })
+        let env = Env(systemDark: false, scale: 1.0)
+        let themed = app.headlessRuntime(
+            size: Vec2(200, 100), env: env,
+            processEnvironment: ["RUNE_CONTRAST": "desert", "RUNE_INCREASE_CONTRAST": "1"]
+        )
+        #expect(themed.systemContrast() == SystemContrast.preset(named: "desert"))
+        #expect(themed.systemIncreasedContrast())
+        let plain = app.headlessRuntime(size: Vec2(200, 100), env: env, processEnvironment: ["RUNE_INCREASE_CONTRAST": "true"])
+        #expect(plain.systemContrast() == nil)
+        #expect(!plain.systemIncreasedContrast(), "exactly 1")
     }
 
     // MARK: - #962 RUNE_OPEN_INACTIVE

@@ -466,6 +466,15 @@ public final class MacOSAccessibilityHost {
     public var onActivate: (@MainActor () -> Void)?
     /// What the last update asked VoiceOver to say (`announcementRequested`), in order.
     public private(set) var lastSpoken: [(text: String, politeness: LiveRegionPoliteness)] = []
+    /// How many times the announcer had been told to speak at the last update (the `Stamp`'s
+    /// `announced: self.announcement.said()`, `a11y/tree.rs`).
+    public private(set) var sentAnnouncementCount: UInt32 = 0
+
+    /// `Tx::announce` was called since the last update: the stamp changed, so the tree goes out
+    /// although the view did not re-commit (a `Tx::live_only()` handler's words, #980).
+    public func announcementChanged(_ announcement: AccessibilityAnnouncement) -> Bool {
+        announcement.count != sentAnnouncementCount
+    }
 
     public init() {}
 
@@ -499,6 +508,7 @@ public final class MacOSAccessibilityHost {
         previousTree = tree
         var announcer: AccessibilityNode? = nil
         if let announcement {
+            sentAnnouncementCount = announcement.count
             let full = treeState.diff(root: tree, windowTitle: "", announcement: announcement, now: now)?.isFullTree ?? false
             let node = AccessibilityTreeState.announcerNode(announcement, holdWords: treeState.held)
             // Its words are a change a reader announces; a whole tree's are not.

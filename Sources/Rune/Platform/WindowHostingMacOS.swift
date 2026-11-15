@@ -914,7 +914,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
             }
         }
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
+        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+        syncPlatformBridges(
+            treeCommitted: !didInitialA11ySync || a11yFollowUp
+                || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
+                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
+        )
 
         if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
             if displayLinkDriver == nil {

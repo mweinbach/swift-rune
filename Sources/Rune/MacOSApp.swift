@@ -849,7 +849,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             devStatsReceiver?(stats)
         }
         pumpPlatformActions()
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore)
+        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+        syncPlatformBridges(
+            treeCommitted: !didInitialA11ySync || a11yFollowUp || runtime.viewCommitCount != commitsBefore
+                || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
+        )
 
         if isAnim {
             if displayLinkDriver == nil {
