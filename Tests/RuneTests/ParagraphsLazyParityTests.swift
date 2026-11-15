@@ -269,6 +269,76 @@ struct ParagraphsLazyParityTests {
         #expect((rt.animSources & AnimSource.textFill) == 0)
     }
 
+    struct RichS {
+        var field: TextEdit = {
+            var e = TextEdit("", multiline: true)
+            e.isRichEnabled = true
+            return e
+        }()
+    }
+
+    @Test("a rich field with no marks lays out by paragraph and a long paste's lines wait (blocks all paragraphs)")
+    func richFieldLongPasteWaits() throws {
+        let rt = Runtime(state: RichS(), viewport: Vec2(400, 300), pixelScale: 2.0) { _, _ in
+            col().size(400, 300)
+                .child(textInput(key: "field", \RichS.field).font(Self.style).size(400, 300))
+        }
+        _ = rt.frame(at: 0.0)
+        rt.update { _, tx in tx.focus("field") }
+        _ = rt.frame(at: 0.0)
+        let n = ParagraphConstants.lazyMin * 10
+        // A rich field reads the clipboard's rich flavours first; the paste lands through its edit.
+        rt.update { s, _ in s.field.paste(Self.pasteLines(n)) }
+        #expect(rt.state.field.text == Self.pasteLines(n))
+        #expect(rt.state.field.isRichEnabled)
+        // The rich resolve shows one `.paragraph` block per line.
+        let el = textInput(key: "field", \RichS.field).font(Self.style)
+        let resolved = ElDisplayResolver.resolveInput(el: el, edit: rt.state.field, innerWidth: 400)
+        #expect(resolved.isRich)
+        #expect(resolved.blocks.count == n)
+        #expect(resolved.blocks.allSatisfy { $0 == .paragraph })
+        // Laid out without a frame's fill: the lines away from the paste's ends wait in runs.
+        let ts = TextSystem()
+        let request = try #require(Runtime<RichS>.paragraphRequest(field: NodeId(1), el: el, edit: rt.state.field, resolved: resolved))
+        let pl = try #require(ts.layoutInput(text: resolved.renderedString, spans: resolved.spans, pills: resolved.pills, style: resolved.style, maxWidth: 400, pixelScale: 2, emitGlyphs: false, request: request).paragraphs)
+        #expect(pl.waiting)
+        #expect(pl.paragraphs.filter { $0.shaped }.count == ParagraphConstants.eagerStart + ParagraphConstants.eagerEnd)
+        #expect(pl.waitingLines == n - ParagraphConstants.eagerStart - ParagraphConstants.eagerEnd)
+        // In the runtime the field holds a by-paragraph layout and fills it over frames.
+        _ = rt.frame(at: 0.016)
+        let box = try #require(rt.nodeTextLayouts.first { $0.value.isInput }?.value.box)
+        #expect(box.paragraphs != nil)
+        // A block that isn't a paragraph keeps one layout (blocks aren't ported to paragraphs).
+        var quoted = resolved
+        quoted.blocks[0] = .quote
+        #expect(Runtime<RichS>.paragraphRequest(field: NodeId(1), el: el, edit: rt.state.field, resolved: quoted) == nil)
+    }
+
+    @Test("a commit's end forgets its last layout and keeps stale layouts within STALE_BYTES")
+    func commitEndForgetsLastAndEvictsStale() throws {
+        let ts = TextSystem()
+        let style = Self.wrapped(Self.style)
+        _ = ts.layoutInput(text: "a\nb", spans: nil, pills: [], style: style, maxWidth: 300, pixelScale: 1, emitGlyphs: false, request: Self.request(11))
+        #expect(ts.paragraphState.lastParagraphs != nil)
+        ts.endCommit()
+        #expect(ts.paragraphState.lastParagraphs == nil)
+        #expect(ParagraphState.staleBytes == 3 << 20)
+        // `evict_to`: stale entries past the budget go oldest first; the last two commits' stay.
+        let laid = try #require(ts.paragraphState.cache.values.first?.layout)
+        var cache: [UInt64: ParagraphCacheEntry] = [:]
+        for (k, used) in [(1, 10), (2, 9), (3, 7), (4, 5)] as [(UInt64, UInt64)] {
+            var e = ParagraphCacheEntry(laid, used: used, textLen: 0)
+            e.cost = 100
+            cache[k] = e
+        }
+        ParagraphState.evict(&cache, 10, budget: 150)
+        // Ages 0 and 1 aren't stale; of the stale (ages 3 and 5) only the younger fits.
+        #expect(Set(cache.keys) == [1, 2, 3])
+        ParagraphState.evict(&cache, 10, budget: 0)
+        #expect(Set(cache.keys) == [1, 2])
+        #expect(ParagraphCacheEntry(laid, used: 0, textLen: 10).cost == 10 * 64 + 2048)
+    }
+
     @Test("a caret key or a press near waiting lines shapes them first; typing does not")
     func caretKeyAndPressFillNearRows() throws {
         #expect(Runtime<S>.readsTextLayout(KeyEvent(key: .arrowUp)))

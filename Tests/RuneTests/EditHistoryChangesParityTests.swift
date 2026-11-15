@@ -48,7 +48,9 @@ struct EditHistoryChangesParityTests {
         #expect(e.text == "" && e.anchor == 0 && e.cursor == 0)
         e.redo()
         #expect(e.text == "hé🙂" && e.anchor == 7 && e.cursor == 7)
-        e.setSelectionRaw(anchor: 3, cursor: 1)
+        _ = e.handleKey(KeyEvent(key: .arrowLeft))
+        _ = e.handleKey(KeyEvent(key: .arrowLeft, mods: Mods(shift: true)))
+        #expect(e.anchor == 3 && e.cursor == 1)
         e.paste("界\r\n日")
         #expect(e.text == "h界\n日🙂")
         e.undo()
@@ -189,6 +191,21 @@ struct EditHistoryChangesParityTests {
         var single = TextEdit("")
         single.paste("x\ny")
         #expect(single.text == "xy")
+    }
+
+    /// `history.rs` `Meta::bytes` / `Change::bytes`: marks at `size_of::<MarkRange>()` (40), blocks
+    /// at `size_of::<Block>()` (2) and soft breaks at `size_of::<u32>()` (4), plus the texts.
+    @Test("a step's bytes count marks, blocks and soft breaks at upstream's sizes")
+    func stepBytesMatchUpstreamSizes() {
+        let meta = TextEdit.HistoryMeta(
+            anchor: 0, cursor: 0, marks: [],
+            richMarks: [RichMarkRange(start: 0, end: 1, mark: .bold), RichMarkRange(start: 1, end: 2, mark: .italic)],
+            blocks: [.paragraph, .quote, .paragraph],
+            softBreaks: [3]
+        )
+        #expect(meta.byteCost == 2 * 40 + 3 * 2 + 1 * 4)
+        let change = TextEdit.HistoryChange(at: 0, removed: "ab", inserted: "xyz", lens: (2, 3), before: meta, after: meta)
+        #expect(change.byteCost == 2 + 3 + 2 * meta.byteCost)
     }
 
     /// `edit/tests.rs::paste_keeps_single_line_fields_on_one_line`.

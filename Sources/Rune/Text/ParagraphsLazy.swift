@@ -152,6 +152,10 @@ extension TextSystem {
     /// come from one font run, whose one line is then not every ASCII line's (`ascii_line`).
     internal func asciiLine(style: TextStyle, scale: Float) -> AsciiLine? {
         let st = paragraphState
+        // Reached directly too (not only through `layoutParagraphs`/`fillParagraphs`): it takes
+        // the state's lock itself (recursive, so a caller holding it is fine).
+        st.lock.lock()
+        defer { st.lock.unlock() }
         let key = paragraphStyleKey(style, scale: scale)
         if let m = st.ascii[key] { return m }
         var sample = ""
@@ -244,7 +248,7 @@ extension TextSystem {
         let left = paragraphs.contains { !$0.shaped }
         let built = ParagraphLayout(paragraphs: paragraphs, width: width, fullWidth: fullWidth, height: Float(y), maxWidth: laid.maxWidth, align: laid.align, whole: laid.whole, keyed: laid.keyed, lazy: left ? lazy : nil, content: laid.content, style: laid.style, scale: laid.scale, forced: laid.forced, baseFont: laid.baseFont)
         let g = st.generation
-        st.cache[lazy.cacheKey] = (built, g)
+        st.cache[lazy.cacheKey] = ParagraphCacheEntry(built, used: g, textLen: built.paragraphs.count * ParagraphState.paragraphRecordBytes / 64)
         if let l = st.lastParagraphs, l === laid { st.lastParagraphs = built }
         if let field, let f = st.fields[field], f.layout === laid { st.fields[field] = (built, g) }
         return (built, moved)

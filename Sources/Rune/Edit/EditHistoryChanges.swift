@@ -19,11 +19,20 @@ extension TextEdit {
             HistoryMeta(anchor: s.anchor, cursor: s.cursor, marks: s.marks, richMarks: s.richMarks, blocks: s.blocks, softBreaks: s.softBreaks)
         }
 
+        /// `size_of::<MarkRange>()`, `size_of::<Block>()` and `size_of::<u32>()` upstream (64-bit):
+        /// a `MarkRange` is two `usize`s and a `Mark` (a `String`-sized enum), a `Block` a tag and
+        /// a `u8`, a soft break a `u32`.
+        static let markRangeBytes = 40
+        static let blockBytes = 2
+        static let softBreakBytes = 4
+
+        /// `Meta::bytes`: its marks, blocks and soft breaks at upstream's sizes, so a history is
+        /// trimmed to `HISTORY_BYTES` at the same steps. The Swift-only `marks` (`TextMark`, which
+        /// upstream has no counterpart of) aren't counted.
         var byteCost: Int {
-            marks.count * MemoryLayout<TextMark>.stride
-                + richMarks.count * MemoryLayout<RichMarkRange>.stride
-                + blocks.count * MemoryLayout<Block>.stride
-                + softBreaks.count * MemoryLayout<Int>.stride
+            richMarks.count * Self.markRangeBytes
+                + blocks.count * Self.blockBytes
+                + softBreaks.count * Self.softBreakBytes
         }
     }
 

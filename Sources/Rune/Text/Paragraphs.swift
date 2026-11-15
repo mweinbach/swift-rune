@@ -11,10 +11,14 @@ import CoreText
 // one. A long paste's plain ASCII lines away from its ends wait in runs at their exact heights
 // and are shaped a few a frame (`ParagraphsLazy.swift`, `Runtime/TextFill.swift`).
 //
-// Swift scope: CoreText fields without spans, pills or blocks (upstream's `plain` fields, the
-// ones `Keyed` and the lazy paste serve). A field with spans or pills keeps one layout: its
-// pills are CoreText run delegates inside one typesetter string (no FSI/PDI isolates needed).
-// Positions here are the field's content UTF-8 bytes and device px, as upstream's.
+// Swift scope (partial port): CoreText fields whose text has no spans or pills and whose
+// blocks are all paragraphs (upstream's `plain` fields, the ones `Keyed` and the lazy paste
+// serve; a rich field with no marks is one). A field with spans, pills or other blocks keeps one
+// layout. Not ported: pill isolates (`ISOLATE`, `Piece::shaped`/`content`, `spans_in`/`pills_in`,
+// `with_isolates`), spans and pills in a paragraph's key, block indentation in the break key and
+// per-paragraph block layouts, and the `newline` selection width / `range_boxes` newline
+// highlight (the stacked lines keep Swift's selection sliver). Positions here are the field's
+// content UTF-8 bytes and device px, as upstream's.
 
 /// What a by-paragraph field asks of `TextSystem.layoutInput`: the field it is (whose last
 /// layout an edit starts from, upstream's node slot), the direction every paragraph takes
@@ -324,13 +328,36 @@ internal struct LineScan {
     var flags: [UInt8]
 }
 
+/// A by-paragraph layout in the cache and the commit it was last used in, with about how many
+/// heap bytes it holds (`layout_cache::Entry`).
+internal struct ParagraphCacheEntry {
+    var layout: ParagraphLayout
+    var used: UInt64
+    var cost: Int
+
+    /// `Entry::new`: `textLen` bytes at `LAYOUT_PER_BYTE` each, on top of `LAYOUT_BASE`.
+    init(_ layout: ParagraphLayout, used: UInt64, textLen: Int) {
+        self.layout = layout
+        self.used = used
+        self.cost = min(textLen * ParagraphState.layoutPerByte + ParagraphState.layoutBase, Int(UInt32.max))
+    }
+}
+
 /// By-paragraph layouts by key, the field each was last laid out for, printable ASCII's
 /// measures per style, and one layout pass's scratch (`TextSystem` fields in `text.rs`).
 internal final class ParagraphState: @unchecked Sendable {
+    /// Heap bytes a layout holds per byte of its text, and on top of that (`layout_cache.rs`).
+    static let layoutPerByte = 64
+    static let layoutBase = 2048
+    /// Heap bytes of layouts kept after the commits that used them (`STALE_BYTES`).
+    static let staleBytes = 3 << 20
+    /// `size_of::<Paragraph>()` upstream (64-bit): what a layout's records cost in the cache.
+    static let paragraphRecordBytes = 72
+
     let lock = NSRecursiveLock()
     var generation: UInt64 = 0
-    var cache: [UInt64: (layout: ParagraphLayout, used: UInt64)] = [:]
-    /// The last by-paragraph layout made, which its text at another width breaks from.
+    var cache: [UInt64: ParagraphCacheEntry] = [:]
+    /// The last by-paragraph layout made this commit, which its text at another width breaks from.
     var lastParagraphs: ParagraphLayout? = nil
     /// Each field's last layout (upstream's node slot `text_layout`), which its next edit keeps
     /// paragraphs of.
@@ -344,23 +371,62 @@ internal final class ParagraphState: @unchecked Sendable {
     /// Paragraphs shaped anew (not kept, not re-broken), for tests.
     var shapedParagraphs: Int = 0
 
+    /// `end_commit`'s by-paragraph half: evicts stale layouts past `STALE_BYTES` and forgets the
+    /// commit's last layout and comparisons, then moves the generation on.
     func endCommit() {
         lock.lock()
         defer { lock.unlock() }
-        generation &+= 1
-        let g = generation
-        cache = cache.filter { g &- $0.value.used < 60 }
-        if cache.count > 64 {
-            let keep = cache.sorted { $0.value.used > $1.value.used }.prefix(64)
-            cache = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
-        }
+        Self.evict(&cache, generation, budget: Self.staleBytes)
+        lastParagraphs = nil
+        lastDiff = nil
+        lineScan = nil
+        lastBytes = nil
+        // A field's last layout is its node's (upstream keeps it in the node's slot); fields long
+        // gone are dropped once more than 64 are held.
         if fields.count > 64 {
             let keep = fields.sorted { $0.value.used > $1.value.used }.prefix(64)
             fields = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
         }
-        lineScan = nil
-        lastDiff = nil
-        lastBytes = nil
+        generation &+= 1
+    }
+
+    /// `rest`: drops every layout the last two commits didn't use.
+    func rest() {
+        lock.lock()
+        defer { lock.unlock() }
+        Self.evict(&cache, generation &- 1, budget: 0)
+    }
+
+    /// `evict_to`: drops what `cache` hasn't used in the last two commits once it outgrows
+    /// `budget`, least recently used first; a commit's layouts are kept together while the
+    /// budget lasts.
+    static func evict(_ cache: inout [UInt64: ParagraphCacheEntry], _ g: UInt64, budget: Int) {
+        let stale = { (used: UInt64) in g &- used >= 2 }
+        let total = cache.values.filter { stale($0.used) }.reduce(0) { $0 + $1.cost }
+        if total <= budget { return }
+        var ages = cache.values.filter { stale($0.used) }.map { (g &- $0.used, $0.cost) }
+        ages.sort { $0.0 < $1.0 }
+        var younger = 0
+        var kept = 0
+        var cutoff = UInt64.max
+        for (i, (age, cost)) in ages.enumerated() {
+            if i > 0 && ages[i - 1].0 != age { younger = kept }
+            kept += cost
+            if kept > budget {
+                cutoff = age
+                break
+            }
+        }
+        var room = budget - younger
+        cache = cache.filter { _, e in
+            let age = g &- e.used
+            if age < cutoff { return true }
+            if age == cutoff && e.cost <= room {
+                room -= e.cost
+                return true
+            }
+            return false
+        }
     }
 
     func bytes(of text: String) -> [UInt8] {
@@ -502,8 +568,9 @@ extension TextSystem {
         if (request.forced ?? request.startFlow) == .rtl { whole ^= ParagraphConstants.paragraphs }
         let key = Self.paragraphBreakKey(whole, maxWidth: maxWidth, align: style.align)
         let g = st.generation
-        if let e = st.cache[key] {
-            st.cache[key] = (e.layout, g)
+        if var e = st.cache[key] {
+            e.used = g
+            st.cache[key] = e
             st.fields[request.field] = (e.layout, g)
             return e.layout
         }
@@ -518,9 +585,10 @@ extension TextSystem {
         // This text laid out at another width measuring asked for this commit: a paragraph
         // neither keeps is broken again from it rather than shaped twice.
         let other = st.lastParagraphs.flatMap { o in (o.whole == whole && (o.maxWidth != maxWidth || o.align != style.align)) ? o : nil }
-        let built = layOutParagraphs(text: text, style: style, scale: scale, maxWidth: maxWidth, whole: whole, cacheKey: key, request: request, prev: prev, other: other)
+        let (built, fresh) = layOutParagraphs(text: text, style: style, scale: scale, maxWidth: maxWidth, whole: whole, cacheKey: key, request: request, prev: prev, other: other)
         st.lastParagraphs = built
-        st.cache[key] = (built, g)
+        // It holds what it shaped or broke anew; the paragraphs it kept are its last layout's.
+        st.cache[key] = ParagraphCacheEntry(built, used: g, textLen: fresh + built.paragraphs.count * ParagraphState.paragraphRecordBytes / 64)
         st.fields[request.field] = (built, g)
         return built
     }
@@ -558,7 +626,7 @@ extension TextSystem {
 
     /// Lays out each of the text's paragraphs, keeping `prev`'s layout of each it still has: those
     /// before an edit and after it (`lay_out_paragraphs`).
-    private func layOutParagraphs(text: String, style: TextStyle, scale: Float, maxWidth: Float?, whole: UInt64, cacheKey: UInt64, request: ParagraphRequest, prev: ParagraphLayout?, other: ParagraphLayout?) -> ParagraphLayout {
+    private func layOutParagraphs(text: String, style: TextStyle, scale: Float, maxWidth: Float?, whole: UInt64, cacheKey: UInt64, request: ParagraphRequest, prev: ParagraphLayout?, other: ParagraphLayout?) -> (ParagraphLayout, Int) {
         let st = paragraphState
         let content = st.bytes(of: text)
         let styleKey = paragraphStyleKey(style, scale: scale)
@@ -622,6 +690,7 @@ extension TextSystem {
         var y: Double = 0
         var width: Float = 0
         var fullWidth: Float = 0
+        var fresh = 0
         for (k, item) in items.enumerated() {
             let (f, kept) = item
             // A waiting record kept at the same width stays as it was; a run found here waits.
@@ -647,12 +716,14 @@ extension TextSystem {
             let pstyle = Self.styled(style, f.flow)
             let layout: TextLayoutBox
             if let o = again {
+                fresh += f.end - f.start
                 layout = rebreakOwned(o.layout, maxWidth: maxWidth, emitGlyphs: false)
                     ?? layoutKeyed(text: String(decoding: content[f.start..<f.end], as: UTF8.self), style: pstyle, maxWidth: maxWidth, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
             } else if let o = kept {
                 layout = o.layout
             } else {
                 st.shapedParagraphs += 1
+                fresh += f.end - f.start
                 layout = layoutKeyed(text: String(decoding: content[f.start..<f.end], as: UTF8.self), style: pstyle, maxWidth: maxWidth, pixelScale: scale, emitGlyphs: false, keep: .owned, countAsRebreak: false)
             }
             // A paragraph kept as it was keeps its measures too.
@@ -667,7 +738,7 @@ extension TextSystem {
         let lazy: LazyFill? = waiting > 0 ? asciiLine(style: style, scale: scale).map {
             LazyFill(content: content, style: style, scale: scale, cacheKey: cacheKey, styleKey: styleKey, forced: forced, startFlow: startFlow, ascii: $0)
         } : nil
-        return ParagraphLayout(paragraphs: paragraphs, width: width, fullWidth: fullWidth, height: Float(y), maxWidth: maxWidth, align: style.align, whole: whole, keyed: keyed, lazy: lazy, content: content, style: style, scale: scale, forced: forced, baseFont: resolveCTFont(style: style, pixelScale: scale))
+        return (ParagraphLayout(paragraphs: paragraphs, width: width, fullWidth: fullWidth, height: Float(y), maxWidth: maxWidth, align: style.align, whole: whole, keyed: keyed, lazy: lazy, content: content, style: style, scale: scale, forced: forced, baseFont: resolveCTFont(style: style, pixelScale: scale)), fresh)
     }
 
     /// The paragraphs an edit left whole, with their keys: those before it (`head`) and after it

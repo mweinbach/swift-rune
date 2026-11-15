@@ -2450,6 +2450,7 @@ public final class TextSystem: @unchecked Sendable {
         for k in evictedKeys {
             glyphCache.forget(shapeKey: k)
         }
+        paragraphState.rest()
         glyphAtlas.dropOrphans()
     }
 

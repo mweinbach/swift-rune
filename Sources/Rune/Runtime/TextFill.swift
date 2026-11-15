@@ -65,7 +65,10 @@ extension Runtime {
     internal static func paragraphRequest(field: NodeId, el: El<State>, edit: TextEdit, resolved: ElResolvedInput) -> ParagraphRequest? {
         guard !resolved.showingPlaceholder, !resolved.isSingleLine, !resolved.isSecure, edit.multiline,
               resolved.style.wrap == .wrap, resolved.style.maxLines == 0,
-              resolved.spans?.isEmpty ?? true, resolved.pills.isEmpty, resolved.blocks.isEmpty else { return nil }
+              resolved.spans?.isEmpty ?? true, resolved.pills.isEmpty,
+              // A rich field shows a block per line, `.paragraph` when it has none: plain while
+              // every block is a paragraph (`paragraphs.rs` `plain`).
+              resolved.blocks.allSatisfy({ $0 == .paragraph }) else { return nil }
         let plaintext = el.textDirByParagraph && edit.forcedDir == nil
         guard plaintext || resolved.renderedString.utf8.contains(0x0a) else { return nil }
         let forced: TextFlow?

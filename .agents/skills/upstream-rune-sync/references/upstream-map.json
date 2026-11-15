@@ -5044,8 +5044,8 @@
             "Sources/Rune/Text/Paragraphs.swift",
             "Sources/Rune/Text.swift"
           ],
-          "status": "ported",
-          "note": "By-paragraph field layout (ParagraphLayout/Paragraph/key_paragraphs/reuse_keys/LineScan, 3aea1e4a #865 + 165f87a4 #957 + 2371240d #990, as of 615f06a4) for CoreText plain fields; stacked lines feed the caret/selection/hit/motion code, paint draws pieces_in; fields with spans/pills keep one layout (CoreText run-delegate pills)"
+          "status": "partial",
+          "note": "Ported (3aea1e4a #865, 165f87a4 #957, 2371240d #990, as of 615f06a4): ParagraphLayout/Paragraph, key_paragraphs (runs <= 512, LineScan), reuse_keys, common_start/common_end, count_newlines, flow_of, pieces_in/piece_at/piece_at_y, the layout cache (Entry cost, evict/STALE_BYTES, last_paragraphs cleared per commit) for CoreText fields with no spans or pills whose blocks are all paragraphs (plain and mark-less rich fields); their stacked lines feed the caret/selection/hit/motion code and paint draws pieces_in. Not ported: pill isolates (ISOLATE, Piece::shaped/content, spans_in/pills_in, with_isolates), spans and pills in a paragraph's key, block indentation in the break key and per-paragraph block layouts, and the newline selection width / range_boxes newline highlight; fields with spans, pills or non-paragraph blocks keep one layout"
         },
         {
           "upstream": "src/text/pill_chips.rs",
