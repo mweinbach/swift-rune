@@ -55,6 +55,25 @@ public enum TabOverflow: Sendable, Equatable {
         return .full
     }
 
+    /// The widest an unpinned horizontal tab grows (`max_width`): what each tab is when the strip
+    /// was given no width to share. `nil` for `.scroll`, whose tabs upstream have no bound
+    /// (`f32::INFINITY`); a horizontal strip then takes `horizontalDefault`'s 224.
+    public var maxTabWidth: Float? {
+        switch self {
+        case .scroll: return nil
+        case .shrink(_, let maxW): return maxW
+        case .shrinkThenScroll(_, let maxW, _, _): return maxW
+        }
+    }
+
+    /// A pinned tab's width across a horizontal strip (`pinned_width`; 36 where the mode has none).
+    public var pinnedTabWidth: Float {
+        switch self {
+        case .shrinkThenScroll(_, _, let pinnedW, _): return pinnedW
+        case .scroll, .shrink: return 36.0
+        }
+    }
+
     public var fadeWidth: Float {
         switch self {
         case .scroll(let fadeWidth): return fadeWidth
@@ -217,6 +236,14 @@ public struct TabDragState: Sendable, Equatable {
     public var draggingId: String? {
         switch phase {
         case .dragging(let id, _, _, _), .tornOut(let id, _, _): return id
+        case .idle, .pressing: return nil
+        }
+    }
+
+    /// The index of the tab being dragged, reordered or torn out (`TabDragState::dragging`).
+    public var draggingIndex: Int? {
+        switch phase {
+        case .dragging(_, let from, _, _), .tornOut(_, let from, _): return from
         case .idle, .pressing: return nil
         }
     }
@@ -535,6 +562,8 @@ public struct StripTabItem<State> {
     public var isClosable: Bool
     public var isDisabled: Bool
     public var isPulsing: Bool
+    /// Highlighted while its context menu is open; keeps it built past `BAND_PAST` (`TabItem::marked`).
+    public var isMarked: Bool
     public var status: TabItemStatus
     public var badgeText: String?
     public var avatarEl: El<State>?
@@ -550,6 +579,7 @@ public struct StripTabItem<State> {
         self.isClosable = true
         self.isDisabled = false
         self.isPulsing = false
+        self.isMarked = false
         self.status = .none
         self.badgeText = nil
         self.avatarEl = nil
@@ -570,6 +600,8 @@ public struct StripTabItem<State> {
     public func closable(_ on: Bool = true) -> Self { var c = self; c.isClosable = on; return c }
     public func disabled(_ on: Bool = true) -> Self { var c = self; c.isDisabled = on; return c }
     public func pulse(_ on: Bool = true) -> Self { var c = self; c.isPulsing = on; return c }
+    /// Highlights the tab while its context menu is open (`TabItem::marked`).
+    public func marked(_ on: Bool = true) -> Self { var c = self; c.isMarked = on; return c }
     public func status(_ value: TabItemStatus) -> Self { var c = self; c.status = value; return c }
     public func badge(_ value: String?) -> Self { var c = self; c.badgeText = value; return c }
 }
@@ -580,6 +612,7 @@ public struct StripTabItem<State> {
 public struct TabStrip<State> {
     private var keyId: String
     private var items: [StripTabItem<State>]
+    private var lazySource: (slots: [TabSlot], build: (Int) -> StripTabItem<State>)? = nil
     private var selectedId: String?
     private var orientation: TabOrientation = .horizontal
     private var density: TabDensity? = nil
@@ -625,6 +658,16 @@ public struct TabStrip<State> {
     public func tabs(_ tabs: [StripTabItem<State>]) -> Self {
         var c = self
         c.items.append(contentsOf: tabs)
+        return c
+    }
+
+    /// The tabs, of which the strip builds only those it shows (`build(index)`), when there are
+    /// more than `BAND_PAST`: the rest stand as empty space their length, so a strip of hundreds
+    /// of tabs costs a frame what a screenful does. In place of `tabs(_:)`
+    /// (`TabStrip::lazy_tabs`, #1020).
+    public func lazyTabs(_ slots: [TabSlot], build: @escaping (Int) -> StripTabItem<State>) -> Self {
+        var c = self
+        c.lazySource = (slots, build)
         return c
     }
 
@@ -690,13 +733,40 @@ public struct TabStrip<State> {
         buildLayered(state, kit: k, elevateDragged: false)
     }
 
+    /// An unpinned horizontal tab's width when the strip was given no `availableWidth`: the
+    /// overflow's `max_width` (`self.viewport.map_or(max_width, ..)`), `horizontalDefault`'s for
+    /// `.scroll`.
+    static func defaultTabWidth(_ overflow: TabOverflow) -> Float {
+        overflow.maxTabWidth ?? TabOverflow.horizontalDefault.maxTabWidth ?? 224.0
+    }
+    /// The width of the line between two horizontal tabs.
+    static var separatorWidth: Float { 1.0 }
+
+    /// The slots in strip order (pinned first) and how to build the tab at each; tabs given
+    /// whole become slots built from the items themselves.
+    private func resolvedSlots() -> (slots: [TabSlot], build: (Int) -> StripTabItem<State>) {
+        if let lazy = lazySource {
+            let given = lazy.slots
+            let order = given.indices.filter { given[$0].pinned } + given.indices.filter { !given[$0].pinned }
+            let build = lazy.build
+            return (order.map { given[$0] }, { build(order[$0]) })
+        }
+        let ordered = items.filter(\.isPinned) + items.filter { !$0.isPinned }
+        let slots = ordered.map {
+            TabSlot(id: $0.id, pinned: $0.isPinned, twoLine: $0.subtitle != nil, keep: $0.isMarked || $0.editorEl != nil)
+        }
+        return (slots, { ordered[$0] })
+    }
+
     public func buildLayered(_ state: State, kit k: Kit, elevateDragged: Bool = true) -> El<State> {
         let dens = effectiveDensity
         let tabH = dens.height
         let overflowMode = effectiveOverflow
-        let pinned = items.filter(\.isPinned)
-        let unpinned = items.filter { !$0.isPinned }
-        let ordered = pinned + unpinned
+        let vertical = orientation == .vertical
+        // Tabs given whole take the lazy path too: each is built once, in order (pinned first).
+        let (slots, buildTab) = resolvedSlots()
+        let count = slots.count
+        let pinnedCount = slots.filter(\.pinned).count
 
         let effectiveGap = gapOverride ?? 2.0
         let computedUnpinnedWidth: Float? = {
@@ -707,81 +777,157 @@ public struct TabStrip<State> {
                 let trailingReserve = trailingEl != nil ? (trailingWidthValue + effectiveGap) : 0.0
                 return overflowMode.tabWidth(
                     available: max(0, avail - trailingReserve),
-                    unpinnedCount: unpinned.count,
-                    pinnedCount: pinned.count,
+                    unpinnedCount: count - pinnedCount,
+                    pinnedCount: pinnedCount,
                     gap: effectiveGap
                 )
             }
             return nil
         }()
 
-        let tabBarCount = ordered.count
+        // A separator stands after tab `i` unless it or the next is active, hovered or dragged.
+        let quiet: (String) -> Bool = { id in
+            id == selectedId || id == dragStateValue.hoveredId || id == dragStateValue.draggingId
+        }
+        let separatorAfter: (Int) -> Bool = { i in
+            !vertical && i + 1 < count && !quiet(slots[i].id) && !quiet(slots[i + 1].id)
+        }
+        // Each tab's length along the strip with the gap after it: its width across (and the
+        // separator after it), its row down.
+        // Every horizontal tab is drawn this wide (`width: Some(tab_w)`), so a run of unbuilt
+        // tabs is exactly as long as they would be.
+        let tabW = computedUnpinnedWidth ?? Self.defaultTabWidth(overflowMode)
+        let pinnedW = overflowMode.pinnedTabWidth
+        let tabWidth: Float? = vertical ? computedUnpinnedWidth : tabW
+        let pitch: (Bool, Bool) -> Float = { pin, twoLine in
+            vertical
+                ? (twoLine ? TabStripBand.twoLineHeight : tabH) + effectiveGap
+                : (pin ? pinnedW : tabW) + effectiveGap
+        }
+        let pitches: [Float] = slots.indices.map { i in
+            pitch(slots[i].pinned, slots[i].twoLine) + (separatorAfter(i) ? Self.separatorWidth + effectiveGap : 0)
+        }
+        let landing = dragStateValue.incomingSlot(count: count)
+        let listKey = "\(keyId)-list"
+        let scrollKey = "\(keyId)-scroll"
 
-        // Assemble strip children with separator suppression next to active/hovered/selected tabs
+        // Which tabs are built: past `BAND_PAST`, those near what the strip shows, and the ones a
+        // gesture, a key or a menu is on wherever they are.
+        let shown: [Bool]? = count > BAND_PAST ? {
+            let along = vertical
+                ? (tabH + effectiveGap) * TabStripBand.verticalStepRows
+                : (tabW + effectiveGap) * TabStripBand.horizontalStepTabs
+            let fallback = vertical ? TabStripBand.verticalFallback : (availableWidth ?? TabStripBand.horizontalFallback)
+            let band = TabStripBand.band(
+                listKey: listKey,
+                scrollKey: scrollKey,
+                vertical: vertical,
+                step: max(along, TabStripBand.minStep),
+                fallback: fallback
+            )
+            return TabStripBand.built(
+                slots: slots,
+                pitches: pitches,
+                band: band,
+                active: selectedId,
+                dragging: dragStateValue.draggingIndex,
+                landing: landing
+            )
+        }() : nil
+
         var stripChildren: [El<State>] = []
-        stripChildren.reserveCapacity(ordered.count * 2)
-        for (idx, item) in ordered.enumerated() {
+        stripChildren.reserveCapacity(min(count, BAND_PAST * 2) * 2)
+        // Where each built tab's element is in `stripChildren`.
+        var atChild = [Int?](repeating: nil, count: count)
+        // A run of tabs not built: where it starts, and its length along the strip.
+        var run: (from: Int, len: Float)? = nil
+        func space() {
+            guard let (from, len) = run else { return }
+            run = nil
+            let spacer: El<State> = el().key("\(listKey)-unbuilt-\(from)").a11yHidden()
+            // The list's own gap stands after it, as after a tab.
+            stripChildren.append(
+                vertical
+                    ? spacer.wFull().h(max(0, len - effectiveGap))
+                    : spacer.w(max(0, len - effectiveGap)).h(tabH)
+            )
+        }
+        for i in 0..<count {
+            if let shown, !shown[i] {
+                run = (run?.from ?? i, (run?.len ?? 0) + pitches[i])
+                continue
+            }
+            space()
+            let item = buildTab(i)
+            atChild[i] = stripChildren.count
             stripChildren.append(
                 buildSingleTab(
                     item: item,
-                    index: idx,
-                    tabBarCount: tabBarCount,
+                    index: i,
+                    tabBarCount: count,
                     dens: dens,
                     tabH: tabH,
-                    computedUnpinnedWidth: computedUnpinnedWidth,
+                    computedUnpinnedWidth: tabWidth,
                     dragStateValue: dragStateValue,
                     elevateDragged: elevateDragged,
                     kit: k
                 )
             )
-            if orientation == .horizontal && idx + 1 < ordered.count {
-                let next = ordered[idx + 1]
-                let suppress = item.id == selectedId
-                    || next.id == selectedId
-                    || item.id == dragStateValue.hoveredId
-                    || next.id == dragStateValue.hoveredId
-                    || item.id == dragStateValue.draggingId
-                    || next.id == dragStateValue.draggingId
-                if !suppress {
-                    stripChildren.append(
-                        el()
-                            .key("\(keyId)-sep-\(idx)")
-                            .w(1)
-                            .h(tabH * 0.55)
-                            .bg(k.c.borderMuted)
-                    )
-                }
+            if separatorAfter(i) {
+                stripChildren.append(
+                    el()
+                        .key("\(keyId)-sep-\(i)")
+                        .w(Self.separatorWidth)
+                        .h(tabH * 0.55)
+                        .bg(k.c.borderMuted)
+                )
             }
+        }
+        space()
+        // The incoming tab's place: an empty slot its own length, which the tab takes when it's
+        // let go.
+        if let slot = landing {
+            let incomingPitch = pitch(false, false)
+            let place: El<State> = el().key("\(listKey)-incoming").a11yHidden()
+            let sized = vertical ? place.wFull().h(incomingPitch) : place.w(incomingPitch - effectiveGap).h(tabH)
+            let child = (slot < count ? atChild[slot] : nil) ?? stripChildren.count
+            stripChildren.insert(sized, at: child)
         }
 
         let listLabel = accessibleLabel ?? "Tabs"
-        var track: El<State>
+        let track: El<State>
         if orientation == .horizontal {
-            track = row()
-                .key("\(keyId)-track")
+            let list = row()
+                .key(listKey)
                 .role(.tabList)
                 .label(listLabel)
                 .focusGroup(true)
-                .grow(1)
-                .minW(0)
                 .gap(effectiveGap)
                 .itemsCenter()
-            if computedUnpinnedWidth == nil || availableWidth == nil {
-                track = track.scroll()
-            }
-            track = track.children(stripChildren)
+                .children(stripChildren)
+            track = row()
+                .key(scrollKey)
+                .grow(1)
+                .minW(0)
+                .itemsCenter()
+                .scrollX()
+                .child(list)
         } else {
-            track = col()
-                .key("\(keyId)-track")
+            let list = col()
+                .key(listKey)
                 .role(.tabList)
                 .label(listLabel)
                 .focusGroup(true)
                 .wFull()
+                .gap(effectiveGap)
+                .children(stripChildren)
+            track = col()
+                .key(scrollKey)
+                .wFull()
                 .grow(1)
                 .minH(0)
-                .gap(effectiveGap)
                 .scroll()
-                .children(stripChildren)
+                .child(list)
         }
 
         if orientation == .horizontal {
@@ -804,9 +950,12 @@ public struct TabStrip<State> {
             if let trailingEl { strip = strip.child(trailingEl) }
             return strip
         } else {
+            // It grows into the height it's given, so its scroll shows what fits (`grow(1).min_h(0)`).
             var strip: El<State> = col()
                 .key(keyId)
                 .wFull()
+                .grow(1)
+                .minH(0)
                 .p(6)
                 .gap(4)
                 .bg(fillColor ?? k.c.layer01)
@@ -905,7 +1054,8 @@ public struct TabStrip<State> {
         isEditing: Bool,
         kit k: Kit
     ) -> El<State> {
-        let bg: Color = (isSelected || isEditing) ? k.c.surfaceRaised : (isHovered ? k.c.surfaceHover : .transparent)
+        // A marked tab (its context menu open) keeps the hover wash (`item.marked => c.hover`).
+        let bg: Color = (isSelected || isEditing) ? k.c.surfaceRaised : ((isHovered || item.isMarked) ? k.c.surfaceHover : .transparent)
         let statusDesc = Self.statusWords(wordsValue, item.status)
         var tab: El<State> = row()
             .key("\(keyId)-tab-\(item.id)")
@@ -916,7 +1066,7 @@ public struct TabStrip<State> {
             .itemSelected(isSelected)
             .disabled(item.isDisabled)
             .positionInSet(index + 1, size: tabBarCount)
-            .h(tabH)
+            .h(orientation == .vertical && item.subtitle != nil ? TabStripBand.twoLineHeight : tabH)
             .px(item.isPinned ? 8 : 10)
             .gap(6)
             .itemsCenter()
@@ -929,12 +1079,12 @@ public struct TabStrip<State> {
         }
 
         if orientation == .horizontal {
+            // Every horizontal tab has a fixed width (`width: Some(tab_w)`): the strip's share, else
+            // the overflow's `max_width`, so the band's pitches are what it draws.
             if item.isPinned {
-                tab = tab.w(36).center()
-            } else if let w = computedUnpinnedWidth {
-                tab = tab.w(w)
+                tab = tab.w(effectiveOverflow.pinnedTabWidth).center()
             } else {
-                tab = tab.minW(100).maxW(220)
+                tab = tab.w(computedUnpinnedWidth ?? Self.defaultTabWidth(effectiveOverflow))
             }
         } else {
             tab = tab.wFull()
@@ -1147,7 +1297,7 @@ public struct TabStrip<State> {
 
         if let dragKeyPath {
             let isPin = item.isPinned
-            let estWidth = item.isPinned ? Float(36) : (computedUnpinnedWidth ?? 120.0)
+            let estWidth = item.isPinned ? effectiveOverflow.pinnedTabWidth : (computedUnpinnedWidth ?? 120.0)
             let tearSpec = tearOutSpec
             let onReorder = onReorderFn
             let onTear = onTearOutFn

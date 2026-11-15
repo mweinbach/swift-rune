@@ -624,7 +624,7 @@ struct ShellAndTabStripTests {
         rt.keyDown(KeyEvent(key: .tab), at: 0.07)
         rt.frame(at: 0.08)
         #expect(rt.focusedKey == "after-tabs")
-        let trackEl = try #require(rt.element(byKey: "fg-strip-track"))
+        let trackEl = try #require(rt.element(byKey: "fg-strip-list"))
         #expect(trackEl.role == .tabList)
         #expect(trackEl.label == "Workspace tabs")
     }
