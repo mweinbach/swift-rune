@@ -81,11 +81,13 @@ extension Runtime {
     internal func recordCopy(_ content: ClipboardContent, rich: RichClipboardPayload? = nil) {
         clipboard = content
         richClipboard = rich ?? RichClipboardPayload(content: content)
+        clipboardRouting.copies.pendingConcealed = nil
         if boundClipboard != nil {
-            writeCopyToBoundClipboard(text: content.text, rich: rich)
+            writeCopyToBoundClipboard(text: content.text, rich: richClipboard)
             copyRequest = nil
         } else {
             copyRequest = content.text
         }
+        recordOwnPills(content)
     }
 }

@@ -293,6 +293,8 @@ public struct Tx {
     public internal(set) var shortcutActivationToken: String? = nil
     internal var minimizeOrder: UInt64? = nil
     internal var pickReads: [TxPickRead] = []
+    /// `Tx.readClipboard` callbacks (`Tx::clipboard_reads`).
+    internal var clipboardReads: [TxClipboardRead] = []
     internal var runtimeActions: [String: Any] = [:]
 
     public init() {}
@@ -432,6 +434,7 @@ public struct Tx {
     /// Copies text to the system / headless clipboard.
     public mutating func copyText(_ text: String) {
         clipboardWrite = ClipboardContent(text)
+        runtimeActions[txSecretCopyKey] = nil
     }
 
     /// Requests a paste delivery into the focused editor or `onPaste`/`onPasteContent` handler (`Tx::request_paste`).
@@ -541,7 +544,14 @@ public struct Tx {
         textFlights.append(contentsOf: one.textFlights)
         launches.append(contentsOf: one.launches)
         unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
-        if let cb = one.clipboardWrite { clipboardWrite = cb }
+        if let cb = one.clipboardWrite {
+            clipboardWrite = cb
+            runtimeActions[txSecretCopyKey] = nil
+        }
+        if one.runtimeActions[txSecretCopyKey] != nil {
+            clipboardWrite = nil
+            runtimeActions["richClipboardWrite"] = nil
+        }
         pasteRequested = pasteRequested || one.pasteRequested
         if let title = one.windowTitle { windowTitle = title }
         quitRequested = quitRequested || one.quitRequested
@@ -560,6 +570,7 @@ public struct Tx {
             minimizeOrder = max(minimizeOrder ?? 0, otherMinimizeOrder)
         }
         pickReads.append(contentsOf: one.pickReads)
+        clipboardReads.append(contentsOf: one.clipboardReads)
         traceEvents.append(contentsOf: one.traceEvents)
         traceChannels.append(contentsOf: one.traceChannels)
         if let ann = one.announcement { announcement = ann }

@@ -985,7 +985,7 @@ public final class Runtime<State> {
         return false
     }
     internal var boundClipboard: Clipboard? = nil
-    internal var pendingPasteRequests: Int = 0
+    internal var clipboardRouting = ClipboardRoutingState()
     internal var inheritedHoverCurvesByPath: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var anchorHoverWithinByKey: [String: (enter: Anim<Float>, exit: Anim<Float>)] = [:]
     internal var unseenPresence = UnseenPresenceState()
@@ -10466,8 +10466,7 @@ public final class Runtime<State> {
                     return true
                 }
                 if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
-                    let pasteContent = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
-                    if deliverPaste(pasteContent, at: now) {
+                    if pasteClipboardNow(at: now) {
                         return true
                     }
                 }
@@ -10671,8 +10670,7 @@ public final class Runtime<State> {
 
         // 2c. Non-editor `Cmd+V` falls through to active modal / root `onPaste` when unhandled by focused `onKey`.
         if ev.mods.primaryCommand, (ev.key == .command("v") || ev.key == .text("v") || ev.key == .text("V")) {
-            let pasteContent = boundClipboard?.readRich(sanitizeUntrustedHTML: true).content ?? clipboard
-            if deliverPaste(pasteContent, at: now) {
+            if pasteClipboardNow(at: now) {
                 return true
             }
         }
@@ -11374,6 +11372,7 @@ public final class Runtime<State> {
         }
         let nonOffsetCommitRequests = (!tx.liveOnlyRequested && tx.followEdgeRequested)
             || tx.pasteRequested
+            || !tx.clipboardReads.isEmpty
             || !tx.scrollRevealRequests.isEmpty
             || !tx.scrollBottomRequests.isEmpty
             || !tx.scrollPageRequests.isEmpty
@@ -11471,9 +11470,7 @@ public final class Runtime<State> {
             )
             pendingWindowFrame = pendingWindowFrame?.merged(with: resolved) ?? resolved
         }
-        if tx.pasteRequested {
-            pendingPasteRequests += 1
-        }
+        latchClipboardRequests(tx)
         if !tx.sentKeys.isEmpty {
             pendingSentKeys.append(contentsOf: tx.sentKeys)
         }
