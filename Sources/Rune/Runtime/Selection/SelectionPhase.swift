@@ -20,10 +20,13 @@ public enum SelectionUnit: Sendable, Equatable {
 public struct SelectionFar: Equatable, Sendable {
     public var path: String
     public var content: String
+    /// Its virtual-list row identity when inside a virtual list (`phase.rs::Far::end`).
+    public var end: VirtualEnd?
 
-    public init(path: String, content: String) {
+    public init(path: String, content: String, end: VirtualEnd? = nil) {
         self.path = path
         self.content = content
+        self.end = end
     }
 }
 
@@ -37,6 +40,9 @@ public struct ActiveSelection: Equatable, Sendable {
     public var originEnd: Int
     public var far: SelectionFar?
     public var betweenHash: UInt64
+    /// Virtual-list row identity of the anchor when inside a virtual list
+    /// (`phase.rs::Selection::anchor_end`).
+    public var anchorEnd: VirtualEnd?
 
     public init(
         path: String,
@@ -45,7 +51,8 @@ public struct ActiveSelection: Equatable, Sendable {
         focus: Int,
         origin: (Int, Int),
         far: SelectionFar? = nil,
-        betweenHash: UInt64 = 0
+        betweenHash: UInt64 = 0,
+        anchorEnd: VirtualEnd? = nil
     ) {
         self.path = path
         self.content = content
@@ -55,9 +62,26 @@ public struct ActiveSelection: Equatable, Sendable {
         self.originEnd = origin.1
         self.far = far
         self.betweenHash = betweenHash
+        self.anchorEnd = anchorEnd
     }
 
     public var origin: (Int, Int) { (originStart, originEnd) }
+
+    /// This selection with `other`'s path and content, as a drag that moved nothing found them.
+    internal func withShape(of other: ActiveSelection) -> ActiveSelection {
+        var out = self
+        out.path = other.path
+        out.content = other.content
+        out.betweenHash = other.betweenHash
+        if var far = out.far, let otherFar = other.far {
+            far.path = otherFar.path
+            far.content = otherFar.content
+            out.far = far
+        } else {
+            out.far = other.far
+        }
+        return out
+    }
 }
 
 /// State machine phase for `El.selectable` selection (`crates/rune/src/runtime/selection/phase.rs`).
@@ -101,13 +125,11 @@ public enum SelectionPhase: Equatable, Sendable {
         self = .dragging(sel, unit: unit)
     }
 
+    /// The press ended: released, cancelled, lost, or taken by a draggable row. The selection
+    /// stays where it stands, collapsed or not (`phase.rs::step` `Event::Release`).
     public mutating func endDrag() {
         guard case .dragging(let sel, _) = self else { return }
-        if sel.far == nil && sel.anchor == sel.focus {
-            self = .empty
-        } else {
-            self = .placed(sel)
-        }
+        self = .placed(sel)
     }
 
     public mutating func place(_ selection: ActiveSelection) {

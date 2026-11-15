@@ -126,7 +126,7 @@ public enum CopyJoin {
 public final class SelectionCoordinator {
     public internal(set) var phase: SelectionPhase = .empty
     public internal(set) var pick = SelectAllPick()
-    private var heardByPath: [String: TextSelection] = [:]
+    internal private(set) var heardByPath: [String: TextSelection] = [:]
 
     public init() {}
 
