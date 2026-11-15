@@ -335,7 +335,8 @@ extension Runtime {
         let snapImmediately = cut || cxSettings.hostReducedMotion
         for node in flatNodes {
             let el = node.el
-            guard el.pressColor != nil else { continue }
+            // `Visual::tracks_press`: a press fill or a press color.
+            guard el.pressColor != nil || (el.pressBg?.a ?? 0) > 0 else { continue }
             let nid = node.nodeId
             let trackId = Self.pressTrackId(nid)
             let isDown = isNodePressedVisually(
@@ -343,6 +344,23 @@ extension Runtime {
                 restingContains: pressRestingContains(path: node.path, at: pointerPosition)
             )
             let target: Float = isDown ? 1.0 : 0.0
+            if el.pressColor == nil {
+                // A press fill's track (`hover.rs::update_interaction`): ready from rest, then
+                // down at once and back on a snappy spring.
+                defer { lastPressTargetById[nid] = target }
+                if !liveStore.has(trackId, Self.pressProp) {
+                    if target == 0.0 { continue }
+                    liveStore.snap(trackId, Self.pressProp, to: 0.0)
+                }
+                guard liveStore.target(trackId, Self.pressProp) != target else { continue }
+                if snapImmediately {
+                    liveStore.snap(trackId, Self.pressProp, to: target)
+                } else {
+                    let spring = isDown ? MotionTokens.INSTANT : MotionTokens.SNAPPY
+                    liveStore.set(trackId, Self.pressProp, to: target, anim: Anim<Float>(curve: .spring(spring)), at: now)
+                }
+                continue
+            }
             let prevTarget = lastPressTargetById[nid]
             let anim = el.styleSpring.map { Anim<Float>(curve: .spring($0)) } ?? .instant
             if snapImmediately || (el.styleSpring == nil) {

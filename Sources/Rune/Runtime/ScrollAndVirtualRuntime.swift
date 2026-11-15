@@ -2482,10 +2482,22 @@ extension Runtime {
             let glideX = animate && abs(end.x - before.x) > 0.5
             let glideY = animate && abs(end.y - before.y) > 0.5
             if glideX || glideY {
-                if !glideX || !glideY {
-                    // Jump the short axis first; the long one then glides from there.
-                    let jumped = Vec2(glideX ? before.x : end.x, glideY ? before.y : end.y)
-                    if jumped != before { applyScrollOffset(path: path, next: jumped, glide: nil) }
+                // A gliding axis on a long trip cuts to a couple of viewports out first, as a
+                // glide to the bottom does (`offset.rs:49-52,63-66`, `bottom.rs::GLIDE_REACH`);
+                // a jumping axis lands first, and the gliding one then glides from there.
+                let view: Vec2 = scrollViewportSizes[path]
+                    ?? nodeByPath[path].map { Vec2(flatNodes[$0].targetRect.width, flatNodes[$0].targetRect.height) }
+                    ?? .zero
+                let reachX = Float(Self.scrollGlideReach) * view.x
+                let reachY = Float(Self.scrollGlideReach) * view.y
+                let start = Vec2(
+                    glideX ? min(max(before.x, end.x - reachX), end.x + reachX) : end.x,
+                    glideY ? min(max(before.y, end.y - reachY), end.y + reachY) : end.y
+                )
+                if start != before {
+                    let handGliding = isScrollHandGliding(path: path)
+                    applyScrollOffset(path: path, next: start, glide: nil)
+                    if handGliding { markScrollHandGliding(path: path) }
                 }
                 applyScrollOffset(path: path, next: end, glide: glide)
             } else {
