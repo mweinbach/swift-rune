@@ -6939,93 +6939,98 @@ public final class Runtime<State> {
                 let highlightedMenu = isHighlightedMenuNode(snap, isFocused: isFocused)
                 let effectiveFocusFill = activeFocusFill ?? (highlightedMenu ? el.focusHighlightColor : nil)
                 let effectiveBoxFill = effectiveFocusFill ?? fillColor
-                if let (surf, fit) = el.surfacePayload, surfaceVisible {
-                    if hasFill && el.gradient == nil {
-                        primitives.append(attachFade(.roundedRect(
+                // Kept out of `emitNodeEnter`'s frame (`@inline(never)`) so the text path's stack stays
+                // under the 512 KB test thread in debug builds.
+                @inline(never) func emitSurfacePayloadSection() {
+                    if let (surf, fit) = el.surfacePayload, surfaceVisible {
+                        if hasFill && el.gradient == nil {
+                            primitives.append(attachFade(.roundedRect(
+                                rect: devRect,
+                                radii: devRadii,
+                                fill: effectiveBoxFill.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                borderColor: .zero,
+                                borderWidth: 0,
+                                borderSides: nil,
+                                clip: devClip,
+                                turn: useLayer ? 0 : p.rotate
+                            )))
+                        }
+                        let wakeHandle = self.waker
+                        if let pulled = surf.pullVideo(clock: now, wake: { wakeHandle.wake() }) {
+                            if pulled.active {
+                                videosActive = true
+                            }
+                            newVideoSig = VideoSignature.fold(newVideoSig, generation: pulled.generation, surfaceKey: surf.key)
+                        }
+                        builtSurfaces.append(SurfaceDraw(
+                            surface: surf.placed(el.surfacePlace),
+                            fit: fit,
+                            beforeInstance: UInt32(primitives.count),
                             rect: devRect,
                             radii: devRadii,
-                            fill: effectiveBoxFill.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                            borderColor: .zero,
-                            borderWidth: 0,
-                            borderSides: nil,
-                            clip: devClip,
-                            turn: useLayer ? 0 : p.rotate
-                        )))
-                    }
-                    let wakeHandle = self.waker
-                    if let pulled = surf.pullVideo(clock: now, wake: { wakeHandle.wake() }) {
-                        if pulled.active {
-                            videosActive = true
+                            clip: SIMD4<Float>(devClip.x, devClip.y, devClip.x + devClip.z, devClip.y + devClip.w),
+                            fade: activeFadeEdges.first?.fade ?? .zero,
+                            fadeOrigin: activeFadeEdges.first?.origin ?? .zero,
+                            opacity: localAlpha
+                        ))
+                        if hasSolidBorder {
+                            let b4 = borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            let sidePx = el.borderSides.map { s in
+                                SIMD4<Float>(
+                                    snapBorderWidthPx(s.top, scale: pxScale),
+                                    snapBorderWidthPx(s.right, scale: pxScale),
+                                    snapBorderWidthPx(s.bottom, scale: pxScale),
+                                    snapBorderWidthPx(s.left, scale: pxScale)
+                                )
+                            }
+                            let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
+                            primitives.append(attachFade(.roundedRect(
+                                rect: devRect,
+                                radii: devRadii,
+                                fill: .zero,
+                                borderColor: b4,
+                                borderWidth: bwPx,
+                                borderSides: sidePx,
+                                clip: devClip,
+                                turn: useLayer ? 0 : p.rotate
+                            )))
                         }
-                        newVideoSig = VideoSignature.fold(newVideoSig, generation: pulled.generation, surfaceKey: surf.key)
-                    }
-                    builtSurfaces.append(SurfaceDraw(
-                        surface: surf.placed(el.surfacePlace),
-                        fit: fit,
-                        beforeInstance: UInt32(primitives.count),
-                        rect: devRect,
-                        radii: devRadii,
-                        clip: SIMD4<Float>(devClip.x, devClip.y, devClip.x + devClip.z, devClip.y + devClip.w),
-                        fade: activeFadeEdges.first?.fade ?? .zero,
-                        fadeOrigin: activeFadeEdges.first?.origin ?? .zero,
-                        opacity: localAlpha
-                    ))
-                    if hasSolidBorder {
-                        let b4 = borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                    } else if hasFill || hasSolidBorder {
+                        let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
+                        let borderScale = (scaleVec.x + scaleVec.y) * 0.5
                         let sidePx = el.borderSides.map { s in
                             SIMD4<Float>(
-                                snapBorderWidthPx(s.top, scale: pxScale),
-                                snapBorderWidthPx(s.right, scale: pxScale),
-                                snapBorderWidthPx(s.bottom, scale: pxScale),
-                                snapBorderWidthPx(s.left, scale: pxScale)
+                                snapBorderWidthPx(s.top, scale: pxScale) * borderScale,
+                                snapBorderWidthPx(s.right, scale: pxScale) * borderScale,
+                                snapBorderWidthPx(s.bottom, scale: pxScale) * borderScale,
+                                snapBorderWidthPx(s.left, scale: pxScale) * borderScale
                             )
                         }
-                        let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) : 0
+                        let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) * borderScale : 0
                         primitives.append(attachFade(.roundedRect(
                             rect: devRect,
                             radii: devRadii,
-                            fill: .zero,
+                            fill: f4,
                             borderColor: b4,
                             borderWidth: bwPx,
                             borderSides: sidePx,
                             clip: devClip,
-                            turn: useLayer ? 0 : p.rotate
+                            turn: useLayer ? 0 : effRotate
+                        )))
+                    } else if let hl = effectiveFocusFill {
+                        primitives.append(attachFade(.roundedRect(
+                            rect: devRect,
+                            radii: devRadii,
+                            fill: hl.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                            borderColor: .zero,
+                            borderWidth: 0,
+                            clip: devClip,
+                            turn: useLayer ? 0 : effRotate
                         )))
                     }
-                } else if hasFill || hasSolidBorder {
-                    let f4 = (el.gradient == nil ? effectiveBoxFill : .transparent).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    let b4 = hasSolidBorder ? borderColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend) : .zero
-                    let borderScale = (scaleVec.x + scaleVec.y) * 0.5
-                    let sidePx = el.borderSides.map { s in
-                        SIMD4<Float>(
-                            snapBorderWidthPx(s.top, scale: pxScale) * borderScale,
-                            snapBorderWidthPx(s.right, scale: pxScale) * borderScale,
-                            snapBorderWidthPx(s.bottom, scale: pxScale) * borderScale,
-                            snapBorderWidthPx(s.left, scale: pxScale) * borderScale
-                        )
-                    }
-                    let bwPx = el.borderWidth > 0 ? snapBorderWidthPx(el.borderWidth, scale: pxScale) * borderScale : 0
-                    primitives.append(attachFade(.roundedRect(
-                        rect: devRect,
-                        radii: devRadii,
-                        fill: f4,
-                        borderColor: b4,
-                        borderWidth: bwPx,
-                        borderSides: sidePx,
-                        clip: devClip,
-                        turn: useLayer ? 0 : effRotate
-                    )))
-                } else if let hl = effectiveFocusFill {
-                    primitives.append(attachFade(.roundedRect(
-                        rect: devRect,
-                        radii: devRadii,
-                        fill: hl.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                        borderColor: .zero,
-                        borderWidth: 0,
-                        clip: devClip,
-                        turn: useLayer ? 0 : effRotate
-                    )))
                 }
+                emitSurfacePayloadSection()
 
                 // 3. Dashed border ring
                 if let dash = el.dashedBorder, borderColor.a > 0.0005 {
@@ -7081,46 +7086,51 @@ public final class Runtime<State> {
                 }
 
                 // 5. Image payload
-                if let img = el.imagePayload {
-                    let uv = imagePacker.insert(img)
-                    let tint = (el.textColor ?? .white).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    primitives.append(.image(
-                        rect: devRect,
-                        radii: devRadii,
-                        uv: uv,
-                        tint: tint,
-                        clip: devClip,
-                        turn: useLayer ? 0 : p.rotate
-                    ))
-                } else if let px = el.pixelsPayload {
-                    let sz = px.size
-                    if sz.width > 0 && sz.height > 0 {
-                        let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: px.rgbaBytes())
-                        let normUV = imagePacker.insert(atlas)
-                        let fitted = Runtime.fittedPixelsGeometry(
-                            box: devRect,
-                            uv: normUV,
-                            imageWidth: Float(sz.width),
-                            imageHeight: Float(sz.height),
-                            fit: el.pixelsFitMode,
-                            place: el.surfacePlace,
-                            pixelScale: pxScale
-                        )
-                        let maxR = min(fitted.rect.z, fitted.rect.w) * 0.5
-                        let fittedRadii: SIMD4<Float> = el.pixelsFitMode != nil
-                            ? SIMD4<Float>(min(devRadii.x, maxR), min(devRadii.y, maxR), min(devRadii.z, maxR), min(devRadii.w, maxR))
-                            : devRadii
-                        let tint = Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                // Kept out of `emitNodeEnter`'s frame (`@inline(never)`) so the text path's stack stays
+                // under the 512 KB test thread in debug builds.
+                @inline(never) func emitImagePayloadSection() {
+                    if let img = el.imagePayload {
+                        let uv = imagePacker.insert(img)
+                        let tint = (el.textColor ?? .white).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
                         primitives.append(.image(
-                            rect: fitted.rect,
-                            radii: fittedRadii,
-                            uv: fitted.uv,
+                            rect: devRect,
+                            radii: devRadii,
+                            uv: uv,
                             tint: tint,
                             clip: devClip,
                             turn: useLayer ? 0 : p.rotate
                         ))
+                    } else if let px = el.pixelsPayload {
+                        let sz = px.size
+                        if sz.width > 0 && sz.height > 0 {
+                            let atlas = RGBA8Atlas(width: Int(sz.width), height: Int(sz.height), texels: px.rgbaBytes())
+                            let normUV = imagePacker.insert(atlas)
+                            let fitted = Runtime.fittedPixelsGeometry(
+                                box: devRect,
+                                uv: normUV,
+                                imageWidth: Float(sz.width),
+                                imageHeight: Float(sz.height),
+                                fit: el.pixelsFitMode,
+                                place: el.surfacePlace,
+                                pixelScale: pxScale
+                            )
+                            let maxR = min(fitted.rect.z, fitted.rect.w) * 0.5
+                            let fittedRadii: SIMD4<Float> = el.pixelsFitMode != nil
+                                ? SIMD4<Float>(min(devRadii.x, maxR), min(devRadii.y, maxR), min(devRadii.z, maxR), min(devRadii.w, maxR))
+                                : devRadii
+                            let tint = Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            primitives.append(.image(
+                                rect: fitted.rect,
+                                radii: fittedRadii,
+                                uv: fitted.uv,
+                                tint: tint,
+                                clip: devClip,
+                                turn: useLayer ? 0 : p.rotate
+                            ))
+                        }
                     }
                 }
+                emitImagePayloadSection()
 
                 let avgScale = (scaleVec.x + scaleVec.y) * 0.5
                 let wExact = max(0, rExact[2] - rExact[0])
@@ -7129,95 +7139,100 @@ public final class Runtime<State> {
                 let boxGliding = gliding || (snapRest?.left != nil && snapRest!.left != .zero)
 
                 // 6. SVG Icon payload
-                if let (svg, _) = el.iconPayload {
-                    let baseIconColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? sceneTextColor ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
-                    let resolvedColor = applyPressColor(effPressColor, to: baseIconColor, frac: effPressFrac)
-                    let animIconTurn = scene.get(p.id, Props.ICON_TURN) ?? el.iconRotation
-                    let effGlyphTurn = (useLayer ? 0 : effRotate) + animIconTurn
-                    let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                    let tk = (flightCover != nil) ? Float(1.0) : avgScale
-                    let raster = (flightCover != nil) ? Float(1.0) : nodeScaleMotion.raster(sc: avgScale, rest: inh.stillScale)
-                    let zoom = tk / max(1e-4, raster)
-                    let rawSide = max(0, min(rawRect.width, rawRect.height)) * pxScale
-                    let snapU: Float = (flightCover == nil && abs(rawSide - rawSide.rounded()) < 1.0 / 512.0)
-                        ? max(0, min(1, 1.0 - abs(avgScale - 1.0) * 32.0))
-                        : 0.0
-                    let drawn = exactSide + (min(devRect.z, devRect.w) - exactSide) * snapU
-                    let px: Int = (flightCover == nil && nodeScaleMotion != .still)
-                        ? max(1, Int((rawSide * raster).rounded()))
-                        : max(1, Int((drawn / max(1e-4, zoom)).rounded()))
-                    let posX = devRect.x + (devRect.z - drawn) * 0.5
-                    let posY = devRect.y + (devRect.w - drawn) * 0.5
-                    let iconResting = (flightCover == nil)
-                        && (nodeScaleMotion == .still)
-                        && !boxGliding
-                        && abs(effGlyphTurn) <= 1e-6
-                        && abs(avgScale - 1.0) < 1e-5
-                    if drawn > 1e-4,
-                       let colorDecoded = textSystem.colorIcons.rasterize(
-                           svg,
-                           pixelSize: px,
-                           currentColor: resolvedColor,
-                           oneColor: el.isIconOneColor ? resolvedColor : nil,
-                           mirrored: snap.mirroredInRtl
-                       ),
-                       let baseMip = colorDecoded.mips.first {
-                        let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
-                        let normUV = imagePacker.insert(atlas)
-                        primitives.append(attachFade(.image(
-                            rect: SIMD4<Float>(posX, posY, drawn, drawn),
-                            radii: .zero,
-                            uv: normUV,
-                            tint: Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                            clip: devClip,
-                            turn: effGlyphTurn
-                        )))
-                    } else if iconResting && exactSide > 1e-4 {
-                        let canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
-                        let containPx = inh.snap.contain * pxScale
-                        let atX = PixelSnap.onGrid(rExact[0] + (wExact - exactSide) * 0.5, contain: containPx.x)
-                        let atY = PixelSnap.onGrid(rExact[1] + (hExact - exactSide) * 0.5, contain: containPx.y)
-                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide, mirrored: snap.mirroredInRtl)
-                        let primIdx = primitives.count
-                        primitives.append(attachFade(.glyph(
-                            rect: SIMD4<Float>(atX, atY, Float(canvas), Float(canvas)),
-                            uv: entry.uv,
-                            color: tint,
-                            gamma: 1.0,
-                            clip: devClip,
-                            turn: effGlyphTurn
-                        )))
-                        glyphPageEntries.append((primIdx, entry.page))
-                        usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
-                    } else if drawn > 1e-4 {
-                        let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: px, mirrored: snap.mirroredInRtl)
-                        let pxF = Float(max(1, entry.pixelSize.x))
-                        let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
-                        let quadRect: SIMD4<Float>
-                        let quadUV: SIMD4<Float>
-                        if abs(effGlyphTurn) <= 1e-6 && nearWhole(posX) && nearWhole(posY) && abs(drawn - pxF) < 1.0 / 512.0 {
-                            quadRect = SIMD4<Float>(posX.rounded(), posY.rounded(), pxF, pxF)
-                            quadUV = entry.uv
-                        } else {
-                            let t = drawn / pxF
-                            let du = (entry.uv.z - entry.uv.x) / pxF
-                            let dv = (entry.uv.w - entry.uv.y) / pxF
-                            quadRect = SIMD4<Float>(posX - t, posY - t, drawn + 2.0 * t, drawn + 2.0 * t)
-                            quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
+                // Kept out of `emitNodeEnter`'s frame (`@inline(never)`) so the text path's stack stays
+                // under the 512 KB test thread in debug builds.
+                @inline(never) func emitIconPayloadSection() {
+                    if let (svg, _) = el.iconPayload {
+                        let baseIconColor = (nearestGroupHovered ? el.groupColor : nil) ?? liveTextColor ?? sceneTextColor ?? el.textColor ?? cxSettings.viewDefaults.foreground ?? .white
+                        let resolvedColor = applyPressColor(effPressColor, to: baseIconColor, frac: effPressFrac)
+                        let animIconTurn = scene.get(p.id, Props.ICON_TURN) ?? el.iconRotation
+                        let effGlyphTurn = (useLayer ? 0 : effRotate) + animIconTurn
+                        let tint = resolvedColor.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                        let tk = (flightCover != nil) ? Float(1.0) : avgScale
+                        let raster = (flightCover != nil) ? Float(1.0) : nodeScaleMotion.raster(sc: avgScale, rest: inh.stillScale)
+                        let zoom = tk / max(1e-4, raster)
+                        let rawSide = max(0, min(rawRect.width, rawRect.height)) * pxScale
+                        let snapU: Float = (flightCover == nil && abs(rawSide - rawSide.rounded()) < 1.0 / 512.0)
+                            ? max(0, min(1, 1.0 - abs(avgScale - 1.0) * 32.0))
+                            : 0.0
+                        let drawn = exactSide + (min(devRect.z, devRect.w) - exactSide) * snapU
+                        let px: Int = (flightCover == nil && nodeScaleMotion != .still)
+                            ? max(1, Int((rawSide * raster).rounded()))
+                            : max(1, Int((drawn / max(1e-4, zoom)).rounded()))
+                        let posX = devRect.x + (devRect.z - drawn) * 0.5
+                        let posY = devRect.y + (devRect.w - drawn) * 0.5
+                        let iconResting = (flightCover == nil)
+                            && (nodeScaleMotion == .still)
+                            && !boxGliding
+                            && abs(effGlyphTurn) <= 1e-6
+                            && abs(avgScale - 1.0) < 1e-5
+                        if drawn > 1e-4,
+                           let colorDecoded = textSystem.colorIcons.rasterize(
+                               svg,
+                               pixelSize: px,
+                               currentColor: resolvedColor,
+                               oneColor: el.isIconOneColor ? resolvedColor : nil,
+                               mirrored: snap.mirroredInRtl
+                           ),
+                           let baseMip = colorDecoded.mips.first {
+                            let atlas = RGBA8Atlas(width: Int(baseMip.width), height: Int(baseMip.height), texels: [UInt8](baseMip.rgba))
+                            let normUV = imagePacker.insert(atlas)
+                            primitives.append(attachFade(.image(
+                                rect: SIMD4<Float>(posX, posY, drawn, drawn),
+                                radii: .zero,
+                                uv: normUV,
+                                tint: Color.white.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
+                                clip: devClip,
+                                turn: effGlyphTurn
+                            )))
+                        } else if iconResting && exactSide > 1e-4 {
+                            let canvas = max(1, Int(ceil(exactSide - 1.0 / 64.0)))
+                            let containPx = inh.snap.contain * pxScale
+                            let atX = PixelSnap.onGrid(rExact[0] + (wExact - exactSide) * 0.5, contain: containPx.x)
+                            let atY = PixelSnap.onGrid(rExact[1] + (hExact - exactSide) * 0.5, contain: containPx.y)
+                            let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: canvas, drawnSize: exactSide, mirrored: snap.mirroredInRtl)
+                            let primIdx = primitives.count
+                            primitives.append(attachFade(.glyph(
+                                rect: SIMD4<Float>(atX, atY, Float(canvas), Float(canvas)),
+                                uv: entry.uv,
+                                color: tint,
+                                gamma: 1.0,
+                                clip: devClip,
+                                turn: effGlyphTurn
+                            )))
+                            glyphPageEntries.append((primIdx, entry.page))
+                            usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
+                        } else if drawn > 1e-4 {
+                            let entry = textSystem.glyphAtlas.rasterizeIcon(svg, pixelSize: px, mirrored: snap.mirroredInRtl)
+                            let pxF = Float(max(1, entry.pixelSize.x))
+                            let nearWhole: (Float) -> Bool = { abs($0 - $0.rounded()) < 1.0 / 512.0 }
+                            let quadRect: SIMD4<Float>
+                            let quadUV: SIMD4<Float>
+                            if abs(effGlyphTurn) <= 1e-6 && nearWhole(posX) && nearWhole(posY) && abs(drawn - pxF) < 1.0 / 512.0 {
+                                quadRect = SIMD4<Float>(posX.rounded(), posY.rounded(), pxF, pxF)
+                                quadUV = entry.uv
+                            } else {
+                                let t = drawn / pxF
+                                let du = (entry.uv.z - entry.uv.x) / pxF
+                                let dv = (entry.uv.w - entry.uv.y) / pxF
+                                quadRect = SIMD4<Float>(posX - t, posY - t, drawn + 2.0 * t, drawn + 2.0 * t)
+                                quadUV = SIMD4<Float>(entry.uv.x - du, entry.uv.y - dv, entry.uv.z + du, entry.uv.w + dv)
+                            }
+                            let primIdx = primitives.count
+                            primitives.append(attachFade(.glyph(
+                                rect: quadRect,
+                                uv: quadUV,
+                                color: tint,
+                                gamma: 1.0,
+                                clip: devClip,
+                                turn: effGlyphTurn
+                            )))
+                            glyphPageEntries.append((primIdx, entry.page))
+                            usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
                         }
-                        let primIdx = primitives.count
-                        primitives.append(attachFade(.glyph(
-                            rect: quadRect,
-                            uv: quadUV,
-                            color: tint,
-                            gamma: 1.0,
-                            clip: devClip,
-                            turn: effGlyphTurn
-                        )))
-                        glyphPageEntries.append((primIdx, entry.page))
-                        usedGlyphMask |= UInt32(1) << min(UInt32(entry.page), 31)
                     }
                 }
+                emitIconPayloadSection()
 
                 // 7. Vector Canvas Shapes (triangles & segments)
                 let shapeStill = (flightCover == nil)
@@ -7291,145 +7306,150 @@ public final class Runtime<State> {
                 }
 
                 // 7b. TerminalGrid (`terminalGridPayload`)
-                if let grid = el.terminalGridPayload {
-                    let gPadL = el.layout.padding.left * scaleVec.x
-                    let gPadT = el.layout.padding.top * scaleVec.y
-                    let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
-                    if abs(scaleVec.x - 1.0) < 1e-4 && abs(scaleVec.y - 1.0) < 1e-4 {
-                        let padLx = gPadL * pxScale
-                        let padTy = gPadT * pxScale
-                        let gridDevRect = SIMD4<Float>(devRect.x + padLx, devRect.y + padTy, max(0, devRect.z - padLx), max(0, devRect.w - padTy))
-                        let gridExact = SIMD4<Float>(rExact.x + padLx, rExact.y + padTy, rExact.z, rExact.w)
-                        var gridGlyphCount = 0
-                        paintTerminalGrid(
-                            grid,
-                            devRect: gridDevRect,
-                            exactRectPx: gridExact,
-                            devClip: devClip,
-                            localAlpha: localAlpha,
-                            defaultColor: defaultGridColor,
-                            effRotate: effRotate,
-                            useLayer: useLayer,
-                            primitives: &primitives,
-                            glyphPageEntries: &glyphPageEntries,
-                            usedGlyphMask: &usedGlyphMask,
-                            glyphCount: &gridGlyphCount
-                        )
-                    } else {
-                    let baseX = rect.x + gPadL
-                    let baseY = rect.y + gPadT
-                    let cellW = grid.cellSize.x * scaleVec.x
-                    let cellH = grid.cellSize.y * scaleVec.y
-                    for (rowIdx, row) in grid.rows.enumerated() {
-                        let rowY = baseY + Float(rowIdx) * cellH
-                        for fill in row.fills {
-                            let fw = Float(max(0, fill.endColumn - fill.startColumn)) * cellW
-                            guard fw > 0 else { continue }
-                            let fx = baseX + Float(fill.startColumn) * cellW
-                            primitives.append(.roundedRect(
-                                rect: SIMD4<Float>(fx * pxScale, rowY * pxScale, fw * pxScale, cellH * pxScale),
-                                fill: fill.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
-                                clip: devClip
-                            ))
-                        }
-                        if !row.text.isEmpty || !row.spans.isEmpty {
-                            let shaped = textSystem.shape(
-                                text: row.text,
-                                spans: row.spans.isEmpty ? nil : row.spans,
-                                style: row.style,
-                                maxWidth: nil,
-                                pixelScale: pxScale,
-                                emitGlyphs: true
+                // Kept out of `emitNodeEnter`'s frame (`@inline(never)`) so the text path's stack stays
+                // under the 512 KB test thread in debug builds.
+                @inline(never) func emitTerminalGridSection() {
+                    if let grid = el.terminalGridPayload {
+                        let gPadL = el.layout.padding.left * scaleVec.x
+                        let gPadT = el.layout.padding.top * scaleVec.y
+                        let defaultGridColor = liveTextColor ?? el.textColor ?? defaultViewFg ?? Tok.theme(dark: systemDark).text
+                        if abs(scaleVec.x - 1.0) < 1e-4 && abs(scaleVec.y - 1.0) < 1e-4 {
+                            let padLx = gPadL * pxScale
+                            let padTy = gPadT * pxScale
+                            let gridDevRect = SIMD4<Float>(devRect.x + padLx, devRect.y + padTy, max(0, devRect.z - padLx), max(0, devRect.w - padTy))
+                            let gridExact = SIMD4<Float>(rExact.x + padLx, rExact.y + padTy, rExact.z, rExact.w)
+                            var gridGlyphCount = 0
+                            paintTerminalGrid(
+                                grid,
+                                devRect: gridDevRect,
+                                exactRectPx: gridExact,
+                                devClip: devClip,
+                                localAlpha: localAlpha,
+                                defaultColor: defaultGridColor,
+                                effRotate: effRotate,
+                                useLayer: useLayer,
+                                primitives: &primitives,
+                                glyphPageEntries: &glyphPageEntries,
+                                usedGlyphMask: &usedGlyphMask,
+                                glyphCount: &gridGlyphCount
                             )
-                            for g in shaped.glyphs {
-                                let gc = (g.color ?? defaultGridColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                let primIdx = primitives.count
-                                primitives.append(.glyph(
-                                    rect: SIMD4<Float>(
-                                        (baseX + g.rect.x * scaleVec.x) * pxScale,
-                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
-                                        g.rect.z * scaleVec.x * pxScale,
-                                        g.rect.w * scaleVec.y * pxScale
-                                    ),
-                                    uv: g.uv,
-                                    color: gc,
-                                    gamma: systemDark ? 0.88 : 1.05,
+                        } else {
+                        let baseX = rect.x + gPadL
+                        let baseY = rect.y + gPadT
+                        let cellW = grid.cellSize.x * scaleVec.x
+                        let cellH = grid.cellSize.y * scaleVec.y
+                        for (rowIdx, row) in grid.rows.enumerated() {
+                            let rowY = baseY + Float(rowIdx) * cellH
+                            for fill in row.fills {
+                                let fw = Float(max(0, fill.endColumn - fill.startColumn)) * cellW
+                                guard fw > 0 else { continue }
+                                let fx = baseX + Float(fill.startColumn) * cellW
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(fx * pxScale, rowY * pxScale, fw * pxScale, cellH * pxScale),
+                                    fill: fill.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend),
                                     clip: devClip
                                 ))
-                                glyphPageEntries.append((primIdx, g.atlasPage))
-                                usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
                             }
-                        }
-                        for cell in row.cells where !cell.text.isEmpty {
-                            let shaped = textSystem.shape(
-                                text: cell.text,
-                                spans: nil,
-                                style: cell.style,
-                                maxWidth: nil,
-                                pixelScale: pxScale,
-                                emitGlyphs: true
-                            )
-                            let cx = baseX + Float(cell.column) * cellW
-                            for g in shaped.glyphs {
-                                let gc = cell.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                let primIdx = primitives.count
-                                primitives.append(.glyph(
-                                    rect: SIMD4<Float>(
-                                        (cx + g.rect.x * scaleVec.x) * pxScale,
-                                        (rowY + g.rect.y * scaleVec.y) * pxScale,
-                                        g.rect.z * scaleVec.x * pxScale,
-                                        g.rect.w * scaleVec.y * pxScale
-                                    ),
-                                    uv: g.uv,
-                                    color: gc,
-                                    gamma: systemDark ? 0.88 : 1.05,
-                                    clip: devClip
-                                ))
-                                glyphPageEntries.append((primIdx, g.atlasPage))
-                                usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                            if !row.text.isEmpty || !row.spans.isEmpty {
+                                let shaped = textSystem.shape(
+                                    text: row.text,
+                                    spans: row.spans.isEmpty ? nil : row.spans,
+                                    style: row.style,
+                                    maxWidth: nil,
+                                    pixelScale: pxScale,
+                                    emitGlyphs: true
+                                )
+                                for g in shaped.glyphs {
+                                    let gc = (g.color ?? defaultGridColor).scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                    let primIdx = primitives.count
+                                    primitives.append(.glyph(
+                                        rect: SIMD4<Float>(
+                                            (baseX + g.rect.x * scaleVec.x) * pxScale,
+                                            (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                            g.rect.z * scaleVec.x * pxScale,
+                                            g.rect.w * scaleVec.y * pxScale
+                                        ),
+                                        uv: g.uv,
+                                        color: gc,
+                                        gamma: systemDark ? 0.88 : 1.05,
+                                        clip: devClip
+                                    ))
+                                    glyphPageEntries.append((primIdx, g.atlasPage))
+                                    usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                                }
                             }
-                        }
-                        if let overlay = row.overlayShape {
-                            for op in overlay.ops {
-                                switch op {
-                                case let .fill(points, col):
-                                    let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                    if c4.w <= 0.0005 { continue }
-                                    for (indices, aaMask) in Shape.triangulate(points) {
-                                        let p0 = points[indices[0]], p1 = points[indices[1]], p2 = points[indices[2]]
-                                        primitives.append(.triangle(
-                                            v0: SIMD2<Float>((baseX + p0.x * scaleVec.x) * pxScale, (rowY + p0.y * scaleVec.y) * pxScale),
-                                            v1: SIMD2<Float>((baseX + p1.x * scaleVec.x) * pxScale, (rowY + p1.y * scaleVec.y) * pxScale),
-                                            v2: SIMD2<Float>((baseX + p2.x * scaleVec.x) * pxScale, (rowY + p2.y * scaleVec.y) * pxScale),
-                                            aaMask: aaMask,
-                                            color: c4,
-                                            clip: devClip
-                                        ))
-                                    }
-                                case let .stroke(points, closed, width, cap, col):
-                                    let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                                    if c4.w <= 0.0005 { continue }
-                                    let strokeW = width * min(scaleVec.x, scaleVec.y) * pxScale
-                                    let roundCap = (cap == .round)
-                                    let n = points.count
-                                    let count = closed ? n : max(0, n - 1)
-                                    for idx in 0..<count {
-                                        let a = points[idx], b = points[(idx + 1) % n]
-                                        primitives.append(.segment(
-                                            from: SIMD2<Float>((baseX + a.x * scaleVec.x) * pxScale, (rowY + a.y * scaleVec.y) * pxScale),
-                                            to: SIMD2<Float>((baseX + b.x * scaleVec.x) * pxScale, (rowY + b.y * scaleVec.y) * pxScale),
-                                            width: strokeW,
-                                            color: c4,
-                                            roundCap: roundCap,
-                                            clip: devClip
-                                        ))
+                            for cell in row.cells where !cell.text.isEmpty {
+                                let shaped = textSystem.shape(
+                                    text: cell.text,
+                                    spans: nil,
+                                    style: cell.style,
+                                    maxWidth: nil,
+                                    pixelScale: pxScale,
+                                    emitGlyphs: true
+                                )
+                                let cx = baseX + Float(cell.column) * cellW
+                                for g in shaped.glyphs {
+                                    let gc = cell.color.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                    let primIdx = primitives.count
+                                    primitives.append(.glyph(
+                                        rect: SIMD4<Float>(
+                                            (cx + g.rect.x * scaleVec.x) * pxScale,
+                                            (rowY + g.rect.y * scaleVec.y) * pxScale,
+                                            g.rect.z * scaleVec.x * pxScale,
+                                            g.rect.w * scaleVec.y * pxScale
+                                        ),
+                                        uv: g.uv,
+                                        color: gc,
+                                        gamma: systemDark ? 0.88 : 1.05,
+                                        clip: devClip
+                                    ))
+                                    glyphPageEntries.append((primIdx, g.atlasPage))
+                                    usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                                }
+                            }
+                            if let overlay = row.overlayShape {
+                                for op in overlay.ops {
+                                    switch op {
+                                    case let .fill(points, col):
+                                        let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                        if c4.w <= 0.0005 { continue }
+                                        for (indices, aaMask) in Shape.triangulate(points) {
+                                            let p0 = points[indices[0]], p1 = points[indices[1]], p2 = points[indices[2]]
+                                            primitives.append(.triangle(
+                                                v0: SIMD2<Float>((baseX + p0.x * scaleVec.x) * pxScale, (rowY + p0.y * scaleVec.y) * pxScale),
+                                                v1: SIMD2<Float>((baseX + p1.x * scaleVec.x) * pxScale, (rowY + p1.y * scaleVec.y) * pxScale),
+                                                v2: SIMD2<Float>((baseX + p2.x * scaleVec.x) * pxScale, (rowY + p2.y * scaleVec.y) * pxScale),
+                                                aaMask: aaMask,
+                                                color: c4,
+                                                clip: devClip
+                                            ))
+                                        }
+                                    case let .stroke(points, closed, width, cap, col):
+                                        let c4 = col.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                        if c4.w <= 0.0005 { continue }
+                                        let strokeW = width * min(scaleVec.x, scaleVec.y) * pxScale
+                                        let roundCap = (cap == .round)
+                                        let n = points.count
+                                        let count = closed ? n : max(0, n - 1)
+                                        for idx in 0..<count {
+                                            let a = points[idx], b = points[(idx + 1) % n]
+                                            primitives.append(.segment(
+                                                from: SIMD2<Float>((baseX + a.x * scaleVec.x) * pxScale, (rowY + a.y * scaleVec.y) * pxScale),
+                                                to: SIMD2<Float>((baseX + b.x * scaleVec.x) * pxScale, (rowY + b.y * scaleVec.y) * pxScale),
+                                                width: strokeW,
+                                                color: c4,
+                                                roundCap: roundCap,
+                                                clip: devClip
+                                            ))
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
+                        }
                     }
                 }
+                emitTerminalGridSection()
 
                 // 8. Text / Rich Text / TextInput
                 let snappedOriginX = snappedEdgesPx[0] / pxScale
@@ -7456,255 +7476,261 @@ public final class Runtime<State> {
                 let defaultTextColor = applyPressColor(effPressColor, to: baseDefaultTextColor, frac: effPressFrac)
 
                 if let edit = editValue {
-                    let resolvedInput = ElDisplayResolver.resolveInput(
-                        el: el,
-                        edit: edit,
-                        innerWidth: innerW / max(1e-4, scaleVec.x)
-                    )
-                    let showingPlaceholder = resolvedInput.showingPlaceholder
-                    let renderedStr = resolvedInput.renderedString
-                    let textCol = showingPlaceholder
-                        ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
-                        : defaultTextColor
-
-                    let inputBox = resolvePaintTextLayout(
-                        snapId: snap.nodeId,
-                        isInput: true,
-                        isExiting: p.isExiting,
-                        text: renderedStr,
-                        spans: resolvedInput.spans,
-                        pills: resolvedInput.pills,
-                        style: resolvedInput.style,
-                        wrapWidth: resolvedInput.maxWidthForShape,
-                        pxScale: pxScale,
-                        glidePx: glidePx,
-                        isSecure: resolvedInput.isSecure
-                    )
-                    let shaped = inputBox.shaped
-                    if !nodeIsSecure {
-                        elementDrawnText = shaped.drawnText
-                        elementElision = shaped.elided
-                    }
-                    let inputClip = intersectRects(visClip, rect)
-                    let devInputClip = SIMD4<Float>(
-                        inputClip.x * pxScale,
-                        inputClip.y * pxScale,
-                        inputClip.width * pxScale,
-                        inputClip.height * pxScale
-                    )
-                    let inputScrollX = computeSingleLineScroll(
-                        path: snap.path,
-                        edit: edit,
-                        shaped: shaped,
-                        isFocused: isFocused,
-                        showingPlaceholder: showingPlaceholder,
-                        innerWidthPt: innerW / max(1e-4, scaleVec.x),
-                        pixelScale: pxScale
-                    )
-                    let inputTextOriginX = textOriginX - inputScrollX * scaleVec.x
-                    let inputRestOriginX = restOriginX - inputScrollX * scaleVec.x
-
-                    if !resolvedInput.blocks.isEmpty {
-                        RichTextFieldRender.emitBlockDecorations(
-                            blocks: resolvedInput.blocks,
-                            richStyle: resolvedInput.richStyle,
-                            displayText: renderedStr,
-                            shaped: shaped,
-                            innerW: innerW,
-                            textOriginX: inputRestOriginX,
-                            textOriginY: restOriginY,
-                            scaleVec: scaleVec,
-                            pxScale: pxScale,
-                            localAlpha: localAlpha,
-                            srgbBlend: srgbBlend,
-                            devClip: devInputClip,
-                            into: &primitives
+                    // Kept out of `emitNodeEnter`'s frame (`@inline(never)`): debug builds give every
+                    // temporary its own slot, and the deep text-shaping path below overflowed the
+                    // 512 KB test-thread stack.
+                    @inline(never) func emitEditInputSection(_ edit: TextEdit) {
+                        let resolvedInput = ElDisplayResolver.resolveInput(
+                            el: el,
+                            edit: edit,
+                            innerWidth: innerW / max(1e-4, scaleVec.x)
                         )
-                    }
+                        let showingPlaceholder = resolvedInput.showingPlaceholder
+                        let renderedStr = resolvedInput.renderedString
+                        let textCol = showingPlaceholder
+                            ? (el.placeholderColor ?? defaultTextColor.alpha(0.45))
+                            : defaultTextColor
 
-                    // Selection highlight
-                    if isFocused && edit.hasSelection && !showingPlaceholder {
-                        let rawRange = edit.selectedUTF8Range
-                        let displayRange: Range<Int>
-                        if resolvedInput.isSecure && !edit.isRevealed {
-                            if edit.multiline {
-                                displayRange = 0..<renderedStr.utf8.count
-                            } else {
-                                let utf8Count = edit.text.utf8.count
-                                let lo = max(0, min(rawRange.lowerBound, utf8Count))
-                                let hi = max(lo, min(rawRange.upperBound, utf8Count))
-                                let loIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: lo)
-                                let hiIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: hi)
-                                let loScalars = edit.text[..<loIdx].unicodeScalars.count
-                                let hiScalars = edit.text[..<hiIdx].unicodeScalars.count
-                                let bulletBytes = "•".utf8.count
-                                displayRange = (loScalars * bulletBytes)..<(hiScalars * bulletBytes)
-                            }
-                        } else {
-                            displayRange = rawRange
+                        let inputBox = resolvePaintTextLayout(
+                            snapId: snap.nodeId,
+                            isInput: true,
+                            isExiting: p.isExiting,
+                            text: renderedStr,
+                            spans: resolvedInput.spans,
+                            pills: resolvedInput.pills,
+                            style: resolvedInput.style,
+                            wrapWidth: resolvedInput.maxWidthForShape,
+                            pxScale: pxScale,
+                            glidePx: glidePx,
+                            isSecure: resolvedInput.isSecure
+                        )
+                        let shaped = inputBox.shaped
+                        if !nodeIsSecure {
+                            elementDrawnText = shaped.drawnText
+                            elementElision = shaped.elided
                         }
-                        let baseSelCol = el.resolvedSelectionStyle?.pick(active: windowFocused).highlight
-                            ?? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
-                        let selCol = baseSelCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                        let lineRects = textSystem.selectionRects(
-                            in: shaped,
-                            utf8Range: displayRange,
+                        let inputClip = intersectRects(visClip, rect)
+                        let devInputClip = SIMD4<Float>(
+                            inputClip.x * pxScale,
+                            inputClip.y * pxScale,
+                            inputClip.width * pxScale,
+                            inputClip.height * pxScale
+                        )
+                        let inputScrollX = computeSingleLineScroll(
+                            path: snap.path,
+                            edit: edit,
+                            shaped: shaped,
+                            isFocused: isFocused,
+                            showingPlaceholder: showingPlaceholder,
+                            innerWidthPt: innerW / max(1e-4, scaleVec.x),
                             pixelScale: pxScale
                         )
-                        if !lineRects.isEmpty {
-                            for r in lineRects {
-                                primitives.append(.roundedRect(
-                                    rect: SIMD4<Float>(
-                                        (inputRestOriginX + r.x) * pxScale,
-                                        (restOriginY + r.y) * pxScale,
-                                        max(2.0, r.z) * pxScale,
-                                        r.w * pxScale
-                                    ),
-                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
-                                    fill: selCol,
-                                    clip: devInputClip
-                                ))
-                            }
-                        } else {
-                            let cStart = textSystem.caretRect(in: shaped, utf8Offset: displayRange.lowerBound, pixelScale: pxScale)
-                            let cEnd = textSystem.caretRect(in: shaped, utf8Offset: displayRange.upperBound, pixelScale: pxScale)
-                            if abs(cStart.y - cEnd.y) < 1.0 {
-                                let sx = min(cStart.x, cEnd.x)
-                                let sw = max(2.0, abs(cEnd.x - cStart.x))
-                                primitives.append(.roundedRect(
-                                    rect: SIMD4<Float>(
-                                        (inputRestOriginX + sx) * pxScale,
-                                        (restOriginY + cStart.y) * pxScale,
-                                        sw * pxScale,
-                                        cStart.w * pxScale
-                                    ),
-                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
-                                    fill: selCol,
-                                    clip: devInputClip
-                                ))
+                        let inputTextOriginX = textOriginX - inputScrollX * scaleVec.x
+                        let inputRestOriginX = restOriginX - inputScrollX * scaleVec.x
+
+                        if !resolvedInput.blocks.isEmpty {
+                            RichTextFieldRender.emitBlockDecorations(
+                                blocks: resolvedInput.blocks,
+                                richStyle: resolvedInput.richStyle,
+                                displayText: renderedStr,
+                                shaped: shaped,
+                                innerW: innerW,
+                                textOriginX: inputRestOriginX,
+                                textOriginY: restOriginY,
+                                scaleVec: scaleVec,
+                                pxScale: pxScale,
+                                localAlpha: localAlpha,
+                                srgbBlend: srgbBlend,
+                                devClip: devInputClip,
+                                into: &primitives
+                            )
+                        }
+
+                        // Selection highlight
+                        if isFocused && edit.hasSelection && !showingPlaceholder {
+                            let rawRange = edit.selectedUTF8Range
+                            let displayRange: Range<Int>
+                            if resolvedInput.isSecure && !edit.isRevealed {
+                                if edit.multiline {
+                                    displayRange = 0..<renderedStr.utf8.count
+                                } else {
+                                    let utf8Count = edit.text.utf8.count
+                                    let lo = max(0, min(rawRange.lowerBound, utf8Count))
+                                    let hi = max(lo, min(rawRange.upperBound, utf8Count))
+                                    let loIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: lo)
+                                    let hiIdx = edit.text.utf8.index(edit.text.utf8.startIndex, offsetBy: hi)
+                                    let loScalars = edit.text[..<loIdx].unicodeScalars.count
+                                    let hiScalars = edit.text[..<hiIdx].unicodeScalars.count
+                                    let bulletBytes = "•".utf8.count
+                                    displayRange = (loScalars * bulletBytes)..<(hiScalars * bulletBytes)
+                                }
                             } else {
-                                primitives.append(.roundedRect(
-                                    rect: SIMD4<Float>(
-                                        (inputRestOriginX + cStart.x) * pxScale,
-                                        (restOriginY + cStart.y) * pxScale,
-                                        max(4, innerW - cStart.x) * pxScale,
-                                        cStart.w * pxScale
-                                    ),
-                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
-                                    fill: selCol,
-                                    clip: devInputClip
-                                ))
-                                primitives.append(.roundedRect(
-                                    rect: SIMD4<Float>(
-                                        inputRestOriginX * pxScale,
-                                        (restOriginY + cEnd.y) * pxScale,
-                                        max(4, cEnd.x) * pxScale,
-                                        cEnd.w * pxScale
-                                    ),
-                                    radii: SIMD4<Float>(repeating: 2.0 * pxScale),
-                                    fill: selCol,
-                                    clip: devInputClip
-                                ))
+                                displayRange = rawRange
+                            }
+                            let baseSelCol = el.resolvedSelectionStyle?.pick(active: windowFocused).highlight
+                                ?? (el.selectionColor ?? Tok.accent(0, dark: systemDark).alpha(0.28))
+                            let selCol = baseSelCol.scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                            let lineRects = textSystem.selectionRects(
+                                in: shaped,
+                                utf8Range: displayRange,
+                                pixelScale: pxScale
+                            )
+                            if !lineRects.isEmpty {
+                                for r in lineRects {
+                                    primitives.append(.roundedRect(
+                                        rect: SIMD4<Float>(
+                                            (inputRestOriginX + r.x) * pxScale,
+                                            (restOriginY + r.y) * pxScale,
+                                            max(2.0, r.z) * pxScale,
+                                            r.w * pxScale
+                                        ),
+                                        radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                        fill: selCol,
+                                        clip: devInputClip
+                                    ))
+                                }
+                            } else {
+                                let cStart = textSystem.caretRect(in: shaped, utf8Offset: displayRange.lowerBound, pixelScale: pxScale)
+                                let cEnd = textSystem.caretRect(in: shaped, utf8Offset: displayRange.upperBound, pixelScale: pxScale)
+                                if abs(cStart.y - cEnd.y) < 1.0 {
+                                    let sx = min(cStart.x, cEnd.x)
+                                    let sw = max(2.0, abs(cEnd.x - cStart.x))
+                                    primitives.append(.roundedRect(
+                                        rect: SIMD4<Float>(
+                                            (inputRestOriginX + sx) * pxScale,
+                                            (restOriginY + cStart.y) * pxScale,
+                                            sw * pxScale,
+                                            cStart.w * pxScale
+                                        ),
+                                        radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                        fill: selCol,
+                                        clip: devInputClip
+                                    ))
+                                } else {
+                                    primitives.append(.roundedRect(
+                                        rect: SIMD4<Float>(
+                                            (inputRestOriginX + cStart.x) * pxScale,
+                                            (restOriginY + cStart.y) * pxScale,
+                                            max(4, innerW - cStart.x) * pxScale,
+                                            cStart.w * pxScale
+                                        ),
+                                        radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                        fill: selCol,
+                                        clip: devInputClip
+                                    ))
+                                    primitives.append(.roundedRect(
+                                        rect: SIMD4<Float>(
+                                            inputRestOriginX * pxScale,
+                                            (restOriginY + cEnd.y) * pxScale,
+                                            max(4, cEnd.x) * pxScale,
+                                            cEnd.w * pxScale
+                                        ),
+                                        radii: SIMD4<Float>(repeating: 2.0 * pxScale),
+                                        fill: selCol,
+                                        clip: devInputClip
+                                    ))
+                                }
                             }
                         }
-                    }
 
-                    if resolvedInput.isRich {
-                        textSystem.emitTextDecorationsAndPills(
-                            shaped: shaped,
-                            textOriginX: inputRestOriginX,
-                            textOriginY: restOriginY,
-                            scaleVec: scaleVec,
-                            pxScale: pxScale,
-                            defaultTextColor: textCol,
-                            localAlpha: localAlpha,
-                            srgbBlend: srgbBlend,
-                            devClip: devInputClip,
-                            rot: useLayer ? 0 : effRotate,
-                            insertImage: { imagePacker.insert($0) },
-                            into: &primitives
-                        )
-                    }
-
-                    // Text glyphs
-                    let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
-                    let inputRotated = nodeTurn != nil
-                    let inputShownY0 = (!inputRotated && !inputInCache) ? max(devInputClip.y, -filterMargin) : devInputClip.y
-                    let inputShownY1 = (!inputRotated && !inputInCache) ? min(devInputClip.y + devInputClip.w, Float(devH) + filterMargin) : (devInputClip.y + devInputClip.w)
-                    let inputBasePt = resolvedInput.style.lineHeight ?? resolvedInput.style.size
-                    let inputSpanPt = resolvedInput.spans?.compactMap(\.size).max() ?? 0
-                    let inputEmPt = max(max(resolvedInput.style.size, inputBasePt), inputSpanPt)
-                    let inputBandPad = 2.0 * inputEmPt * scaleVec.y * pxScale + 2.0 / max(1e-4, pxScale)
-                    let inputVisMinY = inputShownY0 - inputBandPad
-                    let inputVisMaxY = inputShownY1 + inputBandPad
-                    // Under a turn (own or inherited) the upright clip doesn't bound the glyphs: upstream drops
-                    // the clip inside a turned layer (`pinh.clip = NO_CLIP`), so no band.
-                    let (inBandTop, inBandBot): (Float, Float) = (!inputRotated && abs(scaleVec.y) > 1e-4)
-                        ? (
-                            (devInputClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
-                            ((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
-                        )
-                        : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
-                    let visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
-                        key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
-                        keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
-                        bandTopPt: inBandTop,
-                        bandBottomPt: inBandBot
-                    ) {
-                        (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
-                    }
-                    for g in visibleInputGlyphs {
-                        let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
-                        let gh = g.rect.w * scaleVec.y * pxScale
-                        if !inputRotated && (gy + gh < inputVisMinY || gy > inputVisMaxY) { continue }
-                        let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? textCol
-                        let gc = baseGlyphColor.scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
-                        let primIdx = primitives.count
-                        primitives.append(.glyph(
-                            rect: SIMD4<Float>(
-                                (inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
-                                gy,
-                                g.rect.z * scaleVec.x * pxScale,
-                                gh
-                            ),
-                            uv: g.uv,
-                            color: gc,
-                            gamma: systemDark ? 0.88 : 1.05,
-                            clip: devInputClip
-                        ))
-                        glyphPageEntries.append((primIdx, g.atlasPage))
-                        usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
-                    }
-
-                    // Caret bar when focused & window focused
-                    if isFocused {
-                        let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: showingPlaceholder)
-                        let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
-                        let caretXPt: Float
-                        if isGliding {
-                            let cxPx = (inputTextOriginX + cRect.x) * pxScale
-                            caretXPt = ((cxPx - glidePx.x).rounded(.toNearestOrAwayFromZero) + glidePx.x) / pxScale
-                        } else {
-                            caretXPt = inputTextOriginX + cRect.x
+                        if resolvedInput.isRich {
+                            textSystem.emitTextDecorationsAndPills(
+                                shaped: shaped,
+                                textOriginX: inputRestOriginX,
+                                textOriginY: restOriginY,
+                                scaleVec: scaleVec,
+                                pxScale: pxScale,
+                                defaultTextColor: textCol,
+                                localAlpha: localAlpha,
+                                srgbBlend: srgbBlend,
+                                devClip: devInputClip,
+                                rot: useLayer ? 0 : effRotate,
+                                insertImage: { imagePacker.insert($0) },
+                                into: &primitives
+                            )
                         }
-                        let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
-                        caretOut = worldCaret
-                        if windowFocused {
-                            let cc = (el.caretColor ?? Tok.accent(0, dark: systemDark))
-                                .scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
-                            primitives.append(.roundedRect(
+
+                        // Text glyphs
+                        let inputInCache = inh.inCache || ((el.runtimeExtras[RenderExtrasKey.cacheEnabled] as? Bool) ?? false)
+                        let inputRotated = nodeTurn != nil
+                        let inputShownY0 = (!inputRotated && !inputInCache) ? max(devInputClip.y, -filterMargin) : devInputClip.y
+                        let inputShownY1 = (!inputRotated && !inputInCache) ? min(devInputClip.y + devInputClip.w, Float(devH) + filterMargin) : (devInputClip.y + devInputClip.w)
+                        let inputBasePt = resolvedInput.style.lineHeight ?? resolvedInput.style.size
+                        let inputSpanPt = resolvedInput.spans?.compactMap(\.size).max() ?? 0
+                        let inputEmPt = max(max(resolvedInput.style.size, inputBasePt), inputSpanPt)
+                        let inputBandPad = 2.0 * inputEmPt * scaleVec.y * pxScale + 2.0 / max(1e-4, pxScale)
+                        let inputVisMinY = inputShownY0 - inputBandPad
+                        let inputVisMaxY = inputShownY1 + inputBandPad
+                        // Under a turn (own or inherited) the upright clip doesn't bound the glyphs: upstream drops
+                        // the clip inside a turned layer (`pinh.clip = NO_CLIP`), so no band.
+                        let (inBandTop, inBandBot): (Float, Float) = (!inputRotated && abs(scaleVec.y) > 1e-4)
+                            ? (
+                                (devInputClip.y / pxScale - restOriginY) / scaleVec.y - 2.0,
+                                ((devInputClip.y + devInputClip.w) / pxScale - restOriginY) / scaleVec.y + 2.0
+                            )
+                            : (-Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+                        let visibleInputGlyphs = textSystem.glyphCache.glyphsInBandCached(
+                            key: GlyphReplayKey(shapeKey: inputBox.shapeKey, maxWidth: inputBox.maxWidth, glidePx: glidePx),
+                            keep: resolvedInput.isSecure ? .secret : (glidePx == .zero ? .cached : .owned),
+                            bandTopPt: inBandTop,
+                            bandBottomPt: inBandBot
+                        ) {
+                            (shaped.glyphs, shaped.lineGlyphRanges, shaped.lineHeight)
+                        }
+                        for g in visibleInputGlyphs {
+                            let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                            let gh = g.rect.w * scaleVec.y * pxScale
+                            if !inputRotated && (gy + gh < inputVisMinY || gy > inputVisMaxY) { continue }
+                            let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? textCol
+                            let gc = baseGlyphColor.scaleAlpha(localAlpha * textFlightGlyphAlpha).simd4(srgb: srgbBlend)
+                            let primIdx = primitives.count
+                            primitives.append(.glyph(
                                 rect: SIMD4<Float>(
-                                    worldCaret[0] * pxScale,
-                                    worldCaret[1] * pxScale,
-                                    max(1.5 * pxScale, 2.0),
-                                    worldCaret[3] * pxScale
+                                    (inputRestOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                    gy,
+                                    g.rect.z * scaleVec.x * pxScale,
+                                    gh
                                 ),
-                                radii: SIMD4<Float>(repeating: 1.0 * pxScale),
-                                fill: cc,
+                                uv: g.uv,
+                                color: gc,
+                                gamma: systemDark ? 0.88 : 1.05,
                                 clip: devInputClip
                             ))
+                            glyphPageEntries.append((primIdx, g.atlasPage))
+                            usedGlyphMask |= UInt32(1) << min(UInt32(g.atlasPage), 31)
+                        }
+
+                        // Caret bar when focused & window focused
+                        if isFocused {
+                            let byteOff = displayCaretByteOffset(for: edit, showingPlaceholder: showingPlaceholder)
+                            let cRect = textSystem.caretRect(in: shaped, utf8Offset: byteOff, pixelScale: pxScale)
+                            let caretXPt: Float
+                            if isGliding {
+                                let cxPx = (inputTextOriginX + cRect.x) * pxScale
+                                caretXPt = ((cxPx - glidePx.x).rounded(.toNearestOrAwayFromZero) + glidePx.x) / pxScale
+                            } else {
+                                caretXPt = inputTextOriginX + cRect.x
+                            }
+                            let worldCaret = [caretXPt, textOriginY + cRect.y, cRect.z, cRect.w]
+                            caretOut = worldCaret
+                            if windowFocused {
+                                let cc = (el.caretColor ?? Tok.accent(0, dark: systemDark))
+                                    .scaleAlpha(localAlpha).simd4(srgb: srgbBlend)
+                                primitives.append(.roundedRect(
+                                    rect: SIMD4<Float>(
+                                        worldCaret[0] * pxScale,
+                                        worldCaret[1] * pxScale,
+                                        max(1.5 * pxScale, 2.0),
+                                        worldCaret[3] * pxScale
+                                    ),
+                                    radii: SIMD4<Float>(repeating: 1.0 * pxScale),
+                                    fill: cc,
+                                    clip: devInputClip
+                                ))
+                            }
                         }
                     }
+                    emitEditInputSection(edit)
                 } else if el.richSpans != nil || paintedLabelValue != nil || el.advanceInRun != nil {
                     var resolvedText = ElDisplayResolver.resolveText(
                         el: el,
