@@ -214,56 +214,9 @@ struct PointerHitParityTests {
 
     // MARK: - input_click_tests.rs:243 `shift_click_extends_from_anchor_and_does_not_start_multiclick`
 
-    struct Form {
-        var single = TextEdit("make the title smaller", multiline: false)
-        var multi = TextEdit("first line here\nsecond line there\nthird line end", multiline: true)
-        var other = TextEdit("other words", multiline: false)
-        var presses = 0
-    }
-
-    private static func formRuntime() -> Runtime<Form> {
-        let style = TextStyle(size: 14, weight: 400).lh(20)
-        let rt = Runtime(state: Form(), viewport: Vec2(320, 300), pixelScale: 1.0) { _, _ in
-            col().wFull().hFull().p(8).gap(8)
-                .child(textInput(key: "single", \Form.single).singleLine(true).font(style).w(280).h(24)
-                    .onClick { $0.presses += 1 })
-                .child(textInput(key: "multi", \Form.multi).font(style).w(280).h(80))
-                .child(textInput(key: "other", \Form.other).singleLine(true).font(style).w(280).h(24))
-        }
-        _ = rt.frame(at: 0)
-        return rt
-    }
-
-    /// Window point a quarter of the way across the glyph cluster at `byte` in field `key`,
-    /// vertically centred on its caret (`point_at_byte` / `point_in_cluster(.., 0.25)`).
-    private static func pointAtByte(_ rt: Runtime<Form>, _ key: String, _ byte: Int) throws -> Vec2 {
-        let node = try #require(rt.flatNodes.first { $0.key == key })
-        let lens = try #require(node.el.handlers.editLens)
-        let edit = lens.get(rt.state)
-        let rect = rt.presentedRectByPath[node.path] ?? node.targetRect
-        let pad = node.el.layout.padding
-        let resolved = ElDisplayResolver.resolveInput(el: node.el, edit: edit, innerWidth: max(0, rect.width - pad.left - pad.right))
-        let shaped = rt.textSystem.shape(
-            text: resolved.renderedString,
-            spans: resolved.spans,
-            pills: resolved.pills,
-            style: resolved.style,
-            maxWidth: resolved.maxWidthForShape,
-            pixelScale: rt.pixelScale,
-            emitGlyphs: false
-        )
-        let c0 = rt.textSystem.caretRect(in: shaped, utf8Offset: byte, pixelScale: rt.pixelScale)
-        let c1 = rt.textSystem.caretRect(in: shaped, utf8Offset: byte + 1, pixelScale: rt.pixelScale)
-        let hScroll = edit.multiline ? 0 : (rt.inputMachines.inputScroll[node.path] ?? 0)
-        return Vec2(
-            rect.x + pad.left + c0.x + (c1.x - c0.x) * 0.25 - hScroll,
-            rect.y + pad.top + c0.y + c0.w * 0.5
-        )
-    }
-
     @Test("shift_click_extends_from_anchor_and_does_not_start_multiclick")
     func shiftClickExtendsFromAnchorAndDoesNotStartMulticlick() throws {
-        let rt = Self.formRuntime()
+        let rt = InputClickFixture.runtime()
         var t = 0.0
         func click(_ p: Vec2) {
             rt.pointerDown(at: p, at: t)
@@ -271,8 +224,8 @@ struct PointerHitParityTests {
             t += 1.0 / 60.0
             _ = rt.frame(at: t)
         }
-        let pMake = try Self.pointAtByte(rt, "single", 2)
-        let pTitle = try Self.pointAtByte(rt, "single", 11)
+        let pMake = try InputClickFixture.pointAtByte(rt, "single", 2)
+        let pTitle = try InputClickFixture.pointAtByte(rt, "single", 11)
 
         click(pMake)
         let anchor = rt.state.single.anchor
@@ -292,5 +245,109 @@ struct PointerHitParityTests {
         // Immediately clicking at pTitle without Shift is a single click, not a double-click.
         click(pTitle)
         #expect(rt.state.single.anchor == rt.state.single.cursor)
+    }
+
+    // MARK: - help.rs:617 `reaching_help_wakes_a_host_that_skips_unchanged_frames`
+
+    @Test("reaching_help_wakes_a_host_that_skips_unchanged_frames")
+    func reachingHelpWakesAHostThatSkipsUnchangedFrames() {
+        struct S { var modal = false; var cover = false }
+        // `help.rs` tests `view` / `runtime(S::default(), false)` at 300 × 300, scale 2.
+        let rt = Runtime(state: S(), viewport: Vec2(300, 300), pixelScale: 2.0) { _, _ in
+            el().wFull().hFull()
+                .child(el().key("copy").size(40, 20).pin(top: 20, left: 20).help("Copy"))
+                .child(el().key("low").size(40, 20).pin(top: 200, left: 20).help("Low"))
+        }
+        rt.nativeHelp = false
+        _ = rt.frame(at: 0)
+        // An overlay draws only when observePointer says something changed; help that has no
+        // hover paint of its own must still start its wait.
+        #expect(!rt.observePointer(at: Vec2(150, 150), at: 0), "nothing there")
+        #expect(rt.observePointer(at: Vec2(30, 30), at: 0), "onto help")
+        _ = rt.frame(at: 1.0 / 60.0)
+        #expect(!rt.observePointer(at: Vec2(31, 30), at: 1.0 / 60.0), "still on it")
+        _ = rt.frame(at: 1.0 / 60.0 + rt.helpDelay)
+        #expect(rt.helpTooltip() != nil)
+        #expect(rt.observePointer(at: Vec2(150, 150), at: 1.0 / 60.0 + rt.helpDelay), "off it hides the tooltip")
+    }
+
+    // MARK: - `observe_pointer` counts what a held press's move queues (`pointer.rs:13-65`)
+
+    @Test("observePointer: a text field drag-selection queues Action::Focus on every move (input_drag)")
+    func observePointerFieldDragSelectionNeedsFrames() throws {
+        let rt = InputClickFixture.runtime()
+        let pDown = try InputClickFixture.pointAtByte(rt, "single", 2)
+        let pMid = try InputClickFixture.pointAtByte(rt, "single", 8)
+        let pFar = try InputClickFixture.pointAtByte(rt, "single", 11)
+        rt.pointerMove(to: pDown, at: 0)
+        rt.pointerDown(at: pDown, at: 0)
+        _ = rt.frame(at: 1.0 / 60.0)
+        #expect(rt.observePointer(at: pMid, at: 1.0 / 60.0), "a field drag-selection move queues Focus")
+        #expect(rt.observePointer(at: pFar, at: 2.0 / 60.0), "and every further move does")
+        #expect(!rt.observePointer(at: pFar, at: 2.0 / 60.0), "a duplicate observation queues nothing")
+        rt.pointerUp(at: pFar, at: 3.0 / 60.0)
+        _ = rt.frame(at: 3.0 / 60.0)
+        #expect(rt.state.single.anchor != rt.state.single.cursor, "the drag selected")
+        #expect(!rt.observePointer(at: Vec2(pFar.x + 1, pFar.y), at: 4.0 / 60.0), "released, moving within the field queues nothing")
+    }
+
+    @Test("observePointer: a held drag queues Action::Drag only where on_drag hears it (drags_with); a drag-out start queues DragStart")
+    func observePointerHeldDragAndDragOut() throws {
+        struct S { var moves = 0; var started = 0 }
+        let rt = Runtime(state: S(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
+            row()
+                .child(el().key("knob").size(40, 40).onDrag { s, d, _ in if d.phase == .move { s.moves += 1 } })
+                .child(el().key("card").size(40, 40)
+                    .onDrag { s, _, _ in s.moves += 1 }
+                    .dragOut { _ in DragItem().text("payload") }
+                    .onDragStart { s, _ in s.started += 1 })
+        }
+        _ = rt.frame(at: 0)
+
+        rt.pointerMove(to: Vec2(10, 10), at: 0)
+        rt.pointerDown(at: Vec2(10, 10), at: 0)
+        #expect(rt.observePointer(at: Vec2(12, 10), at: 0.01), "on_drag hears the held press's move")
+        #expect(rt.state.moves >= 1)
+        rt.pointerUp(at: Vec2(12, 10), at: 0.02)
+        _ = rt.frame(at: 0.03)
+
+        // A drag-out element's `on_drag` doesn't hear the press (`!drags_out(n)`): a move inside
+        // its threshold queues nothing.
+        rt.pointerMove(to: Vec2(50, 10), at: 0.1)
+        _ = rt.frame(at: 0.11)
+        rt.pointerDown(at: Vec2(50, 10), at: 0.12)
+        let moves = rt.state.moves
+        #expect(!rt.observePointer(at: Vec2(51, 10), at: 0.13), "within the drag-out threshold, nothing is queued")
+        #expect(rt.state.moves == moves)
+        // Past the threshold the move starts the drag-out (`start_drag_out` queues DragStart).
+        #expect(rt.observePointer(at: Vec2(70, 10), at: 0.14), "a drag-out the move starts needs a frame")
+        #expect(rt.takeDragOutStart() != nil)
+        #expect(rt.state.started == 1)
+    }
+
+    // MARK: - `overlay/input.rs:41-49` `Overlay::observe_pointer`
+
+    @Test("overlayObservePointer: inside or captured observes; outside, a known pointer leaves once")
+    func overlayObservePointerLeavesOutsideTheCanvas() {
+        struct S { var hovered = 0; var pressed = 0 }
+        let rt = Runtime(state: S(), viewport: Vec2(100, 100), pixelScale: 1.0) { _, _ in
+            el().child(el().size(40, 20).onClick { $0.pressed += 1 }.onHover { s, inside, _ in if inside { s.hovered += 1 } })
+        }
+        _ = rt.frame(at: 0)
+        #expect(!rt.overlayObservePointer(at: Vec2(150, 50), at: 0), "outside with no pointer: nothing")
+        #expect(rt.overlayObservePointer(at: Vec2(5, 5), at: 0.01), "inside: observed, entering hover")
+        #expect(!rt.overlayObservePointer(at: Vec2(6, 5), at: 0.02))
+        #expect(rt.overlayObservePointer(at: Vec2(150, 50), at: 0.03), "leaving the canvas lets the pointer go")
+        #expect(rt.hoveredPath == nil)
+        #expect(!rt.overlayObservePointer(at: Vec2(160, 50), at: 0.04), "already gone")
+
+        // A held press keeps observing outside the canvas: the release there cancels.
+        #expect(rt.overlayObservePointer(at: Vec2(5, 5), at: 0.1))
+        rt.pointerDown(at: Vec2(5, 5), at: 0.1)
+        #expect(rt.overlayObservePointer(at: Vec2(150, 50), at: 0.11), "the capture moved outside")
+        #expect(rt.pointerPosition == Vec2(150, 50))
+        rt.pointerUp(at: Vec2(150, 50), at: 0.12)
+        _ = rt.frame(at: 0.13)
+        #expect(rt.state.pressed == 0)
     }
 }
