@@ -1149,7 +1149,9 @@ public struct TextEdit: Sendable, Equatable {
         // What the edit left, read in place: copying a long document to compare it costs more
         // than the edit.
         let after = HistoryMeta(anchor: anchor, cursor: cursor, marks: marks, richMarks: richMarks, blocks: blocks, softBreaks: softBreaks)
-        if before.text == text && before.marks == after.marks && before.richMarks == after.richMarks
+        // Bytes, as upstream compares (`before.text.as_str() == self.text`): Swift's `==` takes
+        // canonically equivalent texts (NFC é and NFD e + U+0301) as one.
+        if HistoryText.sameBytes(before.text, text) && before.marks == after.marks && before.richMarks == after.richMarks
             && before.blocks == after.blocks && before.softBreaks == after.softBreaks {
             return
         }
@@ -1291,13 +1293,13 @@ public struct TextEdit: Sendable, Equatable {
         syncRichInvariants()
         let now = makeSnapshot()
         func same(_ m: HistoryMeta) -> Bool {
-            doc == now.text && m.marks == now.marks && m.richMarks == now.richMarks
+            HistoryText.sameBytes(doc, now.text) && m.marks == now.marks && m.richMarks == now.richMarks
                 && m.blocks == now.blocks && m.softBreaks == now.softBreaks
         }
         let leadsHere = (undo.last?.after ?? redo.last?.before).map(same) ?? false
         if !leadsHere {
             guard let last = undo.last?.after else { return false }
-            if doc == now.text {
+            if HistoryText.sameBytes(doc, now.text) {
                 return false
             }
             redo.removeAll()

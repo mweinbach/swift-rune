@@ -49,7 +49,7 @@ extension TextEdit {
         var after: HistoryMeta
 
         static func == (l: HistoryChange, r: HistoryChange) -> Bool {
-            l.at == r.at && l.removed == r.removed && l.inserted == r.inserted
+            l.at == r.at && HistoryText.sameBytes(l.removed, r.removed) && HistoryText.sameBytes(l.inserted, r.inserted)
                 && l.lens == r.lens && l.before == r.before && l.after == r.after
         }
 
@@ -104,6 +104,12 @@ extension TextEdit {
 
 /// UTF-8 byte helpers for history changes: offsets are byte offsets on scalar boundaries.
 internal enum HistoryText {
+    /// Whether `a` and `b` hold the same bytes (Rust's `str` equality). Swift's `==` compares
+    /// canonical equivalence, so NFC and NFD forms of one text would compare equal.
+    static func sameBytes(_ a: String, _ b: String) -> Bool {
+        a.utf8.count == b.utf8.count && a.utf8.elementsEqual(b.utf8)
+    }
+
     static func withBytes<R>(_ s: String, _ body: (UnsafeBufferPointer<UInt8>) -> R) -> R {
         if let r = s.utf8.withContiguousStorageIfAvailable(body) { return r }
         let copy = Array(s.utf8)

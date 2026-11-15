@@ -208,6 +208,59 @@ struct EditHistoryChangesParityTests {
         #expect(change.byteCost == 2 + 3 + 2 * meta.byteCost)
     }
 
+    /// History compares documents by bytes, as upstream's `str` equality does
+    /// (`history.rs` `record_change` / `restore_history_json`): an edit that swaps NFC text for
+    /// its NFD form is a step, and undo and redo give back the exact bytes.
+    @Test("an NFC to NFD replacement is a step whose undo and redo restore the exact bytes")
+    func nfcToNfdReplacementIsAStep() throws {
+        let nfc = "caf\u{E9}"
+        let nfd = "cafe\u{301}"
+        #expect(nfc == nfd)
+        #expect(Array(nfc.utf8) != Array(nfd.utf8))
+        var e = TextEdit(nfc, multiline: true)
+        e.setSelectionRaw(anchor: 3, cursor: 5)
+        e.paste("e\u{301}")
+        #expect(Array(e.text.utf8) == Array(nfd.utf8))
+        #expect(e.historyLen().undo == 1)
+        e.undo()
+        #expect(Array(e.text.utf8) == Array(nfc.utf8))
+        #expect(e.anchor == 3 && e.cursor == 5)
+        e.redo()
+        #expect(Array(e.text.utf8) == Array(nfd.utf8))
+        // The step's bytes lead to the document, so the next edit keeps the history.
+        _ = e.handleKey(KeyEvent(key: .text("!")))
+        #expect(Array(e.text.utf8) == Array((nfd + "!").utf8))
+        #expect(e.historyLen().undo == 2)
+        e.undo()
+        #expect(Array(e.text.utf8) == Array(nfd.utf8))
+        e.undo()
+        #expect(Array(e.text.utf8) == Array(nfc.utf8))
+
+        // A stored history restores onto the NFD document it ends at, not the NFC one.
+        var stored = TextEdit(nfc, multiline: true)
+        stored.setSelectionRaw(anchor: 3, cursor: 5)
+        stored.paste("e\u{301}")
+        let json = try #require(stored.historyJson(maxSteps: TextEdit.maxHistorySteps, maxBytes: TextEdit.maxHistoryBytes))
+        var same = TextEdit(nfd, multiline: true)
+        same.setSelectionRaw(anchor: stored.anchor, cursor: stored.cursor)
+        let restoredSame = same.restoreHistoryJson(json)
+        #expect(restoredSame)
+        #expect(same.historyLen().undo == 1)
+        same.undo()
+        #expect(Array(same.text.utf8) == Array(nfc.utf8))
+        // Onto the NFC document (equal to Swift's `==`, not by bytes) it isn't where the history
+        // ends: a step from the stored document to this one comes first.
+        var other = TextEdit(nfc, multiline: true)
+        other.setSelectionRaw(anchor: stored.anchor, cursor: stored.cursor)
+        let restoredOther = other.restoreHistoryJson(json)
+        #expect(restoredOther)
+        #expect(other.historyLen().undo == 2)
+        other.undo()
+        #expect(Array(other.text.utf8) == Array(nfd.utf8))
+        other.undo()
+        #expect(Array(other.text.utf8) == Array(nfc.utf8))
+    }
+
     /// `edit/tests.rs::paste_keeps_single_line_fields_on_one_line`.
     @Test("a paste keeps single-line fields on one line")
     func pasteKeepsSingleLineFieldsOnOneLine() {
