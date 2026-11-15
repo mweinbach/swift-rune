@@ -128,6 +128,14 @@ public final class SelectionCoordinator {
     public internal(set) var pick = SelectAllPick()
     internal private(set) var heardByPath: [String: TextSelection] = [:]
 
+    /// Moves what the watcher at `old` heard to `new` (`sel_heard.by_path` re-keyed when the
+    /// selection's text is rebound to a moved keyed path).
+    internal func moveHeard(from old: String, to new: String) {
+        if let v = heardByPath.removeValue(forKey: old) {
+            heardByPath[new] = v
+        }
+    }
+
     public init() {}
 
     /// Builds a `TextSelection` from resolved per-node UTF-8 byte ranges in tree order.

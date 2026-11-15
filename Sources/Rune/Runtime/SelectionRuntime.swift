@@ -332,7 +332,7 @@ internal extension Runtime {
         return out
     }
 
-    private func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
+    func offscreenRowElement(source src: VirtualSelectionSource, at rowIndex: Int) -> El<State>? {
         guard rowIndex >= 0 && rowIndex < src.keys.count else { return nil }
         let rowKey = src.keys[rowIndex]
         if src.isIndexed {
@@ -861,56 +861,34 @@ internal extension Runtime {
             return h.onDrag != nil || h.dragOut != nil || hitInteractiveNode?.el.attachedDragOutItem != nil
         }()
 
-        if mods.shift, clicks == 1, let existing = selectionState.coordinator.phase.selection {
-            let anchorSnapIdx = snaps.firstIndex(where: { $0.path == existing.path })
-            let anchorGroup = anchorSnapIdx.flatMap { SelectAllResolver.groupPath(forNodeAt: $0, in: snaps) }
-            if existing.path == sNode.path {
-                let updated = ActiveSelection(
-                    path: existing.path,
-                    content: content,
-                    anchor: existing.anchor,
-                    focus: offset,
-                    origin: (existing.anchor, existing.anchor),
-                    far: nil
-                )
-                if interactiveTakesDrag {
-                    selectionState.coordinator.phase.place(updated)
-                    selectionState.isDraggingSelection = false
-                } else {
-                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                    selectionState.isDraggingSelection = true
-                    selectionState.dragStartPos = pos
-                }
-                sealBetween()
-                selectionState.suppressedClickOnRelease = false
-                if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
-                }
-                dispatchSelectionChanges(at: now)
-                return
-            } else if let sGroup, let anchorGroup, sGroup == anchorGroup, let anchorSnapIdx {
-                _ = anchorSnapIdx
-                var updated = existing
-                updated.originStart = existing.anchor
-                updated.originEnd = existing.anchor
-                updated.focus = offset
-                updated.far = SelectionFar(path: sNode.path, content: content)
-                if interactiveTakesDrag {
-                    selectionState.coordinator.phase.place(updated)
-                    selectionState.isDraggingSelection = false
-                } else {
-                    selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
-                    selectionState.isDraggingSelection = true
-                    selectionState.dragStartPos = pos
-                }
-                sealBetween()
-                selectionState.suppressedClickOnRelease = false
-                if cxSettings.selectionRectsReadByView {
-                    dirtyCommit(at: now, external: false)
-                }
-                dispatchSelectionChanges(at: now)
-                return
+        // `selection_down`: Shift extends the selection whose holder is this text or shares its
+        // group, the holder found by its row identity (so an anchor row scrolled out still counts).
+        if mods.shift, clicks == 1,
+           let sIdx = nodeByPath[sNode.path], let iEnd = mountedSelectionEnd(sIdx),
+           let h = selectionHolderEnd(),
+           h.mountedIdx == sIdx || (h.groupPath != nil && h.groupPath == iEnd.groupPath),
+           var updated = selectionState.coordinator.phase.selection {
+            // `phase::step` `Event::Extend`: the anchor and what its text read stay; the origin
+            // collapses onto the anchor and the focus moves here, in this text or (`far`) another.
+            updated.originStart = updated.anchor
+            updated.originEnd = updated.anchor
+            updated.focus = offset
+            updated.far = h.mountedIdx == sIdx ? nil : SelectionFar(path: sNode.path, content: content)
+            if interactiveTakesDrag {
+                selectionState.coordinator.phase.place(updated)
+                selectionState.isDraggingSelection = false
+            } else {
+                selectionState.coordinator.phase.startDrag(selection: updated, unit: .character)
+                selectionState.isDraggingSelection = true
+                selectionState.dragStartPos = pos
             }
+            sealBetween()
+            selectionState.suppressedClickOnRelease = false
+            if cxSettings.selectionRectsReadByView {
+                dirtyCommit(at: now, external: false)
+            }
+            dispatchSelectionChanges(at: now)
+            return
         }
 
         let unit = SelectionUnit.forClickCount(clicks)

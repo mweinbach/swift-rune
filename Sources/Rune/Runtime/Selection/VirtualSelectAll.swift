@@ -52,9 +52,9 @@ internal extension Runtime {
     func selectAllTarget() -> Int? {
         if let h = selectionHolderEnd() {
             if let i = h.mountedIdx { return selectUnit(i) }
-            return h.groupPath.flatMap { nodeByPath[$0] }
+            return h.groupPath.flatMap(liveNode)
         }
-        if let p = selectionState.coordinator.pick.lastGroupPath, let u = nodeByPath[p], u < flatNodes.count {
+        if let p = selectionState.coordinator.pick.lastGroupPath, let u = liveNode(p) {
             let n = flatNodes[u]
             let picked = (!n.effectiveInert && n.el.isSelectionGroup) ? !selectionGroupTexts(u).isEmpty : selectableLive(u)
             if picked { return u }
@@ -76,7 +76,7 @@ internal extension Runtime {
                 selectSpanEnds(first: h, last: h)
                 return true
             }
-            if nodeByPath[gp] == nil {
+            if liveNode(gp) == nil {
                 guard let listIdx = h.listIdx, listIdx < flatNodes.count,
                       let src = virtualSelectionSources[flatNodes[listIdx].path] else { return false }
                 let members = offscreenRowSelectables(listPath: flatNodes[listIdx].path, src: src, row: h.rowIndex)
@@ -109,7 +109,7 @@ internal extension Runtime {
     /// The first and last selectable text of selection group `gp` when it holds a virtual list,
     /// building unmounted rows at either end (`Runtime::virtual_span_under`).
     func virtualSpanUnder(groupPath gp: String) -> (first: SelectionEndRef, last: SelectionEndRef)? {
-        guard let root = nodeByPath[gp], root < flatNodes.count else { return nil }
+        guard let root = liveNode(gp) else { return nil }
         let prefix = gp + "/"
         func inside(_ j: Int) -> Bool { flatNodes[j].path == gp || flatNodes[j].path.hasPrefix(prefix) }
         var found: Int? = nil

@@ -84,6 +84,17 @@ internal extension Runtime {
         return !n.effectiveInert && (activeModalPath == nil || modalMemberPaths.contains(n.path))
     }
 
+    /// The node at `path` that's not leaving and is allowed (`Runtime::live`).
+    func liveNode(_ path: String) -> Int? {
+        if let i = nodeByPath[path], i < flatNodes.count, flatNodes[i].path == path,
+           !selectionSubtreeExiting(i), selectionAllowed(i) {
+            return i
+        }
+        return flatNodes.indices.first {
+            flatNodes[$0].path == path && !selectionSubtreeExiting($0) && selectionAllowed($0)
+        }
+    }
+
     /// A selectable text that's not leaving and is allowed (`is_selectable && !subtree_exiting && allowed`).
     func selectableLive(_ idx: Int) -> Bool {
         idx < flatNodes.count && selectableNodeText(flatNodes[idx]) != nil && !selectionSubtreeExiting(idx) && selectionAllowed(idx)
@@ -107,46 +118,57 @@ internal extension Runtime {
 
     /// The list at `listPath` is live and not inert (`Runtime::virtual_list_allowed`).
     func virtualListAllowed(_ listPath: String) -> Int? {
-        guard let listIdx = nodeByPath[listPath], listIdx < flatNodes.count, !flatNodes[listIdx].effectiveInert else { return nil }
+        guard let listIdx = liveNode(listPath), !flatNodes[listIdx].effectiveInert else { return nil }
         return listIdx
     }
 
     /// The selectable texts of row `r` of list `listPath`, built on demand, with their groups and
-    /// order in the row (`collect_virtual_row_selection`).
+    /// order in the row: every selectable text that's not a field, redacted or inert, empty ones
+    /// too (`collect_virtual_row_selection` / `walk_row_el`).
     func offscreenRowSelectables(listPath: String, src: VirtualSelectionSource, row r: Int, segment: String? = nil) -> [OffscreenSelectable] {
-        guard r >= 0, r < src.keys.count, let listIdx = nodeByPath[listPath], listIdx < flatNodes.count else { return [] }
+        guard r >= 0, r < src.keys.count, let listIdx = nodeByPath[listPath], listIdx < flatNodes.count,
+              let rowEl = offscreenRowElement(source: src, at: r) else { return [] }
         let seg = segment ?? "@\(src.keys[r])"
-        var rowSnaps: [SelectableNodeSnapshot] = []
-        collectOffscreenRowSnapshots(
-            source: src,
-            rowIndex: r,
-            rowSegment: seg,
-            parentInert: flatNodes[listIdx].effectiveInert,
-            baseY: 0,
-            into: &rowSnaps
-        )
-        let rowPath = "\(listPath)/\(seg)"
-        let listGroup = selectionGroupPath(atOrAbove: listIdx)
-        var byPath: [String: Int] = [:]
-        for (k, s) in rowSnaps.enumerated() { byPath[s.path] = k }
         var out: [OffscreenSelectable] = []
-        for (k, snap) in rowSnaps.enumerated() where snap.isSelectable && !snap.text.isEmpty {
-            var group = listGroup
-            var p = snap.parentPath
-            while let pp = p, let i = byPath[pp] {
-                if rowSnaps[i].isSelectionGroup { group = rowSnaps[i].path; break }
-                p = rowSnaps[i].parentPath
+        var order = 0
+        func walk(_ el: El<State>, path: String, rel: String, group parentGroup: String?, inert parentInert: Bool) {
+            let inert = parentInert || el.isInert
+            let group = el.isSelectionGroup ? path : parentGroup
+            let hasText = el.liveText != nil || el.plainText != nil || el.richSpans != nil
+            if !inert && el.handlers.editLens == nil && hasText && el.isSelectable && !el.isSecure {
+                let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
+                out.append(OffscreenSelectable(path: path, relPath: rel, text: text, group: group, orderInRow: order))
+                order += 1
             }
-            let rel = snap.path == rowPath ? "" : String(snap.path.dropFirst(rowPath.count + 1))
-            out.append(OffscreenSelectable(path: snap.path, relPath: rel, text: snap.text, group: group, orderInRow: k))
+            var seen: [String: Int] = [:]
+            for idx in el.children.indices {
+                let (childSeg, _) = layoutPathSegment(keyId: el.children[idx].keyId, siblingIndex: idx, siblingKeysSeen: &seen)
+                walk(
+                    el.children[idx],
+                    path: "\(path)/\(childSeg)",
+                    rel: rel.isEmpty ? childSeg : "\(rel)/\(childSeg)",
+                    group: group,
+                    inert: inert
+                )
+            }
         }
+        walk(
+            rowEl,
+            path: "\(listPath)/\(seg)",
+            rel: "",
+            group: selectionGroupPath(atOrAbove: listIdx),
+            inert: flatNodes[listIdx].effectiveInert
+        )
         return out
     }
 
     // MARK: - Ends (`resolve_end`, `resolve_virtual_end`, `tree_order`, `virtual_end_of`)
 
+    /// The mounted text `idx` as an end, while it's live and selectable
+    /// (`live(path).filter(is_selectable)`).
     func mountedSelectionEnd(_ idx: Int) -> SelectionEndRef? {
-        guard idx < flatNodes.count, let text = selectableNodeText(flatNodes[idx]) else { return nil }
+        guard idx < flatNodes.count, !selectionSubtreeExiting(idx), selectionAllowed(idx),
+              let text = selectableNodeText(flatNodes[idx]) else { return nil }
         return SelectionEndRef(
             path: flatNodes[idx].path,
             text: text,
@@ -169,7 +191,7 @@ internal extension Runtime {
               let r = src.keys.firstIndex(of: end.rowKey) else { return nil }
         let seg = "@\(end.rowKey)"
         if nodeByPath["\(end.listPath)/\(seg)"] != nil {
-            return nodeByPath[end.fullPath()].flatMap(mountedSelectionEnd)
+            return liveNode(end.fullPath()).flatMap(mountedSelectionEnd)
         }
         return offscreenRowSelectables(listPath: end.listPath, src: src, row: r, segment: seg)
             .first { $0.relPath == end.relPath }
@@ -180,7 +202,7 @@ internal extension Runtime {
     /// text at `path` in an unmounted row (`Runtime::resolve_end`).
     func resolveSelectionEnd(path: String, end: VirtualEnd?) -> SelectionEndRef? {
         if let end, let r = resolveVirtualEnd(end) { return r }
-        if let idx = nodeByPath[path], let m = mountedSelectionEnd(idx) { return m }
+        if let idx = liveNode(path), let m = mountedSelectionEnd(idx) { return m }
         guard let (listPath, src) = nearestVirtualList(forPath: path), let listIdx = virtualListAllowed(listPath),
               let (r, seg) = virtualRowIndex(forPath: path, in: src),
               nodeByPath["\(listPath)/\(seg)"] == nil else { return nil }
@@ -278,7 +300,7 @@ internal extension Runtime {
         case (nil, nil):
             let (firstOrd, lastOrd) = (selectionTreeOrder(of: first), selectionTreeOrder(of: last))
             for (lp, src) in virtualSelectionSources where !src.keys.isEmpty {
-                guard let ln = nodeByPath[lp] else { continue }
+                guard let ln = liveNode(lp) else { continue }
                 let listOrd = VirtualTreeOrder(slot: ln * 2 + 1, row: 0, sub: 0)
                 if firstOrd < listOrd && lastOrd > listOrd { return (lp, 0, src.keys.count - 1) }
             }
@@ -301,6 +323,7 @@ internal extension Runtime {
     /// A hash of mounted row `rowKey`'s texts in group `groupPath`, their paths and content
     /// (`Runtime::mounted_row_hash`).
     func mountedRowHash(listPath: String, rowKey: String, groupPath: String) -> UInt64? {
+        guard liveNode(listPath) != nil else { return nil }
         let rowPath = "\(listPath)/@\(rowKey)"
         guard let rowIdx = nodeByPath[rowPath], rowIdx < flatNodes.count else { return nil }
         var hash = Self.hashBasis
@@ -324,7 +347,7 @@ internal extension Runtime {
         guard let g = h.groupPath, h != f else { return hash }
         let (first, last) = selectionTreeOrder(of: h) < selectionTreeOrder(of: f) ? (h, f) : (f, h)
         if let (listPath, r0, r1) = crossRowVirtualSpan(first, last) {
-            if let gi = nodeByPath[g], nodeByPath[listPath] != nil {
+            if let gi = liveNode(g), liveNode(listPath) != nil {
                 let (firstOrd, lastOrd) = (selectionTreeOrder(of: first), selectionTreeOrder(of: last))
                 let listPrefix = listPath + "/"
                 var j = gi + 1
@@ -463,6 +486,15 @@ internal extension Runtime {
         if selectionHolderEnd() == nil, sel0.anchorEnd == nil {
             let upto = max(sel0.anchor, sel0.focus, sel0.originEnd)
             if let i = reboundSelectable(path: sel0.path, content: sel0.content, upto: upto) {
+                // What `on_selection_change` watchers heard moves with the text, ancestor by
+                // ancestor, so the move itself isn't a change.
+                let oldAncestors = sequence(first: sel0.path) { p in
+                    p.lastIndex(of: "/").map { String(p[..<$0]) }
+                }
+                let newAncestors = sequence(first: i) { self.flatNodes[$0].parentIndex }
+                for (oldAnc, newAnc) in zip(oldAncestors, newAncestors) {
+                    selectionState.coordinator.moveHeard(from: oldAnc, to: flatNodes[newAnc].path)
+                }
                 var s = sel0
                 s.path = flatNodes[i].path
                 replaceActiveSelection(s)
