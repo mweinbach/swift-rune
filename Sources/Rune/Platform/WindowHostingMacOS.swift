@@ -915,7 +915,19 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             didInitialA11ySync = true
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            accessibilityHost.update(tree: snapshot, parentView: self, onSetValue: { [weak self] id, value in
+                MacOSHostViewHelper.dispatchAccessibilitySetValue(id, value: value) { id, value in
+                    guard let self else { return }
+                    if self.entry.performAccessibilitySetValue(
+                        runtimeObj: self.runtime,
+                        id: id,
+                        value: value,
+                        at: self.nowSeconds()
+                    ) {
+                        self.requestRender()
+                    }
+                }
+            }) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.entry.performAccessibilityAction(

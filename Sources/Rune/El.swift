@@ -1108,6 +1108,7 @@ final class ElColdData<State> {
     var pillIconLookup: ((String) -> SVGIcon?)? = nil
     var pillStyleLookup: ((String) -> PillStyle)? = nil
     var isSingleLineInput: Bool = false
+    var editAccessWithheld: Bool = false
     var animateEditLayoutEnabled: Bool = false
     var isIconOneColor: Bool = false
     var iconRotation: Float = 0.0
@@ -1279,6 +1280,7 @@ final class ElColdData<State> {
         c.pillIconLookup = pillIconLookup
         c.pillStyleLookup = pillStyleLookup
         c.isSingleLineInput = isSingleLineInput
+        c.editAccessWithheld = editAccessWithheld
         c.animateEditLayoutEnabled = animateEditLayoutEnabled
         c.isIconOneColor = isIconOneColor
         c.iconRotation = iconRotation
@@ -1539,6 +1541,8 @@ public struct El<State> {
     public var pillIconLookup: ((String) -> SVGIcon?)? { get { _cold?.data.pillIconLookup } set { ensureCold().data.pillIconLookup = newValue } }
     public var pillStyleLookup: ((String) -> PillStyle)? { get { _cold?.data.pillStyleLookup } set { ensureCold().data.pillStyleLookup = newValue } }
     public var isSingleLineInput: Bool { get { _cold?.data.isSingleLineInput ?? false } set { ensureCold().data.isSingleLineInput = newValue } }
+    /// The field shows its editor but takes no edits from it (upstream `Input::access == None`).
+    public var editAccessWithheld: Bool { get { _cold?.data.editAccessWithheld ?? false } set { ensureCold().data.editAccessWithheld = newValue } }
     public var animateEditLayoutEnabled: Bool { get { _cold?.data.animateEditLayoutEnabled ?? false } set { ensureCold().data.animateEditLayoutEnabled = newValue } }
     public var isIconOneColor: Bool { get { _cold?.data.isIconOneColor ?? false } set { ensureCold().data.isIconOneColor = newValue } }
     public var iconRotation: Float { get { _cold?.data.iconRotation ?? 0.0 } set { ensureCold().data.iconRotation = newValue } }

@@ -1219,6 +1219,7 @@ public struct List<State> {
 
         if let search = searchEdit {
             let inputEl: El<State> = Rune.textInput(key: "input", search.keyPath)
+                .singleLine()
                 .label(search.placeholder)
                 .font(TextStyle(size: 14.0, weight: 400.0).lh(20.0))
                 .color(strong)

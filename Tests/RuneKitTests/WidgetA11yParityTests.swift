@@ -798,7 +798,7 @@ struct WidgetA11yParityTests {
             var accOpen = false
             var search = TextEdit()
             var email = TextEdit("a@b.c")
-            var notes = TextEdit("hi", multiline: true)
+            var notes = TextEdit("hi")
             var token = TextEdit("tok")
             var username = TextEdit("ada")
         }

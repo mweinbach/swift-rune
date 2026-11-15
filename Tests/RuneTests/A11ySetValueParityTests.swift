@@ -1,5 +1,8 @@
 import Foundation
 import Testing
+#if os(macOS)
+import AppKit
+#endif
 @testable import Rune
 
 /// Ports of upstream `crates/rune/src/a11y/roles.rs` and `a11y/tests.rs` cases covering
@@ -40,6 +43,7 @@ struct A11ySetValueParityTests {
         var presses = 0
         var level = 0
         var name = TextEdit()
+        var changes = 0
     }
 
     private func formRuntime() -> Runtime<Form> {
@@ -52,7 +56,8 @@ struct A11ySetValueParityTests {
                     .rangeValue(Double(s.level), min: 0.0, max: 10.0).rangeStep(1.0)
                     .label("Volume").size(100, 12)
                     .onStep { st, d, _ in st.level = min(max(st.level + d, 0), 10) },
-                textInput(key: "name", \Form.name).singleLine().w(200),
+                textInput(key: "name", \Form.name).singleLine().w(200)
+                    .onChange { st, _, _ in st.changes += 1 },
                 row().key("off").role(.button).disabled(true).child(text("Unavailable")),
             ])
         }
@@ -92,12 +97,13 @@ struct A11ySetValueParityTests {
         #expect(rt.accessibilityAction("name", .setValue, value: .text("Ada"), at: 0.2))
         rt.frame(at: 0.2)
         #expect(rt.state.name.text == "Ada")
+        #expect(rt.state.changes == 1)
         let tree = parse(rt.accessibilityJSON())
         let name = find(tree, "name")
         #expect(name?["value"] as? String == "Ada")
         #expect(states(name).contains("focused"), "editing focuses the field")
         #expect(!rt.accessibilityAction("name", .setValue, at: 0.3), "SetValue without a value does nothing")
-        #expect(!rt.accessibilityAction("off", .setValue, value: .text("x"), at: 0.3), "a disabled control takes no action")
+        #expect(!rt.accessibilityAction("off", .press, at: 0.3), "a disabled control takes no action")
     }
 
     @Test("SetValue steps clamp into the range and round to whole steps (`a11y/actions.rs:73-82`)")
@@ -112,6 +118,60 @@ struct A11ySetValueParityTests {
         #expect(AccessibilityTreeBuilder.setValueSteps(target: 0.5, range: A11yRange(value: 0, min: 0, max: 1, step: 0.25)) == 2)
     }
 
+    @Test("SetValue with a NaN number moves nothing and never traps (`a11y/actions.rs:76-79`, Rust `as i32`)")
+    func setValueNaNIsNoMovement() {
+        let r = A11yRange(value: 3, min: 0, max: 10, step: 1)
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: .nan, range: r) == nil)
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: 5, range: A11yRange(value: .nan, min: 0, max: 10, step: 1)) == nil)
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: 5, range: A11yRange(value: 3, min: .nan, max: .nan, step: 1)) == nil)
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: 5, range: A11yRange(value: 3, min: .nan, max: 10, step: 1)) == 7,
+                "Rust's f64::min/max ignore a NaN bound: the range is [10, 10]")
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: .infinity, range: r) == 7, "an infinite target clamps into the range")
+        #expect(AccessibilityTreeBuilder.setValueSteps(target: 5, range: A11yRange(value: -.infinity, min: -.infinity, max: 10, step: 1)) == Int(Int32.max),
+                "an infinite distance saturates as `as i32` does")
+        let rt = formRuntime()
+        #expect(!rt.accessibilityAction("volume", .setValue, value: .number(.nan), at: 0.1))
+        rt.frame(at: 0.1)
+        #expect(rt.state.level == 0)
+    }
+
+    @Test("SetValue to the same text runs no change handler (`runtime/input/keys.rs:198-203`)")
+    func setValueSameTextRunsNoChangeHandler() {
+        let rt = formRuntime()
+        #expect(rt.accessibilityAction("name", .setValue, value: .text("Ada"), at: 0.1))
+        rt.frame(at: 0.1)
+        #expect(rt.state.changes == 1)
+        #expect(rt.accessibilityAction("name", .setValue, value: .text("Ada"), at: 0.2), "the field still takes the request")
+        rt.frame(at: 0.2)
+        #expect(rt.state.name.text == "Ada")
+        #expect(rt.state.changes == 1, "nothing changed, so no change handler ran")
+    }
+
+    #if os(macOS)
+    final class SetValueLog: @unchecked Sendable {
+        var got: [(String, AccessibilityActionValue)] = []
+    }
+
+    @Test("VoiceOver setting a value reaches SetValue only where the node offers it (AccessKit macOS adapter)")
+    func appKitSetValueBridge() {
+        let log = SetValueLog()
+        let field = AccessibilityNode(id: "name", role: .textInput, value: "", actions: [.focus, .setValue])
+        let el = AppKitAccessibilityMapper.buildElement(from: field, onSetValue: { id, v in log.got.append((id, v)) })
+        #expect(el.isAccessibilitySelectorAllowed(#selector(NSAccessibilityElement.setAccessibilityValue(_:))))
+        el.setAccessibilityValue("Ada")
+        el.setAccessibilityValue(NSNumber(value: 7.2))
+        #expect(log.got.count == 2)
+        #expect(log.got.first?.0 == "name" && log.got.first?.1 == .text("Ada"))
+        #expect(log.got.last?.1 == .number(7.2))
+
+        let label = AccessibilityNode(id: "title", role: .text, value: "Settings", actions: [])
+        let plain = AppKitAccessibilityMapper.buildElement(from: label, onSetValue: { id, v in log.got.append((id, v)) })
+        #expect(!plain.isAccessibilitySelectorAllowed(#selector(NSAccessibilityElement.setAccessibilityValue(_:))))
+        plain.setAccessibilityValue("x")
+        #expect(log.got.count == 2, "a node without SetValue takes no request")
+    }
+    #endif
+
     // MARK: - `a11y/tests.rs:258` text_fields_expose_lines_caret_and_selection (role)
 
     struct Field {
@@ -120,9 +180,7 @@ struct A11ySetValueParityTests {
 
     @Test("a field that is not single-line is a multi-line text input (`a11y/tests.rs:267`)")
     func multilineFieldRole() {
-        // Swift's `TextEdit` is single-line unless built multi-line; upstream's `text_input` editor
-        // is multi-line until `El::single_line` (the El below stays not single-line, as upstream's).
-        let edit = TextEdit("hello world", multiline: true)
+        let edit = TextEdit("hello world")
         let rt = Runtime(state: Field(edit: edit), viewport: Vec2(400, 200), systemDark: true) { _, _ in
             col().child(textInput(key: "note", \Field.edit).w(300))
         }

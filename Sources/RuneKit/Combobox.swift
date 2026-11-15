@@ -369,7 +369,9 @@ public struct Combobox<State> {
         let chooseCb = chooseHandler
         let searchLabel = name.isEmpty ? "Search" : "Search \(name)"
 
+        // Upstream builds the search on `TextInput` (`combobox.rs:228`), a single-line field.
         var field = Rune.textInput(key: searchKey, searchKeyPath)
+            .singleLine()
             .label(searchLabel)
             .font(k.ty.uiCompact)
             .color(k.c.textBase)

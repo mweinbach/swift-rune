@@ -274,10 +274,11 @@ public enum AccessibilityTreeBuilder {
                 actions.append(.decrement)
             }
         }
+        // `a11y/node.rs:231-240`: SetValue rides on `onStep` with a stated step, or on edit access.
         if AccessibilityTreeBuilder.offersSetValue(
             enabled: enabled,
-            editable: element.handlers.editLens != nil,
-            steps: element.role == .slider || element.handlers.onStep != nil,
+            editable: element.hasEditAccess,
+            steps: element.handlers.onStep != nil,
             range: element.a11yRange
         ) {
             appendAction(.setValue, to: &actions)
@@ -285,12 +286,12 @@ public enum AccessibilityTreeBuilder {
 
         var value: String? = element.a11yValue ?? element.a11ySelected
         var isSecure = element.isSecure
-        var multiline = false
+        // `RoleCtx::multiline` (`a11y/node.rs:31`): a field that is not single-line.
+        let multiline = element.isMultilineField
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
             isSecure = isSecure || edit.isSecure
             value = isSecure ? nil : edit.text
-            multiline = edit.multiline && !element.isSingleLineInput
         }
 
         let resolvedRole: ElementRole = element.role == .textInput && (isSecure || multiline)
@@ -478,11 +479,12 @@ public enum AppKitAccessibilityMapper {
     public static func buildElement(
         from node: AccessibilityNode,
         parent: AnyObject? = nil,
-        onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)? = nil,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) -> RuneNSAccessibilityElement {
-        let el = RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction)
+        let el = RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
         let childEls = node.children.map {
-            buildElement(from: $0, parent: el, onAction: onAction)
+            buildElement(from: $0, parent: el, onAction: onAction, onSetValue: onSetValue)
         }
         el.setAccessibilityChildren(childEls)
         return el
@@ -494,15 +496,18 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
     public let supportedActions: [AccessibilityAction]
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
+    private let setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
 
     public init(
         node: AccessibilityNode,
         parent: AnyObject?,
-        onAction: (@Sendable (String, AccessibilityAction) -> Void)?
+        onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) {
         self.nodeId = node.id
         self.supportedActions = node.actions
         self.actionHandler = onAction
+        self.setValueHandler = onSetValue
         super.init()
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
@@ -517,7 +522,8 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
             setAccessibilityLabel(label)
         }
         if !node.isSecure, let value = node.value {
-            setAccessibilityValue(value)
+            // The node's own value, not an assistive request (see `setAccessibilityValue(_:)`).
+            super.setAccessibilityValue(value)
         }
         if let help = node.help {
             setAccessibilityHelp(help)
@@ -551,6 +557,33 @@ public final class RuneNSAccessibilityElement: NSAccessibilityElement {
         guard supportedActions.contains(.decrement) else { return false }
         actionHandler?(nodeId, .decrement)
         return true
+    }
+
+    /// VoiceOver may set the value only where the node offers `SetValue`.
+    public override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(NSAccessibilityElement.setAccessibilityValue(_:)) {
+            return supportedActions.contains(.setValue) && setValueHandler != nil
+        }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+
+    /// An assistive client setting the value: AccessKit's macOS adapter turns this into
+    /// `ActionRequest { action: SetValue, data: Value(..) / NumericValue(..) }`.
+    public override func setAccessibilityValue(_ accessibilityValue: Any?) {
+        guard supportedActions.contains(.setValue), let setValueHandler else {
+            super.setAccessibilityValue(accessibilityValue)
+            return
+        }
+        switch accessibilityValue {
+        case let text as String:
+            setValueHandler(nodeId, .text(text))
+        case let attributed as NSAttributedString:
+            setValueHandler(nodeId, .text(attributed.string))
+        case let number as NSNumber:
+            setValueHandler(nodeId, .number(number.doubleValue))
+        default:
+            break
+        }
     }
 }
 #elseif canImport(UIKit) && !os(watchOS)

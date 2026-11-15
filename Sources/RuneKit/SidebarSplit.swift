@@ -635,6 +635,7 @@ public struct SidebarRow<State> {
         let titleEl: El<State>
         if let renameConfig {
             var input: El<State> = Rune.textInput(key: renameConfig.inputKey, renameConfig.keyPath)
+                .singleLine()
                 .noWrap()
                 .wFull()
                 .focusSelected(true)

@@ -378,6 +378,7 @@ public protocol HostedWindowEntry: AnyObject {
     func currentCursor(runtimeObj: AnyObject) -> Cursor
     func accessibilitySnapshot(runtimeObj: AnyObject) -> AccessibilityNode
     @discardableResult func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at: Double) -> Bool
+    @discardableResult func performAccessibilitySetValue(runtimeObj: AnyObject, id: String, value: AccessibilityActionValue, at: Double) -> Bool
     func shortcutRegistry(runtimeObj: AnyObject) -> ShortcutRegistry?
     var hasAppGlobalShortcuts: Bool { get }
     func attachShortcuts(wake: Waker, headless: Bool) -> ShortcutGuard?
@@ -713,6 +714,11 @@ final class TypedHostedWindowEntry<State>: HostedWindowEntry {
     @discardableResult
     func performAccessibilityAction(runtimeObj: AnyObject, id: String, action: AccessibilityAction, at time: Double) -> Bool {
         rt(runtimeObj).performAccessibilityAction(id, action: action, at: time)
+    }
+
+    @discardableResult
+    func performAccessibilitySetValue(runtimeObj: AnyObject, id: String, value: AccessibilityActionValue, at time: Double) -> Bool {
+        rt(runtimeObj).accessibilityAction(id, .setValue, value: value, at: time)
     }
 
     func cancelFileDialogs(runtimeObj: AnyObject, at: Double) {

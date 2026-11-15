@@ -40,6 +40,11 @@ public extension AccessibilityTreeBuilder {
                 actions.append(.increment)
                 actions.append(.decrement)
             }
+            // `a11y/node.rs:236-240`: an enabled field with an editor takes a new value
+            // (`editRange` is present exactly when the element has an edit lens).
+            if info.editRange != nil && !info.disabled && !info.inert {
+                actions.append(.setValue)
+            }
 
             let rect = info.rect.count >= 4
                 ? MotionRect.fromXYWH(info.rect[0], info.rect[1], info.rect[2], info.rect[3])
@@ -230,12 +235,11 @@ public extension Runtime {
             var editText: String? = editIsSecure ? nil : richPlain
             var editChars: Int? = nil
             var editSel: [Int]? = nil
-            var editMultiline = false
+            // `RoleCtx::multiline`: a field that is not single-line (`a11y/node.rs:31`).
+            let editMultiline = el.isMultilineField
             if let editLens = el.handlers.editLens {
                 let edit = editLens.get(state)
                 editIsSecure = editIsSecure || edit.isSecure
-                // `RoleCtx::multiline`: a field that is not single-line (`a11y/node.rs:31`).
-                editMultiline = edit.multiline && !el.isSingleLineInput
                 if !editIsSecure {
                     editText = edit.text
                     editChars = edit.text.count
@@ -251,29 +255,7 @@ public extension Runtime {
             let nodeId = node.key ?? node.path
 
             let enabled = !el.a11yDisabled && !node.effectiveInert
-            var actions: [AccessibilityAction] = []
-            if enabled {
-                if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
-                   [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
-                    actions.append(.press)
-                }
-                if el.focusable {
-                    actions.append(.focus)
-                }
-                if el.role == .slider || el.handlers.onStep != nil {
-                    actions.append(.increment)
-                    actions.append(.decrement)
-                }
-            }
-            // `a11y/node.rs:229-235`: a stepped range with a stated step, or an editable field.
-            if AccessibilityTreeBuilder.offersSetValue(
-                enabled: enabled,
-                editable: el.handlers.editLens != nil,
-                steps: el.handlers.onStep != nil,
-                range: el.a11yRange
-            ) {
-                AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
-            }
+            let actions = a11yNodeActions(node)
 
             let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
@@ -422,7 +404,26 @@ public extension Runtime {
         action: AccessibilityAction,
         at now: Double
     ) -> Bool {
+        if action == .setValue {
+            // A new value needs the request's data (`ActionData::Value` / `NumericValue`).
+            return performAccessibilitySetValue(id, value: nil, at: now)
+        }
+        // `a11y_action`: only an allowed node that can do what is asked (`actions.rs:38-81`);
+        // a disabled control advertises nothing and takes no action.
         let all = elements()
+        if let flatIdx = a11yTargetIndex(id) {
+            guard a11yAllowed(flatIdx), a11yNodeActions(flatNodes[flatIdx]).contains(action) else {
+                return false
+            }
+        } else {
+            // An inline text link is a sub-node of its text, not an element of its own:
+            // `(Click, Some(link))` presses it whatever its text offers (`actions.rs:49`).
+            guard action == .press || action == .focus,
+                  let link = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
+                  link.role == .link, !link.inert else {
+                return false
+            }
+        }
         guard let target = all.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
               !target.inert,
               target.rect.count >= 4 else {
@@ -438,8 +439,7 @@ public extension Runtime {
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
         case .setValue:
-            // A new value needs the request's data (`ActionData::Value` / `NumericValue`).
-            return performAccessibilitySetValue(id, value: nil, at: now)
+            return false
         case .increment, .decrement:
             guard let flatTarget = flatNodes.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
                   !flatTarget.effectiveInert,
@@ -472,6 +472,7 @@ public final class MacOSAccessibilityHost {
     public func update(
         tree: AccessibilityNode,
         parentView: NSView,
+        onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil,
         onAction: @escaping @Sendable (String, AccessibilityAction) -> Void
     ) {
         let announcements = AccessibilityTreeBuilder.liveAnnouncements(previous: previousTree, current: tree)
@@ -479,7 +480,7 @@ public final class MacOSAccessibilityHost {
 
         var map: [String: RuneNSAccessibilityElement] = [:]
         func convertNode(_ node: AccessibilityNode, parent: AnyObject) -> RuneNSAccessibilityElement {
-            let elem = AppKitAccessibilityMapper.buildElement(from: node, onAction: onAction)
+            let elem = AppKitAccessibilityMapper.buildElement(from: node, onAction: onAction, onSetValue: onSetValue)
             elem.setAccessibilityParent(parent)
 
             let viewRect = NSRect(
