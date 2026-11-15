@@ -66,22 +66,6 @@ public struct ActiveSelection: Equatable, Sendable {
     }
 
     public var origin: (Int, Int) { (originStart, originEnd) }
-
-    /// This selection with `other`'s path and content, as a drag that moved nothing found them.
-    internal func withShape(of other: ActiveSelection) -> ActiveSelection {
-        var out = self
-        out.path = other.path
-        out.content = other.content
-        out.betweenHash = other.betweenHash
-        if var far = out.far, let otherFar = other.far {
-            far.path = otherFar.path
-            far.content = otherFar.content
-            out.far = far
-        } else {
-            out.far = other.far
-        }
-        return out
-    }
 }
 
 /// State machine phase for `El.selectable` selection (`crates/rune/src/runtime/selection/phase.rs`).

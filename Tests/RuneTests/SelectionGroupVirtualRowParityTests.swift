@@ -40,10 +40,12 @@ struct SelectionGroupVirtualRowParityTests {
             tick()
         }
 
-        /// `support::command`.
-        func command(_ c: Character) {
-            _ = rt.keyDown(KeyEvent(key: .command(c), mods: Mods(cmd: true)), at: t)
+        /// `support::command`, and whether the runtime took the key.
+        @discardableResult
+        func command(_ c: Character) -> Bool {
+            let took = rt.keyDown(KeyEvent(key: .command(c), mods: Mods(cmd: true)), at: t)
             tick()
+            return took
         }
 
         /// `support::glyphs_at`: centres (points) of the glyphs drawn inside element `path`, by x.
@@ -102,8 +104,14 @@ struct SelectionGroupVirtualRowParityTests {
         c.tick()
         #expect(!rt.elements().contains(where: { $0.path == pathA }), "row 0 scrolled out")
         #expect(rt.selectedText() == "row 0 title\nrow 0 body")
-        c.command("c")
-        c.command("a")
+        // Both keys act on the selection while its row isn't mounted: Cmd+C copies it, and
+        // Cmd+A selects all of its group, the row's two texts (`select_all.rs::select_all_key`).
+        #expect(c.command("c"))
+        #expect(rt.clipboard.text == "row 0 title\nrow 0 body")
+        #expect(c.command("a"))
+        #expect(rt.textSelection()?.path == pathA && rt.textSelection()?.range == 0..<"row 0 title".utf8.count)
+        #expect(rt.selectionState.coordinator.phase.selection?.far?.path == pathB)
+        #expect(rt.selectedText() == "row 0 title\nrow 0 body")
         // Back up: the pinned row's selection is preserved when it mounts again.
         for _ in 0..<40 {
             rt.wheel(WheelEvent(dx: 0, dy: 400.0), at: Vec2(200.0, 200.0), now: c.t)

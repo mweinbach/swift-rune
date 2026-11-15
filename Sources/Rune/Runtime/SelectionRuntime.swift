@@ -590,12 +590,16 @@ internal extension Runtime {
             storedChildren: [],
             scrollAxes: []
         )
-        if let r = virtualRowIndex(forPath: activeSel.path, in: src), !mounted.contains(r.rowIndex) {
+        // The rows the selection's ends are in, by their row identity when pinned
+        // (`sync_selection_pins` -> `PinsEvent::Select { anchor, focus }`), else by path.
+        func pinnedRow(path: String, end: VirtualEnd?) -> Int? {
+            if let end, end.listPath == listPath { return keys.firstIndex(of: end.rowKey) }
+            return virtualRowIndex(forPath: path, in: src)?.rowIndex
+        }
+        if let r = pinnedRow(path: activeSel.path, end: activeSel.anchorEnd), !mounted.contains(r) {
             return true
         }
-        if let far = activeSel.far,
-           let r = virtualRowIndex(forPath: far.path, in: src),
-           !mounted.contains(r.rowIndex) {
+        if let far = activeSel.far, let r = pinnedRow(path: far.path, end: far.end), !mounted.contains(r) {
             return true
         }
         return false
@@ -885,21 +889,12 @@ internal extension Runtime {
                 dispatchSelectionChanges(at: now)
                 return
             } else if let sGroup, let anchorGroup, sGroup == anchorGroup, let anchorSnapIdx {
-                let sSnapIdx = snaps.firstIndex(where: { $0.path == sNode.path }) ?? anchorSnapIdx
-                let betweenHash = SelectionMath.computeBetweenHash(
-                    in: snaps,
-                    anchorIdx: anchorSnapIdx,
-                    farIdx: sSnapIdx
-                )
-                let updated = ActiveSelection(
-                    path: existing.path,
-                    content: existing.content,
-                    anchor: existing.anchor,
-                    focus: offset,
-                    origin: existing.origin,
-                    far: SelectionFar(path: sNode.path, content: content),
-                    betweenHash: betweenHash
-                )
+                _ = anchorSnapIdx
+                var updated = existing
+                updated.originStart = existing.anchor
+                updated.originEnd = existing.anchor
+                updated.focus = offset
+                updated.far = SelectionFar(path: sNode.path, content: content)
                 if interactiveTakesDrag {
                     selectionState.coordinator.phase.place(updated)
                     selectionState.isDraggingSelection = false
@@ -1010,40 +1005,21 @@ internal extension Runtime {
             selectionState.edgeScroll.stop()
             return false
         }
-        let before = sel
-        let snaps = selectableSnapshots()
-        let anchorMountedIdx: Int?
-        let edgeScrollIdx: Int
-        let anchorGroup: String?
-        let anchorOrder: VirtualTreeOrder
-        if let idx = resolvedNodeIndex(forPath: sel.path) {
-            anchorMountedIdx = idx
-            edgeScrollIdx = idx
-            sel.path = flatNodes[idx].path
-            anchorGroup = SelectAllResolver.groupPath(forNodeAt: idx, in: snaps)
-            anchorOrder = selectionTreeOrder(mountedIdx: idx)
-        } else if let info = resolveVirtualEndpointInfo(forPath: sel.path) {
-            anchorMountedIdx = nil
-            edgeScrollIdx = info.listIdx
-            sel.path = info.snapshot.path
-            if let rg = info.rowGroupPath {
-                anchorGroup = rg
-            } else if info.listIdx < snaps.count, snaps[info.listIdx].isSelectionGroup {
-                anchorGroup = snaps[info.listIdx].path
-            } else {
-                anchorGroup = SelectAllResolver.groupPath(forNodeAt: info.listIdx, in: snaps)
-            }
-            anchorOrder = VirtualTreeOrder(slot: info.listIdx * 2 + 1, row: info.rowIndex, sub: info.orderInRow)
-        } else {
+        // `selection_drag`: the selection's own text, resolved by its row identity first.
+        guard let h = selectionHolderEnd() else {
             selectionState.isDraggingSelection = false
             selectionState.edgeScroll.stop()
-            selectionState.coordinator.phase.clear()
-            syncSelectionPins()
+            clearTextSelectionPhase()
             if cxSettings.selectionRectsReadByView {
                 dirtyCommit(at: now, external: false)
             }
             return false
         }
+        let snaps = selectableSnapshots()
+        let anchorMountedIdx = h.mountedIdx
+        let edgeScrollIdx = h.mountedIdx ?? h.listIdx ?? 0
+        let anchorGroup = h.groupPath.flatMap { nodeByPath[$0] != nil ? $0 : nil }
+        let anchorOrder = selectionTreeOrder(of: h)
         updateSelectableEdgeScrollOnMove(pos: pos, anchorIdx: edgeScrollIdx, at: now)
 
         let resolvedTarget: (idx: Int, offset: Int)?
@@ -1071,57 +1047,33 @@ internal extension Runtime {
             unit: unit,
             uncopied: flatNodes[targetIdx].el.uncopiedRanges
         )
-        if let anchorIdx = anchorMountedIdx, targetIdx == anchorIdx {
-            let ext = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
-            sel.anchor = ext.anchor
-            sel.focus = ext.focus
-            sel.far = nil
-            sel.betweenHash = 0
+        let reachesAnchor = anchorMountedIdx == targetIdx
+        let ends: (anchor: Int, focus: Int)
+        if reachesAnchor {
+            ends = SelectionMath.extendSelection(origin: sel.origin, at: targetUnit)
+        } else if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
+            ends = (sel.originStart, targetUnit.1)
         } else {
-            if selectionTreeOrder(mountedIdx: targetIdx) > anchorOrder {
-                sel.anchor = sel.originStart
-                sel.focus = targetUnit.1
-            } else {
-                sel.anchor = sel.originEnd
-                sel.focus = targetUnit.0
-            }
-            sel.far = SelectionFar(path: flatNodes[targetIdx].path, content: targetContent)
-            if let anchorIdx = anchorMountedIdx {
-                sel.betweenHash = SelectionMath.computeBetweenHash(
-                    in: snaps,
-                    anchorIdx: anchorIdx,
-                    farIdx: targetIdx
-                )
-            } else {
-                selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
-                let allSnaps = selectableSnapshotsWithVirtuals()
-                if let aIdx = allSnaps.firstIndex(where: { $0.path == sel.path }),
-                   let fIdx = allSnaps.firstIndex(where: { $0.path == flatNodes[targetIdx].path }) {
-                    sel.betweenHash = SelectionMath.computeBetweenHash(
-                        in: allSnaps,
-                        anchorIdx: aIdx,
-                        farIdx: fIdx
-                    )
-                } else {
-                    sel.betweenHash = 0
-                }
-            }
+            ends = (sel.originEnd, targetUnit.0)
         }
-        selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
-        // `phase::step` `Event::Drag`: the same far text re-pins; another seals the rows between.
-        let sameFar = sel.far?.path == before.far?.path
-        if !(sameFar && (sel.anchor, sel.focus) == (before.anchor, before.focus)) {
+        // `phase::step` `Event::Drag`: nothing moved, nothing changes; the same far text keeps
+        // what it read and re-pins; another seals the texts between.
+        let targetPath = flatNodes[targetIdx].path
+        let sameFar = reachesAnchor ? sel.far == nil : sel.far?.path == targetPath
+        if (sel.anchor, sel.focus) != (ends.anchor, ends.focus) || !sameFar {
+            sel.anchor = ends.anchor
+            sel.focus = ends.focus
+            if reachesAnchor {
+                sel.far = nil
+            } else if !sameFar {
+                sel.far = SelectionFar(path: targetPath, content: targetContent)
+            }
+            selectionState.coordinator.phase.startDrag(selection: sel, unit: unit)
             if sameFar {
-                var kept = sel
-                kept.far?.end = before.far?.end
-                kept.anchorEnd = before.anchorEnd
-                selectionState.coordinator.phase.startDrag(selection: kept, unit: unit)
                 syncSelectionPins()
             } else {
                 sealBetween()
             }
-        } else {
-            selectionState.coordinator.phase.startDrag(selection: before.withShape(of: sel), unit: unit)
         }
         if hypot(pos.x - selectionState.dragStartPos.x, pos.y - selectionState.dragStartPos.y) > 4.0,
            selectedText() != nil {
@@ -1164,29 +1116,21 @@ internal extension Runtime {
 
         let isC = ev.key == .command("c") || ev.key == .text("c") || ev.key == .text("C")
         let isA = ev.key == .command("a") || ev.key == .text("a") || ev.key == .text("A")
+        // A selection whose text went away goes before either key (`selection_key`).
+        if selectionState.coordinator.phase.selection != nil, selectionHolderEnd() == nil {
+            clearTextSelectionPhase()
+            if isC { return false }
+        }
         if isC {
-            guard let copied = copySelectionText() else { return false }
+            guard selectionState.coordinator.phase.selection != nil, let copied = copySelectionText() else { return false }
             recordCopy(ClipboardContent(copied, html: copySelectionHTML()))
             return true
         }
         if isA {
-            let outcome = selectionState.coordinator.handleSelectAll(
-                in: selectableSnapshots(),
-                appHandledCmdA: false
-            )
-            if case .selectGroup(let groupPath, _, _) = outcome {
-                // A group holding a virtual list selects its rows never built too
-                // (`select_all.rs::select_all_key` -> `virtual_span_under`).
-                if let span = virtualSpanUnder(groupPath: groupPath) {
-                    selectSpanEnds(first: span.first, last: span.last)
-                } else {
-                    sealBetween()
-                }
-                dirtyCommit(at: now, external: false)
-                dispatchSelectionChanges(at: now)
-                return true
-            }
-            return false
+            guard selectAllKey() else { return false }
+            dirtyCommit(at: now, external: false)
+            dispatchSelectionChanges(at: now)
+            return true
         }
         return false
     }
@@ -1242,13 +1186,6 @@ internal extension Runtime {
             }
         }
         reconcileSelectionPhaseAgainstTree()
-        // `prune_text_selection`: the mounted rows between the ends still read what they read
-        // when hashed, then the ends re-pin.
-        if selectionState.coordinator.phase.selection != nil, !mountedBetweenMatches() {
-            selectionState.coordinator.phase.clear()
-            selectionState.isDraggingSelection = false
-        }
-        syncSelectionPins()
         dispatchSelectionChanges(at: now)
     }
 
@@ -1458,75 +1395,7 @@ internal extension Runtime {
     }
 
     private func reconcileSelectionPhaseAgainstTree() {
-        guard let sel = selectionState.coordinator.phase.selection else { return }
-        let anchorTextNow: String
-        let anchorResolvedPath: String
-        if let anchorIdx = resolvedNodeIndex(forPath: sel.path),
-           let nowText = selectableNodeText(flatNodes[anchorIdx]) {
-            anchorTextNow = nowText
-            anchorResolvedPath = flatNodes[anchorIdx].path
-        } else if let vSnap = resolveVirtualEndpoint(forPath: sel.path) {
-            anchorTextNow = vSnap.text
-            anchorResolvedPath = vSnap.path
-        } else {
-            selectionState.coordinator.phase.clear()
-            selectionState.isDraggingSelection = false
-            return
-        }
-        let anchorUpto = sel.far == nil ? min(sel.anchor, sel.focus) : min(sel.anchor, anchorTextNow.utf8.count)
-        guard SelectionMath.kept(then: sel.content, now: anchorTextNow, upto: anchorUpto) else {
-            selectionState.coordinator.phase.clear()
-            selectionState.isDraggingSelection = false
-            return
-        }
-        var updated = sel
-        updated.path = anchorResolvedPath
-        if var far = sel.far {
-            let farTextNow: String?
-            let farResolvedPath: String?
-            if let farIdx = resolvedNodeIndex(forPath: far.path),
-               let nowText = selectableNodeText(flatNodes[farIdx]) {
-                farTextNow = nowText
-                farResolvedPath = flatNodes[farIdx].path
-            } else if let vFar = resolveVirtualEndpoint(forPath: far.path) {
-                farTextNow = vFar.text
-                farResolvedPath = vFar.path
-            } else {
-                farTextNow = nil
-                farResolvedPath = nil
-            }
-            if let farNow = farTextNow,
-               let farPath = farResolvedPath,
-               SelectionMath.kept(then: far.content, now: farNow, upto: min(sel.focus, farNow.utf8.count)) {
-                let allSnaps = selectableSnapshotsWithVirtuals()
-                if let aIdx = allSnaps.firstIndex(where: { $0.path == anchorResolvedPath }),
-                   let fIdx = allSnaps.firstIndex(where: { $0.path == farPath }) {
-                    let nowBetween = SelectionMath.computeBetweenHash(
-                        in: allSnaps,
-                        anchorIdx: aIdx,
-                        farIdx: fIdx
-                    )
-                    guard nowBetween == sel.betweenHash else {
-                        selectionState.coordinator.phase.clear()
-                        selectionState.isDraggingSelection = false
-                        return
-                    }
-                }
-                far.path = farPath
-                updated.far = far
-            } else {
-                selectionState.coordinator.phase.clear()
-                selectionState.isDraggingSelection = false
-                return
-            }
-        }
-        if updated != sel {
-            if case .dragging(_, let unit) = selectionState.coordinator.phase {
-                selectionState.coordinator.phase.startDrag(selection: updated, unit: unit)
-            } else {
-                selectionState.coordinator.phase.place(updated)
-            }
-        }
+        pruneTextSelection()
     }
 
     func dispatchSelectionChanges(at now: Double) {
