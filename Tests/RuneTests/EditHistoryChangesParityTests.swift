@@ -188,6 +188,23 @@ struct EditHistoryChangesParityTests {
         #expect(e.text == pasted + "a\nb")
         var single = TextEdit("")
         single.paste("x\ny")
-        #expect(single.text == "x y")
+        #expect(single.text == "xy")
+    }
+
+    /// `edit/tests.rs::paste_keeps_single_line_fields_on_one_line`.
+    @Test("a paste keeps single-line fields on one line")
+    func pasteKeepsSingleLineFieldsOnOneLine() {
+        var secure = TextEdit("")
+        secure.isSecure = true
+        var single = TextEdit("")
+        var multi = TextEdit("", multiline: true)
+        secure.paste("a\tb\r\nc\u{2028}d")
+        single.paste("a\tb\r\nc\u{2028}d")
+        multi.paste("a\tb\r\nc\u{2028}d")
+        #expect(secure.text == "abcd")
+        #expect(single.text == "abcd")
+        #expect(multi.text == "a\tb\nc\u{2028}d")
+        _ = single.applyIme(.commit("x\ny"))
+        #expect(single.text == "abcdxy")
     }
 }

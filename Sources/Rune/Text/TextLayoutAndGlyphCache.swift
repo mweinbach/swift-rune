@@ -216,6 +216,9 @@ public final class TextLayoutBox: @unchecked Sendable {
     public var hasGlyphs: Bool
     internal let prepared: TextPreparedShape?
     internal var lastUsedCommit: UInt64 = 0
+    /// A by-paragraph field's paragraphs (`TextLayout::Paragraphs`), whose stacked lines `shaped`
+    /// holds; nil for one layout (`TextLayout::Single`).
+    internal var paragraphs: ParagraphLayout? = nil
 
     public var estimatedBytes: Int {
         (prepared?.estimatedBytes ?? max(128, authText.utf8.count * 16))
@@ -248,7 +251,7 @@ public final class TextLayoutBox: @unchecked Sendable {
     }
 
     public func clone() -> TextLayoutBox {
-        TextLayoutBox(
+        let out = TextLayoutBox(
             shapeKey: shapeKey,
             authText: authText,
             spans: spans,
@@ -260,6 +263,8 @@ public final class TextLayoutBox: @unchecked Sendable {
             hasGlyphs: hasGlyphs,
             prepared: prepared
         )
+        out.paragraphs = paragraphs
+        return out
     }
 }
 

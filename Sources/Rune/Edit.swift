@@ -1881,19 +1881,40 @@ public struct TextEdit: Sendable, Equatable {
         c.isLetter || c.isNumber || c == "_"
     }
 
+    /// Text typed, pasted or committed into this field (`edit.rs::sanitize`). Single-line fields
+    /// drop control characters, line breaks included (stripped, as `<input type=text>` does);
+    /// multi-line fields fold CRLF to LF (and multi-line secure fields also drop control
+    /// characters other than `\n` and `\t`, a lone CR becoming LF).
     private func sanitizeInput(_ s: String) -> String {
-        if multiline {
-            // Most pastes: copied whole, not a character at a time (`edit.rs::sanitize`, #990).
-            // Checked by byte: `"\r\n"` is one `Character`, so `contains("\r")` would miss it.
-            guard s.utf8.contains(0x0D) else { return s }
-            return s.replacingOccurrences(of: "\r\n", with: "\n")
-                .replacingOccurrences(of: "\r", with: "\n")
+        let isControl: (Unicode.Scalar) -> Bool = { $0.properties.generalCategory == .control }
+        let isLineSeparator: (Unicode.Scalar) -> Bool = { $0 == "\u{2028}" || $0 == "\u{2029}" }
+        if !multiline {
+            var out = String.UnicodeScalarView()
+            for c in s.unicodeScalars where !isControl(c) && !isLineSeparator(c) { out.append(c) }
+            return String(out)
         }
-        return s.replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\u{2028}", with: " ")
+        if isSecure {
+            var out = String.UnicodeScalarView()
+            let scalars = Array(s.unicodeScalars)
+            for (i, c) in scalars.enumerated() {
+                if c == "\r" {
+                    if i + 1 >= scalars.count || scalars[i + 1] != "\n" { out.append("\n") }
+                    continue
+                }
+                if (!isControl(c) || c == "\n" || c == "\t") && !isLineSeparator(c) { out.append(c) }
+            }
+            return String(out)
+        }
+        // Most pastes: copied whole, not a character at a time (#990). Checked by byte:
+        // `"\r\n"` is one `Character`, so `contains("\r")` would miss it.
+        guard s.utf8.contains(0x0D) else { return s }
+        var out = String.UnicodeScalarView()
+        let scalars = Array(s.unicodeScalars)
+        for (i, c) in scalars.enumerated() {
+            if c == "\r" && i + 1 < scalars.count && scalars[i + 1] == "\n" { continue }
+            out.append(c)
+        }
+        return String(out)
     }
 
     private func prevBackspaceBoundary(from offset: Int) -> Int {

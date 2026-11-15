@@ -2395,6 +2395,9 @@ public final class TextSystem: @unchecked Sendable {
     internal private(set) var shapeMissCount: Int = 0
     internal private(set) var shapedBuildCount: Int = 0
     private var shapeCallCounter: UInt64 = 0
+    /// By-paragraph field layouts, printable ASCII's measures and the lazy paste's scratch
+    /// (`text/paragraphs.rs`, `text/paragraphs/lazy.rs`).
+    internal let paragraphState = ParagraphState()
 
     /// Drops cached layouts and typesetters while keeping rasterized glyph and icon atlases intact.
     public func clearLayoutCaches() {
@@ -2574,6 +2577,7 @@ public final class TextSystem: @unchecked Sendable {
             }
         }
         lock.unlock()
+        paragraphState.endCommit()
 
         for k in evictedKeys {
             glyphCache.forget(shapeKey: k)
@@ -3363,6 +3367,28 @@ public final class TextSystem: @unchecked Sendable {
             lock.unlock()
             return box
         }
+    }
+
+    /// `box` broken again at `maxWidth` from the shape it holds, without shaping
+    /// (`line_break::rebreak` of a kept paragraph, `paragraphs.rs`); nil when it holds none.
+    internal func rebreakOwned(_ box: TextLayoutBox, maxWidth: Float?, emitGlyphs: Bool) -> TextLayoutBox? {
+        guard let prepared = box.prepared else { return nil }
+        let shaped = measureFramePhase(.text) {
+            breakLines(prepared: prepared, maxWidth: maxWidth, emitGlyphs: emitGlyphs, glidePx: .zero, pretty: box.shapeKey.pretty)
+        }
+        lock.withLock { _rebrokenCount += 1 }
+        return TextLayoutBox(
+            shapeKey: box.shapeKey,
+            authText: box.authText,
+            spans: box.spans,
+            pills: box.pills,
+            style: box.style,
+            pixelScale: box.pixelScale,
+            maxWidth: maxWidth,
+            shaped: shaped,
+            hasGlyphs: emitGlyphs,
+            prepared: prepared
+        )
     }
 
     /// Shapes plain or rich text into lines, optional pill/inline-icon quads, and optional `GlyphAtlas` quads.

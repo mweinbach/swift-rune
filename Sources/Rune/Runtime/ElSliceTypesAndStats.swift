@@ -33,6 +33,7 @@ extension AnimSource {
         "text-flight",
         "live",
         "virtual-fill",
+        "text-fill",
     ]
 }
 
