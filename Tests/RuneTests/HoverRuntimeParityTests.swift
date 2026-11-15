@@ -89,8 +89,9 @@ struct HoverRuntimeParityTests {
             rt.liveStore.tick()
             rt.syncHoverTracks(at: rt.cxSettings.scaledTime(at: 0.0), cut: false, held: false)
             rt.liveStore.tick()
-            // Hover, press and press-scale tracks all live in `liveStore`; any track the pass
-            // touched (of any prop) counts, as `scene.frame().changed` does upstream.
+            // Hover and press tracks live in `liveStore` (press scale lives in `scene.store`, but
+            // this view has no press scale); any track the pass touched (of any prop) counts, as
+            // `scene.frame().changed` does upstream.
             let dirtied = !rt.liveStore.touchedTracks().isEmpty
             #expect(dirtied == custom, "only explicit animations may dirty poses for unchanged targets")
         }
@@ -512,5 +513,69 @@ struct HoverRuntimeParityTests {
         #expect(rt.hoveredKey == "r25")
         #expect(rt.currentCursor() == .text)
     }
-}
 
+    // MARK: - Press tracks (`hover.rs::update_interaction`, `Visual::tracks_press`)
+
+    struct PressState { var modal = false }
+
+    /// A press-fill button, a press-color button, and (while `modal`) a modal sheet beside them.
+    static func pressView(_ s: PressState, _: inout Cx<PressState>) -> El<PressState> {
+        var root: El<PressState> = col().size(240.0, 200.0)
+            .child(el().key("fill").size(100.0, 40.0).press(Color.white).onClick { (_: inout PressState) in })
+            .child(el().key("ink").size(100.0, 40.0).pressColor(Color.white).onClick { (_: inout PressState) in })
+        if s.modal {
+            root = root.child(col().key("sheet").absolute(x: 150.0, y: 150.0).size(40.0, 40.0)
+                .modal(clickOutside: true) { (s: inout PressState) in s.modal = false })
+        }
+        return root
+    }
+
+    /// `hover.rs:351-366`: every node that tracks press (a press fill or a press color) readies
+    /// its `P_PRESS` track from rest, goes down on `INSTANT` and comes back up on `SNAPPY`.
+    @Test("press tracks go down on INSTANT and back on SNAPPY for press fills and press colors")
+    func pressTracksGoDownOnInstantAndBackOnSnappy() {
+        for (key, at) in [("fill", Vec2(50.0, 20.0)), ("ink", Vec2(50.0, 60.0))] {
+            let rt = Runtime<PressState>(state: PressState(), viewport: Vec2(240, 200), pixelScale: 1.0, systemDark: true, view: Self.pressView)
+            var t = 0.0
+            _ = rt.frame(at: t)
+            guard let n = rt.flatNodes.first(where: { $0.key == key }) else { Issue.record("\(key) is in the tree"); continue }
+            let track = Runtime<PressState>.pressTrackId(n.nodeId)
+            #expect(!rt.liveStore.has(track, Runtime<PressState>.pressProp), "\(key): at rest it has no track")
+            rt.pointerMove(to: at, at: t)
+            rt.pointerDown(at: at, at: t)
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            #expect(rt.liveStore.target(track, Runtime<PressState>.pressProp) == 1.0, "\(key): down")
+            for _ in 0..<30 { t += 1.0 / 120.0; _ = rt.frame(at: t) }
+            #expect(abs((rt.liveStore.get(track, Runtime<PressState>.pressProp) ?? 0.0) - 1.0) < 1e-3, "\(key): INSTANT lands down")
+            rt.pointerUp(at: at, at: t)
+            t += 1.0 / 120.0
+            _ = rt.frame(at: t)
+            #expect(rt.liveStore.target(track, Runtime<PressState>.pressProp) == 0.0, "\(key): up")
+            let v = rt.liveStore.get(track, Runtime<PressState>.pressProp) ?? 0.0
+            #expect(v > 0.0 && v < 1.0 && rt.liveStore.isAnimating(track, Runtime<PressState>.pressProp),
+                    "\(key): it springs back on SNAPPY rather than snapping: \(v)")
+        }
+    }
+
+    /// `hover.rs:360` (`down = self.allowed(i) && ...`, `focus.rs::allowed`): a press under a
+    /// modal that opened while it was held shows no press.
+    @Test("a held press behind a modal shows no press")
+    func aHeldPressBehindAModalShowsNoPress() {
+        let rt = Runtime<PressState>(state: PressState(), viewport: Vec2(240, 200), pixelScale: 1.0, systemDark: true, view: Self.pressView)
+        var t = 0.0
+        _ = rt.frame(at: t)
+        guard let n = rt.flatNodes.first(where: { $0.key == "fill" }) else { Issue.record("fill is in the tree"); return }
+        let track = Runtime<PressState>.pressTrackId(n.nodeId)
+        rt.pointerMove(to: Vec2(50.0, 20.0), at: t)
+        rt.pointerDown(at: Vec2(50.0, 20.0), at: t)
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        #expect(rt.liveStore.target(track, Runtime<PressState>.pressProp) == 1.0)
+        rt.update(at: t) { s, _ in s.modal = true }
+        t += 1.0 / 120.0
+        _ = rt.frame(at: t)
+        #expect(rt.activeModalPath != nil, "the sheet is modal")
+        #expect(rt.liveStore.target(track, Runtime<PressState>.pressProp) == 0.0, "behind the modal the press lets go")
+    }
+}

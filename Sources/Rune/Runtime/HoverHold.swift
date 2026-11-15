@@ -140,10 +140,6 @@ public struct ScrollNudge: Sendable, Equatable {
 }
 
 extension Runtime {
-    /// How many viewports out a long glide starts: farther, it cuts to there first and glides
-    /// the rest (`scroll/bottom.rs::GLIDE_REACH`, read by `offset.rs::scroll_to_offsets`).
-    internal static var scrollGlideReach: Double { 2.0 }
-
     // MARK: Scroll carries & nudges (`hover.rs::scroll_carries`, `offset.rs::step_nudges`)
 
     /// Viewport `path` moves content under a still pointer on its own at `now`: a glide, or an

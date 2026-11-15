@@ -9294,9 +9294,16 @@ public final class Runtime<State> {
         applyHoverWithin([], held: false, at: now)
     }
 
+    /// `hover.rs::update_interaction`'s `down`: the element is allowed (`focus.rs::allowed`: not
+    /// inert, not behind a modal) and holds the captured press (the primary press, else the
+    /// secondary capture) with the pointer inside, or a middle/secondary button's tint over it.
     internal func isNodePressedVisually(path: String, effectiveInert: Bool, restingContains: Bool? = nil) -> Bool {
         guard !effectiveInert else { return false }
-        if pressedPath == path && pressedPointerInside {
+        if activeModalPath != nil && !modalMemberPaths.contains(path) { return false }
+        if let pressed = pressedPath {
+            if pressed == path && pressedPointerInside { return true }
+        } else if case .held(let captured, _, _) = inputMachines.secondaryCapture, captured == path,
+                  restingContains ?? pressRestingContains(path: path, at: pointerPosition) {
             return true
         }
         if pressedTint?.path == path {
@@ -11486,33 +11493,28 @@ public final class Runtime<State> {
             && !flatNodes.isEmpty
             && (!scrollRequiresCommit || allowFastLiveScroll)
         if canFastApplyOffsets {
+            // The same per-request path a committing frame takes (`offset.rs::scroll_to_offsets`
+            // + `apply_jumps`): glide or jump per axis, the long-trip cut, and the hover hold a
+            // moving jump arms.
             var anySnapped = false
+            let animNow = cxSettings.scaledTime(at: now)
             for req in tx.scrollOffsetRequests {
                 guard let match = flatNodes.first(where: { !$0.el.layout.scrollAxes.isEmpty && selectsElementSelector(req.key, path: $0.path, key: $0.key) }) else {
                     continue
                 }
                 let path = match.path
-                let maxExt = scrollMaxExtents[path] ?? .zero
                 let cur = scrollOffsets[path] ?? .zero
-                let clamped = Vec2(
-                    max(0, min(maxExt.x, req.x ?? cur.x)),
-                    max(0, min(maxExt.y, req.y ?? cur.y))
-                )
-                let nid = NodeId.hash("scroll:" + path)
-                if let glide = req.glide, !reducedMotion {
-                    if scrollStore.get(nid, Props.SCROLL) == nil {
-                        scrollStore.snap(nid, Props.SCROLL, to: cur)
-                    }
-                    scrollStore.set(nid, Props.SCROLL, to: clamped, anim: .spring(glide), at: cxSettings.scaledTime(at: now))
-                    scrollGlidingPaths.insert(path)
+                markScrollMovedByHand(path: path)
+                if req.glide != nil {
+                    markScrollHandGliding(path: path)
                 } else {
-                    scrollStore.snap(nid, Props.SCROLL, to: clamped)
-                    scrollOffsets[path] = clamped
+                    clearScrollHandGliding(path: path)
+                }
+                applyScrollOffsetRequest(path: path, next: Vec2(req.x ?? cur.x, req.y ?? cur.y), glide: req.glide, cut: false, animNow: animNow)
+                if scrollOffsets[path] != cur {
                     frameMovedScrollPaths.insert(path)
-                    scrollGlidingPaths.remove(path)
                     anySnapped = true
                 }
-                markScrollMovedByHand(path: path)
                 scrollMovedSinceLastFrame = true
             }
             if anySnapped {

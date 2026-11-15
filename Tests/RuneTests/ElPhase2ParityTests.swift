@@ -170,11 +170,16 @@ struct ElPhase2ParityTests {
         let shapeRestPx = try #require(sampleNonZeroPixel(cpuRest, rect: ghostShapeRect))
         #expect(shapeRestPx.r > shapeRestPx.b)
 
-        // Press down on ghost button
+        // Press down on ghost button. The tint rides the node's `P_PRESS` track, which goes down
+        // on `INSTANT` (0.1 s) and back up on `SNAPPY` (0.25 s) (`hover.rs::update_interaction`),
+        // so each state is sampled once its spring has landed.
         let ghostMid = Vec2(ghostRect[0] + 20, ghostRect[1] + 16)
         rt.pointerDown(at: ghostMid, at: 0.05)
-        let rfDown = rt.renderFrame(at: 0.06)
-        let cpuDown = try RuneRef.render(rt.frame(at: 0.06))
+        let rfEarly = rt.renderFrame(at: 0.06)
+        let early = try #require(firstGlyphBlueMinusRed(rfEarly, within: ghostTxtRect))
+        #expect(early > -0.75 && early < 0.8, "10 ms into INSTANT the tint is on its way, not landed: \(early)")
+        let rfDown = rt.renderFrame(at: 0.5)
+        let cpuDown = try RuneRef.render(rt.frame(at: 0.5))
 
         // ElementInfo.textColor preserves authored baseInk; rendered glyphs, shapes, and icon pixels shift to targetInk
         #expect(rt.element(byKey: "ghost-txt")?.textColor == baseInk)
@@ -186,16 +191,19 @@ struct ElPhase2ParityTests {
         #expect(shapeDownPx.b > shapeDownPx.r)
 
         // Drag outside while pressed -> reverts to baseInk; drag back in -> tints again; release -> baseInk + click
-        rt.pointerMove(to: Vec2(220, 100), at: 0.08)
-        let rfOut = rt.renderFrame(at: 0.09)
+        rt.pointerMove(to: Vec2(220, 100), at: 0.55)
+        _ = rt.frame(at: 0.56)
+        let rfOut = rt.renderFrame(at: 1.5)
         #expect((try #require(firstGlyphBlueMinusRed(rfOut, within: ghostTxtRect))) < -0.5)
 
-        rt.pointerMove(to: ghostMid, at: 0.10)
-        let rfBack = rt.renderFrame(at: 0.11)
+        rt.pointerMove(to: ghostMid, at: 1.55)
+        _ = rt.frame(at: 1.56)
+        let rfBack = rt.renderFrame(at: 2.0)
         #expect((try #require(firstGlyphBlueMinusRed(rfBack, within: ghostTxtRect))) > 0.5)
 
-        rt.pointerUp(at: ghostMid, at: 0.12)
-        let rfUp = rt.renderFrame(at: 0.13)
+        rt.pointerUp(at: ghostMid, at: 2.05)
+        _ = rt.frame(at: 2.06)
+        let rfUp = rt.renderFrame(at: 3.0)
         #expect((try #require(firstGlyphBlueMinusRed(rfUp, within: ghostTxtRect))) < -0.5)
         #expect(rt.state.clicks == 1)
 
@@ -203,12 +211,13 @@ struct ElPhase2ParityTests {
         let grpRect = try #require(rt.element(byKey: "grp")).rect
         let grpTxtRect = try #require(rt.element(byKey: "grp-txt")).rect
         let grpPt = Vec2(grpRect[0] + 20, grpRect[1] + 16)
-        rt.pointerMove(to: grpPt, at: 0.20)
-        _ = rt.frame(at: 0.21)
-        rt.pointerDown(at: grpPt, at: 0.22)
-        let rfGrpDown = rt.renderFrame(at: 0.23)
+        rt.pointerMove(to: grpPt, at: 3.1)
+        _ = rt.frame(at: 3.11)
+        rt.pointerDown(at: grpPt, at: 3.12)
+        _ = rt.frame(at: 3.13)
+        let rfGrpDown = rt.renderFrame(at: 3.6)
         #expect((try #require(firstGlyphBlueMinusRed(rfGrpDown, within: grpTxtRect))) > 0.5)
-        rt.pointerUp(at: grpPt, at: 0.24)
+        rt.pointerUp(at: grpPt, at: 3.65)
     }
 
     // MARK: - P2-50: Middle Clicks, Touch Hold Cancel & Headless open_url

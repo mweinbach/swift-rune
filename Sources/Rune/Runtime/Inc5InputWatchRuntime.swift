@@ -331,57 +331,37 @@ extension Runtime {
         NodeId.hash("press:\(nid.rawValue)")
     }
 
+    /// Retargets every press track (the press half of `hover.rs::update_interaction`): a node
+    /// that tracks press (`Visual::tracks_press`: a press fill or a press color) goes to 1 while
+    /// its element holds a press with the pointer inside (or a middle/secondary button's tint
+    /// over it) and is allowed (not inert, not behind a modal), else to 0. The track is readied
+    /// from rest (`paint/tracks.rs::ready_from_rest`), goes down on `INSTANT` and comes back up
+    /// on `SNAPPY`; a cut or Reduce Motion lands it.
     internal func syncPressColorTracks(at now: Double, cut: Bool) {
         let snapImmediately = cut || cxSettings.hostReducedMotion
         for node in flatNodes {
             let el = node.el
-            // `Visual::tracks_press`: a press fill or a press color.
             guard el.pressColor != nil || (el.pressBg?.a ?? 0) > 0 else { continue }
             let nid = node.nodeId
             let trackId = Self.pressTrackId(nid)
-            let isDown = isNodePressedVisually(
+            let pressed = isNodePressedVisually(
                 node,
                 restingContains: pressRestingContains(path: node.path, at: pointerPosition)
             )
-            let target: Float = isDown ? 1.0 : 0.0
-            if el.pressColor == nil {
-                // A press fill's track (`hover.rs::update_interaction`): ready from rest, then
-                // down at once and back on a snappy spring.
-                defer { lastPressTargetById[nid] = target }
-                if !liveStore.has(trackId, Self.pressProp) {
-                    if target == 0.0 { continue }
-                    liveStore.snap(trackId, Self.pressProp, to: 0.0)
-                }
-                guard liveStore.target(trackId, Self.pressProp) != target else { continue }
-                if snapImmediately {
-                    liveStore.snap(trackId, Self.pressProp, to: target)
-                } else {
-                    let spring = isDown ? MotionTokens.INSTANT : MotionTokens.SNAPPY
-                    liveStore.set(trackId, Self.pressProp, to: target, anim: Anim<Float>(curve: .spring(spring)), at: now)
-                }
-                continue
-            }
-            let prevTarget = lastPressTargetById[nid]
-            let anim = el.styleSpring.map { Anim<Float>(curve: .spring($0)) } ?? .instant
-            if snapImmediately || (el.styleSpring == nil) {
-                liveStore.snap(trackId, Self.pressProp, to: target)
-                lastPressTargetById[nid] = target
-                continue
-            }
-            if prevTarget == nil {
+            let target: Float = pressed ? 1.0 : 0.0
+            lastPressTargetById[nid] = target
+            // `ready_from_rest(P_PRESS, 0.0, pressed)`.
+            if !liveStore.has(trackId, Self.pressProp) {
+                if target == 0.0 { continue }
                 liveStore.snap(trackId, Self.pressProp, to: 0.0)
-                if target > 0.5 {
-                    liveStore.set(trackId, Self.pressProp, to: 1.0, anim: anim, at: now)
-                    lastPressTargetById[nid] = 1.0
-                } else {
-                    lastPressTargetById[nid] = 0.0
-                }
-            } else if prevTarget != target {
-                if liveStore.get(trackId, Self.pressProp) == nil {
-                    liveStore.snap(trackId, Self.pressProp, to: prevTarget!)
-                }
-                liveStore.set(trackId, Self.pressProp, to: target, anim: anim, at: now)
-                lastPressTargetById[nid] = target
+            }
+            // Retargeting to the target it has is a no-op in the store; skip touching the track.
+            guard liveStore.target(trackId, Self.pressProp) != target else { continue }
+            if snapImmediately {
+                liveStore.snap(trackId, Self.pressProp, to: target)
+            } else {
+                let spring = pressed ? MotionTokens.INSTANT : MotionTokens.SNAPPY
+                liveStore.set(trackId, Self.pressProp, to: target, anim: Anim<Float>(curve: .spring(spring)), at: now)
             }
         }
         lastPressTargetById = lastPressTargetById.filter { nodeById[$0.key] != nil || exitingSnapshots[$0.key] != nil }

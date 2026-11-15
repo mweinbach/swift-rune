@@ -458,4 +458,47 @@ struct ScrollHoverParityTests {
         #expect(abs((rt.scrollOffsets[path]?.y ?? 0.0) - 390.0) < 1e-3, "r20's top lands 10 points below the top")
         #expect(rt.scrollNudges[path]?.holdAt(now: rt.currentTime) == true, "the jump armed the hover hold")
     }
+
+    /// Upstream has one offset path (`requests.rs::finish_scroll_requests` -> `scroll_to_offsets`
+    /// + `apply_jumps`), whether or not the transaction commits: an instant request from a
+    /// transaction that commits nothing (`updateIf { ...; return false }`, or `liveOnly`) arms
+    /// the hold, holds hover under the still pointer, and the hold's wake resolves it.
+    @Test("an instant offset request from a non-committing transaction arms the nudge")
+    func anInstantOffsetRequestFromANonCommittingTransactionArmsTheNudge() {
+        for liveOnly in [false, true] {
+            var (rt, t) = Self.hovering()
+            let path = rt.flatNodes.first(where: { $0.key == "scroll" })?.path ?? ""
+            _ = rt.updateIf(at: t) { _, tx in
+                if liveOnly { tx.liveOnly() }
+                tx.scrollToInstant("scroll", x: 0.0, y: 400.0)
+                return false
+            }
+            t += Self.dt
+            _ = rt.frame(at: t)
+            #expect(rt.scrollOffsets[path]?.y == 400.0, "liveOnly=\(liveOnly): it jumped")
+            #expect(rt.scrollNudges[path]?.holdAt(now: rt.currentTime) == true, "liveOnly=\(liveOnly): the jump armed the hold")
+            #expect(Self.shown(rt) == ["a5"], "liveOnly=\(liveOnly): hover holds under the still pointer")
+            guard let due = rt.nextWakeDeadline(after: rt.currentTime) else {
+                Issue.record("liveOnly=\(liveOnly): the hold wakes a frame")
+                continue
+            }
+            _ = rt.frame(at: due)
+            #expect(Self.shown(rt) == ["a25"], "liveOnly=\(liveOnly): the wake's frame resolves hover at the pointer")
+        }
+    }
+
+    /// The same single path for a glide from a transaction that commits nothing: the long trip
+    /// cuts to two viewports out first (`GLIDE_REACH`), and the axes split glide and jump.
+    @Test("a glide from a non-committing transaction cuts and splits per axis")
+    func aGlideFromANonCommittingTransactionCutsAndSplitsPerAxis() {
+        var (rt, path, t) = Self.planeRuntime()
+        _ = rt.updateIf(at: t) { _, tx in tx.scrollTo("plane", x: 0.3, y: 3000.0); return false }
+        t += Self.dt
+        _ = rt.frame(at: t)
+        let off = rt.scrollOffsets[path] ?? .zero
+        #expect(off.y >= 3000.0 - 2.0 * 200.0 && off.y < 3000.0, "it starts within two viewports of the end: \(off.y)")
+        #expect(abs(off.x - 0.3) < 1e-6, "x, 0.3 points away, jumps: \(off.x)")
+        #expect(rt.scrollGlidingPaths.contains(path))
+        #expect(rt.scrollNudges[path]?.holdAt(now: rt.currentTime) == true, "the jumped axis armed the hold")
+    }
 }
