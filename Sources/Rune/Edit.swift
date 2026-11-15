@@ -446,19 +446,36 @@ extension Keybind where Action == Void {
     }
 }
 
-/// Rich clipboard payload (`rune::ClipboardContent`).
-public struct ClipboardContent: Sendable, Equatable {
+/// Rich clipboard payload (`rune::ClipboardContent`): plain text and optionally HTML, RTF, an
+/// image and files. Its description shows only sizes, never the contents.
+public struct ClipboardContent: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
     public var text: String
     public var html: String?
     public var rtf: String?
     public var image: ClipboardImage?
+    /// Files on the clipboard. Like the image, only pastes to a hook carry them (`ClipboardContent::files`).
+    public var files: [URL]
+    /// The clipboard still holds the pill copy this runtime wrote last (`own_pills`). Not part of equality.
+    internal var ownPills: Bool = false
 
-    public init(_ text: String = "", html: String? = nil, rtf: String? = nil, image: ClipboardImage? = nil) {
+    public init(_ text: String = "", html: String? = nil, rtf: String? = nil, image: ClipboardImage? = nil, files: [URL] = []) {
         self.text = text
         self.html = html
         self.rtf = rtf
         self.image = image
+        self.files = files
     }
+
+    public static func == (a: ClipboardContent, b: ClipboardContent) -> Bool {
+        a.text == b.text && a.html == b.html && a.rtf == b.rtf && a.image == b.image && a.files == b.files
+    }
+
+    public var description: String {
+        "ClipboardContent(text: \(text.utf8.count), html: \(html.map { String($0.utf8.count) } ?? "nil"), "
+            + "rtf: \(rtf.map { String($0.utf8.count) } ?? "nil"), image: \(image.map { "\($0.width)x\($0.height)" } ?? "nil"), files: \(files.count))"
+    }
+
+    public var debugDescription: String { description }
 }
 
 /// Colored inline mark over a UTF-8 byte range inside `TextEdit`.

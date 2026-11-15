@@ -47,8 +47,8 @@ extension ClipboardImage {
 }
 
 extension ClipboardContent {
-    /// HTML, RTF or an image beside the text (`ClipboardContent::is_rich`).
-    public var isRich: Bool { html != nil || rtf != nil || image != nil }
+    /// HTML, RTF, an image or files beside the text (`ClipboardContent::is_rich`).
+    public var isRich: Bool { html != nil || rtf != nil || image != nil || !files.isEmpty }
     /// No text and no other form (`ClipboardContent::is_empty`).
     public var isEmpty: Bool { text.isEmpty && !isRich }
     /// Plain consumers (a field without `onInputPaste`, a text `onPaste`) take it (`has_plain`).
@@ -63,8 +63,9 @@ extension ClipboardContent {
 
 extension RichClipboardPayload {
     fileprivate var anyImage: ClipboardImage? { content.image ?? image }
+    fileprivate var anyFiles: [URL] { files.isEmpty ? content.files : files }
     fileprivate var pasteIsRich: Bool {
-        content.html != nil || content.rtf != nil || anyImage != nil || !files.isEmpty
+        content.html != nil || content.rtf != nil || anyImage != nil || !anyFiles.isEmpty
     }
     fileprivate var pasteIsEmpty: Bool { content.text.isEmpty && !pasteIsRich }
 
@@ -81,7 +82,7 @@ extension RichClipboardPayload {
             let textForms = ClipboardContent(content.text, html: content.html, rtf: content.rtf)
             return (!had || !textForms.isEmpty) ? textForms : nil
         case .all:
-            return ClipboardContent(content.text, html: content.html, rtf: content.rtf, image: anyImage)
+            return ClipboardContent(content.text, html: content.html, rtf: content.rtf, image: anyImage, files: anyFiles)
         }
     }
 }
@@ -111,6 +112,7 @@ internal struct ClipboardRoutingState {
     var clipboardReads: [(id: UInt64, read: TxClipboardRead.Fn)] = []
     var nextClipboardRead: UInt64 = 0
     var replies: [ClipboardReply] = []
+    var copies = ClipboardCopyState()
 }
 
 extension Tx {
@@ -203,6 +205,9 @@ extension Runtime {
     /// Latches a `Tx`'s paste and read requests and answers them from the clipboard at once
     /// (`latch_requests` + `flush_memory`).
     internal func latchClipboardRequests(_ tx: Tx) {
+        if let copy = tx.runtimeActions[txSecretCopyKey] as? TxSecretCopy {
+            applySecretCopy(copy)
+        }
         if tx.pasteRequested {
             clipboardRouting.pasteRequest = .some(pasteTarget)
         }
@@ -216,14 +221,13 @@ extension Runtime {
         answerClipboardRequests()
     }
 
-    /// What the clipboard holds now, or `nil` when it holds nothing.
-    /// Without a bound `Clipboard`, the runtime's own last copy stands in for it.
+    /// What the clipboard holds now, or `nil` when it holds nothing: never written, cleared
+    /// (`Board::clear` leaves no content) or an empty system clipboard. Without a bound
+    /// `Clipboard`, the runtime's own last copy stands in for it.
     private func currentClipboardPayload() -> RichClipboardPayload? {
         if let board = boundClipboard {
-            if board.kind == .memory && board.changeCount == 0 { return nil }
             let payload = board.readRich(sanitizeUntrustedHTML: false)
-            if board.kind == .system && payload.pasteIsEmpty { return nil }
-            return payload
+            return payload.pasteIsEmpty ? nil : payload
         }
         let local = richClipboard.content == clipboard ? richClipboard : RichClipboardPayload(content: clipboard)
         return local.pasteIsEmpty ? nil : local
@@ -237,28 +241,34 @@ extension Runtime {
         if let target = clipboardRouting.pasteRequest {
             clipboardRouting.pasteRequest = nil
             if let content = payload?.answer(pasteForms(target)) {
-                pasteResult(target: target, content.untrusted())
+                pasteResult(target: target, markOwnPills(content.untrusted()))
             }
         }
         let reads = clipboardRouting.readRequests
         clipboardRouting.readRequests.removeAll()
         for id in reads {
-            readResult(id: id, (payload?.answer(.all) ?? ClipboardContent()).untrusted())
+            readResult(id: id, markOwnPills((payload?.answer(.all) ?? ClipboardContent()).untrusted()))
         }
     }
 
     /// Reads the clipboard for the current paste target and pastes now (a paste key or menu).
+    /// Whenever something accepts a paste the command is consumed, even when the clipboard is
+    /// empty or holds only an image (`physical.rs` edit command `v`).
     @discardableResult
     internal func pasteClipboardNow(at now: Double) -> Bool {
+        guard acceptsPaste else { return false }
         let target = pasteTarget
-        guard let content = currentClipboardPayload()?.answer(pasteForms(target)) else { return false }
-        return runPasteReply(content.untrusted(), target: .some(target), at: now)
+        if let content = currentClipboardPayload()?.answer(pasteForms(target)) {
+            runPasteReply(markOwnPills(content.untrusted()), target: .some(target), at: now)
+        }
+        return true
     }
 
     // MARK: Delivery
 
     /// Runs the queued clipboard replies in order (`Action::Paste`, `Action::ClipboardRead`).
     internal func flushPendingPasteRequests(at now: Double) {
+        pollSecretCopy()
         guard !clipboardRouting.replies.isEmpty else { return }
         let replies = clipboardRouting.replies
         clipboardRouting.replies.removeAll()
@@ -318,7 +328,11 @@ extension Runtime {
                     if fEl.isRevealed { edit.isRevealed = true }
                 }
                 if let html = content.html, edit.isRichEnabled && !edit.isSecure {
-                    edit.pasteHTML(html, plain: content.text)
+                    if content.ownPills {
+                        edit.pasteHTMLWithPills(html, plain: content.text)
+                    } else {
+                        edit.pasteHTML(html, plain: content.text)
+                    }
                 } else if content.hasPlain {
                     edit.paste(content.text)
                 }

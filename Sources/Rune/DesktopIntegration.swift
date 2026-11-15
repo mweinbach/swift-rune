@@ -163,7 +163,7 @@ public struct RichClipboardPayload: Sendable, Equatable {
     ) {
         self.content = content
         self.image = image
-        self.files = files
+        self.files = files.isEmpty ? content.files : files
         self.customPayloads = customPayloads
         self.isConcealed = isConcealed
     }
@@ -2639,6 +2639,7 @@ extension Tx {
     public mutating func copyRich(_ payload: RichClipboardPayload) {
         clipboardWrite = payload.content
         runtimeActions["richClipboardWrite"] = payload
+        runtimeActions[txSecretCopyKey] = nil
     }
 
     /// Copies plain text along with HTML markup (`text/html`) to the clipboard (#832).

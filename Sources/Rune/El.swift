@@ -434,6 +434,7 @@ public struct Tx {
     /// Copies text to the system / headless clipboard.
     public mutating func copyText(_ text: String) {
         clipboardWrite = ClipboardContent(text)
+        runtimeActions[txSecretCopyKey] = nil
     }
 
     /// Requests a paste delivery into the focused editor or `onPaste`/`onPasteContent` handler (`Tx::request_paste`).
@@ -540,7 +541,14 @@ public struct Tx {
         textFlights.append(contentsOf: one.textFlights)
         launches.append(contentsOf: one.launches)
         unclippedFlightsRequested = unclippedFlightsRequested || one.unclippedFlightsRequested
-        if let cb = one.clipboardWrite { clipboardWrite = cb }
+        if let cb = one.clipboardWrite {
+            clipboardWrite = cb
+            runtimeActions[txSecretCopyKey] = nil
+        }
+        if one.runtimeActions[txSecretCopyKey] != nil {
+            clipboardWrite = nil
+            runtimeActions["richClipboardWrite"] = nil
+        }
         pasteRequested = pasteRequested || one.pasteRequested
         if let title = one.windowTitle { windowTitle = title }
         quitRequested = quitRequested || one.quitRequested

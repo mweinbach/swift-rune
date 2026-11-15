@@ -62,7 +62,10 @@ struct InputClipboardParityTests {
         }
         let rt = Runtime(state: S(), viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
             col().size(200, 100)
-                .onPaste { s, text, _ in s.pasted = text }
+                .onPaste { s, text, tx in
+                    s.pasted = text
+                    tx.copySecret(text, clearAfter: .seconds(30))
+                }
                 .child(textInput(key: "field", \S.field).font(Self.style).size(200, 40))
         }
         _ = rt.frame(at: 0.0)
@@ -71,6 +74,11 @@ struct InputClipboardParityTests {
         _ = rt.frame(at: 0.0)
         #expect(rt.state.pasted == "window fixture")
         #expect(rt.events.contains("paste window"))
+        // The handler's concealed copy is pending for the host; its description never shows the text.
+        let concealed = rt.pendingConcealedCopy
+        #expect(concealed != nil)
+        #expect(!String(describing: concealed).contains("window fixture"))
+        #expect(!String(reflecting: concealed).contains("window fixture"))
         #expect(!(rt.copyRequest ?? "").contains("window fixture"))
 
         rt.update { _, tx in tx.focus("field") }
