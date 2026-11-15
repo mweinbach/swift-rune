@@ -113,6 +113,8 @@ public struct ElementInfo: Sendable, Equatable {
     public var shapeKey: UInt64? = nil
     public var drawnText: String? = nil
     public var elision: TextElision? = nil
+    /// What the assistive tree reads of the element's editor and stepper (`a11y/node.rs:31,231-240`).
+    public var a11yInput: ElementA11yInput? = nil
 
     public static func stub(_ key: String) -> ElementInfo {
         ElementInfo(
@@ -8242,6 +8244,7 @@ public final class Runtime<State> {
                 drawnText: elementDrawnText,
                 elision: elementElision
             ))
+            infos[infos.count - 1].a11yInput = ElementA11yInput(el)
             if shouldEmit && !nodeExiting && !snap.effectiveInert {
                 if el.isImeCursor && !hasFocusedTextInput && nextImeCursorArea == nil {
                     nextImeCursorArea = rect.xywh

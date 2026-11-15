@@ -798,7 +798,7 @@ struct WidgetA11yParityTests {
             var accOpen = false
             var search = TextEdit()
             var email = TextEdit("a@b.c")
-            var notes = TextEdit("hi")
+            var notes = TextEdit("hi", multiline: true)
             var token = TextEdit("tok")
             var username = TextEdit("ada")
         }
@@ -899,6 +899,10 @@ struct WidgetA11yParityTests {
         let searchActions = (search?["actions"] as? [String]) ?? []
         #expect(searchActions.contains("set-value") && searchActions.contains("focus"))
         let email = node(fields, "email-input")
+        // controls.rs:229: a disabled labelled field keeps its name and placeholder.
+        #expect(email?["role"] as? String == "textbox")
+        #expect(email?["name"] as? String == "Email")
+        #expect(email?["placeholder"] as? String == "you@example.com")
         let emailStates = (email?["states"] as? [String]) ?? []
         let emailActions = (email?["actions"] as? [String]) ?? []
         #expect(emailStates.contains("disabled"))
@@ -907,6 +911,11 @@ struct WidgetA11yParityTests {
         #expect(notes?["role"] as? String == "multiline-text-input")
         #expect(notes?["name"] as? String == "Notes")
         #expect(json.contains("\"multiline-text-input\""))
+        // controls.rs:233-234: a TextField's editor is a (single-line) text input its error describes.
+        let name = node(fields, "tf-input")
+        #expect(name?["role"] as? String == "textbox")
+        #expect(name?["name"] as? String == "Username")
+        #expect(name?["description"] as? String == "Name is taken")
         #expect(rt.accessibilityAction("search-input", .setValue, value: .text("Ada"), at: 0.01))
         rt.frame(at: 0.02)
         #expect(rt.state.search.text == "Ada")

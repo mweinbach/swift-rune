@@ -28,22 +28,30 @@ public extension AccessibilityTreeBuilder {
         func build(_ idx: Int) -> AccessibilityNode {
             let info = elements[idx]
             let isSecure = securePaths.contains(info.path) || (info.role == .textInput && info.text == nil)
+            // As the live tree's `a11yNodeActions` (`a11y/node.rs:222-240`, under `actionable`).
+            let input = info.a11yInput
+            let enabled = !info.disabled && !info.inert
             var actions: [AccessibilityAction] = []
-            if info.role == .button || info.role == .checkbox || info.role == .switchControl ||
-                info.role == .radio || info.role == .tab || info.role == .menuItem {
-                actions.append(.press)
+            if enabled {
+                if [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(info.role) ||
+                    input?.pressable == true || input?.isInput == true {
+                    actions.append(.press)
+                }
+                if info.focusable {
+                    actions.append(.focus)
+                }
+                if info.role == .slider || input?.steps == true {
+                    actions.append(.increment)
+                    actions.append(.decrement)
+                }
             }
-            if info.focusable {
-                actions.append(.focus)
-            }
-            if info.role == .slider {
-                actions.append(.increment)
-                actions.append(.decrement)
-            }
-            // `a11y/node.rs:236-240`: an enabled field with an editor takes a new value
-            // (`editRange` is present exactly when the element has an edit lens).
-            if info.editRange != nil && !info.disabled && !info.inert {
-                actions.append(.setValue)
+            if AccessibilityTreeBuilder.offersSetValue(
+                enabled: enabled,
+                editable: input?.editable ?? false,
+                steps: input?.steps ?? false,
+                range: input?.range
+            ) {
+                AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
             }
 
             let rect = info.rect.count >= 4
@@ -56,7 +64,9 @@ public extension AccessibilityTreeBuilder {
 
             return AccessibilityNode(
                 id: nodeId,
-                role: (isSecure && info.role == .textInput) ? .passwordInput : info.role,
+                role: info.role == .textInput && (isSecure || input?.multiline == true)
+                    ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: input?.multiline == true)
+                    : info.role,
                 label: projectedLabel,
                 value: projectedValue,
                 help: info.help,
@@ -412,8 +422,15 @@ public extension Runtime {
         // a disabled control advertises nothing and takes no action.
         let all = elements()
         if let flatIdx = a11yTargetIndex(id) {
-            guard a11yAllowed(flatIdx), a11yNodeActions(flatNodes[flatIdx]).contains(action) else {
+            let flat = flatNodes[flatIdx]
+            guard a11yAllowed(flatIdx), a11yTakes(action, on: flat) else {
                 return false
+            }
+            // `(Click, None) if input => A11yAct::Focus(None)` → `set_focus(path, true)`.
+            if action == .press && !a11yPressable(flat.el) && flat.el.handlers.editLens != nil {
+                setFocus(path: flat.path, keyboard: true, at: now)
+                dirtyCommit(at: now)
+                return true
             }
         } else {
             // An inline text link is a sub-node of its text, not an element of its own:

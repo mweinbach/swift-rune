@@ -58,6 +58,42 @@ public extension AccessibilityTreeBuilder {
     }
 }
 
+/// What the element-list tree (`AccessibilityTreeBuilder.project(elements:)`) needs of an element
+/// to read its role and actions as the live tree does (`a11y/node.rs:31,222-240`).
+public struct ElementA11yInput: Sendable, Equatable {
+    /// It has an editor (`input.is_some()`).
+    public var isInput: Bool
+    /// Its editor takes edits (`input.access.is_some()`).
+    public var editable: Bool
+    /// It is a field that is not single-line (`RoleCtx::multiline`).
+    public var multiline: Bool
+    /// It has its own primary press handler (`on_press`).
+    public var pressable: Bool
+    /// It steps (`focus.step.is_some()`).
+    public var steps: Bool
+    public var range: A11yRange?
+
+    public init(isInput: Bool, editable: Bool, multiline: Bool, pressable: Bool, steps: Bool, range: A11yRange?) {
+        self.isInput = isInput
+        self.editable = editable
+        self.multiline = multiline
+        self.pressable = pressable
+        self.steps = steps
+        self.range = range
+    }
+
+    internal init<State>(_ el: El<State>) {
+        self.init(
+            isInput: el.handlers.editLens != nil,
+            editable: el.hasEditAccess,
+            multiline: el.isMultilineField,
+            pressable: el.handlers.onClick != nil || el.handlers.onClickPress != nil,
+            steps: el.handlers.onStep != nil,
+            range: el.a11yRange
+        )
+    }
+}
+
 public extension El {
     /// Keeps the field's editor on screen but takes no edits through it, as an upstream field
     /// without `on_edit` (`Input::access == None`). Kit fields set this when disabled, as upstream
@@ -146,14 +182,21 @@ public extension Runtime {
         return true
     }
 
+    /// `pressable` in `a11y_action` / `a11y_node` (`a11y/actions.rs:43`, `node.rs:225`): the element
+    /// has its own primary press handler (`El::on_press`, Swift `onClick` / `onClickPress`).
+    internal func a11yPressable(_ el: El<State>) -> Bool {
+        el.handlers.onClick != nil || el.handlers.onClickPress != nil
+    }
+
     /// What a pointer or keyboard user can do to node `node`, as the tree advertises it
-    /// (`a11y/node.rs:222-240`); shared by the snapshot projection and action dispatch.
+    /// (`a11y/node.rs:222-240`, all under `actionable`: enabled and allowed).
     internal func a11yNodeActions(_ node: FlatNode) -> [AccessibilityAction] {
         let el = node.el
         let enabled = !el.a11yDisabled && !node.effectiveInert
         guard enabled else { return [] }
         var actions: [AccessibilityAction] = []
-        if el.handlers.onClick != nil || el.handlers.onClickPress != nil ||
+        // `on_press.is_some() || input.is_some()`; Swift also reads its press roles as pressable.
+        if a11yPressable(el) || el.handlers.editLens != nil ||
            [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox].contains(el.role) {
             actions.append(.press)
         }
@@ -173,6 +216,21 @@ public extension Runtime {
             AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
         }
         return actions
+    }
+
+    /// Whether `a11y_action` takes `action` on node `node` (`a11y/actions.rs:32-81`): it reads the
+    /// handlers the element has, not whether it is disabled (`El::disabled` only drops focusability).
+    internal func a11yTakes(_ action: AccessibilityAction, on node: FlatNode) -> Bool {
+        let el = node.el
+        switch action {
+        // `(Click, None) if pressable` / `(Click, None) if input` (focus).
+        case .press: return a11yPressable(el) || el.handlers.editLens != nil
+        // `(Focus, None) if focusable`: `can_focus` — takes focus, or a field with edit access.
+        case .focus: return el.focusable || el.hasEditAccess
+        // `(Increment | Decrement, None) if steps`.
+        case .increment, .decrement: return el.handlers.onStep != nil
+        case .setValue: return el.hasEditAccess || el.handlers.onStep != nil
+        }
     }
 
     /// Moves focus to `path` (or clears it), as keyboard focus when `keyboard`
@@ -206,6 +264,8 @@ public extension Runtime {
         let prevEdit = editLens.get(state)
         var edit = prevEdit
         let stateRevealed = edit.isRevealed
+        // `edit.set_single_line(single_line)`: the field's El decides one line or many.
+        edit.multiline = !el.isSingleLineInput
         if el.isSecure && !edit.isSecure { edit.isSecure = true }
         if let rev = el.revealedOverride { edit.isRevealed = rev }
         apply(&edit)

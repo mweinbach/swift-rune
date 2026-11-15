@@ -172,6 +172,106 @@ struct A11ySetValueParityTests {
     }
     #endif
 
+    @Test("Click on a text field focuses it (`a11y/node.rs:225`, `actions.rs:56`)")
+    func clickOnATextFieldFocusesIt() {
+        let rt = Runtime(state: Field(edit: TextEdit("hello")), viewport: Vec2(400, 200), systemDark: true) { _, _ in
+            col().child(textInput(key: "note", \Field.edit).w(300))
+        }
+        rt.frame(at: 0.0)
+        let note = find(parse(rt.accessibilityJSON()), "note")
+        #expect(actions(note).contains("press"), "every field offers Click")
+        #expect(rt.accessibilityAction("note", .press, at: 0.01))
+        rt.frame(at: 0.02)
+        #expect(rt.focusedKey == "note")
+        #expect(states(find(parse(rt.accessibilityJSON()), "note")).contains("focused"))
+    }
+
+    struct Stepper {
+        var level = 2
+    }
+
+    @Test("a disabled stepper offers nothing but still runs what is asked (`actions.rs:32-81`, `el/a11y.rs:211-218`)")
+    func disabledStepperStillSteps() {
+        let rt = Runtime(state: Stepper(), viewport: Vec2(400, 200), systemDark: true) { s, _ in
+            col().child(
+                el().key("level").role(.slider).disabled(true)
+                    .rangeValue(Double(s.level), min: 0.0, max: 10.0).rangeStep(1.0)
+                    .label("Level").size(100, 12)
+                    .onStep { st, d, _ in st.level = min(max(st.level + d, 0), 10) }
+            )
+        }
+        rt.frame(at: 0.0)
+        #expect(actions(find(parse(rt.accessibilityJSON()), "level")).isEmpty, "a disabled control is not actionable")
+        #expect(rt.accessibilityAction("level", .increment, at: 0.01))
+        rt.frame(at: 0.01)
+        #expect(rt.state.level == 3)
+        #expect(rt.accessibilityAction("level", .decrement, at: 0.02))
+        rt.frame(at: 0.02)
+        #expect(rt.state.level == 2)
+        #expect(rt.accessibilityAction("level", .setValue, value: .number(5), at: 0.03))
+        rt.frame(at: 0.03)
+        #expect(rt.state.level == 5)
+        #expect(!rt.accessibilityAction("level", .press, at: 0.04), "no press handler, no press")
+    }
+
+    @Test("SetValue edits as the field's El says: one line or many (`runtime/input/keys.rs:186-188`)")
+    func setValueFollowsTheElsSingleLine() {
+        let rt = Runtime(state: Field(edit: TextEdit()), viewport: Vec2(400, 200), systemDark: true) { _, _ in
+            col().child(textInput(key: "note", \Field.edit).w(300))
+        }
+        rt.frame(at: 0.0)
+        #expect(find(parse(rt.accessibilityJSON()), "note")?["role"] as? String == "multiline-text-input")
+        #expect(rt.accessibilityAction("note", .setValue, value: .text("a\nb"), at: 0.01))
+        rt.frame(at: 0.01)
+        #expect(rt.state.edit.text == "a\nb", "a multi-line field keeps the line break")
+
+        let single = Runtime(state: Field(edit: TextEdit("x", multiline: true)), viewport: Vec2(400, 200), systemDark: true) { _, _ in
+            col().child(textInput(key: "note", \Field.edit).singleLine().w(300))
+        }
+        single.frame(at: 0.0)
+        #expect(find(parse(single.accessibilityJSON()), "note")?["role"] as? String == "textbox")
+        #expect(single.accessibilityAction("note", .setValue, value: .text("a\nb"), at: 0.01))
+        single.frame(at: 0.01)
+        #expect(!single.state.edit.text.contains("\n"), "a single-line field takes no line break")
+    }
+
+    @Test("the element-list tree reads roles and actions as the live tree (`a11y/node.rs:31,222-240`)")
+    func elementListProjectorMatchesLiveTree() {
+        struct Form2 {
+            // Non-empty: the element-list tree reads a text field with no text as secure.
+            var name = TextEdit("Ada")
+            var note = TextEdit("hi")
+            var locked = TextEdit("x")
+            var level = 0
+        }
+        let rt = Runtime(state: Form2(), viewport: Vec2(400, 400), systemDark: true) { s, _ in
+            col().children([
+                textInput(key: "name", \Form2.name).singleLine().w(200),
+                textInput(key: "note", \Form2.note).w(200),
+                textInput(key: "locked", \Form2.locked).singleLine().withoutEditAccess().w(200),
+                el().key("volume").role(.slider).rangeValue(Double(s.level), min: 0.0, max: 10.0).rangeStep(1.0)
+                    .label("Volume").size(100, 12)
+                    .onStep { st, d, _ in st.level += d },
+            ])
+        }
+        rt.frame(at: 0.0)
+        let listed = AccessibilityTreeBuilder.project(elements: rt.elements(), focusedPath: nil, viewport: Vec2(400, 400))
+        let live = rt.accessibilitySnapshot()
+        func node(_ n: AccessibilityNode, _ id: String) -> AccessibilityNode? {
+            if n.id == id { return n }
+            for c in n.children { if let m = node(c, id) { return m } }
+            return nil
+        }
+        for key in ["name", "note", "locked", "volume"] {
+            #expect(node(listed, key)?.role == node(live, key)?.role, "role of \(key)")
+            #expect(node(listed, key)?.actions == node(live, key)?.actions, "actions of \(key)")
+        }
+        #expect(node(listed, "note")?.role == .multilineTextInput)
+        #expect(node(listed, "name")?.actions.contains(.setValue) == true)
+        #expect(node(listed, "locked")?.actions.contains(.setValue) == false, "a field without edit access takes no value")
+        #expect(node(listed, "volume")?.actions.contains(.setValue) == true, "a stepped range takes a number")
+    }
+
     // MARK: - `a11y/tests.rs:258` text_fields_expose_lines_caret_and_selection (role)
 
     struct Field {
