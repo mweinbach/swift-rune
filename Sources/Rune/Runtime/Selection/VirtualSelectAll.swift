@@ -91,7 +91,7 @@ internal extension Runtime {
         }
         guard let u = selectAllTarget(), u < flatNodes.count else { return false }
         let isGroup = !flatNodes[u].effectiveInert && flatNodes[u].el.isSelectionGroup
-        if isGroup, let span = virtualSpanUnder(groupPath: flatNodes[u].path) {
+        if isGroup, let span = virtualSpanUnder(root: u) {
             selectSpanEnds(first: span.first, last: span.last)
             return true
         }
@@ -106,74 +106,98 @@ internal extension Runtime {
         return true
     }
 
-    /// The first and last selectable text of selection group `gp` when it holds a virtual list,
-    /// building unmounted rows at either end (`Runtime::virtual_span_under`).
-    func virtualSpanUnder(groupPath gp: String) -> (first: SelectionEndRef, last: SelectionEndRef)? {
-        guard let root = liveNode(gp) else { return nil }
-        let prefix = gp + "/"
-        func inside(_ j: Int) -> Bool { flatNodes[j].path == gp || flatNodes[j].path.hasPrefix(prefix) }
+    /// The first and last selectable texts inside mounted node `root`, including rows of a
+    /// virtual list under `root` that aren't mounted, built on demand at either end
+    /// (`Runtime::virtual_span_under`). The texts are those of `root`'s group (`root` itself when
+    /// it's a selection group, else the group holding it), or, in none, of the first text's.
+    func virtualSpanUnder(root: Int) -> (first: SelectionEndRef, last: SelectionEndRef)? {
+        guard root < flatNodes.count else { return nil }
+        let rootPath = flatNodes[root].path
+        let rootPrefix = rootPath + "/"
+        func inside(_ j: Int) -> Bool { j == root || flatNodes[j].path.hasPrefix(rootPrefix) }
         var found: Int? = nil
         var j = root
         while j < flatNodes.count, inside(j) {
             if let src = virtualSelectionSources[flatNodes[j].path], !src.keys.isEmpty { found = j; break }
             j += 1
         }
-        guard let ln = found, let src = virtualSelectionSources[flatNodes[ln].path] else { return nil }
-        let listPath = flatNodes[ln].path
-        func member(_ j: Int) -> String? { selectionMember(j, group: gp) ? flatNodes[j].path : nil }
+        guard let foundIdx = found, let src = virtualSelectionSources[flatNodes[foundIdx].path] else { return nil }
+        let listPath = flatNodes[foundIdx].path
+        guard let ln = liveNode(listPath) else { return nil }
+        let gPath: String? = (!flatNodes[root].effectiveInert && flatNodes[root].el.isSelectionGroup)
+            ? rootPath
+            : selectionGroupPath(ofMounted: root)
+        func inGroup(_ k: Int, _ gp: String?) -> Bool {
+            guard let gp else { return true }
+            return selectionGroupPath(ofMounted: k) == gp
+        }
+        let range = src.mounted
         let listPrefix = listPath + "/"
         var listEnd = ln
         while listEnd + 1 < flatNodes.count, flatNodes[listEnd + 1].path.hasPrefix(listPrefix) { listEnd += 1 }
-        func rowNodes(_ r: Int) -> [Int]? {
+        /// The mounted nodes of row `r`, in tree order.
+        func rowNodes(_ r: Int) -> [Int] {
             let rowPath = "\(listPath)/@\(src.keys[r])"
-            guard let rowIdx = nodeByPath[rowPath], rowIdx <= listEnd else { return nil }
-            var out: [Int] = []
-            var k = rowIdx
-            while k <= listEnd, k == rowIdx || flatNodes[k].path.hasPrefix(rowPath + "/") {
-                out.append(k)
-                k += 1
+            let rowPrefix = rowPath + "/"
+            return ((ln + 1)...max(ln + 1, listEnd)).filter {
+                $0 <= listEnd && (flatNodes[$0].path == rowPath || flatNodes[$0].path.hasPrefix(rowPrefix))
             }
-            return out
         }
 
-        // 1. The first selectable text under the group.
-        var first: String? = nil
-        for k in root..<ln where inside(k) {
-            if let m = member(k) { first = m; break }
+        // 1. The first selectable text under `root`.
+        var firstEnd: SelectionEndRef? = nil
+        for k in root..<ln where inside(k) && selectableLive(k) && inGroup(k, gPath) {
+            firstEnd = mountedSelectionEnd(k)
+            break
         }
-        if first == nil {
+        if firstEnd == nil {
             for r in 0..<src.keys.count {
-                if let nodes = rowNodes(r) {
-                    if let m = nodes.lazy.compactMap(member).first { first = m; break }
-                } else if let t = offscreenRowSelectables(listPath: listPath, src: src, row: r).first(where: { $0.group == gp }) {
-                    first = t.path
+                if range.contains(r) {
+                    if let k = rowNodes(r).first(where: { selectableLive($0) && inGroup($0, gPath) }) {
+                        firstEnd = mountedSelectionEnd(k)
+                        break
+                    }
+                } else if let t = offscreenRowSelectables(listPath: listPath, src: src, row: r)
+                    .first(where: { gPath == nil || $0.group == gPath }) {
+                    // The row is pinned with the texts just built (`pin_offscreen_row`).
+                    firstEnd = offscreenSelectionEnd(t, listIdx: ln, row: r)
                     break
                 }
             }
         }
-        guard let first else { return nil }
+        guard let first = firstEnd else { return nil }
 
-        // 2. The last selectable text under the group.
-        var last: String? = nil
+        guard let gp = gPath ?? first.groupPath else { return (first, first) }
+
+        // 2. The last selectable text under `root` in `gp`.
+        var lastEnd: SelectionEndRef? = nil
         var after = listEnd + 1
         while after < flatNodes.count, inside(after) {
-            if let m = member(after) { last = m }
+            if selectableLive(after), selectionGroupPath(ofMounted: after) == gp { lastEnd = mountedSelectionEnd(after) }
             after += 1
         }
-        if last == nil {
+        if lastEnd == nil {
             for r in (0..<src.keys.count).reversed() {
-                if let nodes = rowNodes(r) {
-                    if let m = nodes.reversed().lazy.compactMap(member).first { last = m; break }
+                if range.contains(r) {
+                    if let k = rowNodes(r).last(where: { selectableLive($0) && selectionGroupPath(ofMounted: $0) == gp }) {
+                        lastEnd = mountedSelectionEnd(k)
+                        break
+                    }
                 } else if let t = offscreenRowSelectables(listPath: listPath, src: src, row: r).last(where: { $0.group == gp }) {
-                    last = t.path
+                    lastEnd = offscreenSelectionEnd(t, listIdx: ln, row: r)
                     break
                 }
             }
         }
-        guard let f = resolveSelectionEnd(path: first, end: nil),
-              let l = resolveSelectionEnd(path: last ?? first, end: nil) else { return nil }
+        let last = lastEnd ?? first
+        // Both ends again by path: a mounted one as mounted, an offscreen one as its pinned text.
+        func again(_ e: SelectionEndRef) -> SelectionEndRef? {
+            e.mountedIdx == nil ? e : resolveSelectionEnd(path: e.path, end: nil)
+        }
+        guard let f = again(first), let l = again(last) else { return nil }
         return (f, l)
     }
+
 
     /// Selects from the start of `first` to the end of `last`, mounted or not
     /// (`Runtime::select_span_ends`), then seals it (`phase::Event::Select`).

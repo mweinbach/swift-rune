@@ -43,6 +43,15 @@ extension Runtime {
         var source: VirtualRowSource<State>?
         var storedChildren: [El<State>]
         var scrollAxes: ScrollAxes
+        /// The selection's pinned rows built offscreen since this commit (`Pins` texts).
+        var pinnedRows = VirtualPinnedRowCache()
+    }
+
+    /// The rows a selection pins, built at most once a commit: a fresh cache comes with each
+    /// commit's source, as `Pins::clear_texts` empties the kept texts at the start of each commit
+    /// and the commit collects the pinned rows again.
+    internal final class VirtualPinnedRowCache {
+        var rows: [String: El<State>] = [:]
     }
 
     internal struct VirtualExpansionContext {

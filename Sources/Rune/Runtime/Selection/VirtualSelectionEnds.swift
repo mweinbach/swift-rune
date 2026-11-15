@@ -1,5 +1,18 @@
 import Foundation
 
+/// Bounds on building unbuilt virtual rows when copying or reading a selection
+/// (`virtual/selection.rs` `MAX_VIRTUAL_COPY_ROWS` / `MAX_VIRTUAL_COPY_BYTES`).
+internal enum VirtualCopyLimits {
+    /// Maximum number of unbuilt virtual rows built on demand when copying or reading a
+    /// selection. Past this cap, collection stops building further unbuilt rows and returns the
+    /// prefix collected so far.
+    static let maxRows = 10_000
+    /// Maximum number of UTF-8 bytes collected when copying or reading a selection across
+    /// unbuilt virtual rows (4 MiB). Past this cap, collection stops and truncates on a character
+    /// boundary.
+    static let maxBytes = 4 * 1024 * 1024
+}
+
 /// Identity of a selection endpoint inside a virtual list: its list, the row's key and index, the
 /// element path within the row, and the text offset (`crates/rune/src/runtime/virtual/selection.rs`
 /// `VirtualEnd`).
@@ -42,6 +55,8 @@ internal struct SelectionEndRef: Equatable {
 internal struct OffscreenSelectable {
     var path: String
     var relPath: String
+    /// The text's own key (`OffscreenText::key`), which `Tx` selectors name.
+    var key: String?
     var text: String
     var group: String?
     var orderInRow: Int
@@ -105,6 +120,17 @@ internal extension Runtime {
         selectableLive(j) && selectionGroupPath(ofMounted: j) == g
     }
 
+    /// The part of selectable text `node` that is selected, as copying would take it
+    /// (`elements.rs` `ElementInfo::selected`: `range_in` -> `TextSpec::copy_slice`).
+    func selectableSelectedSlice(_ node: FlatNode, range: Range<Int>?) -> String? {
+        guard let range, let text = selectableNodeText(node) else { return nil }
+        let len = text.utf8.count
+        let lo = min(max(0, range.lowerBound), len)
+        let hi = min(max(lo, range.upperBound), len)
+        guard lo < hi else { return nil }
+        return CopyJoin.copySlice(in: text, range: lo..<hi, uncopied: node.el.uncopiedRanges)
+    }
+
     // MARK: - Virtual rows
 
     /// The virtual list nearest above `path` (`virtual_end_of`'s walk up to the list).
@@ -137,7 +163,7 @@ internal extension Runtime {
             let hasText = el.liveText != nil || el.plainText != nil || el.richSpans != nil
             if !inert && el.handlers.editLens == nil && hasText && el.isSelectable && !el.isSecure {
                 let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
-                out.append(OffscreenSelectable(path: path, relPath: rel, text: text, group: group, orderInRow: order))
+                out.append(OffscreenSelectable(path: path, relPath: rel, key: el.keyId, text: text, group: group, orderInRow: order))
                 order += 1
             }
             var seen: [String: Int] = [:]
@@ -180,7 +206,7 @@ internal extension Runtime {
         )
     }
 
-    private func offscreenSelectionEnd(_ t: OffscreenSelectable, listIdx: Int, row: Int) -> SelectionEndRef {
+    func offscreenSelectionEnd(_ t: OffscreenSelectable, listIdx: Int, row: Int) -> SelectionEndRef {
         SelectionEndRef(path: t.path, text: t.text, mountedIdx: nil, listIdx: listIdx, rowIndex: row, orderInRow: t.orderInRow, groupPath: t.group)
     }
 
@@ -190,7 +216,7 @@ internal extension Runtime {
         guard let src = virtualSelectionSources[end.listPath], let listIdx = virtualListAllowed(end.listPath),
               let r = src.keys.firstIndex(of: end.rowKey) else { return nil }
         let seg = "@\(end.rowKey)"
-        if nodeByPath["\(end.listPath)/\(seg)"] != nil {
+        if src.mounted.contains(r) {
             return liveNode(end.fullPath()).flatMap(mountedSelectionEnd)
         }
         return offscreenRowSelectables(listPath: end.listPath, src: src, row: r, segment: seg)
@@ -205,7 +231,7 @@ internal extension Runtime {
         if let idx = liveNode(path), let m = mountedSelectionEnd(idx) { return m }
         guard let (listPath, src) = nearestVirtualList(forPath: path), let listIdx = virtualListAllowed(listPath),
               let (r, seg) = virtualRowIndex(forPath: path, in: src),
-              nodeByPath["\(listPath)/\(seg)"] == nil else { return nil }
+              !src.mounted.contains(r) else { return nil }
         return offscreenRowSelectables(listPath: listPath, src: src, row: r, segment: seg)
             .first { $0.path == path }
             .map { offscreenSelectionEnd($0, listIdx: listIdx, row: r) }
@@ -256,6 +282,17 @@ internal extension Runtime {
     }
 
     // MARK: - Pins and the texts between (`sync_selection_pins`, `between_hash_ends`, `seal_between`)
+
+    /// The rows list `listPath` keeps pinned for the selection: its anchor's row, then its
+    /// focus's when that's another, as `sync_selection_pins` hands them to the list
+    /// (`PinsEvent::Select { anchor, focus }` -> `Pins::rows`). Nothing selected, nothing pinned.
+    func virtualSelectionPinnedRows(_ listPath: String) -> [String] {
+        guard let sel = selectionState.coordinator.phase.selection else { return [] }
+        var rows: [String] = []
+        if let a = sel.anchorEnd, a.listPath == listPath { rows.append(a.rowKey) }
+        if let f = sel.far?.end, f.listPath == listPath, !rows.contains(f.rowKey) { rows.append(f.rowKey) }
+        return rows
+    }
 
     /// Writes `sel` back into the phase, keeping it placed or dragging.
     func replaceActiveSelection(_ sel: ActiveSelection) {
@@ -457,6 +494,31 @@ internal extension Runtime {
     }
 
     // MARK: - Prune (`Runtime::prune_text_selection`)
+
+    /// The selection touches a virtual row that isn't mounted: an end in one, or ends around a
+    /// list whose first or last rows aren't mounted (`Runtime::selection_spans_unmounted`).
+    func selectionSpansUnmounted() -> Bool {
+        guard let h = selectionHolderEnd(), let f = focusHolderEnd(h) else { return false }
+        guard let i0 = h.mountedIdx, let i1 = f.mountedIdx else { return true }
+        if i0 == i1 { return false }
+        let firstOrd = selectionTreeOrder(mountedIdx: min(i0, i1))
+        let lastOrd = selectionTreeOrder(mountedIdx: max(i0, i1))
+        for (listPath, src) in virtualSelectionSources {
+            let mounted = src.mounted
+            if src.keys.isEmpty || (mounted.lowerBound == 0 && mounted.upperBound >= src.keys.count) { continue }
+            guard let ln = liveNode(listPath) else { continue }
+            let slot = ln * 2 + 1
+            let headUnmounted = mounted.lowerBound > 0
+                && VirtualTreeOrder(slot: slot, row: 0, sub: Int.max) >= firstOrd
+                && VirtualTreeOrder(slot: slot, row: 0, sub: 0) <= lastOrd
+            let lastRow = src.keys.count - 1
+            let tailUnmounted = mounted.upperBound < src.keys.count
+                && VirtualTreeOrder(slot: slot, row: lastRow, sub: Int.max) >= firstOrd
+                && VirtualTreeOrder(slot: slot, row: lastRow, sub: 0) <= lastOrd
+            if headUnmounted || tailUnmounted { return true }
+        }
+        return false
+    }
 
     /// A unique live selectable text at `path`'s keyed identity when an unkeyed ancestor moved,
     /// still reading `content` up to `upto` (`Runtime::rebound`).

@@ -116,7 +116,12 @@ public extension Runtime {
     /// Current `TextSelection` snapshot across mounted `El.selectable` elements (`Runtime::selection`).
     func currentTextSelection() -> TextSelection? {
         guard selectionState.coordinator.phase.selection != nil else { return nil }
-        return selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals())
+        let bounded = boundedSelectableSnapshots()
+        return selectionState.coordinator.currentSelection(
+            in: bounded.snaps,
+            cut: bounded.cut,
+            cap: bounded.injected ? VirtualCopyLimits.maxBytes : .max
+        )
     }
 
     /// Plain joined text of the active `El.selectable` selection without `El.selectionCopy`
@@ -129,8 +134,13 @@ public extension Runtime {
     /// Clipboard string produced by copying the active `El.selectable` selection, honoring the
     /// nearest `El.selectionCopy` handler spanning the selection (`Runtime::copy_text`).
     func copySelectionText() -> String? {
-        let snaps = selectableSnapshotsWithVirtuals()
-        guard let sel = selectionState.coordinator.currentSelection(in: snaps),
+        let bounded = boundedSelectableSnapshots()
+        let snaps = bounded.snaps
+        guard let sel = selectionState.coordinator.currentSelection(
+                in: snaps,
+                cut: bounded.cut,
+                cap: bounded.injected ? VirtualCopyLimits.maxBytes : .max
+              ),
               let firstSel = sel.texts.first,
               let lastSel = sel.texts.last else {
             return nil
@@ -226,6 +236,8 @@ public extension Runtime {
     /// Semantic `text/html` representation of the active `El.selectable` selection
     /// (`Runtime::copy_html` / `copy_html.rs`). Returns `nil` when empty or spanning unmounted rows.
     func copySelectionHTML() -> String? {
+        // A selection reaching rows that aren't built has no HTML (`copy_html.rs`).
+        if selectionSpansUnmounted() { return nil }
         let snaps = selectableSnapshots()
         guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               !sel.texts.isEmpty else {
@@ -285,6 +297,9 @@ private struct VirtualSelectionInjection {
     var subtreeEnd: Int
     var before: [SelectableNodeSnapshot]
     var after: [SelectableNodeSnapshot]
+    /// A bound stopped building the rows before (after) the mounted window.
+    var beforeCapped = false
+    var afterCapped = false
 }
 
 private enum VirtualEndpointPos {
@@ -337,6 +352,11 @@ internal extension Runtime {
         let rowKey = src.keys[rowIndex]
         if src.isIndexed {
             guard let rowSource = src.source else { return nil }
+            // A pinned row is built once a commit and kept (`Pins`); other rows are built each
+            // time selection needs them (`build_unmounted_row`).
+            let pinned = virtualSelectionPinnedRows(src.listPath).contains(rowKey)
+            let cacheKey = "\(rowIndex)/\(rowKey)"
+            if pinned, let kept = src.pinnedRows.rows[cacheKey] { return kept }
             let scratch = MemoCache()
             var built = MemoScope.enterVirtualRow(
                 cache: scratch,
@@ -347,6 +367,7 @@ internal extension Runtime {
                 rowSource.build(state, rowIndex)
             }
             built = built.key(rowKey)
+            if pinned { src.pinnedRows.rows[cacheKey] = built }
             return built
         }
         guard rowIndex < src.storedChildren.count else { return nil }
@@ -609,14 +630,22 @@ internal extension Runtime {
     /// them: enough to place the selection's ranges in mounted texts (painting), without
     /// building every row a long selection spans each frame.
     func selectableSnapshotsWithVirtuals(endsOnly: Bool = false) -> [SelectableNodeSnapshot] {
+        boundedSelectableSnapshots(endsOnly: endsOnly).snaps
+    }
+
+    /// The mounted snapshots with the unmounted rows the selection spans built in, bounded by
+    /// `VirtualCopyLimits` (`collect_virtual_selection`): `cut` is the index of the last snapshot
+    /// collected when a bound stopped the collection (what follows it isn't part of the copy),
+    /// and `injected` whether any unmounted row was built in.
+    func boundedSelectableSnapshots(endsOnly: Bool = false) -> (snaps: [SelectableNodeSnapshot], cut: Int?, injected: Bool) {
         let base = selectableSnapshots()
         guard let activeSel = selectionState.coordinator.phase.selection,
               !virtualSelectionSources.isEmpty else {
-            return base
+            return (base, nil, false)
         }
 
-        let maxOffscreenRows = 10_000
-        let maxOffscreenBytes = 4 * 1024 * 1024
+        let maxOffscreenRows = VirtualCopyLimits.maxRows
+        let maxOffscreenBytes = VirtualCopyLimits.maxBytes
         var totalRows = 0
         var totalBytes = 0
         var injections: [VirtualSelectionInjection] = []
@@ -683,8 +712,10 @@ internal extension Runtime {
             }
 
             var beforeSnaps: [SelectableNodeSnapshot] = []
+            var beforeCapped = false
+            var afterCapped = false
             for r in beforeRange where !endsOnly || r == p0 || r == p1 {
-                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { beforeCapped = !endsOnly; break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMinTop - Float(mountedLo - r) * 100.0 - 10_000.0
                 let countBefore = beforeSnaps.count
@@ -702,7 +733,7 @@ internal extension Runtime {
 
             var afterSnaps: [SelectableNodeSnapshot] = []
             for r in afterRange where !endsOnly || r == p0 || r == p1 {
-                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { afterCapped = !endsOnly; break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMaxBottom + Float(r - mountedHi + 1) * 100.0 + 10_000.0
                 let countBefore = afterSnaps.count
@@ -718,26 +749,40 @@ internal extension Runtime {
                 for s in afterSnaps[countBefore...] { totalBytes += s.text.utf8.count }
             }
 
-            if !beforeSnaps.isEmpty || !afterSnaps.isEmpty {
-                injections.append(VirtualSelectionInjection(listIdx: listIdx, subtreeEnd: subtreeEnd, before: beforeSnaps, after: afterSnaps))
+            if !beforeSnaps.isEmpty || !afterSnaps.isEmpty || beforeCapped || afterCapped {
+                injections.append(VirtualSelectionInjection(
+                    listIdx: listIdx,
+                    subtreeEnd: subtreeEnd,
+                    before: beforeSnaps,
+                    after: afterSnaps,
+                    beforeCapped: beforeCapped,
+                    afterCapped: afterCapped
+                ))
             }
         }
 
-        guard !injections.isEmpty else { return base }
+        guard !injections.isEmpty else { return (base, nil, false) }
         let beforeByIdx = Dictionary(grouping: injections, by: \.listIdx)
         let afterByIdx = Dictionary(grouping: injections, by: \.subtreeEnd)
         var out: [SelectableNodeSnapshot] = []
         out.reserveCapacity(base.count + 32)
+        var cut: Int? = nil
         for (idx, snap) in base.enumerated() {
             out.append(snap)
             if let ins = beforeByIdx[idx] {
-                for item in ins { out.append(contentsOf: item.before) }
+                for item in ins {
+                    out.append(contentsOf: item.before)
+                    if item.beforeCapped, cut == nil { cut = out.count - 1 }
+                }
             }
             if let ins = afterByIdx[idx] {
-                for item in ins { out.append(contentsOf: item.after) }
+                for item in ins {
+                    out.append(contentsOf: item.after)
+                    if item.afterCapped, cut == nil { cut = out.count - 1 }
+                }
             }
         }
-        return out
+        return (out, cut, true)
     }
 
     func preservesTextSelectionInChain(_ node: FlatNode?) -> Bool {
@@ -863,7 +908,9 @@ internal extension Runtime {
 
         // `selection_down`: Shift extends the selection whose holder is this text or shares its
         // group, the holder found by its row identity (so an anchor row scrolled out still counts).
-        if mods.shift, clicks == 1,
+        // Shift as the pointer reports it, or as the keyboard last left it
+        // (`physical.rs`: `PhysicalInput::Modifiers` -> `selectable.shift`).
+        if mods.shift || inputMachines.currentMods.shift, clicks == 1,
            let sIdx = nodeByPath[sNode.path], let iEnd = mountedSelectionEnd(sIdx),
            let h = selectionHolderEnd(),
            h.mountedIdx == sIdx || (h.groupPath != nil && h.groupPath == iEnd.groupPath),
@@ -1124,22 +1171,18 @@ internal extension Runtime {
         }
         if let key = tx.pendingSelectAllTextKey {
             selectionState.pendingSelectTextRequest = nil
-            let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectAllText(key: key, in: snaps) == nil {
-                selectionState.pendingSelectAllKey = key
-            } else {
+            if applySelectAllRequest(key, snaps: { selectableSnapshots() }, unmounted: false) {
                 selectionState.pendingSelectAllKey = nil
-                sealBetween()
+            } else {
+                selectionState.pendingSelectAllKey = key
             }
             dirtyCommit(at: now)
         } else if let req = tx.pendingSelectTextRequest {
             selectionState.pendingSelectAllKey = nil
-            let snaps = selectableSnapshots()
-            if snaps.isEmpty || selectionState.coordinator.selectText(key: req.key, range: req.range, in: snaps) == nil {
-                selectionState.pendingSelectTextRequest = req
-            } else {
+            if applySelectTextRequest(req.key, range: req.range, snaps: { selectableSnapshots() }, unmounted: false) {
                 selectionState.pendingSelectTextRequest = nil
-                sealBetween()
+            } else {
+                selectionState.pendingSelectTextRequest = req
             }
             dirtyCommit(at: now)
         }
@@ -1148,17 +1191,17 @@ internal extension Runtime {
     func finalizeSelectionAfterCommit(at now: Double) {
         lazy var snaps = selectableSnapshotsWithVirtuals()
         let keepPending = needsCommit || !scrollGlidingPaths.isEmpty || !scrollRequestsState.isEmpty
+        // After the commit, a request naming no mounted element looks in the rows of virtual
+        // lists that aren't mounted (`frame.rs` -> `apply_select_request` -> `select_request`).
         if let pendingAll = selectionState.pendingSelectAllKey {
-            if selectionState.coordinator.selectAllText(key: pendingAll, in: snaps) != nil {
+            if applySelectAllRequest(pendingAll, snaps: { snaps }, unmounted: true) {
                 selectionState.pendingSelectAllKey = nil
-                sealBetween()
             } else if !keepPending {
                 selectionState.pendingSelectAllKey = nil
             }
         } else if let pendingReq = selectionState.pendingSelectTextRequest {
-            if selectionState.coordinator.selectText(key: pendingReq.key, range: pendingReq.range, in: snaps) != nil {
+            if applySelectTextRequest(pendingReq.key, range: pendingReq.range, snaps: { snaps }, unmounted: true) {
                 selectionState.pendingSelectTextRequest = nil
-                sealBetween()
             } else if !keepPending {
                 selectionState.pendingSelectTextRequest = nil
             }

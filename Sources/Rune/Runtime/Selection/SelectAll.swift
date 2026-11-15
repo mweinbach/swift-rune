@@ -92,6 +92,27 @@ public enum SelectAllResolver {
         return nil
     }
 
+    /// `groupPath(forNodeAt:in:)` for every node at once, in one pass over the parent links.
+    static func groupPaths(in nodes: [SelectableNodeSnapshot]) -> [String?] {
+        let byPath = Dictionary(nodes.enumerated().map { ($0.element.path, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        // The group at or above each node, filled as the walks reach it.
+        var atOrAbove = [String??](repeating: nil, count: nodes.count)
+        func resolve(_ i: Int) -> String? {
+            var chain: [Int] = []
+            var cursor: Int? = i
+            var found: String? = nil
+            while let idx = cursor {
+                if let known = atOrAbove[idx] { found = known; break }
+                if nodes[idx].isSelectionGroup { found = nodes[idx].path; atOrAbove[idx] = .some(found); break }
+                chain.append(idx)
+                cursor = nodes[idx].parentPath.flatMap { byPath[$0] }
+            }
+            for idx in chain { atOrAbove[idx] = .some(found) }
+            return found
+        }
+        return nodes.indices.map { i in nodes[i].parentPath.flatMap { byPath[$0] }.flatMap(resolve) }
+    }
+
     public static func groupTexts(groupPath: String, in nodes: [SelectableNodeSnapshot]) -> [SelectableNodeSnapshot] {
         nodes.enumerated().compactMap { idx, node in
             guard node.isSelectable, Self.groupPath(forNodeAt: idx, in: nodes) == groupPath else { return nil }
