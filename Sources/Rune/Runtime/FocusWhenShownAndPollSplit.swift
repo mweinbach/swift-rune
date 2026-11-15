@@ -5,8 +5,25 @@ import Foundation
 //   runtime's `focus_owed` (`el/tx.rs`, `runtime/input/focus.rs::sync_requested_focus`,
 //   `runtime/frame.rs`).
 // - 2e23d0fa (#995): `Runtime::covered_wake` (`runtime/frame.rs`) and `window::covered_step`.
-// - 56e0306d (#970): a resting poll's change commits apart from same-frame input
-//   (`Tx::polled_change`, `runtime/frame.rs`, `runtime/motion/timer_wake.rs`).
+// - 56e0306d (#970): a poll's change commits apart from same-frame input (`Tx::polled_change`,
+//   `CommitWhy::POLL`, `Queued::input`, `runtime/frame.rs`, `runtime/motion/timer_wake.rs`).
+//
+// How #970 maps onto Swift's input model. Upstream queues every input for the next frame and
+// runs it there after the frame's poll; a resting poll (`poll_alone`) runs between frames. Swift
+// runs a host input's handlers when the host delivers it. So:
+// - A resting poll's change (`polledChange`, set in `pollAlone`) is still uncommitted when input
+//   arrives: the input commits it first, on its own (`commitPolledChangeApart`), before its own
+//   handlers run, as upstream's `split` does before the first input or routed action.
+// - The frame's own poll runs after input that arrived since the last frame already changed the
+//   model. With `motionNeedsCause`, that input's tree commits first, animated, and the poll's
+//   change commits after it unprompted, at once (`commitInputApartFromFramePoll`,
+//   `framePollChanged`): the same two trees with the same motion, in the order Swift's dispatch
+//   allows. Input the frame itself runs after its poll (pastes, sent keys, hover delays,
+//   playground stage keys) splits as upstream does.
+// - `Queued::input` (INPUT vs DIRTY): an input entry point (`beginInputDispatch`) counts as the
+//   commit's input cause only when its handlers changed the model (`why |= INPUT` when `r`).
+//   Layout and state observers and the stationary pointer's re-hit after layout never go through
+//   an input entry point, so they stay DIRTY, as `ActionQueue::push` and `observe_since` keep them.
 
 extension Tx {
     /// `Tx.focus` for an element that may not be shown yet: content still loading, a card that
@@ -20,7 +37,6 @@ extension Tx {
         requestedFocusVisible = ring
         focusAskedByReturn = false
         focusAskedWhenShown = true
-        blurFocusRequested = false
     }
 }
 
@@ -32,8 +48,10 @@ extension Runtime {
 
     /// The user's own key or press takes over from a `Tx.focusWhenShown` still waiting
     /// (`frame.rs`: `Action::Key { stage: false }`, a pressed physical key, `Action::Press`,
-    /// `Action::Focus`).
-    internal func dropOwedFocus() {
+    /// `Action::Focus`). Upstream drops it before that action's poll split commits an ask not yet
+    /// resolved; `keepingSplit` keeps one this input's own split made owed.
+    internal func dropOwedFocus(keepingSplit: Bool = false) {
+        if keepingSplit && focusOwedFromSplit { return }
         focusOwed = nil
     }
 
@@ -90,10 +108,10 @@ extension Runtime {
 
     // MARK: - Covered windows (#995)
 
-    /// A frame that builds what changed without drawing or advancing motion
-    /// (`Runtime::hidden_timer_frame`, `frame(0.0)`).
-    internal func hiddenTimerFrame(at now: Double? = nil) {
-        _ = frame(at: now ?? nowClock())
+    /// A frame that builds what changed without advancing time or motion
+    /// (`Runtime::hidden_timer_frame`, `frame(0.0)`): a zero step (`frameStep(dt: 0)`).
+    internal func hiddenTimerFrame() {
+        _ = frameStep(dt: 0.0)
     }
 
     /// `hiddenWake` for a shown window that can't draw (covered, minimised, on a locked or
@@ -104,34 +122,76 @@ extension Runtime {
     @discardableResult
     public func coveredWake(at now: Double? = nil) -> Bool {
         let stale = hiddenWake(at: now)
-        if assistiveTechnology && needsCommit { hiddenTimerFrame(at: now) }
+        if assistiveTechnology && needsCommit { hiddenTimerFrame() }
         return stale
     }
 
     // MARK: - Poll change committed apart from same-frame input (#970)
 
-    /// A host input event is being dispatched: it counts as the frame's input cause, and a
-    /// resting poll's change waiting to commit commits first, on its own.
+    /// A host input event is being dispatched whose arrival alone counts as the frame's input
+    /// cause (presses, keys, IME): a resting poll's change waiting to commit commits first.
     internal func noteInput(at now: Double) {
         frameHadInputSinceLastFrame = true
+        focusOwedFromSplit = false
         commitPolledChangeApart(at: now)
     }
 
-    /// Both a resting poll and an input handler see ordinary `inout State`; after the handler's
-    /// mutation a single view can't tell which introduced a row. So when motion needs a cause
-    /// and a resting poll's change hasn't committed, its tree commits now, before the input's
-    /// handlers run: at once when nothing asked for motion (`unprompted`), its scroll requests
-    /// resolved against it (`finish_scroll_requests(tx, false)`: the caret follow waits for the
-    /// handler's commit), and its motion policy spent, so the handler's own change keeps its
+    /// An input entry point starts (pointer move and leave, wheel, key-up, paste, file drop,
+    /// gestures, and the input a frame runs itself): a poll's change waiting to commit commits
+    /// first (`split` on `input || routed`). Returns whether a commit was already pending, for
+    /// `endInputDispatch`.
+    internal func beginInputDispatch(at now: Double) -> Bool {
+        focusOwedFromSplit = false
+        commitPolledChangeApart(at: now)
+        return needsCommit
+    }
+
+    /// The input entry point ends: when its handlers changed the model, the commit has an input
+    /// cause (`why |= CommitWhy::INPUT` when `r`). Within a frame that's the frame's commit;
+    /// between frames, the next frame's.
+    internal func endInputDispatch(_ pendingBefore: Bool) {
+        guard needsCommit && !pendingBefore else { return }
+        if insideFramePollOrInput {
+            frameCommittedFromInput = true
+        } else {
+            frameHadInputSinceLastFrame = true
+        }
+    }
+
+    /// Both a poll and an input handler see ordinary `inout State`; after the handler's mutation a
+    /// single view can't tell which introduced a row. So when motion needs a cause and a poll's
+    /// change hasn't committed, its tree commits now, before the input's handlers run: at once
+    /// when nothing asked for motion (`unprompted`), its scroll requests resolved against it
+    /// (`finish_scroll_requests(tx, false)`: the caret follow waits for the handler's commit),
+    /// and its motion policy spent (`commitTree` takes it), so the handler's own change keeps its
     /// animation (`frame.rs` `split`).
     internal func commitPolledChangeApart(at now: Double) {
         guard motionNeedsCause, polledChange, needsCommit else { return }
-        polledChange = false
         if !pendingAskedMotion { pendingUnprompted = true }
         let follow = pendingCaretFollow
         pendingCaretFollow = false
+        let asked = pendingFocusWhenShown != nil
         flushPendingCommitIfNeeded(at: now)
+        polledChange = false
+        if asked && focusOwed != nil { focusOwedFromSplit = true }
         pendingCaretFollow = pendingCaretFollow || follow
+    }
+
+    /// Before the frame's own poll (or the playground's), with `motionNeedsCause`: input that
+    /// arrived since the last frame already changed the model, so its tree commits first, with
+    /// its motion, and the poll's change can commit on its own after it.
+    internal func commitInputApartFromFramePoll(at now: Double, polls: Bool) {
+        guard polls, motionNeedsCause, frameCommittedFromInput, needsCommit else { return }
+        flushPendingCommitIfNeeded(at: now)
+    }
+
+    /// The frame's poll changed the model (`why |= CommitWhy::POLL`). Input already handled has
+    /// committed (`commitInputApartFromFramePoll`), so with `motionNeedsCause` the poll's change
+    /// is unprompted and lands at once unless the poll asked for motion; input the frame runs
+    /// after it splits from it (`commitPolledChangeApart`).
+    internal func framePollChanged() {
+        polledChange = true
+        if motionNeedsCause && !pendingAskedMotion && frameCommittedFromInput { pendingUnprompted = true }
     }
 }
 

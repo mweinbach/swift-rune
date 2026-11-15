@@ -433,7 +433,8 @@ public struct Tx {
     /// Clears keyboard focus.
     public mutating func blur() {
         blurFocusRequested = true
-        requestedFocusKey = nil
+        // A `Tx.focusWhenShown` stands apart from the blur, as upstream's `focus_to` does.
+        if !focusAskedWhenShown { requestedFocusKey = nil }
     }
 
     /// Copies text to the system / headless clipboard.

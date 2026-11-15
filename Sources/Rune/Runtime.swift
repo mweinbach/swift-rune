@@ -988,6 +988,9 @@ public final class Runtime<State> {
     internal var focusOwed: (key: String, ring: Bool)? = nil
     /// A resting poll changed the model but hasn't committed its tree yet (`Tx::polled_change`).
     internal var polledChange: Bool = false
+    /// The poll split of the input being dispatched turned a pending `Tx.focusWhenShown` into an
+    /// owed one: upstream drops `focus_owed` before that split, so this input's press keeps it.
+    internal var focusOwedFromSplit: Bool = false
     private var pendingTxFocusVisible: Bool? = nil
     private var pendingTxBlurRequested: Bool = false
     internal var kitHooks = KitRuntimeHooksState()
@@ -1543,8 +1546,6 @@ public final class Runtime<State> {
         let wasLive = frameHadLiveWake
         frameCommittedFromInput = frameHadInputSinceLastFrame
         frameHadInputSinceLastFrame = false
-        // This frame commits what a resting poll changed (`std::mem::take(&mut self.pending)`).
-        polledChange = false
         frameHadLiveWake = false
         frameHadCommitted = false
         frameInstantScrollKey = nil
@@ -1780,7 +1781,8 @@ public final class Runtime<State> {
         liveStore.pixelScale = pixelScale
         insideFramePollOrInput = true
         if !skipFramePoll {
-            _ = runPoll(at: now)
+            commitInputApartFromFramePoll(at: now, polls: poll != nil)
+            if runPoll(at: now) { framePollChanged() }
         }
         frameTookDispatchedInput()
         flushPlatformFrameWork(at: now)
@@ -2178,6 +2180,8 @@ public final class Runtime<State> {
     }
 
     internal func commitTree(at now: Double, cut: Bool, resizeSnap: Bool = false) {
+        // Whatever a poll changed lands in this commit (`why & CommitWhy::POLL` is spent).
+        polledChange = false
         let prevResizeSnap = activeResizeSnap
         let prevExplicitSnap = activeExplicitSnap
         let prevExplicitSettleCut = activeExplicitSettleCut
@@ -5192,7 +5196,13 @@ public final class Runtime<State> {
         }
 
         var nextIdx: Int? = nil
-        if txBlur {
+        if txBlur, let shown = whenShown {
+            // A blur lands before the commit; a `Tx.focusWhenShown` whose element shows in it
+            // still resolves after it (`sync_requested_focus` runs after the latched blur).
+            nextIdx = shown.index
+            focusVisible = shown.ring
+            hoveredHighlightActive = false
+        } else if txBlur {
             nextIdx = nil
         } else if let fk = txFocusKey,
                   let idx = flatNodes.firstIndex(where: { $0.key == fk && canFocusIndex($0.index) }) {
@@ -9370,6 +9380,8 @@ public final class Runtime<State> {
     }
 
     public func pointerMove(to pos: Vec2, mods: Mods = .none, at now: Double) {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         let moved = pos != pointerPosition
         if moved {
             hoverPaused = false
@@ -9825,7 +9837,7 @@ public final class Runtime<State> {
         }
         let isTextBox = node.el.handlers.editLens != nil
         // A press in a text field (`Action::Focus`) takes over from a `Tx.focusWhenShown` still waiting.
-        if optedButton && isTextBox { dropOwedFocus() }
+        if optedButton && isTextBox { dropOwedFocus(keepingSplit: true) }
         var downFocusChanged = false
         if optedButton {
             if node.el.pressFocusesBelow {
@@ -10238,7 +10250,7 @@ public final class Runtime<State> {
             if node.el.handlers.onClick != nil || node.el.handlers.onClickPress != nil {
                 logInputEvent("press \(rPath)")
                 // The user's own press (`Action::Press`) takes over from a `Tx.focusWhenShown` still waiting.
-                dropOwedFocus()
+                dropOwedFocus(keepingSplit: true)
             }
             if let onClick = node.el.handlers.onClick {
                 var tx = makeTx(at: now, button: button, mods: effMods)
@@ -10305,6 +10317,8 @@ public final class Runtime<State> {
 
     /// Routes wheel / trackpad scroll deltas through `WheelLock` to `onWheel` or scrollable ancestors (`gesture.rs`, `scroll/x.rs`).
     public func wheel(_ event: WheelEvent, at pos: Vec2? = nil, now: Double) {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         dispatchLockedWheel(event, at: pos, now: now)
     }
 
@@ -10374,6 +10388,7 @@ public final class Runtime<State> {
 
     @discardableResult
     public func physicalInput(_ event: PhysicalInput, fallbackKey: KeyEvent? = nil, baseChar: Character? = nil, at now: Double) -> Bool {
+        if case .key(_, _, true, _) = event { dropOwedFocus() }
         noteInput(at: now)
         let prevCode = currentPhysicalKey
         let prevBase = currentKeyBase
@@ -10393,9 +10408,9 @@ public final class Runtime<State> {
 
     internal func dispatchPhysicalInputOnly(_ event: PhysicalInput, at now: Double) -> Bool {
         currentTime = now
+        if case .key(_, _, true, _) = event { dropOwedFocus() }
         commitPolledChangeApart(at: now)
         flushPendingCommitIfNeeded(at: now)
-        if case .key(_, _, true, _) = event { dropOwedFocus() }
         if case .focusLost = event {
             dirChord = .idle
         }
@@ -10469,13 +10484,14 @@ public final class Runtime<State> {
 
     @discardableResult
     public func keyDown(_ ev: KeyEvent, isRepeat: Bool = false, at now: Double) -> Bool {
+        // The user's own key takes over from a `Tx.focusWhenShown` still waiting; a playground
+        // step's press for the stage (`Action::Key { stage: true }`) doesn't. As upstream
+        // (frame.rs:565), before this key's commit boundary resolves an ask not yet committed.
+        if playgroundLive?.pressing != true { dropOwedFocus() }
         noteInput(at: now)
         recordEvent(hasSecureFocus ? "key-down [redacted]" : "key-down \(ev.key)")
         currentTime = now
         flushPendingCommitIfNeeded(at: now)
-        // The user's own key takes over from a `Tx.focusWhenShown` still waiting; a playground
-        // step's press for the stage (`Action::Key { stage: true }`) doesn't.
-        if playgroundLive?.pressing != true { dropOwedFocus() }
         let prevKitByKeys = kitHooks.isDispatchingByKeys
         let prevByKeys = activeByKeys
         let prevRepeat = currentKeyRepeat
@@ -10951,6 +10967,8 @@ public final class Runtime<State> {
     }
 
     public func paste(_ content: ClipboardContent, at now: Double) {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         deliverPaste(content, at: now)
     }
 
@@ -11432,15 +11450,7 @@ public final class Runtime<State> {
             focusedPath = nil
             focusedKey = nil
             syncedEditFocusedPaths.removeAll()
-        } else if let fk = tx.requestedFocusKey, tx.focusAskedWhenShown {
-            // `Tx.focusWhenShown`: the next commit resolves it against the tree it builds, and it
-            // waits there until an element with the key shows (`sync_requested_focus`).
-            pendingTxBlurRequested = false
-            pendingTxFocusKey = nil
-            kitHooks.pendingTxFocusVisible = nil
-            pendingTxFocusVisible = nil
-            pendingFocusWhenShown = (fk, tx.requestedFocusVisible)
-        } else if let fk = tx.requestedFocusKey {
+        } else if let fk = tx.requestedFocusKey, !tx.focusAskedWhenShown {
             pendingFocusWhenShown = nil
             hoveredHighlightActive = false
             let matchedNode = flatNodes.first(where: { $0.key == fk })
@@ -11461,6 +11471,14 @@ public final class Runtime<State> {
             if let match = matchedNode {
                 focusedPath = match.path
             }
+        }
+        if let fk = tx.requestedFocusKey, tx.focusAskedWhenShown {
+            // `Tx.focusWhenShown`, latched apart from `Tx.blur` as upstream's `focus_to` is: the
+            // next commit resolves it against the tree it builds (`sync_requested_focus`).
+            pendingTxFocusKey = nil
+            kitHooks.pendingTxFocusVisible = nil
+            pendingTxFocusVisible = nil
+            pendingFocusWhenShown = (fk, tx.requestedFocusVisible)
         }
         for prefix in tx.invalidateMemoPrefixes {
             MemoCache.shared.invalidateByPrefix(prefix)

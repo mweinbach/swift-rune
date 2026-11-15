@@ -82,6 +82,8 @@ extension Runtime {
 
     /// Leaves the window without discarding an active capture (`Runtime::pointer_leave`).
     public func pointerLeave(at now: Double = 0.0) {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         if pressing() {
             inputMachines.pressedLeft = true
         } else {

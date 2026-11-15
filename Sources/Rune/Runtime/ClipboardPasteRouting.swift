@@ -272,6 +272,8 @@ extension Runtime {
     internal func flushPendingPasteRequests(at now: Double) {
         pollSecretCopy()
         guard !clipboardRouting.replies.isEmpty else { return }
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         let replies = clipboardRouting.replies
         clipboardRouting.replies.removeAll()
         for (reply, at) in replies {
