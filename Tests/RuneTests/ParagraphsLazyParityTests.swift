@@ -137,6 +137,43 @@ struct ParagraphsLazyParityTests {
         #expect(ts.paragraphState.shapedParagraphs == shaped)
     }
 
+    @Test("an NFC paragraph edited to its NFD form gets its own layout: keys and cache are by bytes")
+    func nfcToNfdParagraphIsReshaped() throws {
+        let ts = TextSystem()
+        let style = Self.wrapped(Self.style)
+        let nfc = "caf\u{E9}\nb"
+        let nfd = "cafe\u{301}\nb"
+        #expect(nfc == nfd)
+        let first = try #require(ts.layoutInput(text: nfc, spans: nil, pills: [], style: style, maxWidth: 300, pixelScale: 1, emitGlyphs: false, request: Self.request(21)).paragraphs)
+        #expect(first.content == Array(nfc.utf8))
+        #expect(first.paragraphs[0].end == 5)
+        let shaped = ts.paragraphState.shapedParagraphs
+        let second = try #require(ts.layoutInput(text: nfd, spans: nil, pills: [], style: style, maxWidth: 300, pixelScale: 1, emitGlyphs: false, request: Self.request(21)).paragraphs)
+        #expect(second !== first)
+        #expect(second.content == Array(nfd.utf8))
+        let bounds: [[Int]] = second.paragraphs.map { [$0.start, $0.end] }
+        #expect(bounds == [[0, 6], [7, 8]])
+        // The edited paragraph is shaped again from its own bytes; the one after it is kept.
+        #expect(ts.paragraphState.shapedParagraphs - shaped == 1)
+        #expect(second.paragraphs[0].key != first.paragraphs[0].key)
+        #expect(second.paragraphs[0].layout !== first.paragraphs[0].layout)
+        #expect(Array(second.paragraphs[0].layout.authText.utf8) == Array("cafe\u{301}".utf8))
+        #expect(second.paragraphs[1].layout === first.paragraphs[1].layout)
+        let lines = second.composed.lineStrings
+        let lineStarts: [Int] = lines.map { $0.utf8Start }
+        #expect(lineStarts == [0, 7])
+        #expect(Array(lines[0].text.utf8) == Array("cafe\u{301}".utf8))
+        // After the commit ends, the NFD text in another field still isn't the NFC layout.
+        ts.endCommit()
+        let other = try #require(ts.layoutInput(text: "x\n" + "cafe\u{301}", spans: nil, pills: [], style: style, maxWidth: 300, pixelScale: 1, emitGlyphs: false, request: Self.request(22)).paragraphs)
+        let p1 = other.paragraphs[1]
+        #expect(p1.start == 2 && p1.end == 8)
+        #expect(Array(p1.layout.authText.utf8) == Array("cafe\u{301}".utf8))
+        // One text's bytes are read once a pass, and only for the same bytes.
+        #expect(ts.paragraphState.bytes(of: nfc) == Array(nfc.utf8))
+        #expect(ts.paragraphState.bytes(of: nfd) == Array(nfd.utf8))
+    }
+
     // MARK: - Lazy long paste
 
     @Test("a paste of more than LAZY_MIN lines shapes its last EAGER_END and first EAGER_START lines, the rest wait in runs")

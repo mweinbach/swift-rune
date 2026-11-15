@@ -5847,7 +5847,7 @@ public final class Runtime<State> {
         if !isExiting, glidePx == .zero, let live = nodeTextLayouts[snapId]?.box {
             // A layout measured greedy is not reused for pretty paint (or vice versa, `#882`).
             let matchesPretty = live.shapeKey.pretty == TextShapeKey.layoutPretty(pretty, style: style)
-            let matchesText = (live.authText == targetAuth && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
+            let matchesText = (HistoryText.sameBytes(live.authText, targetAuth) && live.spans == spans && live.pills == pills && live.style == style && abs(live.pixelScale - targetScale) < 0.01 && matchesPretty)
             let matchesWidth: Bool = {
                 guard let ww = wrapWidth else {
                     return live.maxWidth == nil

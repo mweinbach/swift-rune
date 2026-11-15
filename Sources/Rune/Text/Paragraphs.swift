@@ -430,7 +430,8 @@ internal final class ParagraphState: @unchecked Sendable {
     }
 
     func bytes(of text: String) -> [UInt8] {
-        if let (t, b) = lastBytes, t == text { return b }
+        // Bytes, not `==`: canonically equal texts (NFC and NFD) hold different bytes.
+        if let (t, b) = lastBytes, HistoryText.sameBytes(t, text) { return b }
         let b = Array(text.utf8)
         lastBytes = (text, b)
         return b
@@ -559,8 +560,12 @@ extension TextSystem {
         st.lock.lock()
         defer { st.lock.unlock() }
         let scale = max(pixelScale, 1.0)
+        // Keyed by the text's bytes, as upstream's shape key is: Swift hashes a `String` by
+        // canonical equivalence, which would hand NFD text the layout of its NFC form.
+        let bytes = st.bytes(of: text)
         var wh = Hasher()
-        wh.combine(text)
+        wh.combine(bytes.count)
+        bytes.withUnsafeBytes { wh.combine(bytes: $0) }
         wh.combine(paragraphStyleKey(style, scale: scale))
         wh.combine(request.forced)
         var whole = UInt64(bitPattern: Int64(wh.finalize()))
@@ -867,8 +872,9 @@ extension TextSystem {
             }
             let words = String(decoding: content[s..<b], as: UTF8.self)
             let flow = forced ?? paragraphFlowOf(words) ?? lastFlow
+            // Its bytes, as a Rust `str` hashes (not Swift's canonical-equivalence `String` hash).
             var h = Hasher()
-            h.combine(words)
+            content.withUnsafeBytes { h.combine(bytes: UnsafeRawBufferPointer(rebasing: $0[s..<b])) }
             h.combine(styleKey)
             h.combine(flow == .rtl)
             h.combine("p")

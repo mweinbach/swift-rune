@@ -323,7 +323,8 @@ internal func splitRun(_ lazy: LazyFill, maxWidth: Float?, paragraphs: [Paragrap
             continue
         }
         var hs = Hasher()
-        hs.combine(String(decoding: content[s..<e], as: UTF8.self))
+        // Keyed as `keyParagraphs` keys a line: by its bytes.
+        content.withUnsafeBytes { hs.combine(bytes: UnsafeRawBufferPointer(rebasing: $0[s..<e])) }
         hs.combine(lazy.styleKey)
         hs.combine(flow == .rtl)
         hs.combine("p")
