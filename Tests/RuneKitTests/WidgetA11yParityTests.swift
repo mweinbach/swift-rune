@@ -880,6 +880,41 @@ struct WidgetA11yParityTests {
         #expect(info(rt, "email-input")?.disabled == true)
         #expect(info(rt, "notes-input")?.label == "Notes")
 
+        // `tests/a11y/controls.rs:222` fields_name_their_editor_and_describe_their_help_and_errors:
+        // an enabled field can take a new value, a disabled one can't, and a text area reads multi-line.
+        func node(_ v: [String: Any], _ key: String) -> [String: Any]? {
+            if v["key"] as? String == key { return v }
+            for c in (v["children"] as? [[String: Any]]) ?? [] {
+                if let hit = node(c, key) { return hit }
+            }
+            return nil
+        }
+        func tree() -> [String: Any] {
+            (try? JSONSerialization.jsonObject(with: Data(rt.accessibilityJSON().utf8))) as? [String: Any] ?? [:]
+        }
+        let fields = tree()
+        let search = node(fields, "search-input")
+        #expect(search?["role"] as? String == "textbox")
+        #expect(search?["name"] as? String == "Search files")
+        let searchActions = (search?["actions"] as? [String]) ?? []
+        #expect(searchActions.contains("set-value") && searchActions.contains("focus"))
+        let email = node(fields, "email-input")
+        let emailStates = (email?["states"] as? [String]) ?? []
+        let emailActions = (email?["actions"] as? [String]) ?? []
+        #expect(emailStates.contains("disabled"))
+        #expect(!emailActions.contains("set-value"))
+        let notes = node(fields, "notes-input")
+        #expect(notes?["role"] as? String == "multiline-text-input")
+        #expect(notes?["name"] as? String == "Notes")
+        #expect(json.contains("\"multiline-text-input\""))
+        #expect(rt.accessibilityAction("search-input", .setValue, value: .text("Ada"), at: 0.01))
+        rt.frame(at: 0.02)
+        #expect(rt.state.search.text == "Ada")
+        #expect(node(tree(), "search-input")?["value"] as? String == "Ada")
+        #expect(!rt.accessibilityAction("email-input", .setValue, value: .text("x"), at: 0.03), "a disabled field takes no value")
+        #expect(rt.state.email.text == "a@b.c")
+        rt.frame(at: 0.03)
+
         #expect(rt.accessibilityAction("menu-item0", .press, at: 0.04))
         rt.frame(at: 0.05)
         #expect(rt.state.wrap)

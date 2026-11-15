@@ -14,6 +14,8 @@ public enum AccessibilityAction: String, Sendable, Hashable, Codable {
     case focus
     case increment
     case decrement
+    /// Sets a new value: an editable text field's text, or a stepped range's number (`Action::SetValue`).
+    case setValue = "set-value"
 }
 
 /// Live-region announcement politeness (`rune::LiveRegion`).
@@ -272,16 +274,28 @@ public enum AccessibilityTreeBuilder {
                 actions.append(.decrement)
             }
         }
+        if AccessibilityTreeBuilder.offersSetValue(
+            enabled: enabled,
+            editable: element.handlers.editLens != nil,
+            steps: element.role == .slider || element.handlers.onStep != nil,
+            range: element.a11yRange
+        ) {
+            appendAction(.setValue, to: &actions)
+        }
 
         var value: String? = element.a11yValue ?? element.a11ySelected
         var isSecure = element.isSecure
+        var multiline = false
         if let state, let editLens = element.handlers.editLens {
             let edit = editLens.get(state)
             isSecure = isSecure || edit.isSecure
             value = isSecure ? nil : edit.text
+            multiline = edit.multiline && !element.isSingleLineInput
         }
 
-        let resolvedRole: ElementRole = (isSecure && element.role == .textInput) ? .passwordInput : element.role
+        let resolvedRole: ElementRole = element.role == .textInput && (isSecure || multiline)
+            ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: multiline)
+            : element.role
         let labelledByText = relatedWords(key: element.a11yLabelledBy, ancestors: ancestors, selfKey: element.keyId)
         let describedByText = relatedWords(key: element.a11yDescribedBy, ancestors: ancestors, selfKey: element.keyId)
         let label = isSecure
@@ -427,6 +441,7 @@ public enum AppKitAccessibilityMapper {
         case .radio: return .radioButton
         case .tab: return .radioButton
         case .textInput, .passwordInput: return .textField
+        case .multilineTextInput: return .textArea
         case .slider: return .slider
         case .progress: return .progressIndicator
         case .listItem: return .row
@@ -545,7 +560,7 @@ public enum UIKitAccessibilityMapper {
         switch role {
         case .button, .menuItem, .menuItemCheckbox: return .button
         case .text, .listItem, .group, .dialog, .menu, .separator: return .staticText
-        case .toolbar, .list, .textInput, .passwordInput: return .none
+        case .toolbar, .list, .textInput, .passwordInput, .multilineTextInput: return .none
         case .splitter, .slider: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header

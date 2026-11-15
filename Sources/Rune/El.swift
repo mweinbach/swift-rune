@@ -894,6 +894,7 @@ public enum ElementRole: String, Sendable, Hashable, Codable {
     case list = "list"
     case menuItemCheckbox = "menu-item-check-box"
     case passwordInput = "password-input"
+    case multilineTextInput = "multiline-text-input"
     case mark = "mark"
     case code = "code"
     case blockquote = "blockquote"

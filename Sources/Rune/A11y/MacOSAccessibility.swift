@@ -230,9 +230,12 @@ public extension Runtime {
             var editText: String? = editIsSecure ? nil : richPlain
             var editChars: Int? = nil
             var editSel: [Int]? = nil
+            var editMultiline = false
             if let editLens = el.handlers.editLens {
                 let edit = editLens.get(state)
                 editIsSecure = editIsSecure || edit.isSecure
+                // `RoleCtx::multiline`: a field that is not single-line (`a11y/node.rs:31`).
+                editMultiline = edit.multiline && !el.isSingleLineInput
                 if !editIsSecure {
                     editText = edit.text
                     editChars = edit.text.count
@@ -262,6 +265,15 @@ public extension Runtime {
                     actions.append(.decrement)
                 }
             }
+            // `a11y/node.rs:229-235`: a stepped range with a stated step, or an editable field.
+            if AccessibilityTreeBuilder.offersSetValue(
+                enabled: enabled,
+                editable: el.handlers.editLens != nil,
+                steps: el.handlers.onStep != nil,
+                range: el.a11yRange
+            ) {
+                AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)
+            }
 
             let resolvedValue: String? = isSecure ? nil : (el.a11yValue ?? el.a11ySelected ?? editText)
             let labelledByText = el.a11yLabelledBy.flatMap { a11yKeyed(from: idx, key: $0) }.flatMap(a11yWords)
@@ -276,7 +288,9 @@ public extension Runtime {
             let sOff = hasScroll ? (scrollOffsets[node.path] ?? .zero) : nil
             let sMax = hasScroll ? scrollMaxExtents[node.path] : nil
 
-            let resolvedRole: ElementRole = (isSecure && el.role == .textInput) ? .passwordInput : el.role
+            let resolvedRole: ElementRole = el.role == .textInput && (isSecure || editMultiline)
+                ? AccessibilityTreeBuilder.textFieldRole(secure: isSecure, multiline: editMultiline)
+                : el.role
             let hasLinks = hasActiveTextLinks(el)
             var builtChildren = (childrenByParent[idx] ?? []).map(build)
             if let grid = el.terminalGridPayload {
@@ -423,6 +437,9 @@ public extension Runtime {
             pointerDown(at: center, button: .primary, mods: Mods(), at: now)
             pointerUp(at: center, button: .primary, mods: Mods(), at: now)
             return true
+        case .setValue:
+            // A new value needs the request's data (`ActionData::Value` / `NumericValue`).
+            return performAccessibilitySetValue(id, value: nil, at: now)
         case .increment, .decrement:
             guard let flatTarget = flatNodes.first(where: { ($0.key ?? $0.path) == id || $0.path == id }),
                   !flatTarget.effectiveInert,
