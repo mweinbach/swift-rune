@@ -299,8 +299,9 @@ extension Runtime {
             let stickyPin = nodeByPath[scrollPath].map { flatNodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
             let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
-            let offsetY = stickyPin ? max(0, total - vpH) : (scrollOffsets[scrollPath]?.y ?? 0)
-            if vState.needsWindow(offset: offsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: stickyPin) {
+            let scrollY = stickyPin && !vState.nested ? max(0, total - vpH) : (scrollOffsets[scrollPath]?.y ?? 0)
+            let (offsetY, pinned) = vState.at(scrollY, pinned: stickyPin, total: total)
+            if vState.needsWindow(offset: offsetY, viewport: vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) {
                 return true
             }
         }
@@ -316,7 +317,7 @@ extension Runtime {
         anchoredScrollYs: [String: Float]
     ) {
         guard pass.virtualExpansion.anyVirtualList else { return (true, virtualLists, [:]) }
-        var anchorInfoByList: [String: (scrollPath: String, vpH: Float, stickyPin: Bool, oldOffsetY: Float, prefixBefore: [Float], anchorIdx: Int?)] = [:]
+        var anchorInfoByList: [String: (scrollPath: String, scrollIdx: Int?, vpH: Float, stickyPin: Bool, oldOffsetY: Float, oldListY: Float, prefixBefore: [Float], anchorIdx: Int?)] = [:]
         for listPath in activeVirtualPaths {
             guard let vBefore = virtualLists[listPath] else { return (false, virtualLists, [:]) }
             let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
@@ -327,10 +328,15 @@ extension Runtime {
             let vpH = scrollIdx.map { max(1, pass.nodes[$0].targetRect.height) } ?? max(1, viewport.y)
             let stickyPin = scrollIdx.map { pass.nodes[$0].el.layout.stickBottom } == true
                 && wasPinnedToBottom.contains(scrollPath)
-            let (prefixBefore, _) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
+            let (prefixBefore, totalBefore) = vBefore.computeOffsets(keys: vBefore.lastKeys, estimated: est)
             let oldOffsetY = scrollOffsets[scrollPath]?.y ?? 0
-            let vis = vBefore.visibleRange(offset: oldOffsetY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
-            anchorInfoByList[listPath] = (scrollPath, vpH, stickyPin, oldOffsetY, prefixBefore, vis.isEmpty ? nil : vis.lowerBound)
+            // `anchor_virtuals`: the list's own offset; one pinned, or nested and wholly above the
+            // viewport's top, anchors nothing (`VirtualList::locate`).
+            var located = vBefore
+            let (oldListY, oldPinned) = located.locate(oldOffsetY, pinned: stickyPin, total: totalBefore)
+            let vis = vBefore.visibleRange(offset: oldListY, viewport: vpH, prefix: prefixBefore, count: vBefore.lastKeys.count)
+            let anchorIdx = (vis.isEmpty || oldPinned || located.passed) ? nil : vis.lowerBound
+            anchorInfoByList[listPath] = (scrollPath, scrollIdx, vpH, stickyPin, oldOffsetY, oldListY, prefixBefore, anchorIdx)
         }
 
         var tempLists = virtualLists
@@ -344,26 +350,33 @@ extension Runtime {
         }
         var anchoredScrollYs: [String: Float] = [:]
         for listPath in activeVirtualPaths {
-            guard let vState = tempLists[listPath],
+            guard var vState = tempLists[listPath],
                   let info = anchorInfoByList[listPath] else { return (false, tempLists, [:]) }
             let est = max(1, (pass.byPath[listPath].flatMap { pass.nodes[$0].el.virtualEstimate }) ?? 40)
+            if let lIdx = pass.byPath[listPath], let sIdx = info.scrollIdx {
+                Self.measureVirtualPlacement(&vState, listIdx: lIdx, scrollIdx: sIdx, nodes: pass.nodes)
+                tempLists[listPath] = vState
+            }
             let (prefix, total) = vState.computeOffsets(keys: vState.lastKeys, estimated: est)
-            let offsetY: Float
+            let scrollY: Float
             if info.stickyPin {
-                offsetY = max(0, total - info.vpH)
+                scrollY = vState.nested ? info.oldOffsetY : max(0, total - info.vpH)
             } else if let aIdx = info.anchorIdx, aIdx < prefix.count, aIdx < info.prefixBefore.count {
                 let delta = prefix[aIdx] - info.prefixBefore[aIdx]
-                let candidate = max(0, min(max(0, total - info.vpH), info.oldOffsetY + delta))
-                offsetY = candidate
+                let listY = max(0, min(max(0, total - info.vpH), info.oldListY + delta))
+                let candidate = max(0, info.oldOffsetY + listY - info.oldListY)
+                scrollY = candidate
                 if abs(candidate - info.oldOffsetY) > 0.05 {
                     anchoredScrollYs[info.scrollPath] = candidate
                 }
             } else {
-                offsetY = info.oldOffsetY
+                scrollY = info.oldOffsetY
             }
+            // `windows_move`: the list's own offset within its window (`VirtualList::at`).
+            let (offsetY, pinned) = vState.at(scrollY, pinned: info.stickyPin, total: total)
             let overscanCap = info.vpH * (RuntimeVirtualListState.overscanMultiplier + 1.0)
-            if vState.needsWindow(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: info.stickyPin)
-                || vState.spare(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: info.stickyPin) > overscanCap {
+            if vState.needsWindow(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned)
+                || vState.spare(offset: offsetY, viewport: info.vpH, prefix: prefix, count: vState.lastKeys.count, pinned: pinned) > overscanCap {
                 return (false, tempLists, [:])
             }
         }

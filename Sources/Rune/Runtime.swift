@@ -856,6 +856,7 @@ public final class Runtime<State> {
     internal var pendingScrollBottoms: [(key: String, animated: Bool)] = []
     internal var pendingScrollPages: [(key: String, pages: Int)] = []
     internal var pendingScrollOffsets: [ScrollOffsetRequest] = []
+    internal var scrollKeyLandings = ScrollKeyLandings()
     internal var pendingKeepOnScreenKeys: [String] = []
     internal var pendingCaretFollow: Bool = false
     internal var scrollRequestsState = ScrollRequestsState()
@@ -1859,8 +1860,14 @@ public final class Runtime<State> {
             flushHiddenDropSteps(at: now)
             _ = laidSelectableEdgeScroll(at: now)
             if needsCommit {
-                commitTree(at: now, cut: false)
-                _ = laidSelectableEdgeScroll(at: now)
+                // Landing a `scrollKeyTo` jump mounts virtual rows there; each landing re-commit
+                // places it again from the new layout before the frame draws (`scroll_to_offsets`).
+                var recommits = 0
+                repeat {
+                    commitTree(at: now, cut: false)
+                    _ = laidSelectableEdgeScroll(at: now)
+                    recommits += 1
+                } while needsCommit && scrollKeyLandings.awaiting && recommits < ScrollKeyLanding.maxRounds
                 needsCommit = false
                 hasExternalDirtyCommit = false
                 popupNeedsLayout = false
@@ -4527,6 +4534,7 @@ public final class Runtime<State> {
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
         }
+        finishScrollKeyLandings(anyVirtualList: pass.virtualExpansion.anyVirtualList)
         if !needsCommit && scrollGlidingPaths.isEmpty && scrollRequestsState.isEmpty {
             pendingTxFocusKey = nil
         }

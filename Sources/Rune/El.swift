@@ -518,6 +518,9 @@ public struct Tx {
     }
 
     /// Moves the vertical scroll viewport around `key` so its top sits `at` points below the viewport top.
+    /// Instant; any momentum or glide stops. A virtual row that isn't mounted lands too: the jump
+    /// goes where its list's estimates put it, which mounts it, and is placed again from its layout
+    /// before the frame draws, the rows it mounts there showing at once.
     public mutating func scrollKeyTo(_ key: String, at: Float) {
         scrollOffsetRequests.append(ScrollOffsetRequest(key: key, x: nil, y: at, glide: nil, anchor: true))
     }
