@@ -2326,7 +2326,8 @@ extension Runtime {
                 let resolvedInput = ElDisplayResolver.resolveInput(
                     el: el,
                     edit: edit,
-                    innerWidth: innerW
+                    innerWidth: innerW,
+                    pxScale: rasterScale * scale
                 )
                 let defaultTextColor = el.textColor ?? (systemDark ? Color.white : Color.black)
                 let textCol = resolvedInput.showingPlaceholder

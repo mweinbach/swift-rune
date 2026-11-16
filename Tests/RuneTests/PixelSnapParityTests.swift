@@ -229,7 +229,7 @@ struct PixelSnapParityTests {
 
     @Test("text_keeps_its_place_against_its_fill")
     func textKeepsItsPlaceAgainstItsFill() {
-        func offset(y: Float) -> (Float, Float) {
+        func place(y: Float) -> (Float, Float) {
             let rt = Runtime(state: y, viewport: Vec2(80, 40), pixelScale: 2.0) { y, _ in
                 let label: El<Float> = text("Hg")
                 return El<Float>().size(80, 40).child(
@@ -243,14 +243,21 @@ struct PixelSnapParityTests {
                 .filter { $0.params.y == Float(PrimitiveKind.glyph.rawValue) }
                 .map { $0.rect.y }
                 .min() ?? .greatestFiniteMagnitude
-            #expect(glyphTop < .greatestFiniteMagnitude)
-            return (glyphTop - fill.y, fill.y)
+            #expect(glyphTop < .greatestFiniteMagnitude, "draws glyphs")
+            return (glyphTop, fill.y)
         }
-        let (want, _) = offset(y: 10.0)
-        for k in 1..<10 {
-            let (got, top) = offset(y: 10.0 + Float(k) * 0.05)
-            #expect(whole(top))
-            #expect(abs(got - want) < 1e-3)
+        // The fill snaps to whole pixels. The text lays out from its box's exact place and rounds
+        // once, as Blink paints a text fragment (#935), so it keeps its place against where its box
+        // is rather than its snapped fill: half a point (a device pixel) further down, it draws one
+        // pixel lower, at every phase; and between, it steps at most a pixel, never back.
+        for k in 0..<10 {
+            let y = 10.0 + Float(k) * 0.05
+            let (glyph, top) = place(y: y)
+            let (next, _) = place(y: y + 0.05)
+            let (lower, _) = place(y: y + 0.5)
+            #expect(whole(top), "\(top)")
+            #expect(lower == glyph + 1.0, "y \(y): a device pixel lower draws a pixel lower")
+            #expect(next == glyph || next == glyph + 1.0, "y \(y): \(glyph) then \(next)")
         }
     }
 

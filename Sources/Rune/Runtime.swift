@@ -6645,6 +6645,11 @@ public final class Runtime<State> {
                     parent: inh.snap.parent
                 )
             }
+            // An `El.offset` here or above: its text moves with its box (`Inherit::shifted`, #963).
+            let snapShifted = inh.snap.shifted || el.offset.x != 0 || el.offset.y != 0
+            // Its exact resting place against its snapped one, inside its containment's own rounding
+            // (`LeafBox::exact_off`, #935).
+            let textExactOffPx = TextBoxGeometry.leafExactOff(rest: snapRest, rigid: rigidPx, containPx: inh.snap.contain * pxScale, shifted: snapShifted)
 
             var caretOut: [Float]? = nil
             var textTruncated = false
@@ -7452,8 +7457,19 @@ public final class Runtime<State> {
                 emitTerminalGridSection()
 
                 // 8. Text / Rich Text / TextInput
-                let snappedOriginX = snappedEdgesPx[0] / pxScale
-                let snappedOriginY = snappedEdgesPx[1] / pxScale
+                // Text lays out from its box's place moved by how far its exact resting box sits from its
+                // snapped one (inside its paint containment), as Blink paints a text fragment from its exact
+                // place; a gliding box carries its rest's offset, so a glide's last frame places glyphs as the
+                // resting frame after it. A field keeps its snapped box, which its caret and selection share
+                // (`content.rs`, #935).
+                let textRestsExact = TextBoxGeometry.restsExact(
+                    isInput: editValue != nil,
+                    scaleStill: nodeScaleMotion == .still && abs(textRasterScale - 1.0) < 1e-5,
+                    scale: SIMD2<Float>(scaleVec.x, scaleVec.y)
+                )
+                let textShiftPx: SIMD2<Float> = textRestsExact ? textExactOffPx : .zero
+                let snappedOriginX = (snappedEdgesPx[0] + textShiftPx.x) / pxScale
+                let snappedOriginY = (snappedEdgesPx[1] + textShiftPx.y) / pxScale
                 let padL = el.layout.padding.left * scaleVec.x
                 let padT = el.layout.padding.top * scaleVec.y
                 let innerW = max(0, (snappedEdgesPx[2] - snappedEdgesPx[0]) / pxScale - (el.layout.padding.left + el.layout.padding.right) * scaleVec.x)
@@ -7480,10 +7496,12 @@ public final class Runtime<State> {
                     // temporary its own slot, and the deep text-shaping path below overflowed the
                     // 512 KB test-thread stack.
                     @inline(never) func emitEditInputSection(_ edit: TextEdit) {
+                        // A field lays out again at its layout width, as it measured (`relayout::lay_out_text`, #948).
                         let resolvedInput = ElDisplayResolver.resolveInput(
                             el: el,
                             edit: edit,
-                            innerWidth: innerW / max(1e-4, scaleVec.x)
+                            innerWidth: max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right),
+                            pxScale: pxScale
                         )
                         let showingPlaceholder = resolvedInput.showingPlaceholder
                         let renderedStr = resolvedInput.renderedString
@@ -7578,11 +7596,12 @@ public final class Runtime<State> {
                             if !lineRects.isEmpty {
                                 for r in lineRects {
                                     primitives.append(.roundedRect(
-                                        rect: SIMD4<Float>(
-                                            (inputRestOriginX + r.x) * pxScale,
-                                            (restOriginY + r.y) * pxScale,
-                                            max(2.0, r.z) * pxScale,
-                                            r.w * pxScale
+                                        // Its edges on the device grid (`selectable::push_field_selection` -> `text_marks::pixel_rect`, #935).
+                                        rect: TextBoxGeometry.pixelRect(
+                                            origin: SIMD2<Float>(inputRestOriginX, restOriginY),
+                                            box: SIMD4<Float>(r.x, r.y, max(2.0, r.z), r.w),
+                                            k: SIMD2<Float>(1, 1),
+                                            pxScale: pxScale
                                         ),
                                         radii: SIMD4<Float>(repeating: 2.0 * pxScale),
                                         fill: selCol,
@@ -7741,9 +7760,9 @@ public final class Runtime<State> {
                         resolvedText.displayedText = paintedLabelValue
                     }
                     let isClampedOrEllipsis = resolvedText.style.maxLines > 0 || resolvedText.style.wrap == .ellipsis
-                    let wrapWidth = isClampedOrEllipsis
-                        ? (innerW / max(1e-4, scaleVec.x))
-                        : ((innerW / max(1e-4, scaleVec.x)) + 0.5)
+                    // A wrapping text lays out again at its layout width, `w * scale + FIT_SLACK` device px, as it
+                    // measured (`relayout::lay_out_text`, #948).
+                    let wrapWidth = TextBoxGeometry.wrapWidth(max(0, snap.targetRect.width - el.layout.padding.left - el.layout.padding.right), scale: textRasterScale * pxScale)!
                     let labelBox: TextLayoutBox?
                     let shaped: ShapedText
                     if resolvedText.truncateFade || resolvedText.advanceRun != nil || isClampedOrEllipsis {
@@ -7842,6 +7861,11 @@ public final class Runtime<State> {
                         helpHits: &newHelpHits,
                         interactiveHits: &newInteractiveHits
                     )
+                    // Laid out from its exact place, its baselines round once where they land, as Skia
+                    // rounds a text blob; its decorations round against them (`content.rs`, #935).
+                    let roundedBaselines: [Float] = textRestsExact
+                        ? TextBoxGeometry.roundedBaselines(originYPx: restOriginY * pxScale, shaped: shaped)
+                        : []
                     textSystem.emitTextDecorationsAndPills(
                         shaped: shaped,
                         textOriginX: textOriginX,
@@ -7854,6 +7878,8 @@ public final class Runtime<State> {
                         devClip: devClip,
                         rot: useLayer ? 0 : effRotate,
                         spanRadius: el.elSpanRadius,
+                        roundedBaselines: roundedBaselines,
+                        glideOffPx: SIMD2<Float>(glideOffPx.x, glideOffPx.y),
                         insertImage: { imagePacker.insert($0) },
                         into: &primitives
                     )
@@ -8003,19 +8029,34 @@ public final class Runtime<State> {
                         } else {
                             glyphsToEmit = shaped.glyphs[...]
                         }
-                        for g in glyphsToEmit {
-                            let gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                        var baselineLine = 0
+                        for gi in glyphsToEmit.indices {
+                            var g = glyphsToEmit[gi]
+                            let inkGlyph = g
+                            var gx = (restOriginX + g.rect.x * scaleVec.x) * pxScale
+                            if textRestsExact {
+                                // Its pen rounds to a quarter pixel where it lands (`glyph_emit.rs`, #935).
+                                (gx, g) = TextBoxGeometry.restingGlyph(g, index: gi, shaped: shaped, originXPx: restOriginX * pxScale, pxScale: pxScale, atlas: textSystem.glyphAtlas)
+                            }
+                            var gy = (restOriginY + g.rect.y * scaleVec.y) * pxScale
+                            if !roundedBaselines.isEmpty {
+                                let ranges = shaped.lineGlyphRanges
+                                while baselineLine + 1 < ranges.count && gi >= ranges[baselineLine].upperBound { baselineLine += 1 }
+                                if baselineLine < roundedBaselines.count {
+                                    gy = TextBoxGeometry.glyphTop(localTopPx: g.rect.y * pxScale, line: baselineLine, roundedBaselines: roundedBaselines, shaped: shaped)
+                                }
+                            }
                             let gh = g.rect.w * scaleVec.y * pxScale
                             if !textRotated && (gy + gh < textVisMinY || gy > textVisMaxY) { continue }
-                            let wordAlpha = wordFadeMask?.alpha(for: g) ?? 1.0
+                            let wordAlpha = wordFadeMask?.alpha(for: inkGlyph) ?? 1.0
                             let effGlyphAlpha = glyphAlpha * wordAlpha
                             if effGlyphAlpha <= 0.0005 { continue }
                             let baseGlyphColor = g.color.map { applyPressColor(effPressColor, to: $0, frac: effPressFrac) } ?? defaultTextColor
-                            let gc = (selPaintInk?.color(for: g) ?? linkInkColor(for: g, ranges: highlightInks) ?? linkInkColor(for: g, ranges: linkInks) ?? baseGlyphColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
+                            let gc = (selPaintInk?.color(for: inkGlyph) ?? linkInkColor(for: inkGlyph, ranges: highlightInks) ?? linkInkColor(for: inkGlyph, ranges: linkInks) ?? baseGlyphColor).scaleAlpha(effGlyphAlpha).simd4(srgb: srgbBlend)
                             let primIdx = primitives.count
                             var prim = attachFade(.glyph(
                                 rect: SIMD4<Float>(
-                                    (restOriginX + g.rect.x * scaleVec.x) * pxScale,
+                                    gx,
                                     gy,
                                     g.rect.z * scaleVec.x * pxScale,
                                     gh
@@ -8447,6 +8488,7 @@ public final class Runtime<State> {
                 childSnap.rigid = childRigid
                 childSnap.contain = childContain
                 childSnap.steps = steps
+                childSnap.shifted = snapShifted
                 childSnap.layer = snapLayer
                 let paintsFrame = PixelSnap.frames(el, effectiveFill: fillColor, effectiveBorder: borderColor)
                 childSnap.parent = (childRigid == inh.snap.rigid && paintsFrame) ? snapRest : nil
@@ -10538,7 +10580,7 @@ public final class Runtime<State> {
                 if !edit.isSecure && (ev.key == .arrowLeft || ev.key == .arrowRight) {
                     let pad = fNode.el.layout.padding
                     let innerW = max(0, fNode.targetRect.width - pad.left - pad.right)
-                    let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW)
+                    let resolvedInput = ElDisplayResolver.resolveInput(el: fNode.el, edit: edit, innerWidth: innerW, pxScale: pixelScale)
                     editLayout = textSystem.shape(
                         text: resolvedInput.renderedString,
                         spans: resolvedInput.spans,
@@ -12712,7 +12754,8 @@ public final class Runtime<State> {
         let resolvedInput = ElDisplayResolver.resolveInput(
             el: node.el,
             edit: resolvedEdit,
-            innerWidth: innerW / max(0.01, sc.x)
+            innerWidth: innerW / max(0.01, sc.x),
+            pxScale: pixelScale
         )
         let shaped = textSystem.shape(
             text: resolvedInput.renderedString,
