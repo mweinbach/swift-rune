@@ -610,11 +610,16 @@ private final class HostedWindowSlot: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        // `WindowEvent::Focused`: reduced motion, the contrast theme and Increase Contrast are
+        // read again (`window/events.rs`).
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: true)
         view.requestRender()
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // `WindowEvent::Focused(false)` re-reads them too.
+        view.rereadSystemAccessibilitySettings()
         entry.setFocused(runtimeObj: runtime, focused: false)
         view.requestRender()
     }
@@ -717,6 +722,10 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     }
     private var lastAppliedCursor: Cursor = .default
     private var didInitialA11ySync = false
+    /// The accessibility tree must go out again although no commit changed it (#980).
+    private var a11yFollowUp = false
+    /// The launch's `--reduced-motion`: the system's setting can't turn it off.
+    private var forceReducedMotion = false
     private let toolTipOwner = MacOSToolTipOwner()
     private let windowFrameDriver = MacOSWindowFrameDriver()
     private var appliedMenuRevision: UInt64 = 0
@@ -820,6 +829,23 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         requestRender()
     }
 
+    /// The window's accessibility adapter watches the workspace's display options and reads
+    /// reduced motion, the contrast theme and Increase Contrast again when they change (#980).
+    func watchSystemDisplayOptions(forceReducedMotion: Bool) {
+        self.forceReducedMotion = forceReducedMotion
+        accessibilityHost.watchDisplayOptions { [weak self] in
+            guard let self else { return }
+            self.rereadSystemAccessibilitySettings()
+            self.requestRender()
+        }
+    }
+
+    /// Reduced motion (kept on under the launch's `--reduced-motion`), the contrast theme and
+    /// Increase Contrast, read again from the system.
+    func rereadSystemAccessibilitySettings() {
+        entry.readSystemAccessibilitySettings(runtimeObj: runtime, forceReducedMotion: forceReducedMotion)
+    }
+
     func requestRender() {
         guard bounds.width > 0 && bounds.height > 0 else { return }
         let t = nowSeconds()
@@ -888,7 +914,13 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                 self.entry.stepViewport(runtimeObj: self.runtime, viewport: vp, pixelScale: sc)
             }
         }
-        syncPlatformBridges(treeCommitted: !didInitialA11ySync || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
+        // The accessibility stamp: a commit, held words or an attaching reader, or words said since
+        // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
+        syncPlatformBridges(
+            treeCommitted: !didInitialA11ySync || a11yFollowUp
+                || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
+                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
+        )
 
         if entry.isAnimating(runtimeObj: runtime) || windowFrameDriver.isMoving {
             if displayLinkDriver == nil {
@@ -925,9 +957,17 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
 
         if treeCommitted {
             didInitialA11ySync = true
+            a11yFollowUp = false
+            if accessibilityHost.onActivate == nil {
+                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
+            }
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
             let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            accessibilityHost.update(tree: snapshot, parentView: self) { [weak self] id, action in
+            let held = accessibilityHost.update(
+                tree: snapshot,
+                announcement: entry.accessibilityAnnouncement(runtimeObj: runtime),
+                parentView: self
+            ) { [weak self] id, action in
                 MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
                     guard let self else { return }
                     if self.entry.performAccessibilityAction(
@@ -940,7 +980,16 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
                     }
                 }
             }
+            if held { scheduleAccessibilityFollowUp() }
         }
+    }
+
+    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
+    private func scheduleAccessibilityFollowUp() {
+        a11yFollowUp = true
+        entry.markAccessibilityDirty(runtimeObj: runtime)
+        DispatchQueue.main.async { [weak self] in self?.requestRender() }
     }
 
     private func localPoint(for event: NSEvent) -> Vec2 {
@@ -1253,7 +1302,9 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             try host.openEntry(spec.makeHostEntry())
         }
 
-        if !options.accessory {
+        // `RUNE_OPEN_INACTIVE` (a tool's launch): the app doesn't take activation at launch
+        // either; the activation policy stays the app's own (#962).
+        if OpenInactiveLaunch.activatesAtLaunch(accessory: options.accessory) {
             app.activate(ignoringOtherApps: true)
         }
         defer {
@@ -1318,6 +1369,7 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
         )
         slot.host = self
         view.slot = slot
+        view.watchSystemDisplayOptions(forceReducedMotion: parsed.reducedMotion)
         window.delegate = slot
         window.contentView = view
 
@@ -1385,7 +1437,10 @@ public final class RuneMultiWindowHost: NSObject, NSApplicationDelegate {
             if specEntry.options.position == nil {
                 window.center()
             }
-            if specEntry.inactive || specEntry.macosWindow.nonactivatingPanel {
+            // `Host::new` reads `RUNE_OPEN_INACTIVE` for every window, those opened later too:
+            // a tool's launch never takes the user's keyboard (#962).
+            let inactive = OpenInactiveLaunch.openInactive(app: specEntry.inactive)
+            if inactive || specEntry.macosWindow.nonactivatingPanel {
                 window.orderFrontRegardless()
             } else {
                 window.makeKeyAndOrderFront(nil)

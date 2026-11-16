@@ -176,7 +176,7 @@ public enum Win32MessageTranslator {
 /// `DwmSetWindowAttribute` dark titlebar/backdrop).
 public enum Win32App {
     @MainActor
-    public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs) throws {
+    public static func run<State>(_ spec: AppSpec<State>, parsed: ToolingArgs, openInactive: Bool = false) throws {
         HeadlessRunner.registerFonts(spec.fonts)
         var state = spec.makeState()
         var initTx = Tx()
@@ -202,7 +202,7 @@ public enum Win32App {
         runtime.poll = spec.poll
         runtime.onAppFileDrop = spec.onFileDrop
         runtime.onFileDrop = spec.onFileDropPhase
-        runtime.setSystemContrast(SystemPreferences.current().contrast)
+        runtime.readSystemContrastSettings()
         runtime.applyTx(initTx, at: 0.0, markDirtyIfNotLiveOnly: false)
 
         let hInstance = GetModuleHandleW(nil)
@@ -244,7 +244,9 @@ public enum Win32App {
         let DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &darkVal, DWORD(MemoryLayout<BOOL>.size))
 
-        ShowWindow(hwnd, SW_SHOW)
+        // `App::open_inactive` or `RUNE_OPEN_INACTIVE` (a tool's launch): shown without taking
+        // activation or the user's keyboard (#962).
+        ShowWindow(hwnd, OpenInactiveLaunch.win32ShowCommand(openInactive: OpenInactiveLaunch.openInactive(app: openInactive)))
         UpdateWindow(hwnd)
         ReadySignal.ready()
 

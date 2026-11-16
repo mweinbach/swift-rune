@@ -95,6 +95,8 @@ public final class LayerHost<State> {
             onKey: spec.onKey,
             view: spec.view
         )
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+        rt.applyCapturePresets()
         self.runtime = rt
         self.config = config
         self.lastViewport = initialSize
@@ -156,6 +158,8 @@ public final class LayerHost<State> {
             onKey: spec.onKey,
             view: spec.view
         )
+        // The capture presets (`RUNE_CONTRAST`, `RUNE_INCREASE_CONTRAST`) as `tooling::runtime_for` applies them (#981).
+        self.runtime.applyCapturePresets()
         self.config = config
         self.lastViewport = initialSize
         self.lastScale = resolvedScale
