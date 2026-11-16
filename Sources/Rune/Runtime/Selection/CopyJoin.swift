@@ -77,58 +77,102 @@ public enum CopyJoin {
     /// piece that passes it is cut on a character boundary
     /// (`crates/rune/src/runtime/selection/copy_join.rs` `CopyJoin::push` / `finish`).
     public static func join(_ entries: [Entry], cap: Int = .max) -> String {
-        var out = ""
-        var prev: (rect: MotionRect, copyBreakAfter: UInt8)? = nil
-        var pieces = 0
-        var firstPrefixCount = 0
-
+        var out = Builder()
+        var prev: MotionRect? = nil
         for entry in entries {
+            let isBeside = prev.map { beside($0, entry.rect) } ?? false
+            prev = entry.rect
+            let capped = out.push(
+                entry.pieceText,
+                fromStart: entry.fromStart,
+                copyBreakBefore: entry.copyBreakBefore,
+                copyBreakAfter: entry.copyBreakAfter,
+                copyPrefix: entry.copyPrefix,
+                beside: isBeside,
+                cap: cap
+            )
+            if capped { break }
+        }
+        return out.finish()
+    }
+
+    /// `range` takes a text from its first copied byte (`copy_join.rs` `from_start`).
+    public static func fromStart(range: Range<Int>, len: Int, uncopied: [Range<Int>]) -> Bool {
+        let first = uncopied.isEmpty ? 0 : SelectionMath.trimUncopied(uncopied, range: (0, len)).0
+        return !range.isEmpty && range.lowerBound <= first
+    }
+
+    /// Copied text, built a selected piece at a time (`copy_join.rs` `CopyJoin`).
+    public struct Builder: Sendable {
+        /// The text so far (`CopyJoin::text`).
+        public private(set) var text = ""
+        /// `text`'s length in UTF-8 bytes.
+        public private(set) var byteCount = 0
+        /// The newlines the last piece wants after it.
+        private var after: UInt8 = 0
+        private var pieces = 0
+        /// The first piece's prefix, in bytes: a copy of one text alone goes without it.
+        private var firstPrefix = 0
+
+        public init() {}
+
+        /// Adds `piece`, what the selected bytes of a text copy as (`CopyJoin::push`). `beside`: it
+        /// sits beside the last piece, as a table row's next cell does; else as many newlines as
+        /// the last piece's `copyBreakAfter` and this one's `copyBreakBefore` ask for (at least
+        /// one, counting those already at the end). `fromStart`: the piece takes the text from its
+        /// first copied byte, so its `copyPrefix` goes before it. `true` when `cap` bytes cut it
+        /// short: a lead that would pass `cap` goes, and the piece that passes it is cut on a
+        /// character boundary.
+        @discardableResult
+        public mutating func push(
+            _ piece: String,
+            fromStart: Bool,
+            copyBreakBefore: UInt8,
+            copyBreakAfter: UInt8,
+            copyPrefix: String?,
+            beside: Bool,
+            cap: Int
+        ) -> Bool {
             var lead = ""
-            if let prev {
-                if beside(prev.rect, entry.rect) {
+            if pieces > 0 {
+                if beside {
                     lead.append("\t")
                 } else {
-                    let want = max(Int(prev.copyBreakAfter), Int(entry.copyBreakBefore), 1)
-                    var trailing = 0
-                    for b in out.utf8.reversed() {
-                        if b == UInt8(ascii: "\n") {
-                            trailing += 1
-                        } else {
-                            break
-                        }
+                    let want = Int(max(after, copyBreakBefore, 1))
+                    var have = 0
+                    for b in text.utf8.reversed() {
+                        guard b == UInt8(ascii: "\n") else { break }
+                        have += 1
                     }
-                    if want > trailing {
-                        lead.append(String(repeating: "\n", count: want - trailing))
-                    }
+                    if want > have { lead.append(String(repeating: "\n", count: want - have)) }
                 }
             }
-            let prefix = entry.fromStart ? (entry.copyPrefix ?? "") : ""
-            if pieces == 0 {
-                firstPrefixCount = prefix.utf8.count
-            }
+            let prefix = fromStart ? (copyPrefix ?? "") : ""
+            if pieces == 0 { firstPrefix = prefix.utf8.count }
             lead.append(prefix)
-            prev = (entry.rect, entry.copyBreakAfter)
             pieces += 1
-            let outLen = out.utf8.count
-            if outLen + lead.utf8.count > cap { break }
-            out.append(lead)
-            let room = cap - out.utf8.count
-            if entry.pieceText.utf8.count <= room {
-                out.append(entry.pieceText)
-                continue
+            after = copyBreakAfter
+            let leadBytes = lead.utf8.count
+            if byteCount + leadBytes > cap { return true }
+            text.append(lead)
+            byteCount += leadBytes
+            let pieceBytes = piece.utf8.count
+            if byteCount + pieceBytes <= cap {
+                text.append(piece)
+                byteCount += pieceBytes
+                return false
             }
-            let take = SelectionMath.floorCharBoundary(in: entry.pieceText, offset: room)
-            out.append(String(decoding: entry.pieceText.utf8.prefix(take), as: UTF8.self))
-            break
+            let take = SelectionMath.floorCharBoundary(in: piece, offset: max(0, cap - byteCount))
+            text.append(String(decoding: piece.utf8.prefix(take), as: UTF8.self))
+            byteCount += take
+            return true
         }
 
-        if pieces == 1 && firstPrefixCount > 0 {
-            let bytes = Array(out.utf8)
-            if bytes.count >= firstPrefixCount {
-                return String(decoding: bytes[firstPrefixCount...], as: UTF8.self)
-            }
+        /// The copied text: a single text goes without its prefix (`CopyJoin::finish`).
+        public func finish() -> String {
+            guard pieces == 1, firstPrefix > 0, byteCount >= firstPrefix else { return text }
+            return String(decoding: text.utf8.dropFirst(firstPrefix), as: UTF8.self)
         }
-        return out
     }
 }
 
@@ -153,8 +197,7 @@ public final class SelectionCoordinator {
     /// Builds a `TextSelection` from resolved per-node UTF-8 byte ranges in tree order.
     public func buildSelection(
         ranges: [(node: SelectableNodeSnapshot, range: Range<Int>)],
-        backward: Bool = false,
-        cap: Int = .max
+        backward: Bool = false
     ) -> TextSelection? {
         let nonEmpty = ranges.filter { $0.range.lowerBound < $0.range.upperBound }
         guard !nonEmpty.isEmpty else { return nil }
@@ -193,7 +236,7 @@ public final class SelectionCoordinator {
         guard !selectedTexts.isEmpty else { return nil }
         return TextSelection(
             texts: selectedTexts,
-            text: CopyJoin.join(joinEntries, cap: cap),
+            text: CopyJoin.join(joinEntries),
             backward: backward
         )
     }
@@ -350,58 +393,6 @@ public final class SelectionCoordinator {
         let b = SelectionMath.floorCharBoundary(in: nodes[anchorIdx].text, offset: max(sel.anchor, sel.focus))
         guard a < b else { return nil }
         return buildSelection(ranges: [(nodes[anchorIdx], a..<b)], backward: sel.focus < sel.anchor)
-    }
-
-    /// The selection over `nodes` with unmounted rows built in (`collect_virtual_selection`):
-    /// the copy takes at most `cap` UTF-8 bytes, and when a bound stopped building rows after
-    /// snapshot `cut`, the selection runs from its first end through `cut` and no further.
-    internal func currentSelection(in nodes: [SelectableNodeSnapshot], cut: Int?, cap: Int) -> TextSelection? {
-        guard let cut else {
-            // Nothing cut short: the whole selection, capped only when its copy runs past `cap`.
-            let whole = currentSelection(in: nodes)
-            guard cap != .max, let w = whole, w.text.utf8.count > cap else { return whole }
-            return cappedSelection(in: nodes, cut: nodes.count - 1, cap: cap)
-        }
-        return cappedSelection(in: nodes, cut: cut, cap: cap)
-    }
-
-    private func cappedSelection(in nodes: [SelectableNodeSnapshot], cut: Int, cap: Int) -> TextSelection? {
-        guard let sel = phase.selection else { return nil }
-        let anchorIdx = nodes.indices.first { $0 <= cut && nodes[$0].path == sel.path && nodes[$0].isSelectable }
-        let farIdx = sel.far.flatMap { far in nodes.indices.first { $0 <= cut && nodes[$0].path == far.path && nodes[$0].isSelectable } }
-        if let a = anchorIdx {
-            guard SelectionMath.kept(then: sel.content, now: nodes[a].text, upto: min(sel.anchor, sel.focus)) else { return nil }
-        }
-        guard sel.far != nil else {
-            guard let a = anchorIdx else { return nil }
-            let lo = SelectionMath.floorCharBoundary(in: nodes[a].text, offset: min(sel.anchor, sel.focus))
-            let hi = SelectionMath.floorCharBoundary(in: nodes[a].text, offset: max(sel.anchor, sel.focus))
-            guard lo < hi else { return nil }
-            return buildSelection(ranges: [(nodes[a], lo..<hi)], backward: sel.focus < sel.anchor, cap: cap)
-        }
-        // The ends inside what was collected, first one first; an end past `cut` lies beyond the
-        // bound, and the copy runs to `cut`.
-        var ends: [(idx: Int, offset: Int)] = []
-        if let a = anchorIdx { ends.append((a, sel.anchor)) }
-        if let f = farIdx, f != anchorIdx { ends.append((f, sel.focus)) }
-        ends.sort { $0.idx < $1.idx }
-        guard let first = ends.first else { return nil }
-        let last: (idx: Int, offset: Int?) = ends.count > 1 ? (ends[1].idx, ends[1].offset) : (cut, nil)
-        let backward = anchorIdx != first.idx
-        let groups = SelectAllResolver.groupPaths(in: nodes)
-        let gPath = groups[first.idx]
-        var ranges: [(SelectableNodeSnapshot, Range<Int>)] = []
-        if first.idx <= last.idx {
-            for idx in first.idx...last.idx {
-                let n = nodes[idx]
-                guard n.isSelectable, groups[idx] == gPath else { continue }
-                let len = n.text.utf8.count
-                let lo = idx == first.idx ? SelectionMath.floorCharBoundary(in: n.text, offset: first.offset) : 0
-                let hi = idx == last.idx ? last.offset.map { SelectionMath.floorCharBoundary(in: n.text, offset: $0) } ?? len : len
-                if lo < hi { ranges.append((n, lo..<hi)) }
-            }
-        }
-        return buildSelection(ranges: ranges, backward: backward, cap: cap)
     }
 
     private static func sameSemanticSelection(_ a: TextSelection?, _ b: TextSelection?) -> Bool {

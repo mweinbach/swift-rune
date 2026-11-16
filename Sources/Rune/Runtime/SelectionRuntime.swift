@@ -114,14 +114,12 @@ private struct SelectableBand {
 
 public extension Runtime {
     /// Current `TextSelection` snapshot across mounted `El.selectable` elements (`Runtime::selection`).
+    /// A selection reaching virtual rows that aren't mounted is collected across them, building
+    /// those rows on demand within `VirtualCopyLimits` (`collect_virtual_selection`).
     func currentTextSelection() -> TextSelection? {
         guard selectionState.coordinator.phase.selection != nil else { return nil }
-        let bounded = boundedSelectableSnapshots()
-        return selectionState.coordinator.currentSelection(
-            in: bounded.snaps,
-            cut: bounded.cut,
-            cap: bounded.injected ? VirtualCopyLimits.maxBytes : .max
-        )
+        if selectionSpansUnmounted() { return collectVirtualSelection(base: nil) }
+        return selectionState.coordinator.currentSelection(in: selectableSnapshotsWithVirtuals())
     }
 
     /// Plain joined text of the active `El.selectable` selection without `El.selectionCopy`
@@ -134,13 +132,9 @@ public extension Runtime {
     /// Clipboard string produced by copying the active `El.selectable` selection, honoring the
     /// nearest `El.selectionCopy` handler spanning the selection (`Runtime::copy_text`).
     func copySelectionText() -> String? {
-        let bounded = boundedSelectableSnapshots()
-        let snaps = bounded.snaps
-        guard let sel = selectionState.coordinator.currentSelection(
-                in: snaps,
-                cut: bounded.cut,
-                cap: bounded.injected ? VirtualCopyLimits.maxBytes : .max
-              ),
+        if selectionSpansUnmounted() { return copyVirtualText() }
+        let snaps = selectableSnapshotsWithVirtuals()
+        guard let sel = selectionState.coordinator.currentSelection(in: snaps),
               let firstSel = sel.texts.first,
               let lastSel = sel.texts.last else {
             return nil
@@ -297,9 +291,6 @@ private struct VirtualSelectionInjection {
     var subtreeEnd: Int
     var before: [SelectableNodeSnapshot]
     var after: [SelectableNodeSnapshot]
-    /// A bound stopped building the rows before (after) the mounted window.
-    var beforeCapped = false
-    var afterCapped = false
 }
 
 private enum VirtualEndpointPos {
@@ -630,18 +621,10 @@ internal extension Runtime {
     /// them: enough to place the selection's ranges in mounted texts (painting), without
     /// building every row a long selection spans each frame.
     func selectableSnapshotsWithVirtuals(endsOnly: Bool = false) -> [SelectableNodeSnapshot] {
-        boundedSelectableSnapshots(endsOnly: endsOnly).snaps
-    }
-
-    /// The mounted snapshots with the unmounted rows the selection spans built in, bounded by
-    /// `VirtualCopyLimits` (`collect_virtual_selection`): `cut` is the index of the last snapshot
-    /// collected when a bound stopped the collection (what follows it isn't part of the copy),
-    /// and `injected` whether any unmounted row was built in.
-    func boundedSelectableSnapshots(endsOnly: Bool = false) -> (snaps: [SelectableNodeSnapshot], cut: Int?, injected: Bool) {
         let base = selectableSnapshots()
         guard let activeSel = selectionState.coordinator.phase.selection,
               !virtualSelectionSources.isEmpty else {
-            return (base, nil, false)
+            return base
         }
 
         let maxOffscreenRows = VirtualCopyLimits.maxRows
@@ -712,10 +695,8 @@ internal extension Runtime {
             }
 
             var beforeSnaps: [SelectableNodeSnapshot] = []
-            var beforeCapped = false
-            var afterCapped = false
             for r in beforeRange where !endsOnly || r == p0 || r == p1 {
-                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { beforeCapped = !endsOnly; break }
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMinTop - Float(mountedLo - r) * 100.0 - 10_000.0
                 let countBefore = beforeSnaps.count
@@ -733,7 +714,7 @@ internal extension Runtime {
 
             var afterSnaps: [SelectableNodeSnapshot] = []
             for r in afterRange where !endsOnly || r == p0 || r == p1 {
-                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { afterCapped = !endsOnly; break }
+                guard totalRows < maxOffscreenRows && totalBytes < maxOffscreenBytes else { break }
                 let rowSeg = "@\(src.keys[r])"
                 let baseY = mountedMaxBottom + Float(r - mountedHi + 1) * 100.0 + 10_000.0
                 let countBefore = afterSnaps.count
@@ -749,40 +730,26 @@ internal extension Runtime {
                 for s in afterSnaps[countBefore...] { totalBytes += s.text.utf8.count }
             }
 
-            if !beforeSnaps.isEmpty || !afterSnaps.isEmpty || beforeCapped || afterCapped {
-                injections.append(VirtualSelectionInjection(
-                    listIdx: listIdx,
-                    subtreeEnd: subtreeEnd,
-                    before: beforeSnaps,
-                    after: afterSnaps,
-                    beforeCapped: beforeCapped,
-                    afterCapped: afterCapped
-                ))
+            if !beforeSnaps.isEmpty || !afterSnaps.isEmpty {
+                injections.append(VirtualSelectionInjection(listIdx: listIdx, subtreeEnd: subtreeEnd, before: beforeSnaps, after: afterSnaps))
             }
         }
 
-        guard !injections.isEmpty else { return (base, nil, false) }
+        guard !injections.isEmpty else { return base }
         let beforeByIdx = Dictionary(grouping: injections, by: \.listIdx)
         let afterByIdx = Dictionary(grouping: injections, by: \.subtreeEnd)
         var out: [SelectableNodeSnapshot] = []
         out.reserveCapacity(base.count + 32)
-        var cut: Int? = nil
         for (idx, snap) in base.enumerated() {
             out.append(snap)
             if let ins = beforeByIdx[idx] {
-                for item in ins {
-                    out.append(contentsOf: item.before)
-                    if item.beforeCapped, cut == nil { cut = out.count - 1 }
-                }
+                for item in ins { out.append(contentsOf: item.before) }
             }
             if let ins = afterByIdx[idx] {
-                for item in ins {
-                    out.append(contentsOf: item.after)
-                    if item.afterCapped, cut == nil { cut = out.count - 1 }
-                }
+                for item in ins { out.append(contentsOf: item.after) }
             }
         }
-        return (out, cut, true)
+        return out
     }
 
     func preservesTextSelectionInChain(_ node: FlatNode?) -> Bool {

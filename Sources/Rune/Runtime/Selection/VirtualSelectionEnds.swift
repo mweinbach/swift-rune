@@ -60,6 +60,14 @@ internal struct OffscreenSelectable {
     var text: String
     var group: String?
     var orderInRow: Int
+    /// The text is the first of a later child of a flex row that holds text before it, so copying
+    /// sets it off with a tab, as a table row's next cell (`OffscreenText::tab_before`).
+    var tabBefore: Bool = false
+    /// How copying takes it (`TextSpec` `cold.uncopied`, `copy_breaks`, `copy_prefix`).
+    var uncopied: [Range<Int>] = []
+    var copyBreakBefore: UInt8 = 1
+    var copyBreakAfter: UInt8 = 1
+    var copyPrefix: String? = nil
 }
 
 internal extension Runtime {
@@ -160,15 +168,25 @@ internal extension Runtime {
         func walk(_ el: El<State>, path: String, rel: String, group parentGroup: String?, inert parentInert: Bool) {
             let inert = parentInert || el.isInert
             let group = el.isSelectionGroup ? path : parentGroup
+            let isRow = el.layout.displayMode == .flex && !el.layout.displayNone
+                && (el.layout.direction == .row || el.layout.direction == .rowReverse)
+            var hadChildText = false
             let hasText = el.liveText != nil || el.plainText != nil || el.richSpans != nil
             if !inert && el.handlers.editLens == nil && hasText && el.isSelectable && !el.isSecure {
                 let text = el.liveText?.get() ?? el.plainText ?? el.richSpans?.map(\.text).joined() ?? ""
-                out.append(OffscreenSelectable(path: path, relPath: rel, key: el.keyId, text: text, group: group, orderInRow: order))
+                let breaks = el.copyBreaksPair
+                out.append(OffscreenSelectable(
+                    path: path, relPath: rel, key: el.keyId, text: text, group: group, orderInRow: order,
+                    uncopied: el.uncopiedRanges, copyBreakBefore: breaks.before, copyBreakAfter: breaks.after,
+                    copyPrefix: el.copyPrefixString
+                ))
                 order += 1
+                hadChildText = true
             }
             var seen: [String: Int] = [:]
             for idx in el.children.indices {
                 let (childSeg, _) = layoutPathSegment(keyId: el.children[idx].keyId, siblingIndex: idx, siblingKeysSeen: &seen)
+                let beforeLen = out.count
                 walk(
                     el.children[idx],
                     path: "\(path)/\(childSeg)",
@@ -176,6 +194,10 @@ internal extension Runtime {
                     group: group,
                     inert: inert
                 )
+                if out.count > beforeLen {
+                    if hadChildText { out[beforeLen].tabBefore = isRow }
+                    hadChildText = true
+                }
             }
         }
         walk(
