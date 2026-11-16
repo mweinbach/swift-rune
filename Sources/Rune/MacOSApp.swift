@@ -680,7 +680,12 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         }
         applyWindowFrameRequest(at: t)
         pumpPlatformActions()
-        syncPlatformBridges(treeCommitted: committed)
+        // The reader gets the tree the covered step committed, held words or an attaching
+        // reader's follow-up, and words said since the last update, as a drawn frame's stamp.
+        syncPlatformBridges(
+            treeCommitted: committed || a11yFollowUp
+                || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
+        )
     }
 
     /// `App::on_ready`, once per window: at its first drawn frame or first covered one.

@@ -2,6 +2,9 @@ import Foundation
 import Testing
 @testable import Rune
 import RuneMotion
+#if os(macOS)
+import AppKit
+#endif
 
 // Upstream 2e23d0fa (#995), host side: `window/sight.rs::Host::set_cover` and `window::covered_step`
 // as the AppKit hosts run them through `CoveredWindowDriver` (`MacOSApp.swift`,
@@ -189,4 +192,52 @@ struct CoveredWindowHostParityTests {
         rt.update(at: 0.02) { s, _ in s.extra = 1 }
         #expect(driver.setOccluded(false, runtime: rt, at: 0.03) == .redraw, "a stale window still draws (`else if rt.stale()`)")
     }
+
+    #if os(macOS)
+    /// What an AppKit host holds: its driver, fed by `WindowCoverWatch` (`MacOSApp`) or the window
+    /// delegate's `windowDidChangeOcclusionState` (`WindowHostingMacOS`), and what each report asked.
+    @MainActor
+    final class AppKitHostProbe {
+        var driver = CoveredWindowDriver()
+        var outcomes: [CoveredWindowDriver.Outcome] = []
+    }
+
+    @Test("AppKit host: the window's occlusion notification covers it through WindowCoverWatch, and its wakes run covered_step for a reader")
+    func appKitOcclusionNotificationRoutesThroughCoveredStep() {
+        let rt = Self.runtime()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: true
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        // Never ordered on screen: `.visible` isn't in its occlusion state (winit's `Occluded(true)`).
+        #expect(WindowCoverWatch.occluded(window))
+        let probe = AppKitHostProbe()
+        let watch = WindowCoverWatch(window: window) { occluded in
+            probe.outcomes.append(probe.driver.setOccluded(occluded, runtime: rt, at: 0.01))
+        }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        let deadline = Date().addingTimeInterval(2.0)
+        while probe.outcomes.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        withExtendedLifetime(watch) {}
+        #expect(probe.outcomes == [.rest], "covered: stop pacing and rest")
+        #expect(!probe.driver.canDraw, "every wake, due timer and redraw now runs covered_step")
+        #expect(!rt.liveVisible)
+
+        // No reader: a wake runs `hidden_wake` alone; the view waits for the uncovering frame.
+        rt.update(at: 0.02) { s, _ in s.extra = 4 }
+        #expect(!probe.driver.step(rt, at: 0.03))
+        #expect(Self.shownCount(rt) == "0")
+        // The host's `accessibilityChildren` attaches a reader: the next wake builds for it.
+        probe.driver.assistiveClientAttached(rt)
+        #expect(probe.driver.step(rt, at: 0.04), "the host hands the reader the committed tree")
+        #expect(Self.shownCount(rt) == "4")
+        #expect(!rt.liveVisible, "built without drawing: still covered")
+    }
+    #endif
 }

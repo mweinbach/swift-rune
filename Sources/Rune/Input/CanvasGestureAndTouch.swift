@@ -103,6 +103,9 @@ extension Runtime {
     /// there hears it first, up to the nearest scroll view; what none takes scrolls as
     /// `wheelXY` does.
     public func wheelEvent(_ ev: WheelEvent, now: Double) {
+        // A wheel is input (`Action::Wheel`): a resting poll's change splits from it (#970).
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         dispatchLockedWheel(ev, at: Vec2(ev.x, ev.y), now: now)
     }
 

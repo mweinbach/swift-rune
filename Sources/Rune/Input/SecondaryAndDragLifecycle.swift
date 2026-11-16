@@ -302,6 +302,9 @@ extension Runtime {
 
     /// Captures a secondary press at `pos` without firing primary handlers (`Runtime::secondary_down`).
     public func secondaryDown(at pos: Vec2, at now: Double = 0.0) {
+        // A secondary press is input: a resting poll's change splits from it (#970).
+        let inputMark = noteInput(at: now)
+        defer { endInputDispatch(inputMark) }
         pointerPosition = pos
         releaseHoverHold()
         dismissHelp(at: now)
@@ -335,6 +338,11 @@ extension Runtime {
 
     /// Completes a captured secondary press at `pos` (`Runtime::secondary_up`).
     public func secondaryUp(at pos: Vec2, mods: Mods = .none, at now: Double = 0.0) {
+        let inputMark = noteInput(at: now)
+        // The release queued `Action::LinkSecondary`, `Action::SecondaryPress` or a field menu:
+        // an input action whatever it changes (#970).
+        var queuedPress = false
+        defer { endInputDispatch(inputMark, queuedAction: queuedPress) }
         pointerPosition = pos
         let captured = inputMachines.secondaryCapture
         inputMachines.secondaryCapture = .up
@@ -349,6 +357,7 @@ extension Runtime {
         }
         let node = flatNodes[idx]
         let upLink = target.linkIndex
+        queuedPress = (upLink != nil && upLink == downLink) || (upLink == nil && downLink == nil)
         if let k = upLink, let d = downLink, k == d {
             if dispatchLinkDown(node: node, linkIdx: k, at: pos, button: .secondary, mods: mods, at: now) {
                 _ = dispatchLinkUp(at: pos, button: .secondary, mods: mods, suppressed: false, at: now)
