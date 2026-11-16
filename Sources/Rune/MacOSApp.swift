@@ -488,7 +488,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let accessibilityHost = MacOSAccessibilityHost()
     private lazy var textInputBridge: MacOSTextInputBridge = MacOSTextInputBridge { [weak self] imeEvent in
         guard let self else { return }
-        if self.runtime.dispatchImeEvent(imeEvent, recordReleaseGuard: self.textInputBridge.isTrackingKeyEvent, at: self.nowSeconds()) {
+        let dispatched = self.arrived(.keyPress, nil) {
+            self.runtime.dispatchImeEvent(imeEvent, recordReleaseGuard: self.textInputBridge.isTrackingKeyEvent, at: self.nowSeconds())
+        }
+        if dispatched {
             self.requestRender()
         }
     }
@@ -1004,68 +1007,79 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         MacOSKeyMapper.mods(for: event)
     }
 
+    /// Dispatches `body` as the platform input `event` of `kind` (else AppKit's current event
+    /// when it is that kind), inside the scope holding when it arrived (`input::time::arrived`).
+    @discardableResult
+    private func arrived<R>(_ kind: HostInputKind, _ event: NSEvent?, _ body: () -> R) -> R {
+        runtime.hostInput(kind, eventTimestamp: MacOSInputEvents.timestamp(kind, event), body)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseExited(with event: NSEvent) {
-        runtime.pointerExit(at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerExit(at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func otherMouseDragged(with event: NSEvent) {
-        runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerMove(to: localPoint(for: event), mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseDown(with event: NSEvent) {
-        runtime.pointerDown(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerDown(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func mouseUp(with event: NSEvent) {
-        runtime.pointerUp(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerUp(at: localPoint(for: event), button: .primary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        runtime.pointerDown(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerDown(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func rightMouseUp(with event: NSEvent) {
-        runtime.pointerUp(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds())
+        arrived(.pointer, event) { runtime.pointerUp(at: localPoint(for: event), button: .secondary, mods: mods(for: event), at: nowSeconds()) }
         renderTick()
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        runtime.pointerDown(
-            at: localPoint(for: event),
-            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
-            mods: mods(for: event),
-            at: nowSeconds()
-        )
+        arrived(.pointer, event) {
+            runtime.pointerDown(
+                at: localPoint(for: event),
+                button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+                mods: mods(for: event),
+                at: nowSeconds()
+            )
+        }
         renderTick()
     }
 
     override func otherMouseUp(with event: NSEvent) {
-        runtime.pointerUp(
-            at: localPoint(for: event),
-            button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
-            mods: mods(for: event),
-            at: nowSeconds()
-        )
+        arrived(.pointer, event) {
+            runtime.pointerUp(
+                at: localPoint(for: event),
+                button: PointerButton.fromAppKit(buttonNumber: event.buttonNumber),
+                mods: mods(for: event),
+                at: nowSeconds()
+            )
+        }
         renderTick()
     }
 
@@ -1078,21 +1092,21 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
 
     @discardableResult
     internal func dispatchMagnify(delta: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
-        let handled = runtime.magnify(MagnifyEvent(delta: delta, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        let handled = arrived(.magnify, nil) { runtime.magnify(MagnifyEvent(delta: delta, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
 
     @discardableResult
     internal func dispatchRotate(degrees: Float, at pt: Vec2, phase: GesturePhase) -> Bool {
-        let handled = runtime.rotate(RotateEvent(degrees: degrees, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds())
+        let handled = arrived(.rotate, nil) { runtime.rotate(RotateEvent(degrees: degrees, x: pt.x, y: pt.y, phase: phase), at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
 
     @discardableResult
     internal func dispatchSmartMagnify(at pt: Vec2) -> Bool {
-        let handled = runtime.smartMagnify(at: pt, now: nowSeconds())
+        let handled = arrived(.smartMagnify, nil) { runtime.smartMagnify(at: pt, now: nowSeconds()) }
         renderTick()
         return handled
     }
@@ -1127,7 +1141,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             precise: event.hasPreciseScrollingDeltas,
             mods: mods(for: event)
         )
-        runtime.wheel(wev, at: localPoint(for: event), now: nowSeconds())
+        arrived(.wheel, event) { runtime.wheel(wev, at: localPoint(for: event), now: nowSeconds()) }
         renderTick()
     }
 
@@ -1138,8 +1152,8 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     @discardableResult
-    func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false) -> Bool {
-        let handled = MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds())
+    func dispatchKeyEvent(_ ev: KeyEvent, isRepeat: Bool = false, from nsEvent: NSEvent? = nil) -> Bool {
+        let handled = arrived(.keyPress, nsEvent) { MacOSClipboardSync.dispatchKeyWithSync(ev, runtime: runtime, at: nowSeconds()) }
         _ = isRepeat
         renderTick()
         return handled
@@ -1148,7 +1162,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     @discardableResult
     func dispatchNativeKeyEvent(_ event: NSEvent) -> Bool {
         guard let kev = makeKeyEvent(from: event) else { return false }
-        return dispatchKeyEvent(kev, isRepeat: event.isARepeat)
+        return dispatchKeyEvent(kev, isRepeat: event.isARepeat, from: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1156,7 +1170,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         let imeAllowed = runtime.hasImeTarget && !runtime.hasSecureFocus && focused
         let optionAsAlt = imeAllowed && runtime.effectiveImeOptionAsAlt
         if imeAllowed {
-            let imeResult = textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt)
+            let imeResult = arrived(.keyPress, event) { textInputBridge.processKeyDown(event, in: self, optionAsAlt: optionAsAlt) }
             if imeResult == .handledByIME {
                 renderTick()
                 return
@@ -1170,7 +1184,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             return
         }
         guard let kev = makeKeyEvent(from: event) else { return }
-        _ = runtime.keyUp(kev, at: nowSeconds())
+        _ = arrived(.keyRelease, event) { runtime.keyUp(kev, at: nowSeconds()) }
         renderTick()
     }
 
@@ -1184,6 +1198,11 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     }
 
     override func flagsChanged(with event: NSEvent) {
+        arrived(.keyRelease, event) { dispatchFlagsChanged(event) }
+        renderTick()
+    }
+
+    private func dispatchFlagsChanged(_ event: NSEvent) {
         let now = nowSeconds()
         let fnTransitions = fnKeyMonitor.take()
         if !fnTransitions.isEmpty {
@@ -1201,7 +1220,6 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
         } else {
             runtime.dispatchModifiers(mods(for: event), at: now)
         }
-        renderTick()
     }
 
     // MARK: - NSTextInputClient

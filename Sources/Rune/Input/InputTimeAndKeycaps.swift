@@ -30,6 +30,54 @@ public enum InputTime {
         return scoped ?? ProcessInfo.processInfo.systemUptime
     }
 
+    /// The arrival time of the input being dispatched now, `nil` outside every `scope`: work no
+    /// input caused (`input::time::current`, which returns `None` there).
+    internal static func arrival() -> Double? {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        return state.currentScopeTime
+    }
+
+    /// Makes `at` the arrival time of what runs now, `nil` for work no input caused, and returns
+    /// the one before it, for the caller to put back (`input::time::scope`'s `Scope`, which
+    /// unlike `scope(at:)` does not count as the last input).
+    @discardableResult
+    internal static func swapArrival(_ at: Double?) -> Double? {
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        let prev = state.currentScopeTime
+        state.currentScopeTime = at
+        return prev
+    }
+
+    /// Runs `body` with `at` as its arrival time (`None` for work no input caused), as a frame
+    /// runs each queued action under its own stamp (`frame.rs`: `input::time::scope(at)`).
+    @discardableResult
+    internal static func withArrival<T>(_ at: Double?, _ body: () throws -> T) rethrows -> T {
+        let prev = swapArrival(at)
+        defer { swapArrival(prev) }
+        return try body()
+    }
+
+    /// The arrival time of a platform event stamped `timestamp` (seconds since boot, as
+    /// `NSEvent`/`UIEvent` stamp them), or now when it has none or is stamped after now
+    /// (`input::time::arrived` with `native`/`since_boot`).
+    internal static func arrival(ofEventStamped timestamp: Double?) -> Double {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        guard let timestamp, timestamp.isFinite, uptime - timestamp > 0 else { return uptime }
+        return sinceBoot(now: uptime, uptime: uptime, timestamp: timestamp)
+    }
+
+    /// A window took an input event from the platform now: `lastInput` is the moment it was
+    /// dispatched, not its arrival stamp, so input dispatched after a frame is always later than
+    /// that frame (`input::time::arrived` setting `LAST` to `Instant::now()`).
+    internal static func noteDispatched() {
+        let now = ProcessInfo.processInfo.systemUptime
+        state.lock.lock()
+        state.lastTimestamp = now
+        state.lock.unlock()
+    }
+
     /// Runs `body` with the current event timestamp bound to `timestamp` (`input::time::scope`).
     public static func scope<T>(at timestamp: Double, _ body: () throws -> T) rethrows -> T {
         state.lock.lock()
