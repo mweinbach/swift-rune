@@ -77,6 +77,8 @@ public struct ElementA11yInput: Sendable, Equatable {
     internal var labelledBy: String?
     internal var describedBy: String?
     internal var description: String?
+    internal var positionInSet: Int?
+    internal var sizeOfSet: Int?
     internal var modalMember: Bool?
     internal var explicitFocus = false
     internal var rolePressable = false
@@ -113,6 +115,8 @@ public struct ElementA11yInput: Sendable, Equatable {
         labelledBy = el.a11yLabelledBy
         describedBy = el.a11yDescribedBy
         description = el.a11yDescription
+        positionInSet = el.a11yPosInSet.map { max(1, $0.position) - 1 }
+        sizeOfSet = el.a11yPosInSet?.size
         self.modalMember = modalMember
         explicitInert = el.isInert
         explicitFocus = el.explicitlyFocusable

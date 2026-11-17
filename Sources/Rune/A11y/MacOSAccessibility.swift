@@ -161,6 +161,8 @@ public extension AccessibilityTreeBuilder {
                 isSelected: info.itemSelected,
                 isExpanded: info.expanded,
                 level: info.level.map { max(0, $0 - 1) },
+                positionInSet: input?.positionInSet,
+                sizeOfSet: input?.sizeOfSet,
                 isDisabled: info.disabled || inert,
                 isModal: input?.isModal == true,
                 isSecure: isSecure,
@@ -358,7 +360,7 @@ public extension Runtime {
             }
 
             let resolvedPosInSet: Int? = {
-                if let explicit = el.a11yPosInSet?.position { return max(0, explicit - 1) }
+                if let explicit = el.a11yPosInSet?.position { return max(1, explicit) - 1 }
                 guard let pIdx = node.parentIndex, pIdx >= 0, pIdx < flatNodes.count,
                       let vList = virtualLists[flatNodes[pIdx].path] else { return nil }
                 let rowSeg = node.path.split(separator: "/").last.map(String.init) ?? ""

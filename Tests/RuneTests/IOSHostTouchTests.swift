@@ -17,16 +17,23 @@ struct IOSHostTouchTests {
             ])
         }
         let view = try RuneIOSView(frame: .zero, runtime: runtime)
+        func focusedRows() throws -> [RuneUIAccessibilityElement] {
+            func walk(_ elements: [RuneUIAccessibilityElement]) -> [RuneUIAccessibilityElement] {
+                elements.flatMap { node in
+                    let children = node.accessibilityElements as? [RuneUIAccessibilityElement] ?? []
+                    return (node.isRuneFocused ? [node] : []) + walk(children)
+                }
+            }
+            return walk(try #require(view.accessibilityElements as? [RuneUIAccessibilityElement]))
+        }
         _ = runtime.frame(at: 0)
         #expect(runtime.accessibilityAction("files", .focus, at: 0.1))
         _ = runtime.frame(at: 0.1)
-        let firstList = try #require(view.accessibilityElements as? [RuneUIAccessibilityElement])
-        let first = try #require(firstList.first { $0.isRuneFocused })
+        let first = try #require(focusedRows().first)
         #expect(first.nodeId == "first")
         runtime.update(at: 0.2) { state, _ in state = "second" }
         _ = runtime.frame(at: 0.2)
-        let next = try #require(view.accessibilityElements as? [RuneUIAccessibilityElement])
-        #expect(next.filter(\.isRuneFocused).map(\.nodeId) == ["second"])
+        #expect(try focusedRows().map(\.nodeId) == ["second"])
         #expect(!first.isRuneFocused)
         #expect(runtime.focusedKey == "files")
     }

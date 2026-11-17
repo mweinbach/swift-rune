@@ -162,6 +162,10 @@ struct A11yPresentationTests {
     #endif
 
     #if canImport(UIKit) && !os(watchOS)
+    private func nativeContents(_ element: RuneUIAccessibilityElement) -> [RuneUIAccessibilityElement] {
+        element.accessibilityElements as? [RuneUIAccessibilityElement] ?? []
+    }
+
     @Test func uiKitExposesNamedAndFocusableGroupsInReadingOrder() {
         let root = AccessibilityNode(id: "root", role: .group, children: [
             AccessibilityNode(id: "layout", role: .group, actions: [.scrollIntoView], children: [
@@ -171,12 +175,145 @@ struct A11yPresentationTests {
             AccessibilityNode(id: "keyboard", role: .group, isFocusable: true),
             AccessibilityNode(id: "viewport", role: .scrollView, label: "Items")
         ])
-        let elements = UIKitAccessibilityMapper.buildElements(from: root, container: UIView())
-        #expect(elements.map(\.nodeId) == ["text", "named", "keyboard", "viewport"])
-        #expect(elements.filter { $0.isAccessibilityElement }.count == elements.count)
-        #expect(elements.first { $0.nodeId == "named" }?.accessibilityLabel == "Inspector")
+        func stops(_ elements: [RuneUIAccessibilityElement]) -> [RuneUIAccessibilityElement] {
+            elements.flatMap { $0.isAccessibilityElement ? [$0] : stops(nativeContents($0)) }
+        }
+        let readable = stops(UIKitAccessibilityMapper.buildElements(from: root, container: UIView()))
+        #expect(readable.map(\.nodeId) == ["text", "named", "keyboard", "viewport"])
+        #expect(readable.first { $0.nodeId == "named" }?.accessibilityLabel == "Inspector")
+    }
+
+    @Test func uiKitExposesNativeContainersAndReadingOrder() async throws {
+        let roles: [(ElementRole, UIAccessibilityContainerType)] = [
+            (.list, .list), (.listbox, .list), (.tree, .list),
+            (.table, .dataTable), (.grid, .dataTable), (.treeGrid, .dataTable),
+            (.group, .semanticGroup), (.main, .landmark), (.region, .landmark)
+        ]
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let host = UIView(frame: CGRect(x: 20, y: 30, width: 240, height: 160))
+        window.addSubview(host)
+        try await confirmation(expectedCount: roles.count) { activated in
+            for (role, expectedType) in roles {
+                let root = AccessibilityNode(id: "container", role: role, label: "Items",
+                                             frame: .fromXYWH(10, 15, 200, 120), children: [
+                    AccessibilityNode(id: "action", role: .button, label: "Open",
+                                      frame: .fromXYWH(48, 67, 80, 24), actions: [.press], children: [
+                        AccessibilityNode(id: "caption", role: .text, label: "Open")
+                    ]),
+                    AccessibilityNode(id: "next", role: .text, label: "Next")
+                ])
+                let top = UIKitAccessibilityMapper.buildElements(from: root, container: host) { id, action in
+                    #expect(id == "action")
+                    #expect(action == .press)
+                    activated()
+                }
+                try #require(top.count == 1)
+                let container = top[0]
+                #expect(container.accessibilityContainerType == expectedType)
+                #expect(!container.isAccessibilityElement)
+                let children = nativeContents(container)
+                try #require(children.map(\.nodeId) == ["action", "next"])
+                #expect(children.allSatisfy { ($0.accessibilityContainer as? RuneUIAccessibilityElement) === container })
+                #expect(container.accessibilityElementCount() == children.count)
+                #expect((container.accessibilityElement(at: 1) as? RuneUIAccessibilityElement) === children[1])
+                #expect(container.index(ofAccessibilityElement: children[0]) == 0)
+                #expect(children[0].isAccessibilityElement)
+                #expect(children[0].accessibilityContainerType == .none)
+                #expect(nativeContents(children[0]).isEmpty)
+                #expect(children[0].accessibilityActivate())
+                #expect(children[0].accessibilityFrameInContainerSpace == CGRect(x: 38, y: 52, width: 80, height: 24))
+                let screenFrame = UIAccessibility.convertToScreenCoordinates(CGRect(x: 48, y: 67, width: 80, height: 24), in: host)
+                #expect(children[0].accessibilityFrame == screenFrame)
+            }
+        }
+    }
+
+    @Test func uiKitDataTableTracksCellsAcrossUpdates() throws {
+        let host = UIView()
+        var cache: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
+        let header = AccessibilityNode(id: "head", role: .columnHeader, label: "Filename")
+        let title = AccessibilityNode(id: "title", role: .rowHeader, label: "Folder")
+        let cell = AccessibilityNode(id: "cell", role: .gridCell, label: "Projects", children: [
+            AccessibilityNode(id: "text", role: .text, label: "Projects")
+        ])
+        let blankCell = AccessibilityNode(id: "blank", role: .cell)
+        let wrapper = AccessibilityNode(id: "layout", role: .group, children: [blankCell])
+        func publish(_ cells: [AccessibilityNode]) throws -> RuneUIAccessibilityElement {
+            let table = AccessibilityNode(id: "files", role: .treeGrid, children: [
+                AccessibilityNode(id: "columns", role: .row, children: [header]),
+                AccessibilityNode(id: "folder", role: .row, children: cells)
+            ])
+            let top = UIKitAccessibilityMapper.updateElements(from: table, container: host, cache: &cache, onAction: nil)
+            return try #require(top.first)
+        }
+        let table = try publish([title, cell, wrapper])
+        let data = try #require((table as AnyObject) as? any UIAccessibilityContainerDataTable)
+        #expect(data.accessibilityRowCount() == 2)
+        #expect(data.accessibilityColumnCount() == 3)
+        let row = try #require(nativeContents(table).last)
+        let target = try #require(nativeContents(row).first { $0.nodeId == "cell" })
+        #expect(target.isAccessibilityElement)
+        #expect(nativeContents(target).isEmpty)
+        let nativeCell = try #require(data.accessibilityDataTableCellElement(forRow: 1, column: 1))
+        let blank = try #require(data.accessibilityDataTableCellElement(forRow: 1, column: 2))
+        #expect((blank as? RuneUIAccessibilityElement)?.nodeId == "blank")
+        #expect((nativeCell as AnyObject) === target)
+        #expect(nativeCell.accessibilityRowRange() == NSRange(location: 1, length: 1))
+        #expect(nativeCell.accessibilityColumnRange() == NSRange(location: 1, length: 1))
+        #expect(data.accessibilityDataTableCellElement(forRow: 0, column: 1) == nil)
+        #expect(data.accessibilityDataTableCellElement(forRow: 2, column: 0) == nil)
+        let columnHeaders = try #require(data.accessibilityHeaderElements?(forColumn: 0))
+        let rowHeaders = try #require(data.accessibilityHeaderElements?(forRow: 1))
+        #expect(columnHeaders.compactMap { ($0 as? RuneUIAccessibilityElement)?.nodeId } == ["head"])
+        #expect(rowHeaders.compactMap { ($0 as? RuneUIAccessibilityElement)?.nodeId } == ["title"])
+        #expect(try publish([cell, title]) === table)
+        #expect((data.accessibilityDataTableCellElement(forRow: 1, column: 0) as AnyObject?) === target)
+        #expect(nativeCell.accessibilityColumnRange() == NSRange(location: 0, length: 1))
+        _ = try publish([AccessibilityNode(id: "cell", role: .text, label: "Summary")])
+        #expect(data.accessibilityDataTableCellElement(forRow: 1, column: 0) == nil)
+        #expect(nativeCell.accessibilityRowRange() == NSRange(location: NSNotFound, length: 0))
+        #expect(nativeCell.accessibilityColumnRange() == NSRange(location: NSNotFound, length: 0))
+    }
+
+    @Test func uiKitDataTablePreservesLogicalRowsOutsideTheViewport() throws {
+        let host = UIView()
+        func table(_ positions: [Int], size: Int) throws -> any UIAccessibilityContainerDataTable {
+            let header = AccessibilityNode(id: "header", role: .row, children: [
+                AccessibilityNode(id: "name", role: .columnHeader, label: "Name")
+            ])
+            let rows = positions.enumerated().map { index, position in
+                AccessibilityNode(id: "row-\(index)", role: .row, positionInSet: position, sizeOfSet: size, children: [
+                    AccessibilityNode(id: "file-\(index)", role: .cell, label: "File \(index)")
+                ])
+            }
+            let root = AccessibilityNode(id: "files", role: .table, children: [header] + rows)
+            let native = try #require(UIKitAccessibilityMapper.buildElements(from: root, container: host).first)
+            return try #require((native as AnyObject) as? any UIAccessibilityContainerDataTable)
+        }
+        let data = try table([24, 25], size: 100_000)
+        #expect(data.accessibilityRowCount() == 100_001)
+        let header = try #require(data.accessibilityDataTableCellElement(forRow: 0, column: 0))
+        #expect((header as? RuneUIAccessibilityElement)?.nodeId == "name")
+        let cell = try #require(data.accessibilityDataTableCellElement(forRow: 25, column: 0))
+        #expect(cell.accessibilityRowRange() == NSRange(location: 25, length: 1))
+        #expect((cell as? RuneUIAccessibilityElement)?.nodeId == "file-0")
+        #expect((data.accessibilityDataTableCellElement(forRow: 26, column: 0) as? RuneUIAccessibilityElement)?.nodeId == "file-1")
+        #expect(data.accessibilityDataTableCellElement(forRow: 24, column: 0) == nil)
+        #expect(data.accessibilityDataTableCellElement(forRow: 99_999, column: 0) == nil)
+        for invalid in [try table([24, 24], size: 100_000), try table([1, 2], size: Int.max)] {
+            #expect(invalid.accessibilityRowCount() == 3)
+            #expect((invalid.accessibilityDataTableCellElement(forRow: 1, column: 0) as? RuneUIAccessibilityElement)?.nodeId == "file-0")
+        }
     }
     #endif
+
+    @Test func minimumAuthoredSetPositionClampsToFirstItem() throws {
+        let row: El<Int> = el().key("row").role(.row).label("First").positionInSet(.min, size: 2)
+        for node in try projections(row, state: 0) {
+            #expect(node.positionInSet == 0)
+            #expect(node.sizeOfSet == 2)
+        }
+    }
 
     @Test func dialogRolesPreserveAuthoredModality() throws {
         for role in [ElementRole.dialog, .alertDialog] {

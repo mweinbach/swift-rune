@@ -419,7 +419,7 @@ public enum AccessibilityTreeBuilder {
             selectedState: selectedState,
             isExpanded: element.a11yExpanded,
             level: element.a11yLevel.map { max(0, $0 - 1) },
-            positionInSet: element.a11yPosInSet.map { max(0, $0.position - 1) },
+            positionInSet: element.a11yPosInSet.map { max(1, $0.position) - 1 },
             sizeOfSet: element.a11yPosInSet?.size,
             keyboardShortcut: element.a11yShortcutHint,
             url: element.a11yHref,
@@ -741,16 +741,17 @@ public enum UIKitAccessibilityMapper {
     public static func traits(for role: ElementRole) -> UIAccessibilityTraits {
         switch role {
         case .button, .menuItem, .menuItemCheckbox, .menuItemRadio: return .button
-        case .text, .listItem, .group, .dialog, .alertDialog, .menu, .separator, .figure: return .staticText
+        case .text, .listItem, .dialog, .alertDialog, .menu, .separator, .figure: return .staticText
         case .presentation, .scrollView, .menuBar, .toolbar, .list, .textInput, .passwordInput, .multilineTextInput,
-             .navigation, .banner, .complementary, .contentInfo, .form, .search: return .none
+             .group, .listbox, .tree, .table, .grid, .treeGrid, .row, .cell, .gridCell, .rowHeader, .columnHeader,
+             .navigation, .banner, .complementary, .contentInfo, .form, .main, .region, .search: return .none
         case .splitter, .slider: return .adjustable
         case .status, .progress: return [.staticText, .updatesFrequently]
         case .heading: return .header
         case .image, .icon: return .image
         case .checkbox, .switchControl, .radio, .tab: return .button
         case .combobox, .option, .link: return .button
-        case .listbox, .tree, .treeItem, .grid, .treeGrid, .row, .cell, .gridCell, .rowHeader, .columnHeader, .radiogroup, .tabList, .tooltip, .alert, .region, .main, .mark, .code, .blockquote, .table:
+        case .treeItem, .radiogroup, .tabList, .tooltip, .alert, .mark, .code, .blockquote:
             return .staticText
         }
     }
@@ -765,9 +766,45 @@ public enum UIKitAccessibilityMapper {
         return updateElements(from: node, container: container, cache: &cache, routingByPath: false, onAction: onAction)
     }
 
-    fileprivate static func isElement(_ node: AccessibilityNode) -> Bool {
-        node.role != .group || node.isFocusable || AccessibilityNameSource.nonblank(node.label) != nil ||
+    fileprivate static func containerType(for role: ElementRole) -> UIAccessibilityContainerType {
+        switch role {
+        case .table, .grid, .treeGrid: return .dataTable
+        case .list, .listbox, .tree: return .list
+        case .banner, .complementary, .contentInfo, .form, .main, .navigation, .region, .search: return .landmark
+        case .group: return .semanticGroup
+        default: return .none
+        }
+    }
+
+    private static func hasOwnControl(_ node: AccessibilityNode) -> Bool {
+        node.isFocusable || node.toggled != nil || node.value != nil || node.range != nil ||
             node.actions.contains { $0 != .scrollIntoView }
+    }
+
+    fileprivate static func isElement(_ node: AccessibilityNode) -> Bool {
+        guard !node.children.isEmpty else {
+            return node.role != .group || hasOwnControl(node) || node.label != nil || node.help != nil
+        }
+        // A focusable tree can retain keyboard focus while VoiceOver visits its active row.
+        // UIKit ignores the descendants of any object marked as an accessibility element.
+        if node.activeDescendant != nil || node.role == .row { return false }
+        switch containerType(for: node.role) {
+        case .dataTable, .list: return false
+        default: break
+        }
+        if hasOwnControl(node) { return true }
+        if node.role == .group { return false }
+        switch node.role {
+        case .cell, .gridCell, .columnHeader, .rowHeader:
+            // A RuneKit cell takes its name from its text. The cell is the table navigation target.
+            if node.label != nil && node.children.allSatisfy({ $0.role == .text && !hasOwnControl($0) && $0.children.isEmpty }) {
+                return true
+            }
+        default: break
+        }
+        return !node.children.contains {
+            !$0.children.isEmpty || hasOwnControl($0) || $0.label != nil || $0.help != nil
+        }
     }
 
     @MainActor
@@ -778,22 +815,35 @@ public enum UIKitAccessibilityMapper {
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?
     ) -> [RuneUIAccessibilityElement] {
         var next: [AccessibilityIdentity: RuneUIAccessibilityElement] = [:]
-        var result: [RuneUIAccessibilityElement] = []
-        AccessibilityIdentity.walk(root) { node, identity in
-            guard isElement(node) else { return }
-            let element: RuneUIAccessibilityElement
-            if let existing = cache[identity] {
-                existing.update(node)
-                element = existing
-            } else {
-                element = RuneUIAccessibilityElement(node: node, container: container, onAction: onAction)
-            }
+        let hostView = (container as? UIView) ?? (container as? RuneUIAccessibilityElement)?.hostView
+        func build(_ node: AccessibilityNode, parentID: AccessibilityIdentity?, in owner: Any,
+                   origin: CGPoint, occurrences: inout [String: Int]) -> RuneUIAccessibilityElement {
+            let identity = AccessibilityIdentity(node, parent: parentID, occurrences: &occurrences)
+            let element = cache[identity] ?? RuneUIAccessibilityElement(container: owner, onAction: onAction)
+            element.accessibilityContainer = owner as AnyObject
+            element.hostView = hostView
+            element.update(node, origin: origin)
             if routingByPath { element.actionTarget = node.runtimePath ?? node.id }
-            result.append(element)
             next[identity] = element
+            if element.isAccessibilityElement || node.children.isEmpty {
+                element.accessibilityElements = nil
+            } else {
+                var children: [String: Int] = [:]
+                let childOrigin = CGPoint(x: CGFloat(node.frame.x), y: CGFloat(node.frame.y))
+                element.accessibilityElements = node.children.map {
+                    build($0, parentID: identity, in: element, origin: childOrigin, occurrences: &children)
+                }
+            }
+            if element.accessibilityContainerType == .dataTable {
+                element.tableData = UIKitAccessibilityTable(element: element)
+            }
+            return element
         }
+        var roots: [String: Int] = [:]
+        let element = build(root, parentID: nil, in: container, origin: .zero, occurrences: &roots)
+        for (id, old) in cache where next[id] == nil { old.detach() }
         cache = next
-        return result
+        return [element]
     }
 }
 
@@ -803,21 +853,58 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
     public private(set) var nodeId: String = ""
     public private(set) var supportedActions: [AccessibilityAction] = []
     internal private(set) var isRuneFocused = false
+    internal private(set) var semanticRole: ElementRole = .group
+    internal private(set) var setPosition: Int?
+    internal private(set) var setSize: Int?
+    internal var tableData: UIKitAccessibilityTable?
+    internal var tableRow: Int?
+    internal var tableColumn: Int?
+    fileprivate weak var hostView: UIView?
+    private var frameInHost = CGRect.zero
+    private var nativeChildren: [Any]?
+    private var indexInParent = NSNotFound
     fileprivate var actionTarget = ""
     private let actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
 
-    public init(
+    public convenience init(
         node: AccessibilityNode,
         container: Any,
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?
     ) {
-        self.actionHandler = onAction
-        super.init(accessibilityContainer: container)
-        update(node)
+        self.init(container: container, onAction: onAction)
+        var occurrences: [String: Int] = [:]
+        let identity = AccessibilityIdentity(node, parent: nil, occurrences: &occurrences)
+        var cache = [identity: self]
+        _ = UIKitAccessibilityMapper.updateElements(from: node, container: container, cache: &cache,
+                                                    routingByPath: false, onAction: onAction)
     }
 
-    fileprivate func update(_ node: AccessibilityNode) {
+    fileprivate init(container: Any, onAction: (@Sendable (String, AccessibilityAction) -> Void)?) {
+        self.actionHandler = onAction
+        super.init(accessibilityContainer: container)
+    }
+
+    fileprivate func detach() {
+        accessibilityContainer = nil
+        hostView = nil
+        frameInHost = .zero
+        accessibilityElements = nil
+        isAccessibilityElement = false
+        isRuneFocused = false
+        supportedActions = []
+        tableData = nil
+        tableRow = nil
+        tableColumn = nil
+    }
+
+    fileprivate func update(_ node: AccessibilityNode, origin: CGPoint) {
         nodeId = node.id
+        semanticRole = node.role
+        setPosition = node.positionInSet
+        setSize = node.sizeOfSet
+        tableData = nil
+        tableRow = nil
+        tableColumn = nil
         isRuneFocused = node.isFocused
         actionTarget = node.id
         supportedActions = node.actions
@@ -827,22 +914,55 @@ public final class RuneUIAccessibilityElement: UIAccessibilityElement {
         self.accessibilityValue = node.value
         self.accessibilityHint = node.help
         self.accessibilityViewIsModal = node.isModal
-        switch node.role {
-        case .banner, .complementary, .contentInfo, .form, .main, .navigation, .region, .search:
-            accessibilityContainerType = .landmark
-        default:
-            accessibilityContainerType = .none
-        }
+        accessibilityContainerType = UIKitAccessibilityMapper.containerType(for: node.role)
         var traits = UIKitAccessibilityMapper.traits(for: node.role)
         if node.isSelected { traits.insert(.selected) }
         if node.isDisabled { traits.insert(.notEnabled) }
         self.accessibilityTraits = traits
-        self.accessibilityFrameInContainerSpace = CGRect(
+        frameInHost = CGRect(
             x: CGFloat(node.frame.x),
             y: CGFloat(node.frame.y),
             width: CGFloat(node.frame.width),
             height: CGFloat(node.frame.height)
         )
+        accessibilityFrameInContainerSpace = frameInHost.offsetBy(dx: -origin.x, dy: -origin.y)
+    }
+
+    public override var accessibilityFrame: CGRect {
+        get {
+            // UIKit cannot convert the bounds of a nested, viewless accessibility container.
+            guard let hostView else { return super.accessibilityFrame }
+            return UIAccessibility.convertToScreenCoordinates(frameInHost, in: hostView)
+        }
+        set { super.accessibilityFrame = newValue }
+    }
+
+    public override var accessibilityElements: [Any]? {
+        get { nativeChildren }
+        set {
+            nativeChildren = newValue
+            if let children = newValue {
+                for (index, element) in children.enumerated() {
+                    (element as? RuneUIAccessibilityElement)?.indexInParent = index
+                }
+            }
+        }
+    }
+
+    public override func accessibilityElementCount() -> Int { nativeChildren?.count ?? 0 }
+
+    public override func accessibilityElement(at index: Int) -> Any? {
+        guard let children = nativeChildren, children.indices.contains(index) else { return nil }
+        return children[index]
+    }
+
+    public override func index(ofAccessibilityElement element: Any) -> Int {
+        guard let children = nativeChildren else { return NSNotFound }
+        if let native = element as? RuneUIAccessibilityElement {
+            let index = native.indexInParent
+            return children.indices.contains(index) && (children[index] as AnyObject) === native ? index : NSNotFound
+        }
+        return children.firstIndex { ($0 as AnyObject) === (element as AnyObject) } ?? NSNotFound
     }
 
     public override func accessibilityActivate() -> Bool {
