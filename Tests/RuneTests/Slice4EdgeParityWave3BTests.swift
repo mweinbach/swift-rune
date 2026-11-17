@@ -117,7 +117,7 @@ struct Slice4EdgeParityWave3BTests {
         rt.update(at: 0) { _, tx in tx.focus("scroll") }
         _ = rt.frame(at: 0)
         #expect(rt.focusedKey == "scroll")
-        let view = RuneMetalHostView(frame: NSRect(x: 0, y: 0, width: 200, height: 200), runtime: rt,
+        let view = RuneMetalHostView(frame: .zero, runtime: rt,
                                      renderer: try MetalRenderer(), timeScale: 1, respectSystemAppearance: false)
         for held in [false, true] {
             let event = try #require(NSEvent.keyEvent(

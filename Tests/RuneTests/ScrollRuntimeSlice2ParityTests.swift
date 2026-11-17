@@ -506,7 +506,7 @@ struct ScrollRuntimeSlice2ParityTests {
         for _ in 0..<4 {
             t += 1.0 / 60.0
             _ = rt.frame(at: t)
-            if rt.hoverHoldState == .held {
+            if rt.hoverHold.held {
                 heldMidGlide = true
                 #expect(rt.hoveredKey == "r5")
             }
