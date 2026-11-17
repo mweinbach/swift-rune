@@ -976,9 +976,10 @@ struct ScrollStateMachinesParityTests {
 
     @Test("wheel: shift_turns_only_a_purely_vertical_wheel")
     func wheelShiftTurnsOnlyAPurelyVerticalWheel() {
-        #expect(wheelDelta(.lineDelta(0.0, -1.0), scale: 2.0, shift: false) == (0.0, -40.0))
-        #expect(wheelDelta(.lineDelta(0.0, -1.0), scale: 2.0, shift: true) == (-40.0, 0.0), "Shift + mouse wheel")
-        #expect(wheelDelta(.lineDelta(1.0, 0.0), scale: 2.0, shift: false) == (40.0, 0.0), "a horizontal wheel")
+        let line = WheelDistance.linePoints
+        #expect(wheelDelta(.lineDelta(0.0, -1.0), scale: 2.0, shift: false) == (0.0, -line))
+        #expect(wheelDelta(.lineDelta(0.0, -1.0), scale: 2.0, shift: true) == (-line, 0.0), "Shift + mouse wheel")
+        #expect(wheelDelta(.lineDelta(1.0, 0.0), scale: 2.0, shift: false) == (line, 0.0), "a horizontal wheel")
         let trackpad = MouseScrollDelta.pixelDelta(x: -8.0, y: 20.0)
         #expect(wheelDelta(trackpad, scale: 2.0, shift: true) == (-4.0, 10.0), "a delta with a horizontal part stays as it is")
         #if os(macOS)
