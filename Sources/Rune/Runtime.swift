@@ -3553,13 +3553,14 @@ public final class Runtime<State> {
             let childFoldHeaderPath: String? = (foldChildLift > 0) ? effectiveFoldHeaders["fold:\(path)"] : nextFoldHeaderPath
             let childFoldHeaderLift: Float = (foldChildLift > 0) ? foldChildLift : nextFoldHeaderLift
 
+            let childLayouts = el.layout.usesNaturalGrowthContents ? item.naturalLayout?.children ?? solved.children : solved.children
             var childItems: [WalkItem] = []
             childItems.reserveCapacity(childCount)
             for cIdx in 0..<childCount {
                 let childEl = el.children[cIdx]
                 childItems.append(WalkItem(
                     el: childEl,
-                    solved: solved.children[cIdx],
+                    solved: childLayouts[cIdx],
                     resolvedKey: childResolvedKeys[cIdx],
                     path: childPaths[cIdx],
                     parentIdx: myIndex,

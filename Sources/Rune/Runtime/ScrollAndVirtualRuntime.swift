@@ -1545,8 +1545,16 @@ extension Runtime {
                     let overflows = entry.edge.overflow && (t.streaming || t.isPaced)
                     if t.moving || hasStreamingLagClamp || landedFoldExiting {
                         if t.h < t.target - 1e-4 || hasStreamingLagClamp || clampCollapse || diff > 1e-4 {
-                            out.layout.height = .points(max(0, t.h))
-                            out.layout.maxHeight = .points(max(0, t.h))
+                            let height = max(0, t.h)
+                            let border = el.layout.borderLayout
+                                ? TaffyBridge.snappedBorderSides(el.borderSides ?? .all(el.borderWidth), pixelScale: pixelScale)
+                                : el.layout.border
+                            let insetHeight = max(0, el.layout.padding.top) + max(0, el.layout.padding.bottom) + border.top + border.bottom
+                            out.layout.usesNaturalGrowthContents = height < insetHeight
+                            let boxHeight = el.layout.boxSizingBorderBox || height < insetHeight ? height : height - insetHeight
+                            out.layout.height = .points(boxHeight)
+                            out.layout.minHeight = .points(boxHeight)
+                            out.layout.maxHeight = .points(boxHeight)
                             if entry.edge.clip && !overflows {
                                 out.layout.clipOverflow = true
                             }
