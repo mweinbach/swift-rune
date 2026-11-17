@@ -112,7 +112,7 @@ final class RetainedLayoutCoordinator {
         let childMark: Int
         let children: [El<State>]
         var childKeys: [String: Int] = [:]
-        var childIndices: [Int] = []
+        var childOffsets: [Int] = []
         var childrenDirty = false
         let memo: MemoMark?
     }
@@ -122,18 +122,19 @@ final class RetainedLayoutCoordinator {
         case finished(SyncResult)
     }
 
+    /// Preorder edges are relative to this node, so sibling insertions preserve an entire memo slice.
     private struct PreparedNode {
         var path: String
         var storeKey: UInt64
         var runtimeId: RuneMotion.NodeId
         var screenIdentity: Bool
-        var parentIndex: Int?
+        var parentOffset: Int?
         var slot: SlotId = SlotId()
         var taffyStyle: RuneTaffy.TaffyStyle
         var rawTaffyStyle: RuneTaffy.TaffyStyle
         var aspectFitRatio: Float?
         var measure: MeasureBox?
-        var childIndices: [Int] = []
+        var childOffsets: [Int] = []
         var flow: Flow = .ltr
         var pin: DirPin = .flowing
     }
@@ -187,7 +188,7 @@ final class RetainedLayoutCoordinator {
         onLiveIdsReady: ((Set<RuneMotion.NodeId>) -> Void)? = nil
     ) -> LayoutEngine.ResultNode {
         var flat: [PreparedNode] = []
-        flat.reserveCapacity(32)
+        flat.reserveCapacity(max(32, store.liveCount))
         var aspectFitIndices: [Int] = []
         var hasAnchoredFit = false
         var nonSecretLeaves: [TextLeafFallback] = []
@@ -567,7 +568,7 @@ final class RetainedLayoutCoordinator {
                 storeKey: keyHash,
                 runtimeId: runtimeNodeId,
                 screenIdentity: el.layoutAnim?.travel == .screen && resolvedKey != nil,
-                parentIndex: parentIndex,
+                parentOffset: parentIndex.map { $0 - myIndex },
                 taffyStyle: effectiveTaffy,
                 rawTaffyStyle: rawTaffy,
                 aspectFitRatio: ratio,
@@ -645,8 +646,8 @@ final class RetainedLayoutCoordinator {
                 store.rekeyAndReuseBatch(slots)
             }
             let oldRoot = span.nodes.first!
-            flat[p.myIndex].childIndices = shift == 0 ? oldRoot.childIndices : oldRoot.childIndices.map { $0 + shift }
-            if shift == 0 && !changedIds {
+            flat[p.myIndex].childOffsets = oldRoot.childOffsets
+            if !changedIds {
                 for (offset, node) in span.nodes.dropFirst().enumerated() {
                     store.reuseSlot(node.slot, nodeIndex: UInt32(p.myIndex + offset + 1))
                     if node.flow == .rtl { hasMirroredFlow = true }
@@ -665,10 +666,6 @@ final class RetainedLayoutCoordinator {
                         let runtimePath = keyedRootPath.map { $0 + node.path.dropFirst(storeRootPath.count) } ?? node.path
                         node.runtimeId = RuneMotion.NodeId.hash(runtimePath)
                     }
-                    if shift != 0 {
-                        node.parentIndex = node.parentIndex.map { $0 + shift }
-                        node.childIndices = node.childIndices.map { $0 + shift }
-                    }
                     if node.flow == .rtl { hasMirroredFlow = true }
                     textLayouts?.liveIds.insert(node.runtimeId)
                     flat.append(node)
@@ -683,7 +680,7 @@ final class RetainedLayoutCoordinator {
                 let index = leaf.index + shift
                 overflowLeaves.append((index, flat[index].runtimeId, leaf.text))
             }
-            for child in flat[p.myIndex].childIndices { store.pushChild(flat[child].slot) }
+            for offset in flat[p.myIndex].childOffsets { store.pushChild(flat[p.myIndex + offset].slot) }
             reusedMemoNodeCount += span.nodes.count - 1
             return true
         }
@@ -780,7 +777,7 @@ final class RetainedLayoutCoordinator {
             if let memoKey, let span = memoSpans[memoKey], span.record.identity === identity,
                reuseChildren(span, p) {
                 let (slot, dirty) = syncFinish(p, childMark: childMark, childrenDirty: false)
-                if !wasRecording, span.isGroupRoot, p.path == span.root.path, p.myIndex == span.root.myIndex,
+                if !wasRecording, span.isGroupRoot, p.path == span.root.path,
                    keyedRootPath == span.keyedRootPath, span.nodes.first?.slot == slot {
                     nextMemoSpans[memoKey] = span
                     for inner in span.nested {
@@ -805,14 +802,14 @@ final class RetainedLayoutCoordinator {
                 recordingMemo = true
             }
             var visit = SyncVisit(prepared: p, childMark: childMark, children: el.children, memo: mark)
-            visit.childIndices.reserveCapacity(el.children.count)
+            visit.childOffsets.reserveCapacity(el.children.count)
             return .visit(visit)
         }
 
         @inline(never)
         func finishVisit(_ visit: SyncVisit<State>) -> SyncResult {
             let p = visit.prepared
-            flat[p.myIndex].childIndices = visit.childIndices
+            flat[p.myIndex].childOffsets = visit.childOffsets
             let (slot, dirty) = syncFinish(p, childMark: visit.childMark, childrenDirty: visit.childrenDirty)
             if let mark = visit.memo {
                 recordingMemo = mark.wasRecording
@@ -839,12 +836,13 @@ final class RetainedLayoutCoordinator {
                 case .finished(let result):
                     guard !stack.isEmpty else { return result }
                     let parent = stack.count - 1
-                    stack[parent].childIndices.append(result.idx)
+                    let offset = result.idx - stack[parent].prepared.myIndex
+                    stack[parent].childOffsets.append(offset)
                     if result.dirty { stack[parent].childrenDirty = true }
                     store.pushChild(result.slot)
                 }
                 let parent = stack.count - 1
-                let index = stack[parent].childIndices.count
+                let index = stack[parent].childOffsets.count
                 if index == stack[parent].children.count {
                     next = .finished(finishVisit(stack.removeLast()))
                 } else {
@@ -926,6 +924,16 @@ final class RetainedLayoutCoordinator {
 
         store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
 
+        func ancestorSlots(of index: Int) -> [SlotId] {
+            var ancestors: [SlotId] = []
+            var current = index
+            while let offset = flat[current].parentOffset {
+                current += offset
+                ancestors.append(flat[current].slot)
+            }
+            return ancestors
+        }
+
         if !aspectFitIndices.isEmpty {
             for idx in aspectFitIndices {
                 guard let ratio = flat[idx].aspectFitRatio else { continue }
@@ -936,13 +944,7 @@ final class RetainedLayoutCoordinator {
                     room: RuneTaffy.Size(width: roomLayout.size.width, height: roomLayout.size.height)
                 )
                 flat[idx].taffyStyle = fitted
-                var ancestors: [SlotId] = []
-                var cur = flat[idx].parentIndex
-                while let p = cur {
-                    ancestors.append(flat[p].slot)
-                    cur = flat[p].parentIndex
-                }
-                store.setStyleAndMarkAncestors(flat[idx].slot, style: fitted, ancestors: ancestors)
+                store.setStyleAndMarkAncestors(flat[idx].slot, style: fitted, ancestors: ancestorSlots(of: idx))
             }
             store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
         }
@@ -951,13 +953,14 @@ final class RetainedLayoutCoordinator {
         // children at the top of the stack in their original painter/layout order.
         func extract() -> LayoutEngine.ResultNode {
             var solved: [(RuneTaffy.Layout, LayoutEngine.ResultNode)] = []
-            for node in flat.reversed() {
+            for index in flat.indices.reversed() {
+                let node = flat[index]
                 let box = store.layout(node.slot)
                 var content = TaffyBridge.ContentExtent(box)
                 var children: [LayoutEngine.ResultNode] = []
-                children.reserveCapacity(node.childIndices.count)
-                for childIndex in node.childIndices {
-                    let child = flat[childIndex]
+                children.reserveCapacity(node.childOffsets.count)
+                for offset in node.childOffsets {
+                    let child = flat[index + offset]
                     let (childBox, result) = solved.removeLast()
                     var placed = result
                     if node.flow == .rtl && child.pin == .flowing {
@@ -989,11 +992,11 @@ final class RetainedLayoutCoordinator {
                 for (idxPath, vertical, bound) in boundsToApply {
                     var targetIdx: Int? = rootRes.idx
                     for c in idxPath {
-                        guard let cur = targetIdx, c >= 0, c < flat[cur].childIndices.count else {
+                        guard let cur = targetIdx, c >= 0, c < flat[cur].childOffsets.count else {
                             targetIdx = nil
                             break
                         }
-                        targetIdx = flat[cur].childIndices[c]
+                        targetIdx = cur + flat[cur].childOffsets[c]
                     }
                     guard let idx = targetIdx else { continue }
                     let dim: RuneTaffy.Dimension = .length(max(0, bound))
@@ -1002,13 +1005,7 @@ final class RetainedLayoutCoordinator {
                     } else {
                         flat[idx].taffyStyle.maxSize.width = dim
                     }
-                    var ancestors: [SlotId] = []
-                    var cur = flat[idx].parentIndex
-                    while let p = cur {
-                        ancestors.append(flat[p].slot)
-                        cur = flat[p].parentIndex
-                    }
-                    store.setStyleAndMarkAncestors(flat[idx].slot, style: flat[idx].taffyStyle, ancestors: ancestors)
+                    store.setStyleAndMarkAncestors(flat[idx].slot, style: flat[idx].taffyStyle, ancestors: ancestorSlots(of: idx))
                 }
                 store.computeLayout(root: rootSlot, availableSpace: available, rounding: false, measureLeaf: measureClosure)
             }

@@ -79,6 +79,53 @@ struct MemoLayoutSpanTests {
         }
     }
 
+    @Test("Nested memo geometry and text survive sibling shifts and compaction")
+    func shiftedNestedSpansKeepRelativeGeometry() {
+        let cache = MemoCache()
+        let layout = RetainedLayoutCoordinator()
+        let textSystem = TextSystem()
+
+        func tree(prefix: Int, version: Int, reparent: Bool, useMemo: Bool) -> El<State> {
+            func panel(_ id: Int) -> El<State> {
+                let key = "panel-\(id)"
+                func content() -> El<State> {
+                    col().w(id == 1 ? 55 : 89)
+                        .child(text("its own wrapping label \(id) remains attached").key("label"))
+                        .child(row().key("row").child(el().size(Float(5 + id), 7)))
+                }
+                return useMemo ? cache.getOrBuild(id: key, deps: 0, build: content).element : content().key(key)
+            }
+            func body() -> El<State> {
+                let first = panel(version.isMultiple(of: 2) ? 1 : 2)
+                let second = panel(version.isMultiple(of: 2) ? 2 : 1)
+                return col().child(first).child(text("version \(version)").key("version")).child(second)
+            }
+            let outer = useMemo ? cache.getOrBuild(id: "outer", deps: version, build: body).element : body().key("outer")
+            var tree: El<State> = col().key(reparent ? "new-root" : "root")
+            for index in 0..<prefix { tree = tree.child(el().key("prefix-\(index)").h(Float(index % 3))) }
+            return tree.child(reparent ? col().key("wrapper").child(outer) : outer)
+        }
+
+        for (prefix, version, reparent) in [
+            (0, 0, false), (3, 0, false), (1, 0, false), (2, 1, false), (4, 1, true),
+            (128, 2, true), (0, 2, true), (2, 2, true), (1, 3, true)
+        ] {
+            let retained = RetainedLayoutCoordinator.TextLayoutCollector()
+            let fresh = RetainedLayoutCoordinator.TextLayoutCollector()
+            let viewport = Vec2(reparent ? 120 : 100, 400)
+            let actual = layout.compute(root: tree(prefix: prefix, version: version, reparent: reparent, useMemo: true),
+                                        state: State(), viewport: viewport, pixelScale: 1, textSystem: textSystem, textLayouts: retained)
+            let expected = RetainedLayoutCoordinator().compute(
+                root: tree(prefix: prefix, version: version, reparent: reparent, useMemo: false),
+                state: State(), viewport: viewport, pixelScale: 1, textSystem: textSystem, textLayouts: fresh
+            )
+            #expect(sameGeometry(actual, expected))
+            #expect(retained.liveIds == fresh.liveIds)
+            #expect(retained.map.mapValues { $0.box.shaped.size } == fresh.map.mapValues { $0.box.shaped.size })
+            if version == 1 && !reparent { #expect(layout.reusedMemoNodeCount > 0) }
+        }
+    }
+
     @Test("Only geometrically unchanged memo passes reuse the solved tree")
     func unrelatedCommitSkipsExtraction() {
         let cache = MemoCache()
