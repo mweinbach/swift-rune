@@ -2555,6 +2555,7 @@ public final class Runtime<State> {
     @inline(never)
     private func makeViewCx(
         focusedCaret: (keyPath: String, rect: [Float])?,
+        memoNodes: [FlatNode]? = nil,
         collector: LayoutReadCollector
     ) -> (cx: Cx<State>, envHash: UInt64) {
         var cx = Cx<State>(
@@ -2641,7 +2642,7 @@ public final class Runtime<State> {
     ) -> (rootEl: El<State>, helpLook: HelpLook?, effectiveReducedMotion: Bool)? {
         viewCallCount += 1
         lastViewReadScroll = false
-        var (cx, envHash) = makeViewCx(focusedCaret: focusedCaret, collector: collector)
+        var (cx, envHash) = makeViewCx(focusedCaret: focusedCaret, memoNodes: memoNodes, collector: collector)
         lastViewMemoEnvHash = envHash
         let viewTouchedBox = MemoScope.TouchedIdsBox()
         let rootEl = SystemScrollBarsScope.$current.withValue(cxSettings.scrollBarsState) {
@@ -3417,7 +3418,6 @@ public final class Runtime<State> {
                 specTransition = nil
             }
             let specSnapMount: Bool = commitCut || commitKind.snaps || (ancestorInstant && childInstant) || (reducedMotion && specTransition == nil)
-            let isFreshMount = !prevMountedIds.contains(nid)
             let specEnterDelay: Float = (el.enterDelay > 0 && viewCommitCount > 1 && !cut && !commitKind.snaps && !commitKind.lands && !ancestorInstant && isFreshMount) ? el.enterDelay : 0
             ancestorInstants.append(ancestorInstant)
 
