@@ -150,7 +150,7 @@ public final class AllocTracker: @unchecked Sendable {
 
     /// Records an allocation for `pointer` of `size` bytes.
     ///
-    /// When `frames` is `nil`, captures the current thread's return addresses via `Thread.callStackReturnAddresses`.
+    /// When `frames` is `nil`, samples share an unattributed site on WASI. Native hosts capture the call stack.
     /// Sampling is triggered whenever accumulated allocated bytes cross `intervalBytes` (or immediately for
     /// allocations >= `intervalBytes`).
     @discardableResult
@@ -172,9 +172,13 @@ public final class AllocTracker: @unchecked Sendable {
         if let frames {
             capturedFrames = Array(frames.prefix(maxFrames))
         } else {
+            #if os(WASI)
+            capturedFrames = []
+            #else
             capturedFrames = Array(
                 Thread.callStackReturnAddresses.dropFirst(1).prefix(maxFrames).map { $0.uint64Value }
             )
+            #endif
         }
 
         let hash = Self.hashFrames(capturedFrames)

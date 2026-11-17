@@ -6,7 +6,13 @@ public enum RunePerf {
         ProcessSampler.sampleUsage()
     }
 
-    public static func snapshot(pid: Int32 = ProcessInfo.processInfo.processIdentifier) -> ProcessSnapshot {
+    #if os(WASI)
+    public static func snapshot(pid: Int32 = 0) -> ProcessSnapshot? {
         ProcessSampler.snapshot(pid: pid)
     }
+    #else
+    public static func snapshot(pid: Int32 = ProcessSampler.currentProcessID) -> ProcessSnapshot {
+        ProcessSampler.snapshot(pid: pid)
+    }
+    #endif
 }

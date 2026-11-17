@@ -252,6 +252,8 @@ public final class ProcessCountingAllocator: @unchecked Sendable {
         return tid
         #elseif os(Windows)
         return UInt64(GetCurrentThreadId())
+        #elseif os(WASI)
+        return 1
         #else
         return Thread.isMainThread ? 1 : UInt64(bitPattern: Int64(ObjectIdentifier(Thread.current).hashValue))
         #endif
@@ -370,6 +372,15 @@ public struct ProcessSnapshot: Sendable, Equatable, Codable {
 
 /// Samples process memory, CPU, threads, and file descriptors across Apple, Linux, Android, and Windows.
 public enum ProcessSampler {
+    @usableFromInline
+    static var currentProcessID: Int32 {
+        #if os(WASI)
+        return 0
+        #else
+        return ProcessInfo.processInfo.processIdentifier
+        #endif
+    }
+
     /// Samples lightweight memory, CPU, and FD usage for the current process.
     public static func sampleUsage() -> ProcessUsage {
         #if os(macOS)
@@ -473,9 +484,17 @@ public enum ProcessSampler {
         #endif
     }
 
+    #if os(WASI)
+    /// Browsers expose no host process to sample.
+    public static func snapshot(
+        pid: Int32 = 0,
+        gaugeRegistry: GaugeRegistry = .shared,
+        allocator: ProcessCountingAllocator = .shared
+    ) -> ProcessSnapshot? { nil }
+    #else
     /// Captures a full snapshot of the current process (or another PID owned by this user).
     public static func snapshot(
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = ProcessSampler.currentProcessID,
         gaugeRegistry: GaugeRegistry = .shared,
         allocator: ProcessCountingAllocator = .shared
     ) -> ProcessSnapshot {
@@ -566,6 +585,7 @@ public enum ProcessSampler {
         return ProcessSnapshot(pid: pid, timestampMs: nowMs, usage: ProcessUsage())
         #endif
     }
+    #endif
 
     #if canImport(Darwin)
     /// Reads Darwin malloc zone live/peak/allocated stats via `malloc_zone_statistics`.

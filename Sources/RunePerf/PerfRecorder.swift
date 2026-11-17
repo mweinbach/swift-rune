@@ -1,4 +1,7 @@
 import Foundation
+#if os(WASI)
+import WASILibc
+#endif
 
 /// Cross-platform state lock backed by `NSLock`.
 final class PortableLock<State>: @unchecked Sendable {
@@ -243,7 +246,7 @@ public final class PerfRecorder: @unchecked Sendable {
         self.windowMs = windowMs
         self.maxSpans = max(1, maxSpans)
         self.lock = PortableLock(
-            initialState: State(baseTimeNanos: DispatchTime.now().uptimeNanoseconds)
+            initialState: State(baseTimeNanos: Self.uptimeNanoseconds)
         )
     }
 
@@ -306,7 +309,7 @@ public final class PerfRecorder: @unchecked Sendable {
         PerfSpanToken(
             name: name,
             category: category,
-            startNanos: DispatchTime.now().uptimeNanoseconds,
+            startNanos: Self.uptimeNanoseconds,
             tid: Self.currentThreadID(),
             args: args
         )
@@ -315,7 +318,7 @@ public final class PerfRecorder: @unchecked Sendable {
     /// Completes a scoped span and records it.
     @discardableResult
     public func endSpan(_ token: PerfSpanToken) -> CompletedSpan {
-        let endNanos = DispatchTime.now().uptimeNanoseconds
+        let endNanos = Self.uptimeNanoseconds
         let durationUs = endNanos >= token.startNanos ? (endNanos - token.startNanos) / 1_000 : 0
         let span = lock.withLock { state -> CompletedSpan in
             let startUs = token.startNanos >= state.baseTimeNanos
@@ -446,11 +449,24 @@ public final class PerfRecorder: @unchecked Sendable {
         return PercentileStats.compute(from: values)
     }
 
+    private static var uptimeNanoseconds: UInt64 {
+        #if os(WASI)
+        // WASI Preview 1 clock 1 is the host's monotonic clock.
+        var ticks: UInt64 = 0
+        guard __wasi_clock_time_get(1, 1, &ticks) == 0 else { return 0 }
+        return ticks
+        #else
+        return DispatchTime.now().uptimeNanoseconds
+        #endif
+    }
+
     private static func currentThreadID() -> UInt64 {
         #if canImport(Darwin)
         var tid: UInt64 = 0
         pthread_threadid_np(nil, &tid)
         return tid
+        #elseif os(WASI)
+        return 1
         #else
         return Thread.isMainThread ? 1 : 2
         #endif

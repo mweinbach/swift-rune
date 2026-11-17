@@ -272,9 +272,11 @@ public final class PerfIncidentStore: @unchecked Sendable {
     public let maxAgeMs: UInt64?
     public let maxEntries: Int?
 
+    #if !os(WASI)
     private let lock = NSLock()
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    #endif
 
     public init(
         directory: URL,
@@ -290,12 +292,32 @@ public final class PerfIncidentStore: @unchecked Sendable {
         self.maxAgeMs = maxAgeMs
         self.maxEntries = maxEntries
 
+        #if !os(WASI)
         let enc = JSONEncoder()
         enc.outputFormatting = [.sortedKeys]
         self.encoder = enc
         self.decoder = JSONDecoder()
+        #endif
     }
 
+    #if os(WASI)
+    public func append(_ incident: Incident) throws {
+        throw PerfRecorderError.localFilesUnsupported
+    }
+
+    public func readAll() throws -> [Incident] {
+        throw PerfRecorderError.localFilesUnsupported
+    }
+
+    @discardableResult
+    public func prune(nowMs: UInt64) throws -> Int {
+        throw PerfRecorderError.localFilesUnsupported
+    }
+
+    public func summaryStats() throws -> IncidentStoreStats {
+        throw PerfRecorderError.localFilesUnsupported
+    }
+    #else
     /// Append an incident as a single JSONL line, rotating to `.1` if `maxLogBytes` would be exceeded.
     public func append(_ incident: Incident) throws {
         lock.lock()
@@ -417,4 +439,5 @@ public final class PerfIncidentStore: @unchecked Sendable {
         }
         return num.uint64Value
     }
+    #endif
 }

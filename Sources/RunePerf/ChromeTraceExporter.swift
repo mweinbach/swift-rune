@@ -61,7 +61,7 @@ public struct TraceEvent: Sendable, Equatable, Codable {
         ph: Phase,
         ts: UInt64,
         dur: UInt64? = nil,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = ProcessSampler.currentProcessID,
         tid: UInt64 = 1,
         args: [String: TraceValue]? = nil
     ) {
@@ -91,7 +91,7 @@ public struct ChromeTraceDocument: Sendable, Equatable, Codable {
 public enum ChromeTraceExporter {
     public static func buildDocument(
         from recorder: PerfRecorder,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier
+        pid: Int32 = ProcessSampler.currentProcessID
     ) -> ChromeTraceDocument {
         var events: [TraceEvent] = []
 
@@ -161,7 +161,7 @@ public enum ChromeTraceExporter {
 
     public static func exportData(
         from recorder: PerfRecorder,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = ProcessSampler.currentProcessID,
         prettyPrinted: Bool = false
     ) throws -> Data {
         let document = buildDocument(from: recorder, pid: pid)
@@ -176,7 +176,7 @@ public enum ChromeTraceExporter {
 
     public static func exportJSON(
         from recorder: PerfRecorder,
-        pid: Int32 = ProcessInfo.processInfo.processIdentifier,
+        pid: Int32 = ProcessSampler.currentProcessID,
         prettyPrinted: Bool = false
     ) throws -> String {
         let data = try exportData(from: recorder, pid: pid, prettyPrinted: prettyPrinted)

@@ -18,7 +18,9 @@ public final class PerfIncidentChannel: @unchecked Sendable {
     public let capacity: Int
     private let lock = NSLock()
     private var buffer: [URL] = []
+    #if !os(WASI)
     private let available = DispatchSemaphore(value: 0)
+    #endif
 
     public init(capacity: Int = 16) {
         self.capacity = max(1, capacity)
@@ -33,12 +35,16 @@ public final class PerfIncidentChannel: @unchecked Sendable {
         }
         buffer.append(url)
         lock.unlock()
+        #if !os(WASI)
         available.signal()
+        #endif
         return true
     }
 
     public func tryReceive() -> URL? {
+        #if !os(WASI)
         guard available.wait(timeout: .now()) == .success else { return nil }
+        #endif
         lock.lock()
         let out = buffer.isEmpty ? nil : buffer.removeFirst()
         lock.unlock()
@@ -46,12 +52,16 @@ public final class PerfIncidentChannel: @unchecked Sendable {
     }
 
     public func receive(timeout: TimeInterval) -> URL? {
+        #if os(WASI)
+        return tryReceive()
+        #else
         let deadline: DispatchTime = .now() + .nanoseconds(Int(max(0, timeout) * 1_000_000_000))
         guard available.wait(timeout: deadline) == .success else { return nil }
         lock.lock()
         let out = buffer.isEmpty ? nil : buffer.removeFirst()
         lock.unlock()
         return out
+        #endif
     }
 }
 
@@ -105,12 +115,15 @@ public struct PerfConfig: Sendable {
 
 public enum PerfRecorderError: Error, Sendable, Equatable, CustomStringConvertible {
     case identityTooLong
+    case localFilesUnsupported
     case io(String)
 
     public var description: String {
         switch self {
         case .identityTooLong:
             return "app/build identity too long"
+        case .localFilesUnsupported:
+            return "local perf files are unsupported on web"
         case .io(let message):
             return message
         }
@@ -132,6 +145,9 @@ public final class PerfFileRecorder: @unchecked Sendable {
     public static let maxBufferedMemoryLines = 20
     public static let incidentSlots = 16
 
+    #if os(WASI)
+    private init() {}
+    #else
     final class SharedHealth: @unchecked Sendable {
         let lock = NSLock()
         var dropped: UInt64 = 0
@@ -251,12 +267,16 @@ public final class PerfFileRecorder: @unchecked Sendable {
     deinit {
         shutdown()
     }
+    #endif
 
     /// Starts the bounded background writer for `config`.
     public static func start(config: PerfConfig) throws -> PerfFileRecorder {
         if config.app.utf8.count > 128 || config.build.utf8.count > 256 {
             throw PerfRecorderError.identityTooLong
         }
+        #if os(WASI)
+        throw PerfRecorderError.localFilesUnsupported
+        #else
         let startNanos = DispatchTime.now().uptimeNanoseconds
         let queue = BoundedSampleQueue(capacity: queueCapacity)
         let health = SharedHealth()
@@ -275,8 +295,16 @@ public final class PerfFileRecorder: @unchecked Sendable {
             health: health,
             doneSemaphore: doneSemaphore
         )
+        #endif
     }
 
+    #if os(WASI)
+    @discardableResult
+    public func record(_ frame: FrameSample) -> Bool { false }
+    public var droppedSamples: UInt64 { 0 }
+    public var writeErrors: UInt64 { 0 }
+    public func shutdown() {}
+    #else
     /// Nonblocking bounded send (`recorder.rs::record`). Returns `false` when full or stopped.
     @discardableResult
     public func record(_ frame: FrameSample) -> Bool {
@@ -409,8 +437,10 @@ public final class PerfFileRecorder: @unchecked Sendable {
         throw PerfRecorderError.io("File locking is unavailable on this platform")
         #endif
     }
+    #endif
 }
 
+#if !os(WASI)
 /// Rotating append-only JSONL log writer (`crates/rune-perf/src/store.rs::Log`).
 final class PerfRotatingLog {
     let directory: URL
@@ -801,3 +831,4 @@ final class PerfStoreWriter {
         return now >= startNanos ? (now - startNanos) / 1_000_000 : 0
     }
 }
+#endif

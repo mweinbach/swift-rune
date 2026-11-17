@@ -286,6 +286,11 @@ public enum Procwatch {
         latestLock.withLock { $0 }
     }
 
+    /// The current host process, if this platform exposes one.
+    public static func snapshot() -> ProcessSnapshot? {
+        ProcessSampler.snapshot()
+    }
+
     /// Starts a background `procwatch` thread sampling every `config.every` and logging to stderr.
     public static func watch(_ config: ProcwatchConfig) {
         watchWith(config) { _, _ in }
@@ -296,6 +301,7 @@ public enum Procwatch {
         _ config: ProcwatchConfig,
         onWarning: @escaping @Sendable (ProcwatchEvent, ProcessSnapshot) -> Void
     ) {
+        #if !os(WASI)
         let initial = ProcessSampler.snapshot()
         guard initial.usage.residentBytes > 0 || initial.usage.footprintBytes != nil else { return }
 
@@ -316,6 +322,7 @@ public enum Procwatch {
         }
         thread.name = "procwatch"
         thread.start()
+        #endif
     }
 
     /// Serves fresh `ProcessSnapshot.toJSON()` HTTP responses on loopback `127.0.0.1:port` (port 0 = ephemeral).
