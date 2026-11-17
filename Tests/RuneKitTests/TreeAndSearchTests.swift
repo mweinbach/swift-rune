@@ -188,20 +188,28 @@ struct TreeAndSearchTests {
     }
 
     @Test("Legacy string tree expansion and selection use the spelling the caller supplied")
-    func legacyTreeProjectsStoredUnicodeIDs() {
+    func legacyTreeProjectsStoredUnicodeIDs() throws {
         let composed = "\u{e9}"
         let decomposed = "e\u{301}"
-        let view: El<Int> = Kit.neutral(dark: true).fileTree(
+        let view: El<[String]> = Kit.neutral(dark: true).fileTree(
             key: "files", paths: [composed + "/a", decomposed + "/b"],
-            expanded: [composed], selected: decomposed, onToggle: { _, _ in }, onSelect: { _, _ in }
+            expanded: [composed], selected: decomposed, onToggle: { _, _ in }, onSelect: { $0.append($1) }
         )
-        func row(_ id: String) -> El<Int>? {
+        func row(_ id: String) -> El<[String]>? {
             view.children.first { $0.keyId?.utf8.elementsEqual(("files-" + id).utf8) == true }
         }
         #expect(view.children.count == 3)
         #expect(row(composed)?.a11yExpanded == true && row(composed)?.itemSelected == false)
         #expect(row(decomposed)?.a11yExpanded == false && row(decomposed)?.itemSelected == true)
         #expect(row(composed + "/a") != nil && row(decomposed + "/b") == nil)
+        let rt = Runtime(state: [String](), viewport: Vec2(200, 120)) { _, _ in view }
+        rt.frame(at: 0)
+        let first = try #require(rt.element(byKey: "files-" + composed))
+        let second = try #require(rt.element(byKey: "files-" + decomposed))
+        #expect(first.path != second.path && first.rect[1] != second.rect[1])
+        #expect(rt.accessibilityAction(first.path, .press, at: 0.1))
+        #expect(rt.accessibilityAction("files-" + decomposed, .press, at: 0.2))
+        #expect(rt.state.map { Array($0.utf8) } == [Array(composed.utf8), Array(decomposed.utf8)])
     }
 
     // MARK: - Tree integration tests (crates/rune-kit/tests/tree.rs)

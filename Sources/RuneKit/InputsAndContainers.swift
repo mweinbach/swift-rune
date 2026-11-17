@@ -2049,7 +2049,7 @@ extension Kit {
         onToggleExpand: @escaping (inout State, ID) -> Void,
         onSelect: @escaping (inout State, ID) -> Void
     ) -> El<State> {
-        var list: El<State> = col().key(key).wFull().gap(2).focusGroup(true)
+        var list: El<State> = col().key(key, byteExact: true).wFull().gap(2).focusGroup(true)
 
         func emit(_ item: TreeItem<ID>, depth: Int) {
             let isExp: Bool
@@ -2066,7 +2066,7 @@ extension Kit {
             let indent = Float(depth) * 14.0 + 8.0
 
             var rowEl: El<State> = row()
-                .key("\(key)-\(item.id)")
+                .key("\(key)-\(item.id)", byteExact: ID.self == String.self)
                 .role(.listItem)
                 .itemSelected(isSel)
                 .expanded(item.isFolder ? isExp : nil)

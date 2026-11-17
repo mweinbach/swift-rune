@@ -217,6 +217,13 @@ struct OverlaysAndTableTests {
         state.widths["other"] = 89
         let columns = [TableCol(composed, "A"), TableCol(decomposed, "B"), TableCol("other", "C")]
         #expect(state.resolvedColumnWidths(columns: columns, totalWidth: 500) == [71, 139, 89])
+        var copy = state
+        copy.widths[composed] = 76
+        #expect(copy.columnWidth(composed) == 76 && copy.columnWidth(decomposed) == 139)
+        #expect(state.columnWidth(composed) == 71)
+        copy.widths.removeValue(forKey: composed)
+        #expect(copy.columnWidth(composed) == nil && copy.columnWidth(decomposed) == nil)
+        #expect(copy.widths["other"] == 89)
         state.resetColumnWidth(decomposed)
         #expect(state.columnWidth(composed) == 71 && state.columnWidth(decomposed) == nil)
         state.setColumnWidth(decomposed, 139)

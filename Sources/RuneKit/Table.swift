@@ -175,31 +175,57 @@ final class TableScrollSync: @unchecked Sendable {
 
 /// Column IDs keep their authored bytes. The dictionary projection supports existing Swift callers.
 private struct TableColumnWidths: Sendable {
-    var values: [KitSourceKey: Float] = [:]
+    private var projected: [String: Float] = [:]
+    private var variants: [String: [KitSourceKey: Float]] = [:]
 
     var dictionary: [String: Float] {
-        get {
-            var result: [String: Float] = [:]
-            for (id, width) in values {
-                if let i = result.index(forKey: id.source) {
-                    guard id.source.utf8.lexicographicallyPrecedes(result.keys[i].utf8) else { continue }
-                    result.remove(at: i)
-                }
-                result[id.source] = width
-            }
-            return result
+        get { projected }
+        set {
+            projected = newValue
+            variants.removeAll()
         }
-        set { values = Dictionary(uniqueKeysWithValues: newValue.map { (KitSourceKey($0.key), $0.value) }) }
         _modify {
-            var visible = dictionary
-            // Keep unrepresentable spellings when an older client edits one dictionary entry.
-            for id in visible.keys { values.removeValue(forKey: KitSourceKey(id)) }
             defer {
-                if !values.isEmpty { values = values.filter { visible[$0.key.source] != nil } }
-                for (id, width) in visible { values[KitSourceKey(id)] = width }
+                // A public dictionary edit can delete a whole bucket or replace its representative.
+                for id in variants.keys {
+                    if let index = projected.index(forKey: id) {
+                        variants[id]?[KitSourceKey(projected[index].key)] = nil
+                        if variants[id]?.isEmpty == true { variants[id] = nil }
+                    } else {
+                        variants[id] = nil
+                    }
+                }
             }
-            yield &visible
+            yield &projected
         }
+    }
+
+    subscript(_ id: KitSourceKey) -> Float? {
+        guard let index = projected.index(forKey: id.source) else { return nil }
+        let entry = projected[index]
+        return KitSourceKey.equalBytes(entry.key, id.source) ? entry.value : variants[id.source]?[id]
+    }
+
+    @discardableResult
+    mutating func updateValue(_ width: Float, forKey id: KitSourceKey) -> Float? {
+        if let index = projected.index(forKey: id.source),
+           !KitSourceKey.equalBytes(projected[index].key, id.source) {
+            return variants[id.source, default: [:]].updateValue(width, forKey: id)
+        }
+        return projected.updateValue(width, forKey: id.source)
+    }
+
+    mutating func removeValue(forKey id: KitSourceKey) {
+        guard let index = projected.index(forKey: id.source) else { return }
+        if KitSourceKey.equalBytes(projected[index].key, id.source) {
+            projected.remove(at: index)
+            if let replacement = variants[id.source]?.popFirst() {
+                projected[replacement.key.source] = replacement.value
+            }
+        } else {
+            variants[id.source]?[id] = nil
+        }
+        if variants[id.source]?.isEmpty == true { variants[id.source] = nil }
     }
 }
 
@@ -280,14 +306,14 @@ public struct TableState: Sendable {
         columnWidth(KitSourceKey(column))
     }
 
-    fileprivate func columnWidth(_ column: KitSourceKey) -> Float? { explicitWidths.values[column] }
+    fileprivate func columnWidth(_ column: KitSourceKey) -> Float? { explicitWidths[column] }
 
     public mutating func setColumnWidth(_ column: String, _ w: Float) {
-        explicitWidths.values[KitSourceKey(column)] = w
+        explicitWidths.updateValue(w, forKey: KitSourceKey(column))
     }
 
     public mutating func resetColumnWidth(_ column: String) {
-        explicitWidths.values.removeValue(forKey: KitSourceKey(column))
+        explicitWidths.removeValue(forKey: KitSourceKey(column))
     }
 
     /// Set projection of the selection. `exactSelectedIDs` retains every authored spelling.
@@ -304,10 +330,10 @@ public struct TableState: Sendable {
     public var selectedCount: Int { selected.count + variantCount }
 
     fileprivate mutating func recordColumnWidth(_ width: Float, for id: KitSourceKey) -> Float? {
-        measuredWidths.values.updateValue(width, forKey: id)
+        measuredWidths.updateValue(width, forKey: id)
     }
 
-    fileprivate func measuredColumnWidth(_ id: KitSourceKey) -> Float? { measuredWidths.values[id] }
+    fileprivate func measuredColumnWidth(_ id: KitSourceKey) -> Float? { measuredWidths[id] }
 
     public func isSelected(_ id: String) -> Bool {
         guard let i = selected.firstIndex(of: id) else { return false }
@@ -521,7 +547,7 @@ public struct TableState: Sendable {
         var flexSum: Float = 0
 
         for (i, c) in columns.enumerated() {
-            if let w = explicitWidths.values[c.sourceKey] {
+            if let w = explicitWidths[c.sourceKey] {
                 let cw = c.clamp(w)
                 result[i] = cw
                 fixedSum += cw
@@ -539,7 +565,7 @@ public struct TableState: Sendable {
 
         let remaining = max(0, totalWidth - fixedSum)
         if flexSum > 0 {
-            for (i, c) in columns.enumerated() where explicitWidths.values[c.sourceKey] == nil {
+            for (i, c) in columns.enumerated() where explicitWidths[c.sourceKey] == nil {
                 if case .flex(let weight) = c.width {
                     let share = remaining * (max(0, weight) / flexSum)
                     result[i] = c.clamp(share)
