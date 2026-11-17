@@ -2857,13 +2857,13 @@ public final class Runtime<State> {
                     onLiveIdsReady: { [weak self] ids in self?.releaseKeptLayoutsBeforeCommit(liveIds: ids) }
                 )
             }
-            let needsRetry = virtualPass < 8 && measureVirtualsFromSolved(
+            let needsRetry = measureVirtualsFromSolved(
                 expandedRoot: layoutRoot,
                 solvedRoot: solvedRoot,
                 expansion: virtualExpansion,
                 lands: commitKind.lands
             )
-            if !needsRetry { break }
+            if !needsRetry || virtualPass >= 8 { break }
             virtualPass += 1
             // Keep newly measured row heights while restoring prior commit's anchor & window for retry.
             for (path, cur) in virtualLists {
@@ -4925,7 +4925,7 @@ public final class Runtime<State> {
         if applyUnseenPresenceAfterCommit(specs: specs, cut: commitCut, to: &scene) {
             isAnimating = true
         }
-        recordVirtualMeasurementsAndCallbacks(expansion: pass.virtualExpansion, at: now)
+        updateVirtualVisibleRowsOnScroll(at: now)
         stepVirtualFillAfterCommit(now: now)
         if pass.virtualExpansion.anyVirtualList && !changedScrollDeltas.isEmpty && anyVirtualListNeedsWindow() {
             needsCommit = true
