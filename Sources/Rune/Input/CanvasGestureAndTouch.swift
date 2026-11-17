@@ -5,35 +5,39 @@ import RuneMotion
 
 // MARK: - Runtime Canvas Gesture, Wheel Lock & Touch
 
-extension Runtime {
-    private func nodeContainsGesturePoint(_ idx: Int, _ windowPos: Vec2) -> Bool {
-        let node = flatNodes[idx]
-        if let geom = hitGeometryByPath[node.path] {
-            if geom.isExiting || geom.opacity <= 0.001 { return false }
-            return geom.contains(windowPos)
-        }
-        if node.el.opacity <= 0.001 { return false }
-        let r = presentedRectByPath[node.path] ?? node.targetRect
-        return halfOpenContains(intersectRects(node.clipRect, r), windowPos)
-    }
+private enum WheelStart {
+    case unknown, at(Int?)
+}
 
-    private func wheelGestureStartIndex(at windowPos: Vec2) -> Int? {
-        let hitIdx = hitTest(at: windowPos, predicate: { _ in true }).flatMap { nodeByPath[$0.node.path] }
-        let scrollIdx = flatNodes.indices.reversed().first { i in
-            let n = flatNodes[i]
-            guard !n.el.layout.scrollAxes.isEmpty, !n.effectiveInert else { return false }
-            if activeModalPath != nil && !modalMemberPaths.contains(n.path) { return false }
-            return nodeContainsGesturePoint(i, windowPos)
-        }
-        if let h = hitIdx, let s = scrollIdx {
-            var p = flatNodes[s].parentIndex
-            while let cur = p {
-                if cur == h { return s }
-                p = flatNodes[cur].parentIndex
+extension Runtime {
+    /// The last paint determines which branch receives a gesture. Ordinary decorative boxes
+    /// allow the wheel through, while raised, anchored and sticky roots mask their siblings.
+    internal func gestureStartIndex(at point: Vec2) -> Int? {
+        for path in paintOrderPaths.reversed() {
+            guard let geometry = hitGeometryByPath[path], !geometry.isExiting,
+                  geometry.opacity > 0.001, geometry.contains(point),
+                  let i = nodeByPath[path], hoverAllowed(i), !subtreeExiting(i) else { continue }
+            let el = flatNodes[i].el
+            if !el.layout.scrollAxes.isEmpty || el.anchor != nil || el.isRaised || el.layout.sticky != nil {
+                return i
             }
-            return h
+            if hasActiveTextLinks(el) && !el.isSelectable {
+                if linkBoxesByPath[path]?.contains(where: { $0.visibleUnion.z > 0 && $0.visibleUnion.w > 0 }) == true {
+                    return i
+                }
+                continue
+            }
+            if el.explicitHit || el.focusable || el.isSelectable || el.isModal || el.isWindowDrag
+                || el.noWindowDrag || el.role == .textInput || el.attachedDragOutItem != nil { return i }
+            guard el.hasAuthoredHandlers else { continue }
+            let h = el.handlers
+            if h.onClick != nil || h.onClickPress != nil || h.onDoubleClick != nil || h.onSecondaryClick != nil
+                || h.onMiddlePress != nil || h.onHover != nil || h.onHoverChange != nil || h.onDrag != nil
+                || h.dragOut != nil || h.onPointerDown != nil || h.onPointerUp != nil || h.onPointerMove != nil
+                || h.onWheel != nil || h.onMagnify != nil || h.onRotate != nil || h.onSmartMagnify != nil
+                || h.editLens != nil { return i }
         }
-        return hitIdx ?? scrollIdx
+        return nil
     }
 
     /// `pointer.rs` `scroll_at_axis`: the innermost scroll viewport at `pos` that moves on `axis`.
@@ -123,6 +127,7 @@ extension Runtime {
     private func runWheel(gesture: AttemptToken, _ ev: WheelEvent, phased: Bool, at targetPos: Vec2, moved: Bool, now: Double) {
         inputMachines.wheelLock.syncGesture(gesture)
         var handled = false
+        var start = WheelStart.unknown
         switch inputMachines.wheelLock.ownerOf(gesture) {
         case .handler(let ownerPath)?:
             if let idx = nodeByPath[ownerPath],
@@ -142,11 +147,13 @@ extension Runtime {
                 inputMachines.wheelLock.setOwner(gesture, .unpicked)
             }
         case .unpicked?:
-            if let startIdx = wheelGestureStartIndex(at: targetPos) {
+            let hit = gestureStartIndex(at: targetPos)
+            start = .at(hit)
+            if let startIdx = hit {
                 var walkIdx: Int? = startIdx
                 while let i = walkIdx, i < flatNodes.count {
                     let node = flatNodes[i]
-                    if node.effectiveInert || subtreeExiting(i) { break }
+                    if !hoverAllowed(i) || subtreeExiting(i) { break }
                     if let onWheel = node.el.handlers.onWheel {
                         let local = wheelLocalPoint(for: node, at: targetPos)
                         var localEv = ev
@@ -170,7 +177,7 @@ extension Runtime {
         }
 
         if !handled && moved {
-            wheelScrollLocked(gesture: gesture, dx: ev.dx, dy: ev.dy, phased: phased, at: targetPos, now: now)
+            wheelScrollLocked(gesture: gesture, dx: ev.dx, dy: ev.dy, phased: phased, at: targetPos, start: start, now: now)
         }
     }
 
@@ -186,7 +193,7 @@ extension Runtime {
 
     /// `scroll/x.rs` `wheel_scroll_for`: scrolls by a delta no `onWheel` handler took, on the
     /// axis `gesture` locked to. `phased` is that delta's own gesture's policy.
-    private func wheelScrollLocked(gesture: AttemptToken, dx: Float, dy: Float, phased: Bool, at targetPos: Vec2, now: Double) {
+    private func wheelScrollLocked(gesture: AttemptToken, dx: Float, dy: Float, phased: Bool, at targetPos: Vec2, start: WheelStart, now: Double) {
         if dx == 0 && dy == 0 { return }
         inputMachines.wheelLock.syncGesture(gesture)
         let horizontal: Bool
@@ -226,31 +233,35 @@ extension Runtime {
                 }
             }
         } else if dy != 0 {
-            scrollVerticalWheel(dy: dy, at: targetPos, now: now)
+            scrollVerticalWheel(dy: dy, at: targetPos, start: start, now: now)
         }
     }
 
-    /// A fresh wheel run starts in the innermost eligible viewport with room in its direction.
-    private func verticalWheelTarget(dy: Float, at point: Vec2) -> Int? {
-        for i in flatNodes.indices.reversed() {
+    /// An exhausted viewport passes a new run to its enclosing viewport.
+    private func verticalWheelTarget(dy: Float, at point: Vec2, start: WheelStart) -> Int? {
+        var next: Int?
+        switch start {
+        case .unknown: next = gestureStartIndex(at: point)
+        case .at(let hit): next = hit
+        }
+        while let i = next {
             let node = flatNodes[i]
+            next = node.parentIndex
             guard node.el.layout.scrollAxes.contains(.vertical), hoverAllowed(i), !subtreeExiting(i),
                   let limit = scrollMaxExtents[node.path]?.y else { continue }
             let offset = scrollOffsets[node.path]?.y ?? 0
-            if (dy > 0 ? offset > 0 : offset < limit), nodeContainsGesturePoint(i, point) {
-                return i
-            }
+            if dy > 0 ? offset > 0 : offset < limit { return i }
         }
         return nil
     }
 
-    private func scrollVerticalWheel(dy: Float, at point: Vec2, now: Double) {
+    private func scrollVerticalWheel(dy: Float, at point: Vec2, start: WheelStart, now: Double) {
         let held = inputMachines.wheelLock.verticalTarget(at: now, x: point.x, y: point.y, dy: dy).flatMap { path -> Int? in
             guard let i = nodeByPath[path], !flatNodes[i].el.layout.scrollAxes.isEmpty,
                   hoverAllowed(i), !subtreeExiting(i) else { return nil }
             return i
         }
-        guard let i = held ?? verticalWheelTarget(dy: dy, at: point) else {
+        guard let i = held ?? verticalWheelTarget(dy: dy, at: point, start: start) else {
             inputMachines.wheelLock.endVertical()
             return
         }
@@ -304,7 +315,7 @@ extension Runtime {
     @discardableResult
     public func pinchWheel(dy: Float, at pos: Vec2, now: Double = 0) -> Bool {
         guard dy != 0 else { return false }
-        guard let startIdx = wheelGestureStartIndex(at: pos) else { return false }
+        guard let startIdx = gestureStartIndex(at: pos) else { return false }
         var walkIdx: Int? = startIdx
         var hasHandler = false
         while let i = walkIdx, i < flatNodes.count {

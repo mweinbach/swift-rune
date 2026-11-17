@@ -145,43 +145,13 @@ extension Runtime {
 
     // MARK: - Trackpad Gestures (`El::on_magnify`, `El::on_rotate`, `El::on_smart_magnify`)
 
-    private func nodeContainsWindowPoint(_ idx: Int, _ windowPos: Vec2) -> Bool {
-        let node = flatNodes[idx]
-        if let geom = hitGeometryByPath[node.path] {
-            if geom.isExiting || geom.opacity <= 0.001 { return false }
-            return geom.contains(windowPos)
-        }
-        if node.el.opacity <= 0.001 { return false }
-        let r = presentedRectByPath[node.path] ?? node.targetRect
-        return halfOpenContains(intersectRects(node.clipRect, r), windowPos)
-    }
-
-    private func gestureStartIndex(at windowPos: Vec2) -> Int? {
-        let hitIdx = hitTest(at: windowPos, predicate: { _ in true }).flatMap { nodeByPath[$0.node.path] }
-        let scrollIdx = flatNodes.indices.reversed().first { i in
-            let n = flatNodes[i]
-            guard !n.el.layout.scrollAxes.isEmpty, !n.effectiveInert else { return false }
-            if activeModalPath != nil && !modalMemberPaths.contains(n.path) { return false }
-            return nodeContainsWindowPoint(i, windowPos)
-        }
-        if let h = hitIdx, let s = scrollIdx {
-            var p = flatNodes[s].parentIndex
-            while let cur = p {
-                if cur == h { return s }
-                p = flatNodes[cur].parentIndex
-            }
-            return h
-        }
-        return hitIdx ?? scrollIdx
-    }
-
     private func dispatchGestureChain(at windowPos: Vec2, body: (FlatNode, Vec2) -> (handled: Bool, tx: Tx)?) -> Bool {
         pointerPosition = windowPos
         guard let startIdx = gestureStartIndex(at: windowPos) else { return false }
         var walkIdx: Int? = startIdx
         while let cur = walkIdx, cur < flatNodes.count {
             let node = flatNodes[cur]
-            if node.effectiveInert { break }
+            if !hoverAllowed(cur) || subtreeExiting(cur) { break }
             let local: Vec2
             if let geom = hitGeometryByPath[node.path], let lp = geom.unturnedLocalPoint(for: windowPos) {
                 let scale = max(1e-4, node.inheritedScale)

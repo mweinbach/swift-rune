@@ -4151,7 +4151,10 @@
         {
           "upstream": "src/runtime/input/gesture.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Sources/Rune/Runtime/Inc5InputWatchRuntime.swift",
+            "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial"
         },
@@ -4175,7 +4178,9 @@
         {
           "upstream": "src/runtime/input/hit.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Sources/Rune/Runtime/HitTesting.swift"
           ],
           "status": "partial"
         },
@@ -4263,7 +4268,8 @@
             "Sources/Rune/Input/WheelLock.swift",
             "Tests/RuneTests/WheelOwnerHandoffParityTests.swift",
             "Sources/Rune/Input/CanvasGestureAndTouch.swift",
-            "Tests/RuneTests/TouchTapParityTests.swift"
+            "Tests/RuneTests/TouchTapParityTests.swift",
+            "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial",
           "note": "A mouse pressOnDown runs immediately with touchTap() false. A finger waits for release inside the target."
@@ -4954,7 +4960,9 @@
           "swift": [
             "Sources/Rune/Runtime.swift",
             "Sources/Rune/Input/WheelLock.swift",
-            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift"
+            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift",
+            "Sources/Rune/Input/CanvasGestureAndTouch.swift",
+            "Tests/RuneTests/WheelChainParityTests.swift"
           ],
           "status": "partial"
         },
