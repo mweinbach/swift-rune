@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import Rune
 
-@Suite("InteractionTiming & PerfWarn Parity", .serialized)
+@Suite("InteractionTiming & PerfWarn Parity", .serialized, PerfWarningScope())
 struct InteractionAndPerfWarnTests {
 
     // MARK: - Interaction Names & Interning (interaction/tests.rs)

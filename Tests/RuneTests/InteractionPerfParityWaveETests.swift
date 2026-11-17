@@ -5,7 +5,7 @@ import Testing
 import Darwin
 #endif
 
-@Suite("Interaction & PerfWarn Wave E Parity", .serialized)
+@Suite("Interaction & PerfWarn Wave E Parity", .serialized, PerfWarningScope())
 struct InteractionPerfParityWaveETests {
     private static func resetAll() {
         PerfWarn.resetForTesting()
@@ -49,6 +49,18 @@ struct InteractionPerfParityWaveETests {
     }
 
     // MARK: - perf_warn/tests.rs (Runtime + Stall + Launch + Override)
+
+    @Test("warning capture and site deduplication are isolated from other windows")
+    func capturesOnlyWarningsFromThisTest() async {
+        let site = "warning-capture-isolation"
+        await Task.detached {
+            PerfWarn.warnOnce(site: site) { "another task's warning" }
+        }.value
+        PerfWarn.warnOnce(site: site) { "this test's warning" }
+        let lines = PerfWarn.takeTestLog()
+        #expect(lines.count == 1)
+        #expect(lines.first?.contains("this test's warning") == true)
+    }
 
     @Test("perf_warn/tests.rs: Runtime virtualize(1000) warns once; small virtualize and virtualRows are silent")
     func runtimeVirtualizeAndVirtualRowsWarnings() {

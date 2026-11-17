@@ -465,10 +465,27 @@ public enum PerfWarn {
     public static let overbuildRows: Int = 200
     public static let overbuildRatio: Int = 4
 
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var warnedSites: Set<String> = []
-    nonisolated(unsafe) private static var capturedLog: [String] = []
-    nonisolated(unsafe) internal static var testEnabledOverride: Bool? = nil
+    internal final class WarningLog: @unchecked Sendable {
+        fileprivate let lock = NSLock()
+        fileprivate var warnedSites: Set<String> = []
+        fileprivate var lines: [String] = []
+        fileprivate var enabledOverride: Bool?
+    }
+
+    private static let processLog = WarningLog()
+    @TaskLocal internal static var testLog: WarningLog?
+    private static var log: WarningLog { testLog ?? processLog }
+
+    internal static var testEnabledOverride: Bool? {
+        get {
+            let log = self.log
+            return log.lock.withLock { log.enabledOverride }
+        }
+        set {
+            let log = self.log
+            log.lock.withLock { log.enabledOverride = newValue }
+        }
+    }
 
     public static var isEnabled: Bool {
         if let override = testEnabledOverride {
@@ -545,34 +562,31 @@ public enum PerfWarn {
 
     public static func warnOnce(site: String, message: () -> String) {
         guard isEnabled else { return }
-        lock.lock()
-        let isNew = warnedSites.insert(site).inserted
-        lock.unlock()
+        let log = self.log
+        let isNew = log.lock.withLock { log.warnedSites.insert(site).inserted }
         guard isNew else { return }
         let text = "rune: \(message()). (debug builds only; RUNE_PERF_WARN=0 silences)"
-        lock.lock()
-        capturedLog.append(text)
-        lock.unlock()
+        log.lock.withLock { log.lines.append(text) }
     }
 
     /// Drains warnings emitted since the last call (and optionally resets deduplication for tests).
     public static func takeTestLog(resetSites: Bool = false) -> [String] {
-        lock.lock()
-        let out = capturedLog
-        capturedLog.removeAll()
-        if resetSites {
-            warnedSites.removeAll()
+        let log = self.log
+        return log.lock.withLock {
+            let out = log.lines
+            log.lines.removeAll()
+            if resetSites { log.warnedSites.removeAll() }
+            return out
         }
-        lock.unlock()
-        return out
     }
 
     public static func resetForTesting() {
-        lock.lock()
-        warnedSites.removeAll()
-        capturedLog.removeAll()
-        testEnabledOverride = nil
-        lock.unlock()
+        let log = self.log
+        log.lock.withLock {
+            log.warnedSites.removeAll()
+            log.lines.removeAll()
+            log.enabledOverride = nil
+        }
     }
 
     public static func overbuilt(path: String, site: String? = nil, built: Int, mounted: Int) {
