@@ -766,6 +766,26 @@ struct ScrollAndStickySlice2ParityTests {
         #expect(abs(mark3.rect[1] - 24.0) < 2.0, "scrollKeyTo placed TextHighlight at 24pt: \(mark3.rect)")
     }
 
+    @Test("scroll_center aligns the top of a target taller than its viewport")
+    func scrollCenterAlignsTallTargetToViewportTop() throws {
+        let rt = Runtime<Void>(state: (), viewport: Vec2(200, 200), pixelScale: 1) { _, _ in
+            col().key("list").size(200, 200).scroll(stickBottom: false).child(
+                col().wFull()
+                    .child(el().wFull().h(240))
+                    .child(el().key("tall").wFull().h(300))
+                    .child(el().wFull().h(240))
+            )
+        }
+        _ = rt.frame(at: 0)
+        rt.update(at: 0.01) { _, tx in tx.scrollCenterInInstant("list", "tall") }
+        _ = rt.frame(at: 0.02)
+        let target = try #require(rt.flatNodes.first { $0.key == "tall" })
+        #expect(rt.lastCommittedSpecs[target.index].rect == target.targetRect)
+        _ = rt.frame(at: 0.03)
+        #expect(abs(rt.scrollOffset(forKey: "list").y - 240) < 1)
+        #expect(abs(rt.element(byKey: "tall")?.rect[1] ?? .infinity) < 1)
+    }
+
     // MARK: - tests/scroll_x.rs
 
     @Test("scroll_x: scroll_xy_scrolls_both_axes_one_gesture_at_a_time")
