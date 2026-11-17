@@ -113,8 +113,8 @@ public enum RuneShortcutProbeApp {
         }()
 
         let event = KeyEvent(
-            key: .text("k"),
-            mods: Mods(shift: true, ctrl: true, alt: true, cmd: true)
+            key: .command("k"),
+            mods: Mods(shift: true, ctrl: true, alt: true, cmd: KeyPlatform.current == .mac, logo: true)
         )
         let dispatched = registry.dispatch(event, activeScopes: [.global])
         let handledId: String? = {
