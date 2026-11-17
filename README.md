@@ -167,7 +167,7 @@ xcrun swift run rune-ref check
 
 ### Cross-Platform Architecture & Builds
 
-`Package.swift` configures Apple deployment minimums (`.macOS(.v14)`, `.iOS(.v17)`, `.tvOS(.v17)`, `.visionOS(.v1)`) and conditional system libraries for Windows and Android, while Linux and WebAssembly (`wasm32-unknown-wasip1`) are supported out of the box:
+`Package.swift` configures Apple deployment minimums (`.macOS(.v14)`, `.iOS(.v17)`, `.tvOS(.v17)`, `.visionOS(.v1)`) and conditional system libraries for Windows and Android. Linux and WebAssembly (`wasm32-unknown-wasip1`) use portable host implementations.
 
 | Platform | Backend / Shell (`Sources/Rune/`) | Build Command |
 | :--- | :--- | :--- |
