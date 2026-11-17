@@ -289,6 +289,8 @@ extension Runtime {
     }
 
     private func performDropFiles(_ urls: [URL], at point: Vec2?, at now: Double) -> Bool {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         currentTime = now
         let targetPt = point ?? draggedFilesPoint
         if let movePt = pendingDropMovePoint,

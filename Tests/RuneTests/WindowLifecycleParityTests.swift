@@ -45,9 +45,10 @@ struct WindowLifecycleParityTests {
                 s.messages += 1
                 tx.wakeAfter(0.010)
             }
-            _ = rt.hiddenWake(at: t)
+            // As the host does for a wake while covered (`covered_step`, now `covered_wake`).
+            coveredStep(rt, at: t)
             t += 0.020
-            _ = rt.hiddenWake(at: t)
+            coveredStep(rt, at: t)
         }
         #expect(rt.state.messages == 100 && rt.state.read == 100)
         #expect(rt.state.polls - pollsBefore == 200)
@@ -81,7 +82,7 @@ struct WindowLifecycleParityTests {
         _ = rt.frame(at: 0.0)
         rt.setLiveVisible(false)
         _ = rt.dropFiles([URL(fileURLWithPath: "/tmp/doc.txt")], at: Vec2(50, 50), at: 0.01)
-        let built = rt.hiddenWake(at: 0.02)
+        let built = rt.coveredWake(at: 0.02)
         #expect(built == true)
         #expect(rt.state.dropped == ["doc.txt"])
     }
@@ -106,7 +107,7 @@ struct WindowLifecycleParityTests {
         _ = rt.frame(at: 0.0)
         rt.setLiveVisible(false)
         rt.update(at: 0.01) { s, _ in s.expanded = true }
-        _ = rt.hiddenWake(at: 0.02)
+        coveredStep(rt, at: 0.02)
 
         rt.setLiveVisible(true)
         rt.settleAll()

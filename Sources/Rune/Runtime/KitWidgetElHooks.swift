@@ -52,6 +52,7 @@ extension Tx {
         requestedFocusKey = targetKey
         requestedFocusVisible = focusVisible
         focusAskedByReturn = false
+        focusAskedWhenShown = false
         blurFocusRequested = false
     }
 

@@ -32,6 +32,8 @@ extension Runtime {
 
     @discardableResult
     internal func keyUp(_ ev: KeyEvent, fromPhysicalRelease: Bool, at now: Double = 0) -> Bool {
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark, queuedAction: true) }
         if !fromPhysicalRelease && inputMachines.keyReleases.eat(composing: isAnyImeComposing) {
             return false
         }
@@ -204,7 +206,9 @@ extension Runtime {
     /// Routes a pinch magnification gesture at `windowPos` from innermost element outward (`Runtime::magnify_event`).
     @discardableResult
     public func magnify(_ ev: MagnifyEvent, at windowPos: Vec2, now: Double = 0) -> Bool {
-        dispatchGestureChain(at: windowPos) { node, local in
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
+        return dispatchGestureChain(at: windowPos) { node, local in
             guard let handler = node.el.handlers.onMagnify else { return nil }
             var localEv = ev
             localEv.x = local.x
@@ -218,7 +222,9 @@ extension Runtime {
     /// Routes a two-finger rotation gesture at `windowPos` from innermost element outward (`Runtime::rotate_event`).
     @discardableResult
     public func rotate(_ ev: RotateEvent, at windowPos: Vec2, now: Double = 0) -> Bool {
-        dispatchGestureChain(at: windowPos) { node, local in
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
+        return dispatchGestureChain(at: windowPos) { node, local in
             guard let handler = node.el.handlers.onRotate else { return nil }
             var localEv = ev
             localEv.x = local.x
@@ -232,7 +238,9 @@ extension Runtime {
     /// Routes a smart-magnify tap at `windowPos` from innermost element outward (`Runtime::smart_magnify`).
     @discardableResult
     public func smartMagnify(at windowPos: Vec2, now: Double = 0) -> Bool {
-        dispatchGestureChain(at: windowPos) { node, local in
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
+        return dispatchGestureChain(at: windowPos) { node, local in
             guard let handler = node.el.handlers.onSmartMagnify else { return nil }
             var tx = makeTx(at: now)
             let handled = handler(&state, local.x, local.y, &tx)
@@ -946,6 +954,8 @@ extension Runtime {
 
     internal func fireHoverDelays(at now: Double) {
         guard hoverDelays.waiting else { return }
+        let inputMark = beginInputDispatch(at: now)
+        defer { endInputDispatch(inputMark) }
         let clockNow = now + 1e-6
         for path in hoverDelays.paths {
             stepHoverDelay(path, event: .due(now: clockNow), at: now)
@@ -986,7 +996,11 @@ extension Runtime {
             let d = effectiveHoverDelay(for: old.el)
             let heard = (d.enter == 0 && d.leave == 0) ? inside : shown
             if heard, let cb = old.el.handlers.onHoverChange {
-                dispatchHoverChange(path: old.path, inside: false, handler: cb, at: now)
+                // No pointer event asked for this leave (`hover.rs`: `observe_since`): its change is
+                // DIRTY even when a commit flushed inside an input entry point prunes it (#970).
+                asInputObserver {
+                    dispatchHoverChange(path: old.path, inside: false, handler: cb, at: now)
+                }
             }
         }
     }

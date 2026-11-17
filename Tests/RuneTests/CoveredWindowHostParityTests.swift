@@ -1,0 +1,243 @@
+import Foundation
+import Testing
+@testable import Rune
+import RuneMotion
+#if os(macOS)
+import AppKit
+#endif
+
+// Upstream 2e23d0fa (#995), host side: `window/sight.rs::Host::set_cover` and `window::covered_step`
+// as the AppKit hosts run them through `CoveredWindowDriver` (`MacOSApp.swift`,
+// `WindowHostingMacOS.swift`). The upstream commit changed no Rust #[test]; its host paths are
+// `window/covered_tests.rs`'s (ported in `WindowLifecycleParityTests`) with `covered_step` now
+// running `Runtime::covered_wake`. These drive the driver exactly as the hosts' occlusion,
+// miniaturize, wake and accessibility callbacks do.
+@Suite("Covered window host parity (#995)")
+@MainActor
+struct CoveredWindowHostParityTests {
+    struct S {
+        var extra = 0
+        var loaded = false
+        var visibility: [Bool] = []
+        var permission = false
+    }
+
+    static func runtime() -> Runtime<S> {
+        let rt = Runtime<S>(state: S(), viewport: Vec2(400, 300), pixelScale: 1.0) { s, _ in
+            var root: El<S> = col().size(400, 300).gap(8)
+                .child(el().key("prompt").size(120, 24).focusable())
+                .child(text("\(s.extra)").key("count"))
+            if s.loaded {
+                root = root.child(
+                    el().key("card").size(80, 40)
+                        .child(el().key("allow").size(60, 24).focusable())
+                )
+            }
+            return root
+        }
+        rt.onVisibility = { s, visible, _ in s.visibility.append(visible) }
+        _ = rt.frame(at: 0.0)
+        return rt
+    }
+
+    static func shownCount(_ rt: Runtime<S>) -> String? {
+        rt.elements().first { $0.key == "count" }?.text
+    }
+
+    @Test("an occlusion report covers the window: not live, wakes run covered_step, nothing builds without a reader")
+    func occlusionCoversAndWakesRunCovered() {
+        let rt = Self.runtime()
+        var driver = CoveredWindowDriver()
+        #expect(driver.canDraw)
+        #expect(driver.setOccluded(true, runtime: rt, at: 0.01) == .rest, "covered: stop pacing and rest")
+        #expect(!driver.canDraw)
+        #expect(!rt.liveVisible, "set_live_visible(uncovered && !minimized)")
+        #expect(rt.state.visibility == [false], "App::on_visibility hears it go")
+
+        let commits = rt.commitCount
+        rt.update(at: 0.02) { s, _ in s.extra = 3 }
+        #expect(!driver.step(rt, at: 0.03), "no reader: the view waits for the frame that uncovers it")
+        #expect(rt.commitCount == commits)
+        #expect(rt.isStale)
+        #expect(Self.shownCount(rt) == "0")
+
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.04) == .redraw, "uncovered: its first frame draws what it owed")
+        #expect(driver.canDraw)
+        #expect(rt.liveVisible)
+        #expect(rt.state.visibility == [false, true], "and hears it come back")
+        _ = rt.frame(at: 0.05)
+        #expect(Self.shownCount(rt) == "3")
+    }
+
+    @Test("once an assistive client reads the window, a covered wake builds what changed at once, without drawing")
+    func readerGetsCoveredChangesAtOnce() {
+        let rt = Self.runtime()
+        var driver = CoveredWindowDriver()
+        _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+        // The host's `accessibilityChildren` asks for the tree (AccessKit's activation).
+        driver.assistiveClientAttached(rt)
+        #expect(rt.assistiveTechnology, "a11y.is_some()")
+        let commits = rt.commitCount
+        rt.update(at: 0.02) { s, _ in s.extra = 7 }
+        #expect(driver.step(rt, at: 0.03), "the host hands the reader the new tree")
+        #expect(rt.commitCount == commits + 1)
+        #expect(Self.shownCount(rt) == "7")
+        #expect(!rt.isStale)
+        #expect(!driver.step(rt, at: 0.04), "nothing more to build")
+        #expect(!rt.liveVisible, "still covered: not live")
+    }
+
+    @Test("focus a poll asks of what a covered window's change shows (a permission's card) lands while a reader reads it")
+    func readerGetsAskedFocusWhileCovered() {
+        let rt = Self.runtime()
+        rt.poll = { s, _, tx in
+            guard s.permission, !s.loaded else { return false }
+            s.loaded = true
+            tx.focusWhenShown("card", ring: true)
+            return true
+        }
+        var driver = CoveredWindowDriver()
+        _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+        driver.assistiveClientAttached(rt)
+        rt.state.permission = true
+        driver.step(rt, at: 0.02)
+        #expect(rt.focusedKey == "allow", "the reader hears the card take focus without waiting for a draw")
+        #expect(rt.focusVisible)
+    }
+
+    @Test("without a reader, focus asked while covered waits and lands on the frame that uncovers it")
+    func askedFocusWaitsForUncoverWithoutReader() {
+        let rt = Self.runtime()
+        var driver = CoveredWindowDriver()
+        _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+        rt.update(at: 0.02) { s, tx in
+            s.loaded = true
+            tx.focusWhenShown("card", ring: false)
+        }
+        driver.step(rt, at: 0.03)
+        #expect(rt.focusedKey == nil)
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.04) == .redraw)
+        _ = rt.frame(at: 0.05)
+        #expect(rt.focusedKey == "allow")
+    }
+
+    @Test("on macOS minimising is occlusion: an uncover after it always settles and redraws (`Win::minimized()` is false there)")
+    func minimiseIsOcclusionOnMacOS() {
+        let rt = Self.runtime()
+        var driver = CoveredWindowDriver()
+        // Miniaturize drops `.visible` from the occlusion state (winit's `Occluded(true)`).
+        #expect(driver.setOccluded(true, runtime: rt, at: 0.01) == .rest)
+        #expect(!driver.canDraw)
+        #expect(!rt.liveVisible)
+        driver.assistiveClientAttached(rt)
+        rt.update(at: 0.02) { s, _ in s.extra = 5 }
+        #expect(driver.step(rt, at: 0.03), "a minimised window a reader reads builds at once too")
+        #expect(Self.shownCount(rt) == "5")
+        #expect(!rt.isStale, "nothing left to build")
+        // Deminiaturize brings `.visible` back (`Occluded(false)`): it was covered, so it settles and redraws.
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.04) == .redraw)
+        #expect(rt.isStale, "settle_all asks for the settled frame")
+        #expect(driver.canDraw)
+        #expect(rt.liveVisible)
+    }
+
+    @Test("a covered window a reader reads builds for pending frame work alone (`needs_commit`: `pending.frame_work()`)")
+    func readerBuildsForPendingFrameWork() {
+        struct L { var rows = 40 }
+        for reader in [false, true] {
+            let rt = Runtime<L>(state: L(), viewport: Vec2(200, 100), pixelScale: 1.0) { s, _ in
+                col().size(200, 100).child(
+                    col().key("list").size(200, 100).scrollY()
+                        .children((0..<s.rows).map { i in el().key("row\(i)").size(200, 20) })
+                )
+            }
+            _ = rt.frame(at: 0.0)
+            var driver = CoveredWindowDriver()
+            _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+            if reader { driver.assistiveClientAttached(rt) }
+            // Frame work with nothing to rebuild: a scroll request the last commit left pending.
+            rt.pendingScrollBottoms.append((key: "list", animated: false))
+            #expect(!rt.needsCommit)
+            driver.step(rt, at: 0.02)
+            if reader {
+                #expect(rt.pendingScrollBottoms.isEmpty, "built at once for the reader")
+            } else {
+                #expect(!rt.pendingScrollBottoms.isEmpty, "waits for the frame that uncovers it")
+            }
+        }
+    }
+
+    @Test("uncovering settles what changed while covered, so its first frame paints where motion ends")
+    func uncoverSettles() throws {
+        struct M { var wide = false }
+        let rt = Runtime<M>(state: M(), viewport: Vec2(400, 300), pixelScale: 1.0) { s, _ in
+            col().size(400, 300).child(el().key("bar").size(s.wide ? 180 : 40, 20).motion(Spring(duration: 0.4, bounce: 0.0)))
+        }
+        _ = rt.frame(at: 0.0)
+        var driver = CoveredWindowDriver()
+        _ = driver.setOccluded(true, runtime: rt, at: 0.01)
+        rt.update(at: 0.02) { s, _ in s.wide = true }
+        driver.step(rt, at: 0.03)
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.04) == .redraw)
+        _ = rt.frame(at: 0.04 + 1.0 / 120.0)
+        let bar = try #require(rt.presented("bar")).rect[2]
+        #expect(abs(bar - 180) < 0.5, "landed, nothing left to play: \(bar)")
+    }
+
+    @Test("an uncover report for a window that was never covered and is current asks for nothing")
+    func uncoverWhenSeenAndCurrentIsNone() {
+        let rt = Self.runtime()
+        var driver = CoveredWindowDriver()
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.01) == .none)
+        rt.update(at: 0.02) { s, _ in s.extra = 1 }
+        #expect(driver.setOccluded(false, runtime: rt, at: 0.03) == .redraw, "a stale window still draws (`else if rt.stale()`)")
+    }
+
+    #if os(macOS)
+    /// What an AppKit host holds: its driver, fed by `WindowCoverWatch` (`MacOSApp`) or the window
+    /// delegate's `windowDidChangeOcclusionState` (`WindowHostingMacOS`), and what each report asked.
+    @MainActor
+    final class AppKitHostProbe {
+        var driver = CoveredWindowDriver()
+        var outcomes: [CoveredWindowDriver.Outcome] = []
+    }
+
+    @Test("AppKit host: the window's occlusion notification covers it through WindowCoverWatch, and its wakes run covered_step for a reader")
+    func appKitOcclusionNotificationRoutesThroughCoveredStep() {
+        let rt = Self.runtime()
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: true
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        // Never ordered on screen: `.visible` isn't in its occlusion state (winit's `Occluded(true)`).
+        #expect(WindowCoverWatch.occluded(window))
+        let probe = AppKitHostProbe()
+        let watch = WindowCoverWatch(window: window) { occluded in
+            probe.outcomes.append(probe.driver.setOccluded(occluded, runtime: rt, at: 0.01))
+        }
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        let deadline = Date().addingTimeInterval(2.0)
+        while probe.outcomes.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        withExtendedLifetime(watch) {}
+        #expect(probe.outcomes == [.rest], "covered: stop pacing and rest")
+        #expect(!probe.driver.canDraw, "every wake, due timer and redraw now runs covered_step")
+        #expect(!rt.liveVisible)
+
+        // No reader: a wake runs `hidden_wake` alone; the view waits for the uncovering frame.
+        rt.update(at: 0.02) { s, _ in s.extra = 4 }
+        #expect(!probe.driver.step(rt, at: 0.03))
+        #expect(Self.shownCount(rt) == "0")
+        // The host's `accessibilityChildren` attaches a reader: the next wake builds for it.
+        probe.driver.assistiveClientAttached(rt)
+        #expect(probe.driver.step(rt, at: 0.04), "the host hands the reader the committed tree")
+        #expect(Self.shownCount(rt) == "4")
+        #expect(!rt.liveVisible, "built without drawing: still covered")
+    }
+    #endif
+}

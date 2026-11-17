@@ -473,9 +473,13 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     private let windowHandle: WindowHandle?
     private let onReady: ((WindowHandle) -> Void)?
     private var didFireReady: Bool = false
+    private var didRunOnReady: Bool = false
     private let chromeStyle: Chrome
     private let customTitlebar: Titlebar?
     private var chromeWatch: WindowChromeWatch?
+    /// Whether the shown window can draw, and what covering it runs (`window/sight.rs`, #995).
+    private var coverDriver = CoveredWindowDriver()
+    private var coverWatch: WindowCoverWatch?
     private var lastFrameTime: Double = 0.0
     private var displayLinkDriver: MacOSDisplayLinkDriver?
     private var trackingAreaRef: NSTrackingArea?
@@ -628,6 +632,85 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             self?.syncWindowChrome()
             self?.requestRender()
         }
+        coverWatch = WindowCoverWatch(window: w) { [weak self] occluded in
+            self?.coverChanged(occluded: occluded)
+        }
+    }
+
+    /// The window was covered or uncovered, minimising included (`Host::set_cover`).
+    private func coverChanged(occluded: Bool) {
+        switch coverDriver.setOccluded(occluded, runtime: runtime, at: nowSeconds()) {
+        case .rest:
+            stopTimer()
+        case .redraw:
+            requestRender()
+        case .none:
+            break
+        }
+    }
+
+    /// A wake, due timer or redraw for a shown window that can't draw (`covered_step`): `poll`,
+    /// due timers and queued input run, and while an assistive client reads the window what
+    /// changed builds at once for it (`Runtime::covered_wake`); nothing draws or moves.
+    private func coveredTick(at t: Double) {
+        stopTimer()
+        let committed = coverDriver.step(runtime, at: t)
+        // `on_ready` starts an app's live work, so it can't wait on a drawable: the first frame
+        // skipped for being off screen runs it; the window isn't ready until it draws
+        // (`FirstFrame::skipped`).
+        runOnReadyOnce()
+        // What the step asked of the shell goes out now (`self.shell(event_loop)`).
+        if let title = runtime.windowTitle, window?.title != title {
+            window?.title = title
+        }
+        if runtime.closeWindowRequested {
+            runtime.clearShellRequests()
+            window?.performClose(nil)
+            return
+        }
+        if runtime.minimizeRequested {
+            runtime.clearShellRequests()
+            window?.miniaturize(nil)
+        }
+        if runtime.quitRequested {
+            let after: QuitAfter = runtime.relaunchRequested ? .relaunch : .exit
+            _ = QuitLifecycle.send(.start(ending: false, after: after))
+            NSApplication.shared.terminate(nil)
+            return
+        }
+        applyWindowFrameRequest(at: t)
+        pumpPlatformActions()
+        // The reader gets the tree the covered step committed, held words or an attaching
+        // reader's follow-up, and words said since the last update, as a drawn frame's stamp.
+        syncPlatformBridges(
+            treeCommitted: committed || a11yFollowUp
+                || accessibilityHost.announcementChanged(runtime.a11yAnnouncement)
+        )
+    }
+
+    /// `App::on_ready`, once per window: at its first drawn frame or first covered one.
+    private func runOnReadyOnce() {
+        guard !didRunOnReady else { return }
+        didRunOnReady = true
+        if let wh = windowHandle {
+            onReady?(wh)
+        }
+    }
+
+    /// A `Tx.setWindowFrame` the runtime holds goes to the window (`window/frame.rs`).
+    private func applyWindowFrameRequest(at t: Double) {
+        guard let frameReq = runtime.takeWindowFrameRequest(), let w = window else { return }
+        let scale = Float(w.backingScaleFactor)
+        windowFrameDriver.applyRequest(
+            frameReq,
+            window: w,
+            now: t,
+            minSize: minWindowSize,
+            maxSize: maxWindowSize,
+            scale: scale
+        ) { [weak self] vp, sc in
+            self?.runtime.stepViewport(vp, pixelScale: sc)
+        }
     }
 
     func stopTimer() {
@@ -688,6 +771,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             applyDrainedRequests(drained)
         }
         syncNativeMenus()
+        if !coverDriver.canDraw {
+            coveredTick(at: t)
+            return
+        }
 
         let desiredFmt: MTLPixelFormat = runtime.srgbBlend ? .bgra8Unorm : .bgra8Unorm_srgb
         if metalLayer.pixelFormat != desiredFmt {
@@ -749,19 +836,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             return
         }
 
-        if let frameReq = runtime.takeWindowFrameRequest(), let w = window {
-            let scale = Float(w.backingScaleFactor)
-            windowFrameDriver.applyRequest(
-                frameReq,
-                window: w,
-                now: t,
-                minSize: minWindowSize,
-                maxSize: maxWindowSize,
-                scale: scale
-            ) { [weak self] vp, sc in
-                self?.runtime.stepViewport(vp, pixelScale: sc)
-            }
-        }
+        applyWindowFrameRequest(at: t)
         let isAnim = runtime.isAnimating || (compositor?.isAnimating ?? false) || windowFrameDriver.isMoving
         if isAnim {
             restingGiveBackDone = false
@@ -823,9 +898,7 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
             if !didFireReady {
                 didFireReady = true
                 ReadySignal.ready()
-                if let wh = windowHandle {
-                    onReady?(wh)
-                }
+                runOnReadyOnce()
             }
             if let reports {
                 let encoded = FrameEncoded(
@@ -1277,7 +1350,10 @@ internal final class RuneMetalHostView<State>: NSView, @MainActor NSTextInputCli
     nonisolated override func accessibilityChildren() -> [Any]? {
         guard Thread.isMainThread else { return nil }
         return MainActor.assumeIsolated {
-            MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
+            // An assistive client reads the tree (AccessKit's activation): covered, the window
+            // builds what changed for it at once (`Runtime::covered_wake`).
+            coverDriver.assistiveClientAttached(runtime)
+            return MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
         }.value
     }
 

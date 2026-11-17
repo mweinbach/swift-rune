@@ -263,6 +263,8 @@ public struct Tx {
     public internal(set) var requestedFocusKey: String? = nil
     public internal(set) var requestedFocusVisible: Bool = true
     public internal(set) var focusAskedByReturn: Bool = false
+    /// The focus ask is `Tx.focusWhenShown` (`FocusAsk::WhenShown`): it waits for its element.
+    public internal(set) var focusAskedWhenShown: Bool = false
     public internal(set) var blurFocusRequested: Bool = false
     public internal(set) var clipboardWrite: ClipboardContent? = nil
     public var scrollToRequests: [(key: String, offset: Vec2, animated: Bool)] {
@@ -424,13 +426,15 @@ public struct Tx {
         requestedFocusKey = targetKey
         requestedFocusVisible = true
         focusAskedByReturn = false
+        focusAskedWhenShown = false
         blurFocusRequested = false
     }
 
     /// Clears keyboard focus.
     public mutating func blur() {
         blurFocusRequested = true
-        requestedFocusKey = nil
+        // A `Tx.focusWhenShown` stands apart from the blur, as upstream's `focus_to` does.
+        if !focusAskedWhenShown { requestedFocusKey = nil }
     }
 
     /// Copies text to the system / headless clipboard.
@@ -563,6 +567,7 @@ public struct Tx {
                 requestedFocusKey = fk
                 requestedFocusVisible = one.requestedFocusVisible
                 focusAskedByReturn = one.focusAskedByReturn
+                focusAskedWhenShown = one.focusAskedWhenShown
             }
         }
         sentKeys.append(contentsOf: one.sentKeys)
@@ -619,6 +624,7 @@ public struct Tx {
             requestedFocusKey = targetKey
             requestedFocusVisible = visible
             focusAskedByReturn = true
+            focusAskedWhenShown = false
             blurFocusRequested = false
         }
     }

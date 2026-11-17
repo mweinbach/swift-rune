@@ -531,6 +531,7 @@ extension Runtime {
 
     internal func pollPlaygroundIfNeeded(at now: Double) {
         guard let live = playgroundLive, live.polls else { return }
+        commitInputApartFromFramePoll(at: now, polls: true)
         var tx = Tx()
         let (changed, wakeAfter) = live.pollStage(at: now, appState: &state, tx: &tx)
         if let wakeAfter {
@@ -540,8 +541,11 @@ extension Runtime {
             }
         }
         applyTx(tx, at: now, markDirtyIfNotLiveOnly: changed, why: changed ? CommitWhy.poll : 0)
+        // The playground's poll is a frame poll too (frame.rs:542, `why |= CommitWhy::POLL`).
+        if changed { framePollChanged() }
 
         let keys = live.takePressed()
+        if !keys.isEmpty { commitPolledChangeApart(at: now) }
         for ev in keys {
             _ = routePlaygroundStageKey(ev, at: now)
             live.played += 1
