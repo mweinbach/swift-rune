@@ -574,8 +574,7 @@ public final class MacOSAccessibilityHost {
     private var announcerElement: RuneNSAccessibilityElement?
     /// An assistive client has asked for this view's tree (AccessKit's activation).
     public private(set) var isActivated = false
-    /// Called when a client first asks for the tree: the host must update again (and keep the
-    /// runtime dirty) so the whole tree that reader starts from goes out.
+    /// Called synchronously on the first reader query so a native host can supply its current tree.
     public var onActivate: (@MainActor () -> Void)?
     /// What the last update asked VoiceOver to say (`announcementRequested`), in order.
     public private(set) var lastSpoken: [(text: String, politeness: LiveRegionPoliteness)] = []
@@ -722,10 +721,8 @@ public final class MacOSAccessibilityHost {
     public func activate() {
         guard !isActivated else { return }
         isActivated = true
-        if previousTree != nil {
-            treeState.forceFullUpdate()
-            onActivate?()
-        }
+        if previousTree != nil { treeState.forceFullUpdate() }
+        onActivate?()
     }
 
     public func accessibilityChildren() -> [Any] {
@@ -734,6 +731,7 @@ public final class MacOSAccessibilityHost {
     }
 
     public func accessibilityFocusedUIElement() -> Any? {
+        activate()
         if let fid = lastFocusedId {
             return elementById[fid]
         }
@@ -741,6 +739,7 @@ public final class MacOSAccessibilityHost {
     }
 
     public func accessibilityHitTest(_ screenPoint: NSPoint, in parentView: NSView) -> Any? {
+        activate()
         func hitTestNode(_ element: RuneNSAccessibilityElement) -> RuneNSAccessibilityElement? {
             let children = (element.accessibilityChildren() as? [RuneNSAccessibilityElement]) ?? []
             for child in children.reversed() {

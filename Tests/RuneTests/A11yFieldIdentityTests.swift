@@ -33,6 +33,51 @@ struct A11yFieldIdentityTests {
         #expect(runtime.focusedKey == "files")
     }
 
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil))
+    func detachedReaderSkipsUnfocusedFieldsAndFirstQueryGetsTheirCurrentValue() throws {
+        final class Counter { var reads = 0 }
+        let reads = Counter()
+        let runtime = Runtime(state: TextEdit("initial"), viewport: Vec2(180, 64)) { _, _ in
+            textInput(key: "draft", editAccess(get: { value in
+                reads.reads += 1
+                return value
+            }, set: { state, value in state = value })).size(120, 28)
+        }
+        _ = NSApplication.shared
+        let view = RuneMetalHostView(frame: NSRect(x: 0, y: 0, width: 180, height: 64),
+                                     runtime: runtime, renderer: try MetalRenderer(),
+                                     timeScale: 1, respectSystemAppearance: false)
+        runtime.update(at: 0) { state, _ in state = TextEdit("latest") }
+        _ = runtime.frame(at: 0)
+        let before = reads.reads
+        view.syncPlatformBridges(treeCommitted: true)
+        #expect(reads.reads == before)
+        #expect(!runtime.assistiveTechnology)
+
+        let field = try #require(view.accessibilityChildren()?.first as? RuneAXTextField)
+        #expect(field.accessibilityValue() as? String == "latest")
+        #expect(runtime.assistiveTechnology && reads.reads > before)
+        runtime.update(at: 0.1) { state, _ in state = TextEdit("changed") }
+        _ = runtime.frame(at: 0.1)
+        view.syncPlatformBridges(treeCommitted: true)
+        #expect(field.accessibilityValue() as? String == "changed")
+    }
+
+    @Test(.enabled(if: MTLCreateSystemDefaultDevice() != nil))
+    func readerHitTestCanActivateBeforeTheFirstFrame() throws {
+        _ = NSApplication.shared
+        let runtime = Runtime(state: 0, viewport: Vec2(180, 64)) { _, _ in
+            el().key("btn").role(.button).label("First button").size(100, 30)
+        }
+        let view = RuneMetalHostView(frame: NSRect(x: 0, y: 0, width: 180, height: 64),
+                                     runtime: runtime, renderer: try MetalRenderer(),
+                                     timeScale: 1, respectSystemAppearance: false)
+        let target = try #require(view.accessibilityHitTest(NSPoint(x: 10, y: 10)) as? RuneNSAccessibilityElement)
+        #expect(target.accessibilityIdentifier() == "btn")
+        #expect(runtime.assistiveTechnology)
+        #expect(runtime.viewCommitCount == 1)
+    }
+
     @Test func fieldsWithMatchingKeysRouteToTheirOwnEditor() throws {
         struct Form { var first = TextEdit("first"); var second = TextEdit("second") }
         let runtime = Runtime(state: Form(), viewport: Vec2(300, 160), systemDark: false) { _, _ in

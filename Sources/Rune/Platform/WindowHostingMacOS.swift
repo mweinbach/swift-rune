@@ -760,7 +760,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         }
     }
     private var lastAppliedCursor: Cursor = .default
-    private var didInitialA11ySync = false
+    private var didSyncToolTips = false
     /// The accessibility tree must go out again although no commit changed it (#980).
     private var a11yFollowUp = false
     /// The launch's `--reduced-motion`: the system's setting can't turn it off.
@@ -798,6 +798,15 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         self.timeScale = timeScale
         self.respectSystemAppearance = respectSystemAppearance
         super.init(frame: frame)
+        accessibilityHost.onActivate = { [weak self] in
+            guard let self else { return }
+            let readerRuntime = self.entry.coveredRuntime(runtimeObj: self.runtime)
+            self.coverDriver.assistiveClientAttached(readerRuntime)
+            if readerRuntime.commitCount == 0 || !self.coverDriver.canDraw {
+                self.coverDriver.step(readerRuntime, at: self.nowSeconds())
+            }
+            self.syncAccessibilityTree()
+        }
         self.wantsLayer = true
         launchDrawables.cap(metalLayer)
         metalLayer.device = renderer.device
@@ -1020,9 +1029,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             entry.unchanged(presentsAt: targetTimestamp)
             slot?.host?.drainOpenedWindows()
             pumpPlatformActions()
-            syncPlatformBridges(treeCommitted: !didInitialA11ySync || a11yFollowUp ||
-                                entry.viewCommitCount(runtimeObj: runtime) != commitsBefore ||
-                                accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime)))
+            syncPlatformBridges(treeCommitted: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
             sleepUntilRuntimeWake()
             surfaceMeter.setPacing(displayLinkDriver.pacing)
             return
@@ -1080,13 +1087,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             }
             slot?.host?.drainOpenedWindows()
             pumpPlatformActions()
-            // The accessibility stamp: a commit, held words or an attaching reader, or words said since
-            // the last update (`announced`), which a live-only `Tx::announce` brings without a commit.
-            syncPlatformBridges(
-                treeCommitted: !didInitialA11ySync || a11yFollowUp
-                    || entry.viewCommitCount(runtimeObj: runtime) != commitsBefore
-                    || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
-            )
+            syncPlatformBridges(treeCommitted: entry.viewCommitCount(runtimeObj: runtime) != commitsBefore)
 
 
             if isAnimating || needsFrame() {
@@ -1131,10 +1132,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
         slot?.host?.drainOpenedWindows()
         pumpPlatformActions()
         applyWindowFrameRequest(at: t)
-        syncPlatformBridges(
-            treeCommitted: committed || a11yFollowUp
-                || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime))
-        )
+        syncPlatformBridges(treeCommitted: committed)
         sleepUntilRuntimeWake()
     }
 
@@ -1199,49 +1197,53 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
             in: self
         )
 
-        if treeCommitted {
-            didInitialA11ySync = true
-            a11yFollowUp = false
-            if accessibilityHost.onActivate == nil {
-                accessibilityHost.onActivate = { [weak self] in self?.scheduleAccessibilityFollowUp() }
-            }
+        if treeCommitted || !didSyncToolTips {
+            didSyncToolTips = true
             toolTipOwner.sync(regions: entry.helpRegionsList(runtimeObj: runtime), on: self)
-            let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
-            let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, onSelectText: { [weak self] id, range in
-                MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
-                    guard let self else { return }
-                    if self.entry.selectAccessibilityText(runtimeObj: self.runtime, id: id, range: range, at: self.nowSeconds()) { self.requestRender() }
-                }
-            }, onSetValue: { [weak self] id, value in
-                MacOSHostViewHelper.dispatchAccessibilitySetValue(id, value: value) { id, value in
-                    guard let self else { return }
-                    if self.entry.performAccessibilitySetValue(
-                        runtimeObj: self.runtime,
-                        id: id,
-                        value: value,
-                        at: self.nowSeconds()
-                    ) {
-                        self.requestRender()
-                    }
-                }
-            }) { [weak self] id, action in
-                MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
-                    guard let self else { return }
-                    if self.entry.performAccessibilityAction(
-                        runtimeObj: self.runtime,
-                        id: id,
-                        action: action,
-                        at: self.nowSeconds()
-                    ) {
-                        self.requestRender()
-                    }
-                }
-            }
-            if held { scheduleAccessibilityFollowUp() }
+        }
+        if accessibilityHost.isActivated,
+           treeCommitted || a11yFollowUp || accessibilityHost.announcementChanged(entry.accessibilityAnnouncement(runtimeObj: runtime)) {
+            syncAccessibilityTree()
         }
     }
 
-    /// Held announcer words or a client that just attached: the runtime stays dirty and the tree
+    private func syncAccessibilityTree() {
+        a11yFollowUp = false
+        let snapshot = entry.accessibilitySnapshot(runtimeObj: runtime)
+        let held = accessibilityHost.update(tree: snapshot, announcement: entry.accessibilityAnnouncement(runtimeObj: runtime), parentView: self, onSelectText: { [weak self] id, range in
+            MacOSHostViewHelper.dispatchAccessibilityRequest { [weak self] in
+                guard let self else { return }
+                if self.entry.selectAccessibilityText(runtimeObj: self.runtime, id: id, range: range, at: self.nowSeconds()) { self.requestRender() }
+            }
+        }, onSetValue: { [weak self] id, value in
+            MacOSHostViewHelper.dispatchAccessibilitySetValue(id, value: value) { id, value in
+                guard let self else { return }
+                if self.entry.performAccessibilitySetValue(
+                    runtimeObj: self.runtime,
+                    id: id,
+                    value: value,
+                    at: self.nowSeconds()
+                ) {
+                    self.requestRender()
+                }
+            }
+        }) { [weak self] id, action in
+            MacOSHostViewHelper.dispatchAccessibilityAction(id, action: action) { id, action in
+                guard let self else { return }
+                if self.entry.performAccessibilityAction(
+                    runtimeObj: self.runtime,
+                    id: id,
+                    action: action,
+                    at: self.nowSeconds()
+                ) {
+                    self.requestRender()
+                }
+            }
+        }
+        if held { scheduleAccessibilityFollowUp() }
+    }
+
+    /// Recent announcer words held on activation: the runtime stays dirty and the tree
     /// goes out again on the next frame (`a11y_update`'s `self.dirty = true`).
     private func scheduleAccessibilityFollowUp() {
         a11yFollowUp = true
@@ -1437,10 +1439,7 @@ private final class RuneHostedMetalView: NSView, @MainActor NSTextInputClient {
     nonisolated override func accessibilityChildren() -> [Any]? {
         guard Thread.isMainThread else { return MacOSHostViewHelper.superclassAccessibilityChildren(of: self) }
         return MainActor.assumeIsolated {
-            // An assistive client reads the tree (AccessKit's activation): covered, the window
-            // builds what changed for it at once (`Runtime::covered_wake`).
-            coverDriver.assistiveClientAttached(entry.coveredRuntime(runtimeObj: runtime))
-            return MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
+            MacOSUnsafeSendableBox(accessibilityHost.accessibilityChildren())
         }.value
     }
 
