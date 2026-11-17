@@ -1427,8 +1427,12 @@ struct MotionGateEvidenceParityTests {
         }
         #expect(try String(contentsOfFile: path + ".dump", encoding: .utf8) ==
                 MotionGateEvidence.dump(Self.recording(), filter: "focus", from: 4, to: 5))
+        #if os(WASI)
+        #expect(!FileManager.default.fileExists(atPath: path + ".sheet.png"))
+        #else
         #expect(try Frame.fromPNG(data: Data(contentsOf: URL(fileURLWithPath: path + ".sheet.png"))) ==
                 MotionGateEvidence.sheet(Self.recording(), at: 4, focus: "focus"))
+        #endif
         #expect(MotionGateGate.run(jobs, filter: "run/").map(\.name) == ["run/short", "run/focus"])
     }
 }

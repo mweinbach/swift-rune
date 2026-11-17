@@ -1,6 +1,20 @@
 import Foundation
 #if os(WASI)
 import CRuneDesktopText
+import WASILibc
+
+/// WASI Preview 1 clock IDs. The page supplies Date time and performance time
+/// through the same ABI as a standalone WASI host.
+package enum RuneWASIClock: UInt32 {
+    case realtime = 0
+    case monotonic = 1
+
+    package var nanoseconds: UInt64 {
+        var ticks: UInt64 = 0
+        guard __wasi_clock_time_get(rawValue, 1, &ticks) == 0 else { return 0 }
+        return ticks
+    }
+}
 #endif
 
 /// Execution-local state and monotonic time used by the input and frame pipelines.
@@ -9,7 +23,7 @@ internal enum RuneExecutionContext {
     /// The Windows Foundation uptime advances with the system timer tick; use the
     /// same high-resolution monotonic clock as input events and frame diagnostics.
     @usableFromInline static var hostUptime: Double {
-        #if os(Windows)
+        #if os(Windows) || os(WASI)
         Double(uptimeNanoseconds) / 1_000_000_000
         #else
         ProcessInfo.processInfo.systemUptime
@@ -21,7 +35,7 @@ internal enum RuneExecutionContext {
     nonisolated(unsafe) static let locals = NSMutableDictionary()
 
     @usableFromInline static var uptimeNanoseconds: UInt64 {
-        UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000_000)
+        RuneWASIClock.monotonic.nanoseconds
     }
     #else
     static var locals: NSMutableDictionary { Thread.current.threadDictionary }

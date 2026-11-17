@@ -540,9 +540,13 @@ public struct Knobs: Sendable, Equatable {
     public mutating func random(_ group: KnobGroup) {
         checkpoint()
         if seed == 0 {
+            #if os(WASI)
+            seed = RuneWASIClock.realtime.nanoseconds | 1
+            #else
             let wall = UInt64(max(0.0, Date().timeIntervalSince1970) * 1_000_000_000.0)
             let mono = UInt64(max(0.0, ProcessInfo.processInfo.systemUptime) * 1_000_000_000.0)
             seed = (wall ^ mono.byteSwapped) | 1
+            #endif
         }
         for k in group.knobs {
             seed ^= seed << 13

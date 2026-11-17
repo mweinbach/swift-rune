@@ -152,11 +152,11 @@ public enum MotionGateGate {
         _ jobs: [(String, Job)], rows: [MotionGateAllowRow],
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> MotionGateReport {
-        let start = ProcessInfo.processInfo.systemUptime
+        let start = RuneExecutionContext.hostUptime
         let filter = environment["MOTION_GATE"] ?? ""
         let cells = try run(jobs, filter: filter, environment: environment)
         let report = reportWith(cells, rows: rows, listAllowed: environment["MOTION_GATE_ALLOWED"] != nil,
-                                whole: filter.isEmpty, secs: Float(ProcessInfo.processInfo.systemUptime - start))
+                                whole: filter.isEmpty, secs: Float(RuneExecutionContext.hostUptime - start))
         if let path = environment["MOTION_GATE_OUT"] {
             try Data(report.text.utf8).write(to: URL(fileURLWithPath: path), options: .runeOutput)
         }
@@ -279,11 +279,13 @@ public enum MotionGateGate {
                 RuneStandardIO.error(dumped)
             }
         }
+        #if !os(WASI)
         if let parts = spec("MOTION_GATE_SHEET"), let at = index(parts[1]) {
             let path = out ?? FileManager.default.temporaryDirectory.appendingPathComponent("motion-gate").path
             let sheet = MotionGateEvidence.sheet(rec, at: at, focus: parts.count > 2 ? String(parts[2]) : "")
             try sheet.pngData().write(to: URL(fileURLWithPath: path + ".sheet.png"), options: .runeOutput)
         }
+        #endif
     }
 }
 
