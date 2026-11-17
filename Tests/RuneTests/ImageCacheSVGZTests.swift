@@ -13,8 +13,8 @@ struct ImageCacheSVGZTests {
         "H4sIHgAAAAAA/wQAUlUAAGV4YW1wbGUuc3ZnAFJ1bmUAsYxNzEkKgDAMQNGrlLg3oQUX0vYyageoA20wHl9dCK7f59t2RnWtZWsOEvMxIopIL6bfa0RNRPgUoCTPnBwMoNKSY2IHGryty8QfmT+pkEtx0BGFQATo7bvxN2fyGONuAAAA"
     )!
 
-    private func checkRaster(_ image: CachedImage, width: Int, height: Int) throws {
-        let (w, h) = try image.wait().get()
+    private func checkRaster(_ image: CachedImage, width: Int, height: Int) async throws {
+        let (w, h) = try await image.decodedSizeForTest()
         try #require(Int(w) == width && Int(h) == height)
         let rgba = image.pixels.rgbaBytes()
         try #require(rgba.count == width * height * 4)
@@ -24,17 +24,17 @@ struct ImageCacheSVGZTests {
         #expect(Array(rgba[outside..<(outside + 4)]) == [0, 0, 0, 0])
     }
 
-    @Test func compressedBytesPaintAtDoubleIntrinsicSize() throws {
+    @Test func compressedBytesPaintAtDoubleIntrinsicSize() async throws {
         let cache = ImageCache()
         let compressed = cache.load(Self.svgz)
-        try checkRaster(compressed, width: 12, height: 4)
+        try await checkRaster(compressed, width: 12, height: 4)
         let plain = cache.load(Self.svg)
-        _ = try plain.wait().get()
+        try await plain.decodedSizeForTest()
         #expect(compressed.pixels.rgbaBytes() == plain.pixels.rgbaBytes())
     }
 
     #if !os(WASI)
-    @Test func localFileURLsUseTheRequestedSizeWithAndWithoutTheSVGZExtension() throws {
+    @Test func localFileURLsUseTheRequestedSizeWithAndWithoutTheSVGZExtension() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -43,7 +43,7 @@ struct ImageCacheSVGZTests {
             let file = directory.appendingPathComponent(name)
             try Self.svgz.write(to: file)
             let image = cache.url(file.absoluteString, sizePt: 9, scale: 2)
-            try checkRaster(image, width: 18, height: 6)
+            try await checkRaster(image, width: 18, height: 6)
         }
     }
     #endif

@@ -33,6 +33,25 @@ private final class MockImageURLProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+/// Let the executor run the image loader while a test waits for its result or wake.
+func imageUpdateArrived(_ condition: () -> Bool) async throws -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(5))
+    while !condition() {
+        guard clock.now < deadline else { return false }
+        try await clock.sleep(for: .milliseconds(5))
+    }
+    return true
+}
+
+extension CachedImage {
+    @discardableResult
+    func decodedSizeForTest() async throws -> (UInt32, UInt32) {
+        try #require(try await imageUpdateArrived { self.isReady }, "Image did not finish loading")
+        return try wait(timeout: 0).get()
+    }
+}
+
 @Suite("Text Unblock All Parity (ImageFromURL, Pills/InlineIcon, Quality, Selectable, Observer, DropPointer, KeyDiagnostics, KeyPaths, HostHooks)")
 struct TextUnblockAllTests {
 
@@ -46,7 +65,7 @@ struct TextUnblockAllTests {
     }
 
     @Test("from_url_tests 1: decoded file shares handle per (url, px) and exposes pixels")
-    func decodedFileSharesHandleAndPixels() throws {
+    func decodedFileSharesHandleAndPixels() async throws {
         let svgURL = Self.makeTempSVG(
             name: "square",
             body: ##"<svg width="10" height="10" viewBox="0 0 10 10"><rect x="1" y="1" width="8" height="8" fill="#ff3366"/></svg>"##
@@ -62,19 +81,15 @@ struct TextUnblockAllTests {
         #expect(a.id == b.id)
         #expect(a !== c)
 
-        let resA = a.wait(timeout: 2.0)
-        let resC = c.wait(timeout: 2.0)
-        guard case .success = resA, case .success = resC else {
-            Issue.record("Expected local SVG loads to succeed: \(resA), \(resC)")
-            return
-        }
+        try await a.decodedSizeForTest()
+        try await c.decodedSizeForTest()
         #expect(a.error == nil)
         #expect((a.size?.0 ?? 0) > 0 && (a.size?.1 ?? 0) > 0)
         #expect(a.pixels.sourceURLString == svgURL.path)
     }
 
     @Test("from_url_tests 2: svg scales with point size * pixel scale and preserves width")
-    func svgScalesToPointSizeTimesScale() {
+    func svgScalesToPointSizeTimesScale() async throws {
         let svgURL = Self.makeTempSVG(
             name: "icon",
             body: ##"<svg viewBox="0 0 24 24"><path d="M2 2 L22 2 L22 22 L2 22 Z" fill="#00cc88"/></svg>"##
@@ -85,20 +100,18 @@ struct TextUnblockAllTests {
         let lo = cache.url(svgURL.path, sizePt: 16, scale: 1)
         let hi = cache.url(svgURL.path, sizePt: 16, scale: 2)
 
-        guard case .success = lo.wait(timeout: 2.0), case .success = hi.wait(timeout: 2.0) else {
-            Issue.record("Expected SVG decode to succeed")
-            return
-        }
+        try await lo.decodedSizeForTest()
+        try await hi.decodedSizeForTest()
         #expect(lo.size?.0 == 16)
         #expect(hi.size?.0 == 32)
         #expect(lo.id != hi.id)
     }
 
     @Test("from_url_tests 3: unsupported URL without session records prefixed error; URLProtocol HTTP succeeds")
-    func unsupportedAndHTTPURLProtocol() {
+    func unsupportedAndHTTPURLProtocol() async throws {
         let bareCache = ImageCache()
         let bad = bareCache.url("https://example.com/a.svg", sizePt: 16, scale: 1)
-        _ = bad.wait(timeout: 1.0)
+        try #require(try await imageUpdateArrived { bad.isReady })
         #expect(bad.error?.message.hasPrefix("https://example.com/a.svg: ") == true)
 
         let woke = DispatchSemaphore(value: 0)
@@ -119,18 +132,15 @@ struct TextUnblockAllTests {
         )
 
         let remote = cache.url("https://cdn.example.com/avatar.svg", sizePt: 20, scale: 2)
-        guard case .success = remote.wait(timeout: 3.0) else {
-            Issue.record("Expected URLProtocol SVG fetch to succeed")
-            return
-        }
+        try await remote.decodedSizeForTest()
         #expect(remote.error == nil)
         #expect(remote.size?.0 == 40)
         // The cache publishes the decoded pixels before calling the application's wake closure.
-        #expect(woke.wait(timeout: .now() + 3) == .success)
+        #expect(try await imageUpdateArrived { woke.wait(timeout: .now()) == .success })
     }
 
     @Test("from_url_tests 4: urlSet picks narrowest source >= target px and shares handle")
-    func urlSetSelectsNarrowestCoveringTarget() {
+    func urlSetSelectsNarrowestCoveringTarget() async throws {
         let small = Self.makeTempSVG(name: "s100", body: ##"<svg width="16" height="16" viewBox="0 0 16 16"><rect x="0" y="0" width="16" height="16" fill="#ff0000"/></svg>"##)
         let large = Self.makeTempSVG(name: "s200", body: ##"<svg width="16" height="16" viewBox="0 0 16 16"><rect x="0" y="0" width="16" height="16" fill="#00ff00"/></svg>"##)
         defer {
@@ -147,10 +157,8 @@ struct TextUnblockAllTests {
         #expect(pick1 === pick2)
         #expect(pick1.pixels.sourceURLString == large.path)
         #expect(pick3.pixels.sourceURLString == small.path)
-        guard case .success = pick1.wait(timeout: 2.0), case .success = pick3.wait(timeout: 2.0) else {
-            Issue.record("Expected urlSet loads to succeed")
-            return
-        }
+        try await pick1.decodedSizeForTest()
+        try await pick3.decodedSizeForTest()
     }
 
     @Test("from_url_tests 5: rgba and manual load settle synchronously and validate inputs")

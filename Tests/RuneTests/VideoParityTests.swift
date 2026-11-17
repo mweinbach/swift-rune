@@ -34,17 +34,22 @@ struct VideoParityTests {
     }
 
     @Test("missing file, .ogv, and unsupported .ogg/.webm fail cleanly without resurrection")
-    func unsupportedAndMissingFilesFailCleanly() {
+    func unsupportedAndMissingFilesFailCleanly() async throws {
         let missing = Player.file("/nonexistent/path/not-a-file.mp4")
-        let deadline = Date().addingTimeInterval(0.5)
-        while !missing.state.isFailed && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
+        for _ in 0..<100 {
+            if missing.state.isFailed { break }
+            try await Task.sleep(for: .milliseconds(20))
         }
-        #expect(missing.state.isFailed)
+        let failure = missing.state
+        guard case .failed(let reason) = failure else {
+            Issue.record("Expected a missing-file error, got \(failure)")
+            return
+        }
+        #expect(reason.hasPrefix("media file not found: "))
         missing.play()
-        #expect(missing.state.isFailed)
+        #expect(missing.state == failure)
         missing.seek(to: 0.5)
-        #expect(missing.state.isFailed)
+        #expect(missing.state == failure)
 
         let ogv = Player.file("/tmp/sample.ogv")
         if case .failed(let msg) = ogv.snapshot().state {
