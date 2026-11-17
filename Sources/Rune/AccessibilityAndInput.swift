@@ -527,11 +527,14 @@ public enum AppKitAccessibilityMapper {
         onSelectText: (@Sendable (String, Range<Int>) -> Void)? = nil,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) -> RuneNSAccessibilityElement {
-        let el = makeElement(node, parent: parent, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
-        el.setAccessibilityChildren(node.children.map {
-            buildElement(from: $0, parent: el, onAction: onAction, onSelectText: onSelectText, onSetValue: onSetValue)
-        })
-        return el
+        let transform = (parent as? NSView).map(RuneAXTextField.viewToScreen) ?? .identity
+        func build(_ node: AccessibilityNode, parent: AnyObject?) -> RuneNSAccessibilityElement {
+            let el = makeElement(node, parent: parent, onAction: onAction, onSelectText: onSelectText,
+                                 onSetValue: onSetValue, viewToScreen: transform)
+            el.setAccessibilityChildren(node.children.map { build($0, parent: el) })
+            return el
+        }
+        return build(node, parent: parent)
     }
 
     @MainActor
@@ -541,20 +544,23 @@ public enum AppKitAccessibilityMapper {
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
         onSelectText: (@Sendable (String, Range<Int>) -> Void)?,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?,
-        reusing existingField: RuneAXTextField? = nil
+        reusing existingField: RuneAXTextField? = nil,
+        viewToScreen: @autoclosure () -> CGAffineTransform = .identity
     ) -> RuneNSAccessibilityElement {
         if !node.isSecure, node.role == .textInput || node.role == .multilineTextInput,
            let text = node.value, let selection = node.textSelection,
            selection.count == 4, selection[0] == 0, selection[2] == 0 {
+            let snapshot = RuneAXTextField.Snapshot(text: text, anchor: selection[1], focus: selection[3],
+                                                    layout: node.fieldLayout, viewToScreen: viewToScreen(),
+                                                    target: node.runtimePath ?? node.id,
+                                                    select: node.actions.contains(.setValue) ? onSelectText : nil)
             if let field = existingField {
-                field.updateText(text, anchor: selection[1], focus: selection[3],
-                                 onSelectText: node.actions.contains(.setValue) ? onSelectText : nil)
+                field.replaceSnapshot(snapshot)
                 field.update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
                 return field
             }
-            return RuneAXTextField(node: node, parent: parent, text: text,
-                                   anchor: selection[1], focus: selection[3], onAction: onAction,
-                                   onSelectText: onSelectText, onSetValue: onSetValue)
+            return RuneAXTextField(node: node, parent: parent, snapshot: snapshot,
+                                   onAction: onAction, onSetValue: onSetValue)
         }
         return RuneNSAccessibilityElement(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
@@ -563,10 +569,17 @@ public enum AppKitAccessibilityMapper {
 /// Concrete `NSAccessibilityElement` backing a projected `AccessibilityNode` on macOS.
 public class RuneNSAccessibilityElement: NSAccessibilityElement {
     public let nodeId: String
-    internal let actionTarget: String
-    public private(set) var supportedActions: [AccessibilityAction] = []
-    private var actionHandler: (@Sendable (String, AccessibilityAction) -> Void)?
-    private var setValueHandler: (@Sendable (String, AccessibilityActionValue) -> Void)?
+    private struct Actions {
+        let supported: [AccessibilityAction]
+        let target: String
+        let perform: (@Sendable (String, AccessibilityAction) -> Void)?
+        let setValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
+    }
+
+    private let actionsLock = NSLock()
+    private var actionState: Actions
+    private var actions: Actions { actionsLock.withLock { actionState } }
+    public var supportedActions: [AccessibilityAction] { actions.supported }
 
     public init(
         node: AccessibilityNode,
@@ -575,7 +588,8 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)? = nil
     ) {
         self.nodeId = node.id
-        self.actionTarget = node.runtimePath ?? node.id
+        self.actionState = Actions(supported: node.actions, target: node.runtimePath ?? node.id,
+                                   perform: onAction, setValue: onSetValue)
         super.init()
         update(node: node, parent: parent, onAction: onAction, onSetValue: onSetValue)
     }
@@ -585,9 +599,10 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         onAction: (@Sendable (String, AccessibilityAction) -> Void)?,
         onSetValue: (@Sendable (String, AccessibilityActionValue) -> Void)?
     ) {
-        self.supportedActions = node.actions
-        self.actionHandler = onAction
-        self.setValueHandler = onSetValue
+        actionsLock.withLock {
+            actionState = Actions(supported: node.actions, target: node.runtimePath ?? node.id,
+                                  perform: onAction, setValue: onSetValue)
+        }
 
         setAccessibilityRole(AppKitAccessibilityMapper.nsRole(for: node.role))
         if node.isSecure {
@@ -617,28 +632,22 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
         }
     }
 
-    public override func accessibilityPerformPress() -> Bool {
-        guard supportedActions.contains(.press) else { return false }
-        actionHandler?(actionTarget, .press)
+    private func perform(_ action: AccessibilityAction) -> Bool {
+        let current = actions
+        guard current.supported.contains(action) else { return false }
+        current.perform?(current.target, action)
         return true
     }
 
-    public override func accessibilityPerformIncrement() -> Bool {
-        guard supportedActions.contains(.increment) else { return false }
-        actionHandler?(actionTarget, .increment)
-        return true
-    }
-
-    public override func accessibilityPerformDecrement() -> Bool {
-        guard supportedActions.contains(.decrement) else { return false }
-        actionHandler?(actionTarget, .decrement)
-        return true
-    }
+    public override func accessibilityPerformPress() -> Bool { perform(.press) }
+    public override func accessibilityPerformIncrement() -> Bool { perform(.increment) }
+    public override func accessibilityPerformDecrement() -> Bool { perform(.decrement) }
 
     /// VoiceOver may set the value only where the node offers `SetValue`.
     public override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
         if selector == #selector(NSAccessibilityElement.setAccessibilityValue(_:)) {
-            return supportedActions.contains(.setValue) && setValueHandler != nil
+            let current = actions
+            return current.supported.contains(.setValue) && current.setValue != nil
         }
         return super.isAccessibilitySelectorAllowed(selector)
     }
@@ -646,17 +655,18 @@ public class RuneNSAccessibilityElement: NSAccessibilityElement {
     /// An assistive client setting the value: AccessKit's macOS adapter turns this into
     /// `ActionRequest { action: SetValue, data: Value(..) / NumericValue(..) }`.
     public override func setAccessibilityValue(_ accessibilityValue: Any?) {
-        guard supportedActions.contains(.setValue), let setValueHandler else {
+        let current = actions
+        guard current.supported.contains(.setValue), let setValueHandler = current.setValue else {
             super.setAccessibilityValue(accessibilityValue)
             return
         }
         switch accessibilityValue {
         case let text as String:
-            setValueHandler(actionTarget, .text(text))
+            setValueHandler(current.target, .text(text))
         case let attributed as NSAttributedString:
-            setValueHandler(actionTarget, .text(attributed.string))
+            setValueHandler(current.target, .text(attributed.string))
         case let number as NSNumber:
-            setValueHandler(actionTarget, .number(number.doubleValue))
+            setValueHandler(current.target, .number(number.doubleValue))
         default:
             break
         }
