@@ -43,7 +43,7 @@ public struct Sources: Sendable, Equatable {
     }
 
     /// Adds a built-in module by its original path without retaining source text (`Sources::with_embedded`).
-    /// The compiled bytecode retains its line table and path for stack traces.
+    /// Stack traces use the supplied path and the line table from the bytecode.
     public func withEmbedded(_ path: String, _ code: Data, native: Bool = false) -> Sources {
         var copy = self
         copy.insertEmbedded(path, code, native: native)
@@ -138,29 +138,22 @@ public struct Sources: Sendable, Equatable {
         }
     }
 
-    /// Registers precompiled bytecode once per process (write-once `OnceLock` semantics).
+    /// Registers bytecode by the exact source text it was compiled from. Only the first call takes effect.
     public static func precompiled(_ entries: [(String, Data)]) {
-        var map: [String: Data] = [:]
-        for (rawPath, data) in entries {
-            let key = normalizePrecompiledKey(rawPath)
-            map[key] = data
+        var map: [Data: Data] = [:]
+        for (source, code) in entries where code.starts(with: LuauProto.bytecodeHeader) {
+            map[Data(source.utf8)] = code
         }
         PrecompiledStore.shared.setOnce(map)
     }
 
-    /// Registers precompiled bytecode once per process (write-once `OnceLock` semantics).
+    /// Registers bytecode by the exact source text it was compiled from. Only the first call takes effect.
     public static func precompiled(_ entries: [String: Data]) {
         precompiled(entries.map { ($0.key, $0.value) })
     }
 
     internal static func _resetPrecompiledForTests() {
         PrecompiledStore.shared.resetForTests()
-    }
-
-    private static func normalizePrecompiledKey(_ path: String) -> String {
-        var s = path
-        if s.hasPrefix("@") { s.removeFirst() }
-        return normalize(s)
     }
 
     public func compile() throws -> CompiledSources {
@@ -186,7 +179,7 @@ public struct Sources: Sendable, Equatable {
             case .text(let text):
                 source = text
             case .embedded(let code, let native):
-                guard let proto = LuauProto.decode(code) else {
+                guard let proto = LuauProto.decode(code, sourceName: path) else {
                     throw ScriptError(kind: .syntax, message: "\(path): invalid embedded bytecode")
                 }
                 modules[path] = CompiledModule(proto: proto, native: native, source: nil)
@@ -196,12 +189,13 @@ public struct Sources: Sendable, Equatable {
                 configs[path] = source
                 continue
             }
-            if let prev = previous?.modules[path], prev.source == source {
+            if let prev = previous?.modules[path], let oldSource = prev.source,
+               oldSource.utf8.elementsEqual(source.utf8) {
                 modules[path] = prev
                 continue
             }
-            if let precompiledData = PrecompiledStore.shared.lookup(path),
-               let proto = LuauProto.decode(precompiledData) {
+            if let precompiledData = PrecompiledStore.shared.lookup(source),
+               let proto = LuauProto.decode(precompiledData, sourceName: path) {
                 modules[path] = CompiledModule(proto: proto, native: Self.isNative(source), source: source)
                 continue
             }
@@ -311,9 +305,9 @@ public final class CompiledSources: @unchecked Sendable {
 private final class PrecompiledStore: @unchecked Sendable {
     static let shared = PrecompiledStore()
     private let lock = NSLock()
-    private var entries: [String: Data]?
+    private var entries: [Data: Data]?
 
-    func setOnce(_ map: [String: Data]) {
+    func setOnce(_ map: [Data: Data]) {
         lock.lock()
         defer { lock.unlock() }
         if entries == nil {
@@ -321,10 +315,9 @@ private final class PrecompiledStore: @unchecked Sendable {
         }
     }
 
-    func lookup(_ path: String) -> Data? {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries?[path]
+    func lookup(_ source: String) -> Data? {
+        let table = lock.withLock { entries }
+        return table?[Data(source.utf8)]
     }
 
     func resetForTests() {

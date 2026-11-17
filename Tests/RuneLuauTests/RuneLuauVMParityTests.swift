@@ -78,8 +78,8 @@ struct RuneLuauVMParityTests {
 
     // MARK: - 2. Sources
 
-    @Test("Sources CRUD, paths, compileFrom reuse, fromDir, and precompiled")
-    func sourcesMethodsAndPrecompiled() throws {
+    @Test("Sources CRUD, paths, compileFrom reuse, and fromDir")
+    func sourcesMethodsAndCompileFrom() throws {
         #expect(Sources.entry == "init.luau")
 
         var s = Sources.single("return { x = 1 }")
@@ -121,36 +121,67 @@ struct RuneLuauVMParityTests {
         #expect(diskSources.folder == "app")
         #expect(diskSources.parentConfig != nil)
         #expect(diskSources.paths == [".config.luau", "init.luau"])
+    }
 
-        // Precompiled OnceLock + version check + bypass syntax error in source
+    @Test("Precompiled modules match exact source bytes and resolve imports from their loaded path")
+    func precompiledSourceIdentity() throws {
         Sources._resetPrecompiledForTests()
         defer { Sources._resetPrecompiledForTests() }
 
-        let goodBC = try Sources.compileBytecode("return { ok = 99 }", name: "init.luau")
-        var badVersionBC = goodBC
-        badVersionBC[4] = 0xFF // corrupt version uint32
+        // This literal source key also names the unrelated entry module. Only the moved module
+        // containing this exact text should receive its bytecode.
+        let cachedOnly = "init.luau"
+        let cachedCode = try Sources.compileBytecode("return { value = 99 }")
+        var staleVersion = cachedCode
+        staleVersion[4] = 0xFF
+        let fallback = "return { value = 77 }"
+        let shared = "return { read = function() return require('./sibling').value end }"
+        let sharedCode = try Sources.compileBytecode(shared, name: "offline/shared.luau")
+        let composed = "return { length = function() return #'\u{e9}' end }"
+        let decomposed = "return { length = function() return #'e\u{301}' end }"
 
         Sources.precompiled([
-            ("init.luau", goodBC),
-            ("fallback.luau", badVersionBC),
+            (cachedOnly, cachedCode),
+            (cachedOnly, staleVersion),
+            (fallback, staleVersion),
+            (shared, sharedCode),
+            (composed, try Sources.compileBytecode(composed)),
+            (decomposed, try Sources.compileBytecode(decomposed)),
         ])
-        // Second call must be ignored (write-once OnceLock)
-        let secondBC = try Sources.compileBytecode("return { ok = 123 }", name: "init.luau")
-        Sources.precompiled(["init.luau": secondBC])
+        Sources.precompiled([cachedOnly: try Sources.compileBytecode("return { value = 123 }")])
 
-        let preSrc = Sources()
-            .with("init.luau", "this is invalid syntax %%% !!!")
-            .with("fallback.luau", "return 77")
-        let compiledPre = try preSrc.compile()
-        let vm = LuauVM()
-        let entryMod = try #require(compiledPre.module("init.luau"))
-        let res = try vm.call(closure: LuauClosure(proto: entryMod.proto, upvalues: [], env: vm.globals))
-        guard case .table(let t) = res.first else {
-            Issue.record("expected table from precompiled init.luau")
-            return
+        let entry = """
+        local a = require("@self/a/shared")
+        local b = require("@self/b/shared")
+        local cached = require("@self/moved/cached")
+        local fallback = require("@self/fallback")
+        return {
+            read = function() return a.read() * 100 + b.read() end,
+            cached = function() return cached.value end,
+            fallback = function() return fallback.value end,
         }
-        #expect(t.rawGet("ok") == .number(99))
-        #expect(compiledPre.module("fallback.luau") != nil)
+        """
+        let sources = Sources.single(entry)
+            .with("a/shared.luau", shared)
+            .with("b/shared.luau", shared)
+            .with("a/sibling.luau", "return { value = 12 }")
+            .with("b/sibling.luau", "return { value = 99 }")
+            .with("moved/cached.luau", cachedOnly)
+            .with("fallback.luau", fallback)
+        let script = Script(name: "precompiled", sources: sources)
+        #expect(try script.query("read").asInt64 == 1299)
+        #expect(try script.query("cached").asInt64 == 99)
+        #expect(try script.query("fallback").asInt64 == 77)
+
+        let initial = Sources.single(composed)
+        let compiled = try initial.compile()
+        let edited = Sources.single(decomposed)
+        let recompiled = try edited.compileFrom(compiled)
+        #expect(recompiled.module(Sources.entry) !== compiled.module(Sources.entry))
+        let unicode = Script(name: "unicode", sources: initial)
+        #expect(try unicode.query("length").asInt64 == 2)
+        _ = try unicode.reloadCompiled(edited, compiled: recompiled, compileDuration: .zero)
+        #expect(try unicode.query("length").asInt64 == 3)
     }
 
     // MARK: - 3. Workers

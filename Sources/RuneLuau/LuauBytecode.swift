@@ -96,24 +96,21 @@ internal final class LuauProto: @unchecked Sendable {
 
     static let bytecodeMagic: [UInt8] = [0x52, 0x4C, 0x42, 0x43] // "RLBC"
     static let bytecodeVersion: UInt32 = 1
+    static let bytecodeHeader = bytecodeMagic + withUnsafeBytes(of: bytecodeVersion.littleEndian) { Array($0) }
 
     func encode() -> Data {
         var buf = ByteWriter()
-        buf.writeBytes(Self.bytecodeMagic)
-        buf.writeUInt32(Self.bytecodeVersion)
+        buf.writeBytes(Self.bytecodeHeader)
         encodeProto(into: &buf)
         return Data(buf.bytes)
     }
 
-    static func decode(_ data: Data) -> LuauProto? {
+    static func decode(_ data: Data, sourceName: String) -> LuauProto? {
         var reader = ByteReader([UInt8](data))
-        guard let magic = reader.readBytes(count: 4), magic == Self.bytecodeMagic else {
+        guard reader.readBytes(count: Self.bytecodeHeader.count) == Self.bytecodeHeader else {
             return nil
         }
-        guard let version = reader.readUInt32(), version == Self.bytecodeVersion else {
-            return nil
-        }
-        guard let proto = decodeProto(from: &reader), reader.isAtEnd else {
+        guard let proto = decodeProto(from: &reader, sourceName: sourceName), reader.isAtEnd else {
             return nil
         }
         return proto
@@ -178,9 +175,9 @@ internal final class LuauProto: @unchecked Sendable {
         }
     }
 
-    private static func decodeProto(from reader: inout ByteReader) -> LuauProto? {
+    private static func decodeProto(from reader: inout ByteReader, sourceName: String) -> LuauProto? {
         guard let name = reader.readString(),
-              let sourceName = reader.readString(),
+              reader.readString() != nil, // The loaded module path names every nested function.
               let paramsCount = reader.readInt(),
               let isVarByte = reader.readUInt8(),
               let numLocals = reader.readInt(),
@@ -233,7 +230,7 @@ internal final class LuauProto: @unchecked Sendable {
         var protos: [LuauProto] = []
         protos.reserveCapacity(protoCount)
         for _ in 0..<protoCount {
-            guard let p = decodeProto(from: &reader) else { return nil }
+            guard let p = decodeProto(from: &reader, sourceName: sourceName) else { return nil }
             protos.append(p)
         }
 
@@ -380,10 +377,6 @@ internal final class LuauProto: @unchecked Sendable {
 private struct ByteWriter {
     var bytes: [UInt8] = []
     mutating func writeUInt8(_ v: UInt8) { bytes.append(v) }
-    mutating func writeUInt32(_ v: UInt32) {
-        var le = v.littleEndian
-        withUnsafeBytes(of: &le) { bytes.append(contentsOf: $0) }
-    }
     mutating func writeUInt64(_ v: UInt64) {
         var le = v.littleEndian
         withUnsafeBytes(of: &le) { bytes.append(contentsOf: $0) }
@@ -407,10 +400,6 @@ private struct ByteReader {
     mutating func readUInt8() -> UInt8? {
         guard offset < bytes.count else { return nil }
         let v = bytes[offset]; offset += 1; return v
-    }
-    mutating func readUInt32() -> UInt32? {
-        guard let slice = readBytes(count: 4) else { return nil }
-        return slice.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.littleEndian
     }
     mutating func readUInt64() -> UInt64? {
         guard let slice = readBytes(count: 8) else { return nil }
