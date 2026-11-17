@@ -1,3 +1,6 @@
+#if os(macOS)
+import AppKit
+#endif
 import Foundation
 import Testing
 @testable import Rune
@@ -102,6 +105,32 @@ struct Slice4EdgeParityWave3BTests {
         #expect(!rt.state)
         #expect(top() == -360)
     }
+
+    #if os(macOS)
+    @Test("The macOS host forwards held Space without activating a pressable scroller again")
+    func nativeSpaceRepeatOnAPressableScroller() throws {
+        let rt = Runtime(state: 0, viewport: Vec2(200, 200), pixelScale: 1) { _, _ in
+            col().key("scroll").size(200, 200).scrollY().focusable()
+                .onClick { count in count += 1 }
+                .child(el().size(200, 800))
+        }
+        rt.update(at: 0) { _, tx in tx.focus("scroll") }
+        _ = rt.frame(at: 0)
+        #expect(rt.focusedKey == "scroll")
+        let view = RuneMetalHostView(frame: NSRect(x: 0, y: 0, width: 200, height: 200), runtime: rt,
+                                     renderer: try MetalRenderer(), timeScale: 1, respectSystemAppearance: false)
+        for held in [false, true] {
+            let event = try #require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: 0, context: nil, characters: " ", charactersIgnoringModifiers: " ",
+                isARepeat: held, keyCode: 49
+            ))
+            #expect(view.dispatchNativeKeyEvent(event))
+            #expect(rt.state == 1)
+            #expect(rt.scrollOffset(forKey: "scroll").y == 0)
+        }
+    }
+    #endif
 
     @Test("A key lands the vertical finger fling and leaves a horizontal glide alone")
     func keyboardScrollLandsOnlyTheVerticalLane() throws {

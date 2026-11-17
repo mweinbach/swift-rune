@@ -831,6 +831,7 @@ public enum MacOSClipboardSync {
     public static func dispatchKeyWithSync<State>(
         _ event: KeyEvent,
         runtime: Runtime<State>,
+        isRepeat: Bool = false,
         at now: Double
     ) -> Bool {
         if event.mods.cmd, (event.key == .command("v") || event.key == .text("v") || event.key == .text("V")) {
@@ -842,7 +843,7 @@ public enum MacOSClipboardSync {
         }
         let prevClip = runtime.clipboard
         let prevRich = runtime.richClipboard
-        let handled = runtime.keyDown(event, at: now)
+        let handled = runtime.keyDown(event, isRepeat: isRepeat, at: now)
         if runtime.richClipboard != prevRich {
             Clipboard.shared.writeRich(runtime.richClipboard)
         } else if runtime.clipboard != prevClip,
