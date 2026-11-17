@@ -2346,9 +2346,15 @@ extension Runtime {
         }
     }
 
+    /// Keeps use the painted box in window coordinates, including turns about the row's or an ancestor's pivot.
+    private func scrollKeepBounds(_ path: String) -> MotionRect? {
+        guard let geometry = hitGeometryByPath[path] else { return presentedRectByPath[path] }
+        return geometry.turn?.bbox(geometry.rect) ?? geometry.rect
+    }
+
     internal func captureKeepAnchorsBeforeCommit() {
         let drawnRect: (FlatNode) -> MotionRect = { node in
-            self.presentedRectByPath[node.path] ?? node.targetRect
+            self.scrollKeepBounds(node.path) ?? node.targetRect
         }
 
         // `El.scrollAnchor`: anchor the first visible non-sticky row when viewport is scrolled off top.
@@ -2372,13 +2378,12 @@ extension Runtime {
                 var parentIdx = sIdx
                 var foundRowPath: String? = nil
                 while true {
-                    let children = flatNodes.indices.filter { flatNodes[$0].parentIndex == parentIdx }
-                    guard let childIdx = children.first(where: { j in
+                    guard let childIdx = ((parentIdx + 1)..<flatNodes.count).first(where: { j in
+                        guard flatNodes[j].parentIndex == parentIdx, flatNodes[j].el.stickyConfig == nil else { return false }
                         let r = drawnRect(flatNodes[j])
                         return r.width > 0 && r.height > 0
                             && r.bottom > vpRect.top + 0.5
                             && r.top < vpRect.bottom
-                            && flatNodes[j].el.stickyConfig == nil
                     }) else {
                         break
                     }
@@ -2558,8 +2563,8 @@ extension Runtime {
             guard let tIdx = nodeByPath[k.path],
                   let vIdx = flatNodes[tIdx].enclosingVScrollIndex,
                   flatNodes[vIdx].path == k.viewport,
-                  let drawnI = presentedRectByPath[k.path],
-                  let drawnS = presentedRectByPath[k.viewport] else {
+                  let drawnI = scrollKeepBounds(k.path),
+                  let drawnS = scrollKeepBounds(k.viewport) else {
                 continue
             }
             let sNode = flatNodes[vIdx]
@@ -2683,8 +2688,8 @@ extension Runtime {
             guard let vIdx = flatNodes[tIdx].enclosingVScrollIndex else { return .loose }
             let vPath = flatNodes[vIdx].path
             if !wasPinnedToBottom.contains(vPath) { return .free }
-            let tRect = presentedRectByPath[k.path] ?? flatNodes[tIdx].targetRect
-            let vRect = presentedRectByPath[vPath] ?? flatNodes[vIdx].targetRect
+            let tRect = scrollKeepBounds(k.path) ?? flatNodes[tIdx].targetRect
+            let vRect = scrollKeepBounds(vPath) ?? flatNodes[vIdx].targetRect
             return .pinned(tRect.top - vRect.top)
         }
 

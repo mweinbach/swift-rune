@@ -773,6 +773,46 @@ struct ScrollRuntimeSlice2ParityTests {
 
     // MARK: - tests/scroll_anchor.rs & src/runtime/tests/scroll_children.rs
 
+    @Test("scroll_anchor keeps the first row whose painted bounds reach the viewport", arguments: [false, true], [false, true])
+    func scrollAnchorUsesPaintedRowBounds(native: Bool, turned: Bool) throws {
+        let rt = Runtime<[Float]>(state: Array(repeating: 40, count: 20), viewport: Vec2(200, 200), pixelScale: 1) { heights, _ in
+            let rows: [El<[Float]>] = heights.enumerated().map { i, height in
+                let row: El<[Float]> = el().key("r\(i)").size(200, height)
+                return i == 1 && turned ? row.rotate(.pi / 2) : row
+            }
+            return col().key("scroll").size(200, 200).scrollY(stickBottom: false).scrollAnchor()
+                .child(col().key("list").wFull().children(rows))
+        }
+        func draw(_ frame: Int) {
+            let time = Double(frame) / 120
+            if native { _ = rt.renderFrame(at: time) } else { _ = rt.frame(at: time) }
+        }
+        draw(0)
+        rt.update(at: 0) { _, tx in tx.scrollToInstant("scroll", x: 0, y: 120) }
+        for frame in 1...4 { draw(frame) }
+        let first = try #require(rt.element(byKey: "r1"))
+        #expect(abs(first.visible[3] - (turned ? 40 : 0)) < 0.05)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - 120) < 0.05)
+
+        // Only the row between r1 and r3 grows. If r1 turns into view it stays put and r3 moves down.
+        rt.update(at: 4.0 / 120) { heights, _ in heights[2] = 80 }
+        for frame in 5...124 { draw(frame) }
+        let last = try #require(rt.element(byKey: "r1"))
+        let r3 = try #require(rt.element(byKey: "r3"))
+        #expect(abs(last.visible[3] - first.visible[3]) < 0.05)
+        #expect(abs(r3.rect[1] - (turned ? 40 : 0)) < 0.05)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - (turned ? 120 : 160)) < 0.05)
+
+        // Growing r1 moves its rotation pivot by half the height change.
+        rt.update(at: 124.0 / 120) { heights, _ in heights[1] = 80 }
+        for frame in 125...244 { draw(frame) }
+        let resized = try #require(rt.element(byKey: "r1"))
+        let following = try #require(rt.element(byKey: "r3"))
+        #expect(abs(resized.visible[3] - first.visible[3]) < 0.05)
+        #expect(abs(following.rect[1] - (turned ? 60 : 0)) < 0.05)
+        #expect(abs(rt.scrollOffset(forKey: "scroll").y - (turned ? 140 : 200)) < 0.05)
+    }
+
     @Test("tests/scroll_anchor.rs: rows inserted or grown above anchor top row; off-top/without-anchor/stick_bottom follow", arguments: [false, true])
     func scrollAnchorInsertionAndGrowth(native: Bool) {
         struct Feed {
