@@ -1426,6 +1426,22 @@ struct MarkdownFullParityTests {
 
     // MARK: - 1:1 Rust Parity Additions (`src/markdown/tests.rs`, `markdown_table_card`, `markdown_find`, `markdown_fixture`, `markdown_diagram_*`, `markdown_quote_frame`, `markdown.rs #91`)
 
+    @Test("A nested list renders its fenced code with syntax highlighting")
+    func nestedListCodeHighlight() throws {
+        let source = """
+        - Message
+
+          - Example
+
+            ```rust
+            fn callback() {}
+            ```
+        """
+        let root: El<Int> = Markdown(source).build(.neutral(dark: false))
+        let code = try #require(collectRichNodes(root).first { $0.plain == "fn callback() {}" })
+        #expect(Set(code.spans.compactMap(\.color)).count > 1)
+    }
+
     @Test("src/markdown/tests.rs & blocks_and_highlights: syntax highlights (#1-#6), glyph-invariant TextSystem (#7), whole/stream/ref cache (#9, #11), link span ordering (#12), strike (#115)")
     func markdownCoreParserMetricsAndMaps() {
         // #1: known languages are coloured and others stay plain

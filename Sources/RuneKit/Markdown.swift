@@ -4882,6 +4882,12 @@ public struct MarkdownView<State>: Sendable {
     }
 
     public func render(_ style: MarkdownStyle) -> El<State> {
+        guard let digest = cacheDigest(style) else { return renderUncached(style) }
+        return Rune.cached(digest) { self.renderUncached(style) }
+    }
+
+    // Release the cache-key temporaries before recursively building the block tree.
+    private func cacheDigest(_ style: MarkdownStyle) -> UInt64? {
         let canCache = !config.isStreaming
             && onLinkHandler == nil
             && onLinkSecondaryHandler == nil
@@ -4899,31 +4905,27 @@ public struct MarkdownView<State>: Sendable {
             && imageFrameHandler == nil
             && config.linkFaviconFn == nil
             && !config.source.contains("mermaid")
-        if canCache {
-            var h = Hasher()
-            h.combine(config.source)
-            h.combine(style)
-            for item in config.callerBlockKeys {
-                h.combine(item.offset)
-                h.combine(item.key)
-            }
-            for item in config.highlightsList {
-                h.combine(item.ranges)
-                h.combine(item.style)
-            }
-            h.combine(config.isAutolinkEnabled)
-            h.combine(config.revealDelay.bitPattern)
-            h.combine(config.areTasksReadOnly)
-            h.combine(config.isSelectable)
-            h.combine(config.isScrollWide)
-            h.combine(config.tentativeDirection)
-            h.combine(config.imageAltVisible)
-            let digest = UInt64(bitPattern: Int64(h.finalize()))
-            return Rune.cached(digest) {
-                self.renderUncached(style)
-            }
+        guard canCache else { return nil }
+
+        var h = Hasher()
+        h.combine(config.source)
+        h.combine(style)
+        for item in config.callerBlockKeys {
+            h.combine(item.offset)
+            h.combine(item.key)
         }
-        return renderUncached(style)
+        for item in config.highlightsList {
+            h.combine(item.ranges)
+            h.combine(item.style)
+        }
+        h.combine(config.isAutolinkEnabled)
+        h.combine(config.revealDelay.bitPattern)
+        h.combine(config.areTasksReadOnly)
+        h.combine(config.isSelectable)
+        h.combine(config.isScrollWide)
+        h.combine(config.tentativeDirection)
+        h.combine(config.imageAltVisible)
+        return UInt64(bitPattern: Int64(h.finalize()))
     }
 
     private func renderUncached(_ style: MarkdownStyle) -> El<State> {
