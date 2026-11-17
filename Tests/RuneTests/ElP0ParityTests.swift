@@ -240,7 +240,12 @@ struct ElP0ParityTests {
         _ = rt.frame(at: 0.02)
         let shortRev = try #require(rt.element(byKey: "short"))
         let longRev = try #require(rt.element(byKey: "long"))
-        #expect(longRev.rect[2] > shortRev.rect[2] + 20)
+        #expect(longRev.target[2] > shortRev.target[2] + 20)
+
+        _ = rt.frame(at: 1.02)
+        let shortDrawn = try #require(rt.element(byKey: "short"))
+        let longDrawn = try #require(rt.element(byKey: "long"))
+        #expect(longDrawn.rect[2] > shortDrawn.rect[2] + 20)
     }
 
     @Test("Nested rotated element folds ancestor rotated clip into outerClip for hit-testing")

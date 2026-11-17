@@ -1053,6 +1053,7 @@ public final class Runtime<State> {
     internal var pressedKeyFocusPath: String? = nil
     internal var lastPixelsSizeByPath: [String: (UInt32, UInt32)] = [:]
     internal var pixelsAspectSnapIds: Set<NodeId> = []
+    private var pictureOnlyRelayout = false
     /// `hover.rs::HoverHold` (`Runtime/HoverHold.swift`).
     internal var hoverHold = HoverHold()
     /// Per scroll viewport path: the hover hold an app's instant scroll armed (`ScrollState::nudge`).
@@ -1885,7 +1886,8 @@ public final class Runtime<State> {
             let l = node.el.layout
             guard l.aspectRatio == nil, (l.width == .auto) != (l.height == .auto) else { continue }
             let sz = px.size
-            if let prev = lastPixelsSizeByPath[node.path], prev.0 == sz.width, prev.1 == sz.height {
+            if let prev = lastPixelsSizeByPath[node.path], prev.1 > 0,
+               UInt64(prev.0) * UInt64(sz.height) == UInt64(sz.width) * UInt64(prev.1) {
                 continue
             }
             if sz.width > 0 && sz.height > 0 {
@@ -1952,7 +1954,12 @@ public final class Runtime<State> {
             pendingGrowthStepNow = now
             defer { pendingGrowthStepNow = nil }
             let why = takeFrameCommitWhy(settle: explicitSettleRequested, layout: ranLayoutFeedback, read: false)
+            // A decode on its own reflows siblings at once. With an input or state change,
+            // only the pictures that acquired a new aspect land at their measured size.
+            pictureOnlyRelayout = !pixelsAspectSnapIds.isEmpty && why == CommitWhy.relayout && !other
             commitFor(why: why, at: commitAt, cut: shouldCut, resizeSnap: resizeSnap)
+            pictureOnlyRelayout = false
+            pixelsAspectSnapIds.removeAll(keepingCapacity: true)
             kitHooks.frameGrowthStepDt = 0
             reconcileDropHoverAfterCommit(at: now)
             flushHiddenDropSteps(at: now)
@@ -3367,7 +3374,7 @@ public final class Runtime<State> {
                 hasAnimateLayout: el.layoutAnim != nil,
                 isStackContainer: isStackContainer
             )
-            if commitCut || reducedMotion || pixelsAspectSnapIds.remove(nid) != nil || followsWindow {
+            if commitCut || reducedMotion || followsWindow {
                 layoutAnimSpec = nil
             } else if selfInstantLayoutOrStyle {
                 layoutAnimSpec = (keepsFlights && isRunningSameSceneFrame()) ? .instant : nil
@@ -3426,6 +3433,9 @@ public final class Runtime<State> {
                 } else {
                     layoutAnimSpec = .widthLeads(styleSp ?? MotionTokens.SETTLE)
                 }
+            }
+            if pictureOnlyRelayout || pixelsAspectSnapIds.contains(nid) {
+                layoutAnimSpec = nil
             }
             let isFreshMount = !prevMountedIds.contains(nid)
             var specScaleAnim: Anim<Vec2>? = selfInstantLayoutOrStyle ? nil : el.scaleMotionAnim
