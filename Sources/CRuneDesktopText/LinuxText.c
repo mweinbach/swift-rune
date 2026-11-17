@@ -6,6 +6,7 @@
 #include <hb-ot.h>
 #include <cairo-ft.h>
 #include <ft2build.h>
+#include FT_MULTIPLE_MASTERS_H
 #include FT_GASP_H
 #include FT_OUTLINE_H
 #include FT_TRUETYPE_TABLES_H
@@ -210,6 +211,107 @@ static void measure_line(RuneDesktopLine *result) {
     }
 }
 
+#if PANGO_VERSION_CHECK(1, 46, 0)
+typedef struct {
+    int weight, style, stretch;
+} RuneStaticCut;
+
+typedef struct {
+    PangoFontMap *map;
+    guint serial;
+    GHashTable *stacks;
+} RuneFaceCache;
+
+static void free_face_cache(gpointer value) {
+    RuneFaceCache *cache = value;
+    g_hash_table_unref(cache->stacks);
+    g_object_unref(cache->map);
+    g_free(cache);
+}
+
+static GPrivate thread_face_cache = G_PRIVATE_INIT(free_face_cache);
+
+// Pango's default map belongs to the thread. A map serial also changes when
+// new app fonts arrive, so a previous fallback cannot hide a newly added cut.
+static GArray *static_cuts(PangoFontMap *map, const char *stack) {
+    const guint serial = pango_font_map_get_serial(map);
+    RuneFaceCache *cache = g_private_get(&thread_face_cache);
+    if (!cache || cache->map != map || cache->serial != serial) {
+        cache = g_new(RuneFaceCache, 1);
+        cache->map = g_object_ref(map);
+        cache->serial = serial;
+        cache->stacks = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_array_unref);
+        g_private_replace(&thread_face_cache, cache);
+    }
+    GArray *cuts = g_hash_table_lookup(cache->stacks, stack);
+    if (cuts) return cuts;
+    cuts = g_array_new(FALSE, FALSE, sizeof(RuneStaticCut));
+    gchar **families = g_strsplit(stack, ",", -1);
+    for (gchar **part = families; *part; ++part) {
+        const char *name = g_strstrip(*part);
+        if (!*name) continue;
+        // Fontconfig handles generic families and variable design axes natively.
+        if (g_ascii_strcasecmp(name, "sans-serif") == 0 || g_ascii_strcasecmp(name, "serif") == 0 ||
+            g_ascii_strcasecmp(name, "monospace") == 0 || g_ascii_strcasecmp(name, "system-ui") == 0) break;
+        PangoFontFamily *family = pango_font_map_get_family(map, name);
+        if (!family) continue;
+        if (pango_font_family_is_variable(family)) break;
+        PangoFontFace **faces = NULL;
+        int count = 0;
+        pango_font_family_list_faces(family, &faces, &count);
+        for (int i = 0; i < count; ++i) {
+            if (pango_font_face_is_synthesized(faces[i])) continue;
+            PangoFontDescription *desc = pango_font_face_describe(faces[i]);
+            RuneStaticCut cut = { pango_font_description_get_weight(desc), pango_font_description_get_style(desc),
+                                  pango_font_description_get_stretch(desc) };
+            g_array_append_val(cuts, cut);
+            pango_font_description_free(desc);
+        }
+        g_free(faces);
+        break;
+    }
+    g_strfreev(families);
+    // Arbitrary user-authored fallback stacks should not grow this thread's cache without bound.
+    if (g_hash_table_size(cache->stacks) >= 256) g_hash_table_remove_all(cache->stacks);
+    g_hash_table_insert(cache->stacks, g_strdup(stack), cuts);
+    return cuts;
+}
+
+static int weight_rank(int weight, int target) {
+    if (target >= 400 && target <= 500) {
+        if (weight >= target && weight <= 500) return weight - target;
+        if (weight < target) return 1000 + target - weight;
+        return 2000 + weight - 500;
+    }
+    const gboolean preferred = target < 400 ? weight <= target : weight >= target;
+    return (preferred ? 0 : 1000) + ABS(weight - target);
+}
+#endif
+
+// CSS/Fontique match width, then style, then weight. Fontconfig's default
+// weight comparison instead picks Regular for requests such as Inter 440.
+static PangoWeight match_css_weight(PangoFontMap *map, const char *stack, int target, gboolean italic) {
+    int best_weight = target;
+#if PANGO_VERSION_CHECK(1, 46, 0)
+    if (!stack || !*stack) return (PangoWeight)target;
+    GArray *cuts = static_cuts(map, stack);
+    int best_rank = G_MAXINT;
+    for (guint i = 0; i < cuts->len; ++i) {
+        RuneStaticCut cut = g_array_index(cuts, RuneStaticCut, i);
+        int width_rank = cut.stretch <= PANGO_STRETCH_NORMAL ? PANGO_STRETCH_NORMAL - cut.stretch
+                                                             : 5 + cut.stretch - PANGO_STRETCH_NORMAL;
+        int style_rank = italic ? (cut.style == PANGO_STYLE_ITALIC ? 0 : cut.style == PANGO_STYLE_OBLIQUE ? 1 : 2)
+                                : (cut.style == PANGO_STYLE_NORMAL ? 0 : cut.style == PANGO_STYLE_OBLIQUE ? 1 : 2);
+        const int rank = 12000 * width_rank + 4000 * style_rank + weight_rank(cut.weight, target);
+        if (rank < best_rank) {
+            best_rank = rank;
+            best_weight = cut.weight;
+        }
+    }
+#endif
+    return (PangoWeight)best_weight;
+}
+
 RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
     const char *family, float size_px, int32_t weight, int32_t italic,
     int32_t mono, int32_t direction) {
@@ -239,7 +341,7 @@ RuneDesktopLine *rune_desktop_line_create(const char *utf8, int32_t length,
     PangoFontDescription *font = pango_font_description_new();
     pango_font_description_set_family(font, family && *family ? family : (mono ? "monospace" : "sans-serif"));
     pango_font_description_set_absolute_size(font, size_px * PANGO_SCALE);
-    pango_font_description_set_weight(font, (PangoWeight)weight);
+    pango_font_description_set_weight(font, match_css_weight(map, family, weight, italic));
     pango_font_description_set_style(font, italic ? PANGO_STYLE_ITALIC : PANGO_STYLE_NORMAL);
     pango_layout_set_font_description(layout, font);
     pango_font_description_free(font);
@@ -601,8 +703,80 @@ int32_t rune_desktop_line_outline_unplaced(const RuneDesktopLine *source, int32_
     return ok;
 }
 
-// Use the scaled face Pango selected for this real glyph. Cairo activates its
-// FreeType size, variation coordinates and transform before granting the lock.
+// Cairo's FT_Face is mutable and shared with other clients and render
+// threads. Give Rune a private FreeType library and face for the same actual
+// Fontconfig match, sized and varied exactly as Pango shaped it.
+typedef struct {
+    FT_Library library;
+    FT_Face face;
+    GMutex lock;
+    gboolean upright, tried_metrics, has_metrics;
+    double metrics[5];
+} FittedFace;
+
+static void free_fitted_face(gpointer ptr) {
+    FittedFace *f = ptr;
+    if (f->face) FT_Done_Face(f->face);
+    if (f->library) FT_Done_FreeType(f->library);
+    g_mutex_clear(&f->lock);
+    g_free(f);
+}
+
+static gboolean open_fitted_face(PangoFont *font, FittedFace *f) {
+    if (!PANGO_IS_FC_FONT(font) || !PANGO_IS_CAIRO_FONT(font)) return FALSE;
+    cairo_scaled_font_t *scaled = pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font));
+    if (!scaled || cairo_scaled_font_get_type(scaled) != CAIRO_FONT_TYPE_FT ||
+            cairo_ft_font_face_get_synthesize(cairo_scaled_font_get_font_face(scaled))) return FALSE;
+    cairo_matrix_t m;
+    cairo_scaled_font_get_font_matrix(scaled, &m);
+    // Rune shapes horizontal runs. Preserve Pango's artificial oblique from
+    // its actual matrix; FreeType's positive font y points upwards.
+    if (!isfinite(m.xx) || !isfinite(m.yy) || !isfinite(m.xy) || m.xx <= 0 || m.yy <= 0 ||
+            m.xx > 65535 || m.yy > 65535 || fabs(m.xy / m.yy) > 4 || m.yx != 0) return FALSE;
+    f->upright = m.xy == 0;
+    FcPattern *pattern = pango_fc_font_get_pattern(PANGO_FC_FONT(font));
+    FcChar8 *file = NULL;
+    int index = 0;
+    if (!pattern || FcPatternGetString(pattern, FC_FILE, 0, &file) != FcResultMatch) return FALSE;
+    FcPatternGetInteger(pattern, FC_INDEX, 0, &index);
+    if (FT_Init_FreeType(&f->library) ||
+            FT_New_Face(f->library, (const char *)file, index, &f->face)) return FALSE;
+#if PANGO_VERSION_CHECK(1, 44, 0)
+    unsigned count = 0;
+    const int *coordinates = hb_font_get_var_coords_normalized(pango_font_get_hb_font(font), &count);
+    if (coordinates && count && FT_HAS_MULTIPLE_MASTERS(f->face)) {
+        FT_Fixed *blend = g_new(FT_Fixed, count);
+        for (unsigned i = 0; i < count; ++i) blend[i] = (FT_Fixed)coordinates[i] * 4;
+        const FT_Error error = FT_Set_Var_Blend_Coordinates(f->face, count, blend);
+        g_free(blend);
+        if (error) return FALSE;
+    }
+#endif
+    if (FT_Set_Char_Size(f->face, lround(m.xx * 64), lround(m.yy * 64), 72, 72)) return FALSE;
+    if (!f->upright) {
+        FT_Matrix transform = {65536, (FT_Fixed)lround(-65536 * m.xy / m.yy), 0, 65536};
+        FT_Set_Transform(f->face, &transform, NULL);
+    }
+    return TRUE;
+}
+
+static FittedFace *fitted_face(PangoFont *font) {
+    const GQuark key = g_quark_from_static_string("rune-private-fitted-face");
+    G_LOCK(outline_fonts);
+    FittedFace *f = g_object_get_qdata(G_OBJECT(font), key);
+    if (!f) {
+        f = g_new0(FittedFace, 1);
+        g_mutex_init(&f->lock);
+        if (!open_fitted_face(font, f) && f->face) {
+            FT_Done_Face(f->face);
+            f->face = NULL;
+        }
+        g_object_set_qdata_full(G_OBJECT(font), key, f, free_fitted_face);
+    }
+    G_UNLOCK(outline_fonts);
+    return f->face ? f : NULL;
+}
+
 typedef struct {
     RuneOutlineEmit emit;
     void *context;
@@ -638,14 +812,12 @@ static int fitted_cubic(const FT_Vector *a, const FT_Vector *b, const FT_Vector 
 static int fitted_glyph(PangoFont *font, PangoGlyph glyph, float ppem,
         int look, float x, float y, RuneOutlineEmit emit, void *context) {
     if (glyph == PANGO_GLYPH_EMPTY) return 1;
-    if ((glyph & PANGO_GLYPH_UNKNOWN_FLAG) || !PANGO_IS_CAIRO_FONT(font)) return 0;
-    cairo_scaled_font_t *scaled = pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font));
-    if (!scaled || cairo_scaled_font_get_type(scaled) != CAIRO_FONT_TYPE_FT) return 0;
-    cairo_font_face_t *cairo_face = cairo_scaled_font_get_font_face(scaled);
-    if (cairo_ft_font_face_get_synthesize(cairo_face)) return 0;
+    if (glyph & PANGO_GLYPH_UNKNOWN_FLAG) return 0;
+    FittedFace *f = fitted_face(font);
+    if (!f) return 0;
     const gboolean cjk = outline_font(font).cjk;
-    FT_Face face = cairo_ft_scaled_font_lock_face(scaled);
-    if (!face) return 0;
+    g_mutex_lock(&f->lock);
+    FT_Face face = f->face;
     int ok = 0;
     if (FT_IS_SCALABLE(face) && !FT_HAS_COLOR(face)) {
         FT_Int32 flags = FT_LOAD_NO_BITMAP;
@@ -668,7 +840,7 @@ static int fitted_glyph(PangoFont *font, PangoGlyph glyph, float ppem,
             if (sink.open) emit(context, 4, 0, 0, 0, 0, 0, 0);
         }
     }
-    cairo_ft_scaled_font_unlock_face(scaled);
+    g_mutex_unlock(&f->lock);
     return ok;
 }
 
@@ -703,8 +875,6 @@ int32_t rune_linux_line_outline_fitted(const RuneDesktopLine *source, int32_t ow
     return 1;
 }
 
-typedef struct { int valid; double values[5]; } AppleHintMetrics;
-
 static gboolean post_top(FT_Face face, const char *name, double *top) {
     const FT_UInt gid = FT_Get_Name_Index(face, (FT_String *)name);
     if (!gid || FT_Load_Glyph(face, gid, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP |
@@ -724,36 +894,27 @@ int32_t rune_desktop_line_apple_hint_metrics(const RuneDesktopLine *source, int3
     PangoFont *font = c ? g_object_ref(c->font) : NULL;
     g_mutex_unlock(&line->index_lock);
     if (!font) return 0;
-    const GQuark key = g_quark_from_static_string("rune-apple-outline-metrics");
-    G_LOCK(outline_fonts);
-    AppleHintMetrics *m = g_object_get_qdata(G_OBJECT(font), key);
-    if (!m) {
-        m = g_new0(AppleHintMetrics, 1);
-        cairo_scaled_font_t *scaled = PANGO_IS_CAIRO_FONT(font) ?
-            pango_cairo_font_get_scaled_font(PANGO_CAIRO_FONT(font)) : NULL;
-        if (scaled && cairo_scaled_font_get_type(scaled) == CAIRO_FONT_TYPE_FT &&
-                !cairo_ft_font_face_get_synthesize(cairo_scaled_font_get_font_face(scaled))) {
-            FT_Face face = cairo_ft_scaled_font_lock_face(scaled);
-            if (face) {
-                FT_ULong length = 0;
-                if (face->units_per_EM > 0 && FT_HAS_GLYPH_NAMES(face) &&
-                        !FT_Load_Sfnt_Table(face, FT_MAKE_TAG('g','l','y','f'), 0, NULL, &length) && length &&
-                        post_top(face, "o", &m->values[1]) && post_top(face, "X", &m->values[2])) {
-                    m->values[0] = face->units_per_EM;
-                    m->values[3] = face->bbox.yMax;
-                    const char *name = FT_Get_Postscript_Name(face);
-                    m->values[4] = name && !strncmp(name, ".SFNS", 5) ? 79 :
-                        (name && !strcmp(name, "Helvetica") ? 85 : 0);
-                    m->valid = 1;
-                }
-                cairo_ft_scaled_font_unlock_face(scaled);
-            }
+    FittedFace *f = fitted_face(font);
+    if (!f) { g_object_unref(font); return 0; }
+    g_mutex_lock(&f->lock);
+    if (!f->tried_metrics) {
+        f->tried_metrics = TRUE;
+        FT_Face face = f->face;
+        FT_ULong length = 0;
+        if (f->upright && face->units_per_EM > 0 && FT_HAS_GLYPH_NAMES(face) &&
+                !FT_Load_Sfnt_Table(face, FT_MAKE_TAG('g','l','y','f'), 0, NULL, &length) && length &&
+                post_top(face, "o", &f->metrics[1]) && post_top(face, "X", &f->metrics[2])) {
+            f->metrics[0] = face->units_per_EM;
+            f->metrics[3] = face->bbox.yMax;
+            const char *name = FT_Get_Postscript_Name(face);
+            f->metrics[4] = name && !strncmp(name, ".SFNS", 5) ? 79 :
+                (name && !strcmp(name, "Helvetica") ? 85 : 0);
+            f->has_metrics = TRUE;
         }
-        g_object_set_qdata_full(G_OBJECT(font), key, m, g_free);
     }
-    const int valid = m->valid;
-    if (valid) memcpy(metrics, m->values, sizeof(m->values));
-    G_UNLOCK(outline_fonts);
+    const int valid = f->has_metrics;
+    if (valid) memcpy(metrics, f->metrics, sizeof(f->metrics));
+    g_mutex_unlock(&f->lock);
     g_object_unref(font);
     return valid;
 }

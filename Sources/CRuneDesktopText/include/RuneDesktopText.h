@@ -97,11 +97,9 @@ enum { RUNE_LINUX_HINT_DESIGN = 0, RUNE_LINUX_HINT_CHROMIUM = 1, RUNE_LINUX_HINT
 int32_t rune_linux_line_outline_fitted(const RuneDesktopLine *line, int32_t owner,
     float ppem, int32_t look, RuneOutlineEmit emit, void *context);
 #endif
-#if defined(_WIN32) || (defined(__linux__) && !defined(__ANDROID__))
 // Unscaled design metrics for Rune's 7–18 ppem CoreGraphics-style Y transform.
 // The named glyphs are resolved via post, never via Unicode or OS/2 heights.
 int32_t rune_desktop_line_apple_hint_metrics(const RuneDesktopLine *line, int32_t owner, double metrics[5]);
-#endif
 #endif
 float rune_desktop_line_caret(const RuneDesktopLine *line, int32_t byte_offset);
 // Visual left edge and positive advance of [byte_offset, byte_end), a grapheme.

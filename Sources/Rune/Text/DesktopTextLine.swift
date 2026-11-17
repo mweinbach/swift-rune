@@ -235,16 +235,12 @@ private final class DesktopOutlineIndex {
     private var metricsByFace: [UInt64: MacOSHintMetrics?] = [:]
 
     func hintMetrics(for source: Source, region: Region, run: DesktopTextRun) -> MacOSHintMetrics? {
-        #if os(Linux) || os(Windows)
         guard source.intrinsic else { return nil }
         let face = source.key.font
         if let hit = lock.withLock({ metricsByFace[face] }) { return hit }
         let metrics = run.hintMetrics(at: region.bytes.lowerBound)
         lock.withLock { metricsByFace[face] = .some(metrics) }
         return metrics
-        #else
-        return nil
-        #endif
     }
 
     func source(for region: Region, run: DesktopTextRun) -> Source {
@@ -465,7 +461,6 @@ private final class DesktopTextRun {
                      anchor: SIMD2(x, y), intrinsic: true, cjk: flags & 2 != 0)
     }
 
-    #if os(Linux) || os(Windows)
     func hintMetrics(at owner: Int32) -> MacOSHintMetrics? {
         var values = [Double](repeating: 0, count: 5)
         let valid = values.withUnsafeMutableBufferPointer {
@@ -475,7 +470,6 @@ private final class DesktopTextRun {
         return MacOSHintMetrics(upem: values[0], xHeight: values[1], capHeight: values[2],
                                 maxY: values[3], stemHeight: values[4])
     }
-    #endif
 
     func outlineRegions() -> [DesktopOutlineIndex.Region]? {
         var bounds: [DesktopOutlineIndex.Region] = []

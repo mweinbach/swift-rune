@@ -16,7 +16,7 @@
 static JavaVM *vm;
 static jclass bridge;
 static jmethodID constructor, configure, get_metrics, get_cell, get_caret, get_mask;
-static jmethodID get_has_color, extract_ink, get_outline, get_regions, get_single, get_unplaced;
+static jmethodID get_has_color, extract_ink, get_outline, get_regions, get_single, get_unplaced, get_hint_metrics;
 static jmethodID register_file, register_bytes;
 static pthread_mutex_t init_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool ready;
@@ -85,6 +85,8 @@ void rune_android_text_attach(void *raw) {
         if (!get_single) clear_exception(e);
         get_unplaced = (*e)->GetMethodID(e, local, "outlineUnplaced", "(I)[F");
         if (!get_unplaced) clear_exception(e);
+        get_hint_metrics = (*e)->GetMethodID(e, local, "appleHintMetrics", "(I)[D");
+        if (!get_hint_metrics) clear_exception(e);
     }
     STATIC(register_file, "registerFile", "([B)Z");
     STATIC(register_bytes, "registerBytes", "([B)Z");
@@ -377,6 +379,22 @@ int32_t rune_desktop_line_outline_regions(const RuneDesktopLine *line, RuneOutli
     }
     ok = 1;
 done:
+    end_call(call);
+    return ok;
+}
+
+int32_t rune_desktop_line_apple_hint_metrics(const RuneDesktopLine *line, int32_t owner, double metrics[5]) {
+    if (!line || owner < 0 || owner >= line->length || line->indices[owner] < 0 ||
+        !metrics || !rune_android_text_outlines_available() || !get_hint_metrics) return 0;
+    Call call = begin_call();
+    JNIEnv *e = call.env;
+    if (!e) return 0;
+    jdoubleArray record = (jdoubleArray)(*e)->CallObjectMethod(e, line->layout, get_hint_metrics, line->indices[owner]);
+    int ok = record && !clear_exception(e) && (*e)->GetArrayLength(e, record) == 5;
+    if (ok) {
+        (*e)->GetDoubleArrayRegion(e, record, 0, 5, metrics);
+        ok = !clear_exception(e);
+    }
     end_call(call);
     return ok;
 }
