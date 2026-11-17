@@ -122,40 +122,27 @@ public extension AccessibilityTreeBuilder {
         previous: AccessibilityNode?,
         current: AccessibilityNode
     ) -> [AccessibilityAnnouncement] {
-        func flatten(_ node: AccessibilityNode, into out: inout [String: AccessibilityNode]) {
-            out[node.id] = node
-            for child in node.children {
-                flatten(child, into: &out)
-            }
-        }
-
-        var prevMap: [String: AccessibilityNode] = [:]
+        var prevMap: [AccessibilityIdentity: AccessibilityNode] = [:]
         if let previous {
-            flatten(previous, into: &prevMap)
+            AccessibilityIdentity.walk(previous) { node, id in prevMap[id] = node }
         }
 
         var announcements: [AccessibilityAnnouncement] = []
-        func visit(_ node: AccessibilityNode) {
-            if !node.isSecure {
-                let prev = prevMap[node.id]
-                let currentText = [node.label, node.value].compactMap { $0 }.joined(separator: " ")
-                let prevText = prev.map { [$0.label, $0.value].compactMap { $0 }.joined(separator: " ") } ?? ""
-
-                if node.role == .dialog || node.isModal {
-                    if !currentText.isEmpty && (prev == nil || currentText != prevText) {
-                        announcements.append(AccessibilityAnnouncement(text: currentText, politeness: .assertive))
-                    }
-                } else if let live = node.liveRegion {
-                    if !currentText.isEmpty && (prev == nil || currentText != prevText || prev?.liveRegion != live) {
-                        announcements.append(AccessibilityAnnouncement(text: currentText, politeness: live))
-                    }
+        AccessibilityIdentity.walk(current) { node, id in
+            let modal = node.role == .dialog || node.isModal
+            guard !node.isSecure, modal || node.liveRegion != nil else { return }
+            let words = [node.label, node.value].compactMap { $0 }.joined(separator: " ")
+            guard !words.isEmpty else { return }
+            let prev = prevMap[id]
+            let prevWords = prev.map { [$0.label, $0.value].compactMap { $0 }.joined(separator: " ") }
+            if modal {
+                if words != prevWords {
+                    announcements.append(AccessibilityAnnouncement(text: words, politeness: .assertive))
                 }
-            }
-            for child in node.children {
-                visit(child)
+            } else if let live = node.liveRegion, words != prevWords || prev?.liveRegion != live {
+                announcements.append(AccessibilityAnnouncement(text: words, politeness: live))
             }
         }
-        visit(current)
         return announcements
     }
 }
@@ -463,14 +450,9 @@ public extension Runtime {
 @MainActor
 public final class MacOSAccessibilityHost {
     private var previousTree: AccessibilityNode?
-    private enum ElementIdentity: Hashable {
-        case runtime(String)
-        indirect case scoped(parent: ElementIdentity?, id: String, occurrence: Int)
-    }
-
-    private var lastFocusedId: ElementIdentity?
+    private var lastFocusedId: AccessibilityIdentity?
     private var rootElements: [RuneNSAccessibilityElement] = []
-    private var elementById: [ElementIdentity: RuneNSAccessibilityElement] = [:]
+    private var elementById: [AccessibilityIdentity: RuneNSAccessibilityElement] = [:]
     /// The workspace's display options observer (`a11y/macos.rs` `Adapter(_, DisplayOptions)`),
     /// removed with the adapter.
     private var displayOptions: MacOSDisplayOptionsWatcher?
@@ -543,25 +525,18 @@ public final class MacOSAccessibilityHost {
         }
         lastSpoken = spoken
 
-        var map: [ElementIdentity: RuneNSAccessibilityElement] = [:]
-        var focusedNodeId: ElementIdentity?
+        var map: [AccessibilityIdentity: RuneNSAccessibilityElement] = [:]
+        var focusedNodeId: AccessibilityIdentity?
         var changedSelections: [RuneAXTextField] = []
         lazy var viewToScreen = RuneAXTextField.viewToScreen(parentView)
-        func convertChildren(_ children: [AccessibilityNode], parent: AnyObject, scope: ElementIdentity?) -> [RuneNSAccessibilityElement] {
+        func convertChildren(_ children: [AccessibilityNode], parent: AnyObject, scope: AccessibilityIdentity?) -> [RuneNSAccessibilityElement] {
             var occurrences: [String: Int] = [:]
             return children.map { node in
-                let id: ElementIdentity
-                if let path = node.runtimePath {
-                    id = .runtime(path)
-                } else {
-                    let occurrence = occurrences[node.id, default: 0]
-                    occurrences[node.id] = occurrence + 1
-                    id = .scoped(parent: scope, id: node.id, occurrence: occurrence)
-                }
+                let id = AccessibilityIdentity(node, parent: scope, occurrences: &occurrences)
                 return convertNode(node, parent: parent, id: id)
             }
         }
-        func convertNode(_ node: AccessibilityNode, parent: AnyObject, id: ElementIdentity) -> RuneNSAccessibilityElement {
+        func convertNode(_ node: AccessibilityNode, parent: AnyObject, id: AccessibilityIdentity) -> RuneNSAccessibilityElement {
             if node.isFocused && focusedNodeId == nil { focusedNodeId = id }
             let old = elementById[id] as? RuneAXTextField
             let previous = old?.snapshot
