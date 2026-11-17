@@ -192,6 +192,22 @@ struct VirtualMachinesParityTests {
         }
     }
 
+    @Test("The prior runtime's twelve-frame counter matches every draw through two frames past the bound")
+    func fillDrawsMatchPriorCounter() {
+        func walk(_ previous: VirtualFillStateMachine, count: Int, depth: Int) {
+            guard depth < Int(VirtualFillStateMachine.fillFrames) + 2 else { return }
+            for wanted in [false, true] {
+                var machine = previous
+                let missing = machine.atBound ? 1 : 0
+                let drew = machine.step(.frame(now: 0, wanted: wanted, missing: missing, moved: false)) == .draw
+                let nextCount = wanted ? count + 1 : 0
+                #expect(drew == (wanted && nextCount <= 12))
+                walk(machine, count: nextCount, depth: depth + 1)
+            }
+        }
+        walk(VirtualFillStateMachine(), count: 0, depth: 0)
+    }
+
     @Test("a_settled_frame_forgets_the_run_and_the_bound_stops_it")
     func aSettledFrameForgetsTheRunAndTheBoundStopsIt() {
         var machine = VirtualFillStateMachine()
@@ -317,6 +333,35 @@ struct VirtualMachinesParityTests {
         #expect(machine.step(.due(attempt: secondWake.attempt, now: secondWake.due)) == .draw)
     }
 
+    @Test("36,001 display ticks and twenty abandoned deadlines leave a starved list asleep")
+    func staleDisplayDeadlinesDrain() {
+        let dt = 1.0 / 359.94
+        var machine = VirtualFillStateMachine()
+        var deadlines = (0..<20).map { dt * Double($0 * 7 + 3) }
+        var now = 0.0
+        var draw = true
+        var drawn = 0
+        for _ in 0..<36_001 {
+            now += dt
+            guard draw || deadlines.contains(where: { $0 <= now }) else { continue }
+            deadlines.removeAll { $0 <= now }
+            let effect: VirtualFillStateMachine.Effect?
+            if let attempt = machine.wake(at: now) {
+                effect = machine.step(.due(attempt: attempt, now: now))
+            } else {
+                let missing = machine.atBound ? 8 : 0
+                effect = machine.step(.frame(now: now, wanted: true, missing: missing, moved: false))
+            }
+            if case .wakeAt(let due) = effect { deadlines.append(due) }
+            draw = effect == .draw
+            if draw { drawn += 1 }
+        }
+        #expect(drawn <= 4 * Int(VirtualFillStateMachine.fillFrames) + 4)
+        #expect(machine.phase == .stalled)
+        #expect(deadlines.isEmpty)
+        #expect(machine.armedWake == nil)
+    }
+
     @Test("a_wake_after_the_list_is_gone_draws_nothing")
     func aWakeAfterTheListIsGoneDrawsNothing() {
         var machine = VirtualFillStateMachine()
@@ -407,11 +452,13 @@ struct VirtualMachinesParityTests {
     private struct DevPinsModel {
         var rows: [String] = []
         var texts: [PinTextEntry] = []
+        var providers: [String] = []
         var source: PinSourceKind? = nil
 
         mutating func applyClear() {
             rows.removeAll(keepingCapacity: true)
             texts.removeAll(keepingCapacity: true)
+            providers.removeAll(keepingCapacity: true)
         }
 
         mutating func applySelect(_ anchor: String?, _ focus: String?) {
@@ -427,22 +474,26 @@ struct VirtualMachinesParityTests {
             if !rows.contains(key) { rows.append(key) }
             if !already {
                 texts.append(PinTextEntry(rowKey: key, content: text))
+                providers.append("list/\(key)")
             }
         }
 
         mutating func commitStored(stopAfterFirst: Bool = false) {
             texts.removeAll(keepingCapacity: true)
+            providers.removeAll(keepingCapacity: true)
             source = .stored
             for (i, key) in ["a", "b", "c"].enumerated() {
                 if stopAfterFirst && i == 1 { return }
                 if rows.contains(key) {
                     texts.append(PinTextEntry(rowKey: key, content: "row-\(key)"))
+                    providers.append("list/\(key)")
                 }
             }
         }
 
         mutating func commitIndexed(focused: String?, stopAfterFirst: Bool = false, touchSource: Bool = true) {
             texts.removeAll(keepingCapacity: true)
+            providers.removeAll(keepingCapacity: true)
             var steps: [String] = focused.map { [$0] } ?? []
             for r in rows where r != focused {
                 steps.append(r)
@@ -451,6 +502,7 @@ struct VirtualMachinesParityTests {
                 if stopAfterFirst && step == 1 { return }
                 if rows.contains(key) {
                     texts.append(PinTextEntry(rowKey: key, content: "row-\(key)"))
+                    providers.append("list/\(key)")
                 }
             }
             if touchSource {
@@ -471,6 +523,7 @@ struct VirtualMachinesParityTests {
         case commitStored
         case commitRemount
         case commitPanicIndexed
+        case commitPanicStored
         case commitFallbackHere
         case commitFallbackEarlier
 
@@ -542,6 +595,9 @@ struct VirtualMachinesParityTests {
             case .commitRemount:
                 runCommit(stored: false, indexed: false, focused: nil, stopAtOne: false)
                 dev.commitIndexed(focused: nil, touchSource: false)
+            case .commitPanicStored:
+                runCommit(stored: true, indexed: false, focused: nil, stopAtOne: true)
+                dev.commitStored(stopAfterFirst: true)
             case .commitPanicIndexed:
                 runCommit(stored: false, indexed: true, focused: "a", stopAtOne: true)
                 dev.commitIndexed(focused: "a", stopAfterFirst: true)
@@ -551,6 +607,7 @@ struct VirtualMachinesParityTests {
             case .commitFallbackEarlier:
                 pins.clearTexts()
                 dev.texts.removeAll(keepingCapacity: true)
+                dev.providers.removeAll(keepingCapacity: true)
             }
         }
     }
@@ -558,9 +615,9 @@ struct VirtualMachinesParityTests {
     @Test("every_order_of_pins_commits_panics_and_fallbacks_keeps_what_dev_keeps")
     func everyOrderOfPinsCommitsPanicsAndFallbacksKeepsWhatDevKeeps() {
         let rowEls: [String: El<()>] = [
-            "a": el().key("a").child(text("row-a").selectable()),
-            "b": el().key("b").child(text("row-b").selectable()),
-            "c": el().key("c").child(text("row-c").selectable()),
+            "a": el().key("a").selectionCopy { _ in nil }.child(text("row-a").selectable()),
+            "b": el().key("b").selectionCopy { _ in nil }.child(text("row-b").selectable()),
+            "c": el().key("c").selectionCopy { _ in nil }.child(text("row-c").selectable()),
         ]
         let indices = ["a": 0, "b": 1, "c": 2]
         var collected: [String: ([VirtualOffscreenText], [VirtualSelectionCopyProvider])] = [:]
@@ -600,11 +657,13 @@ struct VirtualMachinesParityTests {
                     collected: collected,
                     rebuildSource: rebuildSource
                 )
-                #expect(!nextPins.isNone)
-                #expect(nextPins.rows == nextDev.rows)
                 let kept = nextPins.texts.map { PinTextEntry(rowKey: $0.rowKey, content: $0.content) }
-                #expect(kept == nextDev.texts)
-                #expect(sourceKind(nextPins.source) == nextDev.source)
+                let providers = nextPins.providers.map(\.path)
+                guard !nextPins.isNone && nextPins.rows == nextDev.rows && kept == nextDev.texts &&
+                        providers == nextDev.providers && sourceKind(nextPins.source) == nextDev.source else {
+                    Issue.record("Pin state diverged after \(ev) at depth \(depth): rows \(nextPins.rows), texts \(kept), providers \(providers)")
+                    return
+                }
                 if depth < maxDepth {
                     walk(depth: depth + 1, maxDepth: maxDepth, pins: nextPins, dev: nextDev)
                 }
@@ -619,7 +678,7 @@ struct VirtualMachinesParityTests {
             collected: collected,
             rebuildSource: rebuildSource
         )
-        walk(depth: 1, maxDepth: 4, pins: initialPins, dev: initialDev)
+        walk(depth: 1, maxDepth: 5, pins: initialPins, dev: initialDev)
     }
 
     @Test("a_stored_commit_orders_texts_by_child_while_an_indexed_one_builds_the_focused_row_first")
@@ -691,57 +750,34 @@ struct VirtualMachinesParityTests {
 
     @Test("a_panicking_builder_keeps_the_pins_collected_before_it")
     func aPanickingBuilderKeepsThePinsCollectedBeforeIt() {
-        enum SimulatedPanic: Error { case aborted }
-
-        var pins = VirtualPins()
-        pins.setSource(.stored)
-        pins.sync(.select(anchor: "r-0", focus: "r-1"))
-        VirtualSelectionCollector.collectRowIntoPins(
-            pins: &pins,
-            rowEl: (el() as El<()>).key("r-0").child(text("first").selectable()),
-            listPath: "list",
-            rowKey: "r-0",
-            rowIndex: 0,
-            listGroup: nil,
-            listInert: false
-        )
-        VirtualSelectionCollector.collectRowIntoPins(
-            pins: &pins,
-            rowEl: (el() as El<()>).key("r-1").child(text("second").selectable()),
-            listPath: "list",
-            rowKey: "r-1",
-            rowIndex: 1,
-            listGroup: nil,
-            listInert: false
-        )
-
-        pins.clearTexts()
-        do {
-            for idx in 0..<2 {
-                if idx == 1 { throw SimulatedPanic.aborted }
-                let row: El<()> = el().key("r-\(idx)").child(text("rebuilt-\(idx)").selectable())
-                var texts: [VirtualOffscreenText] = []
-                var providers: [VirtualSelectionCopyProvider] = []
-                VirtualSelectionCollector.collectVirtualRowSelection(
-                    rowEl: row,
-                    listPath: "list",
-                    rowKey: "r-\(idx)",
-                    rowIndex: idx,
-                    listGroup: nil,
-                    listInert: false,
-                    texts: &texts,
-                    copyProviders: &providers
-                )
-                _ = pins.withTextBuffers { dstTexts, dstProviders in
-                    dstTexts.append(contentsOf: texts)
-                    dstProviders.append(contentsOf: providers)
+        enum BuildError: Error { case interrupted }
+        for indexed in [false, true] {
+            var pins = VirtualPins()
+            pins.setSource(indexed ? .rebuild(.empty) : .stored)
+            pins.sync(.select(anchor: "a", focus: "b"))
+            do {
+                try pins.withTextBuffers { texts, providers in
+                    for (index, key) in ["a", "b"].enumerated() {
+                        guard index == 0 else { throw BuildError.interrupted }
+                        let row: El<()> = el().key(key).selectionCopy { _ in nil }
+                            .child(text("first").key("t0").selectable())
+                        VirtualSelectionCollector.collectVirtualRowSelection(
+                            rowEl: row, listPath: "list", rowKey: key, rowIndex: index,
+                            listGroup: nil, listInert: false, texts: &texts, copyProviders: &providers
+                        )
+                    }
                 }
+                Issue.record("The second builder must interrupt collection")
+            } catch BuildError.interrupted {
+                #expect(pins.rows == ["a", "b"])
+                #expect(pins.texts.map(\.rowKey) == ["a"])
+                #expect(pins.texts.map(\.content) == ["first"])
+                #expect(pins.providers.map(\.path) == ["list/a"])
+                #expect((pins.source?.rebuild != nil) == indexed)
+            } catch {
+                Issue.record("Unexpected builder error: \(error)")
             }
-        } catch {}
-
-        #expect(pins.rows == ["r-0", "r-1"])
-        #expect(pins.texts.map(\.rowKey) == ["r-0"])
-        #expect(pins.texts.map(\.content) == ["rebuilt-0"])
+        }
     }
 
     @Test("a_commit_fallback_and_source_change_keep_the_texts_allocation")
