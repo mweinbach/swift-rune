@@ -820,38 +820,6 @@ public struct VirtualRowReorder: Sendable, Equatable {
 
 // MARK: - Virtual Selection Anchors & Bounded Text Collector (`selection.rs`, `selection_collect.rs`)
 
-public enum VirtualCopyLimits {
-    /// Maximum number of unbuilt virtual rows built on demand when copying or reading a selection.
-    public static let maxVirtualCopyRows: Int = 10_000
-    /// Maximum number of UTF-8 bytes collected when copying or reading a selection across unbuilt
-    /// virtual rows (4 MiB).
-    public static let maxVirtualCopyBytes: Int = 4 * 1024 * 1024
-}
-
-/// Identity of a selection endpoint inside a virtual list (`selection.rs::VirtualEnd`).
-public struct VirtualEnd: Sendable, Equatable, Hashable {
-    public var listPath: String
-    public var rowKey: String
-    public var rowIndex: Int
-    public var relPath: String
-    public var offset: Int
-
-    public init(listPath: String, rowKey: String, rowIndex: Int, relPath: String, offset: Int) {
-        self.listPath = listPath
-        self.rowKey = rowKey
-        self.rowIndex = rowIndex
-        self.relPath = relPath
-        self.offset = offset
-    }
-
-    public func fullPath() -> String {
-        if relPath.isEmpty {
-            return "\(listPath)/\(rowKey)"
-        }
-        return "\(listPath)/\(rowKey)/\(relPath)"
-    }
-}
-
 /// A resolved selection endpoint: either a mounted node index or an offscreen text in a virtual list
 /// (`selection.rs::EndRef`).
 public enum VirtualEndRef: Sendable, Equatable, Hashable {
@@ -1528,25 +1496,23 @@ public enum VirtualSelectionCollector {
         }
         let wantRel = normalizedVirtualRelPath(end.relPath)
         if v.bookkeeping.range.contains(rowIdx) {
-            let full = end.fullPath()
-            if let i = index.byPath[full], nodes[i].isSelectable {
-                return .mounted(i)
-            }
             let altRow = "\(end.listPath)/@\(end.rowKey)"
-            let altFull = end.relPath.isEmpty ? altRow : "\(altRow)/\(end.relPath)"
-            if let i = index.byPath[altFull], nodes[i].isSelectable {
-                return .mounted(i)
-            }
             let rawRow = "\(end.listPath)/\(end.rowKey)"
+            for base in [altRow, rawRow] {
+                let full = end.relPath.isEmpty ? base : "\(base)/\(end.relPath)"
+                if let i = index.byPath[full], nodes[i].isSelectable {
+                    return .mounted(i)
+                }
+            }
             for i in nodes.indices where nodes[i].isSelectable {
                 let p = nodes[i].path
-                if p.hasPrefix(altRow) {
+                if p == altRow || p.hasPrefix(altRow + "/") {
                     let tail = String(p.dropFirst(altRow.count))
                     let rel = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
                     if tail.isEmpty ? wantRel.isEmpty : normalizedVirtualRelPath(rel) == wantRel {
                         return .mounted(i)
                     }
-                } else if p.hasPrefix(rawRow) {
+                } else if p == rawRow || p.hasPrefix(rawRow + "/") {
                     let tail = String(p.dropFirst(rawRow.count))
                     let rel = tail.hasPrefix("/") ? String(tail.dropFirst()) : tail
                     if tail.isEmpty ? wantRel.isEmpty : normalizedVirtualRelPath(rel) == wantRel {

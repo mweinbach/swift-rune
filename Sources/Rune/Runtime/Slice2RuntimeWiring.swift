@@ -59,8 +59,6 @@ internal final class Slice2RuntimeState {
     var scrollHorizontalVelocities: [String: Float] = [:]
     var growthStackOrders: [NodeId: [NodeId]] = [:]
     var growthRowReorder: [NodeId: VirtualRowReorder] = [:]
-    var virtualSelectionHosts: [String: VirtualListSelectionHost] = [:]
-    var virtualSelectionAnchorState = VirtualSelectionAnchorState()
     var unclampedBottomByPath: [String: Float] = [:]
     var foldHeaderByGrowthKey: [String: String] = [:]
     var growthScrollByKey: [String: String] = [:]

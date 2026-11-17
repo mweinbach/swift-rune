@@ -2,15 +2,14 @@ import Foundation
 
 /// Bounds on building unbuilt virtual rows when copying or reading a selection
 /// (`virtual/selection.rs` `MAX_VIRTUAL_COPY_ROWS` / `MAX_VIRTUAL_COPY_BYTES`).
-internal enum VirtualCopyLimits {
-    /// Maximum number of unbuilt virtual rows built on demand when copying or reading a
-    /// selection. Past this cap, collection stops building further unbuilt rows and returns the
-    /// prefix collected so far.
-    static let maxRows = 10_000
-    /// Maximum number of UTF-8 bytes collected when copying or reading a selection across
-    /// unbuilt virtual rows (4 MiB). Past this cap, collection stops and truncates on a character
-    /// boundary.
-    static let maxBytes = 4 * 1024 * 1024
+public enum VirtualCopyLimits {
+    /// Maximum number of unbuilt rows visited to materialize a selection.
+    public static let maxVirtualCopyRows = 10_000
+    /// Maximum size in UTF-8 bytes, truncated at a character boundary.
+    public static let maxVirtualCopyBytes = 4 * 1024 * 1024
+
+    internal static let maxRows = maxVirtualCopyRows
+    internal static let maxBytes = maxVirtualCopyBytes
 }
 
 /// Identity of a selection endpoint inside a virtual list: its list, the row's key and index, the

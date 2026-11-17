@@ -71,7 +71,6 @@ extension Runtime {
         var builtVirtualRows: [String: [String: CachedVirtualRow]] = [:]
         var remountHitNestedVirtual: Bool = false
         var selectionSources: [String: VirtualSelectionSource] = [:]
-        var remountPlans: [VirtualRemountPlanInput] = []
         var warnings: [String] = []
     }
 
@@ -232,7 +231,6 @@ extension Runtime {
         var ctx = VirtualExpansionContext()
         activeVirtualPaths.removeAll(keepingCapacity: true)
         guard treeContainsVirtual(rootEl) else {
-            slice2State.virtualSelectionHosts.removeAll(keepingCapacity: true)
             return (rootEl, ctx)
         }
         var expanded = rootEl
@@ -253,20 +251,11 @@ extension Runtime {
             memoEnvHash: memoEnvHash,
             memoPass: memoPass,
             scrollEstHeight: nil,
-            groupPath: nil,
-            inert: false,
             isReorderPermitted: isReorderPermitted,
             bypassBudget: bypassBudget,
             forceAll: forceAll,
             ctx: &ctx
         )
-        slice2State.virtualSelectionHosts = slice2State.virtualSelectionHosts.filter { activeVirtualPaths.contains($0.key) }
-        if !ctx.remountPlans.isEmpty {
-            _ = VirtualSelectionCollector.remountVirtualPins(
-                plans: ctx.remountPlans,
-                lists: &slice2State.virtualSelectionHosts
-            )
-        }
         return (expanded, ctx)
     }
 
@@ -286,8 +275,6 @@ extension Runtime {
         memoEnvHash: UInt64,
         memoPass: UInt64,
         scrollEstHeight: Float?,
-        groupPath: String?,
-        inert: Bool,
         isReorderPermitted: Bool,
         bypassBudget: Bool,
         forceAll: Bool,
@@ -316,8 +303,6 @@ extension Runtime {
             if case .points(let mh) = el.layout.maxHeight { cap = cap.map { min($0, mh) } ?? mh }
             nextEstHeight = cap
         }
-        let effInert = inert || el.isInert
-        let nextGroupPath = (el.isSelectionGroup && !effInert) ? path : groupPath
 
         if el.virtualEstimate != nil || el.virtualRowsSource != nil {
             expandSingleVirtualNode(
@@ -334,8 +319,6 @@ extension Runtime {
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
                 scrollEstHeight: nextEstHeight,
-                groupPath: nextGroupPath,
-                inert: effInert,
                 isReorderPermitted: isReorderPermitted,
                 bypassBudget: bypassBudget,
                 forceAll: forceAll,
@@ -363,8 +346,6 @@ extension Runtime {
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
                 scrollEstHeight: nextEstHeight,
-                groupPath: nextGroupPath,
-                inert: effInert,
                 isReorderPermitted: isReorderPermitted,
                 bypassBudget: bypassBudget,
                 forceAll: forceAll,
@@ -388,8 +369,6 @@ extension Runtime {
         memoEnvHash: UInt64,
         memoPass: UInt64,
         scrollEstHeight: Float?,
-        groupPath: String?,
-        inert: Bool,
         isReorderPermitted: Bool,
         bypassBudget: Bool,
         forceAll: Bool,
@@ -693,8 +672,6 @@ extension Runtime {
                 memoEnvHash: memoEnvHash,
                 memoPass: memoPass,
                 scrollEstHeight: scrollEstHeight,
-                groupPath: groupPath,
-                inert: inert,
                 isReorderPermitted: isReorderPermitted,
                 bypassBudget: bypassBudget,
                 forceAll: forceAll,
@@ -702,83 +679,6 @@ extension Runtime {
             )
             built.append(rowEl)
         }
-
-        // Keep VirtualListSelectionHost in sync for VirtualPins & offscreen selection/copy.
-        var selHost = slice2State.virtualSelectionHosts[path] ?? VirtualListSelectionHost(listPath: path)
-        selHost.bookkeeping.setEstimate(est)
-        selHost.bookkeeping.setGap(virtualGapY(el.layout))
-        for (rk, rh) in vState.measuredByKey {
-            selHost.bookkeeping.setHeight(key: rk, height: rh)
-        }
-        selHost.bookkeeping.setKeys(keys, commit: UInt64(max(0, viewCommitCount)), offset: nil)
-        selHost.bookkeeping.setMountedRange(mounted)
-        selHost.selection.scope = VirtualSelectionScope(groupPath: groupPath, inert: inert)
-        if let src = el.virtualRowsSource {
-            selHost.selection.pins.setSource(.rebuild(VirtualPins.RebuildSource { [weak self] rowIdx, lp, rk, gp, listInert in
-                guard let self, rowIdx >= 0, rowIdx < src.count else { return ([], [], false) }
-                var rEl = src.build(self.state, rowIdx)
-                if rEl.keyId == nil { rEl = rEl.key(rk) }
-                var texts: [VirtualOffscreenText] = []
-                var providers: [VirtualSelectionCopyProvider] = []
-                VirtualSelectionCollector.collectVirtualRowSelection(
-                    rowEl: rEl,
-                    listPath: lp,
-                    rowKey: rk,
-                    rowIndex: rowIdx,
-                    listGroup: gp,
-                    listInert: listInert,
-                    texts: &texts,
-                    copyProviders: &providers
-                )
-                return (texts, providers, VirtualSelectionCollector.elContainsVirtual(rEl))
-            }))
-        } else {
-            let storedChildren = el.children
-            selHost.selection.pins.setSource(.rebuild(VirtualPins.RebuildSource { rowIdx, lp, rk, gp, listInert in
-                guard rowIdx >= 0, rowIdx < storedChildren.count else { return ([], [], false) }
-                var rEl = storedChildren[rowIdx]
-                if rEl.keyId == nil { rEl = rEl.key(rk) }
-                var texts: [VirtualOffscreenText] = []
-                var providers: [VirtualSelectionCopyProvider] = []
-                VirtualSelectionCollector.collectVirtualRowSelection(
-                    rowEl: rEl,
-                    listPath: lp,
-                    rowKey: rk,
-                    rowIndex: rowIdx,
-                    listGroup: gp,
-                    listInert: listInert,
-                    texts: &texts,
-                    copyProviders: &providers
-                )
-                return (texts, providers, VirtualSelectionCollector.elContainsVirtual(rEl))
-            }))
-        }
-        slice2State.virtualSelectionHosts[path] = selHost
-        let mountedKeys = Set(mounted.map { keys[$0] })
-        let matchFocusedRowKey: (String) -> String? = { fp in
-            guard fp.hasPrefix(path + "/") else { return nil }
-            let rest = String(fp.dropFirst(path.count + 1))
-            if let mapped = vState.rowKeyBySegment
-                .sorted(by: { $0.key.count > $1.key.count })
-                .first(where: { rest == $0.key || rest.hasPrefix($0.key + "/") })?.value {
-                return mapped
-            }
-            if let keyMatch = keys.sorted(by: { $0.count > $1.count }).first(where: { k in
-                rest == "@\(k)" || rest.hasPrefix("@\(k)/") || rest.hasPrefix("@\(k)#dup")
-            }) {
-                return keyMatch
-            }
-            let seg = String(rest.prefix(while: { $0 != "/" }))
-            let rk = seg.hasPrefix("@") ? String(seg.dropFirst()) : seg
-            return rk.components(separatedBy: "#dup").first ?? rk
-        }
-        let focusedRowKey = focusedPath.flatMap(matchFocusedRowKey)
-        ctx.remountPlans.append(VirtualRemountPlanInput(
-            listPath: path,
-            newRange: mounted,
-            mountedKeys: mountedKeys,
-            focusedRowKey: focusedRowKey
-        ))
 
         if botSpacerH > 0 {
             built.append(Self.virtualSpacer(key: "__v_bot_spacer", height: botSpacerH))
