@@ -3355,6 +3355,7 @@ public final class TextSystem: @unchecked Sendable {
     private var layoutCache: [TextShapeKey: TextLayoutBox] = [:]
     private var layoutCommitSeq: UInt64 = 0
     private var preparedPass: UInt64 = 0
+    private var hasPreparedWidthSlots = false
     @TaskLocal private static var preparingSystem: TextSystem?
     private var _shapedCount: Int = 0
     private var _rebrokenCount: Int = 0
@@ -3668,7 +3669,11 @@ public final class TextSystem: @unchecked Sendable {
         let ordinary = layoutCache[key]
         if let ordinary, Self.widthsMatch(width, ordinary.maxWidth) { return key }
         let alternate = key.prepared(at: width)
-        return (preparing && ordinary != nil) || layoutCache[alternate] != nil ? alternate : key
+        if preparing && ordinary != nil {
+            hasPreparedWidthSlots = true
+            return alternate
+        }
+        return layoutCache[alternate] != nil ? alternate : key
     }
 
     /// Marks layouts first shaped by an idle pass and limits the bytes it leaves unmounted.
@@ -3751,16 +3756,22 @@ public final class TextSystem: @unchecked Sendable {
                 b.lastUsedCommit = nowSeq
             }
         }
-        var totalBytes = 0
-        for (key, b) in layoutCache {
-            if key.hasPreparedWidth && activeKeys.contains(key.unpreparedKey) {
-                b.lastUsedCommit = nowSeq
+        if hasPreparedWidthSlots {
+            for (key, box) in layoutCache where key.hasPreparedWidth && activeKeys.contains(key.unpreparedKey) {
+                box.lastUsedCommit = nowSeq
             }
-            totalBytes += b.estimatedBytes
+        }
+        // All active widths now carry this commit's stamp. Walk only the boxes to
+        // budget them; copying a rich shape key also retains its text, spans and style.
+        var totalBytes = 0
+        var staleIndices: [Dictionary<TextShapeKey, TextLayoutBox>.Index] = []
+        for index in layoutCache.indices {
+            let box = layoutCache.values[index]
+            totalBytes += box.estimatedBytes
+            if nowSeq &- box.lastUsedCommit >= staleCommits { staleIndices.append(index) }
         }
         if totalBytes > staleBytes {
-            let candidates = layoutCache
-                .filter { !activeKeys.contains($0.key) && nowSeq &- $0.value.lastUsedCommit >= staleCommits }
+            let candidates = staleIndices.map { layoutCache[$0] }
                 .sorted { $0.value.lastUsedCommit < $1.value.lastUsedCommit }
             for (k, b) in candidates {
                 if totalBytes <= staleBytes { break }

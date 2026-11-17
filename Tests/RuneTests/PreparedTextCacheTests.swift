@@ -71,6 +71,32 @@ struct PreparedTextCacheTests {
         #expect(system.layoutKeys() == [ordinary])
     }
 
+    @Test func commitBudgetKeepsActiveWidthsAndEvictsOnlyStaleLayouts() throws {
+        let system = TextSystem()
+        let style = TextStyle(size: 16, wrap: .wrap)
+        func width(_ width: Float) -> TextLayoutBox {
+            system.layoutKeyed(text: "a label with two prepared widths", style: style, maxWidth: width,
+                               pixelScale: 1, emitGlyphs: false)
+        }
+        let mounted = width(180)
+        let old = system.layoutKeyed(text: "W", style: style, maxWidth: 100, pixelScale: 1, emitGlyphs: true)
+        let glyph = try #require(old.shaped.glyphs.first)
+        // Cross the cache budget without making the native shaper build a 3 MiB fixture.
+        old.shaped.glyphs = Array(repeating: glyph, count: (3 << 20) / MemoryLayout<PositionedGlyph>.stride + 1)
+        #expect(system.prepareLayouts { _ = width(35) } == 1)
+        let alternate = width(35)
+        let active: Set<TextShapeKey> = [mounted.shapeKey]
+        for _ in 0..<59 { system.endCommit(activeKeys: active) }
+        let recent = layout("recent", in: system)
+        #expect(system.cachedLayoutBox(for: old.shapeKey) === old)
+        system.endCommit(activeKeys: active)
+        #expect(system.cachedLayoutBox(for: old.shapeKey) == nil)
+        #expect(system.cachedLayoutBox(for: recent.shapeKey) === recent)
+        #expect(system.cachedLayoutBox(for: mounted.shapeKey) === mounted)
+        #expect(system.cachedLayoutBox(for: mounted.shapeKey, matchingWidth: 35) === alternate)
+        #expect(alternate.lastUsedCommit == mounted.lastUsedCommit)
+    }
+
     @Test func aPassOverBudgetReleasesItsLargestLooseLayoutFirst() {
         let system = TextSystem()
         let before = system.layoutKeys()
