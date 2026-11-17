@@ -71,7 +71,10 @@
             "Sources/Rune/A11y/A11ySetValue.swift",
             "Tests/RuneTests/A11ySetValueParityTests.swift",
             "Sources/Rune/A11y/A11yPlatformSettings.swift",
-            "Tests/RuneTests/A11yReaderParityTests.swift"
+            "Tests/RuneTests/A11yReaderParityTests.swift",
+            "Sources/Rune/A11y/AccessibilityNames.swift",
+            "Sources/Rune/A11y/WebAccessibility.swift",
+            "Tests/RuneTests/A11yControlNameTests.swift"
           ],
           "status": "ported"
         },
@@ -114,17 +117,32 @@
         },
         {
           "upstream": "src/a11y/unix.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Linux/AT-SPI platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/A11y/LinuxAccessibility.swift",
+            "Sources/CRuneLinuxA11y/Accessibility.c",
+            "scripts/test-linux-accessibility.py",
+            "Sources/CRuneDesktopServices/GtkAccessibility.c",
+            "Sources/CRuneDesktopServices/linux.c"
+          ],
+          "status": "partial",
+          "note": "Linux publishes the Rune semantic tree and actions through AT-SPI. Its ATK root also attaches and removes mapped GTK native windows, including the file chooser."
         },
         {
           "upstream": "src/a11y/windows.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/A11y/WindowsAccessibility.swift",
+            "Sources/CRuneWin32/RuneAccessibility.cpp",
+            "scripts/windows-uia-smoke.ps1",
+            "Sources/Rune/A11y/AccessibilityTextGeometry.swift",
+            "Sources/CRuneWin32/RuneTextProvider.cpp",
+            "Sources/CRuneWin32/RuneTextRange.cpp",
+            "Tests/Support/WindowsTextAccessibility/Fixture/main.swift",
+            "Tests/Support/WindowsTextAccessibility/TextClient.cpp",
+            "Tests/Support/WindowsTextAccessibility/Run.ps1"
           ],
-          "status": "n/a",
-          "note": "The Swift Win32 host provides no native UI Automation text provider. The upstream vendor changes for long accessible fields apply to that adapter."
+          "status": "partial",
+          "note": "UI Automation exposes the fragment tree, control patterns, TextPattern and TextPattern2. The native text client exercises document, visible, selection, caret and point ranges against a Swift editor fixture. RangeFromAnnotation and ScrollIntoView remain unsupported."
         },
         {
           "upstream": "src/app.rs",
@@ -235,7 +253,11 @@
           "upstream": "src/clipboard/native.rs",
           "swift": [
             "Sources/Rune/DesktopIntegration.swift",
-            "Sources/Rune/Edit/ClipboardSanitizer.swift"
+            "Sources/Rune/Edit/ClipboardSanitizer.swift",
+            "Sources/Rune/Platform/DesktopServices.swift",
+            "Sources/CRuneDesktopServices/windows.c",
+            "Sources/CRuneDesktopServices/linux.c",
+            "Sources/CRuneDesktopServices/wayland_clipboard.c"
           ],
           "status": "ported"
         },
@@ -263,9 +285,14 @@
         },
         {
           "upstream": "src/clipboard/web.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Web clipboard target excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/WebClipboard.swift",
+            "Sources/Rune/Resources/Web/rune-clipboard.mjs",
+            "Tests/Browser/clipboard.test.mjs",
+            "Tests/RuneTests/WebClipboardTests.swift"
+          ],
+          "status": "partial",
+          "note": "Native DOM clipboard events and the gesture-gated asynchronous clipboard API exchange text, HTML and PNG with Rune. Browsers cannot own concealed items for timed expiration."
         },
         {
           "upstream": "src/cold.rs",
@@ -305,17 +332,30 @@
         {
           "upstream": "src/drag_out/mod.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/WindowsDragSource.swift",
+            "Sources/Rune/Platform/DesktopDragPreview.swift",
+            "Sources/Rune/Platform/LinuxDragSource.swift",
+            "Sources/CRuneDesktopServices/x11_drag.c",
+            "Sources/CRuneDesktopServices/wayland_drag.c",
+            "Tests/Support/WindowsDrag/Smoke.cpp",
+            "Tests/Support/X11Drag/test.py",
+            "scripts/test-linux-drag-out.py"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Native drag sources use AppKit on macOS, OLE on Windows, and Xdnd or a Wayland data device on Linux. Source types, result delivery and previews are shared across the desktop runtime."
         },
         {
           "upstream": "src/drag_out/windows.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/Platform/WindowsDragSource.swift",
+            "Sources/CRuneWin32/OutboundDrag.cpp",
+            "Sources/Rune/Platform/DesktopDragPreview.swift",
+            "Tests/Support/WindowsDrag/Smoke.cpp"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "The Win32 host posts a native OLE DoDragDrop session with text, PNG and file formats, permitted effects, shell drag image and completion. Rune can suppress drops from its own process."
         },
         {
           "upstream": "src/drop_tests.rs",
@@ -790,16 +830,24 @@
         {
           "upstream": "src/file_dialog.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/DesktopServices.swift",
+            "Sources/CRuneDesktopServices/windows.c",
+            "Sources/CRuneDesktopServices/linux.c",
+            "Sources/CRuneDesktopServices/GtkAccessibility.c"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Windows uses IFileDialog and Linux uses GtkFileChooserNative. Linux exposes in-process GTK chooser windows through the same AT-SPI application root as Rune."
         },
         {
           "upstream": "src/file_dialog/portal.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/CRuneDesktopServices/linux.c",
+            "Sources/CRuneDesktopServices/GtkAccessibility.c"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Linux dispatches file chooser requests through GtkFileChooserNative. GTK controls the desktop backend. Direct XDG FileChooser protocol parity remains unverified."
         },
         {
           "upstream": "src/file_dialog/portal_format.rs",
@@ -922,7 +970,12 @@
         {
           "upstream": "src/gpu/backend.rs",
           "swift": [
-            "Sources/Rune/MetalRenderer.swift"
+            "Sources/Rune/MetalRenderer.swift",
+            "Sources/Rune/GPU/DisplayGpuAdapter.swift",
+            "Sources/Rune/Render/PortableGLRenderer.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/AndroidPlatform.swift"
           ],
           "status": "partial"
         },
@@ -1101,7 +1154,10 @@
         {
           "upstream": "src/growth.rs",
           "swift": [
-            "Sources/Rune/VirtualList.swift"
+            "Sources/Rune/VirtualList.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Shell/Growth.swift"
           ],
           "status": "partial"
         },
@@ -1133,7 +1189,13 @@
           "upstream": "src/image/animated.rs",
           "swift": [
             "Sources/Rune/MediaPipeline.swift",
-            "Sources/Rune/Image/PixelsAtlas.swift"
+            "Sources/Rune/Image/PixelsAtlas.swift",
+            "Sources/Rune/Image/AnimatedPNG.swift",
+            "Sources/Rune/Image/DesktopImageCodec.swift",
+            "Sources/CRuneDesktopImages/windows.c",
+            "Sources/CRuneDesktopImages/LinuxImages.c",
+            "Sources/CRuneDesktopImages/AndroidImages.c",
+            "Tests/RuneTests/DesktopImageCodecTests.swift"
           ],
           "status": "ported"
         },
@@ -1237,7 +1299,11 @@
         {
           "upstream": "src/input/cursor/image.rs",
           "swift": [
-            "Sources/Rune/Input/Cursor.swift"
+            "Sources/Rune/Input/Cursor.swift",
+            "Sources/Rune/Platform/WindowsCursor.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
           "status": "ported"
         },
@@ -1252,18 +1318,20 @@
           "upstream": "src/input/cursor/os.rs",
           "swift": [
             "Sources/Rune/Input/Cursor.swift",
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Platform/WindowsCursor.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
           "status": "ported",
           "note": "macOS NSCursor bridge wired in MacOSApp.swift (381ca84 / eef55dc)"
         },
         {
           "upstream": "src/input/cursor/web.rs",
-          "swift": [
-            "Sources/Rune/Runtime.swift"
-          ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "The browser host does not apply Rune stock or custom image cursor requests to the canvas."
         },
         {
           "upstream": "src/input/drop_pointer.rs",
@@ -1598,9 +1666,19 @@
         {
           "upstream": "src/native_menu/mod.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/DesktopMenuSnapshot.swift",
+            "Sources/Rune/Platform/WindowsMenu.swift",
+            "Sources/CRuneWin32/Menus.c",
+            "Sources/Rune/Platform/LinuxMenuController.swift",
+            "Sources/Rune/Platform/LinuxMenuView.swift",
+            "Tests/RuneTests/DesktopMenuSnapshotTests.swift",
+            "Sources/Rune/Platform/NativeMenusMacOS.swift",
+            "scripts/windows-menu-smoke.ps1",
+            "Tests/RuneTests/LinuxApplicationMenuTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "AppKit and Win32 publish native menu bars. Linux renders an in-window application menu. Windows and Linux share command snapshots, accelerators and action routing."
         },
         {
           "upstream": "src/native_menu/standard.rs",
@@ -1626,14 +1704,24 @@
         {
           "upstream": "src/native_surface/mod.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/NativeSurface/PortableGLSurfaces.swift",
+            "Sources/CRuneGL/gl_surface.c",
+            "Sources/Rune/Resources/GL/surface.frag",
+            "Tests/RuneTests/PortableGLSurfaceTests.swift",
+            "Tests/Browser/production-surfaces.html"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/native_surface/pipeline.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/NativeSurface/PortableGLSurfaces.swift",
+            "Sources/CRuneGL/gl_surface.c",
+            "Sources/Rune/Resources/GL/surface.frag",
+            "Tests/RuneTests/PortableGLSurfaceTests.swift",
+            "Tests/Browser/production-surfaces.html"
           ],
           "status": "partial"
         },
@@ -1659,17 +1747,20 @@
         {
           "upstream": "src/native_surface/video.wgsl",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/NativeSurface/PortableGLSurfaces.swift",
+            "Sources/CRuneGL/gl_surface.c",
+            "Sources/Rune/Resources/GL/surface.frag",
+            "Tests/RuneTests/PortableGLSurfaceTests.swift",
+            "Tests/Browser/production-surfaces.html"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/native_surface/windows.rs",
-          "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "Importing a named external D3D11 or D3D12 shared texture is missing. The portable GPU surface renderer accepts planes provided by the producer in memory."
         },
         {
           "upstream": "src/open_url.rs",
@@ -1828,9 +1919,14 @@
             "Sources/Rune/Win32Platform.swift",
             "Sources/Rune/LinuxPlatform.swift",
             "Sources/Rune/AndroidPlatform.swift",
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Tests/RuneTests/Win32HostTests.swift",
+            "scripts/test-linux-window.py",
+            "Tests/Android/RuneHostProbe.java",
+            "Tests/Browser/hello-wasi.html"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "AppSpec dispatches to AppKit, UIKit, Win32, SDL2 on Linux, Android NativeActivity, or the browser WASI reactor."
         },
         {
           "upstream": "src/platform/accent.rs",
@@ -1879,10 +1975,12 @@
         {
           "upstream": "src/platform/ime/windows.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "IMM32 supplies preedit text, its cursor, committed UTF-16 text, cancellation and candidate-window placement for the focused editor."
         },
         {
           "upstream": "src/platform/layer_shell.rs",
@@ -2061,7 +2159,9 @@
         {
           "upstream": "src/platform/preferences.rs",
           "swift": [
-            "Sources/Rune/PlatformCommon.swift"
+            "Sources/Rune/PlatformCommon.swift",
+            "Sources/Rune/Platform/WindowsPreferences.swift",
+            "Sources/CRuneWin32/Preferences.c"
           ],
           "status": "partial"
         },
@@ -2097,10 +2197,14 @@
           "swift": [
             "Sources/Rune/WebPlatform.swift",
             "Tests/RuneTests/A11yReaderParityTests.swift",
-            "Sources/Rune/WebBrowserSession.swift"
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Sources/Rune/Resources/Web/rune-webgl-frame.mjs",
+            "Tests/Browser/hello-wasi.html",
+            "Tests/Browser/gpu-scene.html"
           ],
           "status": "partial",
-          "note": "The browser session routes input into WebAppHost and presents CPU-rendered RuneRef frames on a canvas."
+          "note": "The WASI reactor routes input and accessibility through the DOM. WebGL2 renders the production frame and supports an application compositor. The explicit CPU backend draws to a 2D canvas."
         },
         {
           "upstream": "src/platform/web/bridge.js",
@@ -2108,7 +2212,13 @@
             "Sources/Rune/WebPlatform.swift",
             "Sources/Rune/Resources/Web/rune-web.mjs",
             "Sources/Rune/WebBrowserSession.swift",
-            "Tests/Browser/field-mirror.html"
+            "Tests/Browser/field-mirror.html",
+            "Sources/Rune/A11y/WebAccessibility.swift",
+            "Sources/Rune/Resources/Web/rune-web-accessibility.mjs",
+            "Sources/Rune/WebClipboard.swift",
+            "Sources/Rune/Resources/Web/rune-clipboard.mjs",
+            "Tests/Browser/hello-accessibility.mjs",
+            "Tests/Browser/clipboard.test.mjs"
           ],
           "status": "partial",
           "note": "The shipped DOM adapter mirrors textareas and password inputs, selection, composition, and keyboard focus alongside the canvas (#1099)."
@@ -2116,32 +2226,35 @@
         {
           "upstream": "src/platform/web/cpu_canvas.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Tests/Browser/hello-wasi.html"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The optional CPU browser backend transfers a RuneRef RGBA frame into canvas ImageData."
         },
         {
           "upstream": "src/platform/web/full_faces.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/Resources/Web/rune-web-text.mjs",
+            "Tests/Browser/text-shaping.html"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The browser loads bundled faces and registers app font bytes using FontFace. Upstream first-frame deferral for font_url_later is unverified."
         },
         {
           "upstream": "src/platform/web/health.js",
           "swift": [],
-          "status": "n/a",
-          "note": "Web JS bridge excluded"
+          "status": "missing",
+          "note": "WebGPU device error scopes, uncaptured errors and device loss are missing. The canvas host listens for WebGL2 context loss and restoration."
         },
         {
           "upstream": "src/platform/web/health.rs",
-          "swift": [
-            "Sources/Rune/WebPlatform.swift"
-          ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "WebGPU device error scopes, adapter error reporting and device-lost propagation are missing. The WebGL2 host handles context loss and restoration."
         },
         {
           "upstream": "src/platform/web/input.rs",
@@ -2149,58 +2262,79 @@
             "Sources/Rune/WebPlatform.swift",
             "Tests/RuneTests/A11yReaderParityTests.swift",
             "Sources/Rune/WebFieldEvents.swift",
-            "Tests/RuneTests/WebFieldEventsTests.swift"
+            "Tests/RuneTests/WebFieldEventsTests.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Tests/Browser/field-mirror.html"
           ],
           "status": "partial",
-          "note": "Web fields exchange complete-line context, UTF-16 selection and edits through the host (#1099)."
+          "note": "The browser host routes pointer, wheel, keyboard, composition, focus and field-selection events and synchronizes UTF-16 DOM selections."
         },
         {
           "upstream": "src/platform/web/page.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/Resources/Web/rune-web.mjs",
+            "Tests/Browser/hello-wasi.html",
+            "Tests/Browser/field-mirror.html"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The browser mounts a supplied canvas, tracks logical size and pixel ratio, dispatches input and scheduled animation frames and disposes owned listeners and field and accessibility nodes."
         },
         {
           "upstream": "src/platform/web/page_fonts.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/Resources/Web/rune-web-text.mjs",
+            "Tests/Browser/text-shaping.html"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The bridge registers bundled fonts and app font data with document.fonts, sharing faces between Canvas and DOM."
         },
         {
           "upstream": "src/platform/web/platform.js",
-          "swift": [],
-          "status": "n/a",
-          "note": "Web JS bridge excluded"
+          "swift": [
+            "Sources/Rune/Resources/Web/rune-clipboard.mjs",
+            "Sources/Rune/WebClipboard.swift",
+            "Tests/Browser/clipboard.test.mjs"
+          ],
+          "status": "partial",
+          "note": "The browser platform bridge serves native clipboard events and async rich clipboard transfers."
         },
         {
           "upstream": "src/platform/web/platform.rs",
           "swift": [
-            "Sources/Rune/WebPlatform.swift"
+            "Sources/Rune/WebPlatform.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Sources/Rune/WebClipboard.swift",
+            "Sources/Rune/Resources/Web/rune-clipboard.mjs",
+            "Tests/RuneTests/WebClipboardTests.swift"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The Swift browser session exchanges clipboard requests and replies and routes platform events through WASI exports."
         },
         {
           "upstream": "src/platform/web/platform_text.js",
-          "swift": [],
-          "status": "n/a",
-          "note": "Web JS bridge excluded"
+          "swift": [
+            "Sources/Rune/Resources/Web/rune-web-text.mjs",
+            "Sources/CRuneDesktopText/BrowserText.c",
+            "Tests/Browser/text-shaping.html"
+          ],
+          "status": "partial",
+          "note": "Canvas and DOM text metrics supply shaping, directional hit positions and rasterized glyph masks to the WASI text backend."
         },
         {
           "upstream": "src/platform/web/segmenter.js",
           "swift": [],
-          "status": "n/a",
-          "note": "Web JS bridge excluded"
+          "status": "missing",
+          "note": "Dictionary-based word segmentation is missing. The browser text shaper uses Intl.Segmenter for grapheme clusters."
         },
         {
           "upstream": "src/platform/web/segmenter.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Web platform target excluded"
+          "status": "missing",
+          "note": "The WASM binding for browser dictionary word and line boundaries is missing."
         },
         {
           "upstream": "src/platform/web_math.rs",
@@ -2218,136 +2352,156 @@
         {
           "upstream": "src/platform/win32.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/Win32HostTests.swift",
+            "scripts/windows-uia-smoke.ps1"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "Win32 dispatches native input, IME, DPI, window lifecycle, UI Automation and file drops. WGL presents Rune GPU frames."
         },
         {
           "upstream": "src/platform/win32/cloak.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "DWM first-frame cloaking and its timeout are missing. The Win32 host shows a visible window at startup."
         },
         {
           "upstream": "src/platform/win32/dark_mode.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/Platform/WindowsPreferences.swift",
+            "Sources/CRuneWin32/Preferences.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "The Win32 host applies the DWM dark-window attribute and responds to theme and preferences changes."
         },
         {
           "upstream": "src/platform/win32/dcomp_handover.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "DirectComposition handover from a boot surface to the application swap chain is missing on the WGL host."
         },
         {
           "upstream": "src/platform/win32/dib.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "The Win32 startup DIB presentation path is missing. The normal host presents GPU frames through WGL."
         },
         {
           "upstream": "src/platform/win32/dpi_drag.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "WM_DPICHANGED applies the suggested physical window rectangle and updates the scale and client size."
         },
         {
           "upstream": "src/platform/win32/drop_target.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Drop.cpp",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "The Win32 host registers an OLE IDropTarget after the first present and routes file enter, hover, leave, and drop to Rune. WM_DROPFILES also accepts files."
         },
         {
           "upstream": "src/platform/win32/frame.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "Window configuration supports standard and borderless frames and initiates native titlebar dragging. Custom non-client hit testing and Aero Snap parity remain open."
         },
         {
           "upstream": "src/platform/win32/jump_list.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "Windows shell jump-list publication via ICustomDestinationList is missing."
         },
         {
           "upstream": "src/platform/win32/occlusion.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "Desktop z-order occlusion sampling is missing. A minimized or hidden window alone does not establish that another window covers it."
         },
         {
           "upstream": "src/platform/win32/placement.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/CRuneWin32/Displays.c",
+            "Tests/RuneTests/Win32HostTests.swift",
+            "Tests/Support/WindowsWindowHandle/HitTest.c"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "Win32 reports frame, client origin, monitor bounds, DPI and native restore geometry, including WINDOWPLACEMENT workspace coordinates. Move and resize requests are applied through SetWindowPos."
         },
         {
           "upstream": "src/platform/win32/pointer.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "Global low-level mouse observation outside Rune windows remains missing. The Win32 host supports whole-window click-through and local pointer messages."
         },
         {
           "upstream": "src/platform/win32/press_point.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift",
+            "scripts/windows-uia-smoke.ps1"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "Mouse button messages deliver their own signed client coordinates and modifiers to the runtime, including events posted to the window."
         },
         {
           "upstream": "src/platform/win32/session_lock.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "Win32 session-lock and unlock notifications are missing."
         },
         {
           "upstream": "src/platform/win32/taskbar.rs",
           "swift": [
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/Platform/WindowsTaskbar.swift",
+            "Sources/CRuneWin32/Taskbar.c",
+            "Sources/CRuneWin32/Win32.c",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "ITaskbarList3 implements progress and overlay icons. The host re-applies state when TaskbarButtonCreated arrives."
         },
         {
           "upstream": "src/platform/x11.rs",
           "swift": [
-            "Sources/Rune/LinuxPlatform.swift"
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/CRuneLinux/LinuxWindowGeometry.c",
+            "Tests/Support/LinuxWindowHandle/Probe.c",
+            "Tests/Support/LinuxWindowHandle/Reparent.c"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The SDL X11 host reads root-space frame and client geometry and applies whole-window pointer transparency through X Shape. Wayland surface placement is compositor-controlled."
         },
         {
           "upstream": "src/platform/x11/overlay.rs",
           "swift": [
-            "Sources/Rune/LinuxPlatform.swift"
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/CRuneLinux/LinuxWindowGeometry.c",
+            "Tests/Support/LinuxWindowHandle/Probe.c",
+            "Tests/Support/LinuxWindowHandle/Reparent.c"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "X Shape switches whole-window pointer input on the client and its reparented frame, and restores the original region. Arbitrary per-element input regions and global overlay pointer tracking remain open."
         },
         {
           "upstream": "src/platform/x11/pointer.rs",
@@ -2543,9 +2697,17 @@
         {
           "upstream": "src/popup_menu/mod.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/WindowsPopup.swift",
+            "Sources/CRuneWin32/Popup.c",
+            "Sources/Rune/Platform/LinuxContextMenu.swift",
+            "Sources/Rune/Platform/LinuxContextMenuView.swift",
+            "Tests/RuneTests/LinuxContextMenuTests.swift",
+            "scripts/windows-popup-smoke.ps1",
+            "scripts/test-linux-popup.py"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "AppKit and Windows use native context menus. Linux renders a keyboard and pointer accessible context menu inside the Rune window."
         },
         {
           "upstream": "src/popup_menu/tests.rs",
@@ -2556,10 +2718,13 @@
         {
           "upstream": "src/popup_menu/win32.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/Platform/WindowsPopup.swift",
+            "Sources/CRuneWin32/Popup.c",
+            "Sources/Rune/Win32Platform.swift",
+            "scripts/windows-popup-smoke.ps1"
           ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "status": "partial",
+          "note": "The Win32 host posts a native TrackPopupMenuEx session, anchors it to a point or rectangle, routes selection and cancellation to Rune and handles keys during tracking."
         },
         {
           "upstream": "src/prefs.rs",
@@ -2591,11 +2756,9 @@
         },
         {
           "upstream": "src/quit/win32.rs",
-          "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "A persistent native window for WM_QUERYENDSESSION and WM_ENDSESSION during logoff or Restart Manager shutdown is missing."
         },
         {
           "upstream": "src/recorder/control.rs",
@@ -2634,9 +2797,17 @@
         {
           "upstream": "src/recorder/mod.rs",
           "swift": [
-            "Sources/Rune/RecorderAndRewind.swift"
+            "Sources/Rune/RecorderAndRewind.swift",
+            "Sources/Rune/Recorder/DesktopRecorderBackend.swift",
+            "Sources/Rune/Recorder/DesktopRecordingFile.swift",
+            "Sources/CRuneMedia/RecorderWin.cpp",
+            "Sources/CRuneMedia/RecorderAACWin.cpp",
+            "Sources/CRuneMedia/RecorderLinux.c",
+            "Sources/CRuneMedia/RecorderAACLinux.c",
+            "Tests/RuneTests/DesktopMicrophoneTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Desktop capture uses WASAPI on Windows and GStreamer on Linux. The recorder supports levels, pause, completion or cancellation and WAV/AAC output. The portable recorder tests feed synthesized samples."
         },
         {
           "upstream": "src/recorder/tests.rs",
@@ -2655,10 +2826,17 @@
           "upstream": "src/render.rs",
           "swift": [
             "Sources/Rune/MetalRenderer.swift",
-            "Sources/Rune/Win32Platform.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/Render/PortableGLRenderer.swift",
+            "Sources/Rune/Render/RenderFrameGL.swift",
+            "Sources/CRuneGL/production.c",
+            "Sources/Rune/Resources/Web/rune-webgl-frame.mjs",
+            "Tests/RuneTests/ProductionGLFrameTests.swift",
+            "Tests/RuneTests/ProductionGLBlurTests.swift",
+            "Tests/Browser/gpu-scene.html"
           ],
           "status": "partial",
-          "note": "Metal renderer on Apple platforms. The DX12 view-heap limit (#1044) applies to the upstream Windows GPU backend; Win32App presents RuneRef frames with GDI."
+          "note": "Apple uses Metal. Windows and Linux draw Rune frames via desktop OpenGL, Android via GLES3, and the browser via WebGL2. The GL path consumes RenderFrame instances, atlases, layers and blur passes. Upstream DX12 and WebGPU backends remain missing."
         },
         {
           "upstream": "src/render/backdrop_blur.rs",
@@ -3248,7 +3426,13 @@
         {
           "upstream": "src/runtime/drag_out_host.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Platform/WindowsDragSource.swift",
+            "Sources/Rune/Platform/LinuxDragSource.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Tests/Support/WindowsDrag/Smoke.cpp",
+            "scripts/test-linux-drag-out.py"
           ],
           "status": "partial"
         },
@@ -3459,7 +3643,9 @@
           "swift": [
             "Sources/Rune/Runtime.swift",
             "Sources/Rune/Input/PointerHitParity.swift",
-            "Tests/RuneTests/PointerHitParityTests.swift"
+            "Tests/RuneTests/PointerHitParityTests.swift",
+            "Sources/Rune/Input/WheelLock.swift",
+            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift"
           ],
           "status": "partial"
         },
@@ -3587,15 +3773,20 @@
         {
           "upstream": "src/runtime/motion/content_slide.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/runtime/motion/content_slide_tests.rs",
-          "swift": [],
-          "status": "missing",
-          "note": "Inline Rust unit tests tracked against RuneTests"
+          "swift": [
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift"
+          ],
+          "status": "partial",
+          "note": "Swift exercises exact elapsed-time growth steps and fold movement at 60, 120, 144, 165 and 240 Hz (#1067)."
         },
         {
           "upstream": "src/runtime/motion/flights.rs",
@@ -3627,7 +3818,10 @@
         {
           "upstream": "src/runtime/motion/growth_runs.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift"
           ],
           "status": "partial"
         },
@@ -3718,7 +3912,10 @@
         {
           "upstream": "src/runtime/motion/tracks.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Runtime/ScrollAndVirtualRuntime.swift"
           ],
           "status": "partial"
         },
@@ -3945,7 +4142,10 @@
           "upstream": "src/runtime/scroll/bottom.rs",
           "swift": [
             "Sources/Rune/Runtime.swift",
-            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift"
+            "Tests/RuneTests/ScrollAndStickySlice2ParityTests.swift",
+            "Sources/Rune/Runtime/ContentSlide.swift",
+            "Tests/RuneTests/ContentSlideAndMotionTests.swift",
+            "Sources/Rune/Runtime/ScrollStateMachines.swift"
           ],
           "status": "partial"
         },
@@ -4050,7 +4250,9 @@
         {
           "upstream": "src/runtime/scroll/x.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Input/WheelLock.swift",
+            "Tests/RuneTests/WheelOwnerHandoffParityTests.swift"
           ],
           "status": "partial"
         },
@@ -4805,10 +5007,14 @@
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
             "Sources/Rune/Input/MacOSGlobalHotKey.swift",
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/CRuneDesktopServices/WindowsHotkeys.c",
+            "Sources/CRuneDesktopServices/LinuxHotkeys.c",
+            "Sources/CRuneDesktopServices/PortalHotkeys.c"
           ],
           "status": "ported",
-          "note": "ShortcutRegistry + Carbon hotkeys + MacOSHostShortcutBridge wired (381ca84 / eef55dc)"
+          "note": "The shared shortcut registry and service dispatch through Carbon on macOS, RegisterHotKey on Windows, XCB grabs on X11, or XDG GlobalShortcuts on Wayland."
         },
         {
           "upstream": "src/shortcuts/parse.rs",
@@ -4823,10 +5029,15 @@
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
             "Sources/Rune/Input/MacOSGlobalHotKey.swift",
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/Rune/Shell/AppShortcutService.swift",
+            "Tests/Windows/GlobalShortcuts/probe.c",
+            "scripts/test-linux-shortcuts.py",
+            "Tests/Support/PortalShortcuts/test.py"
           ],
           "status": "ported",
-          "note": "ShortcutRegistry + MacOSHostShortcutBridge host dispatch wired (381ca84 / eef55dc)"
+          "note": "AppShortcutService manages registrations and routes host activations. The native desktop drivers supply registration, activation and teardown."
         },
         {
           "upstream": "src/shortcuts/service/host_handler_tests.rs",
@@ -4876,37 +5087,59 @@
         },
         {
           "upstream": "src/shortcuts/wayland.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Linux Wayland global shortcut backend excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/CRuneDesktopServices/PortalHotkeys.c",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Tests/Support/PortalShortcuts/test.py"
+          ],
+          "status": "partial",
+          "note": "The Wayland host uses the XDG GlobalShortcuts portal for session creation, binding, activation and teardown. The D-Bus fixture exercises the protocol against a test portal. The desktop portal controls user consent."
         },
         {
           "upstream": "src/shortcuts/windows.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows RegisterHotKey backend excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/CRuneDesktopServices/WindowsHotkeys.c",
+            "Sources/Rune/Win32Platform.swift",
+            "Tests/Windows/GlobalShortcuts/probe.c"
+          ],
+          "status": "partial",
+          "note": "A Win32 message thread owns RegisterHotKey, WM_HOTKEY dispatch, conflict handling and unregistration. MOD_NOREPEAT suppresses held-key repeats."
         },
         {
           "upstream": "src/shortcuts/x11.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Linux X11 global shortcut backend excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/Shell/DesktopShortcutDriver.swift",
+            "Sources/CRuneDesktopServices/LinuxHotkeys.c",
+            "Sources/Rune/LinuxPlatform.swift",
+            "scripts/test-linux-shortcuts.py"
+          ],
+          "status": "partial",
+          "note": "A private XCB connection grabs root-window shortcuts with modifier variants and dispatches activations to the Rune shortcut registry. The integration probe sends real X11 key events."
         },
         {
           "upstream": "src/shortcuts/x11_repeat.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Linux X11 auto-repeat filter excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopServices/LinuxHotkeys.c",
+            "scripts/test-linux-shortcuts.py"
+          ],
+          "status": "partial",
+          "note": "X11 tracks held keys and filters repeat presses and synthetic release/press pairs. The shortcut probe covers held keys and a second independent press."
         },
         {
           "upstream": "src/spell.rs",
           "swift": [
             "Sources/Rune/AccessibilityAndInput.swift",
             "Sources/Rune/Edit/SpellPause.swift",
-            "Sources/Rune/Edit/HostInputAndPasteExtensions.swift"
+            "Sources/Rune/Edit/HostInputAndPasteExtensions.swift",
+            "Sources/Rune/Edit/DesktopSpellChecker.swift",
+            "Sources/CRuneDesktopServices/spell_windows.c",
+            "Sources/CRuneDesktopServices/spell_linux.c",
+            "Tests/RuneTests/DesktopSpellCheckerTests.swift"
           ],
           "status": "ported",
-          "note": "SpellChecker, SpellPauseWatch, and Runtime.spellCheckWhenSettled ported"
+          "note": "SpellChecker and the settled-field check use native providers on macOS, Windows and Linux. Windows uses ISpellChecker and Linux uses Enchant."
         },
         {
           "upstream": "src/spell/macos.rs",
@@ -4925,14 +5158,19 @@
         {
           "upstream": "src/spell/web.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Web platform target excluded"
+          "status": "missing",
+          "note": "The browser Hunspell dictionary download and lookup backend is missing."
         },
         {
           "upstream": "src/spell/windows.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows ISpellChecker platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/Edit/DesktopSpellChecker.swift",
+            "Sources/CRuneDesktopServices/spell_windows.c",
+            "Sources/Rune/AccessibilityAndInput.swift",
+            "Tests/RuneTests/DesktopSpellCheckerTests.swift"
+          ],
+          "status": "partial",
+          "note": "ISpellChecker checks installed language dictionaries, reports UTF-16 error ranges and suggestions, and learns words. The Swift bridge caches bounded line results and performs the check synchronously. Upstream background-worker scheduling remains open."
         },
         {
           "upstream": "src/states.rs",
@@ -4974,15 +5212,20 @@
         {
           "upstream": "src/task/web.rs",
           "swift": [
-            "Sources/Rune/Runtime.swift"
+            "Sources/Rune/Runtime.swift",
+            "Sources/Rune/Platform/PortableExecution.swift",
+            "Sources/Rune/WebBrowserSession.swift",
+            "Tests/Browser/hello-wasi.html"
           ],
-          "status": "n/a",
-          "note": "Web platform target; minimal stub only in WebPlatform.swift"
+          "status": "partial",
+          "note": "The single-threaded WASI reactor queues work for subsequent event-loop turns and drives it from the browser host."
         },
         {
           "upstream": "src/taskbar.rs",
           "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
+            "Sources/Rune/DesktopIntegration.swift",
+            "Sources/Rune/Platform/WindowsTaskbar.swift",
+            "Sources/CRuneWin32/Taskbar.c"
           ],
           "status": "partial"
         },
@@ -4990,7 +5233,16 @@
           "upstream": "src/text.rs",
           "swift": [
             "Sources/Rune/Text.swift",
-            "Sources/Rune/PortableText.swift"
+            "Sources/Rune/PortableText.swift",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Sources/CRuneDesktopText/LinuxText.c",
+            "Sources/CRuneDesktopText/WindowsText.cpp",
+            "Sources/CRuneDesktopText/AndroidText.c",
+            "Sources/Rune/Resources/Web/rune-web-text.mjs",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift",
+            "Tests/RuneTests/PortableTextCursorTests.swift",
+            "Tests/Android/RuneTextProbe.java",
+            "Tests/Browser/text-shaping.html"
           ],
           "status": "ported"
         },
@@ -5088,8 +5340,8 @@
         {
           "upstream": "src/text/default_fonts_tests.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Compares Web-subset assets/web/*.ttf against native .ttf via swash; excluded on Apple CoreText targets"
+          "status": "missing",
+          "note": "The upstream comparison between web-subset and full native font assets has no matching Swift fixture."
         },
         {
           "upstream": "src/text/fallback.rs",
@@ -5125,8 +5377,8 @@
         {
           "upstream": "src/text/full_faces_tests.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "HarfBuzz/ttf-parser internal full-face registry tests N/A on CoreText backend"
+          "status": "missing",
+          "note": "The upstream late/full-face registry, retry and deduplication tests have no equivalent Swift fixture."
         },
         {
           "upstream": "src/text/glyph_cache.rs",
@@ -5385,10 +5637,14 @@
         {
           "upstream": "src/text/platform_face.rs",
           "swift": [
-            "Sources/Rune/Text.swift"
+            "Sources/Rune/Text.swift",
+            "Sources/Rune/Resources/Web/rune-web-text.mjs",
+            "Sources/CRuneDesktopText/BrowserText.c",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Tests/Browser/text-shaping.html"
           ],
-          "status": "n/a",
-          "note": "Apple uses CTFontRef natively without platform_face HarfBuzz bridge"
+          "status": "partial",
+          "note": "Browser system fallback uses Canvas and DOM text shaping and masking for fonts the page can draw."
         },
         {
           "upstream": "src/text/quality_tests.rs",
@@ -5474,15 +5730,24 @@
         },
         {
           "upstream": "src/text/system_fonts/direct_write.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows DirectWrite platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopText/WindowsText.cpp",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift"
+          ],
+          "status": "partial",
+          "note": "DirectWrite resolves system families through its font collection and registered application fonts through a custom collection. Upstream lazy font-file discovery semantics remain unverified."
         },
         {
           "upstream": "src/text/system_fonts/fontconfig.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Linux Fontconfig platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopText/LinuxText.c",
+            "Sources/CRuneDesktopText/LinuxFontData.c",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift"
+          ],
+          "status": "partial",
+          "note": "Linux shapes via Pango and uses the process Fontconfig configuration for app fonts. Upstream lazy file discovery and fallback ordering remain unverified."
         },
         {
           "upstream": "src/text/system_weight.rs",
@@ -5517,33 +5782,50 @@
         },
         {
           "upstream": "src/text/windfoil.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows windfoil platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/Rune/Text/TextParityHelpers.swift",
+            "Sources/Rune/Text/OutlineRaster.swift",
+            "Sources/Rune/Text/OutlineFill.swift"
+          ],
+          "status": "partial",
+          "note": "Swift models Windfoil smoothing and provides outline raster and fill helpers. DirectWrite and Pango normally generate desktop text masks. End-to-end Windfoil rendering across hosts remains unverified."
         },
         {
           "upstream": "src/text/windows.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows text platform target excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopText/WindowsText.cpp",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift",
+            "Tests/RuneTests/PortableTextCursorTests.swift"
+          ],
+          "status": "partial",
+          "note": "Windows text uses DirectWrite layout, shaping, hit testing and rasterization into the Rune atlas."
         },
         {
           "upstream": "src/text/windows/direct_write.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows DirectWrite text backend excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopText/WindowsText.cpp",
+            "Sources/Rune/Text/DesktopTextLine.swift",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift",
+            "Tests/RuneTests/PortableTextCursorTests.swift"
+          ],
+          "status": "partial",
+          "note": "DirectWrite renders glyph runs and color layers, reports text metrics and maps native UTF-16 positions for editing. Upstream Skia-specific smoothing parity remains open."
         },
         {
           "upstream": "src/text/windows/owner.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows text owner excluded on Apple platforms"
+          "swift": [
+            "Sources/CRuneDesktopText/WindowsText.cpp",
+            "Tests/RuneTests/DesktopTextRenderingTests.swift"
+          ],
+          "status": "partial",
+          "note": "DirectWrite registers app bytes through IDWriteInMemoryFontFileLoader and retains the resulting immutable collection. The Swift bridge passes a null buffer owner, which asks the loader to copy the bytes."
         },
         {
           "upstream": "src/text/windows/skia_gamma.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows Skia gamma LUT excluded on Apple platforms"
+          "status": "missing",
+          "note": "The upstream Skia-specific DirectWrite gamma lookup table is missing."
         },
         {
           "upstream": "src/theme.rs",
@@ -5913,11 +6195,9 @@
         },
         {
           "upstream": "src/tray/win32.rs",
-          "swift": [
-            "Sources/Rune/DesktopIntegration.swift"
-          ],
-          "status": "n/a",
-          "note": "Windows platform target; stub in Win32Platform.swift"
+          "swift": [],
+          "status": "missing",
+          "note": "The Windows shell notification-area icon and menu backend is missing."
         },
         {
           "upstream": "src/uber.metallib",
@@ -5972,7 +6252,12 @@
         {
           "upstream": "src/video/mod.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Video/DesktopMediaDecoder.swift",
+            "Sources/Rune/Video/DesktopMediaSource.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/LinuxMedia.c",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
           "status": "partial"
         },
@@ -6025,30 +6310,38 @@
         {
           "upstream": "src/video/windows/audio.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/WindowsAudio.h",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Media Foundation playback handles audio transport, clock, volume and mute. The video fixture exercises muted playback."
         },
         {
           "upstream": "src/video/windows/decoder.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Video/DesktopMediaDecoder.swift",
+            "Sources/Rune/Video/DesktopMediaSource.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/WindowsMediaFoundation.h",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
         },
         {
           "upstream": "src/video/windows/gpu.rs",
-          "swift": [
-            "Sources/Rune/MediaPipeline.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "missing",
+          "note": "A D3D11/D3D12 shared NV12 texture ring is missing. The Media Foundation path returns CPU-decoded RGB32 frames."
         },
         {
           "upstream": "src/video/windows/layer.rs",
-          "swift": [
-            "Sources/Rune/MediaPipeline.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "missing",
+          "note": "The native DirectComposition video overlay is missing. The WGL host composites decoded frame images in Rune."
         },
         {
           "upstream": "src/video/windows/machine.rs",
@@ -6060,30 +6353,47 @@
         {
           "upstream": "src/video/windows/mf.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Video/DesktopMediaDecoder.swift",
+            "Sources/Rune/Video/DesktopMediaSource.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/WindowsMediaFoundation.h",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
         },
         {
           "upstream": "src/video/windows/mod.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Video/DesktopMediaDecoder.swift",
+            "Sources/Rune/Video/DesktopMediaSource.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/WindowsMediaFoundation.h",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
         },
         {
           "upstream": "src/video/windows/still.rs",
           "swift": [
-            "Sources/Rune/MediaPipeline.swift"
+            "Sources/Rune/MediaPipeline.swift",
+            "Sources/Rune/Video/DesktopMediaDecoder.swift",
+            "Sources/Rune/Video/DesktopMediaSource.swift",
+            "Sources/CRuneMedia/WindowsMedia.cpp",
+            "Sources/CRuneMedia/WindowsMediaFoundation.h",
+            "Tests/RuneTests/DesktopVideoFrameTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "Media Foundation supplies decoded RGB32 frames and timed samples for still and playback, which Rune uploads to the GPU as image data."
         },
         {
           "upstream": "src/video/windows/vsync.rs",
-          "swift": [
-            "Sources/Rune/MediaPipeline.swift"
-          ],
-          "status": "partial"
+          "swift": [],
+          "status": "missing",
+          "note": "Selecting video frames on the DWM_TIMING_INFO refresh grid is missing."
         },
         {
           "upstream": "src/window.rs",
@@ -6095,7 +6405,11 @@
         {
           "upstream": "src/window/any_host.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
         },
@@ -6159,7 +6473,11 @@
         {
           "upstream": "src/window/create.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
         },
@@ -6173,21 +6491,33 @@
         {
           "upstream": "src/window/event_loop.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/window/events.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/window/file_drop.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Drop.cpp",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
           "status": "partial"
         },
@@ -6221,9 +6551,16 @@
         {
           "upstream": "src/window/handle.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/CRuneLinux/LinuxWindowGeometry.c",
+            "Tests/Support/LinuxWindowHandle/Probe.c",
+            "Tests/Support/WindowsWindowHandle/HitTest.c"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "On Win32 and X11 the host reports native geometry and applies placement; Windows, X11 and Wayland support whole-window pointer transparency. Global top-level placement is compositor-controlled on Wayland."
         },
         {
           "upstream": "src/window/handle_tests.rs",
@@ -6267,7 +6604,11 @@
         {
           "upstream": "src/window/lifecycle.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/MacOSApp.swift",
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/Rune/LinuxPlatform.swift",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/DesktopWindowGroupTests.swift"
           ],
           "status": "partial"
         },
@@ -6428,9 +6769,13 @@
         {
           "upstream": "src/window/win.rs",
           "swift": [
-            "Sources/Rune/MacOSApp.swift"
+            "Sources/Rune/Win32Platform.swift",
+            "Sources/CRuneWin32/Win32.c",
+            "Sources/Rune/Platform/DesktopWindowGroup.swift",
+            "Tests/RuneTests/Win32HostTests.swift"
           ],
-          "status": "partial"
+          "status": "partial",
+          "note": "The Win32 native host configures, runs and closes HWND/WGL windows, forwards messages to Rune, and presents GPU frames."
         },
         {
           "upstream": "src/task/queue.rs",
@@ -6620,66 +6965,57 @@
         },
         {
           "upstream": "src/runtime/paint/cycle.rs",
-          "swift": [
-            "Sources/Rune/WebPlatform.swift"
-          ],
-          "status": "n/a",
-          "note": "WebGPU spinner-only damage and retained instance uploads (#1033). The CPU path renders the complete frame."
+          "swift": [],
+          "status": "missing",
+          "note": "The optimized spinner-only damage cycle and retained instance uploads are missing on the Windows and browser renderers."
         },
         {
           "upstream": "src/clipboard/primary.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Linux primary selection only (05d1ddf0 #890)"
+          "status": "missing",
+          "note": "The X11 PRIMARY and Wayland primary-selection protocols for select-to-copy are missing. Linux supports the regular system clipboard."
         },
         {
           "upstream": "src/runtime/input/primary_selection.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Linux primary selection only (05d1ddf0 #890)"
+          "status": "missing",
+          "note": "Routing select-to-copy and middle-click paste to Linux primary selection is missing."
         },
         {
           "upstream": "src/runtime/input/autoscroll.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows/Linux middle-click autoscroll only (740ecbc9 #874; macOS has none)"
+          "status": "missing",
+          "note": "Middle-click autoscroll on Windows and Linux is missing. Ordinary mouse-wheel routing is available."
         },
         {
           "upstream": "src/platform/web/pipelines.rs",
-          "swift": [
-            "Sources/Rune/WebPlatform.swift"
-          ],
-          "status": "n/a",
-          "note": "Rust bridge to WebGPU asynchronous pipeline compilation. WebAppHost renders through the CPU reference rasterizer."
+          "swift": [],
+          "status": "missing",
+          "note": "WebGPU asynchronous pipeline compilation and its WASM bridge are missing. The browser GPU backend uses WebGL2."
         },
         {
           "upstream": "src/platform/web/pipelines.js",
-          "swift": [
-            "Sources/Rune/WebPlatform.swift"
-          ],
-          "status": "n/a",
-          "note": "WebGPU asynchronous pipeline compilation (#977). WebAppHost renders through the CPU reference rasterizer."
+          "swift": [],
+          "status": "missing",
+          "note": "WebGPU asynchronous pipeline creation and shader diagnostics are missing from the WebGL2 renderer."
         },
         {
           "upstream": "src/platform/win32/segmenter.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows ICU segmenter (078f71f2 #861)"
+          "status": "missing",
+          "note": "The Windows ICU word-boundary backend for dictionary-script selection is missing."
         },
         {
           "upstream": "src/render/damaged.rs",
-          "swift": [
-            "Sources/Rune/Win32Platform.swift",
-            "Sources/Rune/WebPlatform.swift"
-          ],
-          "status": "n/a",
-          "note": "Rust retains a GPU render target for Windows damage and WebGPU spinner redraws (#1033). The Swift Windows host presents RuneRef frames with GDI StretchDIBits and WebAppHost renders through RuneRef."
+          "swift": [],
+          "status": "missing",
+          "note": "Retained window render targets for damage-only redraws and WebGPU spinner redraws are missing. The Win32 and browser hosts submit their GPU frame through WGL and WebGL2 respectively."
         },
         {
           "upstream": "src/render/uber/pass_dxbc_hash.rs",
           "swift": [],
           "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (0fc6f315 #897 DXBC)"
+          "note": "These are integrity hashes for upstream precompiled DXBC shader assets. Swift ships GLSL for the Win32 WGL renderer and bundled Metal shader assets for Apple."
         },
         {
           "upstream": "src/surface_alpha.wgsl",
@@ -6692,31 +7028,34 @@
         {
           "upstream": "src/window/damage.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (e1d5cd48 #852)"
+          "status": "missing",
+          "note": "The Windows retained-damage path for partial redraws is missing on the WGL host."
         },
         {
           "upstream": "src/window/look.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (b459621c #844 occlusion)"
+          "status": "missing",
+          "note": "The Windows draw-time z-order occlusion policy is missing."
         },
         {
           "upstream": "src/window/post_frame.rs",
-          "swift": [],
-          "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (0188f2c8 #946)"
+          "swift": [
+            "Sources/Rune/Win32Platform.swift",
+            "Tests/RuneTests/Win32HostTests.swift"
+          ],
+          "status": "partial",
+          "note": "A successful first SwapBuffers signals readiness, registers the OLE drop target and runs onReady. The upstream input-aware queue for deferring individual initialization steps remains open."
         },
         {
           "upstream": "src/window/slot.rs",
           "swift": [],
-          "status": "n/a",
-          "note": "Windows-only (delta-2/3 NOT REQUIRED); macOS/iOS use the Metal path (b459621c #844 frame slot)"
+          "status": "missing",
+          "note": "A Windows waitable swap-chain frame-latency slot is missing on the WGL host."
         }
       ],
       "note": "Core native runtime, layout, input, rendering and platform hosts. Module mappings track file-level coverage; symbol counts below are from the earlier reports.",
       "parity": {
-        "files": "175 ported, 476 partial, 173 missing, 100 n/a",
+        "files": "175 ported, 509 partial, 205 missing, 35 n/a",
         "pubSymbols": "2385/4714 (historical inventory in the referenced reports)",
         "report": "core.md, core-text.md, core-render.md, core-platform.md"
       },
@@ -7715,84 +8054,109 @@
         {
           "upstream": "src/pipes.rs",
           "swift": [
-            "Sources/RuneFX/RuneFXRenderer.swift"
+            "Sources/RuneFX/RuneFXRenderer.swift",
+            "Sources/RuneFX/FxGLRenderer.swift",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/renderer.rs",
           "swift": [
-            "Sources/RuneFX/RuneFXRenderer.swift"
+            "Sources/RuneFX/RuneFXRenderer.swift",
+            "Sources/RuneFX/FxGLRenderer.swift",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/renderer_prepare.rs",
           "swift": [
-            "Sources/RuneFX/RuneFXRenderer.swift"
+            "Sources/RuneFX/RuneFXRenderer.swift",
+            "Sources/RuneFX/FxGLRenderer.swift",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/blur.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/blur-down.frag",
+            "Sources/RuneFX/Resources/GL/blur-up.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/common.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/common.glsl",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/distort.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/distort.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/electric.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/electric.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/extras.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/extras.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/fill.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/fill.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/fire.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/fire.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/firesim.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/fire-sim.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/glow.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/glow.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
@@ -7806,21 +8170,27 @@
         {
           "upstream": "src/shaders/motion.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/motion.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/pulse.wgsl",
           "swift": [
-            "Sources/RuneFX/RuneFXShaders.swift"
+            "Sources/RuneFX/RuneFXShaders.swift",
+            "Sources/RuneFX/Resources/GL/pulse.frag",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/sim.rs",
           "swift": [
-            "Sources/RuneFX/RuneFXSim.swift"
+            "Sources/RuneFX/RuneFXSim.swift",
+            "Sources/RuneFX/FxGLFireSimulation.swift",
+            "Tests/RuneFXTests/FxGLRendererTests.swift"
           ],
           "status": "partial"
         },
@@ -7833,7 +8203,7 @@
           "status": "partial"
         }
       ],
-      "note": "Effects catalog/WGSL->Metal partial; fill/sim/renderer gaps remain",
+      "note": "Effects catalog with Metal and portable OpenGL renderers, effect shaders and fire simulation. Consult individual mappings and backend tests for coverage.",
       "parity": {
         "files": "24/24",
         "pubSymbols": "232/277 (84%)",
@@ -7857,14 +8227,19 @@
         {
           "upstream": "src/glass.rs",
           "swift": [
-            "Sources/RuneLight/RuneLightGlass.swift"
+            "Sources/RuneLight/RuneLightGlass.swift",
+            "Sources/RuneLight/GlassGLRenderer.swift",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/gpu.rs",
           "swift": [
-            "Sources/RuneLight/RuneLightRenderer.swift"
+            "Sources/RuneLight/RuneLightRenderer.swift",
+            "Sources/RuneLight/RuneLightGL.swift",
+            "Sources/RuneLight/LightGLLayers.swift",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
@@ -7878,68 +8253,92 @@
         {
           "upstream": "src/render.rs",
           "swift": [
-            "Sources/RuneLight/RuneLightRenderer.swift"
+            "Sources/RuneLight/RuneLightRenderer.swift",
+            "Sources/RuneLight/RuneLightGL.swift",
+            "Sources/RuneLight/LightGLLayers.swift",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/common.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/common.glsl",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/composite.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/composite.frag",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/field.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/field.frag",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/gbuffer.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/gbuffer.frag",
+            "Sources/RuneLight/Resources/GL/gbuffer.vert",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/gi.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/gi-scene.frag",
+            "Sources/RuneLight/Resources/GL/fluence.frag",
+            "Sources/RuneLight/Resources/GL/cascade.frag",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/glass.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/glass.frag",
+            "Sources/RuneLight/Resources/GL/glass-pyramid.frag",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/shaders/shadow.wgsl",
           "swift": [
-            "Sources/RuneLight/RuneLightShaders.swift"
+            "Sources/RuneLight/RuneLightShaders.swift",
+            "Sources/RuneLight/Resources/GL/shadow.frag",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         },
         {
           "upstream": "src/targets.rs",
           "swift": [
-            "Sources/RuneLight/RuneLightRenderer.swift"
+            "Sources/RuneLight/RuneLightRenderer.swift",
+            "Sources/RuneLight/RuneLightGL.swift",
+            "Sources/RuneLight/LightGLLayers.swift",
+            "Tests/RuneLightTests/RuneLightGLTests.swift"
           ],
           "status": "partial"
         }
       ],
-      "note": "GI/glass shaders ported; target/GPU pass parity incomplete",
+      "note": "Metal and portable OpenGL implementations cover lighting and glass passes. Consult individual mappings and backend tests for coverage.",
       "parity": {
         "files": "13/13",
         "pubSymbols": "61/100 (61%)",
@@ -8672,7 +9071,12 @@
           "swift": [
             "Sources/RuneNotify/RuneNotify.swift",
             "Sources/RuneNotify/NotificationTypes.swift",
-            "Sources/RuneNotify/NotificationBackend.swift"
+            "Sources/RuneNotify/NotificationBackend.swift",
+            "Sources/RuneNotify/NativeWindowsNotifications.swift",
+            "Sources/RuneNotify/NativeLinuxNotifications.swift",
+            "Sources/CRuneNotify/LinuxNotifications.c",
+            "Tests/RuneNotifyTests/LinuxNotificationIntegrationTests.swift",
+            "Tests/Windows/Notifications/run.ps1"
           ],
           "status": "ported"
         },
@@ -8686,20 +9090,31 @@
         {
           "upstream": "src/tests.rs",
           "swift": [
-            "Tests/RuneNotifyTests/RuneNotifyTests.swift"
+            "Tests/RuneNotifyTests/RuneNotifyTests.swift",
+            "Tests/RuneNotifyTests/LinuxNotificationIntegrationTests.swift",
+            "scripts/test-linux-notifications.py",
+            "Tests/RuneNotifyTests/WindowsToastContentTests.swift",
+            "Tests/Windows/Notifications/run.ps1"
           ],
           "status": "ported"
         },
         {
           "upstream": "src/windows.rs",
           "swift": [
-            "Sources/RuneNotify/UserNotificationsBackend.swift"
+            "Sources/RuneNotify/NativeWindowsNotifications.swift",
+            "Sources/RuneNotify/WindowsToastContent.swift",
+            "Sources/CRuneNotify/WindowsToast.cpp",
+            "Sources/CRuneNotify/WindowsNotificationIdentity.c",
+            "Sources/CRuneNotify/WindowsNotificationActivator.cpp",
+            "Tests/RuneNotifyTests/WindowsToastContentTests.swift",
+            "Tests/Windows/NotificationActivation/Probe.cpp",
+            "Tests/Windows/Notifications/run.ps1"
           ],
           "status": "partial",
-          "note": "WindowsToastBackend PowerShell toast + URL/id/scheme parity tested; live WinRT COM/Registry N/A-platform"
+          "note": "The Windows backend registers or adopts notification identity, submits WinRT toast XML, manages history, and serves COM activation and click handoff. The Windows fixtures exercise history and activator registration and revocation."
         }
       ],
-      "note": "Top-level RuneNotify wrappers, macOS UserNotificationsBackend, and injectable-runner LinuxNotifySendBackend & WindowsToastBackend parity tested; live WinRT COM/Registry & Linux notify-send binary N/A-platform on Darwin",
+      "note": "The native notification backends use UserNotifications on macOS, WinRT with a COM activator on Windows, and the freedesktop notifications service on Linux. Platform fixtures cover activation and notification lifecycle.",
       "parity": {
         "files": "4/4",
         "pubSymbols": "25/25 (100%)",
@@ -9174,7 +9589,7 @@
           "upstream": "src/web.rs",
           "swift": [],
           "status": "n/a",
-          "note": "Web Lua bridge excluded"
+          "note": "This module supplies a C allocator and embedded WASI libc shims for the upstream Luau C runtime. RuneLuau implements its VM directly in Swift."
         },
         {
           "upstream": "src/workers.rs",

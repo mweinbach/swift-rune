@@ -1,9 +1,9 @@
 {
   "swiftExecutables" : 98,
-  "swiftTargets" : 18,
-  "syncedAt" : "2026-11-17T09:31:29Z",
-  "syncedCommit" : "47195cfae0fef50997a167e2d75afde901054d2a",
-  "syncedCommitDate" : "2026-11-17T02:30:56-06:00",
-  "syncedCommitSubject" : "Text under gliding growth rows moves in whole pixels with its box (#1072)",
+  "swiftTargets" : 19,
+  "syncedAt" : "2026-11-17T15:32:27Z",
+  "syncedCommit" : "18caec763398cac2974648c6fb95dc498a34937f",
+  "syncedCommitDate" : "2026-11-17T08:28:40-06:00",
+  "syncedCommitSubject" : "Step growth by each frame's own time (#1067)",
   "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
