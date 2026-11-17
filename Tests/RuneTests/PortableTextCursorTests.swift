@@ -120,6 +120,42 @@ struct PortableTextCursorTests {
         }
     }
 
+    @Test func overflowingWordsKeepTheirTrailingSpacesOnTheSameLine() {
+        let system = TextSystem()
+        let font = TextStyle(size: 13, lineHeight: 20, family: .monospace, wrap: .wrap)
+        // Pinned Parley wraps at the UTF-8 boundary after the spaces, even when the word overflows.
+        let examples = [
+            Array(repeating: "word ", count: 40),
+            ["    ", "word  ", "next"],
+            ["word\u{00a0}word  ", "end"],
+            ["e\u{0301}  ", "e\u{0301}e\u{0301} "],
+            ["אבג  ", "مرحبا  ", "ד  "],
+            ["a\t", "b\t  ", "c"],
+            ["    "]
+        ]
+        #if canImport(CoreText)
+        // Adding the hanging space to a CoreText line keeps the original fitted advance.
+        let word = system.shape(text: "word", style: font, maxWidth: nil, pixelScale: 1, emitGlyphs: false)
+        let text = String(repeating: "word ", count: 40)
+        let narrow = system.shape(text: text, style: font, maxWidth: 1, pixelScale: 1, emitGlyphs: false)
+        #expect(abs(narrow.size.x - word.size.x) <= 1.0 / 64.0)
+        #endif
+        for lines in examples {
+            let text = lines.joined()
+            for width: Float in [0, 1] {
+                let shaped = system.shape(text: text, style: font, maxWidth: width, pixelScale: 1, emitGlyphs: false)
+                #expect(shaped.lineCount == lines.count)
+                #expect(shaped.size.y == Float(lines.count) * 20)
+                var byte = 0
+                for (line, content) in lines.enumerated() {
+                    let end = byte + content.utf8.count
+                    #expect(shaped.lineUTF8Range(at: line) == (byte..<end))
+                    byte = end
+                }
+            }
+        }
+    }
+
     @Test func wordAndEmergencyWrapKeepGraphemesAndNonbreakingSpacesIntact() {
         let system = TextSystem()
         let style = TextStyle(size: 16, wrap: .wrap)

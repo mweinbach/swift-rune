@@ -5430,6 +5430,7 @@ public final class TextSystem: @unchecked Sendable {
             var isParaLast: Bool
             var insetsPx: SIMD2<Float>
             var strIndexBase: Int = 0
+            var fittingWidthPx: Float? = nil
         }
         var visualLines: [VisualLine] = []
         var anyTruncated = false
@@ -5485,13 +5486,14 @@ public final class TextSystem: @unchecked Sendable {
                 // kitc's break loop (wrapAnywhere via `CTTypesetterSuggestLineBreak` + surrogate-pair fix;
                 // a break landing mid-word extends to the next break opportunity) run per line at
                 // `lineCaps[line]` when the pretty pass (`#882`) narrows a line, else at the wrap width.
-                func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] {
+                func breakParagraph(lineCaps: [Int: CGFloat]?) -> [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, fittingWidthPx: Float, emergency: Bool)] {
                     var cursor = u16Start
-                    var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, emergency: Bool)] = []
+                    var out: [(ctLine: CTLine, segStart: Int, count: Int, isParaLast: Bool, wPx: Float, twPx: Float, fittingWidthPx: Float, emergency: Bool)] = []
                     var lineIdxInPara = 0
                     while cursor < hardEnd {
                         var count: CFIndex
                         var emergency = false
+                        var hangingStart: Int?
                         if let wrapW = effectiveWrapWidthPx {
                             let targetW = lineCaps?[lineIdxInPara] ?? wrapW
                             let suggested: CFIndex
@@ -5523,6 +5525,15 @@ public final class TextSystem: @unchecked Sendable {
                                     }
                                     count = max(1, end - cursor)
                                 }
+                                // Spaces hang on the preceding line even when its first word overflows.
+                                // Keep their authored range for selection and hit testing.
+                                let wordEnd = count
+                                while cursor + count < hardEnd {
+                                    let next = shapedNS.character(at: cursor + count)
+                                    guard next == 0x20 || next == 0x09 else { break }
+                                    count += 1
+                                }
+                                if count > wordEnd { hangingStart = wordEnd }
                             }
                             // Keep pill chips and bare inline icons attached to their label/word when they fit on a line.
                             let tentativeEnd = cursor + count
@@ -5581,7 +5592,16 @@ public final class TextSystem: @unchecked Sendable {
                         }
                         let wPx = Float(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
                         let twPx = Float(CTLineGetTrailingWhitespaceWidth(ctLine))
-                        out.append((ctLine, cursor, count, isParaLast, wPx, twPx, emergency))
+                        var fittingWidthPx = wPx
+                        if let hangingStart, hangingStart < count {
+                            // Keep the overflowing word's measured advance, including nonbreaking
+                            // spaces within it. The full CTLine still supplies every caret and glyph.
+                            let word = CTTypesetterCreateLine(typesetter, CFRangeMake(cursor, hangingStart))
+                            let wordWidthPx = Float(CTLineGetTypographicBounds(word, nil, nil, nil))
+                            let available = isParaLast ? max(0, (maxWidth ?? 0) * scale - insets.x - insets.y) : 0
+                            fittingWidthPx = max(wordWidthPx, min(wPx, available))
+                        }
+                        out.append((ctLine, cursor, count, isParaLast, wPx, twPx, fittingWidthPx, emergency))
                         cursor += count
                         lineIdxInPara += 1
                     }
@@ -5646,7 +5666,8 @@ public final class TextSystem: @unchecked Sendable {
                         trailingWsPx: entry.twPx,
                         isRTL: paraIsRTL,
                         isParaLast: entry.isParaLast,
-                        insetsPx: insets
+                        insetsPx: insets,
+                        fittingWidthPx: entry.fittingWidthPx
                     ))
                     authUTF8Cursor += sub.utf8.count
                 }
@@ -6043,7 +6064,8 @@ public final class TextSystem: @unchecked Sendable {
         let backgroundsOut = Self.mergeContiguousBackgrounds(rawBackgroundsOut)
         let totalHeightPt = Self.specLineHeight(lineCount: max(1, visualLines.count), lineHeightPt: lhPt, scale: scale, exact: style.exactLines, extraPt: grownExtraPx * invS)
         // A text box is as wide as its widest line to a 64th of a device pixel (`text_width`, #934).
-        let totalWidthPt = TextBoxGeometry.textWidth(maxLineWidthPx) / scale
+        let measuredWidthPx = visualLines.reduce(Float(0)) { max($0, $1.insetsPx.x + ($1.fittingWidthPx ?? $1.widthPx)) }
+        let totalWidthPt = TextBoxGeometry.textWidth(measuredWidthPx) / scale
         var shapedOut = ShapedText(
             size: Vec2(totalWidthPt, totalHeightPt),
             lineCount: max(1, visualLines.count),
