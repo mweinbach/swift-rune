@@ -1,9 +1,9 @@
 {
-  "upstreamRepo": "https://github.com/anomalyco/rune",
-  "syncedCommit": "615f06a43a565c4d9abe2d883b12fcd895421f4e",
-  "syncedCommitDate": "2026-11-15T00:16:58-06:00",
-  "syncedCommitSubject": "Windows: the hand-over without armed command lists, a first frame that doesn't wait on DWM, and input that pauses the hand-over (#1027)",
-  "syncedAt": "2026-11-15T12:13:49Z",
-  "swiftTargets": 18,
-  "swiftExecutables": 98
+  "swiftExecutables" : 98,
+  "swiftTargets" : 18,
+  "syncedAt" : "2026-11-17T08:11:14Z",
+  "syncedCommit" : "3468f3a3b6c690336a94a8a57e66a149c2a422dc",
+  "syncedCommitDate" : "2026-11-16T21:30:16-08:00",
+  "syncedCommitSubject" : "fix(rune): keep status ink with a row during a live reorder (#1098)",
+  "upstreamRepo" : "https:\/\/github.com\/anomalyco\/rune"
 }
