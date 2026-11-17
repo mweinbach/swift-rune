@@ -289,19 +289,22 @@ public enum KeyDiagnostics {
     @discardableResult
     public static func renameDuplicates(_ keys: inout [String]) -> [(index: Int, oldKey: String)] {
         var taken = Set(keys)
+        guard taken.count != keys.count else { return [] }
         var kept = Set<String>()
+        var nextSuffix: [String: Int] = [:]
         var renamed: [(index: Int, oldKey: String)] = []
         for i in keys.indices {
             let cur = keys[i]
             if kept.insert(cur).inserted {
                 continue
             }
-            var n = 1
+            var n = nextSuffix[cur, default: 1]
             var candidate = "\(cur)#dup\(n)"
             while taken.contains(candidate) {
                 n += 1
                 candidate = "\(cur)#dup\(n)"
             }
+            nextSuffix[cur] = n + 1
             taken.insert(candidate)
             kept.insert(candidate)
             renamed.append((i, cur))

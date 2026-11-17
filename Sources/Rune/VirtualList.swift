@@ -250,15 +250,65 @@ public struct VirtualWindow: Sendable, Equatable {
     }
 }
 
+/// The ordered keys own their storage. Most reverse lookups need only a hash and an index.
+/// Full keys are kept in the secondary table only when two different keys share a hash.
+internal struct VirtualRowPlaces<Key: Hashable & Sendable>: Sendable {
+    let keys: [Key]
+    private var firstByHash: [Int: Int]
+    private var collisions: [Key: Int] = [:]
+    private(set) var hasDuplicates = false
+
+    init(_ keys: [Key]) {
+        self.keys = keys
+        firstByHash = Dictionary(minimumCapacity: keys.count)
+        for (index, key) in keys.enumerated() {
+            let hash = key.hashValue
+            if let first = firstByHash[hash] {
+                if keys[first] == key {
+                    hasDuplicates = true
+                    firstByHash[hash] = index
+                } else if collisions.updateValue(index, forKey: key) != nil {
+                    hasDuplicates = true
+                }
+            } else {
+                firstByHash[hash] = index
+            }
+        }
+    }
+
+    func index(of key: Key) -> Int? {
+        guard let first = firstByHash[key.hashValue] else { return nil }
+        if keys[first] == key { return first }
+        return collisions[key]
+    }
+}
+
+/// Measurements follow surviving keys when a list reorders. A removed row releases its height.
+internal struct VirtualRowMeasurements: Sendable {
+    var places = VirtualRowPlaces<String>([])
+    private(set) var heights: [Float?] = []
+
+    mutating func replacePlaces(_ next: VirtualRowPlaces<String>) {
+        heights = next.keys.map { self[$0] }
+        places = next
+    }
+
+    subscript(_ key: String) -> Float? {
+        get { places.index(of: key).flatMap { heights[$0] } }
+        set {
+            if let index = places.index(of: key) { heights[index] = newValue }
+        }
+    }
+}
+
 /// Persistent geometry & scroll-anchor state for a virtualized list (`rune::VirtualList`).
 public final class VirtualListState: @unchecked Sendable {
     /// The fewest rows a list pinned to its end keeps mounted above the end (`PINNED_ROWS = 32`).
     public static let pinnedRows: Int = 32
 
     private let lock = NSLock()
-    public private(set) var keys: [String] = []
-    private var keyToIndex: [String: Int] = [:]
-    private var measuredHeights: [String: Float] = [:]
+    public var keys: [String] { measurements.places.keys }
+    private var measurements = VirtualRowMeasurements()
     private var stickyFlags: [Bool] = []
     private var heights: [Float] = []
     private var prefixSums: [Float] = [0]
@@ -278,7 +328,7 @@ public final class VirtualListState: @unchecked Sendable {
     public private(set) var focusedKey: String? = nil
     public private(set) var enteringKeys: Set<String> = []
     public private(set) var shownKeys: Set<String> = []
-    private var bornByKey: [String: UInt64] = [:]
+    private var born: [UInt64] = []
     private var keysFresh: Bool = false
     private var heldKeys: Bool = false
     private var anchorRow: (key: String, top: Float)? = nil
@@ -303,28 +353,19 @@ public final class VirtualListState: @unchecked Sendable {
     public func setItems(_ items: [VirtualItemSpec]) {
         lock.lock()
         defer { lock.unlock() }
-        let oldShown = shownKeys
         let newKeys = items.map(\.key)
+        let places = VirtualRowPlaces(newKeys)
         if newKeys != keys {
             keysFresh = true
-            let newSet = Set(newKeys)
-            heldKeys = keys.contains { newSet.contains($0) }
+            heldKeys = keys.contains { places.index(of: $0) != nil }
         }
-        keys = newKeys
+        replaceKeys(places, commit: 0)
         stickyFlags = items.map(\.isStickyHeader)
-        keyToIndex.removeAll(keepingCapacity: true)
-        heights.removeAll(keepingCapacity: true)
-
-        for (i, item) in items.enumerated() {
-            keyToIndex[item.key] = i
-            let h = measuredHeights[item.key] ?? item.estimatedHeight
-            heights.append(max(1, h))
-            if bornByKey[item.key] == nil {
-                bornByKey[item.key] = 0
-            }
-            if !oldShown.contains(item.key) {
-                enteringKeys.insert(item.key)
-            }
+        heights = items.enumerated().map { i, item in
+            max(1, measurements.heights[i] ?? item.estimatedHeight)
+        }
+        for key in newKeys where !shownKeys.contains(key) {
+            enteringKeys.insert(key)
         }
         sumsDirty = true
     }
@@ -345,9 +386,9 @@ public final class VirtualListState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         if let vp = viewportHeight { lastViewportHeight = vp }
-        let newSet = Set(newKeys)
+        let places = VirtualRowPlaces(newKeys)
         let anchor: (key: String, top: Float)? = offset.flatMap { off in
-            guard let row = firstVisibleLocked(offset: off, where: { newSet.contains($0) }) else {
+            guard let row = firstVisibleLocked(offset: off, where: { places.index(of: $0) != nil }) else {
                 return nil
             }
             return (lastViewportHeight <= 0 || row.top < off + lastViewportHeight) ? row : nil
@@ -357,23 +398,22 @@ public final class VirtualListState: @unchecked Sendable {
             if offset != nil {
                 heldKeys = anchor != nil
             } else {
-                heldKeys = keys.contains { newSet.contains($0) }
+                heldKeys = keys.contains { places.index(of: $0) != nil }
             }
         }
         anchorRow = anchor
-        keys = newKeys
+        replaceKeys(places, commit: commit)
         stickyFlags = Array(repeating: false, count: newKeys.count)
-        keyToIndex.removeAll(keepingCapacity: true)
-        heights.removeAll(keepingCapacity: true)
-        for (i, k) in newKeys.enumerated() {
-            keyToIndex[k] = i
-            if bornByKey[k] == nil {
-                bornByKey[k] = commit
-            }
-            heights.append(max(1, measuredHeights[k] ?? defaultEstimate))
-        }
+        heights = measurements.heights.map { max(1, $0 ?? defaultEstimate) }
         sumsDirty = true
         return anchor
+    }
+
+    private func replaceKeys(_ places: VirtualRowPlaces<String>, commit: UInt64) {
+        born = places.keys.map { key in
+            measurements.places.index(of: key).map { born[$0] } ?? commit
+        }
+        measurements.replacePlaces(places)
     }
 
     /// Whether row `index` mounting on `commit` skips its insertion transition (`VirtualList::mounts_quietly`).
@@ -382,8 +422,7 @@ public final class VirtualListState: @unchecked Sendable {
         defer { lock.unlock() }
         guard index >= 0 && index < keys.count else { return true }
         let key = keys[index]
-        let born = bornByKey[key] ?? 0
-        let quiet = born < commit && !(keysFresh && !shownKeys.contains(key))
+        let quiet = born[index] < commit && !(keysFresh && !shownKeys.contains(key))
         if !quiet {
             enteringKeys.insert(key)
         }
@@ -435,7 +474,7 @@ public final class VirtualListState: @unchecked Sendable {
     public func anchorDelta() -> Float {
         lock.lock()
         defer { lock.unlock() }
-        guard let anchor = anchorRow, let idx = keyToIndex[anchor.key] else { return 0 }
+        guard let anchor = anchorRow, let idx = measurements.places.index(of: anchor.key) else { return 0 }
         rebuildPrefixSumsIfNeeded()
         return padTop + prefixSums[idx] - anchor.top
     }
@@ -502,12 +541,11 @@ public final class VirtualListState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let clamped = max(1, height)
-        if measuredHeights[key] != clamped {
-            measuredHeights[key] = clamped
-            if let idx = keyToIndex[key], idx < heights.count {
-                heights[idx] = clamped
-                sumsDirty = true
-            }
+        guard let idx = measurements.places.index(of: key) else { return }
+        if measurements.heights[idx] != clamped {
+            measurements[key] = clamped
+            heights[idx] = clamped
+            sumsDirty = true
         }
         enteringKeys.remove(key)
         shownKeys.insert(key)
@@ -611,7 +649,7 @@ public final class VirtualListState: @unchecked Sendable {
         var mountEnd = min(n, upperBound(offset: overBottom) + overscanCount)
 
         // Ensure focused row stays mounted even if offscreen
-        if let fKey = focusedKey, let fIdx = keyToIndex[fKey] {
+        if let fKey = focusedKey, let fIdx = measurements.places.index(of: fKey) {
             if fIdx < mountStart { mountStart = fIdx }
             if fIdx >= mountEnd { mountEnd = fIdx + 1 }
         }

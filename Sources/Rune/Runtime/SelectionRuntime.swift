@@ -617,13 +617,13 @@ internal extension Runtime {
 
     func hasUnmountedVirtualSelectionPin(
         listPath: String,
-        keys: [String],
+        places: VirtualRowPlaces<String>,
         mounted: Range<Int>
     ) -> Bool {
         guard let activeSel = selectionState.coordinator.phase.selection else { return false }
         let src = VirtualSelectionSource(
             listPath: listPath,
-            keys: keys,
+            places: places,
             mounted: mounted,
             isIndexed: true,
             source: nil,

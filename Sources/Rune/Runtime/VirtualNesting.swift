@@ -81,15 +81,43 @@ extension Runtime {
         }
     }
 
+    /// Try the literal selector first, then a mark anywhere under the named row.
+    internal func mountedScrollAnchor(key: String) -> (index: Int, top: Float)? {
+        func find(scope: String?, mark: String) -> (Int, Float)? {
+            func inside(_ index: Int) -> Bool {
+                guard let scope else { return true }
+                var ancestor = flatNodes[index].parentIndex
+                while let p = ancestor {
+                    let n = flatNodes[p]
+                    if selectsElementSelector(scope, path: n.path, key: n.key) { return true }
+                    ancestor = n.parentIndex
+                }
+                return false
+            }
+            if let i = flatNodes.indices.first(where: { i in
+                let n = flatNodes[i]
+                return selectsElementSelector(mark, path: n.path, key: n.key) && inside(i) && !subtreeExiting(i)
+            }) {
+                return (i, flatNodes[i].targetRect.top)
+            }
+            return highlightTargetWithNode(selector: mark, including: { inside($0) && !self.subtreeExiting($0) })
+                .map { ($0.nodeIndex, $0.rect.top) }
+        }
+        if let target = find(scope: nil, mark: key) { return target }
+        guard let slash = key.firstIndex(of: "/") else { return nil }
+        return find(scope: String(key[..<slash]), mark: String(key[key.index(after: slash)...]))
+    }
+
     /// `anchor_offset`'s fallback for a virtual row not mounted yet: it stands where its list's
     /// estimates put it, `top + pad_top + prefix(index)` in its viewport's content. Returns the
     /// viewport and the offset that puts the row's top `at` points below the viewport's top,
     /// before clamping. The jump there mounts it, and it's placed again from its laid-out top
     /// once it has (`ScrollKeyLandings`).
     internal func virtualRowAnchorOffset(key: String, at: Float) -> (viewport: Int, offset: Float)? {
+        let rowKey = key.firstIndex(of: "/").map { String(key[..<$0]) }
         for node in flatNodes {
             guard let list = virtualLists[node.path],
-                  let index = list.lastKeys.firstIndex(of: key),
+                  let index = list.rowPlaces.index(of: key) ?? rowKey.flatMap({ list.rowPlaces.index(of: $0) }),
                   let v = nodeByPath[list.scrollPath] else { continue }
             let est = max(1, node.el.virtualEstimate ?? 40)
             return (v, max(0, list.top + list.padTop + list.prefix(index, estimated: est) - at))

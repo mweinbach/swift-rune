@@ -3539,13 +3539,14 @@ public final class Runtime<State> {
 
     internal func highlightTargetWithNode(
         selector: String,
-        scrolled: Bool = true
+        scrolled: Bool = true,
+        including accepts: (Int) -> Bool = { _ in true }
     ) -> (nodeIndex: Int, rect: MotionRect)? {
         let candidates = LayoutKeyIndex.markedCandidates(selector: selector, index: layoutKeyIndex.indexIfValid(stamp: layoutCommitGen), nodes: flatNodes)
             ?? Array(flatNodes.indices)
         var union: MotionRect? = nil
         var ownerIdx: Int? = nil
-        for i in candidates {
+        for i in candidates where accepts(i) {
             let n = flatNodes[i]
             guard let hls = n.el.textHighlights, !hls.isEmpty else { continue }
             let matches: [Bool] = hls.map { hl in
