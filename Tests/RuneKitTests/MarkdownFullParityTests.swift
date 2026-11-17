@@ -1433,9 +1433,11 @@ struct MarkdownFullParityTests {
 
           - Example
 
-            ```rust
-            fn callback() {}
-            ```
+            - Implementation
+
+              ```rust
+              fn callback() {}
+              ```
         """
         let root: El<Int> = Markdown(source).build(.neutral(dark: false))
         let code = try #require(collectRichNodes(root).first { $0.plain == "fn callback() {}" })

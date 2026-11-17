@@ -5180,37 +5180,45 @@ private final class MarkdownRenderer<State> {
             let innerMaps = map.quoteMaps ?? []
             let drawn = blocksIn(inner, maps: innerMaps, keys: [], topLevel: false, inItem: false)
             flow = savedFlow
-            let qEl: El<State> = row()
-                .role(.blockquote)
-                .wFull()
-                .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
-                .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
-            if let qFrame = view.quoteFrameHandler {
-                var tIdx = savedTaskIdx
-                let plain = MarkdownPlain.render(blocks: inner, tasks: doc.tasks, nextTask: &tIdx)
-                return col().wFull().child(qFrame(qEl, MarkdownQuoteFrameContext(text: plain)))
-            }
-            return qEl
+            return quoteFrame(drawn, blocks: inner, taskIndex: savedTaskIdx)
 
         case let .image(src, alt, title):
-            let imgBox: El<State> = col()
-                .role(.image)
-                .label(alt.isEmpty ? src : alt)
-                .cursor(.zoomIn)
-                .wFull()
-                .p(8)
-                .rounded(6)
-                .bg(s.codeBlockFill)
-                .border(0.5, s.codeBlockBorder)
-                .child(text(alt.isEmpty ? src : alt).font(s.body).color(s.muted))
-            if let imgFrame = view.imageFrameHandler {
-                return col().wFull().child(imgFrame(imgBox, MarkdownImageFrameContext(src: src, alt: alt, title: title)))
-            }
-            return imgBox
+            return renderImage(src: src, alt: alt, title: title)
 
         case .rule:
             return s.rule.a <= 0 ? el().wFull().h(0) : el().wFull().h(0.5).bg(s.rule)
         }
+    }
+
+    private func quoteFrame(_ drawn: El<State>, blocks: [MarkdownDocBlock], taskIndex: Int) -> El<State> {
+        let qEl: El<State> = row()
+            .role(.blockquote)
+            .wFull()
+            .child(el().w(s.quote.width).hFull().rounded(min(s.quote.width / 2.0, 1.0)).bg(s.quoteRule))
+            .child(drawn.grow(1).shrink(1).pl(s.quote.pad))
+        if let qFrame = view.quoteFrameHandler {
+            var tIdx = taskIndex
+            let plain = MarkdownPlain.render(blocks: blocks, tasks: doc.tasks, nextTask: &tIdx)
+            return col().wFull().child(qFrame(qEl, MarkdownQuoteFrameContext(text: plain)))
+        }
+        return qEl
+    }
+
+    private func renderImage(src: String, alt: String, title: String) -> El<State> {
+        let imgBox: El<State> = col()
+            .role(.image)
+            .label(alt.isEmpty ? src : alt)
+            .cursor(.zoomIn)
+            .wFull()
+            .p(8)
+            .rounded(6)
+            .bg(s.codeBlockFill)
+            .border(0.5, s.codeBlockBorder)
+            .child(text(alt.isEmpty ? src : alt).font(s.body).color(s.muted))
+        if let imgFrame = view.imageFrameHandler {
+            return col().wFull().child(imgFrame(imgBox, MarkdownImageFrameContext(src: src, alt: alt, title: title)))
+        }
+        return imgBox
     }
 
     private func withCodeLinks(_ inl: MarkdownInline) -> MarkdownInline {
