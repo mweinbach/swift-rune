@@ -29,9 +29,39 @@ public struct LargeTreeState {
     public var files: TreeModel<FileNode<(UInt32, UInt32)>>
 }
 
+public struct LargeDiffState {
+    var diff: DiffState
+    var selections: [DiffLineRange?] = []
+    var comments: [DiffLineRange] = []
+    var visibleFiles: [Int] = []
+    var actions: [Int] = []
+}
+
 public enum LargeViewFixtures {
     public static let tableViewport = Vec2(900, 900)
     public static let treeViewport = Vec2(360, 900)
+    public static let diffViewport = Vec2(1200, 900)
+
+    /// The interactive view and numbered source files from rune-kit's diff_50k_time.
+    public static func diff() -> Runtime<LargeDiffState> {
+        let lines = 1...50_000
+        let old = lines.map { "let value_\($0) = compute(\($0));\n" }.joined()
+        let new = lines.map { i in
+            "let value_\(i) = compute(\(i))\(i.isMultiple(of: 7) ? " + 1" : "");\n"
+        }.joined()
+        let file = FileDiff.fromTexts(path: "big.rs", old: old, new: new)
+        return Runtime(state: LargeDiffState(diff: DiffState(diff: file)), viewport: diffViewport,
+                       pixelScale: 2, systemDark: true) { state, cx in
+            let view = DiffView<LargeDiffState>(key: "dv", kit: Kit.neutral(dark: true), state: \.diff)
+                .annotation { _, note in el().key("note-\(note.id)").wFull().h(90) }
+                .headerActions { _, file in el().key("act").size(28, 20).onClick { $0.actions.append(file) } }
+                .onSelect { state, selection, _ in state.selections.append(selection) }
+                .onComment { state, range, _ in state.comments.append(range) }
+                .onVisibleFile { state, file in state.visibleFiles.append(file) }
+                .build(state: state, cx: cx)
+            return col().wFull().hFull().child(view)
+        }
+    }
 
     public static func table(_ app: LargeTableState) -> Runtime<LargeTableState> {
         return Runtime(state: app, viewport: tableViewport, pixelScale: 2.0, systemDark: true) { s, cx in

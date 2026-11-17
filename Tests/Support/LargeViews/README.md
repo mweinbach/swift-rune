@@ -1,12 +1,13 @@
 # Large-view benchmark
 
-Run the Release executable from the Swift Rune checkout. It shares its 100,000-row table and 50,000-file tree with the RuneKit performance tests. Each workload scrolls by −48 logical points 600 times. The table viewport is 900 × 900 and the tree viewport is 360 × 900. Both use a 2× target in headless runs. The runner verifies the full visible row-key sequence after the final scroll.
+Run the Release executable from the Swift Rune checkout. The 100,000-row table (900 × 900) and 50,000-file tree (360 × 900) scroll by −48 logical points 600 times. The 50,000-line interactive code diff (1200 × 900) changes every seventh line and flings by −400 points 600 times. Headless runs use a 2× target. The runner verifies the full visible row-key sequence after the final scroll. The diff also checks the 240,000-point offset and excludes rows covered by the sticky header.
 
 ```sh
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench table reference --capture .build/scroll/swift
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree reference --capture .build/scroll/swift
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench table production
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree window
+swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff production
 ```
 
 - `reference` measures elapsed CPU-side frame construction time using a monotonic wall clock. Logical time advances by 1/120 second per frame. Captures export row keys and clipped geometry at frames 0, 1, 24, 60, 300, and 600 and full top-down RGBA8 pixels and viewable PNGs at frames 0 and 60, outside the timed interval.
@@ -30,6 +31,9 @@ python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-table.csv
 swift run --package-path Tests/Support/LargeViews -c release ScrollBench tree window --metal-presents .build/scroll/swift-tree.csv
 python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-tree.csv
 python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll/rust-mac
+xcrun swift run --package-path Tests/Support/LargeViews -c release ScrollBench diff window --metal-presents .build/scroll/swift-diff.csv
+python3 Tests/Support/LargeViews/presentations.py .build/scroll/swift-diff.csv
+python3 Tests/Support/LargeViews/rust-native.py /path/to/rust-rune .build/scroll/rust-mac --case diff
 ```
 
 The 50,000-line code diff has a separate benchmark. It changes every seventh line and measures elapsed frame-construction time for ordinary scrolls, 400-point flings, and jumps between distant hunks. Run the Swift command from this checkout and the Cargo command from the pinned Rust checkout. The reported times exclude GPU submission and physical presentation.

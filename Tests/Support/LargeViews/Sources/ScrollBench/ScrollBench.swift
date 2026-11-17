@@ -7,13 +7,25 @@ import ScrollBenchMetal
 #endif
 
 private enum Workload: String {
-    case table, tree
+    case table, tree, diff
 
     var viewport: Vec2 {
-        self == .table ? LargeViewFixtures.tableViewport : LargeViewFixtures.treeViewport
+        switch self {
+        case .table: LargeViewFixtures.tableViewport
+        case .tree: LargeViewFixtures.treeViewport
+        case .diff: LargeViewFixtures.diffViewport
+        }
     }
 
-    var rowRole: ElementRole { self == .table ? .row : .treeItem }
+    var wheelDelta: Float { self == .diff ? -400 : -48 }
+
+    func isRow(_ element: ElementInfo) -> Bool {
+        switch self {
+        case .table: element.role == .row
+        case .tree: element.role == .treeItem
+        case .diff: element.key?.hasPrefix("dv-df") == true
+        }
+    }
 
     var finalKeys: [String] {
         switch self {
@@ -23,6 +35,10 @@ private enum Workload: String {
                 let package = "pkg\(index / 101)"
                 let entry = index % 101
                 return entry == 0 ? package : "\(package)/file\(entry - 1).rs"
+            }
+        case .diff:
+            return (10_502...10_540).flatMap { line in
+                line.isMultiple(of: 7) ? ["df0.o\(line)", "df0.n\(line)"] : ["df0.c\(line)"]
             }
         }
     }
@@ -48,6 +64,8 @@ private struct Snapshot: Codable {
     let rows: [Row]
     let nativeInstances: Int?
     let referencePrimitives: Int?
+    let scrollOffsetY: Float?
+    let stickyHeaderBottom: Float?
 }
 
 private struct Timing: Codable {
@@ -78,6 +96,7 @@ private struct Result: Codable {
     let visibleDataRows: Int
     let firstVisible: String?
     let lastVisible: String?
+    let scrollOffsetY: Float?
     let frameWork: Timing
     let hostReportIntervals: Timing?
 }
@@ -96,7 +115,7 @@ private struct Probe {
     let checkpoints = [0, 1, 24, 60, 300, 600]
 
     init(_ args: [String]) throws {
-        let usage = Failure("Usage: ScrollBench table|tree reference|production|window [--capture directory] [--metal-presents file.csv]")
+        let usage = Failure("Usage: ScrollBench table|tree|diff reference|production|window [--capture directory] [--metal-presents file.csv]")
         guard args.count >= 2, args.count.isMultiple(of: 2),
               let workload = Workload(rawValue: args[0]), let mode = Mode(rawValue: args[1]) else {
             throw usage
@@ -122,15 +141,24 @@ private struct Probe {
 
     func scroll<S>(_ rt: Runtime<S>, at now: Double) {
         let size = workload.viewport
-        rt.wheel(WheelEvent(dx: 0, dy: -48), at: Vec2(size.x / 2, size.y / 2), now: now)
+        rt.wheel(WheelEvent(dx: 0, dy: workload.wheelDelta), at: Vec2(size.x / 2, size.y / 2), now: now)
     }
 
     func snapshot<S>(_ rt: Runtime<S>, nativeInstances: Int? = nil, referencePrimitives: Int? = nil) -> Snapshot {
-        let rows = rt.elements().filter { !$0.exiting && $0.role == workload.rowRole }
-            .map { Row(key: $0.key, label: $0.label, rect: $0.rect, visible: $0.visible) }
+        let elements = rt.elements()
+        let rows = elements.filter { !$0.exiting && workload.isRow($0) }.map { element in
+            let key = workload == .diff ? element.key.map { String($0.dropFirst("dv-".count)) } : element.key
+            return Row(key: key, label: element.label, rect: element.rect, visible: element.visible)
+        }
+        var headerBottom: Float?
+        if workload == .diff, let header = elements.first(where: { element in
+            element.key == "dv-header" && !element.exiting && element.parentIndex.map { elements[$0].key == "dv" } == true
+        }) { headerBottom = header.rect[1] + header.rect[3] }
         let size = [rt.viewport.x, rt.viewport.y].map { Int(($0 * rt.pixelScale).rounded()) }
         return Snapshot(scene: size, count: rows.count, rows: rows, nativeInstances: nativeInstances,
-                        referencePrimitives: referencePrimitives)
+                        referencePrimitives: referencePrimitives,
+                        scrollOffsetY: workload == .diff ? rt.scrollOffset(forKey: "dv-body").y : nil,
+                        stickyHeaderBottom: headerBottom)
     }
 
     func capture<S>(_ rt: Runtime<S>, index: Int, scene: RefScene?, nativeInstances: Int? = nil) throws {
@@ -148,13 +176,17 @@ private struct Probe {
     func report<S>(_ rt: Runtime<S>, commits: UInt64, work: [Double], arrivals: [Double] = []) throws {
         let frame = snapshot(rt)
         let rows = frame.rows.filter { $0.key != "header" }
-        let visible = rows.filter { $0.visible[2] > 0 && $0.visible[3] > 0 }.sorted { $0.visible[1] < $1.visible[1] }
+        let visible = rows.filter { $0.visible[2] > 0 && $0.visible[3] > 0
+            && $0.visible[1] + $0.visible[3] > (frame.stickyHeaderBottom ?? 0)
+        }.sorted { $0.visible[1] < $1.visible[1] }
         let begin = visible.first?.key, end = visible.last?.key
-        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys else {
-            throw Failure("Unexpected viewport or scroll position after \(work.count) wheel steps")
+        guard rt.viewport == workload.viewport, visible.compactMap(\.key) == workload.finalKeys,
+              frame.scrollOffsetY.map({ abs($0 + Float(steps) * workload.wheelDelta) < 0.01 }) ?? true else {
+            throw Failure("Unexpected viewport, offset or visible rows after \(work.count) wheels (\(begin ?? "none") to \(end ?? "none"))")
         }
         let result = Result(workload: workload.rawValue, mode: mode.rawValue, steps: work.count, dimensions: frame.scene,
                             commits: commits, mountedDataRows: rows.count, visibleDataRows: visible.count, firstVisible: begin, lastVisible: end,
+                            scrollOffsetY: frame.scrollOffsetY,
                             frameWork: Timing(work), hostReportIntervals: arrivals.isEmpty ? nil : Timing(arrivals))
         let bytes = try JSONEncoder().encode(result)
         FileHandle.standardOutput.write(bytes + Data([0x0a]))
@@ -266,6 +298,7 @@ private struct Probe {
             switch probe.workload {
             case .table: try probe.run(LargeViewFixtures.table(LargeTableState()))
             case .tree: try probe.run(LargeViewFixtures.tree(LargeViewFixtures.treeModel()))
+            case .diff: try probe.run(LargeViewFixtures.diff())
             }
         } catch {
             fail(error)
