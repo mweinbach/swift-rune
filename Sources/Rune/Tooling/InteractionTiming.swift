@@ -4,6 +4,12 @@ import Foundation
 import Darwin
 #elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#elseif os(Android)
+import Android
+#elseif os(WASI)
+import WASILibc
 #elseif os(Windows)
 import WinSDK
 #endif
@@ -1094,8 +1100,33 @@ public enum InteractionGate {
     }
 
     public static func isEnabled(headless: Bool = false) -> Bool {
-        let env = ProcessInfo.processInfo.environment
-        return wanted(perfEnv: env["RUNE_PERF"], otelEnv: env["OTEL_EXPORTER_OTLP_ENDPOINT"], headless: headless)
+        wanted(
+            perfEnv: setting("RUNE_PERF"),
+            otelEnv: setting("OTEL_EXPORTER_OTLP_ENDPOINT"),
+            headless: headless
+        )
+    }
+
+    private static func setting(_ name: String) -> String? {
+        #if os(Windows)
+        return name.withCString(encodedAs: UTF16.self) { key in
+            var capacity = GetEnvironmentVariableW(key, nil, 0)
+            while capacity > 0 {
+                var buffer = [WCHAR](repeating: 0, count: Int(capacity))
+                let length = GetEnvironmentVariableW(key, &buffer, capacity)
+                guard length > 0 else { return nil }
+                if length < capacity {
+                    return String(decoding: buffer.prefix(Int(length)), as: UTF16.self)
+                }
+                capacity = length
+            }
+            return nil
+        }
+        #elseif canImport(Darwin) || canImport(Glibc) || canImport(Musl) || os(Android) || os(WASI)
+        return getenv(name).map { String(cString: $0) }
+        #else
+        return ProcessInfo.processInfo.environment[name]
+        #endif
     }
 }
 
@@ -1364,8 +1395,12 @@ public final class InteractionTracker {
     private static let phaseDictKey = "rune.interaction.activePhases"
 
     public static func recordActiveThreadPhase(_ index: Int, ms: Double) {
-        guard index >= 0, index < InteractionPhase.allCases.count else { return }
-        guard let box = RuneExecutionContext.locals[phaseDictKey] as? ActivePhaseBox else { return }
+        recordActiveThreadPhase(index, ms: ms, when: true)
+    }
+
+    static func recordActiveThreadPhase(_ index: Int, ms: Double, when enabled: @autoclosure () -> Bool) {
+        guard let box = RuneExecutionContext.locals[phaseDictKey] as? ActivePhaseBox,
+              box.times.indices.contains(index), enabled() else { return }
         box.times[index] += ms
     }
 

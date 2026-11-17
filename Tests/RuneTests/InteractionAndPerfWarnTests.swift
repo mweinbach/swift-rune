@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import Rune
+#if os(Windows)
+import WinSDK
+#endif
 
 @Suite("InteractionTiming & PerfWarn Parity", .serialized, PerfWarningScope())
 struct InteractionAndPerfWarnTests {
@@ -46,6 +49,50 @@ struct InteractionAndPerfWarnTests {
         let def = InteractionGate.endpoint(otelEnv: nil)
         #expect("\(def.host):\(def.port)" == InteractionGate.defaultEndpoint)
     }
+
+    #if os(macOS) || os(Linux) || os(Windows)
+    @Test func interactionGateReadsEnvironmentChanges() async {
+        await #expect(processExitsWith: .success) {
+            func set(_ name: String, _ value: String) {
+                #if os(Windows)
+                let changed = name.withCString(encodedAs: UTF16.self) { key in
+                    value.withCString(encodedAs: UTF16.self) { SetEnvironmentVariableW(key, $0) }
+                }
+                precondition(changed)
+                #else
+                precondition(setenv(name, value, 1) == 0)
+                #endif
+            }
+            set("RUNE_PERF", "0")
+            set("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+            precondition(!InteractionGate.isEnabled())
+            set("RUNE_PERF", " 1 ")
+            precondition(InteractionGate.isEnabled(headless: true))
+            set("RUNE_PERF", "")
+            precondition(InteractionGate.isEnabled())
+            precondition(!InteractionGate.isEnabled(headless: true))
+            set("OTEL_EXPORTER_OTLP_ENDPOINT", "https://example.invalid:4318")
+            precondition(!InteractionGate.isEnabled())
+
+            let tracker = InteractionTracker()
+            let name = tracker.names.fixed("control")
+            _ = tracker.frameBegins(queued: true, nowNs: 1)
+            tracker.noted(note: InteractionNote(route: name, control: name, action: "press", rank: 1),
+                          arrivedNs: 1, startedNs: 1, handlerMs: 0)
+            InteractionGate.forceOnForTesting = true
+            recordFramePhase(.paint, wallMs: 3, cpuMs: 1)
+            set("RUNE_PERF", "1")
+            InteractionGate.forceOnForTesting = false
+            recordFramePhase(.paint, wallMs: 5, cpuMs: 2)
+            InteractionGate.forceOnForTesting = nil
+            recordFramePhase(.paint, wallMs: 7, cpuMs: 3)
+            _ = tracker.built(shaped: 0, nodes: 0, nowNs: 2)
+            let finished = tracker.finish(submittedNs: 3)
+            precondition(finished?.phases[InteractionPhase.paint.rawValue] == 10)
+            precondition(takeFramePhases()[FramePhase.paint.rawValue] == 15)
+        }
+    }
+    #endif
 
     @Test("InteractionRollup: histogram quantiles land within bucket accuracy")
     func rollupQuantilesParity() {

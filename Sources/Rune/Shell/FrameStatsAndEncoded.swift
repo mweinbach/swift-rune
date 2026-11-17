@@ -650,25 +650,33 @@ public enum FramePhase: Int, CaseIterable, Sendable {
 private enum FramePhaseStorage {
     private static let key = "rune.frameProfile.phases"
 
+    private final class Totals: NSObject {
+        var values = [Double](repeating: 0, count: 2 * FRAME_PHASES)
+    }
+
+    private static var current: Totals {
+        let locals = RuneExecutionContext.locals
+        if let totals = locals[key] as? Totals { return totals }
+        let totals = Totals()
+        locals[key] = totals
+        return totals
+    }
+
     static func record(_ phase: FramePhase, wallMs: Double, cpuMs: Double) {
-        var row = (RuneExecutionContext.locals[key] as? [Double])
-            ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
-        row[phase.rawValue] += wallMs
-        row[phase.rawValue + FRAME_PHASES] += cpuMs
-        RuneExecutionContext.locals[key] = row
+        let totals = current
+        totals.values[phase.rawValue] += wallMs
+        totals.values[phase.rawValue + FRAME_PHASES] += cpuMs
         if CommitBudget.isOn {
             CommitBudget.add(phase, ms: wallMs)
         }
-        if InteractionGate.isOn {
-            InteractionTracker.recordActiveThreadPhase(phase.rawValue, ms: wallMs)
-        }
+        InteractionTracker.recordActiveThreadPhase(phase.rawValue, ms: wallMs, when: InteractionGate.isOn)
     }
 
     static func take() -> [Double] {
-        let current = (RuneExecutionContext.locals[key] as? [Double])
-            ?? Array(repeating: 0.0, count: 2 * FRAME_PHASES)
-        RuneExecutionContext.locals[key] = Array(repeating: 0.0, count: 2 * FRAME_PHASES)
-        return current
+        let totals = current
+        let values = totals.values
+        totals.values = [Double](repeating: 0, count: 2 * FRAME_PHASES)
+        return values
     }
 }
 

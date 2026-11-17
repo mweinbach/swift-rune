@@ -695,16 +695,15 @@ struct CxEnvAndSystemParityTests {
         _ = takeFramePhases()
         let t0 = threadCpuMs()
         #expect(t0 >= 0.0)
-        recordFramePhase(.commit, wallMs: 1.25, cpuMs: 0.75)
-        recordFramePhase(.paint, wallMs: 2.5, cpuMs: 1.5)
+        for phase in FramePhase.allCases {
+            let weight = Double(phase.rawValue + 1)
+            recordFramePhase(phase, wallMs: weight, cpuMs: weight / 4)
+            recordFramePhase(phase, wallMs: weight / 2, cpuMs: weight / 4)
+        }
         let taken = takeFramePhases()
-        #expect(taken.count == 2 * FRAME_PHASES)
-        #expect(taken[FramePhase.commit.rawValue] == 1.25)
-        #expect(taken[FramePhase.commit.rawValue + FRAME_PHASES] == 0.75)
-        #expect(taken[FramePhase.paint.rawValue] == 2.5)
-        #expect(taken[FramePhase.paint.rawValue + FRAME_PHASES] == 1.5)
         let cleared = takeFramePhases()
-        #expect(cleared.allSatisfy { $0 == 0.0 })
+        #expect(cleared == Array(repeating: 0.0, count: 12))
+        #expect(taken == [1.5, 3, 4.5, 6, 7.5, 9, 0.5, 1, 1.5, 2, 2.5, 3])
 
         // Verify Runtime.frame(at:) populates all 6 FramePhase slots
         let rt = Runtime<Int>(state: 0, viewport: Vec2(200, 100), pixelScale: 1.0) { _, _ in
@@ -720,6 +719,21 @@ struct CxEnvAndSystemParityTests {
         _ = rt.renderFrame(at: 0.1)
         #expect(takeFramePhases()[FramePhase.paint.rawValue] > 0.0)
     }
+
+    #if !os(WASI)
+    @Test func framePhaseSnapshotsAreIsolatedBetweenThreads() {
+        _ = takeFramePhases()
+        recordFramePhase(.view, wallMs: 5, cpuMs: 2)
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            recordFramePhase(.layout, wallMs: 7, cpuMs: 3)
+            #expect(takeFramePhases() == [0, 0, 7, 0, 0, 0, 0, 0, 3, 0, 0, 0])
+            finished.signal()
+        }
+        finished.wait()
+        #expect(takeFramePhases() == [5, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0])
+    }
+    #endif
 
     @Test func appSharedMemoLayoutWithCompositorAndTextStyleParity() {
         let shared = AppShared<Int>()
