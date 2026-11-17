@@ -278,7 +278,9 @@ public final class MotionGateRecording: @unchecked Sendable {
             var flags: UInt8 = 0
             if e.exiting { flags |= MotionGateSnapFlags.exiting }
             if m.scrolling { flags |= MotionGateSnapFlags.scrolling }
-            if m.inGrowingRow || m.revealing { flags |= MotionGateSnapFlags.growing }
+            if e.inGrowingRow || e.revealing || m.inGrowingRow || m.revealing {
+                flags |= MotionGateSnapFlags.growing
+            }
             if m.liveIntent != 0 { flags |= MotionGateSnapFlags.live }
             if m.virtualExtent { flags |= MotionGateSnapFlags.virtual }
             if e.role == .text { flags |= MotionGateSnapFlags.text }

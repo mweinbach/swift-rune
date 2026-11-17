@@ -105,6 +105,18 @@ struct LiveTailParityTests {
         }
     }
 
+    @Test("Ink delivery and unpinned controls have no motion-gate findings", arguments: [Delivery.ink, .unpinned])
+    func deliveryMotionGate(_ delivery: Delivery) {
+        let run = MotionGateRun(feed(delivery), hz: 120)
+        run.idle(0.45)
+        run.step()
+        run.play(1.05)
+        run.quiet()
+        run.stepN(4)
+        let findings = motionGateCheck(run.rec)
+        #expect(findings.isEmpty, "\(findings)")
+    }
+
     @Test("An adjacent delivery animates just the stationary row's corner and retargets from the drawn radius")
     func stationaryCornerRetargets() throws {
         let runtime = Runtime<Int>(state: 0, viewport: Vec2(280, 180), pixelScale: 1) { accepted, _ in
