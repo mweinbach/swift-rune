@@ -9,7 +9,7 @@ internal struct AccessibilityNameSource {
 
     init<State>(_ el: El<State>, securePath: Bool = false) {
         label = el.a11yLabel
-        text = el.handlers.editLens == nil ? el.plainText ?? el.richSpans?.map(\.text).joined() : nil
+        text = !el.hasEditLens ? el.plainText ?? el.richSpans?.map(\.text).joined() : nil
         secure = el.isSecure || securePath
         hidden = el.isA11yHidden || el.opacity <= 0.01
     }
@@ -22,7 +22,7 @@ internal struct AccessibilityNameSource {
     }
 
     static func nonblank(_ text: String?) -> String? {
-        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let text, text.unicodeScalars.contains(where: { !CharacterSet.whitespacesAndNewlines.contains($0) }) else { return nil }
         return text
     }
 
@@ -32,7 +32,10 @@ internal struct AccessibilityNameSource {
         let root = source(node)
         guard !root.secure else { return nil }
         if let label = nonblank(root.label) { return label }
-        if let text = root.text { return nonblank(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        if let text = root.text {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
 
         // Upstream caps a composite name at 400 UTF-8 bytes, on a scalar boundary.
         var name = ""
@@ -40,6 +43,10 @@ internal struct AccessibilityNameSource {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return }
             if !name.isEmpty { name.append(" ") }
+            if name.utf8.count + trimmed.utf8.count <= 400 {
+                name.append(trimmed)
+                return
+            }
             for scalar in trimmed.unicodeScalars {
                 guard name.utf8.count + scalar.utf8.count <= 400 else { break }
                 name.unicodeScalars.append(scalar)
@@ -59,7 +66,7 @@ internal struct AccessibilityNameSource {
             }
         }
         visit(node)
-        return nonblank(name)
+        return name.isEmpty ? nil : name
     }
 
     /// Look for a referenced key inside the nearest common ancestor first.

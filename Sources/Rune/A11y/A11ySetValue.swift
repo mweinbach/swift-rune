@@ -133,10 +133,10 @@ public extension El {
     }
 
     /// The field can be edited (`input.access.is_some()`).
-    internal var hasEditAccess: Bool { handlers.editLens != nil && !editAccessWithheld }
+    internal var hasEditAccess: Bool { hasEditLens && !editAccessWithheld }
 
     /// `RoleCtx::multiline` (`a11y/node.rs:31`): a field that is not `singleLine()`.
-    internal var isMultilineField: Bool { handlers.editLens != nil && !isSingleLineInput }
+    internal var isMultilineField: Bool { hasEditLens && !isSingleLineInput }
 }
 
 public extension Runtime {
@@ -244,7 +244,9 @@ public extension Runtime {
     /// `pressable` in `a11y_action` / `a11y_node` (`a11y/actions.rs:43`, `node.rs:225`): the element
     /// has its own primary press handler (`El::on_press`, Swift `onClick` / `onClickPress`).
     internal func a11yPressable(_ el: El<State>) -> Bool {
-        el.handlers.onClick != nil || el.handlers.onClickPress != nil
+        guard el.hasAuthoredHandlers else { return false }
+        let handlers = el.handlers
+        return handlers.onClick != nil || handlers.onClickPress != nil
     }
 
     /// What a pointer or keyboard user can do to node `node`, as the tree advertises it
@@ -253,23 +255,24 @@ public extension Runtime {
         let el = node.el
         let enabled = !el.a11yDisabled && !node.effectiveInert
         guard enabled else { return [] }
+        let steps = el.hasAuthoredHandlers && el.handlers.onStep != nil
         var actions: [AccessibilityAction] = []
         // `on_press.is_some() || input.is_some()`; Swift also reads its press roles as pressable.
-        if a11yPressable(el) || el.handlers.editLens != nil ||
+        if a11yPressable(el) || el.hasEditLens ||
            [.button, .checkbox, .switchControl, .radio, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio].contains(el.role) {
             actions.append(.press)
         }
         if el.focusable {
             actions.append(.focus)
         }
-        if el.role == .slider || el.handlers.onStep != nil {
+        if el.role == .slider || steps {
             actions.append(.increment)
             actions.append(.decrement)
         }
         if AccessibilityTreeBuilder.offersSetValue(
             enabled: enabled,
             editable: el.hasEditAccess,
-            steps: el.handlers.onStep != nil,
+            steps: steps,
             range: el.a11yRange
         ) {
             AccessibilityTreeBuilder.appendAction(.setValue, to: &actions)

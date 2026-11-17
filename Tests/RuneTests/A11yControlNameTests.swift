@@ -57,6 +57,18 @@ struct A11yControlNameTests {
         }
     }
 
+    @Test func compositeNameTrimsUnicodeWhitespaceAndStopsOnAScalarBoundary() throws {
+        let prefix = String(repeating: "x", count: 394)
+        let view: El<Int> = row().key("choice").role(.option)
+            .label("\u{2003}\n")
+            .child(text("\u{2002}\(prefix)\t"))
+            .child(text("🦀é"))
+        for tree in try projections(view) {
+            #expect(tree.label == "\(prefix) 🦀")
+            #expect(tree.label?.utf8.count == 399)
+        }
+    }
+
     @Test func leafControlsSuppressOnlyRepeatedContent() throws {
         let roles: [ElementRole] = [.checkbox, .radio, .switchControl, .tab, .menuItem, .menuItemCheckbox, .menuItemRadio, .option]
         let view: El<Int> = col().children(roles.map { role in

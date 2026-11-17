@@ -514,7 +514,8 @@ struct ToolingHTMLAndHeadlessTests {
         #if os(macOS) || os(Linux)
         // Use a short directory under /tmp so the Unix domain socket path stays < 104 bytes on macOS
         let dir = "/tmp/rsi-\(String(UUID().uuidString.prefix(8)))"
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
         defer {
             SingleInstance.release()
             try? FileManager.default.removeItem(atPath: dir)

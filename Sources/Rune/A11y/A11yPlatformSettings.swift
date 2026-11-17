@@ -97,7 +97,7 @@ public enum AccessibilityRoleRules {
     internal static func projectedRole<State>(for el: El<State>, takesFocus: Bool, keyboardTarget: Bool) -> ElementRole? {
         projectedRole(el.role, keyed: el.keyId != nil, labelled: AccessibilityNameSource.nonblank(el.a11yLabel) != nil,
                       pressable: el.a11yPressable, takesFocus: takesFocus, keyboardTarget: keyboardTarget,
-                      input: el.handlers.editLens != nil, modal: el.isModal, scrolls: !el.layout.scrollAxes.isEmpty,
+                      input: el.hasEditLens, modal: el.isModal, scrolls: !el.layout.scrollAxes.isEmpty,
                       hasText: AccessibilityNameSource.nonblank(el.plainText) != nil ||
                         el.richSpans?.contains { AccessibilityNameSource.nonblank($0.text) != nil } == true,
                       hasImage: el.pixelsPayload != nil || el.imagePayload != nil || el.surfacePayload != nil,

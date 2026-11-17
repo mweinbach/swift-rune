@@ -303,8 +303,9 @@ public enum SingleInstance {
     /// Claims the app's single-instance slot (`id`).
     ///
     /// On macOS/iOS, the OS maintains single-process URL/reopen delivery, so this returns `true`.
-    /// Linux uses a Unix socket in `$XDG_RUNTIME_DIR` or `baseDirectory`. Windows uses a
-    /// named pipe scoped to the current user and logon session.
+    /// Linux uses a Unix socket in the user's runtime directory. An explicit `baseDirectory`
+    /// must be owned by the current user and writable only by that user. Windows uses a named
+    /// pipe scoped to the current user and logon session.
     public static func claim(
         id: String,
         arguments: [String]? = nil,
