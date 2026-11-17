@@ -1229,6 +1229,7 @@ public final class Runtime<State> {
         self.systemDark = systemDark
         self.reducedMotion = reducedMotion
         self.textSystem = textSystem
+        textSystem.initializeWindowFontFamilies()
         self.waker = waker
         let defaultWaker = waker
         self.liveLane = LiveLane(waker: LiveWake { [weak defaultWaker] in defaultWaker?.wake() })
@@ -1363,7 +1364,7 @@ public final class Runtime<State> {
     }
 
     /// Whether a layout/view re-evaluation commit is currently pending.
-    public var hasPendingCommit: Bool { needsCommit }
+    public var hasPendingCommit: Bool { needsCommit || textSystem.windowFontFamiliesBehind }
 
     /// Whether any deferred layout/drawn/visible handler callbacks await the next frame.
     public var hasPendingActions: Bool { !pendingLayoutActions.isEmpty }
@@ -2121,6 +2122,9 @@ public final class Runtime<State> {
         // Clear the wake before poll, input, or layout can sample a published value.
         // Any subsequent publication remains pending for the next frame.
         let liveWoke = liveLane.take()
+        if textSystem.followWindowFontFamilies() {
+            invalidateFontFamilyLayout(at: now)
+        }
         let (animNow, prevAnimNow, growthMoving) = prepareAndCommitFrame(
             at: now,
             splitStep: splitStep,
@@ -2651,7 +2655,7 @@ public final class Runtime<State> {
                 touchedIdsOut: viewTouchedBox
             ) {
                 measureFramePhase(.view) {
-                    buildPlaygroundViewIfAttached(cx: &cx)
+                    TextMeasure.withLentSystem(textSystem) { buildPlaygroundViewIfAttached(cx: &cx) }
                 }
             }
         }
@@ -2828,17 +2832,19 @@ public final class Runtime<State> {
             if virtualPass == 0, let override = expandedContextOverride {
                 (expandedRoot, virtualExpansion) = (rootEl, override)
             } else {
-                (expandedRoot, virtualExpansion) = expandVirtualSubtrees(
-                    in: rootEl,
-                    remountRowCache: remountRowCache,
-                    rowReuseMode: rowReuseMode,
-                    memoGeometry: memoGeometryOverride ?? currentMemoGeometry(),
-                    memoEnvHash: lastViewMemoEnvHash,
-                    memoPass: memo.currentPass,
-                    isReorderPermitted: isReorderPermitted,
-                    bypassBudget: virtualPass > 0,
-                    forceAll: virtualPass >= 8
-                )
+                (expandedRoot, virtualExpansion) = TextMeasure.withLentSystem(textSystem) {
+                    expandVirtualSubtrees(
+                        in: rootEl,
+                        remountRowCache: remountRowCache,
+                        rowReuseMode: rowReuseMode,
+                        memoGeometry: memoGeometryOverride ?? currentMemoGeometry(),
+                        memoEnvHash: lastViewMemoEnvHash,
+                        memoPass: memo.currentPass,
+                        isReorderPermitted: isReorderPermitted,
+                        bypassBudget: virtualPass > 0,
+                        forceAll: virtualPass >= 8
+                    )
+                }
             }
             layoutRoot = prepareGrowthStacksBeforeLayout(
                 in: expandedRoot,
@@ -12420,7 +12426,7 @@ public final class Runtime<State> {
                 waker: waker,
                 helpLook: viewHelpLook
             )
-            let rootEl = view(state, &cx)
+            let rootEl = TextMeasure.withLentSystem(textSystem) { view(state, &cx) }
             let measured = retainedLayout.compute(
                 root: rootEl,
                 state: state,
@@ -12438,7 +12444,7 @@ public final class Runtime<State> {
     // MARK: - App Shell Lifecycle & State Update Helpers
 
     /// True when the view tree needs a rebuild before the next frame (`Runtime::stale`).
-    public var isStale: Bool { needsCommit }
+    public var isStale: Bool { hasPendingCommit }
 
     /// Runs `poll(state, now, tx)` when attached. Only dirties the commit if `poll` returns `true`
     /// or `tx.commit()` was explicitly called.

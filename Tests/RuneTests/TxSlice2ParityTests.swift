@@ -168,7 +168,9 @@ struct TxSlice2ParityTests {
         tx2.setShell(Shell.relaunch)
         tx2.setShell(Shell.quit) // should not downgrade from relaunch
         tx1.merge(tx2)
-        rt.applyTx(tx1, at: 0.016)
+        withFontFamilies(sans: "", mono: "") {
+            rt.applyTx(tx1, at: 0.016)
+        }
 
         #expect(rt.slice2State.lastShellRequest == Shell.relaunch)
         #expect(rt.slice2State.toggleMaximizedRequested == true)

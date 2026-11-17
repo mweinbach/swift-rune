@@ -84,6 +84,30 @@ struct DefaultFontsParityTests {
         #expect(first == second)
     }
 
+    @Test("a family switch updates measured text and cached run cells only within its scope")
+    func scopedFamilySwitchSeparatesRunCells() throws {
+        let ts = TextSystem()
+        let run = TextRun("iiiiiiii")
+        let mono = TextStyle(size: 14, weight: 400).mono()
+        try withFontFamilies(sans: "Inter", mono: "IBM Plex Mono") {
+            let original = ts.runLayout(run, style: mono)
+            let epoch = ts.currentFontEpoch
+            try withFontFamilies(sans: "Inter", mono: "IBM Plex Mono") {
+                #expect(ts.setFamilies(sans: "Inter", mono: "Inter"))
+                #expect(ts.families().mono == "Inter")
+                let switched = ts.runLayout(run, style: mono)
+                let cellWidth = try #require(switched.cellLayout?.advance(atByte: 0))
+                #expect(cellWidth == switched.advance(atUTF8Offset: 0))
+                #expect(switched.totalWidthPx < original.totalWidthPx)
+                #expect(TextMeasure.advance(run.text, style: mono) == switched.totalWidthPx)
+                #expect(ts.currentFontEpoch == fontEpoch() && ts.currentFontEpoch != epoch)
+            }
+            #expect(ts.families().mono == "IBM Plex Mono")
+            #expect(ts.currentFontEpoch == epoch)
+            #expect(ts.runLayout(run, style: mono).totalWidthPx == original.totalWidthPx)
+        }
+    }
+
     @Test("OpenType tnum feature equalizes digit widths in bundled Inter")
     func openTypeTabularFiguresEqualizeDigitWidths() throws {
         let ts = TextSystem()

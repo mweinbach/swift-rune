@@ -23,10 +23,9 @@ private enum PanelTypography {
     static let chipOn = TextStyle(size: 12.0, weight: 600.0).lh(16.0)
     static let caption = TextStyle(size: 11.0, weight: 500.0).lh(14.0)
     static let digit = TextStyle(size: 8.5, weight: 600.0).lh(10.0)
-    static let measurer = TextSystem()
 
     static func textWidth(_ text: String, style: TextStyle) -> Float {
-        measurer.measure(text, style: style, maxWidth: nil, pixelScale: 1.0).x
+        TextMeasure.measure(text, style: style).x
     }
 }
 

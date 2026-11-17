@@ -499,13 +499,18 @@ extension Runtime {
 
     // MARK: - Font Families (`runtime/font_families.rs`) & Event Log (`runtime/event_log.rs`)
 
-    /// Switches `.systemUI` (`sans`) and `.monospace` (`mono`) font family slots (`Runtime::set_font_families`).
+    /// Switches the sans and monospace slots for this window. Other windows on this thread
+    /// take up the choice on their next frame (`Runtime::set_font_families`).
     public func setFontFamilies(_ sans: String, _ mono: String) {
-        if textSystem.setFamilies(sans: sans, mono: mono) {
-            memo.clear()
-            retainedLayout = RetainedLayoutCoordinator()
-            dirtyCommit(at: currentTime)
+        if textSystem.chooseWindowFontFamilies(sans: sans, mono: mono) {
+            invalidateFontFamilyLayout(at: currentTime)
         }
+    }
+
+    internal func invalidateFontFamilyLayout(at now: Double) {
+        memo.clear()
+        retainedLayout = RetainedLayoutCoordinator()
+        dirtyCommit(at: now)
     }
 
     /// Current sans and mono font family slot strings (`Runtime::font_families`).

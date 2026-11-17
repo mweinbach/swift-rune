@@ -6,31 +6,30 @@ struct RichTextAndIconTests {
 
     @Test("fontEpoch bumps when FontFamiliesRegistry or TextSystem.setFamilies changes")
     func fontEpochAndFamilies() {
-        let initial = fontEpoch()
-        let ts = TextSystem()
-        #expect(ts.currentFontEpoch == initial)
+        withFontFamilies(sans: "", mono: "") {
+            let initial = fontEpoch()
+            let ts = TextSystem()
+            #expect(ts.currentFontEpoch == initial)
 
-        // Setting same empty families does nothing
-        #expect(ts.setFamilies(sans: "", mono: "") == false)
-        #expect(fontEpoch() == initial)
+            // Setting same empty families does nothing
+            #expect(ts.setFamilies(sans: "", mono: "") == false)
+            #expect(fontEpoch() == initial)
 
-        // Switching families bumps epoch
-        #expect(ts.setFamilies(sans: "Helvetica Neue, Inter", mono: "Menlo") == true)
-        let afterSet = fontEpoch()
-        #expect(afterSet > initial)
-        #expect(ts.families().sans == "Helvetica Neue, Inter")
-        #expect(ts.families().mono == "Menlo")
+            // Switching families bumps epoch
+            #expect(ts.setFamilies(sans: "Helvetica Neue, Inter", mono: "Menlo") == true)
+            let afterSet = fontEpoch()
+            #expect(afterSet > initial)
+            #expect(ts.families().sans == "Helvetica Neue, Inter")
+            #expect(ts.families().mono == "Menlo")
 
-        // Scoped withFontFamilies bumps on entry and restores on exit
-        withFontFamilies(sans: "Avenir", mono: "Courier") {
-            #expect(FontFamiliesRegistry.currentFamilies().sans == "Avenir")
-            #expect(fontEpoch() > afterSet)
+            // A nested scope has its own epoch, then restores the enclosing one.
+            withFontFamilies(sans: "Avenir", mono: "Courier") {
+                #expect(FontFamiliesRegistry.currentFamilies().sans == "Avenir")
+                #expect(fontEpoch() > afterSet)
+            }
+            #expect(FontFamiliesRegistry.currentFamilies().sans == "Helvetica Neue, Inter")
+            #expect(fontEpoch() == afterSet)
         }
-        #expect(FontFamiliesRegistry.currentFamilies().sans == "Helvetica Neue, Inter")
-        #expect(fontEpoch() > afterSet + 1)
-
-        // Restore clean defaults
-        _ = FontFamiliesRegistry.setFamilies(sans: "", mono: "")
     }
 
     @Test("TextCaseMapping preserves UTF-8 byte offsets across Unicode case expansions")

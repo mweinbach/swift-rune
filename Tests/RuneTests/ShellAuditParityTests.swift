@@ -671,28 +671,28 @@ struct ShellAuditParityTests {
 
     @Test("withFontFamilies nests, bumps fontEpoch, and affects TextSystem.measure")
     func withFontFamiliesMeasuresAndRestores() {
-        let ts = TextSystem()
-        let style = TextStyle(size: 14, weight: 400).mono()
-        let sample = "let mono = 42; // iiiiiiiiii"
-        _ = FontFamiliesRegistry.setFamilies(sans: "Helvetica", mono: "Helvetica")
-        defer { _ = FontFamiliesRegistry.setFamilies(sans: "", mono: "") }
+        withFontFamilies(sans: "Helvetica", mono: "Helvetica") {
+            let ts = TextSystem()
+            let style = TextStyle(size: 14, weight: 400).mono()
+            let sample = "let mono = 42; // iiiiiiiiii"
 
-        let baseEpoch = fontEpoch()
-        let baseWidth = ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x
+            let baseEpoch = fontEpoch()
+            let baseWidth = ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x
 
-        withFontFamilies(sans: "Helvetica", mono: "Courier New") {
-            let outerEpoch = fontEpoch()
-            let courierWidth = ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x
-            #expect(outerEpoch != baseEpoch)
-            #expect(courierWidth != baseWidth)
+            withFontFamilies(sans: "Helvetica", mono: "Courier New") {
+                let outerEpoch = fontEpoch()
+                let courierWidth = ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x
+                #expect(outerEpoch != baseEpoch)
+                #expect(courierWidth != baseWidth)
 
-            withFontFamilies(sans: "Helvetica", mono: "Helvetica") {
-                #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == baseWidth)
-                #expect(fontEpoch() != outerEpoch)
+                withFontFamilies(sans: "Helvetica", mono: "Helvetica") {
+                    #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == baseWidth)
+                    #expect(fontEpoch() != outerEpoch)
+                }
+                #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == courierWidth)
             }
-            #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == courierWidth)
+            #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == baseWidth)
         }
-        #expect(ts.shape(text: sample, style: style, maxWidth: nil, pixelScale: 1.0, emitGlyphs: false).size.x == baseWidth)
     }
 
     // MARK: - 4. Live, LiveWake, Tween & liveOnly drag

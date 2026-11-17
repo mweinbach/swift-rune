@@ -377,24 +377,23 @@ struct Phase2TextParityTests {
 
     @Test("#853: TextSystem.setFaceWeights steers font weight matching across declared ranges")
     func faceWeightsRangeMatching() {
-        defer { TextSystem.setFaceWeights([]) }
-        #expect(DefaultFonts.registerIfNeeded())
+        let previous = TextSystem.faceWeights
+        defer { TextSystem.setFaceWeights(previous) }
 
         let beforeEpoch = FontFamiliesRegistry.currentEpoch()
         TextSystem.setFaceWeights([
-            FaceWeights(family: "Inter", weight: 400, range: (100, 599)),
-            FaceWeights(family: "Inter", weight: 600, range: (600, 900)),
+            FaceWeights(family: "Georgia", weight: 400, range: (100, 599)),
+            FaceWeights(family: "Georgia", weight: 700, range: (600, 900)),
         ])
         let afterEpoch = FontFamiliesRegistry.currentEpoch()
         #expect(afterEpoch > beforeEpoch)
 
         let ts = TextSystem()
-        // Weight 530 falls inside [100, 599] declared at 400 -> resolves to Inter-Regular (400), not Medium/SemiBold.
-        let mid = ts.resolveCTFont(style: TextStyle(size: 13, weight: 530), pixelScale: 1)
-        #expect((CTFontCopyPostScriptName(mid) as String) == "Inter-Regular")
+        // Use a named family so these process-wide declarations leave the bundled slots usable by other windows.
+        let mid = ts.resolveCTFont(style: TextStyle(size: 13, weight: 530, family: .custom("Georgia")), pixelScale: 1)
+        #expect((CTFontCopyPostScriptName(mid) as String) == "Georgia")
 
-        // Weight 650 falls inside [600, 900] declared at 600 -> resolves to Inter-SemiBold.
-        let heavy = ts.resolveCTFont(style: TextStyle(size: 13, weight: 650), pixelScale: 1)
-        #expect((CTFontCopyPostScriptName(heavy) as String) == "Inter-SemiBold")
+        let heavy = ts.resolveCTFont(style: TextStyle(size: 13, weight: 650, family: .custom("Georgia")), pixelScale: 1)
+        #expect((CTFontCopyPostScriptName(heavy) as String) == "Georgia-Bold")
     }
 }

@@ -2371,10 +2371,12 @@ public final class TextSystem: @unchecked Sendable {
     public let glyphAtlas: GlyphAtlas
     public let glyphCache = GlyphReplayCache()
     public let colorIcons = ColorIconRasterizer()
-    private var sansFamilyOverride: String = ""
-    private var monoFamilyOverride: String = ""
     private var languageTagOverride: String?
-    private var lastObservedFontEpoch: UInt64 = fontEpoch()
+    private var usesScopedFamilies = true
+    private var ownFamilies: FontFamiliesRegistry.State
+    private var followedWindowEpoch: UInt64?
+    private var lastFontSettingsEpoch = FontFamiliesRegistry.settingsEpoch
+    private var lastObservedFontEpoch: UInt64 = 0
     private var lastObservedLanguageEpoch: UInt64 = TextLanguageRegistry.currentEpoch()
     #if canImport(CoreText) && canImport(CoreGraphics)
     private var fontCache: [FontKey: CTFont] = [:]
@@ -2665,10 +2667,68 @@ public final class TextSystem: @unchecked Sendable {
 
     public init(glyphAtlas: GlyphAtlas = GlyphAtlas()) {
         self.glyphAtlas = glyphAtlas
-        let (sans, mono) = FontFamiliesRegistry.currentFamilies()
-        self.sansFamilyOverride = sans
-        self.monoFamilyOverride = mono
+        self.ownFamilies = FontFamiliesRegistry.threadOverride ?? .init(sans: "", mono: "", epoch: 1)
+        self.lastObservedFontEpoch = ownFamilies.epoch
         self.languageTagOverride = TextLanguageRegistry.currentLanguageTag()
+    }
+
+    internal convenience init(forMeasurement: Void) {
+        self.init()
+        usesScopedFamilies = false
+        followMeasurementFontFamilies()
+    }
+
+    internal func followMeasurementFontFamilies() {
+        let families = FontFamiliesRegistry.snapshot()
+        lock.lock()
+        ownFamilies = families
+        lock.unlock()
+    }
+
+    /// Window text retains its own slots while painting. Sibling windows on the same thread
+    /// take up a new choice when they start their next frame (`text/families.rs`).
+    internal func initializeWindowFontFamilies() {
+        lock.lock()
+        usesScopedFamilies = false
+        lock.unlock()
+        _ = followWindowFontFamilies()
+    }
+
+    internal func chooseWindowFontFamilies(sans: String, mono: String) -> Bool {
+        FontFamiliesRegistry.chooseWindowFamilies(sans: sans, mono: mono)
+        return followWindowFontFamilies()
+    }
+
+    internal var windowFontFamiliesBehind: Bool {
+        guard let choice = FontFamiliesRegistry.windowChoice else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return followedWindowEpoch != choice.epoch
+    }
+
+    internal func followWindowFontFamilies() -> Bool {
+        guard let choice = FontFamiliesRegistry.windowChoice else { return false }
+        lock.lock()
+        guard followedWindowEpoch != choice.epoch else {
+            lock.unlock()
+            return false
+        }
+        followedWindowEpoch = choice.epoch
+        lock.unlock()
+        return setFamilies(sans: choice.sans, mono: choice.mono)
+    }
+
+    private func activeFamilies() -> FontFamiliesRegistry.State {
+        let settings = FontFamiliesRegistry.settingsEpoch
+        lock.lock()
+        if lastFontSettingsEpoch != settings {
+            ownFamilies = FontFamiliesRegistry.makeState(sans: ownFamilies.sans, mono: ownFamilies.mono)
+            lastFontSettingsEpoch = settings
+        }
+        let own = ownFamilies
+        let scoped = usesScopedFamilies
+        lock.unlock()
+        return scoped ? FontFamiliesRegistry.threadOverride ?? own : own
     }
 
     /// Preferred BCP-47 language tag used for CJK fallback and `kCTLanguageAttributeName` (`TextSystem::language`).
@@ -2708,13 +2768,8 @@ public final class TextSystem: @unchecked Sendable {
         return true
     }
 
-    /// Current global font epoch seen by this `TextSystem` (auto-syncs when global families change).
-    public var currentFontEpoch: UInt64 {
-        syncGlobalFamiliesIfNeeded()
-        lock.lock()
-        defer { lock.unlock() }
-        return lastObservedFontEpoch
-    }
+    /// Cache epoch for the active family slots, including a thread-scoped measurement override.
+    public var currentFontEpoch: UInt64 { activeFamilies().epoch }
 
     private final class PrettyWrapStorage: @unchecked Sendable {
         let lock = NSLock()
@@ -2761,56 +2816,30 @@ public final class TextSystem: @unchecked Sendable {
 
     /// CSS font family lists backing `.systemUI` (`sans`) and `.monospace` (`mono`).
     public func families() -> (sans: String, mono: String) {
-        syncGlobalFamiliesIfNeeded()
-        lock.lock()
-        defer { lock.unlock() }
-        return (sansFamilyOverride, monoFamilyOverride)
+        let active = activeFamilies()
+        return (active.sans, active.mono)
     }
 
-    /// Updates `sans` and `mono` family slots (`TextSystem::set_families`). Drops cached shapes/fonts when changed.
+    /// Updates this text system and the fonts used by free measurement calls.
     @discardableResult
     public func setFamilies(sans: String, mono: String) -> Bool {
-        if FontFamiliesRegistry.threadOverrideFamilies() != nil {
-            return FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
-        }
+        let previous = activeFamilies()
+        guard previous.sans != sans || previous.mono != mono else { return false }
+        _ = FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
+        let state = FontFamiliesRegistry.makeState(sans: sans, mono: mono)
         lock.lock()
-        let unchanged = (sansFamilyOverride == sans && monoFamilyOverride == mono)
-        if unchanged {
-            lock.unlock()
-            return false
-        }
-        sansFamilyOverride = sans
-        monoFamilyOverride = mono
-        #if canImport(CoreText) && canImport(CoreGraphics)
-        fontCache.removeAll(keepingCapacity: true)
-        #endif
-        measureCache.removeAll(keepingCapacity: true)
-        shapeCache.removeAll(keepingCapacity: true)
-        elisionCache.removeAll(keepingCapacity: true)
-        typesetterCache.removeAll(keepingCapacity: true)
-        preparedShapeCache.removeAll(keepingCapacity: true)
-        layoutCache.removeAll(keepingCapacity: true)
+        ownFamilies = state
         lock.unlock()
-        glyphCache.clear()
-
-        FontFamiliesRegistry.setFamilies(sans: sans, mono: mono)
-        let newEpoch = fontEpoch()
-        lock.lock()
-        lastObservedFontEpoch = newEpoch
-        lock.unlock()
+        syncGlobalFamiliesIfNeeded()
         return true
     }
 
     private func syncGlobalFamiliesIfNeeded() {
         let langEpoch = TextLanguageRegistry.currentEpoch()
-        let inThreadScope = (FontFamiliesRegistry.threadOverrideFamilies() != nil)
-        let globalEpoch = inThreadScope ? 0 : fontEpoch()
+        let activeFontEpoch = currentFontEpoch
         var clearGlyphs = false
         lock.lock()
-        if !inThreadScope && lastObservedFontEpoch != globalEpoch {
-            let (sans, mono) = FontFamiliesRegistry.currentFamilies()
-            sansFamilyOverride = sans
-            monoFamilyOverride = mono
+        if lastObservedFontEpoch != activeFontEpoch {
             #if canImport(CoreText) && canImport(CoreGraphics)
             fontCache.removeAll(keepingCapacity: true)
             #endif
@@ -2820,7 +2849,7 @@ public final class TextSystem: @unchecked Sendable {
             typesetterCache.removeAll(keepingCapacity: true)
             preparedShapeCache.removeAll(keepingCapacity: true)
             layoutCache.removeAll(keepingCapacity: true)
-            lastObservedFontEpoch = globalEpoch
+            lastObservedFontEpoch = activeFontEpoch
             clearGlyphs = true
         }
         if lastObservedLanguageEpoch != langEpoch {
@@ -2928,15 +2957,14 @@ public final class TextSystem: @unchecked Sendable {
 
     internal func resolveCTFont(style: TextStyle, pixelScale: Float) -> CTFont {
         syncGlobalFamiliesIfNeeded()
-        let threadFamilies = FontFamiliesRegistry.threadOverrideFamilies()
-        let scopeEpoch = fontEpoch()
+        let families = activeFamilies()
         let sizePx = style.size * pixelScale
         let key = FontKey(
             family: style.family,
             sizePx10: Int((sizePx * 10.0).rounded()),
             weight10: Int(style.weight.rounded()),
             italic: style.italic,
-            fontScopeEpoch: scopeEpoch,
+            fontScopeEpoch: families.epoch,
             variations: style.variations,
             features: style.features
         )
@@ -2945,8 +2973,6 @@ public final class TextSystem: @unchecked Sendable {
             lock.unlock()
             return cached
         }
-        let sansList = threadFamilies?.sans ?? sansFamilyOverride
-        let monoList = threadFamilies?.mono ?? monoFamilyOverride
         lock.unlock()
 
         let ctWeight = Self.coreTextWeight(for: style.weight)
@@ -2962,12 +2988,12 @@ public final class TextSystem: @unchecked Sendable {
         let baseFont: CTFont
         switch style.family {
         case .systemUI:
-            let effectiveSans = sansList.isEmpty ? DefaultFonts.sansFamily : sansList
+            let effectiveSans = families.sans.isEmpty ? DefaultFonts.sansFamily : families.sans
             baseFont = Self.firstMatchingFont(in: effectiveSans, sizePx: CGFloat(sizePx))
                 ?? CTFontCreateUIFontForLanguage(.system, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("SFProText-Regular" as CFString, CGFloat(sizePx), nil)
         case .monospace:
-            let effectiveMono = monoList.isEmpty ? DefaultFonts.monoFamily : monoList
+            let effectiveMono = families.mono.isEmpty ? DefaultFonts.monoFamily : families.mono
             baseFont = Self.firstMatchingFont(in: effectiveMono, sizePx: CGFloat(sizePx))
                 ?? CTFontCreateUIFontForLanguage(.userFixedPitch, CGFloat(sizePx), nil)
                 ?? CTFontCreateWithName("Menlo-Regular" as CFString, CGFloat(sizePx), nil)
@@ -3140,7 +3166,7 @@ public final class TextSystem: @unchecked Sendable {
             maxWidthHalfPt: maxWKey,
             scale100: Int((pixelScale * 100).rounded()),
             pillsHash: pHash,
-            fontEpoch: fontEpoch(),
+            fontEpoch: currentFontEpoch,
             pretty: effectivePretty
         )
         if !bypassCache {
@@ -3521,7 +3547,7 @@ public final class TextSystem: @unchecked Sendable {
         }
         syncGlobalFamiliesIfNeeded()
         let pHash = Self.hashPills(pills)
-        let fEpoch = fontEpoch()
+        let fEpoch = currentFontEpoch
         let lEpoch = TextLanguageRegistry.currentEpoch()
         let maxWKey = maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1
         let scaleKey = Int((scale * 100.0).rounded())
@@ -3995,7 +4021,7 @@ public final class TextSystem: @unchecked Sendable {
             style: style,
             scale: scale,
             languageTag: effectiveLang,
-            fontEpoch: fontEpoch()
+            fontEpoch: currentFontEpoch
         )
         let builtPrepared: TextPreparedShape
         lock.lock()
@@ -5526,7 +5552,7 @@ public final class TextSystem: @unchecked Sendable {
             maxWidthHalfPt: maxWidth.map { Int(($0 * 2.0).rounded()) } ?? -1,
             scale100: Int((pixelScale * 100.0).rounded()),
             pillsHash: Self.hashPills(pills),
-            fontEpoch: fontEpoch()
+            fontEpoch: currentFontEpoch
         )
         if !bypassCache {
             lock.lock()

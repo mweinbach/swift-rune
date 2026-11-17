@@ -1027,7 +1027,7 @@ struct MermaidParityTests {
             rebuilt = MermaidScenes.built(src, theme: dark, hover: (.edges, dark.text.alpha(0.9)), prev: nil).scene
         }
         #expect(insideEpoch != beforeEpoch)
-        #expect(fontEpoch() > insideEpoch)
+        #expect(fontEpoch() != insideEpoch)
         #expect(rebuilt != nil)
         if let first, let rebuilt {
             #expect(first.size.x > 0 && rebuilt.size.x > 0)

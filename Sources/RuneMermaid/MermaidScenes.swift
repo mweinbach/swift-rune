@@ -127,7 +127,7 @@ enum MermaidScenes {
             h.combine(false)
         }
         h.combine(growing)
-        h.combine(fontEpoch())
+        h.combine(TextMeasure.currentFontEpoch)
         return h.finalize()
     }
 
