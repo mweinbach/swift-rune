@@ -298,7 +298,7 @@ struct ScrollAndStickySlice2ParityTests {
     @Test("scroll/bottom: rows_crossing_into_overflow_as_the_composer_shrinks_start_smoothly")
     func rowsCrossingIntoOverflowAsComposerShrinksStartSmoothly() throws {
         for lines in [2, 3] {
-            let edit = TextEdit(Array(repeating: "line", count: lines).joined(separator: "\n"))
+            let edit = TextEdit(Array(repeating: "line", count: lines).joined(separator: "\n"), multiline: true)
             let rt = makeBottomChat(BottomChatState(rows: 5, sends: true, hasComposer: true, composer: edit))
             var t = 1.0 / 120.0
             var ys = [try reqEl(rt, "r0").rect[1]]
