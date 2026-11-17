@@ -1738,22 +1738,7 @@ extension Runtime {
                             slice2State.growthGrownByScrollPath[vp, default: 0] += grown
                         }
                     }
-                    let r = entry.track.restore
-                    if r > 0 {
-                        entry.track.restore = 0
-                        if let vp = slice2State.growthScrollByKey[k],
-                           let rp = slice2State.growthRowPathByKey[k] {
-                            restored.append((scrollPath: vp, rowPath: rp, restore: r))
-                        }
-                    }
-                    if let share = entry.track.give {
-                        let d = (prevH - entry.track.h) * share
-                        if abs(d) > 1e-6 {
-                            gave.append((growthKey: k, delta: d))
-                        }
-                    }
                     if !entry.track.moving {
-                        entry.track.give = nil
                         entry.contentSlide = nil
                         if entry.track.isShut {
                             entry.track.forgetFolded()
