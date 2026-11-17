@@ -181,7 +181,7 @@ public enum Win32MessageTranslator {
         case .touch(let id, let phase, let x, let y):
             let scale = Win32DpiScale.scaleFactor(forDPI: dpi)
             let point = runtime.inputPoint(fromWindow: Vec2(x / scale, y / scale))
-            runtime.touch(id: UInt64(id), phase: phase, at: point, time: now)
+            runtime.touch(id: UInt64(id), phase: phase, at: point, time: now, holdClock: now)
             return true
         case .keyDown(let vk, let mods):
             if let key = Win32KeyMap.translate(virtualKey: vk, shift: mods.shift) {

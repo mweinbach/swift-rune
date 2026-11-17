@@ -88,7 +88,7 @@ public enum AndroidMotionTranslator {
                     runtime.pointerMove(to: pt, mods: event.mods, at: now)
                     runtime.buttonDown(at: pt, button: event.button, mods: event.mods, at: now)
                 } else {
-                    runtime.touch(id: id, phase: .started, at: pt, time: now)
+                    runtime.touch(id: id, phase: .started, at: pt, time: now, holdClock: now)
                 }
             case .move where !event.isMouse:
                 runtime.touch(id: id, phase: .moved, at: pt, time: now)

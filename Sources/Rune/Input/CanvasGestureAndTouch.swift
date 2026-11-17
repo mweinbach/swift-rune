@@ -358,9 +358,15 @@ extension Runtime {
 
     /// Delivers a touchscreen/pen event, arbitrating tap vs element drag vs scrollable pan & fling (`input/touch.rs`).
     public func touch(id: UInt64 = 1, phase: TouchPhase, at pos: Vec2, time: Double) {
+        touch(id: id, phase: phase, at: pos, time: time, holdClock: nil)
+    }
+
+    /// Event timestamps measure movement. A live host schedules a long press on the clock
+    /// its next frame will use, including when the last frame preceded a long idle interval.
+    internal func touch(id: UInt64, phase: TouchPhase, at pos: Vec2, time: Double, holdClock: Double?) {
         switch phase {
         case .started:
-            touchDown(id: id, at: pos, time: time)
+            touchDown(id: id, at: pos, time: time, holdClock: holdClock)
         case .moved:
             touchMove(id: id, at: pos, time: time)
         case .ended:

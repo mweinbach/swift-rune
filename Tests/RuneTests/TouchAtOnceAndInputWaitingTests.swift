@@ -125,6 +125,37 @@ struct TouchAtOnceAndInputWaitingTests {
         #expect(!rt.touching())
     }
 
+    @Test func aLiveTouchAfterIdleStartsItsHoldAtDelivery() {
+        struct State {
+            var taps: [Bool] = []
+            var menus = 0
+        }
+        let rt = Runtime(state: State(), viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            el().size(100, 100)
+                .onClick { state, tx in state.taps.append(tx.touchTap()) }
+                .onSecondaryClick { state, _, _ in state.menus += 1 }
+        }
+        let p = Vec2(20, 25)
+        _ = rt.frame(at: 0.465)
+
+        // Device timestamps and the host's frame clock have independent origins.
+        rt.touch(id: 1, phase: .started, at: p, time: 100, holdClock: 2.331)
+        _ = rt.frame(at: 2.337)
+        rt.touch(id: 1, phase: .ended, at: p, time: 100.065, holdClock: 2.396)
+        #expect(rt.state.taps == [true])
+        #expect(rt.state.menus == 0)
+
+        rt.touch(id: 2, phase: .started, at: p, time: 104, holdClock: 6.25)
+        #expect(rt.wakeDeadlines.contains(6.75))
+        _ = rt.frame(at: 6.749)
+        #expect(rt.state.menus == 0)
+        _ = rt.frame(at: 6.75)
+        #expect(rt.state.menus == 1)
+        rt.touch(id: 2, phase: .ended, at: p, time: 104.7, holdClock: 6.95)
+        #expect(rt.state.taps == [true])
+        #expect(rt.state.menus == 1)
+    }
+
     @Test("touch_drags_at_once needs on_drag: without it a touch is still a tap")
     func withoutOnDragATouchIsStillATap() {
         let rt = rig(atOnce: true)

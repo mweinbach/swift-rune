@@ -225,6 +225,11 @@ extension Runtime {
 
     /// Convenience alias for touch start (`Runtime::touch_down`).
     public func touchDown(id: UInt64, at pos: Vec2, time: Double) {
+        touchDown(id: id, at: pos, time: time, holdClock: nil)
+    }
+
+    /// Hosts with a separate display clock supply its current time for the long-press wake.
+    internal func touchDown(id: UInt64, at pos: Vec2, time: Double, holdClock: Double?) {
         guard slice2State.touchFinger == nil else { return }
         let vIdx = scrollNodeAt(pos, horizontal: false)
         let vNode = vIdx.map { flatNodes[$0] }
@@ -244,7 +249,7 @@ extension Runtime {
             applyTouchEffects(TouchScrollMachine.step(&slice2State.touchScroll, .up(id: vNode?.nodeId, velocity: 0)), at: time)
             mode = .drag
         } else {
-            let due = nowClock() + Slice2ScrollConstants.touchLongPress
+            let due = (holdClock ?? nowClock()) + Slice2ScrollConstants.touchLongPress
             wakeAt(due)
             mode = .pending(scroll: vNode?.nodeId, holdDue: due)
         }

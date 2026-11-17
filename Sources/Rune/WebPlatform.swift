@@ -506,7 +506,7 @@ public final class WebAppHost<State> {
                        pointerType: String, pointerID: UInt64 = 1, mods: Mods = .none, at now: Double) {
         let point = Vec2(x, y)
         if pointerType == "touch" {
-            runtime.touch(id: pointerID, phase: phase, at: point, time: now)
+            runtime.touch(id: pointerID, phase: phase, at: point, time: now, holdClock: now)
             if phase == .ended { finishActivation(at: now) }
             return
         }

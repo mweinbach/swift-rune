@@ -140,6 +140,42 @@ struct WebFieldEventsTests {
         #expect(host.runtime.state == [true, false, false, false])
     }
 
+    @Test func idleCanvasMeasuresTheHoldFromTheNewContact() throws {
+        struct Activations {
+            var taps: [Bool] = []
+            var secondary = 0
+        }
+        let app = AppSpec<Activations>(title: "Touch duration", size: Vec2(80, 60), state: Activations()) { _, _ in
+            el().size(80, 60)
+                .onClick { state, tx in state.taps.append(tx.touchTap()) }
+                .onSecondaryClick { state, _, _ in state.secondary += 1 }
+        }
+        let host = WebAppHost(spec: app)
+        let browser = WebBrowserSession(host)
+        _ = try browser.renderFrame(at: 0)
+        func finger(_ kind: String, at time: Double) throws {
+            #expect(try send(["kind": kind, "pointerType": "touch", "pointerId": 5, "x": 20, "y": 20],
+                             to: browser, at: time))
+        }
+
+        try finger("pointerdown", at: 3)
+        _ = try browser.renderFrame(at: 3.02)
+        try finger("pointerup", at: 3.065)
+        #expect(!host.runtime.touching())
+        #expect(host.runtime.state.taps == [true])
+        #expect(host.runtime.state.secondary == 0)
+
+        try finger("pointerdown", at: 8)
+        _ = try browser.renderFrame(at: 8.02)
+        #expect(host.runtime.state.secondary == 0)
+        _ = try browser.renderFrame(at: 8.51)
+        #expect(host.runtime.state.secondary == 1)
+        try finger("pointerup", at: 8.65)
+        #expect(!host.runtime.touching())
+        #expect(host.runtime.state.taps == [true])
+        #expect(host.runtime.state.secondary == 1)
+    }
+
     @Test func nativeEditSelectionAndKeysUpdateLastInputWithoutQueuedArrivals() throws {
         let host = host(TextEdit("old"))
         let browser = WebBrowserSession(host)

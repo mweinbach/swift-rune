@@ -610,7 +610,7 @@ public final class RuneIOSView<State>: UIView, UIKeyInput {
                 case .cancelled: runtime.cancelPointer(at: time)
                 }
             } else {
-                runtime.touch(id: id, phase: phase, at: point, time: time)
+                runtime.touch(id: id, phase: phase, at: point, time: time, holdClock: nowSeconds())
             }
         }
     }

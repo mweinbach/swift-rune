@@ -903,7 +903,8 @@ final class LinuxWindowSession<State> {
         case RuneLinuxTouchDown:
             guard touchContact == nil, !runtime.touching() else { return }
             touchContact = (event.touchDevice, event.fingerID, event.nativeTouch)
-            runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: .started, at: point, time: now)
+            runtime.touch(id: UInt64(bitPattern: event.fingerID), phase: .started, at: point,
+                          time: now, holdClock: now)
         case RuneLinuxTouchMove, RuneLinuxTouchUp, RuneLinuxTouchCancel:
             guard let touchContact, touchContact.device == event.touchDevice, touchContact.finger == event.fingerID,
                   touchContact.native == event.nativeTouch else { return }

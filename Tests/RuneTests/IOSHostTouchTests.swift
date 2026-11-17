@@ -108,5 +108,23 @@ struct IOSHostTouchTests {
         view.deliverContact(id: 3, phase: .ended, at: Vec2(50, 40), eventTimestamp: nil, time: 1.02)
         #expect(runtime.state == 1)
     }
+
+    @Test("A short UIKit tap after idle uses the current scaled display clock")
+    func tapAfterIdle() async throws {
+        let runtime = Runtime(state: [Bool](), viewport: Vec2(80, 80)) { _, _ in
+            el().size(80, 80).onClick { state, tx in state.append(tx.touchTap()) }
+        }
+        let scale = 16.0
+        let view = try RuneIOSView(frame: .zero, runtime: runtime, timeScale: scale, backend: .software)
+        _ = runtime.frame(at: 0)
+        let idleStart = CACurrentMediaTime()
+        try await Task.sleep(for: .milliseconds(60))
+        let now = (CACurrentMediaTime() - idleStart) * scale
+        let point = Vec2(40, 40)
+        view.deliverContact(id: 1, phase: .started, at: point, eventTimestamp: nil, time: now)
+        _ = runtime.frame(at: now + 0.05)
+        view.deliverContact(id: 1, phase: .ended, at: point, eventTimestamp: nil, time: now + 0.08)
+        #expect(runtime.state == [true])
+    }
 }
 #endif

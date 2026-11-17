@@ -4,6 +4,36 @@ import Testing
 @Suite("Android native event dispatch")
 @MainActor
 struct AndroidInputHostTests {
+    @Test("After an idle Android frame, a short tap stays primary and a full hold fires once")
+    func touchHoldStartsAtDeliveryAfterIdle() {
+        enum Activation: Equatable { case primary(touchTap: Bool), secondary }
+        let runtime = Runtime(state: [Activation](), viewport: Vec2(80, 80), systemDark: false) { _, _ in
+            el().size(80, 80)
+                .onClick { events, tx in events.append(.primary(touchTap: tx.touchTap())) }
+                .onSecondaryClick { events, _, _ in events.append(.secondary) }
+        }
+        func send(_ action: AndroidMotionAction, at time: Double) {
+            AndroidMotionTranslator.dispatch(.init(action: action, xPx: 20, yPx: 20),
+                                             to: runtime, density: 1, at: time)
+        }
+        _ = runtime.frame(at: 0)
+        send(.down, at: 10)
+        _ = runtime.frame(at: 10.02)
+        #expect(runtime.state.isEmpty)
+        send(.up, at: 10.05)
+        _ = runtime.frame(at: 11)
+        #expect(runtime.state == [.primary(touchTap: true)])
+
+        send(.down, at: 20)
+        _ = runtime.frame(at: 20.02)
+        #expect(runtime.nextWakeDeadline(after: 20.02) == 20.5)
+        _ = runtime.frame(at: 20.49)
+        #expect(runtime.state == [.primary(touchTap: true)])
+        _ = runtime.frame(at: 20.5)
+        send(.up, at: 20.6)
+        #expect(runtime.state == [.primary(touchTap: true), .secondary])
+    }
+
     @Test("A density-scaled touch keeps its pointer ID through cancel and release")
     func touchCapture() {
         let runtime = Runtime(state: 0, viewport: Vec2(80, 80), pixelScale: 2, systemDark: false) { _, _ in

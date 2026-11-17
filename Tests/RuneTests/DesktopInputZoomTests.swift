@@ -4,6 +4,46 @@ import Testing
 @MainActor
 @Suite("Desktop input in a zoomed window")
 struct DesktopInputZoomTests {
+    @Test(arguments: [0.5, 1.0, 2.0])
+    func windowsIdleContactUsesTheRenderClock(playbackRate: Double) {
+        let runtime = Runtime(state: [String](), viewport: Vec2(100, 100), pixelScale: 1) { _, _ in
+            el().sizeFull()
+                .onClick { taps, tx in taps.append(tx.touchTap() ? "tap" : "mouse") }
+                .onSecondaryClick { taps, _, _ in taps.append("hold") }
+        }
+        var dpi: UInt32 = 96
+        // Win32 measures event and frame times from the same monotonic window origin.
+        // At normal speed the runtime can also sample that origin between frames.
+        func elapsed(_ wallSeconds: Double) -> Double {
+            runtime.wallStart = playbackRate == 1 ? RuneExecutionContext.hostUptime - wallSeconds : nil
+            return wallSeconds * playbackRate
+        }
+        func finger(_ phase: TouchPhase, after wallSeconds: Double) {
+            let now = elapsed(wallSeconds)
+            _ = Win32MessageTranslator.dispatch(.touch(id: 3, phase: phase, x: 20, y: 20),
+                                                to: runtime, dpi: &dpi, at: now)
+        }
+        _ = runtime.renderFrame(at: elapsed(0))
+        finger(.started, after: 3)
+        _ = runtime.renderFrame(at: elapsed(3.01))
+        finger(.ended, after: 3.04)
+        #expect(runtime.state == ["tap"])
+
+        finger(.started, after: 6)
+        _ = runtime.renderFrame(at: elapsed(6 + 0.40 / playbackRate))
+        #expect(runtime.state == ["tap"])
+        _ = runtime.renderFrame(at: elapsed(6 + 0.55 / playbackRate))
+        finger(.ended, after: 6 + 0.60 / playbackRate)
+        #expect(runtime.state == ["tap", "hold"])
+
+        finger(.started, after: 9)
+        finger(.cancelled, after: 9.01) // WM_KILLFOCUS cancels the contact before focus loss.
+        finger(.started, after: 9 + 0.48 / playbackRate)
+        _ = runtime.renderFrame(at: elapsed(9 + 0.52 / playbackRate))
+        finger(.ended, after: 9 + 0.54 / playbackRate)
+        #expect(runtime.state == ["tap", "hold", "tap"])
+    }
+
     @Test func windowsContactRetainsItsOriginAndIdentityThroughRelease() {
         let runtime = Runtime(state: [Bool](), viewport: Vec2(300, 200), pixelScale: 1.5) { _, cx in
             cx.zoom(2)
