@@ -65,6 +65,30 @@ struct SceneParityTests {
         #expect(!s.isRestingAt(id, r1))
     }
 
+    @Test("Exact child geometry includes its parent's static or tracked offset before presentation")
+    func exactChildGeometryIncludesParentOffsetBeforePresentation() {
+        var scene = Scene()
+        let parent = NodeSpec(id: NodeId(1), rect: .fromXYWH(10, 20, 100, 80), offset: Vec2(15, -8))
+        let child = NodeSpec(id: NodeId(2), parent: parent.id, rect: .fromXYWH(30, 50, 24, 18), offset: Vec2(6, -4))
+        scene.commit([parent, child], at: 0, initialCut: true)
+        let initial = MotionRect.fromXYWH(45, 42, 24, 18)
+        #expect(scene.currentRect(child.id) == initial)
+        #expect(scene.unoffsetWorldRect(for: child.id) == initial)
+        _ = scene.frame(at: 0)
+        #expect(scene.world(child.id) == initial)
+        #expect(scene.presented(child.id)?.rect == initial.translated(child.offset))
+        #expect(scene.samplingError().maxDevicePxError == 0)
+
+        scene.set(parent.id, Props.OFFSET, Vec2(-2, 9))
+        let moved = MotionRect.fromXYWH(28, 59, 24, 18)
+        #expect(scene.currentRect(child.id) == moved)
+        #expect(scene.unoffsetWorldRect(for: child.id) == moved)
+        #expect(scene.presented(child.id)?.rect == initial.translated(child.offset))
+        _ = scene.frame(at: 0)
+        #expect(scene.presented(child.id)?.rect == moved.translated(child.offset))
+        #expect(scene.samplingError().maxDevicePxError == 0)
+    }
+
     // MARK: - tests/siblings.rs
 
     @Test("Sibling order matches reference after removal and slot reuse")

@@ -1018,7 +1018,8 @@ public struct Scene: Sendable {
 
     internal func originDual(_ i: Int) -> (SceneDual, SceneDual) {
         let w = worldDual(i)
-        var off = [SceneDual.c(0), SceneDual.c(0)]
+        let base = nodes[i].baseOffset
+        var off = [SceneDual.c(base.x), SceneDual.c(base.y)]
         lanesDual(i, Props.OFFSET.id, into: &off)
         var p = [SceneDual.c(1.0)]
         lanesDual(i, Props.PRESENCE.id, into: &p)
